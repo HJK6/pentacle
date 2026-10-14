@@ -10,7 +10,7 @@ Activate Speak, then the textarea, to open the glasses' system composer. Dictate
 
 Question envelopes come from `promptList({producer_stream_id, open:true})`. Their option actions come from matching open notifications, joined by notification ID and exact question ID/answer value. Selecting an option submits its exact action ID and value through the existing `notificationResolve` bridge. An answer becomes green only after resolution succeeds and a readback confirms removal from the open set. Missing or ambiguous actions leave the card read-only with instructions to answer from the phone/desktop. The custom-answer row uses the same question resolution path when the envelope permits custom text. Free-text questions can use the composer directly. No server or bridge method was added.
 
-The fonts Rajdhani, JetBrains Mono and Cinzel are copied and preloaded locally. There is no runtime CDN or Babel dependency. The home-entry structure permits a later read-only entry; no work-lanes surface or pairing endpoint is implemented here.
+The glasses entry always bundles React in production mode and minifies its output. The fonts Rajdhani, JetBrains Mono and Cinzel are copied and preloaded locally, including the bold Rajdhani weight. There is no runtime CDN or Babel dependency. The home-entry structure permits a later read-only entry; no work-lanes surface or pairing endpoint is implemented here.
 
 ## Validation
 

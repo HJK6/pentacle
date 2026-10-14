@@ -153,6 +153,28 @@ test('quick replies use the same correlated send and block duplicate activation 
   } finally { await h.close(); }
 });
 
+test('quick-reply and send controls disable on disconnect and recover on reconnect', async () => {
+  const h = await harness();
+  try {
+    await h.key('Enter'); await h.key('Enter');
+    await act(async () => { h.controller.commit('An offline draft'); });
+    await h.emit({ connected: false });
+    const buttons = Array.from(h.dom.window.document.querySelectorAll<HTMLButtonElement>('.quick-replies button'));
+    assert.equal(buttons.length, QUICK_REPLIES.length);
+    assert.ok(buttons.every(button => button.disabled));
+    assert.equal((h.dom.window.document.querySelector('.send-button') as HTMLButtonElement).disabled, true);
+    await h.click('.quick-replies button');
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.controller.voice!.phase, 'rec');
+    await h.emit({ connected: true });
+    assert.ok(buttons.every(button => !button.disabled));
+    assert.equal((h.dom.window.document.querySelector('.send-button') as HTMLButtonElement).disabled, false);
+    await h.click('.quick-replies button');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0][2], QUICK_REPLIES[0]);
+  } finally { await h.close(); }
+});
+
 test('questions map exact action IDs independent of ordering, page, read back and return', async () => {
   const h = await harness({ questions: [question(), question('question-2')] });
   try {
@@ -205,6 +227,7 @@ test('custom question text settles the question instead of sending a new chat me
     await h.click('.send-button');
     assert.equal(h.sends.length, 0);
     assert.equal(h.settles[0][2].custom_text, 'A different path');
+    assert.equal(Object.hasOwn(h.settles[0][2], 'text'), false, 'choice custom answers only use custom_text');
     assert.equal(h.controller.answered.has('question-1'), true);
   } finally { await h.close(); }
 });
@@ -261,18 +284,21 @@ test('binding invalidation while composing prevents submission', async () => {
   } finally { await h.close(); }
 });
 
-test('free-text question with an open notice and no option actions remains answerable', async () => {
-  const q = question(); q.envelope.response_mode = 'free_text'; q.envelope.options = [];
-  const h = await harness({ questions: [q], notices: [{ notification_id: q.notification_id, state: 'open', actions: [] }] });
-  try {
-    await h.key('Enter'); await h.key('ArrowRight'); await h.key('Enter');
-    assert.ok(h.controller.voice);
-    await act(async () => { h.controller.commit('A custom response'); });
-    await h.click('.send-button');
-    assert.equal(h.settles[0][1], 'resolved');
-    assert.equal(h.settles[0][2].text, 'A custom response');
-    assert.equal(h.controller.answered.has(q.question_id), true);
-  } finally { await h.close(); }
+test('free-text question resolves with text only, even when its notice has a choice action', async () => {
+  for (const actionsPresent of [true, false]) {
+    const q = question(); q.envelope.response_mode = 'free_text'; q.envelope.options = [];
+    const h = await harness({ questions: [q], notices: [{ notification_id: q.notification_id, state: 'open', actions: actionsPresent ? notice(q).actions : [] }] });
+    try {
+      await h.key('Enter'); await h.key('ArrowRight'); await h.key('Enter');
+      assert.ok(h.controller.voice);
+      await act(async () => { h.controller.commit('A custom response'); });
+      await h.click('.send-button');
+      assert.equal(h.settles[0][1], 'resolved');
+      assert.equal(h.settles[0][2].text, 'A custom response');
+      assert.equal(Object.hasOwn(h.settles[0][2], 'custom_text'), false, 'free-text answers only use text');
+      assert.equal(h.controller.answered.has(q.question_id), true);
+    } finally { await h.close(); }
+  }
 });
 
 test('long question text scrolls by arrows before moving focus to the next option', async () => {
@@ -293,6 +319,7 @@ test('600 square viewport, contained overflow, local fonts and bundled React con
   const css = fs.readFileSync(path.join(root, 'renderer/glasses.css'), 'utf8');
   const build = fs.readFileSync(path.join(root, 'scripts/build-web.js'), 'utf8');
   assert.match(html, /width=600,height=600/);
+  assert.match(html, /rel="preload" href="\/assets\/fonts\/Rajdhani_700Bold\.ttf"/);
   const dom = new JSDOM(`<style>${css}</style><div class="glasses"></div>`);
   try {
     const style = dom.window.getComputedStyle(dom.window.document.querySelector('.glasses')!);

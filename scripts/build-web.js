@@ -201,7 +201,7 @@ async function build({ minify = false } = {}) {
     define: { 'process.env.NODE_ENV': '"production"' },
     sourcemap: true,
     sourcesContent: false,
-    minify,
+    minify: true,
     logLevel: 'info',
   });
   fs.copyFileSync(path.join(RENDERER, 'glasses.html'), path.join(OUT, 'glasses.html'));

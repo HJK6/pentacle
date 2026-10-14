@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const esbuild = require('esbuild');
 const { build, OUT } = require('../scripts/build-web');
 const { serveStatic } = require('../server');
 
@@ -30,4 +31,13 @@ test('built /glasses aliases serve the second entry and inject the existing host
   assert.doesNotMatch(bundle, /require\(["'](?:electron|node:fs|child_process)["']\)/);
   assert.match(bundle, /getAssistantBinding/);
   assert.match(bundle, /chatSendCorrelated/);
+  const unminified = await esbuild.build({
+    entryPoints: [path.resolve(__dirname, '../renderer/src/glasses_entry.tsx')],
+    bundle: true, format: 'iife', platform: 'browser', target: 'chrome134',
+    define: { 'process.env.NODE_ENV': '"production"' }, minify: false, write: false,
+  });
+  assert.ok(Buffer.byteLength(bundle) < unminified.outputFiles[0].contents.length,
+    'the default glasses build must be smaller than its unminified production equivalent');
+  const map = JSON.parse(fs.readFileSync(path.join(OUT, 'glasses.bundle.js.map'), 'utf8'));
+  assert.equal(Object.hasOwn(map, 'sourcesContent'), false, 'source contents remain excluded');
 });

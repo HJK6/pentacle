@@ -209,8 +209,12 @@ export class GlassesController {
     if (option && !option.action_id) { this.error = 'This option has no action ID. Please use the main app.'; this.changed(); return; }
     this.settling = true; this.settlingQuestionId = this.questionId(q); this.error = ''; this.changed();
     try {
-      const reply = await this.cc.notificationResolve(q.notification_id, option?.kind || q.actions?.[0]?.kind || (envelope.response_mode === 'free_text' ? 'resolved' : 'yes_no'), {
-        action_id: option?.action_id, selections: option ? [option.value] : undefined, text, custom_text: text, submit: true, by: 'operator',
+      const freeText = envelope.response_mode === 'free_text';
+      const kind = freeText ? 'resolved' : option?.kind || q.actions?.find((action: any) => action?.kind)?.kind || 'yes_no';
+      const answer = option ? { action_id: option.action_id, selections: [option.value] }
+        : freeText ? { text } : { custom_text: text };
+      const reply = await this.cc.notificationResolve(q.notification_id, kind, {
+        ...answer, submit: true, by: 'operator',
       });
       if (reply?.ok !== true) throw new Error(reply?.error || 'Answer failed');
       // An acknowledged command is insufficient: read back the open set.
