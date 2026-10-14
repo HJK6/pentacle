@@ -279,6 +279,45 @@ the authoritative reply; the shared transcript renderer handles its Markdown.
 If the seat ends that dispatch's turn with prose and no publication, the daemon
 shows that prose as an acknowledgment (see the turn-final exception below).
 
+A structured final (Claude `end_turn`, Codex `final_answer`) is not mirrored
+when its own turn made a proactive publication (`assistant publish --proactive`)
+from the bound seat and its current generation. The daemon places a proactive
+publication in the turn in one of two ways, without comparing text: a tool row
+of the same transcript, after the previous final, names the publication's
+request key; or, for a key built at run time, the daemon stored the publication
+between the ingest of the previous final and of this final. A later turn
+without its own proactive publication mirrors as usual, even with the same text.
+A publication from another seat, an earlier generation, or one without
+`raw.actor_generation` never suppresses a final. Known limit: if a run-time key
+is stored while the previous final is still being ingested, it is not matched;
+the final mirrors and the daemon logs
+`assistant mirror proactive correlation miss ... miss_class=dynamic_key_ingest_lag`.
+Each suppression logs `assistant mirror skipped proactive-published turn`.
+
+## Dispatch batching
+
+An operator input that arrives while the bound seat still has an open direct
+dispatch (resolved, not failed, and with no final prose publication yet) keeps
+its own dispatch id, envelope and single delivery. Nothing is resent, and no
+receipt changes. The daemon records `batched_into_dispatch_id` (the oldest open
+dispatch) and appends a batch block to the envelope listing
+`batch_head_dispatch_id`, `batch_dispatch_ids` and
+`batch_reply_to_message_ids`. Question answers, voice-answer takes and
+explicit replies are never batched. An input resolved for a new seat or
+generation never joins an older seat's open dispatches.
+
+To answer a batch, publish once under any one of its dispatch ids and pass
+every answered input in `--reply-to-message-ids` (including that dispatch's own
+`--reply-to-message-id`). Each listed id must be an open dispatch of the same
+seat and generation; any other id fails with
+`assistant_publish_reply_unverified`. The publication closes every other listed
+dispatch with its own closing row (`publication_key=publish:<dispatch>`,
+`merged_into_event_id` set to the publication's event). The reply's
+`closed_dispatch_ids` lists those dispatches in the order given. The batch gets
+one canonical event and one reply push. An input the publication does not list
+stays open. The seat answers it under its own dispatch id, and newer inputs
+batch into it. Never publish the same body twice.
+
 ## Direct-primary questions
 
 The current direct-primary seat asks with the ordinary durable `prompt ask`,

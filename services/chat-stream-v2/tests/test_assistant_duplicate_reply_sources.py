@@ -607,6 +607,14 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
             await _turn_row(store, seat_b, "5252", provider="claude", kind="TOOL_USE", identity="b-t1",
                             command="agent-orch assistant publish --request-id publish:seat-a")
             await _restamp_publication(store, "publish:seat-a")
+
+            def _same_generation(conn):
+                # Even a (forged) equal generation string from another seat never matches.
+                conn.execute("UPDATE session_event_tail SET event_json=json_set(event_json,'$.raw.actor_generation',?) "
+                             "WHERE event_id=(SELECT event_id FROM v2_assistant_composite_publications WHERE publication_key='publish:seat-a')",
+                             (other["session_generation"],))
+                conn.commit()
+            await store.submit(_same_generation)
             await _turn_row(store, seat_b, "5252", provider="claude", kind="ASSIST_TEXT", identity="b-f1",
                             text="Seat A update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)][-2:] == ["Seat A update.", "Seat A update."]
