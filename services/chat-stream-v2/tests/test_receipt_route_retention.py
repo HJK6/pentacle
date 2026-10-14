@@ -854,3 +854,67 @@ def test_pending_bootstrap_retro_validates_archive_before_union(tmp_path,defect)
             assert archive.read_bytes()==before
         finally:first.stop();second.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing_columns", [("batched_into_dispatch_id", "answered_by_event_id"), ("answered_by_event_id",)])
+def test_populated_pre_batch_archive_migrates_on_store_restart(tmp_path, missing_columns):
+    async def run():
+        store = running(tmp_path)
+        try:
+            old_receipt_id = (await append(store, "preserved-receipt"))["receipt_rowid"]
+            await seed_routes(store)
+            assert (await move(store, r.RECEIPT_TABLE))["moved"] == 1
+            assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            archive = await archive_path(store)
+            old_receipt = await combined(store, r.RECEIPT_TABLE)
+            old_route = await combined(store, r.ROUTE_TABLE)
+        finally:
+            store.stop()
+        for db in (tmp_path / "hot.db", archive):
+            with sqlite3.connect(db) as conn:
+                conn.execute("DROP INDEX IF EXISTS idx_v2_assistant_composite_routes_batch")
+                for column in missing_columns:
+                    conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN {column}")
+        with sqlite3.connect(archive) as conn:
+            marker = conn.execute("SELECT * FROM v2_receipt_route_archive").fetchall()
+        # Candidate migrations and first real archive-backed read, twice for idempotence.
+        for index in range(2):
+            store = running(tmp_path)
+            try:
+                assert [row for row in await combined(store, r.RECEIPT_TABLE)
+                        if row["request_id"] == "preserved-receipt"] == old_receipt
+                assert await combined(store, r.ROUTE_TABLE) == old_route
+                new_receipt = await append(store, "after-migration-" + str(index))
+                assert new_receipt["receipt_rowid"] > old_receipt_id
+                old_receipt_id = new_receipt["receipt_rowid"]
+            finally:
+                store.stop()
+            with sqlite3.connect(archive) as conn:
+                assert conn.execute("SELECT * FROM v2_receipt_route_archive").fetchall() == marker
+                names = {x[1]: x[2] for x in conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})")}
+                assert names["batched_into_dispatch_id"] == "TEXT"
+                assert names["answered_by_event_id"] == "INTEGER"
+    asyncio.run(run())
+
+
+def test_batch_archive_migration_rejects_foreign_pair_without_altering_it(tmp_path):
+    async def run():
+        store = running(tmp_path)
+        try:
+            await seed_routes(store)
+            assert (await move(store, r.ROUTE_TABLE))["moved"] == 1
+            archive = await archive_path(store)
+        finally:
+            store.stop()
+        with sqlite3.connect(archive) as conn:
+            for column in ("batched_into_dispatch_id", "answered_by_event_id"):
+                conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN {column}")
+            conn.execute("UPDATE v2_receipt_route_archive SET pair_id='foreign-pair'")
+            before = conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall()
+            schema = conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall()
+        with pytest.raises(r.RetentionError, match="archive pair/format mismatch"):
+            running(tmp_path)
+        with sqlite3.connect(archive) as conn:
+            assert conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall() == before
+            assert conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall() == schema
+    asyncio.run(run())
