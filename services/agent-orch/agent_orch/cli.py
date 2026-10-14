@@ -1683,7 +1683,8 @@ def assistant_transfer(args: argparse.Namespace) -> int:
         'authorization-revoke':('authorization_id','expected_revision','request_id','composite_stream_id','reason'),
         'resume':('authorization_id','expected_revision','command_id','expected_attempt','request_id','composite_stream_id'),
         'request':('authorization_id','expected_revision','command_id','request_id','composite_stream_id','pointers_file') if standing else ('command_id','dispatch_id','destination','member'),
-        'ready':('command_id','pointer_digest'), 'status':('command_id',),'cancel':('command_id',),
+        'ready':('command_id','pointer_digest'), 'status':('command_id',),
+        'cancel':('command_id','expected_attempt','request_id','composite_stream_id') if standing else ('command_id',),
     }[action]
     missing=[flag for flag in required if getattr(args,flag,None) is None or getattr(args,flag,None)=='']
     if missing: raise SystemExit('transfer '+action+' requires '+', '.join('--'+f.replace('_','-') for f in missing))

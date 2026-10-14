@@ -88,12 +88,14 @@ class HostTransfer:
         if retired:
             if action=='authorization-status':
                 a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
+                journal.require_composite(a,msg)
                 if (a['actor'],a['actor_generation'])!=(retired['stream_id'],retired['session_generation']):
                     raise journal.TransferError('transfer_status_unauthorized')
                 return {'type':'assistant.transfer.ok','authorization':journal.public_authorization(a)}
             row=await self.read(cid)
             if not row or (row['actor'],row['actor_generation']) != (retired['stream_id'],retired['session_generation']):
                 raise journal.TransferError('transfer_status_unauthorized')
+            if row.get('authorization_id'): journal.require_composite(row,msg)
             if action=='request':
                 if row.get('authorization_id'):
                     replay=await self.store.submit(lambda c: c.execute('SELECT response FROM v2_host_transfer_requests WHERE request_id=?',(msg.get('request_id'),)).fetchone())
@@ -112,12 +114,14 @@ class HostTransfer:
             raise journal.TransferError('transfer_composite_unavailable')
         if action in {'status','ready','cancel'}:
             existing=await self.read(cid)
+            if existing and existing.get('authorization_id'): journal.require_composite(existing,msg)
             if existing and not existing.get('authorization_id') and (mode is not None or msg.get('attempt_id') is not None or msg.get('expected_attempt') is not None):
                 raise journal.TransferError('transfer_action_invalid')
         if action in {'authorization-status','authorization-revoke'}:
             if action=='authorization-status':
                 def read_authorization(c):
                     a=journal.authorization(c,msg.get('authorization_id'))
+                    journal.require_composite(a,msg)
                     if a['composite']!=composite.config.stream_id: raise journal.TransferError('transfer_authorization_conflict')
                     journal.authorization_reader(c,a,auth)
                     return journal.public_authorization(a)
@@ -142,6 +146,10 @@ class HostTransfer:
                 a=await self.mutate(lambda c:journal.authorize(c,msg,auth,**context),credential=True)
                 return {'type':'assistant.transfer.ok','authorization':a}
             if mode==journal.STANDING_MODE:
+                a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
+                journal.require_owner(a,auth)
+                journal.require_composite(a,msg)
+                if cid!=a['command_id']: raise journal.TransferError('transfer_authorization_conflict')
                 # Authenticate replay before expensive checks; replay never spawns.
                 replay=await self.store.submit(lambda c:journal.request_identity(c,msg,auth)[2])
                 if replay is not None:
@@ -149,16 +157,12 @@ class HostTransfer:
                 if action=='resume':
                     prior=await self.read(cid)
                     if not prior: raise journal.TransferError('transfer_unknown')
-                    a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
-                    journal.require_owner(a,auth)
                     await self.verify_pointers(prior)
                     if prior.get('last_error')=='transfer_effect_busy':
                         if any(lock.locked() for lock in self.actor_locks.values()) or self.server.lane_rulings and any(lock.locked() for lock in self.server.lane_rulings._release_locks.values()):
                             raise journal.TransferError('transfer_effect_busy')
                     fn=journal.resume_authorized
                 else:
-                    a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
-                    journal.require_owner(a,auth)
                     candidate={**a['scope_row'],'pointers':msg.get('pointers')}
                     journal.validate_pointers(candidate,candidate['pointers'],trusted)
                     await self.verify_pointers(candidate)

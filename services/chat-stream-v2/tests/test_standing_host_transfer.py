@@ -198,7 +198,7 @@ def test_resume_does_not_trust_caller_cleanup(tmp_path,change,code):
             if change=='pending':
                 await v.host_transfer.mutate(lambda db:db.execute('INSERT INTO v2_stream_reservations(host,session_name,expires_at,payload) VALUES(?,?,?,?)',(*parts[0]['target'].split(':',1),time.time()+600,'{}')))
             if change=='cancel':
-                await v.host_transfer.mutate(lambda db:t.cancel(db,row['command_id'],auth,{'expected_attempt':1,'request_id':'cancel-1'}))
+                await v.host_transfer.mutate(lambda db:t.cancel(db,row['command_id'],auth,{'expected_attempt':1,'request_id':'cancel-1','composite_stream_id':CHAT}))
             with pytest.raises(t.TransferError,match=code): await resume(s,v,row,auth,**({'expected_attempt':0} if change=='old_attempt' else {}))
     asyncio.run(run())
 
@@ -369,4 +369,92 @@ def test_clock_regression_suspends_same_attempt_without_exhaustion(tmp_path,monk
             assert caught_up['last_error'] is None
             consumed=await s.submit(lambda db:t.authorization(db,a['authorization_id']))
             assert consumed['state']=='consumed' and consumed['attempts_started']==1
+    asyncio.run(run())
+
+
+def test_preupgrade_legacy_replay_cannot_issue_standing_authority(tmp_path):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            old=await s.fetch_session('node-a','old')
+            await dispatch(s,old,'operator:'+g.ceremony.cid)
+            auth={'token_verified':True,'stream_id':OLD,'session_generation':old['session_generation']}
+            ctx=dict(name='fixture',composite=CHAT,env_binding=c._env_binding(),advisor=ADVISOR,
+                     helpers={},trusted_hosts={'node-a','node-b'},registry=v.operator_credential_registry)
+            msg={'command_id':'legacy-upgrade','dispatch_id':'dispatch-move','destination':'node-b',
+                 'members':[OLD,ADVISOR],'pointers':{}}
+            def preupgrade(db):
+                # Persist the original legacy representation, whose empty
+                # pointers were valid before checkpoint admission was added.
+                row=t.claim(db,msg,auth,**ctx,snapshot_only=True)
+                row['state']='failed'
+                db.execute('INSERT INTO v2_host_transfers VALUES(?,?,?,?,?,?,?,?)',
+                    (row['command_id'],row['composite'],row['input_identity'],row['dispatch_id'],
+                     row['digest'],row['state'],row['expires_at'],t.canonical(row)))
+                return row
+            row=await v.host_transfer.mutate(preupgrade,credential=True)
+            assert await v.host_transfer.mutate(lambda db:t.claim(db,msg,auth,**ctx,now=row['admitted_at']+601),credential=True)==row
+            newer={**msg,'action':'authorize','mode':t.STANDING_MODE,'authorization_id':'upgrade-grant',
+                   'request_id':'upgrade-authorize','composite_stream_id':CHAT}
+            for age in (1,601):
+                with pytest.raises(t.TransferError,match='transfer_command_conflict'):
+                    await v.host_transfer.mutate(lambda db:t.authorize(db,newer,auth,**ctx,now=row['admitted_at']+age),credential=True)
+            assert await s.submit(lambda db:db.execute('SELECT count(*) FROM v2_host_transfer_authorizations').fetchone()[0])==0
+    asyncio.run(run())
+
+
+def test_two_composites_cannot_spend_or_operate_another_grants_scope(tmp_path,monkeypatch):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            from dataclasses import replace
+            from assistant_composite import AssistantComposite
+            a,_,auth,_=await grant(s,v,c,g)
+            other=AssistantComposite(s,config=replace(c.env_config,name='second',stream_id='second:assistant'))
+            v.assistant_composites={'fixture':c,'second':other}
+            monkeypatch.setattr(v.host_transfer,'schedule',lambda *args:None)
+            async def reachable(*args): pass
+            monkeypatch.setattr(v.hosts,'ensure_reachable',reachable)
+            g.actor,g.token=OLD,await source_token(s)
+            msg={'type':'assistant.transfer','action':'request','mode':t.STANDING_MODE,
+                 'authorization_id':a['authorization_id'],'command_id':a['command_id'],
+                 'expected_revision':1,'request_id':'wrong-composite','composite_stream_id':'second:assistant',
+                 'pointers':checkpoint_pointers(s)}
+            reply=await g.rpc(msg)
+            assert reply['error_code']=='transfer_authorization_conflict'
+            assert (await s.submit(lambda db:t.authorization(db,a['authorization_id'])))['attempts_started']==0
+            row,req=await request(s,v,a,auth)
+            for action in ('status','ready','cancel'):
+                wrong={'type':'assistant.transfer','action':action,'mode':t.STANDING_MODE,
+                       'command_id':row['command_id'],'composite_stream_id':'second:assistant','request_id':'wrong-'+action}
+                if action=='ready': wrong.update(attempt_id=row['attempt_id'],pointer_digest='0'*64)
+                if action=='cancel': wrong['expected_attempt']=1
+                assert (await g.rpc(wrong))['error_code']=='transfer_authorization_conflict'
+            await failed(s,v,row)
+            with pytest.raises(t.TransferError,match='transfer_authorization_conflict'):
+                await resume(s,v,row,auth,composite_stream_id='second:assistant')
+            with pytest.raises(t.TransferError,match='transfer_authorization_conflict'):
+                await v.host_transfer.mutate(lambda db:t.start_authorized(db,{**req,'composite_stream_id':'second:assistant'},auth,v.operator_credential_registry,{'node-a','node-b'}),credential=True)
+            assert (await s.submit(lambda db:t.authorization(db,a['authorization_id'])))['attempts_started']==1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change,code',[
+    ({'expected_revision':99},'transfer_authorization_revision_conflict'),
+    ({'reason':''},'transfer_authorization_conflict'),
+    ({'composite_stream_id':'second:assistant'},'transfer_authorization_conflict'),
+])
+def test_rejected_revoke_retains_identity_without_changing_authority(tmp_path,change,code):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            a,_,_,_=await grant(s,v,c,g)
+            valid={'action':'authorization-revoke','mode':t.STANDING_MODE,'authorization_id':a['authorization_id'],
+                   'expected_revision':1,'request_id':'rejected-revoke','composite_stream_id':CHAT,'reason':'Fixture'}
+            msg={**valid,**change};admin={'peer_loopback':True,'local_admin_verified':True}
+            for _ in range(2):
+                with pytest.raises(t.TransferError,match=code):
+                    await v.host_transfer.mutate(lambda db:t.revoke_authorization(db,msg,admin),credential=True)
+            with pytest.raises(t.TransferError,match='transfer_authorization_conflict'):
+                await v.host_transfer.mutate(lambda db:t.revoke_authorization(db,{**valid,'reason':'Changed'},admin),credential=True)
+            current=await s.submit(lambda db:t.authorization(db,a['authorization_id']))
+            assert current['state']=='issued' and current['revision']==1 and current['revocation'] is None
+            assert await s.submit(lambda db:db.execute('SELECT count(*) FROM v2_host_transfer_requests WHERE request_id=?',('rejected-revoke',)).fetchone()[0])==1
     asyncio.run(run())

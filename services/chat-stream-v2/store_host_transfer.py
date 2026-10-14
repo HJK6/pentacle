@@ -28,6 +28,7 @@ SOURCE_FIELDS = ('session_generation', 'role', 'parent_stream_id', 'provider',
 class TransferError(ValueError):
     def __init__(self, code):
         self.code = code
+        self.rejection_receipt = None
         super().__init__(code)
 
 
@@ -188,6 +189,7 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
              'members':sorted(members),'pointers':pointers,'intent':'full-authority-transfer/v1'}
     prior=load(conn,cid)
     if prior:
+        if snapshot_only: raise TransferError('transfer_command_conflict')
         if prior['digest']!=digest(payload) or (prior['actor'],prior['actor_generation'])!=(actor,generation):
             raise TransferError('transfer_command_conflict')
         return prior
@@ -525,8 +527,18 @@ def transaction(conn,fn,registry=None):
             result=fn(conn)
             conn.commit()
             return result
-        except BaseException:
+        except BaseException as exc:
             conn.rollback()
+            if isinstance(exc,TransferError) and exc.rejection_receipt is not None:
+                # Keep the authenticated rejection identity while rolling back
+                # every authority write. The credential lock remains held.
+                conn.execute('BEGIN IMMEDIATE')
+                try:
+                    request_receipt(conn,*exc.rejection_receipt)
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
             raise
 
 
@@ -800,10 +812,11 @@ def new_attempt(conn,a,row,*,resume_evidence=None):
 
 
 def start_authorized(conn,msg,auth,registry,trusted_hosts,*,now=None):
+    a=authorization(conn,msg.get('authorization_id'));require_owner(a,auth)
+    require_composite(a,msg)
+    if msg.get('command_id')!=a['command_id']: raise TransferError('transfer_authorization_conflict')
     rid,hashed,replay=request_identity(conn,msg,auth)
     if replay is not None: return replay
-    a=authorization(conn,msg.get('authorization_id'));require_owner(a,auth)
-    if msg.get('command_id')!=a['command_id']: raise TransferError('transfer_authorization_conflict')
     if type(msg.get('expected_revision')) is not int or msg['expected_revision']!=a['revision']: raise TransferError('transfer_authorization_revision_conflict')
     observe_authorization(conn,a,time.time() if now is None else now)
     if a['state']!='issued': raise TransferError('transfer_authorization_conflict')
@@ -869,11 +882,12 @@ def independent_cleanup(conn,row):
 
 
 def resume_authorized(conn,msg,auth,registry,trusted_hosts,*,now=None):
+    a=authorization(conn,msg.get('authorization_id'));require_owner(a,auth)
+    require_composite(a,msg)
+    if msg.get('command_id')!=a['command_id']: raise TransferError('transfer_authorization_conflict')
     rid,hashed,replay=request_identity(conn,msg,auth)
     if replay is not None: return replay
-    a=authorization(conn,msg.get('authorization_id'));require_owner(a,auth)
     row=load(conn,a['command_id'])
-    if msg.get('command_id')!=a['command_id']: raise TransferError('transfer_authorization_conflict')
     if type(msg.get('expected_revision')) is not int or msg['expected_revision']!=a['revision']: raise TransferError('transfer_authorization_revision_conflict')
     observe_authorization(conn,a,time.time() if now is None else now)
     if not row or type(msg.get('expected_attempt')) is not int or msg['expected_attempt']!=row['attempt_number']: raise TransferError('transfer_attempt_conflict')
@@ -900,13 +914,17 @@ def revoke_authorization(conn,msg,auth):
     if not independent_admin(auth): raise TransferError('transfer_revoke_unauthorized')
     rid,hashed,replay=request_identity(conn,msg,auth)
     if replay is not None: return replay
-    a=authorization(conn,msg.get('authorization_id'))
-    if msg.get('composite_stream_id')!=a['composite']: raise TransferError('transfer_authorization_conflict')
-    if a['state']=='consumed':
-        request_receipt(conn,rid,hashed,{'_error':'transfer_authorization_consumed'})
-        return {'_error':'transfer_authorization_consumed'}
-    if type(msg.get('expected_revision')) is not int or msg['expected_revision']!=a['revision']: raise TransferError('transfer_authorization_revision_conflict')
-    if not isinstance(msg.get('reason'),str) or not msg['reason'].strip(): raise TransferError('transfer_authorization_conflict')
+    try:
+        a=authorization(conn,msg.get('authorization_id'))
+        require_composite(a,msg)
+        if a['state']=='consumed':
+            request_receipt(conn,rid,hashed,{'_error':'transfer_authorization_consumed'})
+            return {'_error':'transfer_authorization_consumed'}
+        if type(msg.get('expected_revision')) is not int or msg['expected_revision']!=a['revision']: raise TransferError('transfer_authorization_revision_conflict')
+        if not isinstance(msg.get('reason'),str) or not msg['reason'].strip(): raise TransferError('transfer_authorization_conflict')
+    except TransferError as exc:
+        exc.rejection_receipt=(rid,hashed,{'_error':exc.code})
+        raise
     a.update(state='revoked',revision=a['revision']+1,revocation={'request_id':rid,'reason':msg['reason'],'at':stamp()})
     save_authorization(conn,a)
     row=load(conn,a['command_id'])
@@ -917,6 +935,7 @@ def revoke_authorization(conn,msg,auth):
 
 
 def cancel_authorized(conn,row,auth,msg):
+    require_composite(row,msg)
     rid,hashed,replay=request_identity(conn,msg,auth)
     if replay is not None: return replay
     if type(msg.get('expected_attempt')) is not int or msg['expected_attempt']!=row['attempt_number']: raise TransferError('transfer_attempt_conflict')
@@ -927,6 +946,11 @@ def cancel_authorized(conn,row,auth,msg):
     row['state']='cancelled';save(conn,row)
     audit(conn,row['command_id'],'cancelled',auth.get('stream_id'),auth.get('session_generation'),request_id=rid)
     return request_receipt(conn,rid,hashed,public_command(row))
+
+
+def require_composite(row,msg):
+    if msg.get('composite_stream_id')!=row['composite']:
+        raise TransferError('transfer_authorization_conflict')
 
 
 def attempts(conn,cid):

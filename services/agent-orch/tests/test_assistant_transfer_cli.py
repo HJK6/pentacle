@@ -80,3 +80,22 @@ def test_authorization_revoke_uses_independent_transport(monkeypatch):
     assert verb=='assistant.transfer' and kw['local_admin'] is True
     assert not {'stream_token','from_stream_id'} & payload.keys()
     assert payload['expected_revision']==2
+
+
+def test_standing_cancel_requires_stable_identity_and_preserves_legacy(monkeypatch):
+    import pytest
+    calls=[]
+    async def call(config,payload,**kwargs):
+        calls.append(payload);return {'type':'assistant.transfer.ok'}
+    monkeypatch.setattr(cli,'assistant_once',call);monkeypatch.setattr(cli,'load_config',lambda:object())
+    base=['assistant','transfer','cancel','--command-id','cancel-command','--expected-attempt','1']
+    for flags,missing in [(['--composite-stream-id','fixture:assistant'],'--request-id'),
+                          (['--request-id','cancel-once'],'--composite-stream-id')]:
+        args=cli.build_parser().parse_args(base+flags)
+        with pytest.raises(SystemExit,match=missing): args.func(args)
+    assert calls==[]
+    args=cli.build_parser().parse_args(base+['--request-id','cancel-once','--composite-stream-id','fixture:assistant'])
+    assert args.func(args)==args.func(args)==0
+    assert calls[0]==calls[1] and calls[0]['request_id']=='cancel-once'
+    legacy=cli.build_parser().parse_args(['assistant','transfer','cancel','--command-id','legacy-command'])
+    assert legacy.func(legacy)==0 and 'mode' not in calls[-1]
