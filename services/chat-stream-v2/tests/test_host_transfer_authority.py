@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from hosts import Hosts
 
 import store_host_transfer as transfer
@@ -16,16 +17,23 @@ from store_lifecycle_authority import AuthorityError
 from test_assistant_recovery_command import fixture, OLD, NEW, CHILD, ADVISOR, CHAT
 
 
+def checkpoint_pointers(store,members=(OLD,ADVISOR)):
+    path=Path(store.path).parent/'checkpoint.md'
+    path.write_text('Commission: fixture transfer; spec: fixture; stage: preparation; obligations: none; owner: fixture.\n')
+    ref={'host':'node-a','path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    return {sid:[ref] for sid in members}
+
+
 async def source_token(store):
     token = 'fixture-transfer-source-token'
     await store.grant_stream_token('node-a', 'old', hashlib.sha256(token.encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
     return token
 
 
-async def dispatch(store, source, principal):
+async def dispatch(store, source, principal, body="Move the whole desk to the other trusted host."):
     route = await store.admit_assistant_composite_input(
         stream_id=CHAT, input_identity='operator-move', input_request_id='operator-move',
-        body='Move the whole desk to the other trusted host.', attachments=[],
+        body=body, attachments=[],
         reply_to_message_id=None, reply_to_question_id=None, actor_stream_id=principal,
         direct_primary=True, direct_target_stream_id=OLD,
         direct_target_generation=source['session_generation'])
@@ -46,7 +54,7 @@ def test_current_fd_can_request_one_daemon_transfer(tmp_path):
             reply = await gateway.rpc({'type':'assistant.transfer','action':'request',
                 'request_id':'migration-1','command_id':'migration-1','composite_stream_id':CHAT,
                 'dispatch_id':'dispatch-move','destination':'node-b',
-                'members':[OLD, ADVISOR], 'pointers':{}})
+                'members':[OLD, ADVISOR], 'pointers':checkpoint_pointers(store)})
             assert reply['type'] == 'assistant.transfer.ok', reply
             assert reply['command']['state'] == 'preparing'
     asyncio.run(run())
@@ -91,11 +99,12 @@ def test_old_parent_cannot_close_child_after_custody_changes(tmp_path):
 
 
 async def claim_bundle(store,server,gateway,composite,**overrides):
+    if server.hosts is None: server.hosts=Hosts(local_host='node-a',peers={'node-b':object()})
     old=await store.fetch_session('node-a','old')
     await dispatch(store,old,'operator:'+gateway.ceremony.cid)
     auth={'token_verified':True,'stream_id':OLD,'session_generation':old['session_generation']}
     msg={'command_id':'bundle-1','dispatch_id':'dispatch-move','destination':'node-b',
-         'members':[OLD,ADVISOR],'pointers':{},**overrides}
+         'members':[OLD,ADVISOR],'pointers':checkpoint_pointers(store),**overrides}
     def claim(c):
         return transfer.claim(c,msg,auth,name='fixture',composite=CHAT,
             env_binding=composite._env_binding(),advisor=ADVISOR,helpers={},
@@ -113,9 +122,9 @@ async def prepare_bundle(store,server,row):
             provider=source['provider'],effective_model=source['effective_model'],
             effective_effort=source['effective_effort'],pane_status='pane_alive',bootstrap_state='ready')
         server.sessions.tmux.live.add(name)
-        await store.submit(lambda c:transfer.transaction(c,lambda c:transfer.prepared(c,row['command_id'],p['target'],target['session_generation'])))
+        await store.submit(lambda c:transfer.transaction(c,lambda c:transfer.prepared(c,row['command_id'],p['target'],target['session_generation'],row.get('attempt_id'))))
         await store.submit(lambda c:transfer.transaction(c,lambda c:transfer.ready(c,row['command_id'],
-            {'token_verified':True,'stream_id':p['target'],'session_generation':target['session_generation']},transfer.digest([]))))
+            {'token_verified':True,'stream_id':p['target'],'session_generation':target['session_generation']},transfer.digest(row['pointers'].get(p['source'],[])),row.get('attempt_id'))))
     return await store.submit(lambda c:transfer.seats(c,row['command_id']))
 
 
@@ -283,7 +292,8 @@ def test_dispatch_and_fd_binding_predicates(tmp_path,change,code):
             if change=='unverified': auth['token_verified']=False
             if change=='stale': auth['session_generation']='stale'
             if change=='off_fleet': msg['destination']='external-host'
-            if change=='roster': msg['members']=[OLD]
+            if change=='roster':
+                msg['members']=[OLD];msg['pointers']={OLD:msg['pointers'][OLD]}
             with pytest.raises(transfer.TransferError,match=code):
                 await store.submit(lambda c:transfer.transaction(c,claim,server.operator_credential_registry))
             assert (await store.lifecycle_authority_current())['stream_id']==OLD

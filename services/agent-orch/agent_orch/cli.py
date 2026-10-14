@@ -1667,22 +1667,51 @@ def assistant_rebind(args: argparse.Namespace) -> int:
 
 
 def assistant_transfer(args: argparse.Namespace) -> int:
-    payload: dict[str, object] = {
-        'type':'assistant.transfer', 'action':args.action,
-        'command_id':args.command_id, 'request_id':args.request_id or str(uuid.uuid4()),
-    }
-    if args.composite_stream_id:
-        payload['composite_stream_id'] = args.composite_stream_id
-    if args.action == 'request':
-        if not args.dispatch_id or not args.destination or not args.member:
-            raise SystemExit('transfer request requires --dispatch-id, --destination and --member for each seat')
-        payload.update(dispatch_id=args.dispatch_id,destination=args.destination,members=args.member)
-        if args.pointers_file:
-            payload['pointers'] = json.loads(Path(args.pointers_file).read_text())
-    elif args.action == 'ready':
-        if not args.pointer_digest:
-            raise SystemExit('transfer ready requires --pointer-digest')
-        payload['pointer_digest'] = args.pointer_digest
+    action=args.action
+    standing=(action in {'authorize','authorization-status','authorization-revoke','resume'} or bool(args.authorization_id)
+              or action=='ready' and bool(args.attempt_id) or action=='cancel' and args.expected_attempt is not None)
+    payload: dict[str, object] = {'type':'assistant.transfer','action':action,
+        'request_id':args.request_id or str(uuid.uuid4())}
+    if args.composite_stream_id: payload['composite_stream_id']=args.composite_stream_id
+    if standing: payload['mode']='standing-transfer/v1'
+    if args.command_id: payload['command_id']=args.command_id
+    if args.authorization_id: payload['authorization_id']=args.authorization_id
+    if args.expected_revision is not None: payload['expected_revision']=args.expected_revision
+    required={
+        'authorize':('authorization_id','command_id','request_id','composite_stream_id','dispatch_id','destination','member'),
+        'authorization-status':('authorization_id','composite_stream_id'),
+        'authorization-revoke':('authorization_id','expected_revision','request_id','composite_stream_id','reason'),
+        'resume':('authorization_id','expected_revision','command_id','expected_attempt','request_id','composite_stream_id'),
+        'request':('authorization_id','expected_revision','command_id','request_id','composite_stream_id','pointers_file') if standing else ('command_id','dispatch_id','destination','member'),
+        'ready':('command_id','pointer_digest'), 'status':('command_id',),
+        'cancel':('command_id','expected_attempt','request_id','composite_stream_id') if standing else ('command_id',),
+    }[action]
+    missing=[flag for flag in required if getattr(args,flag,None) is None or getattr(args,flag,None)=='']
+    if missing: raise SystemExit('transfer '+action+' requires '+', '.join('--'+f.replace('_','-') for f in missing))
+    if action in {'authorize','request'}:
+        for field in ('dispatch_id','destination','expires_at'):
+            value=getattr(args,field,None)
+            if value is not None: payload[field]=value
+        if args.member: payload['members']=args.member
+        if args.pointers_file: payload['pointers']=json.loads(Path(args.pointers_file).read_text())
+        if args.extension_evidence_file: payload['extension_evidence']=json.loads(Path(args.extension_evidence_file).read_text())
+    if action=='ready':
+        payload['pointer_digest']=args.pointer_digest
+        if args.attempt_id: payload['attempt_id']=args.attempt_id
+    if action in {'resume','cancel'} and args.expected_attempt is not None: payload['expected_attempt']=args.expected_attempt
+    if action=='authorization-revoke':
+        payload['reason']=args.reason
+        # Select the existing independent local-admin transport. Never attach a
+        # seat token or inherit its identity for an emergency revocation.
+        config=load_config()
+        try:
+            response=asyncio.run(consent_once(config,'assistant.transfer',
+                {**payload,'local_admin_token':_local_admin_token(config)},timeout=args.timeout,local_admin=True))
+            _print_response(response)
+            return 0 if response.get('type')=='assistant.transfer.ok' else 1
+        except Exception as exc:
+            print(f'agent-orch transfer authorization-revoke: {type(exc).__name__}',file=sys.stderr)
+            return 1
     return _assistant_call(args,payload)
 
 
@@ -5307,8 +5336,8 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_rebind_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_rebind_parser.set_defaults(func=assistant_rebind)
     transfer_parser = assistant_sub.add_parser('transfer', help='Request/read/cancel a daemon-owned full host transfer')
-    transfer_parser.add_argument('action', choices=('request','status','cancel','ready'))
-    transfer_parser.add_argument('--command-id', required=True)
+    transfer_parser.add_argument('action', choices=('request','status','cancel','ready','authorize','authorization-status','authorization-revoke','resume'))
+    transfer_parser.add_argument('--command-id')
     transfer_parser.add_argument('--request-id')
     transfer_parser.add_argument('--composite-stream-id')
     transfer_parser.add_argument('--dispatch-id')
@@ -5316,6 +5345,13 @@ def build_parser() -> argparse.ArgumentParser:
     transfer_parser.add_argument('--member', action='append')
     transfer_parser.add_argument('--pointers-file')
     transfer_parser.add_argument('--pointer-digest')
+    transfer_parser.add_argument('--authorization-id')
+    transfer_parser.add_argument('--expected-revision',type=int)
+    transfer_parser.add_argument('--expected-attempt',type=int)
+    transfer_parser.add_argument('--attempt-id')
+    transfer_parser.add_argument('--expires-at')
+    transfer_parser.add_argument('--extension-evidence-file')
+    transfer_parser.add_argument('--reason')
     transfer_parser.add_argument('--timeout', type=float, default=30.0)
     transfer_parser.set_defaults(func=assistant_transfer)
     assistant_authority_parser = assistant_sub.add_parser(

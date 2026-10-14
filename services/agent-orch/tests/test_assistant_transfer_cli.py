@@ -35,3 +35,67 @@ def test_emergency_retirement_binds_explicit_generation_revision_and_request(mon
     assert payload['expected_revision']==7  # fresh inspect must not rewrite replay CAS
     assert (payload['target_stream_id'],payload['target_generation'])==('host:fd','exact')
     assert payload['retire_fd_generation'] and payload['request_id']=='revoke-once'
+
+
+def test_standing_authorize_and_resume_wire_shapes(tmp_path,monkeypatch):
+    evidence=tmp_path/'extension.json';evidence.write_text(json.dumps({'body_start':0,'body_end':4,'quote':'Move','timezone':'UTC','requested_expires_at':'2026-10-15T00:00:00Z'}))
+    calls=[]
+    async def call(config,payload,**kwargs):
+        calls.append(payload);return {'type':'assistant.transfer.ok'}
+    monkeypatch.setattr(cli,'assistant_once',call);monkeypatch.setattr(cli,'load_config',lambda:object())
+    base=['assistant','transfer']
+    args=cli.build_parser().parse_args(base+['authorize','--authorization-id','grant-1','--command-id','move-1',
+        '--request-id','authorize-1','--composite-stream-id','fixture:assistant','--dispatch-id','original',
+        '--destination','peer','--member','host:fd','--expires-at','2026-10-15T00:00:00Z','--extension-evidence-file',str(evidence)])
+    assert args.func(args)==0
+    assert calls[-1]['mode']=='standing-transfer/v1'
+    assert calls[-1]['extension_evidence']['quote']=='Move'
+    assert 'extension_evidence_file' not in calls[-1]
+    args=cli.build_parser().parse_args(base+['resume','--authorization-id','grant-1','--command-id','move-1',
+        '--request-id','resume-1','--composite-stream-id','fixture:assistant','--expected-revision','2','--expected-attempt','1'])
+    assert args.func(args)==0
+    assert calls[-1]['expected_revision']==2 and calls[-1]['expected_attempt']==1
+    assert 'pointers' not in calls[-1] and 'dispatch_id' not in calls[-1]
+
+
+def test_standing_request_requires_stable_identity_and_manifest(monkeypatch,tmp_path):
+    import pytest
+    pointers=tmp_path/'pointers.json';pointers.write_text('{}')
+    args=cli.build_parser().parse_args(['assistant','transfer','request','--authorization-id','grant-1',
+        '--command-id','move-1','--expected-revision','1','--composite-stream-id','fixture:assistant',
+        '--pointers-file',str(pointers)])
+    with pytest.raises(SystemExit,match='--request-id'): args.func(args)
+
+
+def test_authorization_revoke_uses_independent_transport(monkeypatch):
+    args=cli.build_parser().parse_args(['assistant','transfer','authorization-revoke','--authorization-id','grant-1',
+        '--request-id','revoke-1','--expected-revision','2','--composite-stream-id','fixture:assistant','--reason','Fixture'])
+    calls=[]
+    async def call(config,verb,payload,**kwargs):
+        calls.append((verb,payload,kwargs));return {'type':'assistant.transfer.ok'}
+    monkeypatch.setattr(cli,'consent_once',call);monkeypatch.setattr(cli,'load_config',lambda:object())
+    monkeypatch.setattr(cli,'_local_admin_token',lambda _:'fixture-independent-token')
+    assert args.func(args)==0
+    verb,payload,kw=calls[-1]
+    assert verb=='assistant.transfer' and kw['local_admin'] is True
+    assert not {'stream_token','from_stream_id'} & payload.keys()
+    assert payload['expected_revision']==2
+
+
+def test_standing_cancel_requires_stable_identity_and_preserves_legacy(monkeypatch):
+    import pytest
+    calls=[]
+    async def call(config,payload,**kwargs):
+        calls.append(payload);return {'type':'assistant.transfer.ok'}
+    monkeypatch.setattr(cli,'assistant_once',call);monkeypatch.setattr(cli,'load_config',lambda:object())
+    base=['assistant','transfer','cancel','--command-id','cancel-command','--expected-attempt','1']
+    for flags,missing in [(['--composite-stream-id','fixture:assistant'],'--request-id'),
+                          (['--request-id','cancel-once'],'--composite-stream-id')]:
+        args=cli.build_parser().parse_args(base+flags)
+        with pytest.raises(SystemExit,match=missing): args.func(args)
+    assert calls==[]
+    args=cli.build_parser().parse_args(base+['--request-id','cancel-once','--composite-stream-id','fixture:assistant'])
+    assert args.func(args)==args.func(args)==0
+    assert calls[0]==calls[1] and calls[0]['request_id']=='cancel-once'
+    legacy=cli.build_parser().parse_args(['assistant','transfer','cancel','--command-id','legacy-command'])
+    assert legacy.func(legacy)==0 and 'mode' not in calls[-1]

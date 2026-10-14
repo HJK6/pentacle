@@ -17,6 +17,7 @@ class HostTransfer:
         self.tasks={}
         self.actor_locks={}
         self.retries={}
+        self.task_attempts={}
         self.stopping=False
 
     def actor_lock(self, actor):
@@ -47,8 +48,13 @@ class HostTransfer:
         if previous is not None: previous.cancel()
         self.retries[cid]=asyncio.get_running_loop().call_later(2,self.schedule,cid)
 
-    def schedule(self,cid):
-        if self.stopping or cid in self.tasks and not self.tasks[cid].done(): return
+    def schedule(self,cid,attempt_id=None):
+        if self.stopping: return
+        if cid in self.tasks and not self.tasks[cid].done():
+            if attempt_id is not None and attempt_id!=self.task_attempts.get(cid):
+                self.tasks[cid].add_done_callback(lambda _: self.schedule(cid,attempt_id))
+            return
+        self.task_attempts[cid]=attempt_id
         # A source RPC context must never leak into daemon recovery work.
         token=journal.actor_context.set(None)
         try: self.tasks[cid]=asyncio.create_task(self.drive(cid))
@@ -58,53 +64,157 @@ class HostTransfer:
         auth=msg.get('_auth_context') or {}
         cid=msg.get('command_id')
         action=msg.get('action','status')
+        mode=msg.get('mode')
+        new_actions={'authorize','authorization-status','authorization-revoke','resume'}
+        if mode not in {None,journal.STANDING_MODE}:
+            raise journal.TransferError('transfer_action_invalid')
+        common={'type','action','mode','request_id','composite_stream_id','from_stream_id','stream_token','local_admin_token','protocol'}
+        fields={
+            'authorize':{'authorization_id','command_id','dispatch_id','destination','members','expires_at','extension_evidence'},
+            'authorization-status':{'authorization_id'},
+            'authorization-revoke':{'authorization_id','expected_revision','reason'},
+            'resume':{'authorization_id','expected_revision','command_id','expected_attempt'},
+            'request':{'command_id','dispatch_id','destination','members','pointers'},
+            'ready':{'command_id','pointer_digest','attempt_id'},
+            'status':{'command_id'},'cancel':{'command_id','expected_attempt'},
+        }
+        if action not in fields or action in new_actions and mode!=journal.STANDING_MODE:
+            raise journal.TransferError('transfer_action_invalid')
+        if action=='request' and mode==journal.STANDING_MODE:
+            fields[action]|={'authorization_id','expected_revision'}
+        if any(not k.startswith('_') and k not in common|fields[action] for k in msg):
+            raise journal.TransferError('transfer_action_invalid')
         retired=auth.get('retired_transfer_owner')
         if retired:
+            if action=='authorization-status':
+                a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
+                journal.require_composite(a,msg)
+                if (a['actor'],a['actor_generation'])!=(retired['stream_id'],retired['session_generation']):
+                    raise journal.TransferError('transfer_status_unauthorized')
+                return {'type':'assistant.transfer.ok','authorization':journal.public_authorization(a)}
             row=await self.read(cid)
             if not row or (row['actor'],row['actor_generation']) != (retired['stream_id'],retired['session_generation']):
                 raise journal.TransferError('transfer_status_unauthorized')
+            if row.get('authorization_id'): journal.require_composite(row,msg)
             if action=='request':
-                payload={k:msg.get(k) for k in ('dispatch_id','destination')}
-                payload.update(members=sorted(msg.get('members') or []),pointers=msg.get('pointers',{}),intent='full-authority-transfer/v1')
-                if journal.digest(payload)!=row['digest']:
-                    raise journal.TransferError('transfer_command_conflict')
+                if row.get('authorization_id'):
+                    replay=await self.store.submit(lambda c: c.execute('SELECT response FROM v2_host_transfer_requests WHERE request_id=?',(msg.get('request_id'),)).fetchone())
+                    if not replay or msg.get('authorization_id')!=row['authorization_id']:
+                        raise journal.TransferError('transfer_command_conflict')
+                    # Recheck the exact payload, with the original authenticated identity.
+                    await self.store.submit(lambda c: journal.request_identity(c,msg,{'token_verified':True,**retired}))
+                else:
+                    payload={k:msg.get(k) for k in ('dispatch_id','destination')}
+                    payload.update(members=sorted(msg.get('members') or []),pointers=msg.get('pointers',{}),intent='full-authority-transfer/v1')
+                    if journal.digest(payload)!=row['digest']: raise journal.TransferError('transfer_command_conflict')
             elif action!='status': raise journal.TransferError('transfer_status_unauthorized')
-            return {'type':'assistant.transfer.ok','command':row,'seats':await self.store.submit(lambda c:journal.seats(c,cid))}
+            return {'type':'assistant.transfer.ok','command':journal.public_command(row),'seats':await self.store.submit(lambda c:journal.seats(c,cid))}
         composite=self.server._composite_for_message(msg)
         if composite is None or not composite.enabled or not composite.config.direct_primary:
             raise journal.TransferError('transfer_composite_unavailable')
-        if action=='request':
+        if action in {'status','ready','cancel'}:
+            existing=await self.read(cid)
+            if existing and existing.get('authorization_id'): journal.require_composite(existing,msg)
+            if existing and not existing.get('authorization_id') and (mode is not None or msg.get('attempt_id') is not None or msg.get('expected_attempt') is not None):
+                raise journal.TransferError('transfer_action_invalid')
+        if action in {'authorization-status','authorization-revoke'}:
+            if action=='authorization-status':
+                def read_authorization(c):
+                    a=journal.authorization(c,msg.get('authorization_id'))
+                    journal.require_composite(a,msg)
+                    if a['composite']!=composite.config.stream_id: raise journal.TransferError('transfer_authorization_conflict')
+                    journal.authorization_reader(c,a,auth)
+                    return journal.public_authorization(a)
+                a=await self.store.submit(read_authorization)
+            else:
+                async with self.server.sessions.assistant.authority_lock:
+                    a=await self.mutate(lambda c:journal.revoke_authorization(c,msg,auth),credential=True)
+                if a.get('_error'): raise journal.TransferError(a['_error'])
+                self.schedule(a['command_id']) if await self.read(a['command_id']) else None
+            return {'type':'assistant.transfer.ok','authorization':a}
+        if action in {'authorize','request','resume'}:
             hosts=self.server.hosts
             if hosts is None: raise journal.TransferError('transfer_hosts_unavailable')
+            trusted={hosts.local_host,*hosts.peers}
             advisor=await self.store.get('assistant.authority.stream_id')
             if advisor is None: advisor=composite.env_config.authority_stream_id
-            helpers={k:getattr(composite.config,k) for k in ('luna_stream_id',)
-                     if getattr(composite.config,k)}
-            row=await self.mutate(lambda c: journal.claim(c,msg,auth,
-                name=composite.env_config.name,composite=composite.config.stream_id,
+            helpers={k:getattr(composite.config,k) for k in ('luna_stream_id',) if getattr(composite.config,k)}
+            context=dict(name=composite.env_config.name,composite=composite.config.stream_id,
                 env_binding=composite._env_binding(),advisor=advisor,helpers=helpers,
-                trusted_hosts={hosts.local_host,*hosts.peers},registry=self.server.operator_credential_registry),credential=True)
-            self.schedule(cid)
+                trusted_hosts=trusted,registry=self.server.operator_credential_registry)
+            if action=='authorize':
+                a=await self.mutate(lambda c:journal.authorize(c,msg,auth,**context),credential=True)
+                return {'type':'assistant.transfer.ok','authorization':a}
+            if mode==journal.STANDING_MODE:
+                a=await self.store.submit(lambda c:journal.authorization(c,msg.get('authorization_id')))
+                journal.require_owner(a,auth)
+                journal.require_composite(a,msg)
+                if cid!=a['command_id']: raise journal.TransferError('transfer_authorization_conflict')
+                # Authenticate replay before expensive checks; replay never spawns.
+                replay=await self.store.submit(lambda c:journal.request_identity(c,msg,auth)[2])
+                if replay is not None:
+                    return {'type':'assistant.transfer.ok','command':replay,'seats':await self.store.submit(lambda c:journal.seats(c,cid))}
+                if action=='resume':
+                    prior=await self.read(cid)
+                    if not prior: raise journal.TransferError('transfer_unknown')
+                    await self.verify_pointers(prior)
+                    if prior.get('last_error')=='transfer_effect_busy':
+                        if any(lock.locked() for lock in self.actor_locks.values()) or self.server.lane_rulings and any(lock.locked() for lock in self.server.lane_rulings._release_locks.values()):
+                            raise journal.TransferError('transfer_effect_busy')
+                    fn=journal.resume_authorized
+                else:
+                    candidate={**a['scope_row'],'pointers':msg.get('pointers')}
+                    journal.validate_pointers(candidate,candidate['pointers'],trusted)
+                    await self.verify_pointers(candidate)
+                    fn=journal.start_authorized
+                async with self.server.sessions.assistant.authority_lock:
+                    def start_attempt(c):
+                        self.check_runtime_scope(c,a['scope_row'])
+                        return fn(c,msg,auth,self.server.operator_credential_registry,trusted)
+                    row=await self.mutate(start_attempt,credential=True)
+            else:
+                row=await self.mutate(lambda c:journal.claim(c,msg,auth,**context),credential=True)
+            self.schedule(cid,row.get('attempt_id'))
         elif action=='ready':
-            await self.mutate(lambda c: journal.ready(c,cid,auth,msg.get('pointer_digest')))
+            await self.mutate(lambda c:journal.ready(c,cid,auth,msg.get('pointer_digest'),msg.get('attempt_id')))
             row=await self.read(cid)
             self.schedule(cid)
         elif action=='cancel':
             async with self.server.sessions.assistant.authority_lock:
-                row=await self.mutate(lambda c: journal.cancel(c,cid,auth))
+                row=await self.mutate(lambda c:journal.cancel(c,cid,auth,msg),credential=True)
             self.schedule(cid)
-        elif action=='status':
+        else:
             row=await self.read(cid)
             if not row: raise journal.TransferError('transfer_unknown')
-            parts=await self.store.submit(lambda c: journal.seats(c,cid))
+            parts=await self.store.submit(lambda c:journal.seats(c,cid))
             pairs={(row['actor'],row['actor_generation']),*((p['target'],p['target_generation']) for p in parts)}
-            if not (auth.get('token_verified') and (auth.get('stream_id'),auth.get('session_generation')) in pairs
-                    or auth.get('operator_authenticated') and not auth.get('token_verified')
-                    or auth.get('peer_loopback') and auth.get('local_admin_verified')):
+            if not (auth.get('token_verified') and (auth.get('stream_id'),auth.get('session_generation')) in pairs or journal.independent_admin(auth)):
                 raise journal.TransferError('transfer_status_unauthorized')
-        else: raise journal.TransferError('transfer_action_invalid')
-        return {'type':'assistant.transfer.ok','command':row,
-                'seats':await self.store.submit(lambda c: journal.seats(c,cid))}
+        result={'type':'assistant.transfer.ok','command':journal.public_command(row),
+                'seats':await self.store.submit(lambda c:journal.seats(c,cid))}
+        if row.get('authorization_id'):
+            result['authorization']=await self.store.submit(lambda c:journal.public_authorization(journal.authorization(c,row['authorization_id'])))
+            result['attempts']=await self.store.submit(lambda c:journal.attempts(c,cid))
+        return result
+
+    def check_runtime_scope(self,conn,row):
+        composite=self.server._composite_for(row['composite'])
+        if composite is None or not composite.enabled or not composite.config.direct_primary:
+            raise journal.TransferError('transfer_composite_unavailable')
+        hosts=self.server.hosts
+        if hosts is None or row['destination'] not in {hosts.local_host,*hosts.peers}:
+            raise journal.TransferError('transfer_host_untrusted')
+        binding=journal._binding_conn(conn,composite._env_binding(),name=composite.env_config.name)
+        if composite.env_config.name!=row['name'] or any(binding[k]!=row['binding'][k] for k in ('stream_id','generation','revision')):
+            raise journal.TransferError('transfer_authority_changed')
+        overrides=conn.execute('SELECT v FROM kv WHERE k=?',('assistant.transfer.helpers.'+row['name'],)).fetchone()
+        overrides=json.loads(overrides[0]) if overrides else {}
+        helpers={k:overrides.get(k,getattr(composite.config,k)) for k in ('luna_stream_id',)}
+        helpers={k:v for k,v in helpers.items() if v}
+        advisor=conn.execute("SELECT v FROM kv WHERE k='assistant.authority.stream_id'").fetchone()
+        advisor=advisor[0] if advisor else composite.env_config.authority_stream_id
+        if helpers!=row['helpers'] or advisor!=row['advisor']:
+            raise journal.TransferError('transfer_helper_changed')
 
     async def verify_pointers(self,row):
         hosts=self.server.hosts
@@ -120,6 +230,7 @@ class HostTransfer:
 
     async def prepare(self,row):
         if self.server.spawnctl is None: raise journal.TransferError('transfer_spawn_unavailable')
+        await self.mutate(lambda c:(self.check_runtime_scope(c,row),journal.check_source(c,row,self.server.operator_credential_registry)),credential=True)
         await self.verify_pointers(row)
         parts=await self.store.submit(lambda c: journal.seats(c,row['command_id']))
         for part in parts:
@@ -138,6 +249,7 @@ class HostTransfer:
                 'initial_prompt':json.dumps({'migration':row['command_id'],'source':part['source'],
                     'pointers':row['pointers'].get(part['source'],[]),
                     'instructions':'Read and verify the recorded host/path/hash pointers. Use agent-orch assistant transfer ready with this command id and pointer digest. Until status says committed, only readiness and status are authorized.',
+                    'attempt_id':row.get('attempt_id'),
                     'pointer_digest':journal.digest(row['pointers'].get(part['source'],[]))}),
                 '_auth_context':{'service_authenticated':True,'service_actor':'daemon:host-transfer'}}
             existing=await self.store.fetch_session(host,name)
@@ -148,7 +260,7 @@ class HostTransfer:
             # existing reservation/outcome remains the only spawn obligation.
             while True:
                 fresh=await self.read(row['command_id'])
-                if fresh['state']!='preparing': return
+                if fresh['state']!='preparing' or fresh.get('attempt_id')!=row.get('attempt_id'): return
                 journal._fresh(fresh,time.time())
                 existing=await self.store.fetch_session(host,name)
                 if existing and existing.get('bootstrap_state')=='ready': break
@@ -157,7 +269,7 @@ class HostTransfer:
                 if outcome and outcome.get('state') in {'failed','cancelled'}:
                     raise journal.TransferError('transfer_preparation_failed')
                 await asyncio.sleep(.1)
-            await self.mutate(lambda c: journal.prepared(c,row['command_id'],part['target'],existing['session_generation']))
+            await self.mutate(lambda c: journal.prepared(c,row['command_id'],part['target'],existing['session_generation'],row.get('attempt_id')))
 
     async def commit(self,row):
         sessions=self.server.sessions
@@ -191,7 +303,10 @@ class HostTransfer:
                 await stack.enter_async_context(sessions._lifecycle_lock(*sid.split(':',1)))
             await stack.enter_async_context(sessions._graph_lock)
             async def committed_and_published():
-                result=await self.mutate(lambda c: journal.commit(c,row['command_id'],self.server.operator_credential_registry),credential=True)
+                def commit_current(c):
+                    self.check_runtime_scope(c,row)
+                    return journal.commit(c,row['command_id'],self.server.operator_credential_registry,attempt_id=row.get('attempt_id'))
+                result=await self.mutate(commit_current,credential=True)
                 await composite.load_binding()
                 await sessions.refresh()
                 return result
@@ -204,14 +319,16 @@ class HostTransfer:
                 raise
 
     async def drive(self,cid):
+        expected_attempt=None
         try:
             row=await self.read(cid)
+            expected_attempt=row.get('attempt_id')
             if row['state']=='preparing':
                 await self.prepare(row)
                 while True:
                     row=await self.read(cid)
-                    if row['state']!='preparing': break
-                    await self.store.submit(lambda c: journal.check_source(c,row,self.server.operator_credential_registry))
+                    if row['state']!='preparing' or row.get('attempt_id')!=expected_attempt: break
+                    await self.mutate(lambda c:(self.check_runtime_scope(c,row),journal.check_source(c,row,self.server.operator_credential_registry)),credential=True)
                     parts=await self.store.submit(lambda c: journal.seats(c,cid))
                     if all(p['ready'] for p in parts):
                         row=await self.commit(row)
@@ -223,14 +340,25 @@ class HostTransfer:
                 await self.cleanup_preparations(row)
         except asyncio.CancelledError: raise
         except Exception as exc:
+            code=getattr(exc,'code',type(exc).__name__)
+            if code=='transfer_clock_regressed':
+                def suspend(c):
+                    current=journal.load(c,cid)
+                    if current.get('attempt_id')!=expected_attempt or current['state']!='preparing': return False
+                    current['last_error']=code
+                    journal.save(c,current)
+                    journal.audit(c,cid,'clock_suspended',detail=code)
+                    return True
+                if await self.mutate(suspend): self.retry(cid)
+                return
             def failed(c):
                 row=journal.load(c,cid)
-                row['last_error']=getattr(exc,'code',type(exc).__name__)
-                if row['state']=='preparing': row['state']='expired' if row['expires_at']<=time.time() else 'failed'
-                journal.save(c,row)
+                if row.get('attempt_id')!=expected_attempt: return None
+                journal.fail_attempt(c,row,code)
                 journal.audit(c,cid,'reconcile_failed',detail=row['last_error'])
                 return row
             row=await self.mutate(failed)
+            if row is None: return
             if row['state'] not in journal.COMMITTED:
                 await self.cleanup_preparations(row)
             else:
@@ -238,6 +366,7 @@ class HostTransfer:
 
     async def cleanup_preparations(self,row):
         parts=await self.store.submit(lambda c: journal.seats(c,row['command_id']))
+        if any(p.get('attempt_id')!=row.get('attempt_id') for p in parts): return
         outcomes={}
         for part in parts:
             host,name=part['target'].split(':',1)
@@ -268,7 +397,10 @@ class HostTransfer:
                 outcomes[part['target']]=getattr(exc,'code',type(exc).__name__)
         complete=all(v in {'closed','closed_or_not_created'} for v in outcomes.values())
         def record(c):
-            current=journal.load(c,row['command_id']);current.update(cleanup=outcomes,cleanup_complete=complete);journal.save(c,current)
+            current=journal.load(c,row['command_id'])
+            if current.get('attempt_id')!=row.get('attempt_id'): return
+            current.update(cleanup=outcomes,cleanup_complete=complete);journal.save(c,current)
+            if complete: journal.finalize_attempt(c,current)
         await self.mutate(record)
         if not complete: self.retry(row['command_id'])
 
