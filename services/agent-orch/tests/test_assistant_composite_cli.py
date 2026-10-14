@@ -33,6 +33,32 @@ def test_assistant_publish_uses_typed_existing_socket_request(monkeypatch, capsy
     assert "assistant.publish.ok" in capsys.readouterr().out
 
 
+def test_assistant_publish_batch_lists_every_answered_input(monkeypatch) -> None:
+    """spec_pentacle__assistant_duplicate_reply_sources_2026_10: one publication answers a batch."""
+    args = cli.build_parser().parse_args([
+        "assistant", "publish", "--dispatch-id", "dispatch-1",
+        "--reply-to-message-id", "input-1", "--reply-to-message-ids", "input-1", "input-2,input-3",
+        "--request-id", "publish:dispatch-1", "--composite-stream-id", "fixture-host-chat:assistant",
+        "--publish-kind", "prose", "--response-state", "final", "--message", "done",
+    ])
+    captured = {}
+
+    async def fake_once(_config, payload, *, timeout):
+        captured.update(payload=payload)
+        return {"type": "assistant.publish.ok", "event_id": 9, "closed_dispatch_ids": ["d2", "d3"]}
+
+    monkeypatch.setattr(cli, "assistant_once", fake_once)
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    assert args.func(args) == 0
+    assert captured["payload"]["reply_to_message_ids"] == ["input-1", "input-2", "input-3"]
+    proactive = cli.build_parser().parse_args([
+        "assistant", "publish", "--proactive", "--reply-to-message-ids", "input-1",
+        "--request-id", "p", "--composite-stream-id", "fixture-host-chat:assistant",
+        "--publish-kind", "prose", "--message", "x",
+    ])
+    assert proactive.func(proactive) == 2
+
+
 def test_assistant_rebind_reads_revision_then_sends_one_typed_mutation(monkeypatch, capsys) -> None:
     args = cli.build_parser().parse_args([
         "assistant", "rebind", "--target", "fixture-host:new",

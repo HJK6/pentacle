@@ -327,12 +327,40 @@ def _assistant_authority_request_receipt_conn(conn, stream_id, dispatch_id):
             "recipient_stream_id": row["recipient_stream_id"], "last_error": row["last_error"]}
 
 
+def _open_direct_dispatches_conn(conn: sqlite3.Connection, stream_id: str,
+                                 target: str | None = None, generation: str | None = None) -> list[dict[str, Any]]:
+    """Resolved direct dispatches with no final prose publication, oldest first.
+
+    Batch membership never affects openness; a closing row counts as a final.
+    """
+    sql = ("SELECT r.route_id,r.dispatch_id,r.input_identity,r.reply_to_question_id,"
+           "r.route_target,r.route_target_generation FROM v2_assistant_composite_routes r "
+           "WHERE r.stream_id=? AND r.routing_state='resolved' AND r.dispatch_id IS NOT NULL "
+           "AND r.delivery_state IN ('intent','committed_pending','uncertain','landed') "
+           "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+           "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
+           "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id AND p.publish_kind='prose' "
+           "AND json_extract(p.canonical_payload_json,'$.response_state')='final')")
+    params: list[Any] = [stream_id]
+    if target is not None:
+        sql += " AND r.route_target=? AND r.route_target_generation=?"
+        params += [target, generation]
+    return [dict(row) for row in conn.execute(sql + " ORDER BY r.created_at,r.rowid", params)]
+
+
+def _closed_dispatch_ids_conn(conn: sqlite3.Connection, event_id: int, publication_key: str) -> list[str]:
+    return [row[0] for row in conn.execute(
+        "SELECT dispatch_id FROM v2_assistant_composite_publications "
+        "WHERE merged_into_event_id=? AND publication_key<>? ORDER BY rowid", (event_id, publication_key))]
+
+
 def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication_key, dispatch_id, reply_to_message_id,
                              reply_to_question_id, publish_kind, attachment_ids, evidence_refs,
                              canonical_payload, event, actor_stream_id=None, actor_generation=None,
                              authority_stream_id=None, direct_target_stream_id=None,
                              direct_target_generation=None, direct_single_final=False,
-                             proactive_binding_name=None, proactive_env_binding=None) -> dict[str, Any]:
+                             proactive_binding_name=None, proactive_env_binding=None,
+                             reply_to_message_ids=None) -> dict[str, Any]:
     """Insert one assistant publication and its receipt on ``conn``.
 
     The caller owns the transaction: it must hold ``BEGIN IMMEDIATE`` and
@@ -400,7 +428,8 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
             "SELECT event_json FROM session_event_tail WHERE event_id=?", (saved["event_id"],),
         ).fetchone()[0])
         replay_event["daemon_seq"] = int(saved["event_id"])
-        saved.update({"event": replay_event, "duplicate": True})
+        saved.update({"event": replay_event, "duplicate": True,
+                      "closed_dispatch_ids": _closed_dispatch_ids_conn(conn, int(saved["event_id"]), publication_key)})
         return saved
     if actor_generation is not None and proactive_binding_name is None:
         route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
@@ -464,6 +493,26 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
         if any(json.loads(row["canonical_payload_json"]).get("response_state") == "final"
                for row in previous_finals):
             raise ValueError("assistant_direct_final_already_published")
+    # Dispatch batching: one final may also close the caller's other open
+    # dispatches it lists; each keeps its own row, pointing at this event.
+    closing: list[dict[str, Any]] = []
+    if reply_to_message_ids is not None:
+        if reply_to_message_id not in reply_to_message_ids:
+            raise ValueError("assistant_publish_reply_unverified")
+        others = [i for i in dict.fromkeys(reply_to_message_ids) if i != reply_to_message_id]
+        if others:
+            if not (direct_single_final and publish_kind == "prose"):
+                raise ValueError("assistant_publish_reply_unverified")
+            from store_host_transfer import successor
+            open_inputs = {
+                row["input_identity"]: row for row in _open_direct_dispatches_conn(conn, stream_id)
+                if row["dispatch_id"] != dispatch_id and successor(
+                    conn, row["route_target"], row["route_target_generation"],
+                ) == (actor_stream_id, actor_generation)
+            }
+            if any(i not in open_inputs for i in others):
+                raise ValueError("assistant_publish_reply_unverified")
+            closing = [open_inputs[i] for i in others]
     session = conn.execute(
         "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
         (host, session_name),
@@ -496,13 +545,38 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
             json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
         ),
     )
+    for member in closing:
+        member_payload = {
+            "composite_stream_id": stream_id, "dispatch_id": member["dispatch_id"],
+            "reply_to_message_id": member["input_identity"],
+            "reply_to_question_id": member["reply_to_question_id"],
+            "publish_kind": "prose", "response_state": "final",
+            "merged_into_publication_key": publication_key,
+        }
+        member_json = json.dumps(member_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        conn.execute(
+            """INSERT INTO v2_assistant_composite_publications(
+                publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,
+                reply_to_message_id,reply_to_question_id,publish_kind,attachment_ids_json,
+                evidence_refs_json,event_id,created_at,merged_into_event_id
+            ) VALUES (?,?,?,?,?,?,?,'prose','[]','[]',?,?,?)""",
+            ("publish:" + member["dispatch_id"], stream_id,
+             hashlib.sha256(member_json.encode("utf-8")).hexdigest(), member_json,
+             member["dispatch_id"], member["input_identity"], member["reply_to_question_id"],
+             event_id, stamp, event_id),
+        )
+        conn.execute(
+            "UPDATE v2_assistant_composite_routes SET answered_by_event_id=?, updated_at=? "
+            "WHERE stream_id=? AND dispatch_id=?", (event_id, stamp, stream_id, member["dispatch_id"]),
+        )
     for attachment in event.get('attachments') or []:
         conn.execute("INSERT INTO v2_attachment_refs(owner_kind,owner_id,stream_id,upload_id,blob_sha) VALUES ('publication',?,?,?,?)",
             (publication_key, stream_id, attachment['upload_id'], attachment['key']))
     stored = dict(conn.execute(
         "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
     ).fetchone())
-    stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False})
+    stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False,
+                   "closed_dispatch_ids": [member["dispatch_id"] for member in closing]})
     return stored
 
 
@@ -1210,7 +1284,11 @@ class _RoutingStoreMixin:
         expected_dispatch_id: str | None = None,
         expected_routing_state: str | None = None,
         expected_delivery_state: str | None = None,
+        direct_batch: Any = None,
     ) -> dict[str, Any] | None:
+        """``direct_batch(open_dispatches) -> (route_payload, batched_into_dispatch_id)``
+        builds a direct route's payload from the target's other open dispatches
+        inside this transaction, so membership and resolution commit together."""
         allowed_routing = {
             "queued", "classifying", "fallback_dispatched", "deferred", "resolved", "routing_failed",
         }
@@ -1235,8 +1313,16 @@ class _RoutingStoreMixin:
                     return None
                 existing = dict(row)
                 stamp = _routing_iso_now()
+                payload = route_payload
+                batched_into = None
+                if direct_batch is not None:
+                    payload, batched_into = direct_batch([
+                        item for item in _open_direct_dispatches_conn(
+                            conn, row["stream_id"], route_target, route_target_generation)
+                        if item["route_id"] != route_id
+                    ])
                 prior_payload = json.loads(row["route_json"] or "{}")
-                merged_payload = dict(route_payload) if route_payload is not None else prior_payload
+                merged_payload = dict(payload) if payload is not None else prior_payload
                 # Admission owns this input; classifier/rebind/retry cannot replace it.
                 if "input_meta" in prior_payload:
                     merged_payload["input_meta"] = prior_payload["input_meta"]
@@ -1255,11 +1341,12 @@ class _RoutingStoreMixin:
                          dispatch_id=COALESCE(?,dispatch_id), route_target=COALESCE(?,route_target),
                          route_target_generation=COALESCE(?,route_target_generation),
                          route_json=COALESCE(?,route_json), depends_on_message_id=COALESCE(?,depends_on_message_id),
+                         batched_into_dispatch_id=COALESCE(?,batched_into_dispatch_id),
                          error_code=?, lease_owner=NULL, lease_until=NULL, updated_at=?
                        WHERE route_id=?""",
                     (
                         routing_state, delivery_state, dispatch_id, route_target, route_target_generation, persisted_route_json,
-                        depends_on_message_id, error_code, stamp, route_id,
+                        depends_on_message_id, batched_into, error_code, stamp, route_id,
                     ),
                 )
                 updated = dict(conn.execute(
@@ -1396,6 +1483,7 @@ class _RoutingStoreMixin:
         direct_single_final: bool = False,
         proactive_binding_name: str | None = None,
         proactive_env_binding: dict[str, str] | None = None,
+        reply_to_message_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or (not dispatch_id and proactive_binding_name is None):
@@ -1420,6 +1508,7 @@ class _RoutingStoreMixin:
                     direct_single_final=direct_single_final,
                     proactive_binding_name=proactive_binding_name,
                     proactive_env_binding=proactive_env_binding,
+                    reply_to_message_ids=reply_to_message_ids,
                 )
                 conn.commit()
                 return stored
