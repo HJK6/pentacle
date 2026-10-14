@@ -103,6 +103,7 @@
     "services/chat-stream-v2/tests/test_role_set.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_routing_integrity.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_schedule_transport.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "services/chat-stream-v2/tests/test_seat_injection_provenance.py": "Synthetic host and stream identifiers exercise injected setup provenance.",
     "services/chat-stream-v2/tests/test_seat_token_telemetry.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_self_close_backlog_sweep.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "services/chat-stream-v2/tests/test_send_receipts.py": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
