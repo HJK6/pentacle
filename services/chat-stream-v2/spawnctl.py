@@ -219,6 +219,7 @@ RESUBMIT_GRACE_S = 2.0
 #: rules the agent never started (QA #16 FINAL / determinism item (a)). A live
 #: pane that never creates a session log inside this window is `agent_never_started`.
 ADOPTION_BOOT_DEADLINE_S = 20.0
+NATIVE_TRUST_POLL_S = 2.0
 # Reserve part of the remaining adoption budget for the authoritative Store
 # read that follows the advisory transcript probe.  The slice is capped by the
 # remote event-read bound and shrinks with short deterministic test deadlines.
@@ -311,6 +312,7 @@ class SpawnCtl:
         # sharing a key on this controller.
         self._submission_attempts: dict[str, int] = {}
         self._submission_proof_failures: dict[str, str] = {}
+        self._native_trust_entered: set[str] = set()
         #: A disconnected requester must not cancel the daemon's spawn
         #: obligation. The task remains owned here until it records a terminal
         #: delivered/failed outcome and cleans up any pane it created.
@@ -1292,7 +1294,59 @@ class SpawnCtl:
                 "unreachable", stream_id, 0,
                 reason="initial_event_proof_unavailable",
             )
-        return await waiter(stream_id, expected_text=text, timeout_s=timeout_s)
+        proof = asyncio.create_task(waiter(stream_id, expected_text=text, timeout_s=timeout_s))
+        host, name = self.sessions.split(stream_id)
+        tmux = self._tmux_for(host)
+
+        async def recover_dialog():
+            from boot_ready import codex_trust_dialog_visible
+            while not proof.done():
+                try:
+                    pane = await tmux.capture(name)
+                    if (not proof.done() and stream_id not in self._native_trust_entered
+                            and not codex_reset_interstitial_visible(pane)
+                            and codex_trust_dialog_visible(pane)):
+                        # Mark before input: ambiguity never authorizes a second Enter.
+                        self._native_trust_entered.add(stream_id)
+                        log.warning("native trust_dialog recovery stream=%s action=single_enter", stream_id)
+                        await tmux.send_enter(name)
+                except Exception:
+                    log.debug("native proof pane recovery unavailable stream=%s", stream_id, exc_info=True)
+                await asyncio.sleep(NATIVE_TRUST_POLL_S)
+
+        recovery = asyncio.create_task(recover_dialog())
+        try:
+            return await proof
+        finally:
+            recovery.cancel()
+            if not proof.done():
+                proof.cancel()
+            await asyncio.gather(recovery, proof, return_exceptions=True)
+
+    async def _notice_native_delivery_failure(self, host, name, request_id, parent_id, code, pane):
+        from boot_ready import codex_trust_dialog_visible
+        from message_envelopes import build_notice_body
+        classification = ("reset_interstitial" if codex_reset_interstitial_visible(pane)
+                          else "trust_dialog" if codex_trust_dialog_visible(pane) else "silent")
+        log.warning("native_initial_prompt_delivery_failed stream=%s key=%s failure_code=%s pane=%s",
+                    f"{host}:{name}", request_id, code, classification)
+        if not parent_id or ":" not in parent_id:
+            return
+        notice_id = "spawn-delivery-failed:" + hashlib.sha256(
+            json.dumps([host, name, request_id]).encode()).hexdigest()
+        try:
+            parent = await self.store.fetch_session(*self.sessions.split(parent_id))
+            await self.store.enqueue_outbound_notice(
+                notice_id=notice_id, tell_id=notice_id, kind="spawn_delivery_failed", dedupe_key=notice_id,
+                recipient_stream_id=parent_id, source_stream_id=f"{host}:{name}",
+                body=build_notice_body(notice_id,
+                    f"Native spawn delivery failed for {host}:{name}; key={request_id}; "
+                    f"failure_code={code}; pane_classification={classification}. "
+                    "Inspect the existing spawn handle before recovery; do not spawn a duplicate."),
+                metadata={"failure_code": code, "pane_classification": classification,
+                          "parent_generation": (parent or {}).get("session_generation")})
+        except Exception:
+            log.exception("native failure parent notice persistence failed stream=%s", f"{host}:{name}")
 
     # -- spawn -------------------------------------------------------------
 
@@ -2032,6 +2086,8 @@ class SpawnCtl:
                 delivery_receipt=delivery_receipt,
                 native_initial_prompt=native_initial_prompt,
             )
+            if native_initial_prompt and self.instance_id:
+                delivery_receipt["spawn_daemon_instance_id"] = self.instance_id
             # Graph admission ends before boot. A winning parent close makes
             # this request refuse before a pane; a winning intent blocks close.
             async with self.sessions._graph_lock:
@@ -2219,6 +2275,16 @@ class SpawnCtl:
                     "type": "spawn.cancelled", "ok": False, "state": "cancelled",
                     "stream_id": f"{host}:{name}", "request_id": request_id,
                 }
+            if (delivery_receipt.get("transport") == "native_argv"
+                    and reason in {"native_initial_prompt_delivery_failed", CODEX_RESET_BLOCKED}):
+                pane = str(getattr(exc, "extra", {}).get("pane_capture") or "")
+                if not pane:
+                    try:
+                        pane = await tmux.capture(name)
+                    except Exception:
+                        pane = ""
+                await self._notice_native_delivery_failure(host, name, request_id,
+                    str(open_flds.get("parent_stream_id") or ""), reason, pane)
             outcome_fields: dict[str, Any] = {}
             if reason == CODEX_RESET_BLOCKED:
                 # The provider pane is intentionally left OPEN and alive.  The
@@ -2749,6 +2815,13 @@ class SpawnCtl:
             raise VerbError("spawn_fence_lost", "spawn no longer owns its creation intent")
         provider = str((resolution.get("resolved_launch_tuple") or {}).get("provider") or "")
         promptless_codex = provider == "codex" and not brief
+        if provider == "codex" and not str(msg.get("command") or "").strip():
+            machine = self._launch_machine(host, provider)
+            if machine is not None:
+                await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd))
+        if provider == "codex":
+            # An explicitly reused name is a fresh pane, with its own Enter budget.
+            self._native_trust_entered.discard(f"{host}:{name}")
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart
@@ -3398,6 +3471,10 @@ class SpawnCtl:
                         stage = "work_lanes"
                         result["work_lanes_moved"] = len(
                             await self.store.work_lane_handoff(handoff_from, successor_stream_id))
+                        stage = "watch_custody"
+                        result["watches_moved"] = await self.store.transfer_watch_custody(
+                            handoff_from, str(source.get("session_generation") or ""), successor_stream_id,
+                            str(successor.get("session_generation") or ""))
                         stage = "source_close"
                         self.sessions.assistant.guard_close(source, "handed_off")
                         closed = await self.sessions._close_locked(src_host, src_name, reason="handed_off",
@@ -4027,37 +4104,26 @@ class SpawnCtl:
         # the caller before we are ever reached.
         brief = str(intent.get("brief") or "")
         receipt = intent.get("delivery_receipt")
-        if not (
-            isinstance(receipt, dict)
-            and str(receipt.get("proof_watermark_state") or "") == "reachable"
-        ):
-            # A crash after the outcome write can leave the newest receipt in
-            # `v2_spawn_outcomes` while the reservation payload still carries
-            # the pre-paste version. Reuse that durable boundary when it is
-            # reachable; never manufacture a fresh watermark during adoption.
-            try:
-                prior_outcome = await self.store.get_spawn_outcome(host, name)
-                outcome_receipt = (
-                    prior_outcome.get("delivery_receipt")
-                    if isinstance(prior_outcome, dict) else None
-                )
-                if (
-                    isinstance(prior_outcome, dict)
-                    and request_id
-                    and str(prior_outcome.get("request_id") or "") == request_id
-                    and str(prior_outcome.get("state") or "") == "indeterminate"
-                    and isinstance(outcome_receipt, dict)
-                    and str(outcome_receipt.get("proof_watermark_state") or "") == "reachable"
+        try:
+            prior = await self.store.get_spawn_outcome(host, name)
+            if (isinstance(prior, dict) and str(prior.get("request_id") or "") == request_id
+                    and isinstance(prior.get("delivery_receipt"), dict)):
+                prior_receipt = prior["delivery_receipt"]
+                if prior_receipt.get("transport") == "native_argv":
+                    receipt = {**(receipt if isinstance(receipt, dict) else {}), **prior_receipt}
+                elif (not isinstance(receipt, dict) or receipt.get("proof_watermark_state") != "reachable") and (
+                    prior.get("state") == "indeterminate" and prior_receipt.get("proof_watermark_state") == "reachable"
                 ):
-                    receipt = outcome_receipt
-            except Exception:  # noqa: BLE001 - missing outcome is not proof
-                pass
+                    receipt = prior_receipt
+        except Exception:
+            log.debug("adoption prior receipt unavailable stream=%s", f"{host}:{name}", exc_info=True)
         try:
             state, evidence, reason = await self._settle_adoption(
                 host, name, brief, tmux,
                 delivery_receipt=receipt if isinstance(receipt, dict) else None,
                 resume={"request_id": request_id, "nonce": str((reservation or {}).get("nonce") or ""),
-                        "intent": intent, "expires_at": float((reservation or {}).get("expires_at") or 0.0)},
+                        "intent": intent, "expires_at": float((reservation or {}).get("expires_at") or 0.0),
+                        "owner_instance_id": (reservation or {}).get("owner_instance_id")},
             )
         except Exception:  # noqa: BLE001 - one bad intent never aborts the boot pass
             # Preserve the reservation: a definite failure could release the
@@ -4125,7 +4191,8 @@ class SpawnCtl:
                 delivery_receipt=receipt,
             )
             return "deferred"
-        pane_evidence_line = ""
+        if isinstance(receipt, dict) and state == "delivered" and receipt.get("delivery_failed_at"):
+            receipt = {**receipt, "delivered_late_at": iso_now()}
         if isinstance(receipt, dict) and state == "delivered":
             receipt = {
                 **receipt,
@@ -4306,7 +4373,11 @@ class SpawnCtl:
                 return (
                     "delivered",
                     "native_argv",
-                    "adopted_after_restart: first USER event proves native argv delivery",
+                    ("adopted_after_restart" if (
+                        self.instance_id
+                        and (delivery_receipt.get("spawn_daemon_instance_id") or (resume or {}).get("owner_instance_id"))
+                        and (delivery_receipt.get("spawn_daemon_instance_id") or (resume or {}).get("owner_instance_id")) != self.instance_id
+                    ) else "late_first_user_event") + ": first USER event proves native argv delivery",
                 )
             return (
                 "indeterminate",

@@ -630,6 +630,10 @@ def test_new_key_after_a_dead_seat_starts_a_fresh_seat() -> None:
 
 class _TokenTmux(PerNameTmux):
     """Only the provider boundary is fake; stage actual private fixture bytes."""
+    async def pretrust_codex_cwd(self, cwd):
+        # Provider-host config is outside this token/staging fixture.
+        pass
+
     def __init__(self):
         super().__init__()
         self.stages = []

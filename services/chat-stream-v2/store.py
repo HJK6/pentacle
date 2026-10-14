@@ -3425,6 +3425,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         *,
         expected_generation: str | None = None,
         expected_spec_source: dict[str, Any] | None = None,
+        transfer_child_watch_custody: bool = False,
         **fields: Any,
     ) -> dict[str, Any] | None:
         """Patch named columns on one row. Returns the row, or None if absent."""
@@ -3456,6 +3457,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 if current is None or str(current[0] or "") != expected_generation:
                     conn.commit()
                     return None
+            custody_child = _session_for_stream_conn(conn, f"{host}:{session_name}") if transfer_child_watch_custody else None
             assign = ", ".join(f"{k}=?" for k in cols)
             cur = conn.execute(
                 f"UPDATE sessions SET {assign} WHERE host=? AND session_name=?",
@@ -3487,6 +3489,14 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     (stream_id,),
                 )
             try:
+                if custody_child and custody_child.get("parent_stream_id") != cols.get("parent_stream_id"):
+                    from store_watch_wake import move_watch_custody_conn, _session
+                    source = _session(conn, custody_child.get("parent_stream_id"))
+                    target = _session(conn, cols.get("parent_stream_id"))
+                    if source and target and source["status"] == "open":
+                        move_watch_custody_conn(conn, custody_child["parent_stream_id"], source["session_generation"],
+                            cols["parent_stream_id"], target["session_generation"],
+                            child=(f"{host}:{session_name}", custody_child["session_generation"]))
                 lifecycle_watch_conn(conn, time.time())
                 install_default_conn(conn, f"{host}:{session_name}", time.time())
             except BaseException:

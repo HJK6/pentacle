@@ -28,6 +28,8 @@ def test_hidden_compact_crossing_advises_seat_and_live_parent():
             assert result.sent == 2
             assert {name for name, text in h.tmux.pasted_by_name} == {'parent', 'child'}
             assert all('context_advisory' in text for name, text in h.tmux.pasted_by_name)
+            child_advisory = next(text for name, text in h.tmux.pasted_by_name if name == 'child')
+            assert 'carry the Operator directives register verbatim' in child_advisory
             assert all('context_handoff' not in text for name, text in h.tmux.pasted_by_name)
             assert len(await store.nudge_states()) >= 1
         finally:

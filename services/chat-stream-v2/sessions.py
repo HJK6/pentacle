@@ -1029,7 +1029,7 @@ class Sessions:
             raise VerbError("reparent_unauthorized", f"{caller} cannot reparent {worker_stream_id}")
 
         updated = await self.store.update_session(
-            host, session_name, parent_stream_id=new_parent_stream_id
+            host, session_name, parent_stream_id=new_parent_stream_id, transfer_child_watch_custody=True
         )
         if updated is None or str(updated.get("status") or "open") != "open":
             raise VerbError("reparent_worker_not_found", f"{worker_stream_id} is no longer open")
@@ -1163,7 +1163,7 @@ class Sessions:
             if child.get("stream_id") == new_parent_stream_id:
                 continue
             row = await self.store.update_session(
-                child["host"], child["session_name"], parent_stream_id=new_parent_stream_id
+                child["host"], child["session_name"], parent_stream_id=new_parent_stream_id, transfer_child_watch_custody=True
             )
             if row is None:
                 continue

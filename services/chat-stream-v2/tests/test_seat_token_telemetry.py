@@ -120,6 +120,10 @@ def test_cli_reads_only_generic_token_file(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 class _TokenStageTmux:
+    async def pretrust_codex_cwd(self, cwd):
+        # Provider-host config is outside this token/staging fixture.
+        pass
+
     def __init__(self) -> None:
         self.staged: list[tuple[str, bytes]] = []
         self.commands: list[str] = []

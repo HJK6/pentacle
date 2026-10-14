@@ -357,6 +357,8 @@ class OutboundNoticeQueue:
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
             if kind == NOTICE_KIND_FD_TURN_BUDGET:
                 message["_notification_answer_generation"] = metadata["fd_turn_budget_binding"]["generation"]
+            if kind == "spawn_delivery_failed" and metadata.get("parent_generation"):
+                message["_notification_answer_generation"] = metadata["parent_generation"]
             if kind == "error_alert":
                 # Reuse the existing generation-fenced, pre-input proof path.
                 message["_notification_answer_generation"] = metadata["root_generation"]

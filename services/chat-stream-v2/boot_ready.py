@@ -58,6 +58,18 @@ def codex_reset_interstitial_visible(pane_text: str) -> bool:
     return not later_composer
 
 
+def codex_trust_dialog_visible(pane_text: str) -> bool:
+    """Current and legacy trust chrome, excluding passive composer history."""
+    lines = (pane_text or "").splitlines()[-48:]
+    markers = ("trust this folder", "trust and continue",
+               "do you trust the contents of this directory?")
+    hits = [i for i, line in enumerate(lines)
+            if any(marker in line.casefold() for marker in markers)]
+    return bool(hits) and not any(
+        i > max(hits) and line.lstrip().startswith(("›", "❯"))
+        for i, line in enumerate(lines))
+
+
 def codex_tui_readiness(pane_text: str) -> str:
     """Classify current Codex chrome, ignoring passive reset text in history."""
     if codex_reset_interstitial_visible(pane_text):
