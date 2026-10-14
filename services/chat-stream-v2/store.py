@@ -3493,7 +3493,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     from store_watch_wake import move_watch_custody_conn, _session
                     source = _session(conn, custody_child.get("parent_stream_id"))
                     target = _session(conn, cols.get("parent_stream_id"))
-                    if source and target:
+                    if source and target and source["status"] == "open":
                         move_watch_custody_conn(conn, custody_child["parent_stream_id"], source["session_generation"],
                             cols["parent_stream_id"], target["session_generation"],
                             child=(f"{host}:{session_name}", custody_child["session_generation"]))

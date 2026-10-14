@@ -344,7 +344,10 @@ def _notice_valid_conn(conn, fact):
 
 
 def move_watch_custody_conn(conn, source, generation, target, target_generation, *, child=None):
-    """Move exact-owner custody before lifecycle retirement, in one transaction."""
+    """Move an open owner's exact-generation custody in one transaction."""
+    prior = _session(conn, source)
+    if not prior or prior["status"] != "open" or prior["session_generation"] != generation:
+        return 0  # Closed-owner recovery retains its manual restore path.
     if not _live(conn, target, target_generation):
         raise ValueError("stale_generation")
     where = "owner=? AND owner_generation=?"

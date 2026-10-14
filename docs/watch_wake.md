@@ -56,3 +56,8 @@ to that child from its old parent to the new parent. The old parent's unrelated
 watches and timed wakes stay with it. A raw parent removal still retires watches.
 Context advisories remind the seat to carry the Operator directives register
 verbatim with its checkpoint before compaction.
+
+Custody moves only while the old owner's session is open at transfer time. A
+closed predecessor's watches have already been cancelled by lifecycle handling;
+cold recovery retains the existing manual restoration path instead of moving
+those cancelled rows to the successor.

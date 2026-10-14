@@ -100,3 +100,22 @@ def test_custody_collision_rolls_back_and_handoff_keeps_source_open():
             assert (await store.list_watch_wake('wake',SOURCE,source['session_generation']))[0]['id']==old['id']
             assert (await store.list_watch_wake('wake',HOST+':successor',target['session_generation']))[0]['id']==new['id']
     asyncio.run(run())
+
+
+def test_closed_owner_retains_all_custody_for_manual_recovery():
+    async def run():
+        async with environment() as (store,sessions,ctl,server,tmux,opened):
+            source=await store.fetch_session(HOST,'source');gen=source['session_generation']
+            target=await opened('successor')
+            await store.register_watch_wake('wake',SOURCE,gen,{'request_id':'fired','due_at':101,'note':'verbatim','urgent':False},now=100)
+            cancelled=await store.register_watch_wake('wake',SOURCE,gen,{'request_id':'cancelled','due_at':200,'note':'cancel','urgent':False},now=100)
+            await store.cancel_watch_wake('wake',SOURCE,gen,cancelled['id'],request_id='cancel-receipt')
+            await store.evaluate_watch_wake({},now=101)
+            await store.update_session(HOST,'source',status='closed')
+            def custody(conn):
+                return {table:[dict(r) for r in conn.execute('SELECT * FROM '+table)]
+                        for table in ('v2_watch_wake','v2_watch_facts','v2_watch_cancellations')}
+            before=await store.submit(custody)
+            assert await store.transfer_watch_custody(SOURCE,gen,HOST+':successor',target['session_generation'])==0
+            assert await store.submit(custody)==before
+    asyncio.run(run())
