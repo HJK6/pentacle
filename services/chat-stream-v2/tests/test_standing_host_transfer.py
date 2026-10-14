@@ -342,3 +342,31 @@ def test_legacy_wire_cannot_acquire_standing_attempt_semantics(tmp_path):
                     'composite_stream_id':CHAT,'expected_attempt':1,'request_id':'legacy-mode-mismatch','_auth_context':auth})
             assert (await v.host_transfer.read(row['command_id']))['state']=='preparing'
     asyncio.run(run())
+
+
+def test_clock_regression_suspends_same_attempt_without_exhaustion(tmp_path,monkeypatch):
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            a,_,auth,_=await grant(s,v,c,g);row,_=await request(s,v,a,auth)
+            v.spawnctl=object()  # No spawn can occur before the clock predicate.
+            before=await s.submit(lambda db:t.authorization(db,a['authorization_id']))
+            with monkeypatch.context() as clock:
+                clock.setattr(t.time,'time',lambda:t.expiry_value(before['last_observed_at'])-1)
+                await v.host_transfer.drive(row['command_id'])
+            current=await v.host_transfer.read(row['command_id'])
+            after=await s.submit(lambda db:t.authorization(db,a['authorization_id']))
+            assert current['state']=='preparing'
+            assert current['last_error']=='transfer_clock_regressed'
+            assert after['state']=='reserved' and after['revision']==before['revision']
+            assert after['attempts_started']==1 and after['expires_at']==before['expires_at']
+            await prepare_bundle(s,v,current)
+            async def prepared(_): pass
+            monkeypatch.setattr(v.host_transfer,'prepare',prepared)
+            monkeypatch.setattr(v.host_transfer,'project_and_cleanup',prepared)
+            await v.host_transfer.drive(row['command_id'])
+            caught_up=await v.host_transfer.read(row['command_id'])
+            assert caught_up['state']=='committed' and caught_up['attempt_id']==row['attempt_id']
+            assert caught_up['last_error'] is None
+            consumed=await s.submit(lambda db:t.authorization(db,a['authorization_id']))
+            assert consumed['state']=='consumed' and consumed['attempts_started']==1
+    asyncio.run(run())

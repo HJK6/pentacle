@@ -336,10 +336,21 @@ class HostTransfer:
                 await self.cleanup_preparations(row)
         except asyncio.CancelledError: raise
         except Exception as exc:
+            code=getattr(exc,'code',type(exc).__name__)
+            if code=='transfer_clock_regressed':
+                def suspend(c):
+                    current=journal.load(c,cid)
+                    if current.get('attempt_id')!=expected_attempt or current['state']!='preparing': return False
+                    current['last_error']=code
+                    journal.save(c,current)
+                    journal.audit(c,cid,'clock_suspended',detail=code)
+                    return True
+                if await self.mutate(suspend): self.retry(cid)
+                return
             def failed(c):
                 row=journal.load(c,cid)
                 if row.get('attempt_id')!=expected_attempt: return None
-                journal.fail_attempt(c,row,getattr(exc,'code',type(exc).__name__))
+                journal.fail_attempt(c,row,code)
                 journal.audit(c,cid,'reconcile_failed',detail=row['last_error'])
                 return row
             row=await self.mutate(failed)

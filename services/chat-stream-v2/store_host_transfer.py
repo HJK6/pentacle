@@ -431,6 +431,7 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
         grant_record.update(state='consumed',revision=grant_record['revision']+1)
         save_authorization(conn,grant_record)
     row['state']='committed'
+    row['last_error']=None
     row['receipt']={'command_id':cid,'digest':row['digest'],'operator':row['operator'],
         'dispatch_id':row['dispatch_id'],'mapping':parts,'binding_revision':row['binding']['revision']+1,
         'grant_revision':grant['revision']+1,'committed_at':stamp()}
