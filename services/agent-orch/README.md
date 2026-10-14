@@ -1366,3 +1366,23 @@ The production daemon retains explicit `agent-orch nexus list|context|inspect` a
 `updates`, `declare`, `register`, `unregister`, `claim`, `release`, `resolve`, `archive`, metrics, and `route --auto` are absent from ordinary CLI help; direct RPC attempts return `disabled`. Ordinary agents are not prompted or instructed to invoke them.
 
 The `repo` command family is absent from ordinary CLI help and direct repo RPCs return `disabled`; stored registration/activity rows remain untouched for audit.
+
+### Lane completion and parked specs
+
+Closing a lead checks the custom criteria in every member of its open lanes.
+Each criterion must be checked, waived with a reason, tracked to an owned
+nonterminal follow-up with a matching receipt, or parked. A member in
+`work/blocked/` grants parking only through an unfenced Tracking declaration
+`- parked: YYYY-MM-DD <authority-ref> — <reason>` with a real calendar date,
+a nonempty authority token and reason; the last declaration governs.
+Parking disposes only unmarked unchecked criteria: existing waiver and tracked
+markers retain their validation. Missing or malformed park declarations refuse
+those criteria with `park_line_missing` or `park_line_malformed` and the line to
+add. Moving the member out of `blocked` ends the park; its declaration may stay
+as history. Single-criterion deferrals still use `tracked:`.
+
+A successful close appends one clause per parked member to the existing audit
+reason: `parked: <spec_id> criteria=<n> date=<YYYY-MM-DD> authority=<token> reason=<reason>`.
+Read it with `agent-orch inspect`. Changes to the park line or folder retain the
+existing preparation/admission source fences and post-termination warning;
+parking adds no atomic-snapshot promise or new audit field.

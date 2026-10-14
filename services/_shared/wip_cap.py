@@ -8,14 +8,11 @@ import re
 from typing import Any
 
 from .custom_ac import SpecReader
+from .tracking_lines import parse_tracking_line
 from .specs_service import SOURCE_READ_ERRORS, _resolve_specs_memory_root
 
 INSTRUCTION = "Add to this spec's Tracking section: - wip_override: YYYY-MM-DD <authority-ref> — <reason>"
 _DATE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
-_HEADING = re.compile(r'^ {0,3}(#{1,6})(?:[ \t]+(.*))?[ \t]*$')
-_FENCE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
-_OVERRIDE_KEY = re.compile(r'^\s*(?:[-*+]\s*)?wip_override\b')
-_OVERRIDE = re.compile(r'- wip_override: ([0-9]{4}-[0-9]{2}-[0-9]{2}) (\S+) — (\S.*)')
 
 
 def _date(value: Any) -> bool:
@@ -58,37 +55,7 @@ def parse_override(text):
     Examples in fenced blocks and declarations outside Tracking are not grants.
     Nested Tracking subsections stay in scope until the next peer/parent heading.
     """
-    tracking_level = None
-    fence = None
-    lines = []
-    for line in text.splitlines():
-        if fence:
-            if re.fullmatch(rf' {{0,3}}{fence[0]}{{{fence[1]},}}\s*', line):
-                fence = None
-            continue
-        opener = _FENCE.match(line)
-        if opener and not (opener[1][0] == '`' and '`' in line[opener.end():]):
-            fence = (opener[1][0], len(opener[1]))
-            continue
-        heading = _HEADING.match(line)
-        if heading:
-            level = len(heading[1])
-            if tracking_level is not None and level <= tracking_level:
-                tracking_level = None
-            # Empty ATX headings also end a section. Closing hashes count
-            # only after whitespace; Tracking# is a different title.
-            title = re.sub(r'[ \t]+#+[ \t]*$', '', heading[2] or '').strip(' \t')
-            if title == 'Tracking':
-                tracking_level = level
-            continue
-        if tracking_level is not None and _OVERRIDE_KEY.match(line):
-            lines.append(line)
-    if not lines:
-        return False
-    match = _OVERRIDE.fullmatch(lines[0]) if len(lines) == 1 else None
-    if match is None or not _date(match[1]) or not match[3].strip():
-        raise ValueError('wip_override_malformed')
-    return True
+    return parse_tracking_line(text, 'wip_override') is not None
 
 
 def format_cap_refusal(repo: str, effective: int, cap: int, grandfather: int, overrides: int) -> str:

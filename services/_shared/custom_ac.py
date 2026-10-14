@@ -11,7 +11,10 @@ import re
 from typing import Any
 
 from .specs_parser import load_frontmatter
+from .tracking_lines import parse_tracking_line
 from .specs_service import SOURCE_READ_ERRORS, SpecsSubsystem, _resolve_specs_memory_root, _bounded_directory
+
+PARK_INSTRUCTION = "Add to this spec's Tracking section: - parked: YYYY-MM-DD <authority-ref> — <reason>"
 
 NONTERMINAL = frozenset({'backlog', 'analysis', 'ready_for_dev', 'in_progress', 'needs_qa', 'blocked'})
 TRACKED_CLASSES = frozenset({'external_event', 'operator_action', 'new_scope'})
@@ -32,6 +35,8 @@ class CompletionRefusal(ValueError):
         self.details = {'items': items, 'retriable': code == 'member_spec_unreadable'}
         super().__init__(code + ': ' + '; '.join(
             f"{item['spec_id']} / {item.get('criterion') or 'spec'}: {item['reason']}" for item in items))
+        if any(item['reason'] in {'park_line_missing', 'park_line_malformed'} for item in items):
+            self.args = (str(self) + '\n' + PARK_INSTRUCTION,)
 
     def audit_reason(self) -> str:
         """Bounded existing-table text, retaining the class and item reasons."""
@@ -347,10 +352,18 @@ def _check_reader_members(reader: SpecReader, members) -> dict[str, Any]:
     failures, dispositions = [], []
     for member in members:
         try:
-            _, folder, identity, text = reader.read(member)
+            status, folder, identity, text = reader.read(member)
         except SOURCE_READ_ERRORS:
             failures.append({'spec_id': member, 'criterion': None, 'reason': 'member_spec_unreadable'})
             continue
+        park, park_error = None, None
+        if status == 'blocked':
+            try:
+                park = parse_tracking_line(text, 'parked', last_wins=True)
+                if park is None:
+                    park_error = 'park_line_missing'
+            except ValueError:
+                park_error = 'park_line_malformed'
         parsed_items = parse_custom(text)
         identities = Counter(item['criterion'] for item in parsed_items)
         for parsed in parsed_items:
@@ -364,6 +377,13 @@ def _check_reader_members(reader: SpecReader, members) -> dict[str, Any]:
                     failures.append(item)
             elif disposition in {'checked', 'waived'}:
                 dispositions.append(item)
+            elif status == 'blocked' and item['reason'] == 'undisposed':
+                if park is not None:
+                    item.update(disposition='parked', **park)
+                    dispositions.append(item)
+                else:
+                    item.update(reason=park_error, instruction=PARK_INSTRUCTION)
+                    failures.append(item)
             else:
                 failures.append(item)
     failures.sort(key=lambda item: (item['spec_id'], item.get('line', 0), item.get('criterion') or ''))

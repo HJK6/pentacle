@@ -1,0 +1,19 @@
+{
+  "source_population": 10,
+  "receipts_stripped": 53,
+  "unmarked_criteria": 53,
+  "members": [
+    "spec_fixture__member_01",
+    "spec_fixture__member_02",
+    "spec_fixture__member_03",
+    "spec_fixture__member_04",
+    "spec_fixture__member_05",
+    "spec_fixture__member_06",
+    "spec_fixture__member_07",
+    "spec_fixture__member_08",
+    "spec_fixture__member_09",
+    "spec_fixture__member_10"
+  ],
+  "resume_spec_id": "spec_fixture__resume",
+  "transformation": "Remove only incident tracked suffixes; add Tracking park line."
+}
