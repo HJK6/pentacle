@@ -39,7 +39,8 @@ from typing import Any, Callable
 import uuid
 
 from retention import (HistoryConnection, prepare_history_schema, history_query,
-                       next_receipt_rowid, bind_history_archive, default_archive_path)
+                       next_receipt_rowid, bind_history_archive, default_archive_path,
+                       migrate_route_batch_archive)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 from prockill import canonical_start
@@ -1800,6 +1801,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             prepare_history_schema(conn, fresh=fresh_history, archive_path=history_path)
             self.schedule_schema_health = "ok"
             conn.commit()
+            migrate_route_batch_archive(conn)
             if self._configured_archive_path is not None:
                 bind_history_archive(conn, Path(self._configured_archive_path))
             self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}

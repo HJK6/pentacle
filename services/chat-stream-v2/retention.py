@@ -65,6 +65,7 @@ class RetentionError(Exception):
 RECEIPT_TABLE = "v2_send_receipts"
 ROUTE_TABLE = "v2_assistant_composite_routes"
 HISTORY_TABLES = (RECEIPT_TABLE, ROUTE_TABLE)
+_ROUTE_BATCH_COLUMNS = (("batched_into_dispatch_id", "TEXT"), ("answered_by_event_id", "INTEGER"))
 HISTORY_MAX_ROWS = 500
 HISTORY_MAX_BYTES = 1024 * 1024
 HISTORY_PASS_ROWS = 2000
@@ -131,7 +132,7 @@ def _history_identity_conflict():
     raise RetentionError("conflicting hot/archive history identity")
 
 
-def _archive_schema(conn, archive, *, initialize: bool, pair_id: str) -> None:
+def _archive_schema(conn, archive, *, initialize: bool, pair_id: str, migrate_route_batch: bool = False) -> None:
     """Require the exact receipt/route schema, including the rowid alias and keys."""
     tables = {r[0] for r in archive.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     marker = "v2_receipt_route_archive" in tables
@@ -154,6 +155,17 @@ def _archive_schema(conn, archive, *, initialize: bool, pair_id: str) -> None:
                 ddl = ddl[:left] + "receipt_rowid INTEGER PRIMARY KEY," + ddl[left:]
             archive.execute(ddl)
         actual = [tuple(r)[1:] for r in archive.execute(f'PRAGMA table_info("{table}")')]
+        if migrate_route_batch and table == ROUTE_TABLE and actual != expected:
+            additions = _ROUTE_BATCH_COLUMNS
+            names = {column[0] for column in actual}
+            missing = [(name, ddl) for name, ddl in additions if name not in names]
+            missing_names = {name for name, _ in missing}
+            # Only the exact known nullable batch-column delta is migratable.
+            if (missing and actual == [column for column in expected if column[0] not in missing_names]
+                    and all((name, ddl, 0, None, 0) in expected for name, ddl in missing)):
+                for name, ddl in missing:
+                    archive.execute(f'ALTER TABLE "{table}" ADD COLUMN {name} {ddl}')
+                actual = [tuple(r)[1:] for r in archive.execute(f'PRAGMA table_info("{table}")')]
         if actual != expected:
             raise RetentionError(f"incompatible archive schema: {table}")
         if table == RECEIPT_TABLE:
@@ -181,6 +193,44 @@ def _archive_schema(conn, archive, *, initialize: bool, pair_id: str) -> None:
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_receipt_optimistic ON {RECEIPT_TABLE}(to_stream_id,optimistic_id)")
         archive.execute(f"CREATE INDEX IF NOT EXISTS idx_archive_route_request ON {ROUTE_TABLE}(input_request_id)")
         archive.commit()
+
+
+
+def migrate_route_batch_archive(conn) -> None:
+    """Extend a matched pre-batching archive after the hot migration commits."""
+    path = getattr(conn, "history_archive_path", None)
+    row = _sequence(conn)
+    if path is None or row is None or not row["archive_ready"] or not Path(path).exists():
+        return
+    try:
+        archive = _open_archive(path, readonly=True)
+    except RetentionError:
+        return  # Preserve hot-only allocation during an archive outage.
+    try:
+        expected = [tuple(column)[1:] for column in conn.execute(f'PRAGMA table_info("{ROUTE_TABLE}")')]
+        actual = [tuple(column)[1:] for column in archive.execute(f'PRAGMA table_info("{ROUTE_TABLE}")')]
+        names = {column[0] for column in actual}
+        missing = [(name, ddl) for name, ddl in _ROUTE_BATCH_COLUMNS if name not in names]
+        missing_names = {name for name, _ in missing}
+        if (not missing or actual != [column for column in expected if column[0] not in missing_names]
+                or not all((name, ddl, 0, None, 0) in expected for name, ddl in missing)):
+            return  # Other schemas retain the existing strict read-time refusal.
+    except sqlite3.Error:
+        return  # A corrupt archive remains a strict read gap, not a new archive.
+    finally:
+        archive.close()
+    archive = None
+    try:
+        archive = _open_archive(path)
+        archive.execute("BEGIN IMMEDIATE")
+        _archive_schema(conn, archive, initialize=False, pair_id=row["pair_id"],
+                        migrate_route_batch=True)
+        archive.commit()
+    except (RetentionError, sqlite3.Error):
+        return  # Unavailable/unsupported archives remain strict read-time gaps.
+    finally:
+        if archive is not None:
+            archive.close()  # Any schema/identity refusal rolls back the entire upgrade.
 
 
 def _open_archive(path: Path, *, create=False, readonly=False):
