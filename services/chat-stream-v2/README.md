@@ -351,3 +351,24 @@ unchanged. Gate ownership uses Linux start ticks or its existing platform
 fallback; orphan-reaper date parsing is an elapsed-age input, not observer
 presentation equality. Private cache/delivery validators are maintained by
 their owner outside this public source tree.
+
+### Native Codex cwd trust and late delivery
+
+Before a configured Codex launch, the target host seeds the realpath cwd in
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). A file lock protects
+idempotent writes; unrelated configuration bytes are preserved. The existing
+command-line trust override remains. Invalid or unsupported project-table
+syntax fails launch with `codex_trust_failed` rather than rewriting the config.
+
+During native initial-prompt proof, the daemon recognizes current and legacy
+folder-trust dialogs and sends at most one Enter, logs a warning, and continues
+waiting for the initial USER event. It never pastes into that dialog. Reset
+interstitials remain operator-only; pane capture cannot extend the proof wait.
+
+Failed native proof logs its key and pane classification and persists a parent
+notice that bypasses the front-desk digest. Classification is `trust_dialog`,
+`reset_interstitial`, or `silent`. The notice survives requester disconnect and
+is fenced to the parent generation. Late proof retains `failure_code` and
+`delivery_failed_at`, adds `delivered_late_at`, and records
+`late_first_user_event`; `adopted_after_restart` requires evidence of a different
+daemon instance. Reuse the existing spawn handle for recovery.

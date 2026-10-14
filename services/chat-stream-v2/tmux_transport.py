@@ -530,6 +530,34 @@ class Tmux:
             )
         return "pane_in_mode" if pane_in_mode else None
 
+    async def pretrust_codex_cwd(self, cwd: str) -> None:
+        """Persist trust on the same host and CODEX_HOME as the provider."""
+        from codex_trust import ensure_codex_trust
+        if self.ssh_target is None:
+            try:
+                await asyncio.to_thread(ensure_codex_trust, cwd)
+            except (OSError, ValueError) as exc:
+                raise VerbError("codex_trust_failed", "local host could not persist cwd trust") from exc
+            return
+        source = await asyncio.to_thread(Path(__file__).with_name("codex_trust.py").read_text)
+        command = "python3 - " + shlex.quote(cwd)
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_command(self.ssh_target, command, ssh_bin=self.ssh_bin,
+                             connect_timeout=self.connect_timeout),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            await asyncio.wait_for(proc.communicate(source.encode()), timeout=10.0)
+            if proc.returncode:
+                raise VerbError("codex_trust_failed", "target host could not persist cwd trust")
+        except (OSError, asyncio.TimeoutError) as exc:
+            await terminate_and_reap(proc)
+            raise VerbError("codex_trust_failed", "cwd trust writer unavailable or timed out") from exc
+        except asyncio.CancelledError:
+            await terminate_and_reap(proc)
+            raise
+
     async def stage_text(self, path: str, data: bytes) -> None:
         """Atomically stage a prompt on the provider's host.
 

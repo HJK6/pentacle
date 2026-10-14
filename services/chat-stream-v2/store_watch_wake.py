@@ -292,6 +292,11 @@ def install_default_conn(conn, child_sid, now):
         return
     if not parent or not _live(conn, child["parent_stream_id"], parent["session_generation"]):
         return
+    defaults = conn.execute("SELECT data FROM v2_watch_wake WHERE kind='watch' AND state='active' "
+                            "AND owner=? AND owner_generation=? AND child=? AND child_generation=?",
+                            (child["parent_stream_id"], parent["session_generation"], child_sid, child["session_generation"])).fetchall()
+    if any(json.loads(row["data"]).get("default") for row in defaults):
+        return
     _register_conn(conn, "watch", child["parent_stream_id"], parent["session_generation"],
         {"request_id": "default:" + _id(child_sid, child["session_generation"], epoch),
          "child_stream_id": child_sid, "triggers": ["end", "blocker", "idle"], "repeat": True}, now, default=True)
@@ -338,7 +343,60 @@ def _notice_valid_conn(conn, fact):
     return child["status"] == "open" and child["parent_stream_id"] == fact["owner"]
 
 
+def move_watch_custody_conn(conn, source, generation, target, target_generation, *, child=None):
+    """Move exact-owner custody before lifecycle retirement, in one transaction."""
+    if not _live(conn, target, target_generation):
+        raise ValueError("stale_generation")
+    where = "owner=? AND owner_generation=?"
+    args = (source, generation)
+    child_where = " AND child=? AND child_generation=?" if child else ""
+    child_args = tuple(child) if child else ()
+    watches = conn.execute("SELECT id FROM v2_watch_wake WHERE " + where + child_where,
+                           args + child_args).fetchall()
+    facts = conn.execute("SELECT notice_id FROM v2_watch_facts WHERE " + where + child_where,
+                         args + child_args).fetchall()
+    for table in ("v2_watch_wake", "v2_watch_facts"):
+        conn.execute(f"UPDATE {table} SET owner=?,owner_generation=? WHERE " + where + child_where,
+                     (target, target_generation) + args + child_args)
+    if child:
+        conn.execute("UPDATE v2_watch_pairs SET parent=?,parent_generation=? "
+                     "WHERE parent=? AND parent_generation=? AND child=? AND child_generation=?",
+                     (target, target_generation) + args + child_args)
+        for watch in watches:
+            conn.execute("UPDATE v2_watch_cancellations SET owner=?,owner_generation=? WHERE "
+                         + where + " AND target=?", (target, target_generation) + args + (watch["id"],))
+    else:
+        conn.execute("UPDATE v2_watch_cancellations SET owner=?,owner_generation=? WHERE " + where,
+                     (target, target_generation) + args)
+    # Fired facts also carry undelivered notices. Keep their immutable ids/body,
+    # and project only recipient custody and its generation-bound digest.
+    from store_routing import _outbound_notice_digest
+    for fact in facts:
+        notice = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=? "
+                              "AND recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL",
+                              (fact["notice_id"], source)).fetchone()
+        if not notice:
+            continue
+        metadata = json.loads(notice["metadata"] or "{}")
+        if metadata.get("owner_generation") not in (None, generation):
+            continue
+        if metadata.get("owner_generation") == generation:
+            metadata["owner_generation"] = target_generation
+        encoded = _json(metadata)
+        digest = _outbound_notice_digest(notice["kind"], notice["dedupe_key"], target, notice["tell_id"],
+            notice["body"], encoded, notice["source_stream_id"] or "", notice["episode_id"] or "")
+        conn.execute("UPDATE v2_outbound_notices SET recipient_stream_id=?,metadata=?,payload_digest=? WHERE notice_id=?",
+                     (target, encoded, digest, notice["notice_id"]))
+    return len(watches)
+
+
 class _WatchWakeStoreMixin:
+    async def transfer_watch_custody(self, source, generation, target, target_generation):
+        def op(conn):
+            with conn:
+                return move_watch_custody_conn(conn, source, generation, target, target_generation)
+        return await self.submit(op)
+
     async def register_watch_wake(self, kind, owner, generation, payload, *, now=None):
         def op(conn):
             with conn:

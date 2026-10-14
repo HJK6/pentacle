@@ -45,6 +45,7 @@ def _desk(store, target, generation):
     ('[notification_answer] answer', {'_outbound_notice_kind':'notification_answer'}),
     ('[child_report_ready] ready', {'_outbound_notice_kind':'report'}),
     ('timed wake', {'_outbound_notice_kind':'wake'}),
+    ('native delivery failure', {'_outbound_notice_kind':'spawn_delivery_failed'}),
     ('DOT EMAIL HANDOFF — [email from Dot]', {'_auth_context':{'operator_authenticated':True}}),
     ('[Assistant lane ruling] '+json.dumps({'state':'release_blocked','action':'spawn'}),
         {'_outbound_notice_kind':'assistant_lane_ruling_result'}),

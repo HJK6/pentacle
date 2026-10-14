@@ -41,3 +41,18 @@ stays quiet. An absent or terminal-undelivered snapshot gets a fresh sequence
 under the current root binding. Restart preserves the same-generation baseline;
 a different recipient or generation gets its own baseline and cannot receive
 the predecessor's notices. Insertion and baseline advancement are atomic.
+
+## Custody through handoff and reparent
+
+`spawn --handoff` moves watches, timed wakes, fired facts and cancellation
+receipts from the predecessor's exact generation to the successor before
+retirement. Their ids, notes, due times and consumed state stay intact. Pending
+notices tied to those facts follow the successor with the same notice identity.
+A custody-key conflict stops handoff before retiring the source and reports an
+incomplete handoff for explicit recovery.
+
+Reparenting one child moves only watches, facts and cancellation receipts bound
+to that child from its old parent to the new parent. The old parent's unrelated
+watches and timed wakes stay with it. A raw parent removal still retires watches.
+Context advisories remind the seat to carry the Operator directives register
+verbatim with its checkpoint before compaction.
