@@ -1663,6 +1663,14 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     "ALTER TABLE v2_assistant_composite_routes "
                     "ADD COLUMN route_target_generation TEXT"
                 )
+            # Dispatch batching (spec_pentacle__assistant_duplicate_reply_sources_2026_10).
+            for column, ddl in (("batched_into_dispatch_id", "TEXT"), ("answered_by_event_id", "INTEGER")):
+                if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_routes)")}:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_routes ADD COLUMN {column} {ddl}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v2_assistant_composite_routes_batch "
+                "ON v2_assistant_composite_routes (batched_into_dispatch_id)"
+            )
             if "summary" not in {
                 r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_lanes)")
             }:
@@ -1705,6 +1713,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 ("publish_kind", "TEXT NOT NULL DEFAULT 'prose'"),
                 ("attachment_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("merged_into_event_id", "INTEGER"),
             ):
                 if column not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_publications)")}:
                     conn.execute(f"ALTER TABLE v2_assistant_composite_publications ADD COLUMN {column} {ddl}")
@@ -2147,6 +2156,43 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         )
         return True
 
+    def _proactive_turn_publication_conn(
+        self, conn: sqlite3.Connection, composite_stream_id: str, *, source_stream_id: str,
+        source_generation: str, session_created_at: str, transcript: str,
+        boundary: sqlite3.Row | None, source_event_id: int,
+    ) -> str | None:
+        """Return the key of this turn's own proactive publication, if any.
+
+        Candidates are the bound seat's proactive publications in its current
+        generation. One belongs to the turn only when a tool row of this
+        transcript, after the previous final, names its request key: lag-free
+        and order-independent, with no text comparison. A key built at run time
+        is not matched, and the final mirrors as before (fail open).
+        """
+        rows = conn.execute(
+            "SELECT p.publication_key,json_extract(t.event_json,'$.raw.tool_input') AS tool_input "
+            "FROM v2_assistant_composite_publications p "
+            "JOIN session_event_tail e ON e.event_id=p.event_id "
+            "JOIN session_event_tail t ON t.stream_id=? AND t.session_created_at=? "
+            "AND t.event_id>? AND t.event_id<? "
+            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
+            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
+            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0 "
+            "WHERE p.stream_id=? AND p.dispatch_id='' AND p.publish_kind IN ('prose','status') "
+            "AND json_extract(e.event_json,'$.raw.actor_stream_id')=? "
+            "AND json_extract(e.event_json,'$.raw.actor_generation')=? "
+            "ORDER BY p.event_id DESC",
+            (source_stream_id, session_created_at,
+             boundary["event_id"] if boundary is not None else 0, source_event_id, transcript,
+             composite_stream_id, source_stream_id, source_generation),
+        ).fetchall()
+        for row in rows:
+            # The whole key, never a substring: publish:x-1 does not match publish:x-10.
+            key = str(row["publication_key"])
+            if re.search(r"(?<![\w.:/-])" + re.escape(key) + r"(?![\w.:/-])", str(row["tool_input"] or "")):
+                return key
+        return None
+
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
         source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
@@ -2281,6 +2327,20 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     source_event_id, published_turn["dispatch_id"],
                     extra={"subsystem": "assistant_mirror",
                            "bug_ref": "pentacle__bart_reply_dedup_2026_09"},
+                )
+                return
+            proactive = self._proactive_turn_publication_conn(
+                conn, binding[0], source_stream_id=source_stream_id,
+                source_generation=source_generation, session_created_at=source["created_at"],
+                transcript=transcript, boundary=boundary, source_event_id=source_event_id,
+            )
+            if proactive is not None:
+                log.info(
+                    "assistant mirror skipped proactive-published turn source_event_id=%s "
+                    "publication_key=%s",
+                    source_event_id, proactive,
+                    extra={"subsystem": "assistant_mirror",
+                           "bug_ref": "spec_pentacle__assistant_duplicate_reply_sources_2026_10"},
                 )
                 return
         # Keep the old fallback for unclassified events only. A known ordinary
