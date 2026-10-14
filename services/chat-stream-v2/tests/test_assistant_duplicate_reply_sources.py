@@ -674,3 +674,47 @@ def test_ordinary_final_ingested_after_a_later_proactive_publication_stays_visib
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_older_key_that_is_a_prefix_of_this_turns_key_never_suppresses():
+    """RED (final QA 9208ca45 F3, FD decision 9d9b420c): correlation matches the whole request
+    key, never a substring. Turn 1 publishes publish:x-1; turn 2's publish of publish:x-10
+    fails, so turn 2 has no publication of its own and its final must stay visible."""
+
+    async def _go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
+            await composite.publish(_proactive(generation, "publish:x-1", "First update."), actor_stream_id=ROOT)
+            await turn(kind="USER", identity="s-u1", text="typed")
+            await turn(kind="TOOL_USE", identity="s-t1", command="agent-orch assistant publish --request-id publish:x-1 --proactive --message 'First update.'")
+            await turn(kind="ASSIST_TEXT", identity="s-f1", text="First update.", final=True)
+            assert [r["text"] for r in await _answer_rows(store)] == ["First update."]
+            # Turn 2: its own publish (publish:x-10) never committed; the older key is only a substring.
+            await turn(kind="USER", identity="s-u2", text="typed again")
+            await turn(kind="TOOL_USE", identity="s-t2", command="agent-orch assistant publish --request-id publish:x-10 --proactive --message 'Second update.'")
+            await turn(kind="ASSIST_TEXT", identity="s-f2", text="Second update.", final=True)
+            assert [r["text"] for r in await _answer_rows(store)] == ["First update.", "Second update."]
+            # Whole-key matches still correlate, quoted or at the end of a JSON-encoded Codex argument.
+            await composite.publish(_proactive(generation, "publish:x-2", "Third update."), actor_stream_id=ROOT)
+            await turn(kind="USER", identity="s-u3", text="typed once more")
+            await turn(kind="TOOL_USE", identity="s-t3", command='agent-orch assistant publish --request-id "publish:x-2" --proactive')
+            await turn(kind="ASSIST_TEXT", identity="s-f3", text="Third update.", final=True)
+            await composite.publish(_proactive(generation, "publish:x-3", "Fourth update."), actor_stream_id=ROOT)
+            await _turn_row(store, ROOT, "4242", provider="codex", kind="USER", identity="s-u4", text="typed", session="codex-s")
+            await _turn_row(store, ROOT, "4242", provider="codex", kind="TOOL_USE", identity="s-t4", session="codex-s",
+                            command="agent-orch assistant publish --proactive --request-id publish:x-3")
+            await _turn_row(store, ROOT, "4242", provider="codex", kind="ASSIST_TEXT", identity="s-f4", session="codex-s",
+                            text="Fourth update.", final=True)
+            assert [r["text"] for r in await _answer_rows(store)] == [
+                "First update.", "Second update.", "Third update.", "Fourth update."]
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
