@@ -73,7 +73,7 @@ def test_direct_dispatch_envelope_carries_the_batched_dispatch_rule():
     envelope = direct_dispatch_envelope(config, route, dispatch_id="assistant-direct-1",
                                         target=ROOT, generation="generation-1")
     wire = envelope["wire_body"]
-    assert "Several dispatches in one turn" in wire
+    assert "Several inputs in one batch" in wire and "--reply-to-message-ids" in wire
     assert "never publish the same body twice" in wire
     # The rule is part of the trusted root instruction, above the untrusted input.
     assert wire.index("never publish the same body twice") < wire.index("<assistant-original-input-json>")
