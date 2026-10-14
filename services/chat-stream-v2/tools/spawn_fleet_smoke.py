@@ -942,6 +942,15 @@ def main(argv: list[str] | None = None) -> int:
         url, DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         allow_legacy_close=args.allow_legacy_close,
     )
+    # A successful verdict requires actual evidence for every planned cell.
+    # run_matrix returns nongreen rows and appends completed passes to evidence.
+    accounted = {(row.get("host"), row.get("provider"), row.get("prompt_mode"))
+                 for row in evidence if row.get("outcome") == "passed"}
+    accounted.update((row.get("host"), row.get("provider"), row.get("prompt_mode"))
+                     for row in results)
+    results.extend({"host": host, "provider": provider, "prompt_mode": mode,
+                    "class": "untested", "reason": "missing_evidence"}
+                   for host, provider, mode in cells if (host, provider, mode) not in accounted)
     optional = set(optional_hosts)
     skipped = [{**row, "outcome": "SKIPPED_OFFLINE"} for row in results
                if row.get("host") in optional and row.get("class") == "untested"

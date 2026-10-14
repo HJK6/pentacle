@@ -23,9 +23,11 @@ def test_scheduled_smoke_optional_offline_is_pass(tmp_path, monkeypatch, capsys)
     monkeypatch.delenv('PENTACLE_MACHINES_JSON', raising=False)
     monkeypatch.delenv('PENTACLE_SMOKE_HOSTS', raising=False)
     monkeypatch.delenv('PENTACLE_SMOKE_EXCLUDED_HOSTS', raising=False)
-    offline = dict(host='portable', provider='codex', prompt_mode='promptless',
-                   **{'class': 'untested', 'reason': 'host_unavailable'})
-    monkeypatch.setattr(smoke, 'run_matrix', lambda *a, **k: [offline])
+    offline = _rows('portable', 'UNTESTED', 'host_unavailable')
+    def complete_matrix(*args, evidence, **kwargs):
+        evidence.extend(_rows('primary') + _rows('required') + offline)
+        return [{**row, 'class': 'untested'} for row in offline]
+    monkeypatch.setattr(smoke, 'run_matrix', complete_matrix)
     assert smoke.main([]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload['status'] == 'PASS' and payload['ok']
@@ -84,3 +86,23 @@ def test_optional_offline_cannot_cover_conflicting_failure(tmp_path):
     result = deploy_mod._fleet_smoke_verdict(subprocess.CompletedProcess([], 0, json.dumps(payload), ''), str(config(tmp_path)))
     assert result['outcome'] == 'failed'
     assert not result['skipped']
+
+
+@pytest.mark.parametrize('missing_host', [None, 'required', 'portable'])
+def test_scheduled_missing_cell_evidence_stays_untested(tmp_path, monkeypatch, capsys, missing_host):
+    monkeypatch.setenv('PENTACLE_MACHINES_FILE', str(config(tmp_path)))
+    for key in ('PENTACLE_MACHINES_JSON', 'PENTACLE_SMOKE_HOSTS', 'PENTACLE_SMOKE_EXCLUDED_HOSTS'):
+        monkeypatch.delenv(key, raising=False)
+    rows = _rows('primary') + _rows('required') + _rows('portable')
+    def incomplete_matrix(*args, evidence, **kwargs):
+        if missing_host is None:
+            return [dict(host='portable', provider='codex', prompt_mode='promptless',
+                         **{'class': 'untested', 'reason': 'host_unavailable'})]
+        evidence.extend(row for row in rows if not (row['host'] == missing_host
+                        and row['provider'] == 'codex' and row['prompt_mode'] == 'promptless'))
+        return []
+    monkeypatch.setattr(smoke, 'run_matrix', incomplete_matrix)
+    assert smoke.main([]) == smoke.EXIT_UNTESTED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['status'] == 'UNTESTED' and not payload['ok']
+    assert any(row['reason'] == 'missing_evidence' for row in payload['untested'])

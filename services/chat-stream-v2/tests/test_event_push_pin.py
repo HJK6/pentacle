@@ -112,7 +112,13 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
     monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
     # This slice measures peer/smoke outcomes; the CLI suite exercises real evidence.
     monkeypatch.setattr(event_push_pin, "_load_gate_evidence", lambda *_: {})
-    monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", lambda *a, **k: rows)
+    rows = [{"provider": "codex", "prompt_mode": "promptless", **row} for row in rows]
+    def complete_matrix(*args, evidence, **kwargs):
+        reported = {(row["host"], row["provider"], row["prompt_mode"]) for row in rows}
+        evidence.extend({"host": host, "provider": provider, "prompt_mode": mode, "outcome": "passed"}
+                        for host, provider, mode in args[3] if (host, provider, mode) not in reported)
+        return rows
+    monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", complete_matrix)
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         code = spawn_fleet_smoke.main([])
