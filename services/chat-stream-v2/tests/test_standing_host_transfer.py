@@ -15,6 +15,7 @@ def iso(value):
 
 
 async def grant(s,v,c,g,**extra):
+    if v.hosts is None: v.hosts=Hosts(local_host='node-a',peers={'node-b':object()})
     old=await s.fetch_session('node-a','old')
     route=await dispatch(s,old,'operator:'+g.ceremony.cid)
     auth={'token_verified':True,'stream_id':OLD,'session_generation':old['session_generation']}
@@ -303,4 +304,23 @@ def test_pointer_hash_verification_before_any_attempt(tmp_path):
                     'request_id':'bad-pointer','composite_stream_id':CHAT,'pointers':pointers,'_auth_context':auth})
             assert (await s.submit(lambda db:t.authorization(db,a['authorization_id'])))['attempts_started']==0
             assert await s.submit(lambda db:t.seats(db,a['command_id']))==[]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change',['environment_binding','destination','advisor'])
+def test_changed_runtime_scope_refuses_commit(tmp_path,change):
+    import dataclasses
+    from test_assistant_recovery_command import NEW
+    async def run():
+        async with fixture(tmp_path,authority=True) as (s,v,c,g,*_):
+            a,_,auth,_=await grant(s,v,c,g);row,_=await request(s,v,a,auth);await prepare_bundle(s,v,row)
+            if change=='environment_binding':
+                fresh=await s.fetch_session('node-b','new')
+                c.env_config=dataclasses.replace(c.env_config,direct_primary_stream_id=NEW,direct_primary_generation=fresh['session_generation'])
+                await c.load_binding()
+            elif change=='destination': v.hosts.peers.clear()
+            else: c.env_config=dataclasses.replace(c.env_config,authority_stream_id=NEW)
+            with pytest.raises(t.TransferError,match='transfer_authority_changed|transfer_host_untrusted|transfer_helper_changed'):
+                await v.host_transfer.commit(row)
+            assert (await s.lifecycle_authority_current())['stream_id']==OLD
     asyncio.run(run())

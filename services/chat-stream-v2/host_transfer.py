@@ -160,7 +160,10 @@ class HostTransfer:
                     await self.verify_pointers(candidate)
                     fn=journal.start_authorized
                 async with self.server.sessions.assistant.authority_lock:
-                    row=await self.mutate(lambda c:fn(c,msg,auth,self.server.operator_credential_registry,trusted),credential=True)
+                    def start_attempt(c):
+                        self.check_runtime_scope(c,a['scope_row'])
+                        return fn(c,msg,auth,self.server.operator_credential_registry,trusted)
+                    row=await self.mutate(start_attempt,credential=True)
             else:
                 row=await self.mutate(lambda c:journal.claim(c,msg,auth,**context),credential=True)
             self.schedule(cid,row.get('attempt_id'))
@@ -186,6 +189,25 @@ class HostTransfer:
             result['attempts']=await self.store.submit(lambda c:journal.attempts(c,cid))
         return result
 
+    def check_runtime_scope(self,conn,row):
+        composite=self.server._composite_for(row['composite'])
+        if composite is None or not composite.enabled or not composite.config.direct_primary:
+            raise journal.TransferError('transfer_composite_unavailable')
+        hosts=self.server.hosts
+        if hosts is None or row['destination'] not in {hosts.local_host,*hosts.peers}:
+            raise journal.TransferError('transfer_host_untrusted')
+        binding=journal._binding_conn(conn,composite._env_binding(),name=composite.env_config.name)
+        if composite.env_config.name!=row['name'] or any(binding[k]!=row['binding'][k] for k in ('stream_id','generation','revision')):
+            raise journal.TransferError('transfer_authority_changed')
+        overrides=conn.execute('SELECT v FROM kv WHERE k=?',('assistant.transfer.helpers.'+row['name'],)).fetchone()
+        overrides=json.loads(overrides[0]) if overrides else {}
+        helpers={k:overrides.get(k,getattr(composite.config,k)) for k in ('luna_stream_id',)}
+        helpers={k:v for k,v in helpers.items() if v}
+        advisor=conn.execute("SELECT v FROM kv WHERE k='assistant.authority.stream_id'").fetchone()
+        advisor=advisor[0] if advisor else composite.env_config.authority_stream_id
+        if helpers!=row['helpers'] or advisor!=row['advisor']:
+            raise journal.TransferError('transfer_helper_changed')
+
     async def verify_pointers(self,row):
         hosts=self.server.hosts
         await hosts.ensure_reachable(row['destination'],'transfer')
@@ -200,6 +222,7 @@ class HostTransfer:
 
     async def prepare(self,row):
         if self.server.spawnctl is None: raise journal.TransferError('transfer_spawn_unavailable')
+        await self.mutate(lambda c:(self.check_runtime_scope(c,row),journal.check_source(c,row,self.server.operator_credential_registry)),credential=True)
         await self.verify_pointers(row)
         parts=await self.store.submit(lambda c: journal.seats(c,row['command_id']))
         for part in parts:
@@ -272,7 +295,10 @@ class HostTransfer:
                 await stack.enter_async_context(sessions._lifecycle_lock(*sid.split(':',1)))
             await stack.enter_async_context(sessions._graph_lock)
             async def committed_and_published():
-                result=await self.mutate(lambda c: journal.commit(c,row['command_id'],self.server.operator_credential_registry,attempt_id=row.get('attempt_id')),credential=True)
+                def commit_current(c):
+                    self.check_runtime_scope(c,row)
+                    return journal.commit(c,row['command_id'],self.server.operator_credential_registry,attempt_id=row.get('attempt_id'))
+                result=await self.mutate(commit_current,credential=True)
                 await composite.load_binding()
                 await sessions.refresh()
                 return result
@@ -294,7 +320,7 @@ class HostTransfer:
                 while True:
                     row=await self.read(cid)
                     if row['state']!='preparing' or row.get('attempt_id')!=expected_attempt: break
-                    await self.mutate(lambda c: journal.check_source(c,row,self.server.operator_credential_registry),credential=True)
+                    await self.mutate(lambda c:(self.check_runtime_scope(c,row),journal.check_source(c,row,self.server.operator_credential_registry)),credential=True)
                     parts=await self.store.submit(lambda c: journal.seats(c,cid))
                     if all(p['ready'] for p in parts):
                         row=await self.commit(row)

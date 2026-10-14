@@ -99,6 +99,7 @@ def test_old_parent_cannot_close_child_after_custody_changes(tmp_path):
 
 
 async def claim_bundle(store,server,gateway,composite,**overrides):
+    if server.hosts is None: server.hosts=Hosts(local_host='node-a',peers={'node-b':object()})
     old=await store.fetch_session('node-a','old')
     await dispatch(store,old,'operator:'+gateway.ceremony.cid)
     auth={'token_verified':True,'stream_id':OLD,'session_generation':old['session_generation']}
