@@ -219,14 +219,18 @@ def migrate_route_batch_archive(conn) -> None:
         return  # A corrupt archive remains a strict read gap, not a new archive.
     finally:
         archive.close()
-    archive = _open_archive(path)
+    archive = None
     try:
+        archive = _open_archive(path)
         archive.execute("BEGIN IMMEDIATE")
         _archive_schema(conn, archive, initialize=False, pair_id=row["pair_id"],
                         migrate_route_batch=True)
         archive.commit()
+    except (RetentionError, sqlite3.Error):
+        return  # Unavailable/unsupported archives remain strict read-time gaps.
     finally:
-        archive.close()  # Any schema/identity refusal rolls back the entire upgrade.
+        if archive is not None:
+            archive.close()  # Any schema/identity refusal rolls back the entire upgrade.
 
 
 def _open_archive(path: Path, *, create=False, readonly=False):

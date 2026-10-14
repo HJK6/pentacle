@@ -897,7 +897,8 @@ def test_populated_pre_batch_archive_migrates_on_store_restart(tmp_path, missing
     asyncio.run(run())
 
 
-def test_batch_archive_migration_rejects_foreign_pair_without_altering_it(tmp_path):
+@pytest.mark.parametrize("defect", ["foreign_pair", "receipt_schema", "busy"])
+def test_batch_archive_migration_preserves_read_gap_without_altering_it(tmp_path, defect):
     async def run():
         store = running(tmp_path)
         try:
@@ -909,11 +910,24 @@ def test_batch_archive_migration_rejects_foreign_pair_without_altering_it(tmp_pa
         with sqlite3.connect(archive) as conn:
             for column in ("batched_into_dispatch_id", "answered_by_event_id"):
                 conn.execute(f"ALTER TABLE {r.ROUTE_TABLE} DROP COLUMN {column}")
-            conn.execute("UPDATE v2_receipt_route_archive SET pair_id='foreign-pair'")
+            if defect == "foreign_pair":
+                conn.execute("UPDATE v2_receipt_route_archive SET pair_id='foreign-pair'")
+            elif defect == "receipt_schema":
+                conn.execute(f"ALTER TABLE {r.RECEIPT_TABLE} DROP COLUMN meta_json")
             before = conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall()
             schema = conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall()
-        with pytest.raises(r.RetentionError, match="archive pair/format mismatch"):
-            running(tmp_path)
+        lock = sqlite3.connect(archive)
+        if defect == "busy":
+            lock.execute("BEGIN IMMEDIATE")
+        try:
+            store = running(tmp_path)
+            try:
+                with pytest.raises(r.RetentionError):
+                    await combined(store, r.ROUTE_TABLE)
+            finally:
+                store.stop()
+        finally:
+            lock.close()
         with sqlite3.connect(archive) as conn:
             assert conn.execute(f"SELECT * FROM {r.ROUTE_TABLE}").fetchall() == before
             assert conn.execute(f"PRAGMA table_info({r.ROUTE_TABLE})").fetchall() == schema
