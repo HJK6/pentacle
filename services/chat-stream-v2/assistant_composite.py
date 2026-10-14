@@ -1491,21 +1491,23 @@ class AssistantComposite:
             "expected_route_target": str(route.get("route_target") or ""),
             "expected_route_target_generation": str(route.get("route_target_generation") or ""),
         }
-        if self.dispatch is None:
-            await self._update_route(
+
+        async def receipt(state: str, error_code: str | None) -> None:
+            applied = await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
-                **fence,
-                delivery_state="uncertain", error_code="assistant_dispatch_unconfigured",
+                **fence, delivery_state=state, error_code=error_code,
             )
+            if applied is None:
+                log.info("assistant dispatch receipt stale custody route=%s dispatch=%s target=%s receipt=%s",
+                         route.get("route_id"), route.get("dispatch_id"), route.get("route_target"), state)
+
+        if self.dispatch is None:
+            await receipt("uncertain", "assistant_dispatch_unconfigured")
             return
         try:
             result = await self.dispatch(dict(route))
         except Exception as exc:  # physical boundary is ambiguous
-            await self._update_route(
-                str(route["route_id"]), routing_state=str(route["routing_state"]),
-                **fence,
-                delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
-            )
+            await receipt("uncertain", f"dispatch_exception:{type(exc).__name__}")
             return
         delivery = str(
             result.get("delivery")
@@ -1524,15 +1526,7 @@ class AssistantComposite:
         reason = str(result.get("reason") or "")
         failure_code = (reason if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason)
                         else "assistant_dispatch_failed") if state == "failed" else None
-        applied = await self._update_route(
-            str(route["route_id"]), routing_state=str(route["routing_state"]),
-            **fence,
-            delivery_state=state,
-            error_code=failure_code if state == "failed" else "dispatch_receipt_ambiguous" if state == "uncertain" else None,
-        )
-        if applied is None:
-            log.info("assistant dispatch receipt stale custody route=%s dispatch=%s target=%s receipt=%s",
-                     route.get("route_id"), route.get("dispatch_id"), route.get("route_target"), state)
+        await receipt(state, failure_code if state == "failed" else "dispatch_receipt_ambiguous" if state == "uncertain" else None)
 
     async def _authenticated_generation(self, msg, actor):
         current = await self._target_generation(str(actor or ""))

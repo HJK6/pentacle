@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 
 import pytest
 
@@ -454,8 +455,16 @@ def test_4k_real_main_dispatch_accepts_a_carried_envelope(tmp_path):
 @pytest.mark.parametrize("outcome", ["landed", "failed", "exception"])
 def test_4l_late_predecessor_receipt_cannot_touch_successor_custody(tmp_path, outcome):
     """C3a: a dispatch started under the predecessor's custody resumes after commit; its receipt
-    (landed, failed or exception) is not applied to the successor's row, and the driver then
-    delivers to the successor exactly through the ordinary path."""
+    (landed, failed or exception) is not applied to the successor's row, is logged as stale custody,
+    and the driver then delivers to the successor exactly through the ordinary path."""
+    stale = []
+    handler = logging.Handler()
+    handler.emit = lambda record: stale.append(record.getMessage()) if record.getMessage().startswith(
+        "assistant dispatch receipt stale custody") else None
+    logger = logging.getLogger("chat_streamd_v2.assistant_composite")
+    logger.addHandler(handler)
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
     async def run():
         async with fixture(tmp_path, authority=True) as (store, server, composite, gateway, _, __):
             wire_production_close_hook(server, composite)
@@ -487,9 +496,14 @@ def test_4l_late_predecessor_receipt_cannot_touch_successor_custody(tmp_path, ou
             await asyncio.sleep(0.05)
             still = await route_of(store, "inp-flight")
             assert (still["route_target"], still["route_target_generation"], still["delivery_state"], still["error_code"]) == (fd["target"], fd["target_generation"], "intent", None), still
+            assert len(stale) == 1 and f"dispatch={inflight['dispatch_id']}" in stale[0], stale
             await server.host_transfer.project_and_cleanup(row)
             after = await route_of(store, "inp-flight")
             assert (after["route_target"], after["delivery_state"], after["error_code"]) == (fd["target"], "landed", None)
             assert [c for c in calls if c[1] == fd["target"] and c[0] == inflight["dispatch_id"]] == [(inflight["dispatch_id"], fd["target"])]
             assert calls[0] == (inflight["dispatch_id"], OLD)
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
