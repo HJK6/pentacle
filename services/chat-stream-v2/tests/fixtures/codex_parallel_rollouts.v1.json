@@ -1,0 +1,32 @@
+{
+  "schema": "pentacle.codex-parallel-rollouts-fixture.v1",
+  "provenance": {
+    "source": "sanitized structural observation",
+    "codex_cli_version": "0.157.1",
+    "observed_at": "2026-10-03",
+    "content_policy": "synthetic ids, paths, timestamps, and message text only"
+  },
+  "cases": [
+    {
+      "id": "gpt6-sol",
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "primary_source": "cli",
+      "subagent_source": {"subagent": {"other": "guardian"}}
+    },
+    {
+      "id": "gpt6-astra",
+      "model": "gpt-6-astra",
+      "reasoning_effort": "high",
+      "primary_source": "cli",
+      "subagent_source": {"subagent": {"other": "guardian"}}
+    },
+    {
+      "id": "gpt5.6-terra-control",
+      "model": "gpt-5.6-terra",
+      "reasoning_effort": "high",
+      "primary_source": "cli",
+      "subagent_source": {"subagent": {"other": "guardian"}}
+    }
+  ]
+}
