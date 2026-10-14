@@ -200,6 +200,7 @@ async function build({ minify = false } = {}) {
     outfile: path.join(OUT, 'glasses.bundle.js'),
     define: { 'process.env.NODE_ENV': '"production"' },
     sourcemap: true,
+    sourcesContent: false,
     minify,
     logLevel: 'info',
   });
