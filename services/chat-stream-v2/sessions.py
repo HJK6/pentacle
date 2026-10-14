@@ -127,7 +127,10 @@ def operator_user_epoch(event: object, created_at: object = None) -> float | Non
             and text.startswith("# AGENTS.md instructions for ")
             and "<environment_context>" in text):
         return None
-    if _classify_user_string(text) != "user" or _parse_peer_tell(text) is not None:
+    # The kind of a stored USER is authoritative for the new setup reservation:
+    # live normalizers already emit SYSTEM, while historical/receipt-bound USER
+    # records must retain their pre-cutover human attribution.
+    if _classify_user_string(text, include_seat_injections=False) != "user" or _parse_peer_tell(text) is not None:
         return None
     epoch = genuine_activity_epoch(event)
     floor = _event_timestamp_epoch(created_at) if created_at is not None else None

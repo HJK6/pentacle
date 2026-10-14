@@ -65,7 +65,25 @@ def submission_text_matches(event: dict[str, Any], expected_text: str) -> bool:
             and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
             and digest == provider_text_digest(expected_text)
         )
+    if event.get("kind") == "TELL":
+        wire = (event.get("raw") or {}).get("peer_wire_text")
+        if isinstance(wire, str) and normalize_submission_text(wire) == normalize_submission_text(expected_text):
+            return True
     return normalize_submission_text(event.get("text")) == normalize_submission_text(expected_text)
+
+
+def system_submission_matches(event: dict[str, Any], expected_text: str) -> bool:
+    """Only reserved SYSTEM context can settle its normalized submitted body."""
+    from claude_jsonl_norm import is_reserved_seat_injection
+    text = event.get("text")
+    return (
+        event.get("kind") == "SYSTEM"
+        and isinstance(text, str)
+        and is_reserved_seat_injection(text)
+        and normalize_submission_text(text) == normalize_submission_text(expected_text)
+        and ("provider_text_digest" not in event
+             or event["provider_text_digest"] == provider_text_digest(expected_text))
+    )
 
 
 @dataclass(frozen=True)
@@ -217,12 +235,29 @@ class DurableUserEventProof:
         )
         if state != "reachable":
             return EventProof("unreachable", stream_id, watermark.daemon_seq, reason=reason)
+        system_matches = [event for event in events
+            if self._seq(event) > watermark.daemon_seq
+            and str(event.get("stream_id") or stream_id) == stream_id
+            and system_submission_matches(event, expected_text)]
+        if len(system_matches) > 1:
+            return EventProof("rejected", stream_id, watermark.daemon_seq,
+                              reason="system_event_not_exactly_once")
+        if system_matches:
+            event = system_matches[0]
+            return EventProof("proven", stream_id, watermark.daemon_seq,
+                              event_id=self._seq(event),
+                              event_ts=str(event.get("timestamp") or "") or None)
         for event in events:
             event_id = self._seq(event)
             if (
                 event_id > watermark.daemon_seq
                 and str(event.get("stream_id") or stream_id) == stream_id
-                and str(event.get("kind") or "") == "USER"
+                and (
+                    event.get("kind") == "USER" or (
+                        event.get("kind") == "TELL"
+                        and isinstance((event.get("raw") or {}).get("peer_wire_text"), str)
+                    )
+                )
                 and submission_text_matches(event, expected_text)
             ):
                 return EventProof(
@@ -269,7 +304,7 @@ class DurableUserEventProof:
     async def wait_for_initial_user_event(
         self, stream_id: str, *, expected_text: str, timeout_s: float,
     ) -> EventProof:
-        """Confirm a native initial prompt from exactly one matching USER event.
+        """Confirm a native initial prompt from exactly one matching USER or TELL event.
 
         A newly admitted stream has a generation-fenced event tail, so native
         argv delivery needs no pre-action watermark, pane needle, or paste
@@ -295,12 +330,15 @@ class DurableUserEventProof:
                 user_events = [
                     event for event in events
                     if str(event.get("stream_id") or stream_id) == stream_id
-                    and str(event.get("kind") or "") == "USER"
+                    and str(event.get("kind") or "") in {"USER", "TELL"}
                 ]
                 if user_events:
                     matching_events = [
                         event for event in user_events
-                        if isinstance(event.get("text"), str) and event["text"] == expected
+                        if (
+                            (event.get("raw") or {}).get("peer_wire_text")
+                            if event.get("kind") == "TELL" else event.get("text")
+                        ) == expected
                     ]
                     if not matching_events:
                         first = user_events[0]

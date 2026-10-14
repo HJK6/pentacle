@@ -394,7 +394,7 @@ through the rollout lock and shared-resource ownership.
 
 The spawned session inherits `PENTACLE_STREAM_ID=<host>:<session_name>` in its provider process environment, with the value computed from the actual session name passed to tmux. It also receives `AGENT_ORCH_STREAM_ID` with the same value. This lets the new leader call `agent-orch report --terminate` without depending on tmux-name snapshot discovery.
 
-Initial prompt delivery is daemon-owned and reconciled independently from readiness. For provider and remote spawns, a prompt-bearing `spawn.ok` requires `DurableUserEventProof`: a durable USER event from the authoritative current-generation Store, strictly newer than the pre-paste watermark, whose normalized text exactly matches the submitted brief or staged pointer. Pane echo, history, queue, and transcript observations cannot settle `delivered` or authorize a pane-driven retry. A local explicit-command spawn retains its anchored line-echo receipt because that line-oriented test/tool path emits an echo only after submission. Missing proof leaves the durable admitted handle in `starting`; a confirmed failure is `spawn.error`. Never infer submission from `delivery_status`, bounded inspect text, or pane liveness, and never launch a replacement logical spawn while its obligation is pending.
+Initial prompt delivery is daemon-owned and reconciled independently from readiness. For provider and remote spawns, a prompt-bearing `spawn.ok` requires `DurableUserEventProof`: a durable USER or stamped TELL event from the authoritative current-generation Store, strictly newer than the pre-paste watermark, whose normalized text exactly matches the submitted brief or staged pointer. Pane echo, history, queue, and transcript observations cannot settle `delivered` or authorize a pane-driven retry. A local explicit-command spawn retains its anchored line-echo receipt because that line-oriented test/tool path emits an echo only after submission. Missing proof leaves the durable admitted handle in `starting`; a confirmed failure is `spawn.error`. Never infer submission from `delivery_status`, bounded inspect text, or pane liveness, and never launch a replacement logical spawn while its obligation is pending.
 
 An `initial_prompt_delivery` receipt whose `state` / `delivery_status` is
 `pending` is explicitly advisory (`advisory:true`, `authoritative:false`): it
@@ -1386,3 +1386,40 @@ reason: `parked: <spec_id> criteria=<n> date=<YYYY-MM-DD> authority=<token> reas
 Read it with `agent-orch inspect`. Changes to the park line or folder retain the
 existing preparation/admission source fences and post-termination warning;
 parking adds no atomic-snapshot promise or new audit field.
+
+### Input provenance
+
+The CLI composes the role baseline and brief without changing their bytes. Before
+choosing a delivery wire, the daemon wraps a parent-commissioned prompt with
+`[from <parent-stream-id>] [send:<spawn-request-id>]` and a newline. Both provider
+normalizers classify it as TELL from that parent. Parentless prompts remain USER.
+Claude inline delivery and Codex native argv retain the complete enveloped wire.
+For a large Claude prompt, the staged file retains the complete unenveloped
+baseline and brief; the submitted `Read <path>` pointer carries the same envelope.
+Native receipt proof requires exactly one current-stream event with the exact
+wire bytes, including the parent and request anchor; display trimming cannot
+settle that proof. Staged-pointer receipt proof binds to the submitted pointer.
+
+Role-set baselines use the closed first line `[role baseline: <role>]` (lowercase
+letters and underscores). That line, Codex setup starting
+`# AGENTS.md instructions for `, and Claude compaction starting
+`This session is being continued from a previous conversation` normalize to
+hidden SYSTEM context. Matching occurs on the first line after leading
+whitespace removal. Reserved first-line openers also hide deliberately typed
+collisions; phrases on later lines and malformed role-baseline headers remain
+USER. SYSTEM records do not count as inbound turns; commissioned TELL does.
+Daemon notices starting `[pentacle-notice:` retain their existing USER
+classification and metadata, including queued records.
+
+Reserved SYSTEM submissions keep delivery receipts: only a post-watermark
+current-stream record with the same reserved body under the existing submission
+normalizer and matching normalized provider digest
+(if present) settles proof. Duplicate SYSTEM matches fail closed. This proof
+does not change stored USER kinds or native USER/TELL wire matching.
+Queued records carrying the reserved setup openers also normalize to SYSTEM;
+existing queued peer and synthetic-tag handling is unchanged. Native injections
+retain their legacy USER source identity component for deduplication, so replay
+cannot insert another copy or rewrite immutable historical USER rows. Queued
+timestamps and delivery-state metadata retain their existing behavior. Stored
+USER records retain their existing operator attribution; the new reservation
+applies at source normalization.

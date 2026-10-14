@@ -3885,7 +3885,8 @@ class Server:
         self, host: str, name: str, role: str, msg: dict[str, Any],
     ) -> dict[str, Any] | None:
         """Paste the frontmatter-stripped baseline the caller supplied into the
-        seat's pane, stamped `[role baseline: <role>]`, via `comms.tell`. Absent
+        seat's pane, stamped `[role baseline: <role>]`, via `comms.tell`. Both
+        provider normalizers reserve this closed first line as SYSTEM. Absent
         content (missing baseline file → the CLI passes null) delivers nothing."""
         content = msg.get("baseline_content")
         if content is None or not str(content).strip() or self.comms is None:

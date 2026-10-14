@@ -345,7 +345,11 @@ def _spawn_ack_schemas() -> dict[str, object]:
 
 
 def _compose_role_baseline_prompt(baseline_content: str, prompt: str | None) -> str:
-    """Put the resolved role contract ahead of the caller's first prompt."""
+    """Put the resolved role contract ahead of the caller's first prompt.
+
+    Preserve these bytes for the daemon, which stamps parent provenance before
+    selecting an inline, staged-pointer, or native-argv delivery wire.
+    """
     if prompt is None:
         return baseline_content
     separator = "\n" if baseline_content.endswith(("\n", "\r")) else "\n\n"

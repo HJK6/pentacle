@@ -105,6 +105,13 @@ _SYNTHETIC_USER_TAGS = (
     "<turn_aborted>",
     "[Request interrupted",
 )
+# Reserved first-line setup openers shared by Claude and Codex. A typed
+# message using a reserved opener also becomes SYSTEM; later lines never do.
+_INJECTED_USER_OPENERS = (
+    "# AGENTS.md instructions for ",
+    "This session is being continued from a previous conversation",
+)
+_ROLE_BASELINE_RE = re.compile(r"^\[role baseline: [a-z_]+\]$")
 #: The classifier is envelope-based rather than position-based: of the openers,
 #: `<environment_context>` 103, `<recommended_plugins>` 2, and one session that
 #: genuinely opens with a typed turn; `<turn_aborted>` appears mid-session.
@@ -149,6 +156,7 @@ def _parse_peer_tell(text: str) -> dict[str, str] | None:
         "tell_id": match.group("tell_id"),
         "enqueued_at": match.group("enqueued_at") or "",
         "payload": payload,
+        "wire_text": text,
     }
 
 
@@ -165,10 +173,19 @@ def _format_turn_duration_text(duration_ms: int, message_count: int | None) -> s
     return f"Worked for {duration}"
 
 
-def _classify_user_string(text: str) -> str:
+def is_reserved_seat_injection(text: str) -> bool:
+    first_line = text.lstrip().split("\n", 1)[0].removesuffix("\r")
+    return bool(_ROLE_BASELINE_RE.fullmatch(first_line)) or any(
+        first_line.startswith(opener) for opener in _INJECTED_USER_OPENERS
+    )
+
+
+def _classify_user_string(text: str, *, include_seat_injections: bool = True) -> str:
     """Return 'user' for real human input, 'system' for synthetic envelopes
     (task notifications, system reminders, command outputs)."""
     stripped = text.lstrip()
+    if include_seat_injections and is_reserved_seat_injection(text):
+        return "system"
     for tag in _SYNTHETIC_USER_TAGS:
         if stripped.startswith(tag):
             return "system"
@@ -265,7 +282,8 @@ def _annotate_user_delivery_state(payloads: list[dict], states: dict[str, str]) 
         if not state:
             continue
         kind = payload.get("kind")
-        if state in {"sent", "returned_to_prompt"} and kind != "USER":
+        reserved_system = kind == "SYSTEM" and is_reserved_seat_injection(str(payload.get("text") or ""))
+        if state in {"sent", "returned_to_prompt"} and kind != "USER" and not reserved_system:
             continue
         if state == "interrupted" and kind != "SYSTEM":
             continue
@@ -362,13 +380,15 @@ def normalize_claude_jsonl_record(
         # synthetic prompts remain USER; the shared interpreter handles them.
         peer_tell = None if queued else _parse_peer_tell(content)
         if queued:
-            event = make("USER", content, {"subtype": "queued-command", "queued_at": timestamp})
+            kind = "SYSTEM" if is_reserved_seat_injection(content) else "USER"
+            event = make(kind, content, {"subtype": "queued-command", "queued_at": timestamp})
         elif peer_tell is not None:
             event = make("TELL", peer_tell["payload"], {
                 "sender": peer_tell["sender"],
                 "tell_id": peer_tell["tell_id"],
                 "enqueued_at": peer_tell["enqueued_at"],
                 "peer_payload": peer_tell["payload"],
+                "peer_wire_text": peer_tell["wire_text"],
             })
         elif _classify_user_string(content) == "system":
             event = make("SYSTEM", content, {"subtype": "synthetic-user"})
@@ -490,7 +510,8 @@ def _latest_event_timestamp(current: str | None, candidate: object) -> str | Non
 
 def _normalize_queued_command_timestamp(payload: dict, *, min_timestamp: str | None) -> dict:
     raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
-    if payload.get("kind") != "USER" or raw.get("subtype") != "queued-command":
+    reserved_system = payload.get("kind") == "SYSTEM" and is_reserved_seat_injection(str(payload.get("text") or ""))
+    if (payload.get("kind") != "USER" and not reserved_system) or raw.get("subtype") != "queued-command":
         return payload
     original_timestamp = str(payload.get("timestamp") or "")
     payload = dict(payload)

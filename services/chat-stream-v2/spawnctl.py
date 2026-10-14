@@ -854,6 +854,14 @@ class SpawnCtl:
             for key in ("prompt", "brief", "initial_prompt")
         )
 
+    @staticmethod
+    def _compose_spawn_brief(text: str, *, parent_stream_id: str, spawn_id: str) -> str:
+        """Stamp the complete CLI composition before computing any staged path."""
+        if not text or not parent_stream_id:
+            return text
+        from comms import _peer_delivery_envelope
+        return _peer_delivery_envelope(parent_stream_id, "send", spawn_id, text)
+
     async def _prepare_brief(
         self,
         text: str,
@@ -866,6 +874,9 @@ class SpawnCtl:
         """Stage a native Codex prompt or bound the legacy paste wire text."""
         if not text:
             return "", {"state": "not_requested"}
+        from claude_jsonl_norm import strip_peer_delivery_envelope
+        payload = strip_peer_delivery_envelope(text)
+        header = text[:len(text) - len(payload)]
         data = text.encode("utf-8")
         size = len(data)
         if size < tmux_transport.INITIAL_PROMPT_STAGE_THRESHOLD_BYTES:
@@ -878,7 +889,9 @@ class SpawnCtl:
                 delivery_receipt.clear()
                 delivery_receipt.update(receipt)
                 return text, delivery_receipt
-        path, digest, data = tmux_transport._prompt_stage_path(text)
+        path, digest, data = tmux_transport._prompt_stage_path(
+            text if native_initial_prompt else payload
+        )
         receipt = delivery_receipt
         receipt.update({
             "transport": "native_argv" if native_initial_prompt else "staged",
@@ -914,6 +927,7 @@ class SpawnCtl:
         if native_initial_prompt:
             return text, receipt
         pointer = f"Read {path} and follow the complete prompt exactly."
+        pointer = header + pointer
         tmux_transport.assert_injectable(pointer, "staged prompt pointer")
         receipt["pointer"] = pointer
         return pointer, delivery_receipt
@@ -1902,7 +1916,11 @@ class SpawnCtl:
                     + (f": {hold['reason']}" if hold.get("reason") else ""),
                 )
         # Accept CLI `initial_prompt`, smoke `prompt`/`brief`, and staged blobs.
-        full_brief = await self._brief_from_message(msg)
+        full_brief = self._compose_spawn_brief(
+            await self._brief_from_message(msg),
+            parent_stream_id=str(msg.get("parent_stream_id") or ""),
+            spawn_id=request_id,
+        )
         ready_marker = str(msg.get("ready_marker") or "READY")
         # Checked BEFORE anything is reserved or created: a hostile brief must
         # cost nothing, not leave a pane behind for the cleanup path to kill.

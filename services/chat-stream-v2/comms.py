@@ -71,6 +71,7 @@ from submission_events import (
     EventWatermark,
     PROOF_FAST_WAIT_S,
     submission_text_matches,
+    system_submission_matches,
 )
 from v2_runtime import iso_now
 
@@ -1444,6 +1445,8 @@ class Comms:
     def _tail_event_matches_submission(event: dict[str, Any], stream_id: str, body: str) -> bool:
         if str(event.get("stream_id") or "") != stream_id:
             return False
+        if event.get("kind") == "SYSTEM":
+            return system_submission_matches(event, body)
         if str(event.get("kind") or "") not in {"USER", "TELL"}:
             return False
         if "provider_text_digest" in event:
@@ -1462,11 +1465,13 @@ class Comms:
         if not stream_id:
             return False
         tail = await self.store.fetch_session_event_tail(stream_id, limit=500)
-        return any(
-            self._daemon_seq(event) > watermark
-            and self._tail_event_matches_submission(event, stream_id, body)
-            for event in tail
-        )
+        matches = [event for event in tail
+            if self._daemon_seq(event) > watermark
+            and self._tail_event_matches_submission(event, stream_id, body)]
+        system_matches = [event for event in matches if event.get("kind") == "SYSTEM"]
+        if system_matches:
+            return len(system_matches) == 1
+        return bool(matches)
 
 
     # -- send --------------------------------------------------------------

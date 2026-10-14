@@ -132,13 +132,20 @@ class _StreamIngest:
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
-    """Source-independent durable dedup identity (LIFTED VERBATIM from v1
-    chat_streamd `_jsonl_event_identity`). A record's `jsonl_record_uuid` +
+    """Source-independent durable dedup identity. A record's `jsonl_record_uuid` +
     event index is the stable key; text-hash fallback when a record has none."""
     raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
     stream_id = str(payload.get("stream_id") or "")
     provider = str(payload.get("provider") or "")
     kind = str(payload.get("kind") or "")
+    from claude_jsonl_norm import is_reserved_seat_injection
+    # These native user-role injections used USER in existing immutable history.
+    # Preserve that identity component on replay; only newly inserted rows use
+    # SYSTEM presentation. No old row is rewritten or re-broadcast.
+    if (kind == "SYSTEM" and provider in {"claude", "codex"}
+            and raw.get("subtype") in {"synthetic-user", "queued-command"}
+            and is_reserved_seat_injection(str(payload.get("text") or ""))):
+        kind = "USER"
     record_uuid = raw.get("jsonl_record_uuid")
     if record_uuid is not None:
         return (stream_id, provider, str(record_uuid), raw.get("jsonl_event_index"), kind)
