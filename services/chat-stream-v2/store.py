@@ -2159,64 +2159,33 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     def _proactive_turn_publication_conn(
         self, conn: sqlite3.Connection, composite_stream_id: str, *, source_stream_id: str,
         source_generation: str, session_created_at: str, transcript: str,
-        boundary: sqlite3.Row | None, source_event_id: int, recorded_at: float,
-    ) -> tuple[str, str] | None:
-        """Return (publication_key, correlation) for this turn's proactive publication.
+        boundary: sqlite3.Row | None, source_event_id: int,
+    ) -> str | None:
+        """Return the key of this turn's own proactive publication, if any.
 
-        Candidates are the bound seat's own proactive publications in its current
-        generation. A candidate belongs to the turn when a tool row of this
-        transcript turn names its key (lag-free), or, for a dynamically built key,
-        when the daemon stored it between the prior final's and this final's
-        ingest. Structural only: no text is compared.
+        Candidates are the bound seat's proactive publications in its current
+        generation. One belongs to the turn only when a tool row of this
+        transcript, after the previous final, names its request key: lag-free
+        and order-independent, with no text comparison. A key built at run time
+        is not matched, and the final mirrors as before (fail open).
         """
-        window_start = boundary["event_id"] if boundary is not None else 0
-        if boundary is not None:
-            lower = float(boundary["recorded_at"])
-        else:
-            first = conn.execute(
-                "SELECT MIN(recorded_at) FROM session_event_tail WHERE stream_id=? "
-                "AND session_created_at=? AND json_extract(event_json,'$.raw.source_session_identity')=?",
-                (source_stream_id, session_created_at, transcript),
-            ).fetchone()[0]
-            lower = float(first) if first is not None else recorded_at
-        candidates = conn.execute(
-            "SELECT p.publication_key,p.created_at,EXISTS (SELECT 1 FROM session_event_tail t "
-            "WHERE t.stream_id=? AND t.session_created_at=? AND t.event_id>? AND t.event_id<? "
-            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
-            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
-            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0"
-            ") AS in_transcript FROM v2_assistant_composite_publications p "
+        row = conn.execute(
+            "SELECT p.publication_key FROM v2_assistant_composite_publications p "
             "JOIN session_event_tail e ON e.event_id=p.event_id "
             "WHERE p.stream_id=? AND p.dispatch_id='' AND p.publish_kind IN ('prose','status') "
             "AND json_extract(e.event_json,'$.raw.actor_stream_id')=? "
             "AND json_extract(e.event_json,'$.raw.actor_generation')=? "
-            "ORDER BY p.event_id DESC",
-            (source_stream_id, session_created_at, window_start, source_event_id, transcript,
-             composite_stream_id, source_stream_id, source_generation),
-        ).fetchall()
-        lag_floor = _iso_epoch(boundary["event_ts"]) if boundary is not None else None
-        missed = None
-        for row in candidates:
-            if row["in_transcript"]:
-                return str(row["publication_key"]), "transcript"
-            created = _iso_epoch(row["created_at"])
-            if created is None:
-                continue
-            if lower <= created <= recorded_at:
-                return str(row["publication_key"]), "clock_window"
-            if missed is None and lag_floor is not None and lag_floor <= created < lower:
-                missed = str(row["publication_key"])
-        if missed is not None:
-            # A dynamic key stored while the previous final was still being ingested
-            # cannot be placed in either turn; the final mirrors as before.
-            log.info(
-                "assistant mirror proactive correlation miss source_event_id=%s "
-                "publication_key=%s miss_class=dynamic_key_ingest_lag",
-                source_event_id, missed,
-                extra={"subsystem": "assistant_mirror",
-                       "bug_ref": "spec_pentacle__assistant_duplicate_reply_sources_2026_10"},
-            )
-        return None
+            "AND EXISTS (SELECT 1 FROM session_event_tail t "
+            "WHERE t.stream_id=? AND t.session_created_at=? AND t.event_id>? AND t.event_id<? "
+            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
+            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
+            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0) "
+            "ORDER BY p.event_id DESC LIMIT 1",
+            (composite_stream_id, source_stream_id, source_generation, source_stream_id,
+             session_created_at, boundary["event_id"] if boundary is not None else 0,
+             source_event_id, transcript),
+        ).fetchone()
+        return str(row["publication_key"]) if row is not None else None
 
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
@@ -2285,7 +2254,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # record is not a previous turn. Unknown legacy assistant rows fence
             # the search too, preventing old dispatches crossing a metadata upgrade.
             boundary = conn.execute(
-                "SELECT event_id,recorded_at,event_ts FROM session_event_tail WHERE stream_id=? "
+                "SELECT event_id FROM session_event_tail WHERE stream_id=? "
                 "AND session_created_at=? AND event_id<? "
                 "AND json_extract(event_json,'$.raw.source_session_identity')=? "
                 "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
@@ -2358,13 +2327,12 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn, binding[0], source_stream_id=source_stream_id,
                 source_generation=source_generation, session_created_at=source["created_at"],
                 transcript=transcript, boundary=boundary, source_event_id=source_event_id,
-                recorded_at=recorded_at,
             )
             if proactive is not None:
                 log.info(
                     "assistant mirror skipped proactive-published turn source_event_id=%s "
-                    "publication_key=%s correlation=%s",
-                    source_event_id, proactive[0], proactive[1],
+                    "publication_key=%s",
+                    source_event_id, proactive,
                     extra={"subsystem": "assistant_mirror",
                            "bug_ref": "spec_pentacle__assistant_duplicate_reply_sources_2026_10"},
                 )

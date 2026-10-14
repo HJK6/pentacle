@@ -281,18 +281,18 @@ shows that prose as an acknowledgment (see the turn-final exception below).
 
 A structured final (Claude `end_turn`, Codex `final_answer`) is not mirrored
 when its own turn made a proactive publication (`assistant publish --proactive`)
-from the bound seat and its current generation. The daemon places a proactive
-publication in the turn in one of two ways, without comparing text: a tool row
-of the same transcript, after the previous final, names the publication's
-request key; or, for a key built at run time, the daemon stored the publication
-between the ingest of the previous final and of this final. A later turn
-without its own proactive publication mirrors as usual, even with the same text.
-A publication from another seat, an earlier generation, or one without
-`raw.actor_generation` never suppresses a final. Known limit: if a run-time key
-is stored while the previous final is still being ingested, it is not matched;
-the final mirrors and the daemon logs
-`assistant mirror proactive correlation miss ... miss_class=dynamic_key_ingest_lag`.
-Each suppression logs `assistant mirror skipped proactive-published turn`.
+from the bound seat and its current generation. A publication belongs to the
+turn only when a tool row of the same transcript, after the previous final,
+names its request key. This works however late the turn's rows are ingested and
+compares no text. A turn without its own proactive publication mirrors as usual,
+even with the same text, including a final ingested after a later turn's
+publication. A publication from another seat, an earlier generation, or one
+without `raw.actor_generation` never suppresses a final. Known limit: a request
+key built at run time (for example `--request-id "$KEY"`) does not appear in the
+tool row, so the turn is not matched and its final mirrors. The result is a
+visible duplicate, which is acceptable; a lost message is not. Pass a literal
+`--request-id`. Each suppression logs
+`assistant mirror skipped proactive-published turn`.
 
 ## Dispatch batching
 

@@ -44,8 +44,9 @@ def test_proactive_publication_turn_final_is_not_mirrored():
 
     Turn 1 stores the publication BEFORE any row of the turn is ingested (delayed ingestion); the
     seat's own tool row carries the literal request id, so transcript correlation suppresses the
-    final. Turn 2 uses a dynamic key (no literal id in the tool row) and is suppressed by the
-    daemon-clock window after the previous final. Turn 3 has no publication and mirrors.
+    final. Turn 2 uses a dynamic key (no literal id in the tool row): FD ruling 2b79b111 removed the
+    daemon-clock window, so it fails open and the final mirrors (known limit: a possible duplicate,
+    never a lost message). Turn 3 has no publication and mirrors.
     """
 
     async def _go():
@@ -70,12 +71,12 @@ def test_proactive_publication_turn_final_is_not_mirrored():
             await composite.publish(_proactive(generation, "publish:fd-domain-1791990000", "Domain **bought**."), actor_stream_id=ROOT)
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Domain bought.", identity="f2", final=True)
             rows = await _answer_rows(store)
-            assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**."], [r["message_id"] for r in rows]
+            assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**.", "Domain bought."], [r["message_id"] for r in rows]
             # Turn 3 (control): no proactive publication; the final mirrors even with equal text.
             await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly once more", identity="u3")
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Card reissued.", identity="f3", final=True)
             rows = await _answer_rows(store)
-            assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**.", "Card reissued."]
+            assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**.", "Domain bought.", "Card reissued."]
             assert rows[-1]["publish_kind"] == "status"
             await composite.stop()
         finally:
@@ -504,17 +505,8 @@ async def _turn_row(store, stream_id, pane_pid, *, provider, kind, identity, tex
          "lifecycle": await store.fetch_open_session_lifecycle(stream_id, pane_pid=pane_pid)}], limit=100))[0]
 
 
-async def _restamp_publication(store, key):
-    """Move a stored publication's daemon time into the current turn window (overlap fixture)."""
-    def _op(conn):
-        conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE publication_key=?",
-                     (_routing_iso_now(), key))
-        conn.commit()
-    await store.submit(_op)
-
-
 def test_proactive_correlation_controls_previous_turn_missing_generation_and_codex():
-    """Rule 3 controls: a previous turn's dynamic-key publication never suppresses the next turn; a
+    """Rule 3 controls: a previous turn's publication never suppresses the next turn; a
     publication without raw.actor_generation never matches; a Codex final_answer turn with its own
     function_call publication is suppressed and the next Codex turn mirrors."""
 
@@ -527,9 +519,9 @@ def test_proactive_correlation_controls_previous_turn_missing_generation_and_cod
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
             turn = lambda **kw: _turn_row(store, ROOT, "4242", **kw)
-            # Previous turn: dynamic key published inside turn 1 (suppressed by the clock window).
+            # Previous turn: turn 1's own tool row names its key, so turn 1's final is suppressed.
             await turn(provider="claude", kind="USER", identity="p-u1", text="typed")
-            await turn(provider="claude", kind="TOOL_USE", identity="p-t1", command="agent-orch assistant publish --request-id $K")
+            await turn(provider="claude", kind="TOOL_USE", identity="p-t1", command="agent-orch assistant publish --request-id publish:dyn-1 --proactive")
             published = await composite.publish(_proactive(generation, "publish:dyn-1", "Lane moved."), actor_stream_id=ROOT)
             assert published["event_id"]
             await turn(provider="claude", kind="ASSIST_TEXT", identity="p-f1", text="Lane moved.", final=True)
@@ -547,7 +539,6 @@ def test_proactive_correlation_controls_previous_turn_missing_generation_and_cod
             await store.submit(_strip)
             await turn(provider="claude", kind="USER", identity="p-u3", text="typed once more")
             await turn(provider="claude", kind="TOOL_USE", identity="p-t3", command="agent-orch assistant publish --request-id publish:legacy-1")
-            await _restamp_publication(store, "publish:legacy-1")
             await turn(provider="claude", kind="ASSIST_TEXT", identity="p-f3", text="Legacy update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)][-2:] == ["Legacy update.", "Legacy update."]
             # Codex: function_call carries the literal key; publication stored before the turn rows.
@@ -573,8 +564,8 @@ def test_proactive_correlation_controls_previous_turn_missing_generation_and_cod
 
 
 def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path):
-    """Rule 3 controls: inside the overlapping window and even with the literal key in the turn,
-    a publication by the previous generation of the seat, or by another seat, never suppresses."""
+    """Rule 3 controls: even with the literal key in the turn's own tool row, a publication by the
+    previous generation of the seat, or by another seat, never suppresses."""
     from test_assistant_prose_mirror import _set_durable_binding
 
     async def _go():
@@ -594,7 +585,6 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
             await _turn_row(store, ROOT, "4242", provider="claude", kind="USER", identity="g-u1", text="typed")
             await _turn_row(store, ROOT, "4242", provider="claude", kind="TOOL_USE", identity="g-t1",
                             command="agent-orch assistant publish --request-id publish:old-gen")
-            await _restamp_publication(store, "publish:old-gen")
             await _turn_row(store, ROOT, "4242", provider="claude", kind="ASSIST_TEXT", identity="g-f1",
                             text="Old generation update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)] == ["Old generation update.", "Old generation update."]
@@ -606,7 +596,6 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
             await _turn_row(store, seat_b, "5252", provider="claude", kind="USER", identity="b-u1", text="typed")
             await _turn_row(store, seat_b, "5252", provider="claude", kind="TOOL_USE", identity="b-t1",
                             command="agent-orch assistant publish --request-id publish:seat-a")
-            await _restamp_publication(store, "publish:seat-a")
 
             def _same_generation(conn):
                 # Even a (forged) equal generation string from another seat never matches.
@@ -625,10 +614,10 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
     asyncio.run(_go())
 
 
-def test_dynamic_key_outside_the_window_mirrors_and_logs_the_miss(caplog):
-    """Rule 3 known limit: a dynamic-key publication stored while the previous final was still
-    being ingested cannot be placed; the final mirrors as before and the miss class is logged."""
-    from datetime import datetime, timezone
+def test_dynamic_key_fails_open_and_the_final_mirrors(caplog):
+    """Rule 3 known limit (FD ruling 2b79b111): a key built at run time never appears literally in
+    the tool row, so the turn is not correlated and its final mirrors as before. A possible
+    duplicate is acceptable; a lost message is not."""
 
     async def _go():
         store = Store(":memory:")
@@ -638,25 +627,14 @@ def test_dynamic_key_outside_the_window_mirrors_and_logs_the_miss(caplog):
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
-            turn = lambda **kw: _turn_row(store, ROOT, "4242", **kw)
-            await turn(provider="claude", kind="USER", identity="m-u1", text="typed")
-            boundary_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            await asyncio.sleep(0.01)
-            # Turn 2's dynamic-key publication lands before turn 1's (legacy, unstructured) final is ingested.
-            await composite.publish(_proactive(generation, "publish:dyn-late", "Late update."), actor_stream_id=ROOT)
-            await asyncio.sleep(0.01)
-            legacy = {"stream_id": ROOT, "provider": "codex", "kind": "ASSIST_TEXT", "text": "Turn one answer.",
-                      "timestamp": boundary_ts, "raw": {"source_session_identity": "turn-session", "message_id": "m-f1"}}
-            await store.append_session_events_lifecycle_cas([
-                {"stream_id": ROOT, "event": legacy, "identity": "m-f1",
-                 "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}], limit=100)
-            await turn(provider="claude", kind="USER", identity="m-u2", text="typed again")
-            await turn(provider="claude", kind="TOOL_USE", identity="m-t2", command="agent-orch assistant publish --request-id $K")
+            turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
+            await turn(kind="USER", identity="m-u1", text="typed")
+            await turn(kind="TOOL_USE", identity="m-t1", command="K=publish:fd-$(date +%s); agent-orch assistant publish --request-id $K --proactive")
+            await composite.publish(_proactive(generation, "publish:fd-1791990001", "Late update."), actor_stream_id=ROOT)
             with caplog.at_level(logging.INFO, logger="chat_streamd_v2.store"):
-                await turn(provider="claude", kind="ASSIST_TEXT", identity="m-f2", text="Late update.", final=True)
-            assert [r["text"] for r in await _answer_rows(store)] == ["Late update.", "Turn one answer.", "Late update."]
-            assert "assistant mirror proactive correlation miss" in caplog.text
-            assert "miss_class=dynamic_key_ingest_lag" in caplog.text
+                await turn(kind="ASSIST_TEXT", identity="m-f1", text="Late update.", final=True)
+            assert [r["text"] for r in await _answer_rows(store)] == ["Late update.", "Late update."]
+            assert "skipped proactive-published turn" not in caplog.text
             await composite.stop()
         finally:
             store.stop()
