@@ -15,7 +15,7 @@ import tmux_transport
 
 PARENT = 'hosta:v2-parent'
 SPAWN = 'spawn-public-probe'
-OPENERS = ['[role baseline: lead]', '[pentacle-notice:notice-1]',
+OPENERS = ['[role baseline: lead]',
            '# AGENTS.md instructions for /tmp/workspace',
            'This session is being continued from a previous conversation']
 
@@ -281,3 +281,43 @@ def test_queued_reserved_injection_is_system(text):
     event = normalize_claude_jsonl_records([record], host='hosta', session_name='v2-child')[0]
     assert event['kind'] == 'SYSTEM'
     assert event['text'] == text + '\ncontext'
+
+
+@pytest.mark.parametrize('provider', ['claude', 'codex'])
+def test_p3_notice_keeps_pre_cutover_user_classification(provider):
+    text = '[pentacle-notice:notice-1]\nExisting notice behavior.'
+    event = normalize(provider, text)
+    assert event['kind'] == 'USER'
+    assert event['text'] == text
+    if provider == 'claude':
+        queued = {'type': 'attachment', 'attachment': {'type': 'queued_command',
+                  'origin': {'kind': 'human'}, 'prompt': text}}
+        event = normalize_claude_jsonl_records([queued], host='hosta', session_name='v2-child')[0]
+        assert event['kind'] == 'USER' and event['text'] == text
+        assert event['raw']['subtype'] == 'queued-command'
+
+
+@pytest.mark.parametrize('provider', ['claude', 'codex'])
+@pytest.mark.parametrize('body', OPENERS)
+def test_new_system_kind_keeps_legacy_source_identity_without_history_mutation(provider, body):
+    from ingest import _identity_key
+    system = normalize(provider, body + '\nInjected context')
+    system['raw']['jsonl_record_uuid'] = 'frozen-public-record'
+    legacy = dict(system, kind='USER')
+    assert system['kind'] == 'SYSTEM'
+    assert _identity_key(system) == _identity_key(legacy)
+    other = dict(system, text='Unrelated system context')
+    assert _identity_key(other) != _identity_key(dict(other, kind='USER'))
+    async def replay():
+        store = Store(':memory:'); store.start()
+        try:
+            await store.open_session('hosta', 'v2-child', provider=provider)
+            assert await store.append_session_event('hosta:v2-child', legacy,
+                        identity=_identity_key(legacy), limit=500) is not None
+            assert await store.append_session_event('hosta:v2-child', system,
+                        identity=_identity_key(system), limit=500) is None
+            rows = await store.fetch_session_event_tail('hosta:v2-child', limit=500)
+            assert len(rows) == 1 and rows[0]['kind'] == 'USER'
+        finally:
+            store.stop()
+    asyncio.run(replay())

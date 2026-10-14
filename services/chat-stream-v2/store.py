@@ -6366,9 +6366,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             str(raw.get("tell_id") or "").strip()
             if kind == "TELL" and isinstance(raw, dict) else ""
         )
-        from claude_jsonl_norm import is_reserved_seat_injection
-        reserved_system = kind == "SYSTEM" and is_reserved_seat_injection(text)
-        if (kind not in ("USER", "TELL") and not reserved_system) or not stream_id or not text:
+        if kind not in ("USER", "TELL") or not stream_id or not text:
             return payload
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:

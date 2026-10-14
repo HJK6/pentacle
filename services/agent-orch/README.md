@@ -1381,20 +1381,24 @@ wire bytes, including the parent and request anchor; display trimming cannot
 settle that proof. Staged-pointer receipt proof binds to the submitted pointer.
 
 Role-set baselines use the closed first line `[role baseline: <role>]` (lowercase
-letters and underscores). That line, daemon notices starting `[pentacle-notice:`,
-Codex setup starting `# AGENTS.md instructions for `, and Claude compaction
-starting `This session is being continued from a previous conversation` normalize
-to hidden SYSTEM context. Matching occurs on the first line after leading
+letters and underscores). That line, Codex setup starting
+`# AGENTS.md instructions for `, and Claude compaction starting
+`This session is being continued from a previous conversation` normalize to
+hidden SYSTEM context. Matching occurs on the first line after leading
 whitespace removal. Reserved first-line openers also hide deliberately typed
 collisions; phrases on later lines and malformed role-baseline headers remain
 USER. SYSTEM records do not count as inbound turns; commissioned TELL does.
+Daemon notices starting `[pentacle-notice:` retain their existing USER
+classification and metadata, including queued records.
 
 Reserved SYSTEM submissions keep delivery receipts: only a post-watermark
 current-stream record with the exact reserved body and matching provider digest
 (if present) settles proof. Duplicate SYSTEM matches fail closed. This proof
 does not change stored USER kinds or native USER/TELL wire matching.
-
-Queued records carrying those reserved setup openers also remain SYSTEM; existing
-queued peer and synthetic-tag handling is unchanged. Reserved SYSTEM notices
-retain their envelope and send-receipt metadata through local and satellite
-ingress, while their kind continues to exclude them from inbound turn counts.
+Queued records carrying the reserved setup openers also normalize to SYSTEM;
+existing queued peer and synthetic-tag handling is unchanged. Native injections
+retain their legacy USER source identity component for deduplication, so replay
+cannot insert another copy or rewrite immutable historical USER rows. Queued
+timestamps and delivery-state metadata retain their existing behavior. Stored
+USER records retain their existing operator attribution; the new reservation
+applies at source normalization.

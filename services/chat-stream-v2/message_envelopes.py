@@ -416,9 +416,7 @@ def annotate_message_envelope(event: dict[str, Any]) -> dict[str, Any]:
     text = str(event.get("text") or "")
     provider_source = clean_raw.get("provider_content")
     source = provider_source if isinstance(provider_source, str) else text
-    from claude_jsonl_norm import is_reserved_seat_injection
-    kind = str(event.get("kind") or "").upper()
-    if kind != "USER" and not (kind == "SYSTEM" and is_reserved_seat_injection(text)):
+    if str(event.get("kind") or "").upper() != "USER":
         return result
     provider = str(event.get("provider") or "") or None
     provider_wrapper = event.get("provider_wrapper")

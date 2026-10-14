@@ -108,7 +108,6 @@ _SYNTHETIC_USER_TAGS = (
 # Reserved first-line setup openers shared by Claude and Codex. A typed
 # message using a reserved opener also becomes SYSTEM; later lines never do.
 _INJECTED_USER_OPENERS = (
-    "[pentacle-notice:",
     "# AGENTS.md instructions for ",
     "This session is being continued from a previous conversation",
 )
@@ -181,11 +180,11 @@ def is_reserved_seat_injection(text: str) -> bool:
     )
 
 
-def _classify_user_string(text: str) -> str:
+def _classify_user_string(text: str, *, include_seat_injections: bool = True) -> str:
     """Return 'user' for real human input, 'system' for synthetic envelopes
     (task notifications, system reminders, command outputs)."""
     stripped = text.lstrip()
-    if is_reserved_seat_injection(text):
+    if include_seat_injections and is_reserved_seat_injection(text):
         return "system"
     for tag in _SYNTHETIC_USER_TAGS:
         if stripped.startswith(tag):
@@ -283,7 +282,8 @@ def _annotate_user_delivery_state(payloads: list[dict], states: dict[str, str]) 
         if not state:
             continue
         kind = payload.get("kind")
-        if state in {"sent", "returned_to_prompt"} and kind != "USER":
+        reserved_system = kind == "SYSTEM" and is_reserved_seat_injection(str(payload.get("text") or ""))
+        if state in {"sent", "returned_to_prompt"} and kind != "USER" and not reserved_system:
             continue
         if state == "interrupted" and kind != "SYSTEM":
             continue
@@ -510,7 +510,8 @@ def _latest_event_timestamp(current: str | None, candidate: object) -> str | Non
 
 def _normalize_queued_command_timestamp(payload: dict, *, min_timestamp: str | None) -> dict:
     raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
-    if payload.get("kind") != "USER" or raw.get("subtype") != "queued-command":
+    reserved_system = payload.get("kind") == "SYSTEM" and is_reserved_seat_injection(str(payload.get("text") or ""))
+    if (payload.get("kind") != "USER" and not reserved_system) or raw.get("subtype") != "queued-command":
         return payload
     original_timestamp = str(payload.get("timestamp") or "")
     payload = dict(payload)
