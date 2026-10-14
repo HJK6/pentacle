@@ -2169,23 +2169,29 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         and order-independent, with no text comparison. A key built at run time
         is not matched, and the final mirrors as before (fail open).
         """
-        row = conn.execute(
-            "SELECT p.publication_key FROM v2_assistant_composite_publications p "
+        rows = conn.execute(
+            "SELECT p.publication_key,json_extract(t.event_json,'$.raw.tool_input') AS tool_input "
+            "FROM v2_assistant_composite_publications p "
             "JOIN session_event_tail e ON e.event_id=p.event_id "
+            "JOIN session_event_tail t ON t.stream_id=? AND t.session_created_at=? "
+            "AND t.event_id>? AND t.event_id<? "
+            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
+            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
+            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0 "
             "WHERE p.stream_id=? AND p.dispatch_id='' AND p.publish_kind IN ('prose','status') "
             "AND json_extract(e.event_json,'$.raw.actor_stream_id')=? "
             "AND json_extract(e.event_json,'$.raw.actor_generation')=? "
-            "AND EXISTS (SELECT 1 FROM session_event_tail t "
-            "WHERE t.stream_id=? AND t.session_created_at=? AND t.event_id>? AND t.event_id<? "
-            "AND json_extract(t.event_json,'$.kind')='TOOL_USE' "
-            "AND json_extract(t.event_json,'$.raw.source_session_identity')=? "
-            "AND instr(COALESCE(json_extract(t.event_json,'$.raw.tool_input'),''),p.publication_key)>0) "
-            "ORDER BY p.event_id DESC LIMIT 1",
-            (composite_stream_id, source_stream_id, source_generation, source_stream_id,
-             session_created_at, boundary["event_id"] if boundary is not None else 0,
-             source_event_id, transcript),
-        ).fetchone()
-        return str(row["publication_key"]) if row is not None else None
+            "ORDER BY p.event_id DESC",
+            (source_stream_id, session_created_at,
+             boundary["event_id"] if boundary is not None else 0, source_event_id, transcript,
+             composite_stream_id, source_stream_id, source_generation),
+        ).fetchall()
+        for row in rows:
+            # The whole key, never a substring: publish:x-1 does not match publish:x-10.
+            key = str(row["publication_key"])
+            if re.search(r"(?<![\w.:/-])" + re.escape(key) + r"(?![\w.:/-])", str(row["tool_input"] or "")):
+                return key
+        return None
 
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
