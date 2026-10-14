@@ -334,7 +334,7 @@ def _smoke_payload(result: subprocess.CompletedProcess[str]) -> dict[str, object
     return payload if isinstance(payload, dict) else {}
 
 
-def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Read identity from the installed machine file, never ambient host overrides.
 
     Match machines.py's list/object schema and ssh_target=None local marker. Do not
@@ -347,7 +347,7 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
     rows = payload.get("machines") if isinstance(payload, dict) else payload
     if not isinstance(rows, list) or not rows:
         raise ValueError("installed machine file must contain a nonempty machines list")
-    hosts, local_hosts = [], []
+    hosts, local_hosts, optional_hosts = [], [], []
     for row in rows:
         if not isinstance(row, dict) or not str(row.get("name") or "").strip():
             raise ValueError("installed machine entry has no name")
@@ -355,11 +355,16 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
         if name in hosts:
             raise ValueError("installed machine file contains duplicate names")
         hosts.append(name)
+        optional = row.get("smoke_optional", False)
+        if not isinstance(optional, bool):
+            raise ValueError("smoke_optional must be a boolean")
+        if optional:
+            optional_hosts.append(name)
         if row.get("ssh_target") is None:
             local_hosts.append(name)
         elif not str(row["ssh_target"]).strip():
             raise ValueError("installed remote machine has a blank ssh_target")
-    return tuple(hosts), tuple(local_hosts)
+    return tuple(hosts), tuple(local_hosts), tuple(optional_hosts)
 
 
 def _fleet_smoke_verdict(
@@ -374,9 +379,9 @@ def _fleet_smoke_verdict(
     payload = _smoke_payload(result)
     issues: list[str] = []
     try:
-        hosts, local_hosts = _fleet_smoke_hosts(machines_file)
+        hosts, local_hosts, optional_hosts = _fleet_smoke_hosts(machines_file)
     except (OSError, ValueError, TypeError) as exc:
-        hosts, local_hosts = (), ()
+        hosts, local_hosts, optional_hosts = (), (), ()
         issues.append(f"installed_machine_configuration: {type(exc).__name__}: {exc}")
     if not local_hosts:
         issues.append("installed_local_host_not_identified")
@@ -432,6 +437,11 @@ def _fleet_smoke_verdict(
         cells[key] = {"host": key[0], "provider": key[1], "prompt_mode": key[2],
                       "outcome": "untested", "reason": "missing_evidence", "reasons": ["missing_evidence"]}
     reports = list(cells.values())
+    skipped = []
+    for row in reports:
+        if row["host"] in optional_hosts and row["outcome"] == "unreachable":
+            row["outcome"] = "SKIPPED_OFFLINE"
+            skipped.append(row)
     untested = [row for row in reports if row["outcome"] in {"untested", "unreachable"}]
     unreachable_hosts = sorted({row["host"] for row in reports if row["outcome"] == "unreachable"})
     status = str(payload.get("status") or "").upper()
@@ -443,7 +453,7 @@ def _fleet_smoke_verdict(
     elif unreachable_hosts:
         local_passed = all(cells[key]["outcome"] == "passed" for key in expected if key[0] in local_hosts)
         outcome = FLEET_SMOKE_PARTIAL if local_passed else FLEET_SMOKE_UNTESTED
-    elif result.returncode == 2 or status == "UNTESTED":
+    elif (result.returncode == 2 or status == "UNTESTED") and not skipped:
         outcome = FLEET_SMOKE_UNTESTED
         issues.append("smoke_reported_untested_without_cell_reason")
     elif payload.get("ok") is False:
@@ -453,7 +463,7 @@ def _fleet_smoke_verdict(
         outcome = FLEET_SMOKE_PASSED
     return {
         "outcome": outcome, "cells": reports, "local_hosts": list(local_hosts),
-        "unreachable_hosts": unreachable_hosts, "untested": untested,
+        "unreachable_hosts": unreachable_hosts, "untested": untested, "skipped": skipped,
         "evidence": payload, "issues": issues, "returncode": result.returncode,
         "detail": _terminal_command_detail(result),
         **({"raw_stdout": result.stdout, "raw_stderr": result.stderr} if not payload else {}),
