@@ -22,7 +22,7 @@ from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config, 
 
 def _proactive(generation: str, key: str, text: str) -> dict:
     return {"type": "assistant.publish", "request_id": key, "composite_stream_id": ASSISTANT,
-            "publish_kind": "prose", "message": text,
+            "publish_kind": "prose", "response_state": "final", "message": text,
             "_auth_context": {"token_verified": True, "stream_id": ROOT, "session_generation": generation}}
 
 
@@ -251,24 +251,87 @@ def test_identical_final_to_another_dispatch_is_merged_not_duplicated():
     asyncio.run(_go())
 
 
-def test_proactive_publish_is_refused_while_a_dispatch_is_open():
-    """Rule 2a: proactive content is folded into the open reply, never published beside it."""
+def test_novel_proactive_with_no_open_dispatch_is_always_delivered():
+    """Regression guard (operator 2026-10-14, dispatch b0223cd9): unprompted updates must never be
+    blocked. A brand-new proactive update with no open dispatch goes through immediately, including
+    on a seat that has never received an operator dispatch (the earlier bug: the front desk could
+    only speak after the operator messaged first; spec_pentacle__front_desk_mirror_trigger_scope_2026_10
+    added the proactive path)."""
 
     async def _go():
-        store, composite, generation = await _landed_composite()
+        sends, broadcasts, pushes = [], [], []
+        store, composite, generation = await _landed_composite(sends, broadcasts, pushes)
+        try:
+            assert sends == []  # no operator message ever
+            first = await composite.publish(_proactive(generation, "publish:proactive-1", "Henry texted that his bot is ready."), actor_stream_id=ROOT)
+            assert first["duplicate"] is False and not first.get("deferred")
+            rows = await _answer_rows(store)
+            assert [r["text"] for r in rows] == ["Henry texted that his bot is ready."]
+            assert [b["type"] for b in broadcasts] == ["chat.event"] and len(pushes) == 1
+            # A second novel update, still with no dispatch, also goes through.
+            second = await composite.publish(_proactive(generation, "publish:proactive-2", "The clinic confirmed 3 PM."), actor_stream_id=ROOT)
+            assert second["duplicate"] is False and not second.get("deferred")
+            assert len(await _answer_rows(store)) == 2
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
+
+def test_proactive_during_open_dispatch_is_deferred_then_released_after_the_reply():
+    """Rule 2a: a proactive publish during an open dispatch is accepted and held, then appended right
+    after that dispatch's reply. It is never dropped and never appears before the reply."""
+
+    async def _go():
+        sends, broadcasts, pushes = [], [], []
+        store, composite, generation = await _landed_composite(sends, broadcasts, pushes)
         try:
             head = await _accept(composite, store, "in-a", "pause wmi runs")
-            with pytest.raises(ValueError, match="assistant_publish_proactive_blocked_open_dispatch"):
-                await composite.publish(_proactive(generation, "publish:proactive-1", "By the way, PR 87 passed QA."), actor_stream_id=ROOT)
-            assert [r["text"] for r in await _answer_rows(store)] == []
-            await composite.publish(_final(head["dispatch_id"], "in-a", "WMI is paused. PR 87 passed QA; holding the merge."), actor_stream_id=ROOT)
-            # With no open dispatch the proactive path works as before.
-            ok = await composite.publish(_proactive(generation, "publish:proactive-2", "Reminder: the clinic calls at 3 PM."), actor_stream_id=ROOT)
-            assert ok["duplicate"] is False
-            # Idempotent replay of an accepted proactive publication wins over a later open dispatch.
-            await _accept(composite, store, "in-b", "another question")
-            replay = await composite.publish(_proactive(generation, "publish:proactive-2", "Reminder: the clinic calls at 3 PM."), actor_stream_id=ROOT)
-            assert replay["duplicate"] is True and replay["event_id"] == ok["event_id"]
+            held = await composite.publish(_proactive(generation, "publish:proactive-1", "Separately: Henry texted that his bot is ready."), actor_stream_id=ROOT)
+            assert held["deferred"] is True and held["deferred_behind_dispatch_id"] == head["dispatch_id"]
+            assert await _answer_rows(store) == [] and broadcasts == [] and pushes == []
+            # Idempotent replay while deferred returns the same deferred receipt.
+            again = await composite.publish(_proactive(generation, "publish:proactive-1", "Separately: Henry texted that his bot is ready."), actor_stream_id=ROOT)
+            assert again["duplicate"] is True and again["deferred"] is True
+            await composite.publish(_final(head["dispatch_id"], "in-a", "WMI is paused."), actor_stream_id=ROOT)
+            rows = await _answer_rows(store)
+            assert [r["text"] for r in rows] == ["WMI is paused.", "Separately: Henry texted that his bot is ready."]
+            assert rows[1]["message_id"] == "publication:publish:proactive-1"
+            assert [b["type"] for b in broadcasts] == ["chat.event", "chat.event"] and len(pushes) == 2
+            await composite.stop()
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
+
+def test_deferred_proactive_is_folded_into_a_near_identical_reply_and_released_on_failed_dispatch():
+    """Rule 2a: a held proactive whose content the reply already carries is folded (merged), not
+    shown twice; a held proactive behind a dispatch that fails delivery is released, not lost."""
+
+    async def _go():
+        sends, broadcasts, pushes = [], [], []
+        store, composite, generation = await _landed_composite(sends, broadcasts, pushes)
+        try:
+            head = await _accept(composite, store, "in-a", "did PR 87 pass?")
+            held = await composite.publish(_proactive(generation, "publish:proactive-1", "PR 87 passed QA; I am holding the merge."), actor_stream_id=ROOT)
+            assert held["deferred"] is True
+            await composite.publish(_final(head["dispatch_id"], "in-a", "**PR 87** passed QA; I am holding the merge."), actor_stream_id=ROOT)
+            rows = await _answer_rows(store)
+            assert [r["text"] for r in rows] == ["**PR 87** passed QA; I am holding the merge."]
+            key_row = await store.submit(lambda conn: dict(conn.execute(
+                "SELECT * FROM v2_assistant_composite_publications WHERE publication_key='publish:proactive-1'").fetchone()))
+            assert key_row["merged_into_event_id"] == rows[0]["daemon_seq"]
+            assert [b["type"] for b in broadcasts] == ["chat.event"] and len(pushes) == 1
+            # Release on a failed dispatch: the seat never answers, delivery is proven not landed.
+            second = await _accept(composite, store, "in-b", "and the deploy?")
+            held2 = await composite.publish(_proactive(generation, "publish:proactive-2", "Deploy window opens at 20:00Z."), actor_stream_id=ROOT)
+            assert held2["deferred"] is True
+            await store.submit(lambda conn: (conn.execute(
+                "UPDATE v2_assistant_composite_routes SET delivery_state='failed' WHERE dispatch_id=?", (second["dispatch_id"],)), conn.commit()))
+            await composite.release_deferred_publications()
+            assert [r["text"] for r in await _answer_rows(store)][-1] == "Deploy window opens at 20:00Z."
             await composite.stop()
         finally:
             store.stop()
