@@ -1284,6 +1284,8 @@ class _RoutingStoreMixin:
         expected_dispatch_id: str | None = None,
         expected_routing_state: str | None = None,
         expected_delivery_state: str | None = None,
+        expected_route_target: str | None = None,
+        expected_route_target_generation: str | None = None,
         direct_batch: Any = None,
     ) -> dict[str, Any] | None:
         """``direct_batch(open_dispatches) -> (route_payload, batched_into_dispatch_id)``
@@ -1308,7 +1310,10 @@ class _RoutingStoreMixin:
                     return None
                 if (expected_dispatch_id is not None and row["dispatch_id"] != expected_dispatch_id
                         or expected_routing_state is not None and row["routing_state"] != expected_routing_state
-                        or expected_delivery_state is not None and row["delivery_state"] != expected_delivery_state):
+                        or expected_delivery_state is not None and row["delivery_state"] != expected_delivery_state
+                        or expected_route_target is not None and str(row["route_target"] or "") != expected_route_target
+                        or expected_route_target_generation is not None
+                        and str(row["route_target_generation"] or "") != expected_route_target_generation):
                     conn.commit()
                     return None
                 existing = dict(row)
