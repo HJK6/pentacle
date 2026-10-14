@@ -211,6 +211,7 @@ def normalize_codex_rollout_record(
                     "tell_id": peer_tell["tell_id"],
                     "enqueued_at": peer_tell["enqueued_at"],
                     "peer_payload": peer_tell["payload"],
+                    "peer_wire_text": peer_tell["wire_text"],
                 })],
                 record_uuid,
             )

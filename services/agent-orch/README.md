@@ -394,7 +394,7 @@ through the rollout lock and shared-resource ownership.
 
 The spawned session inherits `PENTACLE_STREAM_ID=<host>:<session_name>` in its provider process environment, with the value computed from the actual session name passed to tmux. It also receives `AGENT_ORCH_STREAM_ID` with the same value. This lets the new leader call `agent-orch report --terminate` without depending on tmux-name snapshot discovery.
 
-Initial prompt delivery is daemon-owned and reconciled independently from readiness. For provider and remote spawns, a prompt-bearing `spawn.ok` requires `DurableUserEventProof`: a durable USER event from the authoritative current-generation Store, strictly newer than the pre-paste watermark, whose normalized text exactly matches the submitted brief or staged pointer. Pane echo, history, queue, and transcript observations cannot settle `delivered` or authorize a pane-driven retry. A local explicit-command spawn retains its anchored line-echo receipt because that line-oriented test/tool path emits an echo only after submission. Missing proof leaves the durable admitted handle in `starting`; a confirmed failure is `spawn.error`. Never infer submission from `delivery_status`, bounded inspect text, or pane liveness, and never launch a replacement logical spawn while its obligation is pending.
+Initial prompt delivery is daemon-owned and reconciled independently from readiness. For provider and remote spawns, a prompt-bearing `spawn.ok` requires `DurableUserEventProof`: a durable USER or stamped TELL event from the authoritative current-generation Store, strictly newer than the pre-paste watermark, whose normalized text exactly matches the submitted brief or staged pointer. Pane echo, history, queue, and transcript observations cannot settle `delivered` or authorize a pane-driven retry. A local explicit-command spawn retains its anchored line-echo receipt because that line-oriented test/tool path emits an echo only after submission. Missing proof leaves the durable admitted handle in `starting`; a confirmed failure is `spawn.error`. Never infer submission from `delivery_status`, bounded inspect text, or pane liveness, and never launch a replacement logical spawn while its obligation is pending.
 
 An `initial_prompt_delivery` receipt whose `state` / `delivery_status` is
 `pending` is explicitly advisory (`advisory:true`, `authoritative:false`): it
@@ -1366,3 +1366,30 @@ The production daemon retains explicit `agent-orch nexus list|context|inspect` a
 `updates`, `declare`, `register`, `unregister`, `claim`, `release`, `resolve`, `archive`, metrics, and `route --auto` are absent from ordinary CLI help; direct RPC attempts return `disabled`. Ordinary agents are not prompted or instructed to invoke them.
 
 The `repo` command family is absent from ordinary CLI help and direct repo RPCs return `disabled`; stored registration/activity rows remain untouched for audit.
+
+### Input provenance
+
+The CLI composes the role baseline and brief without changing their bytes. Before
+choosing a delivery wire, the daemon wraps a parent-commissioned prompt with
+`[from <parent-stream-id>] [send:<spawn-request-id>]` and a newline. Both provider
+normalizers classify it as TELL from that parent. Parentless prompts remain USER.
+Claude inline delivery and Codex native argv retain the complete enveloped wire.
+For a large Claude prompt, the staged file retains the complete unenveloped
+baseline and brief; the submitted `Read <path>` pointer carries the same envelope.
+Native receipt proof requires exactly one current-stream event with the exact
+wire bytes, including the parent and request anchor; display trimming cannot
+settle that proof. Staged-pointer receipt proof binds to the submitted pointer.
+
+Role-set baselines use the closed first line `[role baseline: <role>]` (lowercase
+letters and underscores). That line, daemon notices starting `[pentacle-notice:`,
+Codex setup starting `# AGENTS.md instructions for `, and Claude compaction
+starting `This session is being continued from a previous conversation` normalize
+to hidden SYSTEM context. Matching occurs on the first line after leading
+whitespace removal. Reserved first-line openers also hide deliberately typed
+collisions; phrases on later lines and malformed role-baseline headers remain
+USER. SYSTEM records do not count as inbound turns; commissioned TELL does.
+
+Reserved SYSTEM submissions keep delivery receipts: only a post-watermark
+current-stream record with the exact reserved body and matching provider digest
+(if present) settles proof. Duplicate SYSTEM matches fail closed. This proof
+does not change stored USER kinds or native USER/TELL wire matching.

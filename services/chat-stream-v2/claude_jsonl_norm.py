@@ -105,6 +105,14 @@ _SYNTHETIC_USER_TAGS = (
     "<turn_aborted>",
     "[Request interrupted",
 )
+# Reserved first-line setup openers shared by Claude and Codex. A typed
+# message using a reserved opener also becomes SYSTEM; later lines never do.
+_INJECTED_USER_OPENERS = (
+    "[pentacle-notice:",
+    "# AGENTS.md instructions for ",
+    "This session is being continued from a previous conversation",
+)
+_ROLE_BASELINE_RE = re.compile(r"^\[role baseline: [a-z_]+\]$")
 #: The classifier is envelope-based rather than position-based: of the openers,
 #: `<environment_context>` 103, `<recommended_plugins>` 2, and one session that
 #: genuinely opens with a typed turn; `<turn_aborted>` appears mid-session.
@@ -149,6 +157,7 @@ def _parse_peer_tell(text: str) -> dict[str, str] | None:
         "tell_id": match.group("tell_id"),
         "enqueued_at": match.group("enqueued_at") or "",
         "payload": payload,
+        "wire_text": text,
     }
 
 
@@ -165,10 +174,19 @@ def _format_turn_duration_text(duration_ms: int, message_count: int | None) -> s
     return f"Worked for {duration}"
 
 
+def is_reserved_seat_injection(text: str) -> bool:
+    first_line = text.lstrip().split("\n", 1)[0].removesuffix("\r")
+    return bool(_ROLE_BASELINE_RE.fullmatch(first_line)) or any(
+        first_line.startswith(opener) for opener in _INJECTED_USER_OPENERS
+    )
+
+
 def _classify_user_string(text: str) -> str:
     """Return 'user' for real human input, 'system' for synthetic envelopes
     (task notifications, system reminders, command outputs)."""
     stripped = text.lstrip()
+    if is_reserved_seat_injection(text):
+        return "system"
     for tag in _SYNTHETIC_USER_TAGS:
         if stripped.startswith(tag):
             return "system"
@@ -369,6 +387,7 @@ def normalize_claude_jsonl_record(
                 "tell_id": peer_tell["tell_id"],
                 "enqueued_at": peer_tell["enqueued_at"],
                 "peer_payload": peer_tell["payload"],
+                "peer_wire_text": peer_tell["wire_text"],
             })
         elif _classify_user_string(content) == "system":
             event = make("SYSTEM", content, {"subtype": "synthetic-user"})
