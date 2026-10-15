@@ -1,9 +1,0 @@
-{
-  "compilerOptions": {
-    "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
-    "jsx": "react-jsx", "strict": true, "allowJs": true, "checkJs": false,
-    "skipLibCheck": true, "noEmit": true, "esModuleInterop": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": ["node", "react", "react-dom"]
-  },
-  "include": ["renderer/src/glasses_*.ts", "renderer/src/glasses_*.tsx", "test/glasses.test.ts"]
-}

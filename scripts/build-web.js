@@ -191,22 +191,6 @@ async function build({ minify = false } = {}) {
     logLevel: 'info',
   });
 
-  await esbuild.build({
-    entryPoints: [path.join(RENDERER, 'src', 'glasses_entry.tsx')],
-    bundle: true,
-    format: 'iife',
-    target: 'chrome134',
-    platform: 'browser',
-    outfile: path.join(OUT, 'glasses.bundle.js'),
-    define: { 'process.env.NODE_ENV': '"production"' },
-    sourcemap: true,
-    sourcesContent: false,
-    minify: true,
-    logLevel: 'info',
-  });
-  fs.copyFileSync(path.join(RENDERER, 'glasses.html'), path.join(OUT, 'glasses.html'));
-  fs.copyFileSync(path.join(RENDERER, 'glasses.css'), path.join(OUT, 'glasses.css'));
-
   const html = readIndexHtml();
   fs.writeFileSync(path.join(OUT, 'web.html'), buildHtml(html));
   fs.writeFileSync(path.join(OUT, 'asset-popout.html'), buildAssetPopoutHtml(

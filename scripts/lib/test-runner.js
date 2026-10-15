@@ -200,7 +200,7 @@ async function run(repoRoot, options, injected = {}) {
       const context = { repoRoot, env, deadline, fileDeadline, label: file };
       if (file.endsWith('.ts')) {
         const output = path.join(outDir, `${index}-${path.basename(file, '.ts')}.cjs`);
-        const build = await operation(path.join(repoRoot, 'node_modules', '.bin', 'esbuild'), [target, '--bundle', '--platform=node', '--format=cjs', '--target=node18', '--external:node:*', '--external:jsdom', '--external:react', '--external:react-dom/*', `--outfile=${output}`], context, deps, limits);
+        const build = await operation(path.join(repoRoot, 'node_modules', '.bin', 'esbuild'), [target, '--bundle', '--platform=node', '--format=cjs', '--target=node18', '--external:node:*', '--external:jsdom', `--outfile=${output}`], context, deps, limits);
         row.build = build; row.cleanup = build.cleanup;
         if (build.aborted || build.timedOut || build.exitCode !== 0 || build.cleanup.status !== 'clean') {
           row.status = build.timedOut ? 'timeout' : 'build_failed'; row.reason = 'typescript_build'; row.duration_ms = Math.round(deps.now() - fileStart); continue;
