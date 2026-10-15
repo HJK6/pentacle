@@ -286,11 +286,16 @@ The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
 23. `host-restart-restores-input`
 
 `cross-origin-boundary` is hermetic-only. A page on a second loopback origin
-must fail to open the unauthenticated `/cc` bridge and must receive
-`authentication_required`, never a snapshot, from the daemon. A DNS-rebinding
-hostname, mapped to loopback by a Chrome `--host-resolver-rules` entry merged
-into the fixture's rules, must get `origin_refused`. The served same-origin page
-and an Origin-less native daemon client are the positive controls.
+must get the host's own 403 for a `fetch` (read from Chrome's network log, not
+a generic CORS failure), must fail to open the unauthenticated `/cc` bridge
+(the host's connection count is read while the page holds the attempt), and
+must receive `authentication_required`, never a snapshot, from the daemon. The
+same page, holding the gate's isolated operator credential, is admitted (hello,
+snapshot, `list_sessions`); only the single-use proof enters the page. A
+DNS-rebinding hostname, mapped to loopback by a Chrome `--host-resolver-rules`
+entry merged into the fixture's rules, must get `origin_refused`. The served
+same-origin page and an Origin-less native daemon client are the positive
+controls.
 
 After a successful no-profile main run, the command also runs both
 [history retention](../test/e2e/web_chat_history_retention_gate.cjs) and

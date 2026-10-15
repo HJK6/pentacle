@@ -212,6 +212,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
 ]) {
   const db = path.join(scratch, 'sessions.db');
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
+  runtime.fixtureOperatorTokenPath = path.join(scratch, 'operator-auth', 'token');
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
   runtime.fixtureTokens = {};
   const seed = fixtures.map(fixture => {
