@@ -47,8 +47,8 @@ async function questionFreeText({ session, report, fixture, runtime, cdp, timeou
     await session.waitFor(`document.querySelector(${JSON.stringify(card+' .slot-chat-question-freetext')})?.value === 'answer-${index}'`);
     await session.waitFor('window.cc.getChatStreamState().then(s => s.connected === true)');
     await cdp.sleep(500);
-    await session.eval(`(() => { window.__questionResolutions=[]; const original=window.cc.notificationResolve; window.cc.notificationResolve=async(...args)=>{const result=await original(...args);window.__questionResolutions.push({args,result});return result;}; const b=document.querySelector(${JSON.stringify(card+' .slot-chat-question-submit')}); b.click(); b.click(); })()`);
-    await cdp.sleep(500);
+    await session.eval(`(() => { window.__questionResolutions=[]; const original=window.cc.notificationResolve; window.cc.notificationResolve=async(...args)=>{const call={args,result:null};window.__questionResolutions.push(call);call.result=await original(...args);return call.result;}; const b=document.querySelector(${JSON.stringify(card+' .slot-chat-question-submit')}); b.click(); b.click(); })()`);
+    await session.waitFor('window.__questionResolutions.some(call => call.result !== null)');
     const submissions = await session.eval('window.__questionResolutions');
     report.ok(`${mode} duplicate click produces one accepted resolution`, submissions.length === 1 && submissions[0].result.ok === true,
       { count:submissions.length, ok:submissions[0]?.result.ok, error:submissions[0]?.result.error });

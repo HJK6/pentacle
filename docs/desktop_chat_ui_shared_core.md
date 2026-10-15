@@ -78,9 +78,19 @@ Mono at 13px/20px. Desktop compact density remains available at 12px/18px.
 The question overlay lists pane children in their original order followed by
 open durable notifications in creation/id order. Each page retains its draft by
 source identity. Selection bounds apply, custom text replaces selected options
-and their note, and Send answers requires every unlocked page to be valid.
+and their note. The primary action sends complete durable pages immediately and
+keeps incomplete drafts open. Labels are Send answer (one page), Send k of n
+(partial), and Send all answers (all complete). Pane children remain one atomic
+group: none are sent until every pane child is complete.
 Cancel and Escape close the overlay locally. Composer text cannot bypass a
 multi-page or mixed-source group.
+
+A durable unlocked page also offers Skip. It resolves through the ordinary
+answer bridge with `QUESTION_SKIP_TEXT` (`Skipped by operator`), exported from
+chat-core questionAnswerFormat. This reserved text means the operator declined
+the question. It is stored as an answered prompt and reaches the asker through
+the normal answer tell and await path; it is never a cancellation. Errors retain
+the page and use the existing reconciliation and inline warning.
 
 A complete pane group produces one `question.dismiss` call containing all child
 answers. Each durable notification uses the existing `notification.resolve`
@@ -106,3 +116,9 @@ explicit conversion to a plain voice note. Coverage never closes a question:
 only daemon acknowledgements update cards and counts. See
 [Web voice answers](web_voice_answers.md) for selection, refusal, capture and
 validation boundaries; no unrelated mobile core changes are included.
+
+The existing protocol stores/reports a choice Skip as `custom_text` and a
+free-text Skip as `text`. Both carry the same reserved value. Mobile's canonical
+`prompt.answer` always sends `text`; the daemon maps choice text to the existing
+`custom_text` storage path. Web's existing notification resolver sends that
+choice alias directly. Asking agents recognize either field.

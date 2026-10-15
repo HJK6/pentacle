@@ -206,6 +206,8 @@ test('all target scenarios retain their unique registration and original order',
   const names = SCENARIOS.map(([name]) => name);
   assert.deepEqual(names.filter(name => targets.includes(name)), targets);
   for (const name of targets) assert.equal(names.filter(id => id === name).length, 1);
-  assert.equal(names.indexOf('web-voice-answers'), names.indexOf('question-free-text') + 1);
+  assert.equal(names.indexOf('question-partial-send'), names.indexOf('question-free-text') + 1);
+  assert.equal(names.indexOf('question-skip'), names.indexOf('question-partial-send') + 1);
+  assert.equal(names.indexOf('web-voice-answers'), names.indexOf('question-skip') + 1);
   assert.equal(names.indexOf('web-dashboards-revamp'), names.indexOf('web-voice-answers') + 1);
 });

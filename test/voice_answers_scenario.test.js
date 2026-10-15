@@ -120,7 +120,7 @@ test('M3 browser and unit use the same DOM reader for selectors, state, badges a
 test('M3 scenario is registered exactly once after question-free-text and before closed-chat-slot', () => {
   const { SCENARIOS } = require('./e2e/lib/web_scenarios'); const names = SCENARIOS.map(([name]) => name);
   assert.equal(names.filter(name => name === 'web-voice-answers').length, 1);
-  assert.equal(names.indexOf('web-voice-answers'), names.indexOf('question-free-text') + 1);
+  assert.equal(names.indexOf('web-voice-answers'), names.indexOf('question-skip') + 1);
   assert.ok(names.indexOf('web-voice-answers') < names.indexOf('closed-chat-slot'));
 });
 test('M3 capture and dispatch are real; only ASR and non-mutating track-stop observation are installed', () => {
