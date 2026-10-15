@@ -2789,6 +2789,12 @@ def dashboard(args: argparse.Namespace) -> int:
         response = asyncio.run(dashboard_once(config, payload, timeout=args.timeout))
         _print_response(response)
         return 0 if response.get("type") == f"{verb}.ok" else 1
+    except PermissionError:
+        _print_response({"type": "dashboard.error", "error_code": "dashboard_unauthorized"})
+        return 1
+    except TimeoutError:
+        _print_response({"type": "dashboard.error", "error_code": "dashboard_timeout"})
+        return 1
     except ValueError as exc:
         _print_response({"type":"dashboard.error", "error_code":"dashboard_invalid", "error":str(exc)})
         return 2

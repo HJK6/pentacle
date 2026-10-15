@@ -311,3 +311,84 @@ def test_additive_audit_table_preserves_existing_database(tmp_path):
         assert f.snapshot() == before
         assert (await f.transfer())["audit_id"]
     run(tmp_path, scenario)
+
+
+@pytest.mark.parametrize("case", ["operator", "operator_seat", "revoked", "revoked_fd", "scoped", "bad_proof", "no_nonce"])
+def test_cli_operator_handshake_reaches_real_registry_and_transfer(tmp_path, monkeypatch, case):
+    from _shared import operator_auth
+    from server import _welcome_frame
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "agent-orch"))
+    from agent_orch import wsclient
+    from agent_orch.config import Config
+    for key in list(__import__("os").environ):
+        if key.startswith(("AGENT_ORCH_", "PENTACLE_")):
+            monkeypatch.delenv(key, raising=False)
+
+    async def scenario(f):
+        directory = tmp_path / "credentials"
+        directory.mkdir(mode=0o700)
+        registry = operator_auth.OperatorCredentialRegistry(directory / "registry.json")
+        cid, envelope = registry.issue("pentacle", scope={"stream": WORKER} if case == "scoped" else None)
+        if case in {"revoked", "revoked_fd"}: registry.revoke(cid)
+        if case == "bad_proof": envelope = operator_auth.encode_envelope(cid, "pentacle", b"x" * 32)
+        store = Store(str(tmp_path / "wire-operator.db"))
+        store.start()
+        sessions = Sessions(store, local_host="node-a")
+        sid = FD if case == "revoked_fd" else WORKER
+        await sessions.open("node-a", sid.split(":")[1], provider="codex", pane_status="pane_alive")
+        if case in {"operator_seat", "revoked_fd"}:
+            f.rows[sid] = sessions.get(sid)
+            if sid == FD: f.binding["generation"] = f.rows[sid]["session_generation"]
+            await store.grant_stream_token("node-a", sid.split(":")[1], hashlib.sha256(b"operator-seat-token").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+            monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "operator-seat-token")
+        server = Server(store=store, sessions=sessions, local_host="node-a", seat_operator_authority=True)
+        server.operator_credential_registry = registry
+        server.handlers.update(f.assets.wire_handlers())
+        class Socket:
+            remote_address = ("192.0.2.10", 12345)
+            def __init__(self):
+                self.frames = asyncio.Queue()
+                self.sent = []
+                self.closed = False
+                nonce, expires = operator_auth.new_nonce()
+                server._operator_challenges[self] = (nonce, expires)
+                welcome = _welcome_frame(nonce=nonce, expires_at=expires)
+                if case == "no_nonce": welcome["auth"] = {}
+                self.frames.put_nowait(json.dumps(welcome))
+            async def recv(self): return await self.frames.get()
+            async def send(self, raw):
+                self.sent.append(json.loads(raw))
+                for frame in await server._dispatch(raw, websocket=self):
+                    self.frames.put_nowait(json.dumps(frame))
+            async def close(self): self.closed = True
+        socket = Socket()
+        async def connect(*args, **kwargs): return socket
+        monkeypatch.setattr(wsclient.websockets, "connect", connect)
+        payload = f.request()
+        payload.pop("_auth_context")
+        if case in {"operator_seat", "revoked_fd"}: payload["from_stream_id"] = sid
+        config = Config("ws://fixture", envelope, "node-a", tmp_path)
+        before = f.snapshot()
+        try:
+            if case in {"operator", "operator_seat"}:
+                reply = await wsclient.dashboard_once(config, payload, timeout=1)
+                assert reply["type"] == "dashboard.owner.transfer.ok", reply
+                assert reply["audit_id"] and server._operator_authenticated(socket)
+                details = json.loads(f.snapshot()["catalog_owner_transfers"][0][3])
+                assert details["actor"]["identity"] == "operator:" + cid
+                assert (await f.publish(TARGET))["type"] == "asset.publish.ok"
+            else:
+                try:
+                    reply = await wsclient.dashboard_once(config, payload, timeout=1)
+                except (PermissionError, ValueError):
+                    pass
+                else:
+                    pytest.fail(f"invalid operator connection admitted: {reply}")
+                assert f.snapshot() == before
+                assert all(frame["type"] != "dashboard.owner.transfer" for frame in socket.sent)
+            assert socket.closed
+            assert all(envelope not in json.dumps(frame) for frame in socket.sent)
+            if case != "no_nonce": assert socket.sent[0].get("auth_v2")
+        finally:
+            store.stop()
+    run(tmp_path, scenario)

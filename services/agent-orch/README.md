@@ -357,7 +357,11 @@ Read the target's current generation and the catalog's owner before submitting.
 The command requires both to match; stale generations and changed owners refuse
 without a write. An ordinary seat token, including one with operator elevation,
 does not grant transfer authority. A credential-authenticated operator connection
-can submit without a seat token. The command selects only the server-configured
+can submit without a seat token: configure its existing v2 credential envelope
+through `AGENT_ORCH_TOKEN` or the existing `~/.config/pentacle-stream/token`
+file. The command answers the server challenge using the envelope proof key;
+it never transmits the envelope itself or falls back after a credential failure.
+The command selects only the server-configured
 catalog; it accepts no asset selector or replacement body.
 
 A successful `dashboard.owner.transfer.ok` receipt includes the old and new owner,

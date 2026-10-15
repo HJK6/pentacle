@@ -2008,9 +2008,59 @@ async def repo_once(
     return await _one_shot_rpc(config, payload, prefix="repo", timeout=timeout)
 
 
+async def _catalog_operator_rpc(config: Config, payload: dict[str, Any], *,
+                                caller: str | None, timeout: float) -> dict[str, Any]:
+    # This new command also supports a credential connection without a seat.
+    # Reuse the existing envelope/proof protocol; never send its proof key or
+    # fall back to legacy bearer authentication after a credential failure.
+    from _shared import operator_auth
+    credential = operator_auth.decode_envelope(config.token)
+    deadline = time.monotonic() + timeout
+    keepalive = _websocket_keepalive_from_env()
+    ws = await asyncio.wait_for(websockets.connect(
+        config.ws_url, max_size=WEBSOCKET_MAX_SIZE,
+        ping_interval=keepalive.ping_interval, ping_timeout=keepalive.ping_timeout,
+        close_timeout=keepalive.close_timeout), timeout=timeout)
+    _own_socket(ws)
+    try:
+        welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic())))
+        challenge = welcome.get("auth", {}).get("operator", {})
+        if (welcome.get("type") != "welcome" or challenge.get("protocol_version") != 2
+                or challenge.get("scheme") != operator_auth.AUTH_SCHEME):
+            raise ValueError("operator credential challenge unavailable")
+        hello = _rpc_hello(config, from_stream_id=caller)
+        hello.pop("token", None)
+        hello["client"] = credential["client_kind"]
+        hello["auth_v2"] = {
+            "scheme": operator_auth.AUTH_SCHEME, "credential_id": credential["credential_id"],
+            "proof": operator_auth.make_proof(credential["proof_key"], challenge.get("nonce"),
+                                               credential["credential_id"], credential["client_kind"]),
+        }
+        await asyncio.wait_for(ws.send(json.dumps(hello)), timeout=max(0.01, deadline - time.monotonic()))
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic())))
+            if frame.get("type") == "ping":
+                await asyncio.wait_for(ws.send(json.dumps({"type": "pong"})),
+                                       timeout=max(0.01, deadline - time.monotonic()))
+                continue
+            if frame.get("type") != "ready":
+                raise PermissionError("operator credential RPC admission refused")
+            break
+        await asyncio.wait_for(ws.send(json.dumps(payload)), timeout=max(0.01, deadline - time.monotonic()))
+        return await _read_rpc_response(ws, payload["request_id"], prefix="dashboard", deadline=deadline)
+    finally:
+        await _close_within(ws, deadline)
+
+
 async def dashboard_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     caller = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"dashboard-{uuid.uuid4()}")
+    if payload.get("type") == "dashboard.owner.transfer":
+        from _shared import operator_auth
+        if config.token.startswith(operator_auth.ENVELOPE_PREFIX):
+            return await _catalog_operator_rpc(config, payload, caller=caller, timeout=timeout)
+        if not caller:
+            raise ValueError("operator auth v2 credential envelope or authenticated seat is required")
     return await _one_shot_rpc(config, payload, prefix="dashboard", timeout=timeout, from_stream_id=caller)
 
 
