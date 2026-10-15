@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import store_host_transfer as host_transfer
 import qa_dispatch
+import wmi_brief_producer
 
 import asyncio
 import errno
@@ -53,6 +54,7 @@ except ImportError:  # pragma: no cover
 from _shared import operator_auth
 from _shared.asset_schema import hosted_dashboard_policy
 from comms import ATTACHMENT_MAX_BYTES, AttachmentValidationError, validate_send_attachments
+from tmux_transport import sanitize_injectable
 import store_lifecycle_authority as lifecycle_authority
 from loop_watchdog import RequestTiming, request_timing
 import store_consent as consent
@@ -768,6 +770,8 @@ class Server:
         # The sole non-seat service principal is connection-bound after its
         # exact hello proof. It never enters the seat-token maps above.
         self._client_system_producers: dict[Any, str] = {}
+        self._client_brief_configs: dict[Any, wmi_brief_producer.BriefProducer] = {}
+        self._brief_tell_attempts: list[float] = []
         # -- External scoped ("Dot") principal + its TLS transport -----------
         # Membership set (durable config): which verified seat ids get the Dot
         # scope. Env is the deploy-time source; the constructor param overrides
@@ -1888,6 +1892,7 @@ class Server:
         self._client_authenticated_streams.pop(websocket, None)
         self._client_token_hashes.pop(websocket, None)
         self._client_system_producers.pop(websocket, None)
+        self._client_brief_configs.pop(websocket, None)
         self._client_dot_connections.discard(websocket)
         self._client_scoped_connections.discard(websocket)
         self._client_scoped_revoked.discard(websocket)
@@ -2168,6 +2173,7 @@ class Server:
         if handler is None and not (
             websocket is not None
             and (self._client_system_producers.get(websocket) == BOT_MESSAGING_PRODUCER_STREAM_ID
+                 or wmi_brief_producer.is_actor(self._client_system_producers.get(websocket))
                  or (report_actor is not None
                      and self._client_system_producers.get(websocket) == report_actor))
         ):
@@ -2204,6 +2210,31 @@ class Server:
                         return [self._auth_error_frame(
                             verb, request_id, "system_producer_auth_required"
                         )]
+                elif wmi_brief_producer.is_actor(service_auth["service_actor"]):
+                    if verb != "tell":
+                        return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
+                    producer = self._client_brief_configs.get(websocket)
+                    if (producer is None or not producer.valid_tell(msg)
+                            or not self._verify_system_producer_token(msg.get("stream_token"), producer.stream_id)
+                            or self._composite_for(producer.composite_stream_id) is None
+                            or self._composite_for(producer.ops_stream_id) is not None):
+                        return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
+                    now = _monotonic()
+                    self._brief_tell_attempts = [
+                        at for at in self._brief_tell_attempts
+                        if now - at < wmi_brief_producer.RATE_WINDOW_SECONDS
+                    ]
+                    if len(self._brief_tell_attempts) >= wmi_brief_producer.RATE_ATTEMPTS:
+                        return [self._auth_error_frame(verb, request_id, "system_producer_rate_limited")]
+                    self._brief_tell_attempts.append(now)
+                    # Stamp before either Comms or the durable unbound queue.
+                    # Never treat a service token as a seat token to get a stamp.
+                    actor = service_auth["service_actor"]
+                    dispatch_msg["from_stream_id"] = actor
+                    dispatch_msg["text"] = (
+                        f"[from {actor}] [tell:{msg['tell_id']}]\n"
+                        + sanitize_injectable(msg["text"])
+                    )
                 elif report_actor is not None and service_auth["service_actor"] == report_actor:
                     if verb != "asset.publish":
                         return [self._auth_error_frame(
@@ -2458,13 +2489,19 @@ class Server:
                     msg.get("stream_token"), bound_system_actor
                 ))
             )
-            if bound_system_actor in self._file_token_sources():
+            if (bound_system_actor in self._file_token_sources()
+                    or wmi_brief_producer.is_actor(bound_system_actor)):
                 # Re-read the credential even on tokenless bound connections.
                 # Removal/rotation must revoke old sockets as well as new ones.
                 expected = self._system_producer_token(bound_system_actor)
                 credentials_changed = credentials_changed or not expected or (
                     hashlib.sha256(expected.encode("utf-8")).hexdigest()
                     != self._client_token_hashes.get(websocket)
+                )
+            if wmi_brief_producer.is_actor(bound_system_actor):
+                configured = wmi_brief_producer.load()
+                credentials_changed = credentials_changed or configured is None or (
+                    configured != self._client_brief_configs.get(websocket)
                 )
             context.update({
                 "service_attempted": True,
@@ -2488,6 +2525,7 @@ class Server:
         producer_ids = {FIXED_SYSTEM_PRODUCER_STREAM_ID, *file_sources}
         service_attempted = bool(
             claim in producer_ids
+            or wmi_brief_producer.is_actor(claim)
             or producer in producer_ids
             or cd_token_matches or any(file_token_matches.values())
         )
@@ -2505,6 +2543,8 @@ class Server:
             )
             if authenticated:
                 self._client_system_producers[websocket] = configured_id
+                if wmi_brief_producer.is_actor(configured_id):
+                    self._client_brief_configs[websocket] = wmi_brief_producer.load()
                 if configured_id in file_sources:
                     self._client_token_hashes[websocket] = hashlib.sha256(
                         msg["stream_token"].encode("utf-8")
@@ -2656,11 +2696,19 @@ class Server:
         producer = report_producer.load()
         if producer is not None:
             sources[producer.stream_id] = producer.token_file
+        brief = wmi_brief_producer.load()
+        if brief is not None:
+            sources[brief.stream_id] = brief.token_file
         return sources
 
     @staticmethod
     def _system_producer_token(actor: str = FIXED_SYSTEM_PRODUCER_STREAM_ID) -> str | None:
         # Fixed principals only; no registry or generic service authority.
+        if wmi_brief_producer.is_actor(actor):
+            brief = wmi_brief_producer.load()
+            report = report_producer.load()
+            if brief is None or brief.stream_id != actor or (report is not None and report.stream_id == actor):
+                return None
         sources = Server._file_token_sources()
         if actor in sources:
             expected = Server._read_token_path(sources[actor], strict=True)
@@ -4001,6 +4049,11 @@ class Server:
         }
         if reply.get("front_desk_hold_id"):
             delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
+        # Preserve the committed-but-not-yet-proven acknowledgement for callers
+        # which must not resend an already committed brief.
+        for key in ("action_committed", "action_status", "confirmation_status", "confirmation_pending", "do_not_resubmit"):
+            if key in reply:
+                delivered[key] = reply[key]
         return delivered
 
     async def _flush_composite_tells(self, composite: Any) -> int:
