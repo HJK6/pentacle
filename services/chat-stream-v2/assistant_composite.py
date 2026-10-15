@@ -1050,7 +1050,7 @@ class AssistantComposite:
                     except _DirectBindingChanged:
                         # This route has no allocated dispatch. Re-claim normally
                         # once; repeated mutation retains it for a later wake.
-                        if binding_retry_route == route["route_id"]:
+                        if binding_retry_route == route["route_id"] and not self._worker_rewake:
                             return
                         binding_retry_route = route["route_id"]
                         continue
@@ -1096,9 +1096,36 @@ class AssistantComposite:
                         error_code="assistant_direct_binding_removed",
                     )
                     return
+                guard = None
+                decision = None
+                conflicts = {"assistant_route_binding_changed", "assistant_recovery_observation_changed",
+                             "assistant_recovery_generation_changed"}
+
+                async def retain_conflict(exc):
+                    held = await self._update_route(
+                        str(route["route_id"]), routing_state="queued",
+                        error_code=str(exc), predispatch_only=True,
+                    )
+                    if held is not None:
+                        raise _DirectBindingChanged(str(exc)) from exc
+
+                async def finish_predispatch(state, error):
+                    try:
+                        return await self._update_route(
+                            str(route["route_id"]), routing_state=state, error_code=error,
+                            predispatch_only=True, binding_guard=guard, binding_env=self._env_binding(),
+                            decision_observation=decision,
+                        )
+                    except ValueError as exc:
+                        if str(exc) not in conflicts:
+                            raise
+                        await retain_conflict(exc)
+
                 try:
                     binding = await self.load_binding()
                     guard = {"name": self.config.name, **{k: binding[k] for k in ("stream_id", "generation", "revision")}}
+                    host, _, session_name = guard["stream_id"].partition(":")
+                    decision = {"holder": await self.store.fetch_session(host, session_name)}
                     origin = admission.get("direct_binding_origin")
                     continuation = None
                     if origin:
@@ -1115,6 +1142,8 @@ class AssistantComposite:
                                 raise ValueError("assistant_origin_authority_revoked")
                         if self.input_death_proof is not None:
                             proven, health, reason, observed = await self.input_death_proof(guard["stream_id"], guard["generation"])
+                            if reason != "remote_holder":
+                                decision = {"holder": observed}
                             if proven and all(origin[k] == guard[k] for k in ("stream_id", "generation", "revision")):
                                 await self._update_route(
                                     str(route["route_id"]), routing_state="queued",
@@ -1133,6 +1162,7 @@ class AssistantComposite:
                                             and episode["state"] in {"spawning", "spawned", "bound"}
                                             and episode.get("attempt_generation")
                                             and episode["attempt_generation"] == observed.get("session_generation")):
+                                        decision["episode"] = episode
                                         # The recorded restore opened its holder but
                                         # has not yet completed the binding/wake.
                                         raise _DirectTargetUnbound("assistant_awaiting_recovery")
@@ -1173,28 +1203,13 @@ class AssistantComposite:
                     # cleared) so it replays IN ORDER to the live successor, then
                     # pause the worker — recovery's `recover()`/a rebind re-wakes
                     # it.  Do NOT fail or dispatch to the stale generation.
-                    await self._update_route(
-                        str(route["route_id"]), routing_state="queued",
-                        error_code=str(exc), predispatch_only=True,
-                    )
+                    await finish_predispatch("queued", str(exc))
                     raise
                 except ValueError as exc:
-                    if str(exc) in {"assistant_route_binding_changed",
-                                    "assistant_recovery_observation_changed",
-                                    "assistant_recovery_generation_changed"}:
-                        # The failed transaction allocated no provider action.
-                        # Retain the original input, then re-run all authority
-                        # and lineage checks rather than accepting a stale proof.
-                        held = await self._update_route(
-                            str(route["route_id"]), routing_state="queued",
-                            error_code=str(exc), predispatch_only=True,
-                        )
-                        if held is not None:
-                            raise _DirectBindingChanged(str(exc)) from exc
+                    if str(exc) in conflicts:
+                        await retain_conflict(exc)
                         return
-                    await self._update_route(
-                        str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
-                    )
+                    await finish_predispatch("routing_failed", str(exc))
             # Direct primary has a SINGLE target pane, so queued input must reach it
             # in admission order.  Dispatch synchronously here (outside the binding
             # lock, so a concurrent rebind is not blocked by the paste): the worker

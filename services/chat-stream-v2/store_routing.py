@@ -1300,6 +1300,7 @@ class _RoutingStoreMixin:
         recovery_observation: dict[str, Any] | None = None,
         transfer_successor: tuple[str, str] | None = None,
         predispatch_only: bool = False,
+        decision_observation: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """``direct_batch(open_dispatches) -> (route_payload, batched_into_dispatch_id)``
         builds a direct route's payload from the target's other open dispatches
@@ -1355,8 +1356,23 @@ class _RoutingStoreMixin:
                         conn.commit()
                         return None
                     from store_assistant_binding import (_route_binding_conn, _route_continuation_conn,
-                                                        _route_death_snapshot_conn)
+                                                        _route_death_snapshot_conn, _route_holder_snapshot_conn)
                     _route_binding_conn(conn, binding_guard, binding_env or {})
+                    if decision_observation is not None:
+                        if not predispatch_only:
+                            raise ValueError("assistant_recovery_not_predispatch")
+                        _route_holder_snapshot_conn(
+                            conn, binding_guard["stream_id"], decision_observation["holder"])
+                        episode = decision_observation.get("episode")
+                        if episode is not None:
+                            current = conn.execute(
+                                "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?",
+                                (episode["episode_id"],),
+                            ).fetchone()
+                            keys = ("episode_id", "name", "stream_id", "generation", "expected_revision",
+                                    "attempt_generation", "attempt_seq", "state")
+                            if current is None or any(current[k] != episode[k] for k in keys):
+                                raise ValueError("assistant_recovery_observation_changed")
                     if recovery_observation is not None:
                         if not origin or row["dispatch_id"] or row["delivery_state"]:
                             raise ValueError("assistant_recovery_not_predispatch")

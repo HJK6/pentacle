@@ -351,16 +351,25 @@ def _route_continuation_conn(conn, origin, target, *, transfer_successor=None):
     ).fetchone())
 
 
-def _route_death_snapshot_conn(conn, origin, observed):
-    row = _seat_conn(conn, origin["stream_id"])
+def _route_holder_snapshot_conn(conn, stream_id, observed):
+    """Identity/lifecycle equality, including an explicitly absent holder."""
+    row = _seat_conn(conn, stream_id)
+    if row is None or observed is None:
+        if row is not observed:
+            raise ValueError("assistant_recovery_observation_changed")
+        return
     keys = ("session_generation", "status", "closed_at", "close_kind", "presumed_dead_at",
             "dead_open_closed_at")
     def observer(value):
         return json.loads(value) if isinstance(value, str) and value else value
-    if (row is None or any(row.get(k) != observed.get(k) for k in keys)
+    if (any(row.get(k) != observed.get(k) for k in keys)
             or observer(row.get("observer_binding")) != observer(observed.get("observer_binding"))):
         raise ValueError("assistant_recovery_observation_changed")
-    if row["session_generation"] != origin["generation"]:
+
+
+def _route_death_snapshot_conn(conn, origin, observed):
+    _route_holder_snapshot_conn(conn, origin["stream_id"], observed)
+    if observed is None or observed["session_generation"] != origin["generation"]:
         raise ValueError("assistant_recovery_generation_changed")
 
 
