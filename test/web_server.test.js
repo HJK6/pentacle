@@ -195,3 +195,27 @@ test('two concurrent connections keep their local tmux sessions isolated', { ski
   b.fire('pty:write', 0, 'BBB-AGAIN\r');
   await b.waitForPush((p) => p.event === 'pty:data' && String(p.args[1]).includes('BBB-AGAIN'));
 });
+
+
+test('retired companion routes and assets return the unknown-route response', async (t) => {
+  // A clean build must not retain retired static assets in the frozen bundle.
+  const { build, OUT } = require('../scripts/build-web');
+  await build();
+  assert.equal(fs.readdirSync(OUT).some(name => name.startsWith('glasses')), false);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-retired-route-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const host = await main(['--profile', writeProfile(dir), '--port', '0']);
+  t.after(() => host.close());
+  const origin = `http://127.0.0.1:${host.port}`;
+  const home = await fetch(`${origin}/`);
+  assert.equal(home.status, 200);
+  await home.text();
+  const missing = await fetch(`${origin}/unknown-retired-page`);
+  assert.equal(missing.status, 404);
+  const missingBody = await missing.text();
+  for (const route of ['/glasses', '/glasses/', '/glasses.html', '/glasses.css', '/glasses.bundle.js', '/glasses.bundle.js.map']) {
+    const response = await fetch(`${origin}${route}`);
+    assert.equal(response.status, missing.status, route);
+    assert.equal(await response.text(), missingBody, route);
+  }
+});
