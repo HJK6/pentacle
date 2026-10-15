@@ -54,7 +54,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
   const paneQuestion = questionOverride === undefined ? question : questionOverride;
 
   dom.window.PentacleChatCore = {
-    buildPentacleQuestionAnswerText,
+    ...answerModule.exports,
   };
   dom.window.PentacleChatStore = {
     selectSessionDetail(streamId, options) {

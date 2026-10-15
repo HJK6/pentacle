@@ -233,6 +233,14 @@ work, owner or progress. Status summaries need correlated current evidence;
 when it is insufficient, the conversation backend requests authority review
 and the authority publishes its own response.
 
+Agent peers may also address the primary assistant composite by its literal
+name, `bart`, with `agent-orch tell` or `agent-orch send`. Each attempt resolves the current
+binding once. A tell becomes the ordinary composite tell, and a send becomes
+one ordinary physical send to the bound seat. The alias carries no operator
+authority, adds no ledger, receipt or hold migration, and keeps per-transport
+retry limits, so a resubmitted send after a move can deliver twice. See
+`services/agent-orch/README.md` (Addressing the assistant by alias).
+
 ## Progress and decisions
 
 A currently bound lead can send a concise user-directed update through
@@ -408,7 +416,7 @@ never send dispatch probes to a configured live assistant.
 These are the conventions we use to keep an assistant-run workspace calm and productive. They are guidelines, not features — adopt what fits.
 
 - **One ordinary chat.** The assistant is a normal top-level chat — talk to it naturally. A new topic can begin while earlier work continues; it keeps each task's scope and owners intact.
-- **Keep the sidebar clean.** Long-running work runs in separate lanes led by a visible leader you can open and talk to directly; the helpers and reviewers under a lane stay hidden and are closed when their work is done, and finished or idle sessions are closed promptly.
+- **Keep the sidebar clean.** Long-running work runs in separate lanes. A lane you started is led by a visible leader you can open and talk to directly; lanes the assistant manages keep their leaders hidden and report through the assistant's chat. The helpers and reviewers under a lane stay hidden and are closed when their work is done, and finished or idle sessions are closed promptly.
 - **Decisions as cards.** When the assistant needs a decision from you, it asks with a durable question card carrying the context, what each option does, and a recommendation — so it can still be answered correctly later, not only inline in the moment.
 - **Simplest thing that works.** Reuse what already exists, finish the scoped work, and avoid duplicate review/permission chains or temporary patches that leave the real problem unresolved; small leftovers are finished before a task is called done.
 - **Verify, don't hand you test steps.** Features are checked with mocks and agent-driven runs; you are asked only for a step that genuinely needs you, such as real hardware or a real account action.

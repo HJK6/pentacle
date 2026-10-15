@@ -97,6 +97,10 @@ shared daemon. A chat *send-turn* round trip is intentionally not a CDP scenario
 browser send path is covered by `test/web_cc.test.js` and daemon send/ingest by
 the `chat-stream-v2` python tests.
 
+The **question-partial-send** scenario answers one of two owned durable cards and
+checks that its sibling stays open. **question-skip** clicks Skip, then verifies
+the ordinary answered state, reserved answer text and producer await readback.
+
 The **question-free-text** scenario creates disposable durable questions in the
 isolated daemon and checks the complete adapter/card/submit path for free text
 and custom single/multi-choice answers, whitespace rejection, duplicate clicks,

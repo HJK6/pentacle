@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { closedChatSlot } = require('./closed_chat_scenario');
 const { questionFreeText } = require('./question_free_text_scenario');
+const { questionPartialSend, questionSkip } = require('./question_partial_skip_scenario');
 const { webVoiceAnswers } = require('./voice_answers_scenario');
 const { runGridSplit } = require('./grid_split_scenario');
 const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
@@ -501,6 +502,8 @@ const SCENARIOS = [
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
   ['question-free-text', questionFreeText],
+  ['question-partial-send', questionPartialSend],
+  ['question-skip', questionSkip],
   ['web-voice-answers', webVoiceAnswers],
   ['web-dashboards-revamp', webDashboardsRevamp],
   ['dashboard_catalog', dashboardCatalog],

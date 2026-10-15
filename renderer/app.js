@@ -3779,7 +3779,7 @@ function renderSlotChat(slot) {
     const paneEntries = paneItems.map((item, index) => ({
       source: 'pane', key: `${streamId}:pane:${question.question_key}:${item.question_id || item.id || item.index || index}`,
       model: item,
-    }));
+    })).filter(entry => state.answeredQuestionSig?.[entry.key] !== questionModelSignature(entry.model));
     const entries = [...paneEntries, ...getOpenQuestionsForStream(streamId).map(notification => ({
       source: 'durable', key: `${streamId}:durable:${durableQuestionNotificationId(notification)}:${notification.question?.question_id || ''}`,
       model: durableQuestionOptionBModel(notification), notification,
@@ -3893,7 +3893,7 @@ function renderSlotChat(slot) {
       if (entries[activeIndex]?.notification) container.dataset.notificationId = durableQuestionNotificationId(entries[activeIndex].notification);
       refs.questionEl.appendChild(container);
       const flowQuestion = { multi: true, questions: entries.map((entry, index) => ({
-        ...entry.model, index, _draftKey: entry.key, _signature: entry.signature, _locked: entry.locked,
+        ...entry.model, index, _draftKey: entry.key, _signature: entry.signature, _locked: entry.locked, _source: entry.source,
       })) };
       const lock = entry => { state.answeredQuestionSig[entry.key] = entry.signature; entry.locked = true; };
       const needsReconcile = () => (state.questionUncertainIdsByStream?.[streamId]?.size || 0) > 0;
@@ -3903,7 +3903,7 @@ function renderSlotChat(slot) {
         let resolvingNotificationId = '';
         state.questionSubmissionPending[streamId] = true;
         try {
-          if (paneEntries.some(entry => !entry.locked)) {
+          if (paneEntries.some(entry => !entry.locked) && paneEntries.every((_, index) => detail.submitIndices.includes(index))) {
             if (!assertAssistantDirectSlot(slot)) throw new Error('Direct assistant target is unavailable or changed.');
             if (!question.question_key || !window.cc?.chatDismissQuestion) throw new Error('Question dismiss is unavailable.');
             const answers = detail.answers.slice(0, paneEntries.length).map(answer => answer.customText ? { ...answer, text: answer.customText } : answer);
@@ -3920,7 +3920,7 @@ function renderSlotChat(slot) {
           }
           for (let index = paneEntries.length; index < entries.length; index++) {
             const entry = entries[index];
-            if (entry.locked) continue;
+            if (entry.locked || !detail.submitIndices.includes(index)) continue;
             const answer = detail.answers[index];
             const options = { submit: true };
             if (answer.customText?.trim()) options.custom_text = answer.customText.trim();
@@ -3933,7 +3933,7 @@ function renderSlotChat(slot) {
             resolvingNotificationId = notificationId;
             const result = await window.cc.notificationResolve(notificationId, durableQuestionActionKind(entry.notification), options);
             if (!result?.ok) throw new Error(result?.error || 'Question answer failed.');
-            console.info('[question.answer]', { subsystem: 'questions', bug_ref: 'spec_pentacle__web_question_free_text_missing_2026_09', response_mode: entry.notification.question?.response_mode, accepted: true });
+            console.info('[question.answer]', { subsystem: 'questions', bug_ref: 'spec_pentacle__web_question_card_single_answer_and_skip_2026_10', response_mode: entry.notification.question?.response_mode, skipped: (options.text || options.custom_text) === window.PentacleChatCore.QUESTION_SKIP_TEXT, accepted: true });
             resolvingNotificationId = '';
             lock(entry);
             indexDurableQuestionNotification({ ...entry.notification, state: 'answered', resolved_at: new Date().toISOString(), ...result.notification, question: { ...entry.notification.question, state: 'answered', answer: options, ...result.notification?.question } });
@@ -3951,6 +3951,8 @@ function renderSlotChat(slot) {
           throw error;
         } finally {
           state.questionSubmissionPending[streamId] = false;
+          const next = entries.find(incomplete) || entries.find(entry => !entry.locked);
+          if (next) state.questionPageIndexByStream[draftKey] = next.key;
           scheduleSlotChatRender(slot);
         }
       };
@@ -3958,7 +3960,8 @@ function renderSlotChat(slot) {
         container, doc: document, question: flowQuestion, streamId: draftKey, questionSig: 'flow',
         alreadyAnswered: !!state.questionSubmissionPending[streamId] || needsReconcile(), visibleItemIndex: activeIndex,
         drafts: state.questionDrafts, answeredSig: state.answeredQuestionSig,
-        buildAnswerText: () => '', onSubmit: submit, onCancel: closeQuestions, showCancel: false,
+        buildAnswerText: () => '', onSubmit: submit, onCancel: closeQuestions, showCancel: false, partialSubmit: true,
+        onSkip: index => submit('', { answers: entries.map((_, i) => i === index ? { [entries[i].notification.question?.response_mode === 'free_text' ? 'text' : 'customText']: window.PentacleChatCore.QUESTION_SKIP_TEXT } : {}), submitIndices: [index] }),
         onDraftChange: () => dots.forEach((dot, index) => dot.classList.toggle('is-answered', !incomplete(entries[index]))),
       });
       if (needsReconcile()) {

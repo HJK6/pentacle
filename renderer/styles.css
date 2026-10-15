@@ -3465,7 +3465,8 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
 
 .slot-chat-question-retry,
 .slot-chat-question-submit,
-.slot-chat-question-cancel {
+.slot-chat-question-cancel,
+.slot-chat-question-skip {
   border: 1px solid rgba(148, 163, 184, 0.45);
   border-radius: 8px;
   background: rgba(30, 41, 59, 0.82);
@@ -3478,14 +3479,16 @@ body.web-sidebar-narrow .grid.maximized .grid-cell.narrow-active {
 
 .slot-chat-question-retry:hover:not(:disabled),
 .slot-chat-question-submit:hover:not(:disabled),
-.slot-chat-question-cancel:hover:not(:disabled) {
+.slot-chat-question-cancel:hover:not(:disabled),
+.slot-chat-question-skip:hover:not(:disabled) {
   background: rgba(51, 65, 85, 0.9);
   border-color: var(--machine, rgba(125, 211, 252, 0.7));
 }
 
 .slot-chat-question-retry:disabled,
 .slot-chat-question-submit:disabled,
-.slot-chat-question-cancel:disabled {
+.slot-chat-question-cancel:disabled,
+.slot-chat-question-skip:disabled {
   opacity: 0.55;
   cursor: default;
 }

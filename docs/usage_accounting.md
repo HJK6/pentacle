@@ -386,6 +386,15 @@ Claude CLI `/usage` scrape is the observation; the CLI's cache refresh is a side
 effect that is verified per host, not assumed. The Codex read is quota-only
 (`initialize` and `account/rateLimits/read`); no model inference runs.
 
+The Claude probe captures its unique tmux socket's path and filesystem identity
+before reading usage. After killing that dedicated server, it removes only the
+same owned UNIX socket after a bounded connection proves the endpoint dead.
+Live, replaced, linked or ambiguously identified entries stay untouched. Cleanup
+does not mask an earlier probe error; failed ownership capture is not permission
+to guess a socket path. This assumes a private per-user tmux directory and no
+concurrent writer replacing that invocation's unique name. Historical leftovers
+require a separate, explicitly inventoried cleanup; the probe is not a sweeper.
+
 `usage_state.json` (schema v2) gains one optional top-level key, `observations`,
 that never enters the limits rows or frame:
 

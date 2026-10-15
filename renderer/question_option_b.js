@@ -114,6 +114,14 @@ function allAnswersValid(question, draft, options = {}) {
   return items.length > 0 && items.every(item => !answerConstraint(item, draft.answers[item._draftKey ?? item._draftIndex], options));
 }
 
+function submittableQuestionIndices(question, draft, options = {}) {
+  const items = questionItems(question);
+  const complete = item => !answerConstraint(item, draft.answers[item._draftKey ?? item._draftIndex], options);
+  const paneComplete = items.filter(item => item._source === 'pane' && !item._locked).every(complete);
+  return items.flatMap((item, index) => !item._locked && complete(item)
+    && (item._source !== 'pane' || paneComplete) ? [index] : []);
+}
+
 function setAllControlsDisabled(container, disabled) {
   container.querySelectorAll('button, input, textarea').forEach((el) => {
     el.disabled = disabled;
@@ -143,6 +151,8 @@ function renderQuestionOptionB(opts) {
     onPageNext,
     visibleItemIndex,
     onDraftChange,
+    partialSubmit = false,
+    onSkip,
   } = opts || {};
   if (!container || !doc || !question) return;
   if (typeof buildAnswerText !== 'function') {
@@ -156,7 +166,14 @@ function renderQuestionOptionB(opts) {
     if (item._signature && draft.answers[key]?._signature !== item._signature) draft.answers[key] = { _signature: item._signature };
   }
   const items = Number.isInteger(visibleItemIndex) ? allItems.slice(visibleItemIndex, visibleItemIndex + 1) : allItems;
-  const valid = () => allAnswersValid(question, draft, { submitRequiresSelection });
+  const submitIndices = () => submittableQuestionIndices(question, draft, { submitRequiresSelection });
+  const valid = () => partialSubmit ? submitIndices().length > 0 : allAnswersValid(question, draft, { submitRequiresSelection });
+  const submitLabel = () => {
+    if (!partialSubmit) return 'Send answers';
+    const total = allItems.filter(item => !item._locked).length;
+    const count = submitIndices().length;
+    return total === 1 ? 'Send answer' : count === total ? 'Send all answers' : `Send ${count} of ${total}`;
+  };
   const fields = doc.createElement('div');
   fields.className = 'slot-chat-question-fields';
   container.appendChild(fields);
@@ -165,7 +182,7 @@ function renderQuestionOptionB(opts) {
 
   const refreshSubmit = () => {
     const submit = container.querySelector('.slot-chat-question-submit');
-    if (submit) submit.disabled = alreadyAnswered || !valid();
+    if (submit) { submit.disabled = alreadyAnswered || !valid(); submit.textContent = submitLabel(); }
     const error = container.querySelector('.slot-chat-question-constraint');
     if (error) error.textContent = items.map(item => answerConstraint(item, draft.answers[item._draftKey ?? item._draftIndex], { submitRequiresSelection })).filter(text => text && text !== 'Choose an answer').join(' · ');
     onDraftChange?.(draft);
@@ -347,13 +364,29 @@ function renderQuestionOptionB(opts) {
   const submitBtn = doc.createElement('button');
   submitBtn.type = 'button';
   submitBtn.className = 'slot-chat-question-submit';
-  submitBtn.textContent = 'Send answers';
+  submitBtn.textContent = submitLabel();
   submitBtn.disabled = alreadyAnswered || !valid();
   const cancelBtn = doc.createElement('button');
   cancelBtn.type = 'button';
   cancelBtn.className = 'slot-chat-question-cancel';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.disabled = alreadyAnswered;
+  const activeItem = items.length === 1 ? items[0] : null;
+  if (onSkip && activeItem?.question_id && activeItem._source !== 'pane' && !activeItem._locked && !activeItem._unavailable) {
+    const skip = doc.createElement('button');
+    skip.type = 'button'; skip.className = 'slot-chat-question-skip'; skip.textContent = 'Skip';
+    skip.disabled = alreadyAnswered;
+    skip.addEventListener('click', async () => {
+      if (skip.disabled) return;
+      setAllControlsDisabled(container, true);
+      try { await onSkip(allItems.indexOf(activeItem)); }
+      catch (_) {
+        setAllControlsDisabled(container, false);
+        refreshSubmit();
+      }
+    });
+    actionsEl.appendChild(skip);
+  }
   actionsEl.appendChild(submitBtn);
   if (showCancel) actionsEl.appendChild(cancelBtn);
   container.appendChild(actionsEl);
@@ -366,7 +399,7 @@ function renderQuestionOptionB(opts) {
     if (streamId) answeredSig[streamId] = questionSig;
     setAllControlsDisabled(container, true);
     try {
-      if (typeof onSubmit === 'function') await onSubmit(text, { question, answers });
+      if (typeof onSubmit === 'function') await onSubmit(text, { question, answers, submitIndices: partialSubmit ? submitIndices() : allItems.map((_, index) => index) });
     } catch (error) {
       if (streamId && answeredSig[streamId] === questionSig) delete answeredSig[streamId];
       setAllControlsDisabled(container, false);
@@ -396,5 +429,6 @@ module.exports = {
   answerHasSelection,
   buildAnswersForQuestion,
   questionItems,
+  submittableQuestionIndices,
   renderQuestionOptionB,
 };

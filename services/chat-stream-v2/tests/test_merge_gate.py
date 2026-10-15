@@ -23,7 +23,7 @@ OLD = "a" * 40
 CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
-EXPECTED_PUBLIC_SHA256 = "3654acb015979c8959704458a1338915f37c1dcc28444b62d7da082169bf0fba"
+EXPECTED_PUBLIC_SHA256 = "af736d00b10211ad44fa6e795e3da17567b2093a4cad31303cf812ba6ba36567"
 CHECKOUT_LOG = (Path(__file__).parent / "fixtures/th_h5/tag_checkout.txt").read_text()
 EXPECTED_PUBLIC_STEPS = {
     "Run npm test", "Run python3 scripts/test_check_public_residue.py",

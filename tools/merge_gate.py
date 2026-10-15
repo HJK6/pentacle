@@ -23,7 +23,7 @@ ORIGIN_RE = re.compile(
     r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
     r"(HJK6/(?:pentacle|pentacle-private))(?:\.git)?$"
 )
-PUBLIC_WORKFLOW_SHA256 = "3654acb015979c8959704458a1338915f37c1dcc28444b62d7da082169bf0fba"
+PUBLIC_WORKFLOW_SHA256 = 'af736d00b10211ad44fa6e795e3da17567b2093a4cad31303cf812ba6ba36567'
 WORKFLOWS = {
     "HJK6/pentacle": (".github/workflows/predeploy-tests.yml", "Public checks"),
     "HJK6/pentacle-private": (".github/workflows/chat-stream-v2-smoke.yml", "chat-stream-v2-smoke"),
