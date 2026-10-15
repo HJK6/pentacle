@@ -56,10 +56,10 @@ def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(monkeypatch):
     assert workflow['jobs']['checks']['runs-on'] == 'ubuntu-latest'
     step = next(s for s in workflow['jobs']['checks']['steps']
                 if s.get('name') == 'Daemon and CLI checks')
-    monkeypatch.setenv('RUNNER_TEMP', '/home/runner/work/_temp')
+    monkeypatch.setenv('RUNNER_TEMP', '/opt/ci-runner/_temp')
     monkeypatch.setenv('GITHUB_RUN_ID', '12345')
     monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
-    monkeypatch.setenv('V2_GATE_EVIDENCE_DIR', '/home/runner/work/_temp/pentacle-gate-12345-2')
+    monkeypatch.setenv('V2_GATE_EVIDENCE_DIR', '/opt/ci-runner/_temp/pentacle-gate-12345-2')
     monkeypatch.delenv('COSMO_E2E_DISPOSABLE_BASE', raising=False)
     monkeypatch.setattr(harness, '_disposable_base', lambda: Path('/tmp').resolve())
     line = next(line for line in step['run'].splitlines() if 'run_gate.py merge' in line)
