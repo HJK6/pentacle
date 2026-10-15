@@ -60,7 +60,10 @@ before writes. These exceptions do not grant UI subscriptions or operator author
 The explicitly configured system-producer credential can use RPC mode, without
 receiving an inventory subscription.
 The [daily brief principal](wmi_brief_tell.md) has a separate private credential
-and may send only bounded GATE tells to its two configured destinations.
+and may send only bounded GATE tells to its two configured destinations. Its
+`request_id` and `tell_id` use 1–120 characters from `[!-~]` (printable ASCII
+without whitespace); spaces add no ID value and complicate logs and receipts,
+while the WMI sender uses UUIDs.
 
 ## Phone approval keys
 

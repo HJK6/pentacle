@@ -68,8 +68,10 @@ After `ready`, send exactly these fields:
   131072 UTF-8 bytes before sanitization. Complete briefs are retained within that
   limit; nothing is truncated. A retry may start
   `GATE RESEND (first tell to FD not delivered) — ` before the original brief.
-- `request_id` and `tell_id` contain 1–120 printable ASCII characters without
-  whitespace. Use a stable tell ID per logical message and destination.
+- `request_id` and `tell_id` use 1–120 characters from `[!-~]` (printable ASCII
+  without whitespace); spaces add no ID value and complicate logs and receipts,
+  while the WMI sender uses UUIDs. Use a stable tell ID per logical message and
+  destination.
 - `sanitize` must be `true`; control sequences are stripped before persistence or
   delivery. Extra fields, internal auth/routing fields and urgent overrides are
   refused. Each tell includes its file token even on an authenticated connection.

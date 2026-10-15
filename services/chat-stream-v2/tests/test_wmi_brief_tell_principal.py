@@ -124,6 +124,33 @@ def test_bound_principal_cannot_call_any_other_verb(credentials, tmp_path):
     asyncio.run(run())
 
 
+def test_id_contract_rejects_space_and_accepts_uuid(credentials, tmp_path):
+    async def run():
+        async with Harness(tmp_path / "ids.db") as h:
+            peer = Peer()
+            await authenticate(h.server, peer)
+
+            # Space is deliberately outside the fixed [!-~]{1,120} ID contract.
+            refused = await dispatch(h.server, peer, frame(request_id="brief request"))
+            assert refused["error_code"] == "system_producer_payload_invalid", refused
+            assert not h.tmux.pastes
+            assert await h.store.get_tell_delivery("brief-tell") is None
+
+            request_id = "123e4567-e89b-12d3-a456-426614174000"
+            tell_id = "123e4567-e89b-12d3-a456-426614174001"
+            accepted = await dispatch(
+                h.server, peer, frame(request_id=request_id, tell_id=tell_id)
+            )
+            assert accepted["type"] == "tell.ok", accepted
+            assert accepted["delivery_status"] == "delivered"
+            assert h.tmux.pastes == [
+                f"[from {ACTOR}] [tell:{tell_id}]\nGATE synthetic brief"
+            ]
+            assert await h.store.get_tell_delivery(tell_id) is not None
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("patch", [
     {"to_stream_id": FD}, {"to_stream_id": "other:assistant"}, {"to_stream_id": None},
     {"text": "RESEND GATE brief"}, {"text": "GATEWAY brief"}, {"text": " GATE brief"},
