@@ -59,6 +59,8 @@ one-time code; satellite routes independently verify the configured push secret
 before writes. These exceptions do not grant UI subscriptions or operator authority.
 The explicitly configured system-producer credential can use RPC mode, without
 receiving an inventory subscription.
+The [daily brief principal](wmi_brief_tell.md) has a separate private credential
+and may send only bounded GATE tells to its two configured destinations.
 
 ## Phone approval keys
 

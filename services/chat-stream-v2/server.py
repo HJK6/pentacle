@@ -767,8 +767,8 @@ class Server:
         # one authenticated request to pivot the same socket to another stream.
         self._client_authenticated_streams: dict[Any, str] = {}
         self._client_token_hashes: dict[Any, str] = {}
-        # The sole non-seat service principal is connection-bound after its
-        # exact hello proof. It never enters the seat-token maps above.
+        # Fixed service principals are connection-bound after exact hello proof.
+        # They never enter the seat-token maps above.
         self._client_system_producers: dict[Any, str] = {}
         self._client_brief_configs: dict[Any, wmi_brief_producer.BriefProducer] = {}
         self._brief_tell_attempts: list[float] = []
