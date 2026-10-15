@@ -110,11 +110,13 @@ def _extract_claude_working_status(lines: list[str]) -> tuple[bool, str]:
 
 
 # Provider-reported background work, read only from the footer region below the
-# composer so scrollback that quotes a footer can never count. Claude Code's
+# composer's closing rule so neither scrollback nor a multiline draft that
+# quotes a footer can count. Claude Code's
 # footer pills are `·`-separated (`1 shell`, `2 local agents`); a running
 # background subagent also lists panel rows under a `● main` row. `← N agent`,
 # `/tasks to see subagents` and monitor/team pills are not owned running work.
 _CLAUDE_COMPOSER_RE = re.compile(r"^[❯>›](?:\s|$)")
+_CLAUDE_RULE_RE = re.compile(r"^[─━]{8,}$")
 _CLAUDE_FOOTER_PILL_RE = re.compile(r"(?:^|·)\s*(\d+)\s+(shells?|local agents?)\s*(?=·|$)")
 _CLAUDE_PANEL_ROW_RE = re.compile(r"^[●◯]\s+(\S.*)$")
 _CODEX_BACKGROUND_RE = re.compile(r"\b(\d+) background terminals? running\b")
@@ -131,9 +133,15 @@ def _extract_claude_background(lines: list[str]) -> list[str]:
     )
     if composer is None:
         return []
+    closing = next(
+        (index for index in range(composer + 1, len(lines)) if _CLAUDE_RULE_RE.match(lines[index])),
+        None,
+    )
+    if closing is None:
+        return []
     shells = agents = rows = 0
     panel = False
-    for line in lines[composer + 1:composer + 13]:
+    for line in lines[closing + 1:closing + 13]:
         for count, kind in _CLAUDE_FOOTER_PILL_RE.findall(line):
             if kind.startswith("shell"):
                 shells += int(count)

@@ -65,17 +65,17 @@ def _busy_reasons(rows):
         own[sid] = reasons
         if parent := row.get("parent_stream_id"):
             children.setdefault(str(parent), []).append(sid)
-    memo = {}
-
-    def resolve(sid, visiting):
-        if sid in memo:
-            return memo[sid]
-        visiting.add(sid)
-        reasons = set(own.get(sid, ()))
-        if any(child not in visiting and resolve(child, visiting) for child in children.get(sid, ())):
-            reasons.add("child_seat")
-        visiting.discard(sid)
-        memo[sid] = sorted(reasons)
-        return memo[sid]
-
-    return {sid: resolve(sid, set()) for sid in own}
+    result = {}
+    for sid, reasons in own.items():
+        # Reachability, not a memoized walk: a parent cycle must not make the
+        # answer depend on input order. A seat is not its own descendant.
+        seen, stack, child_busy = {sid}, list(children.get(sid, ())), False
+        while stack and not child_busy:
+            child = stack.pop()
+            if child in seen:
+                continue
+            seen.add(child)
+            child_busy = bool(own.get(child))
+            stack.extend(children.get(child, ()))
+        result[sid] = sorted(reasons | ({"child_seat"} if child_busy else set()))
+    return result

@@ -267,3 +267,46 @@ def test_background_busy_lane_is_not_idle_and_digest_renders_working(monkeypatch
             store.stop()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Final-QA repairs: composer drafts and cycle order
+# --------------------------------------------------------------------------- #
+
+_RULE = "─" * 40
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "❯ Explain this footer:\n  1 shell",
+        "❯ Quote the panel:\n  ● main\n  ◯ general-purpose  sample",
+    ],
+)
+def test_multiline_composer_draft_is_not_background(draft) -> None:
+    pane = f"{_RULE}\n{draft}\n{_RULE}\n  ⏵⏵ bypass permissions on · ← 1 agent\n"
+    state = _extract_live_state(pane, "claude")
+    assert state["working"] is False
+    assert state["background"] == []
+
+
+def test_footer_after_multiline_draft_still_counts() -> None:
+    pane = f"{_RULE}\n❯ first line\n  second line\n{_RULE}\n  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n"
+    assert _extract_live_state(pane, "claude")["background"] == ["1 shell"]
+
+
+def test_composer_without_closing_rule_reads_no_background() -> None:
+    assert _extract_live_state("❯ \n  ⏵⏵ bypass permissions on · 1 shell\n", "claude")["background"] == []
+
+
+@pytest.mark.parametrize("busy_node", ["h:a", "h:b"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_parent_cycle_is_order_independent(busy_node, reverse) -> None:
+    rows = [_r("h:a", "h:b"), _r("h:b", "h:a")]
+    for row in rows:
+        if row["stream_id"] == busy_node:
+            row["working"] = True
+    other = "h:b" if busy_node == "h:a" else "h:a"
+    projected = _by_id(list(reversed(rows)) if reverse else rows)
+    assert projected[busy_node]["busy_reasons"] == ["generating"]
+    assert projected[other]["busy_reasons"] == ["child_seat"]
