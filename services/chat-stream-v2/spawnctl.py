@@ -4552,6 +4552,14 @@ class SpawnCtl:
             if not await tmux.has_session(name):
                 return "failed", "pane_died_during_boot", "adopted pane died before its transcript appeared"
             if time.monotonic() >= deadline:
+                # The awaited liveness read can carry us past the deadline after
+                # the saved-watermark guard above evaluated false; that
+                # watermark still means the paste may have happened.
+                if watermark_unknown:
+                    return (
+                        "indeterminate", "live_pane_unproven",
+                        "spawn_delivery_unknown: saved pre-paste watermark; no affirmative prompt delivery proof",
+                    )
                 log.warning("adoption: %s never created a provider transcript; agent_never_started", name)
                 return "failed", "agent_never_started", "boot deadline expired with no provider transcript ever created"
             await asyncio.sleep(min(tmux_transport.POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
