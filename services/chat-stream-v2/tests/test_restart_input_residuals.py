@@ -313,7 +313,7 @@ def test_recovery_origin_fences(tmp_path, monkeypatch, provider, transition):
             assert held["routing_state"] == "queued" and held["dispatch_id"] is None
             assert held["error_code"] == "assistant_awaiting_recovery"
             origin = json.loads(held["route_json"])["direct_binding_origin"]
-            assert origin == {"name": "bart", "stream_id": SEAT, "generation": G0, "revision": 0}
+            assert origin == {"name": rig.composite.config.name, "stream_id": SEAT, "generation": G0, "revision": 0}
             duplicate = await rig.composite.accept_input({**message, "meta": {"direct_binding_origin": {"stream_id": OTHER}}})
             assert duplicate["duplicate"] is True and duplicate["event_id"] == first["event_id"]
             assert sent == []
