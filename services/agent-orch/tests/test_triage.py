@@ -91,6 +91,36 @@ def test_discover_creates_state_and_notification_payload(tmp_path):
     assert {action["value"]["spec_id"] for action in payload["actions"]} == {"spec_example__followup"}
 
 
+def test_shared_tree_action_uses_revision_checked_command_without_local_writes(tmp_path, monkeypatch):
+    folder = _write_item(tmp_path, "example__followup", spec_id="spec_example__followup", title="Followup", tags=["triage"])
+    original = (folder / "spec.md").read_bytes()
+    monkeypatch.setattr(triage, "_uses_memory_command", lambda root: True)
+    calls = []
+    def command(root, request):
+        calls.append(request)
+        if request["operation"] == "read":
+            return {"ok": True, "revision": "current"}
+        return {"ok": True, "triage_state": {"status": "kept"}}
+    monkeypatch.setattr(triage, "_memory_call", command)
+    assert triage.apply_action(tmp_path, spec_id="spec_example__followup", action_value="keep", decided_by="operator") == {"status": "kept"}
+    assert calls[-1]["operation"] == "triage"
+    assert len(calls[-1]["expected"]) == 3
+    assert (folder / "spec.md").read_bytes() == original
+    assert not (folder / "triage.json").exists()
+
+
+def test_shared_tree_notification_state_routes_through_command(tmp_path, monkeypatch):
+    folder = _write_item(tmp_path, "example__followup", spec_id="spec_example__followup", title="Followup", tags=["triage"])
+    monkeypatch.setattr(triage, "_uses_memory_command", lambda root: True)
+    calls = []
+    monkeypatch.setattr(triage, "_remote_triage", lambda item, action, **fields: calls.append(action) or {"status": "pending"})
+    item = triage.discover_items(tmp_path)[0]
+    triage.ensure_state(item)
+    triage.write_json(folder / "triage.json", {"spec_id": item.spec_id, "last_notified_at": "now"})
+    assert calls == ["initialize", "mark_notified"]
+    assert not (folder / "triage.json").exists()
+
+
 def test_notification_payload_offers_non_triage_merge_candidates(tmp_path):
     _write_item(
         tmp_path,
@@ -509,4 +539,3 @@ def test_duplicate_merge_answer_after_move_returns_terminal_state(tmp_path):
 
     assert second == first
     assert (target / "spec.md").read_text(encoding="utf-8").count("## Triage Merges") == 1
-

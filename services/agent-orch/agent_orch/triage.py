@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +82,48 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
+    if path.name == TRIAGE_STATE_FILE and _uses_memory_command(path.parents[3]):
+        root = path.parents[3]
+        item = _find_any_spec(root, str(data.get("spec_id") or ""), statuses=SOURCE_ACTION_STATUS_DIRS)
+        _remote_triage(item, "mark_notified")
+        return
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _uses_memory_command(root: Path) -> bool:
+    """Only the configured shared tree uses its publisher command.
+
+    Standalone work folders and the publisher's isolated extraction keep the
+    existing local state machine. No host or endpoint is embedded here.
+    """
+    configured = Path.home() / "agent-workspace" / "triforce-memory"
+    return root.resolve() == configured.resolve() and (configured / "scripts/memory_client.py").is_file()
+
+
+def _memory_call(root: Path, request: dict[str, Any]) -> dict[str, Any]:
+    result = subprocess.run([sys.executable, str(root / "scripts/memory_client.py"), "apply"],
+                            input=json.dumps(request), capture_output=True, text=True)
+    try:
+        response = json.loads(result.stdout)
+    except ValueError as exc:
+        raise TriageError("memory publisher reply unavailable: " + result.stderr.strip()) from exc
+    if result.returncode or not isinstance(response, dict) or not response.get("ok"):
+        raise TriageError("memory mutation refused: " + json.dumps(response))
+    return response
+
+
+def _remote_triage(item: WorkItem, action: str, **fields: Any) -> dict[str, Any]:
+    paths = [str((item.folder / name).relative_to(item.root)) for name in
+             ("spec.md", "summary.md", TRIAGE_STATE_FILE)]
+    expected = {path: _memory_call(item.root, {"operation": "read", "path": path})["revision"] for path in paths}
+    result = _memory_call(item.root, {"operation": "triage", "item_id": item.spec_id,
+                                     "action": action, "expected": expected, **fields})
+    if "triage_state" in result:
+        return result["triage_state"]
+    current = _memory_call(item.root, {"operation": "read", "path": paths[-1]})
+    if not current.get("content"):
+        raise TriageError("triage state moved; reread the current item and retry")
+    return json.loads(current["content"])
 
 
 def _frontmatter_bounds(text: str) -> tuple[int, int]:
@@ -221,6 +264,8 @@ def _triage_generation(item: WorkItem) -> str:
 
 
 def ensure_state(item: WorkItem, *, now: str | None = None, write: bool = True) -> dict[str, Any]:
+    if write and _uses_memory_command(item.root):
+        return _remote_triage(item, "initialize")
     state = load_json(item.triage_path)
     if state:
         return state
@@ -367,6 +412,8 @@ def apply_action(
     now: str | None = None,
 ) -> dict[str, Any]:
     item = _find_any_spec(memory_root, spec_id, statuses=SOURCE_ACTION_STATUS_DIRS)
+    if _uses_memory_command(memory_root):
+        return _remote_triage(item, action_value, decided_by=decided_by, reason=reason, defer_until=defer_until)
     if item.status == "deprecated":
         state = load_json(item.triage_path)
         if state.get("status") in {"merged", "deprecated"}:
