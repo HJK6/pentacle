@@ -4,7 +4,9 @@ Record one take while paging through the assistant chat's durable question
 cards. Use the card-header microphone, speak on each relevant page, then choose
 **Done**. Capture, upload and transcription reuse `renderer/web_voice.js` on
 both Electron and the served web client. The deck always uses browser capture
-mode; it never toggles the room microphone or needs the mic server.
+mode; it never toggles the room microphone or needs the mic server. In the web client
+the MIC panel Source picks which local input it captures from; see
+[Web microphone Source](web_mic_source.md).
 
 The recording bar sits between the pager and card. It shows elapsed time, the
 existing audio meter, **k of n answered by voice**, and Done. Below 480 px it

@@ -94,7 +94,15 @@ function encodeWav(chunks, sampleRate) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
-function createBrowserRecorder(env = globalThis) {
+// The getUserMedia audio constraint: the browser default, or one chosen input.
+const audioConstraint = deviceId => (deviceId ? { deviceId: { exact: deviceId } } : true);
+// Errors that mean the requested input no longer exists (not permission or busy).
+const DEVICE_GONE_ERRORS = new Set(['OverconstrainedError', 'NotFoundError']);
+
+// `getDeviceId` returns the chosen input id or null for the browser default.
+// `onDeviceFailure(deviceId)` reports a chosen input that has gone away;
+// `onCaptureStart()` lets the caller refresh device labels after permission.
+function createBrowserRecorder(env = globalThis, { getDeviceId = () => null, onDeviceFailure, onCaptureStart } = {}) {
   let stream; let context; let source; let analyser; let samples; let processor; let recorder; let chunks; let started;
   let interrupted; let onInterrupted; let captureDone; let trackListeners = [];
   async function cleanup() {
@@ -110,7 +118,11 @@ function createBrowserRecorder(env = globalThis) {
     setInterruptionHandler(handler) { onInterrupted = handler; },
     async start() {
       try {
-        stream = await env.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = []; interrupted = false;
+        const deviceId = getDeviceId() || null;
+        try { stream = await env.navigator.mediaDevices.getUserMedia({ audio: audioConstraint(deviceId) }); }
+        catch (error) { if (deviceId && DEVICE_GONE_ERRORS.has(error?.name)) onDeviceFailure?.(deviceId); throw error; }
+        onCaptureStart?.();
+        chunks = []; interrupted = false;
         for (const track of stream.getTracks()) {
           const listener = () => { interrupted = true; onInterrupted?.(); };
           track.addEventListener?.('ended', listener); trackListeners.push([track, listener]);
@@ -342,4 +354,4 @@ async function uploadVoiceBlob(cc, blob) {
   let binary = ''; for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   return cc.chatUploadBlob({ dataBase64: btoa(binary), sizeHintBytes: bytes.length });
 }
-module.exports = { createVoiceTake, createBrowserRecorder, bindComposerMic, uploadVoiceBlob, encodeWav, MAX_DURATION_S };
+module.exports = { createVoiceTake, createBrowserRecorder, audioConstraint, bindComposerMic, uploadVoiceBlob, encodeWav, MAX_DURATION_S };
