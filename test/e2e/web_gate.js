@@ -25,6 +25,15 @@ const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
+const { REBIND_HOST } = require('./lib/cross_origin_scenario');
+
+// Chrome honours only the last --host-resolver-rules flag, so fold the
+// DNS-rebinding probe's mapping (cross-origin-boundary) into any fixture rules.
+function withResolverRule(chromeArgs, rule) {
+  const prefix = '--host-resolver-rules=';
+  const existing = chromeArgs.filter((arg) => arg.startsWith(prefix)).map((arg) => arg.slice(prefix.length));
+  return [...chromeArgs.filter((arg) => !arg.startsWith(prefix)), prefix + [...existing, rule].join(', ')];
+}
 const catalogFixtures = require('./lib/dashboard_catalog_fixture');
 const { startHostedModelerFixture } = require('./lib/hosted_modeler_fixture');
 const { startFakeCosmo } = require('./lib/fake_cosmo_server');
@@ -449,13 +458,14 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     // Retry on a lost CDP port race (fresh port each attempt) unless a fixed
     // --cdp-port was requested.
     let cdpErr;
+    let cdpPort = null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const cdpPort = args.cdpPort || await freePort();
+      cdpPort = args.cdpPort || await freePort();
       chrome = spawn(chromeBin, [
         '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
         '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
-        ...(runtime.modelerFixture?.chromeArgs || []),
+        ...withResolverRule(runtime.modelerFixture?.chromeArgs || [], `MAP ${REBIND_HOST} 127.0.0.1`),
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
       chrome.stderr.on('data', (d) => chromeLog.push(String(d)));
@@ -473,7 +483,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     }
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
-    const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
+    const ctx = { session, report, cdp, cdpPort, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS) {
