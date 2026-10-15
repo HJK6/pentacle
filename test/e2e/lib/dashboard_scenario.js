@@ -67,7 +67,22 @@ async function waitForDashboardChatFiles(session, streamId) {
 // settling when this one arms its marker. Retry only that lifecycle boundary,
 // never arbitrary CDP failures.
 const TRANSIENT_NAVIGATION_ERROR = /Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed/;
-async function reloadDashboardPage({ session, cdp, timeoutMs = 30000 }) {
+// Reloads model a fresh renderer: the next document starts with the classic
+// four-pane workspace and no saved session bindings (the app restores saved
+// bindings on load). Workspace scenarios that test persistence pass
+// keepWorkspace.
+const FRESH_WORKSPACE = JSON.stringify({ paneCount: 4, activeSlot: 0 });
+async function reloadDashboardPage({ session, cdp, timeoutMs = 30000 }, { keepWorkspace = false } = {}) {
+  const fresh = keepWorkspace ? null : await session.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `localStorage.setItem('pentacle.workspace.v1', ${JSON.stringify(FRESH_WORKSPACE)});`,
+  });
+  try {
+    await reloadFreshDocument({ session, cdp, timeoutMs });
+  } finally {
+    if (fresh) await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fresh.identifier });
+  }
+}
+async function reloadFreshDocument({ session, cdp, timeoutMs }) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {

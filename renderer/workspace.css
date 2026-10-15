@@ -1,0 +1,62 @@
+/* Pane-count workspace (default on). Layout only: it uses the existing theme
+   tokens, so the classic look is unchanged. The optional chat-first look lives
+   in chat_first_style.css under html.chat-first-style. */
+
+/* Titlebar controls: sidebar toggle (left) and the 1-4 pane selector (right). */
+.workspace-icon-button {
+  -webkit-app-region: no-drag;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; margin-right: 8px; padding: 0;
+  background: transparent; border: 0; border-radius: 6px;
+  color: var(--pc-soft); cursor: pointer;
+}
+.workspace-icon-button:hover { background: var(--pc-chip-bg); color: var(--pc-text); }
+.workspace-layout-control { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 3px; margin-right: 8px; }
+.workspace-layout-control > span { font-size: 11px; color: var(--pc-soft); margin-right: 6px; }
+.workspace-layout-control button {
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: var(--pc-soft); font-size: 12px; cursor: pointer;
+}
+.workspace-layout-control button:hover { background: var(--pc-chip-bg); color: var(--pc-text); }
+.workspace-layout-control button[aria-pressed="true"] { border-color: var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); }
+.workspace-layout-control button:focus-visible, .workspace-icon-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* Collapsible sidebar; on narrow screens it becomes a drawer over the panes. */
+.main { position: relative; }
+body.sidebar-collapsed:not(.web-sidebar-narrow) .sidebar,
+body.sidebar-collapsed:not(.web-sidebar-narrow) .sidebar-resizer { display: none; }
+.sidebar-scrim { display: none; }
+body.web-sidebar-narrow .main > .sidebar {
+  position: absolute; z-index: 42; inset: 0 auto 0 0;
+  width: min(300px, 85vw); min-width: 0; display: none;
+  box-shadow: 10px 0 35px rgba(0, 0, 0, .25);
+}
+body.web-sidebar-narrow.sidebar-open .main > .sidebar { display: flex; }
+body.web-sidebar-narrow.sidebar-open .sidebar-scrim {
+  display: block; position: absolute; inset: 0; z-index: 41;
+  border: 0; padding: 0; background: rgba(0, 0, 0, .3);
+}
+body.web-sidebar-narrow .sidebar-resizer { display: none; }
+body.web-sidebar-narrow .workspace-layout-control { display: none; }
+
+/* Pane count. All four bindings stay alive; the count only changes which
+   cells are visible. Four panes is the classic 2x2 grid. */
+.grid:not(.maximized) .grid-cell.workspace-hidden { display: none; }
+body.web-sidebar-narrow .grid:not(.maximized) .grid-cell.workspace-hidden.narrow-active { display: flex; }
+.grid[data-pane-count="1"]:not(.maximized) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.grid[data-pane-count="2"]:not(.maximized) { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); }
+.grid[data-pane-count="3"]:not(.maximized) { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.grid[data-pane-count="1"] .grid-row,
+.grid[data-pane-count="2"] .grid-row,
+.grid[data-pane-count="3"] .grid-row { display: contents; }
+.grid[data-pane-count]:not([data-pane-count="4"]) .grid-col-resizer { display: none; }
+.grid[data-pane-count="2"]:not(.maximized) .grid-cell[data-workspace-position="0"] { grid-column: 1; grid-row: 1; }
+.grid[data-pane-count="2"]:not(.maximized) .grid-cell[data-workspace-position="1"] { grid-column: 2; grid-row: 1; }
+.grid[data-pane-count="3"]:not(.maximized) .grid-cell[data-workspace-position="0"] { grid-column: 1; grid-row: 1 / 3; }
+.grid[data-pane-count="3"]:not(.maximized) .grid-cell[data-workspace-position="1"] { grid-column: 2; grid-row: 1; }
+.grid[data-pane-count="3"]:not(.maximized) .grid-cell[data-workspace-position="2"] { grid-column: 2; grid-row: 2; }
+.grid[data-pane-count="1"]:not(.maximized) .grid-cell[data-workspace-position="0"] { grid-column: 1; grid-row: 1; }
+/* Narrow screens keep their single-pane navigator regardless of the count. */
+body.web-sidebar-narrow .grid[data-pane-count] { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+body.web-sidebar-narrow .grid[data-pane-count] .grid-cell.narrow-active { grid-column: 1; grid-row: 2; }

@@ -28,7 +28,8 @@ test('titlebar keeps settings and reload controls without duplicate branding', (
   const app = read('renderer/app.js');
   const css = read('renderer/styles.css');
   assert.doesNotMatch(html, /id="titlebar-(?:text|machines)"/);
-  assert.match(html, /<div class="titlebar-right">\s*<button class="settings-btn"/);
+  // The pane selector precedes Settings; no branding or machine text sits between.
+  assert.match(html, /<div class="titlebar-right">\s*<div class="workspace-layout-control"[^>]*>(?:\s*<(?:span|button)[^>]*>[^<]*<\/(?:span|button)>)+\s*<\/div>\s*<button class="settings-btn"/);
   assert.match(html, /id="web-refresh-btn"/);
   assert.doesNotMatch(app, /renderTitlebarMachines/);
   assert.match(css, /\.titlebar-right[^}]*margin-left: auto/);

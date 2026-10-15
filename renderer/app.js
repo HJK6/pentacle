@@ -10,6 +10,7 @@ const { WebglAddon } = require('@xterm/addon-webgl'); // GPU-accelerated renderi
 const { createTerminalPaste } = require('./terminal_paste');
 const { normalizeSplit, createGridColResizer } = require('./grid_col_resizer');
 const { normalizeSidebarWidth, createSidebarResizer } = require('./sidebar_resizer');
+const { WORKSPACE_STORAGE_KEY, loadWorkspace, visibleWorkspaceSlots, placementSlot, defaultSessionView, uniqueAssistantComposite } = require('./workspace_layout');
 const path = require('path');
 const chatUi = require('./chat_ui_state');
 const assetRender = require('./asset_render');
@@ -122,6 +123,34 @@ const DESIGN_THEME_VARS = {
   },
 };
 
+// Optional chat-first ("Claude-like") palettes from PR #55 (Sai Yeluru), used
+// only when features.chatFirstStyle is on. With the flag off the palettes above
+// and every classic style are unchanged.
+const CHAT_FIRST_THEME_VARS = {
+  light: {
+    bg: '#fcfbf8', bg2: '#f5f4f0', bg3: '#eeede8', fg: '#292823', fgDim: '#77756d',
+    blue: '#a0523d', green: '#378267', red: '#b9473e', yellow: '#997323', purple: '#8060a8', cyan: '#477eaa', border: '#e6e4de',
+    app: '#fcfbf8', side: '#f5f4f0', pane: '#fcfbf8', header: '#fcfbf8',
+    text: '#292823', dim: '#68665e', soft: '#817e74', faint: '#a6a298',
+    line: '#e6e4de', lineSoft: '#efeee9', accent: '#a0523d', accentDim: '#bb725b',
+    codeBg: '#f1f0eb', codeLine: '#e3e0d8', chipBg: '#eeede8', chipTx: '#4d4a42',
+    userBg: '#f1efe8', userLine: '#e9e5db',
+  },
+  dark: {
+    bg: '#22221f', bg2: '#1b1b19', bg3: '#343430', fg: '#eceae3', fgDim: '#a09d92',
+    blue: '#d5987f', green: '#7eba9a', red: '#ec9388', yellow: '#d3b777', purple: '#b6a0d4', cyan: '#8bb4d0', border: '#3b3b35',
+    app: '#22221f', side: '#1b1b19', pane: '#22221f', header: '#22221f',
+    text: '#eceae3', dim: '#b9b6aa', soft: '#a09d92', faint: '#7b786f',
+    line: '#3b3b35', lineSoft: '#30302b', accent: '#d5987f', accentDim: '#c18a73',
+    codeBg: '#2b2b27', codeLine: '#41413a', chipBg: '#343430', chipTx: '#dbd8cd',
+    userBg: '#30302b', userLine: '#3b3b34',
+  },
+};
+
+function chatFirstStyleEnabled() {
+  return CONFIG.features?.chatFirstStyle === true;
+}
+
 // Each flag: key (CONFIG.features.<key>), label, description, and `live`
 // (true = appliable without a reload). `live:false` flags wire up backends or
 // deep slot state at startup, so changing them only takes full effect after a
@@ -134,6 +163,7 @@ const SETTINGS_FLAGS = [
   { key: 'usage',      label: 'Usage bars',          desc: 'Provider usage meters in the sidebar. Requires chat_streamd.',  live: false },
   { key: 'sourceTags', label: 'Source tags',         desc: 'Show the source host tag on each session.',                     live: false },
   { key: 'showTurnDuration', label: 'Show turn duration', desc: 'Show worked-for dividers and timing annotations in chat.', live: true },
+  { key: 'chatFirstStyle', label: 'Chat-first style', desc: 'Claude-like light/dark look, typography and sidebar styling.', live: false },
 ];
 
 function loadSettingsRecord() {
@@ -160,7 +190,8 @@ function saveSettingsOverride(key, value) {
 }
 
 function normalizeAppearance(raw = {}) {
-  const theme = raw.theme === 'light' ? 'light' : 'dark';
+  // The chat-first look defaults to Light; a saved choice always wins.
+  const theme = raw.theme === 'light' || raw.theme === 'dark' ? raw.theme : (chatFirstStyleEnabled() ? 'light' : 'dark');
   const density = raw.density === 'compact' ? 'compact' : 'comfortable';
   return {
     theme, density,
@@ -225,7 +256,8 @@ const themeVarMap = {
 
 function applyAppearanceSettings({ emit = false } = {}) {
   state.appearance = normalizeAppearance(state.appearance || loadAppearanceSettings());
-  const palette = DESIGN_THEME_VARS[state.appearance.theme] || DESIGN_THEME_VARS.dark;
+  const palettes = chatFirstStyleEnabled() ? CHAT_FIRST_THEME_VARS : DESIGN_THEME_VARS;
+  const palette = palettes[state.appearance.theme] || palettes.dark;
   document.documentElement.dataset.theme = state.appearance.theme;
   document.documentElement.dataset.density = state.appearance.density;
   for (const [key, cssVar] of Object.entries(themeVarMap)) {
@@ -423,6 +455,14 @@ const state = {
   // chat_streamd live-state availability. Sidebar rows remain daemon-owned;
   // this flag only gates actions that require a connected daemon.
   degraded: false,
+  // Pane-count workspace (renderer/workspace_layout.js). `workspaceSaved` is
+  // false on a first visit, which opens the assistant composite by default.
+  ...(() => {
+    const { saved, workspace } = loadWorkspace(globalThis.localStorage);
+    return { workspace, workspaceSaved: saved, workspaceAssistantPending: !saved && !IS_CHAT_POPOUT };
+  })(),
+  workspaceRestored: false,
+  workspaceRestoring: false,
   slots: [null, null, null, null], // { name, displayName } or null
   terminals: [null, null, null, null], // { term, fitAddon } or null
   slotViewModes: ['terminal', 'terminal', 'terminal', 'terminal'], // 'chat' | 'terminal' | 'asset' | 'status'
@@ -1934,6 +1974,7 @@ function applyChatStreamState(data) {
   if (state.chatStream.connected) {
     _perfRecord('renderer:sidebar-seeded-from-snapshot', { count: state.sessions.length });
     syncSlotDisplayNames();
+    restoreWorkspaceSessions();
   }
   // On disconnect, drop the lazy-load tracker so the next connect re-fetches
   // each active chat slot's stream events. Live events keep flowing into
@@ -2699,7 +2740,7 @@ function ensureSlotChatSurface(slot) {
 	  const inputEl = document.createElement('textarea');
 	  inputEl.className = 'slot-chat-compose-input';
   inputEl.rows = 1;
-  inputEl.placeholder = '';
+  inputEl.placeholder = chatFirstComposerPlaceholder();
   inputEl.setAttribute('aria-label', 'Message');
   inputEl.dataset.slot = String(slot);
 
@@ -4036,7 +4077,7 @@ function renderSlotChat(slot) {
   }
   refs.inputEl?.classList.toggle('is-remote-draft', !!remoteDraft && !state.slotDraftTouched[slot]);
   refs.inputEl?.classList.toggle('is-remote-pending', !!remotePending && !state.slotDraftTouched[slot]);
-  refs.inputEl?.setAttribute('placeholder', '');
+  refs.inputEl?.setAttribute('placeholder', chatFirstComposerPlaceholder());
   renderSlotReply(slot);
 
   if (refs.scrollEl && shouldStick) scrollSlotChatToBottom(refs);
@@ -4473,6 +4514,10 @@ function updateSlotViewMode(slot, mode) {
     header.querySelectorAll('.cell-view-toggle').forEach((btn) => {
       const active = btn.dataset.mode === mode;
       btn.classList.toggle('active', active);
+      if (chatFirstStyleEnabled()) {
+        btn.setAttribute('aria-pressed', String(active));
+        return;
+      }
       btn.style.opacity = active ? '1' : '0.65';
       btn.style.borderColor = active ? '#2dd4bf' : '#284137';
       btn.style.color = active ? '#dff8ea' : '#86a595';
@@ -4488,6 +4533,7 @@ function updateSlotViewMode(slot, mode) {
   }
   ensureSlotAssetTabs(slot);
   if (mode === 'terminal') scheduleVisibleSlotFits();
+  persistWorkspace();
 }
 
 function ensureSlotModeToggle(slot) {
@@ -4505,10 +4551,11 @@ function ensureSlotModeToggle(slot) {
   group.style.cssText = 'display:flex;gap:4px;margin-right:4px;';
   // Pill order: Status, Chat, Terminal (Chat sits next to Status as the default
   // view). Reordered from the legacy Status/Terminal/Chat per operator request.
+  const pill = chatFirstStyleEnabled() ? '' : ' style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;"';
   group.innerHTML = `
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="status" title="Session status view" aria-label="Session status view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Status</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Chat</button>
-    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view" style="font-size:10px;line-height:1;padding:5px 7px;border-radius:999px;border:1px solid #284137;background:#101815;color:#86a595;">Terminal</button>`;
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="status" title="Session status view" aria-label="Session status view"${pill}>Status</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="chat" title="Chat view" aria-label="Chat view"${pill}>Chat</button>
+    <button class="cell-view-toggle" data-slot="${slot}" data-mode="terminal" title="Terminal view" aria-label="Terminal view"${pill}>Terminal</button>`;
   actions.prepend(group);
   group.querySelectorAll('.cell-view-toggle').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -5167,7 +5214,7 @@ function assignToSlot(sessionName, displayName, hostId) {
       // In maximized mode, switch the maximized view to this slot
       maximizeSlot(existing);
     }
-    focusTerminal(existing);
+    focusSlot(existing);
     return existing;
   }
 
@@ -5179,12 +5226,9 @@ function assignToSlot(sessionName, displayName, hostId) {
     return slot;
   }
 
-  // Find first empty slot
-  let slot = state.slots.findIndex(s => s === null);
-  if (slot === -1) {
-    // All full — replace the last slot (slot 3)
-    slot = 3;
-  }
+  // First empty visible pane, otherwise the focused pane. Hidden panes keep
+  // their sessions and are never silently replaced.
+  const slot = placementSlot(state.workspace, state.slots);
 
   attachSession(slot, sessionName, displayName, hostId);
   return slot;
@@ -5196,20 +5240,31 @@ function assignToSlot(sessionName, displayName, hostId) {
 // view, where the question card renders), first unread report (asset tab), or
 // the status view. Falls back to chat when the target surface is unavailable.
 function activateSidebarRow(el, defaultHostId) {
-  const name = el.dataset.name;
-  const display = el.dataset.display;
-  const hostId = el.dataset.host || defaultHostId;
-  const streamId = el.dataset.streamId || '';
-  const action = el.dataset.primaryAction || 'status';
+  activateSessionEntry({
+    name: el.dataset.name, display: el.dataset.display, hostId: el.dataset.host || defaultHostId,
+    streamId: el.dataset.streamId || '', action: el.dataset.primaryAction || 'status',
+  });
+}
+
+// The same primary action without a rendered row (first-visit default and
+// workspace restore). `slot` pins the pane instead of placement; `quiet`
+// returns -1 for an unusable direct binding instead of toasting, so an
+// automatic open can retry on the next inventory. Returns the slot.
+function activateSessionEntry({ name, display, hostId, streamId = '', action = 'status' }, { slot: pinned = null, quiet = false } = {}) {
+  const place = (sessionName, displayName, host) => {
+    if (pinned === null) return assignToSlot(sessionName, displayName, host);
+    attachSession(pinned, sessionName, displayName, host, { activate: false });
+    return pinned;
+  };
   const direct = assistantDirectForEntry(streamId);
   if (direct.enabled) {
     if (direct.error) {
-      showToast(direct.error, { type: 'error' });
-      return;
+      if (!quiet) showToast(direct.error, { type: 'error' });
+      return -1;
     }
     const targetHostId = _streamHostToHostId(direct.host) || direct.host;
-    const slot = assignToSlot(direct.sessionName, display, targetHostId);
-    if (typeof slot !== 'number' || slot < 0 || !state.slots[slot]) return;
+    const slot = place(direct.sessionName, display, targetHostId);
+    if (typeof slot !== 'number' || slot < 0 || !state.slots[slot]) return -1;
     state.slots[slot].assistantDirect = {
       sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation,
     };
@@ -5220,10 +5275,10 @@ function activateSidebarRow(el, defaultHostId) {
     syncSlotAssistantControls(slot);
     updateSlotViewMode(slot, 'chat');
     renderSidebar();
-    return;
+    return slot;
   }
-  const slot = assignToSlot(name, display, hostId);
-  if (typeof slot !== 'number' || slot < 0) return;
+  const slot = place(name, display, hostId);
+  if (typeof slot !== 'number' || slot < 0) return -1;
   if (state.slots[slot]?.assistantDirect) {
     delete state.slots[slot].assistantDirect;
     state.slots[slot].displayName = display;
@@ -5235,7 +5290,7 @@ function activateSidebarRow(el, defaultHostId) {
   }
   if (isCompositeSlot(slot)) {
     updateSlotViewMode(slot, 'chat');
-    return;
+    return slot;
   }
   if (action === 'report' && streamId) {
     const target = firstUnreadReportForStream(streamId);
@@ -5244,14 +5299,14 @@ function activateSidebarRow(el, defaultHostId) {
     // forcing the slot into an unrelated mode.
     if (target) {
       openSlotAsset(slot, streamId, target.assetId, target.assetKey);
-      return;
+      return slot;
     }
   } else if (action === 'question') {
     // Explicit open question: force chat so the durable question card is visible
     // even when the session was ALREADY attached with its slot in asset, status
     // or terminal mode (assignToSlot's already-attached path only focuses).
     updateSlotViewMode(slot, 'chat');
-    return;
+    return slot;
   }
   // Ordinary open (primary-action 'status') and any default: land on the
   // configured default view. A fresh attach/replacement sets the slot to
@@ -5259,6 +5314,7 @@ function activateSidebarRow(el, defaultHostId) {
   // Terminal); re-selecting an already-attached slot leaves its explicit
   // in-session Chat/Status/Terminal toggle untouched. Status stays reachable
   // through the per-cell view toggle.
+  return slot;
 }
 
 // firstUnreadReportForStream returns the {assetId, assetKey} of the newest
@@ -5278,7 +5334,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   if (state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => { void attachSession(slot, sessionName, displayName, hostId, options); })) return;
   hostId = hostId || 'local';
   // Kill existing terminal in this slot
-  detachSlot(slot);
+  detachSlot(slot, { preserveWorkspace: true });
 
   state.slotGen[slot]++;
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
@@ -5287,7 +5343,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
     laneHistory: options.laneHistory || null,
     assistantDirect: options.assistantDirect || null,
     session_kind: canonicalChatSessionStateForNameHost(sessionName, hostId)?.session_kind };
-  if (document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
+  if (options.activate !== false && document.body.classList.contains('web-sidebar-narrow')) setNarrowActiveSlot(slot);
   closedChatSlots.update();
   window.PentacleHarness?.emit?.('slot:attach', { slot, host: hostId, data: { sessionName } });
 
@@ -5348,7 +5404,10 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   state.slotBuffers[slot] = '';
   state.slotDrafts[slot] = '';
   state.slotDraftTouched[slot] = false;
-  state.slotViewModes[slot] = isCompositeSlot(slot) || options.laneHistory ? 'chat' : defaultChatViewMode();
+  state.slotViewModes[slot] = isCompositeSlot(slot) || options.laneHistory ? 'chat'
+    : (options.viewMode || defaultSessionView(defaultChatViewMode(), canonicalChatSessionStateForNameHost(sessionName, hostId)));
+  if (options.activate !== false) setActiveWorkspaceSlot(slot);
+  persistWorkspace();
   document.getElementById(`cell-${slot}`).classList.toggle('lane-history', !!options.laneHistory);
   fetchSlotAssetSnapshot(slot, gen);
   ensureSlotAssetTabs(slot);
@@ -5520,7 +5579,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   updateSlotViewMode(slot, state.slotViewModes[slot]);
 }
 
-function detachSlot(slot, { force = false } = {}) {
+function detachSlot(slot, { force = false, preserveWorkspace = false } = {}) {
   if (!force && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => detachSlot(slot))) return;
   closedChatSlots.forget(slot);
   // A recording deck is nonmodal, so a slot can now be left with its deck open.
@@ -5627,7 +5686,7 @@ function detachSlot(slot, { force = false } = {}) {
 
   // Clear terminal container
   const container = document.getElementById(`term-${slot}`);
-  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+  container.innerHTML = workspaceEmptyHtml();
 
   // If this was the maximized slot, go back to grid view
   if (state.maximizedSlot === slot) {
@@ -5635,6 +5694,279 @@ function detachSlot(slot, { force = false } = {}) {
   }
 
   renderSidebar();
+  if (!preserveWorkspace) persistWorkspace();
+}
+
+// ── Pane-count workspace ──────────────────────────────────────
+// Derived from PR #55 (Sai Yeluru). Default on: one to four visible panes,
+// placement, persistence and the first-visit assistant default. The optional
+// chat-first look (features.chatFirstStyle) changes presentation only.
+
+function chatFirstComposerPlaceholder() {
+  return chatFirstStyleEnabled() ? 'Message your agent, or type a / command…' : '';
+}
+
+function workspaceEmptyHtml() {
+  if (!chatFirstStyleEnabled()) return '<div class="cell-empty">Click a session or bot to attach</div>';
+  return '<div class="cell-empty workspace-empty"><span class="workspace-mark" aria-hidden="true">✳</span><h1>A little space for big ideas.</h1><p>Start a conversation, or pick up where you left off.</p><button type="button" data-workspace-new>New chat <span aria-hidden="true">↗</span></button><span class="workspace-empty-hint">Your agents, projects, and conversations. In one place.</span></div>';
+}
+
+function persistWorkspace() {
+  if (IS_CHAT_POPOUT || state.workspaceRestoring) return;
+  // Until the saved workspace has been restored, an empty pane keeps its stored
+  // binding: an early layout change must not erase what restore will reopen.
+  const bindings = state.slots.map((session, slot) => {
+    if (!session) return !state.workspaceRestored && state.workspaceSaved ? state.workspace.bindings[slot] : null;
+    if (session.laneHistory || session.popoutStreamId) return null;
+    return {
+      name: session.name, hostId: session.hostId || 'local', mode: state.slotViewModes[slot],
+      draft: state.slotChatRefs[slot]?.inputEl?.value || state.slotDrafts[slot] || '',
+      // A direct-assistant pane is reopened through its assistant entry, which
+      // validates the configured target again instead of trusting this copy.
+      ...(session.assistantDirect ? { assistantSourceId: session.assistantDirect.sourceId } : {}),
+    };
+  });
+  const { paneCount, activeSlot, visibleSlots } = state.workspace;
+  try {
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({ paneCount, activeSlot, visibleSlots, bindings }));
+    state.workspaceSaved = true;
+  } catch { /* private mode / quota */ }
+}
+
+// The sidebar session whose entry stream is `streamId` (an assistant source).
+function sidebarSessionForStream(streamId) {
+  return state.sessions.find(session => sidebarStreamIdForSession(session) === streamId) || null;
+}
+
+// Reopen one saved pane, or leave it empty: a session missing from the
+// inventory, an unusable direct-assistant binding (target offline or on
+// another generation) or a session already open in another pane is not
+// reopened, and that pane's saved draft is dropped. Never spawns.
+function restoreWorkspaceBinding(slot, binding) {
+  const openElsewhere = (name, hostId) => getSlotForSession(name, hostId) >= 0;
+  let opened;
+  if (binding.assistantSourceId) {
+    const source = sidebarSessionForStream(binding.assistantSourceId);
+    if (!source) return null;
+    const direct = assistantDirectForEntry(binding.assistantSourceId);
+    if (direct.enabled && (direct.error
+      || openElsewhere(direct.sessionName, _streamHostToHostId(direct.host) || direct.host))) return null;
+    if (!direct.enabled && openElsewhere(source.name, source.hostId || 'local')) return null;
+    if (activateSessionEntry({
+      name: source.name, display: source.display_name || source.name, hostId: source.hostId || 'local',
+      streamId: binding.assistantSourceId,
+    }, { slot, quiet: true }) !== slot) return null;
+    if (binding.mode && binding.mode !== state.slotViewModes[slot]) updateSlotViewMode(slot, binding.mode);
+  } else {
+    const session = findSession(binding.name, binding.hostId);
+    if (!session || openElsewhere(binding.name, binding.hostId)) return null;
+    opened = attachSession(slot, binding.name, session.display_name || binding.name, binding.hostId,
+      { viewMode: binding.mode, activate: false });
+  }
+  // The chat surface exists once attachSession's synchronous part has run; the
+  // draft must not wait for (or depend on) the terminal PTY. Never copy it over
+  // text the user typed.
+  if (binding.draft && state.slots[slot] && !state.slotDraftTouched[slot]) {
+    state.slotDrafts[slot] = binding.draft;
+    state.slotDraftTouched[slot] = true;
+    if (state.slotChatRefs[slot]?.inputEl) state.slotChatRefs[slot].inputEl.value = binding.draft;
+    renderSlotChat(slot);
+  }
+  return opened || null;
+}
+
+// Restore runs once, at the first non-empty connected inventory (an empty
+// first snapshot is not evidence that the saved sessions are gone).
+async function restoreWorkspaceSessions() {
+  if (IS_CHAT_POPOUT || !state.chatStream.connected) return;
+  if (!state.workspaceRestored && state.sessions.length) {
+    state.workspaceRestored = true;
+    if (state.workspaceSaved) {
+      const bindings = state.workspace.bindings.slice();
+      state.workspaceRestoring = true;
+      try {
+        // Each binding's synchronous part places its session before the next
+        // runs, so two saved panes for one session open it only once.
+        const results = await Promise.allSettled(bindings.map(async (binding, slot) => {
+          if (binding && !state.slots[slot]) await restoreWorkspaceBinding(slot, binding);
+        }));
+        for (const result of results) {
+          if (result.status === 'rejected') console.warn('[workspace restore]', result.reason?.message || result.reason);
+        }
+      } finally {
+        state.workspaceRestoring = false;
+        applyWorkspaceLayout();
+        persistWorkspace();
+      }
+    }
+  }
+  openDefaultAssistant();
+}
+
+// First visit only: open the one assistant composite exactly as its sidebar
+// row would (including a configured direct-assistant binding), without
+// spawning. It keeps waiting through inventories without a unique composite
+// or a usable binding; any pane the user fills, or a pane-count choice, ends it.
+function openDefaultAssistant() {
+  if (!state.workspaceAssistantPending) return;
+  if (state.slots.some(Boolean)) { state.workspaceAssistantPending = false; return; }
+  const entries = state.sessions.map(session => ({ session, stream: canonicalChatSessionStateForNameHost(session.name, session.hostId) }));
+  const composite = uniqueAssistantComposite([...new Set(entries.map(entry => entry.stream).filter(Boolean))]);
+  const entry = composite && entries.find(item => item.stream === composite);
+  if (!entry) return;
+  const { session } = entry;
+  const slot = activateSessionEntry({
+    name: session.name, display: session.display_name || session.name, hostId: session.hostId || 'local',
+    streamId: sidebarStreamIdForSession(session),
+  }, { quiet: true });
+  if (slot < 0) return;
+  state.workspaceAssistantPending = false;
+  window.PentacleHarness?.emit?.('workspace:default-assistant', { data: {
+    sessionName: state.slots[slot]?.name, assistantSourceId: state.slots[slot]?.assistantDirect?.sourceId || null,
+  } });
+}
+
+function applyWorkspaceLayout() {
+  const grid = document.querySelector('.grid');
+  if (!grid || IS_CHAT_POPOUT) return;
+  const { paneCount, activeSlot } = state.workspace;
+  const visible = visibleWorkspaceSlots(paneCount, activeSlot, state.workspace.visibleSlots);
+  state.workspace.visibleSlots = visible;
+  grid.dataset.paneCount = String(paneCount);
+  for (let slot = 0; slot < 4; slot++) {
+    const cell = document.getElementById(`cell-${slot}`);
+    if (!cell) continue;
+    cell.classList.toggle('workspace-hidden', !visible.includes(slot));
+    cell.dataset.workspacePosition = String(visible.indexOf(slot));
+  }
+  document.querySelectorAll('[data-pane-count-button]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(Number(button.dataset.paneCountButton) === paneCount));
+  });
+  gridColResizers.forEach(resizer => resizer.refresh());
+  sidebarResizer?.refresh();
+  scheduleVisibleSlotFits();
+}
+
+// Make a pane the target for the next sidebar selection (revealing it when it
+// was hidden), without moving keyboard focus.
+function setActiveWorkspaceSlot(slot) {
+  if (IS_CHAT_POPOUT || !Number.isInteger(slot) || slot < 0 || slot > 3) return;
+  state.workspace.activeSlot = slot;
+  document.body.classList.remove('sidebar-open');
+  syncSidebarToggle();
+  applyWorkspaceLayout();
+  persistWorkspace();
+}
+
+function focusSlot(slot) {
+  if (!Number.isInteger(slot) || slot < 0 || slot > 3) return;
+  setActiveWorkspaceSlot(slot);
+  setNarrowActiveSlot(slot);
+  const mode = state.slotViewModes[slot];
+  if (mode === 'chat') state.slotChatRefs[slot]?.inputEl?.focus({ preventScroll: true });
+  else if (mode === 'terminal') focusTerminal(slot);
+}
+
+function setPaneCount(count) {
+  if (!Number.isInteger(count) || count < 1 || count > 4) return;
+  state.workspace.paneCount = count;
+  state.workspaceAssistantPending = false;
+  if (state.maximizedSlot !== null) minimizeAll();
+  applyWorkspaceLayout();
+  persistWorkspace();
+  window.PentacleHarness?.emit?.('workspace:pane-count', { data: { paneCount: count, visibleSlots: state.workspace.visibleSlots } });
+}
+
+function syncSidebarToggle() {
+  const narrow = document.body.classList.contains('web-sidebar-narrow');
+  const shown = narrow ? document.body.classList.contains('sidebar-open') : !document.body.classList.contains('sidebar-collapsed');
+  document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', String(shown));
+}
+
+function setupWorkspaceControls() {
+  if (IS_CHAT_POPOUT) {
+    document.querySelector('.workspace-layout-control')?.remove();
+    document.getElementById('sidebar-toggle')?.remove();
+    return;
+  }
+  for (const button of document.querySelectorAll('[data-pane-count-button]')) {
+    button.addEventListener('click', () => setPaneCount(Number(button.dataset.paneCountButton)));
+  }
+  for (let slot = 0; slot < 4; slot++) {
+    document.getElementById(`cell-${slot}`)?.addEventListener('pointerdown', () => {
+      if (state.workspace.activeSlot !== slot) setActiveWorkspaceSlot(slot);
+    });
+  }
+  document.addEventListener('click', (event) => {
+    if (event.target?.closest?.('[data-workspace-new]')) document.getElementById('btn-new')?.click();
+  });
+  document.addEventListener('input', (event) => {
+    if (event.target?.classList?.contains('slot-chat-compose-input')) persistWorkspace();
+  });
+  const toggle = document.getElementById('sidebar-toggle');
+  toggle?.addEventListener('click', () => {
+    const narrow = document.body.classList.contains('web-sidebar-narrow');
+    document.body.classList.toggle(narrow ? 'sidebar-open' : 'sidebar-collapsed');
+    syncSidebarToggle();
+    sidebarResizer?.refresh();
+    gridColResizers.forEach(resizer => resizer.refresh());
+    scheduleVisibleSlotFits();
+  });
+  const closeDrawer = () => { document.body.classList.remove('sidebar-open'); syncSidebarToggle(); };
+  document.getElementById('sidebar-scrim')?.addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) closeDrawer();
+  });
+  applyWorkspaceLayout();
+  syncSidebarToggle();
+}
+
+// Optional chat-first look: class, copy and decorative chrome. Layout and
+// behaviour are identical with the flag off.
+function applyChatFirstStyle() {
+  const enabled = chatFirstStyleEnabled();
+  document.documentElement.classList.toggle('chat-first-style', enabled);
+  if (!enabled || IS_CHAT_POPOUT) return;
+  document.title = 'Pentacle';
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', state.appearance.theme === 'dark' ? '#22221f' : '#fcfbf8');
+  const titlebar = document.querySelector('.titlebar');
+  if (titlebar && !titlebar.querySelector('.workspace-brand')) {
+    const brand = document.createElement('div');
+    brand.className = 'workspace-brand';
+    const toggle = document.getElementById('sidebar-toggle');
+    if (toggle) brand.appendChild(toggle);
+    const name = document.createElement('span');
+    name.textContent = 'Pentacle';
+    brand.appendChild(name);
+    titlebar.prepend(brand);
+    const crumb = document.createElement('div');
+    crumb.className = 'workspace-title';
+    crumb.innerHTML = 'Your workspace <span class="workspace-title-separator">/</span> <span>Chats</span>';
+    brand.after(crumb);
+  }
+  document.querySelector('.pentacle-logo')?.setAttribute('hidden', '');
+  const chats = document.getElementById('view-chats');
+  if (chats) chats.textContent = 'Chats';
+  const search = document.getElementById('session-search');
+  if (search) {
+    search.placeholder = 'Search conversations';
+    search.setAttribute('aria-label', 'Search conversations');
+  }
+  const newButton = document.getElementById('btn-new');
+  const panel = document.getElementById('panel-sessions');
+  if (newButton && panel && !newButton.querySelector('span')) {
+    const label = document.createElement('span');
+    label.textContent = 'New chat';
+    newButton.appendChild(label);
+    panel.prepend(newButton);
+  }
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebar && !sidebar.querySelector('.workspace-sidebar-footer')) {
+    const footer = document.createElement('div');
+    footer.className = 'workspace-sidebar-footer';
+    footer.innerHTML = '<span class="workspace-avatar" aria-hidden="true">P</span><div><strong>Personal workspace</strong><span>Local-first. Always yours.</span></div>';
+    sidebar.appendChild(footer);
+  }
 }
 
 function focusTerminal(slot) {
@@ -5692,6 +6024,7 @@ function maximizeSlot(slot) {
 
   state.maximizedSlot = slot;
   grid.classList.add('maximized');
+  setActiveWorkspaceSlot(slot);
   window.PentacleHarness?.emit?.('slot:maximize', { slot });
 
   for (let i = 0; i < 4; i++) {
@@ -6605,8 +6938,7 @@ async function newSession(options = {}, locationOverride = null) {
 async function newTerminalSession(agent = 'codex', locationOverride = null) {
   const location = locationOverride || newSessionLocation || 'local';
   hideNewSessionModal();
-  let slot = state.slots.findIndex(s => s === null);
-  if (slot === -1) slot = 3;
+  const slot = placementSlot(state.workspace, state.slots);
   const result = await window.cc.newSession(agent, location);
   if (!result) return;
   const sessionName = result.sessionName || result;
@@ -8438,7 +8770,7 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
   const key = rowName === 'top' ? 'gridColSplitTop' : 'gridColSplitBottom';
   gridColResizers.push(createGridColResizer({
     grid: row, handle: row.querySelector('.grid-col-resizer'), initialSplit: state.appearance[key],
-    isVisible: () => state.currentView === 'chats' && state.maximizedSlot === null && !document.body.classList.contains('web-sidebar-narrow'),
+    isVisible: () => state.currentView === 'chats' && state.workspace.paneCount === 4 && state.maximizedSlot === null && !document.body.classList.contains('web-sidebar-narrow'),
     save: fraction => {
       state.appearance[key] = fraction;
       saveAppearanceSetting(key, fraction);
@@ -8450,9 +8782,9 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
 if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pentacle-chat-popout')) {
   document.body.classList.add('web-sidebar-resizable');
   for (const button of document.querySelectorAll('[data-narrow-slot]')) {
-    button.addEventListener('click', () => setNarrowActiveSlot(Number(button.dataset.narrowSlot)));
+    button.addEventListener('click', () => focusSlot(Number(button.dataset.narrowSlot)));
   }
-  setNarrowActiveSlot(narrowActiveSlot);
+  setNarrowActiveSlot(state.workspace.activeSlot);
   sidebarResizer = createSidebarResizer({
     main: document.querySelector('.main'), sidebar: document.querySelector('.sidebar'),
     handle: document.getElementById('sidebar-resizer'), grid: slotGrid,
@@ -8464,20 +8796,26 @@ if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pen
     },
     onNarrow: narrow => {
       document.body.classList.toggle('web-sidebar-narrow', narrow);
-      if (narrow) setNarrowActiveSlot(narrowActiveSlot);
+      if (narrow) setNarrowActiveSlot(state.workspace.activeSlot);
+      else document.body.classList.remove('sidebar-open');
+      syncSidebarToggle();
     },
     onResize: scheduleVisibleSlotFits,
   });
 }
 window.addEventListener('beforeunload', () => {
+  persistWorkspace();
   sidebarResizer?.destroy();
   gridColResizers.forEach(resizer => resizer.destroy());
 });
 
+applyChatFirstStyle();
+setupWorkspaceControls();
+
 // Set empty state for all cells.
 for (let i = 0; i < 4; i++) {
   const container = document.getElementById(`term-${i}`);
-  container.innerHTML = '<div class="cell-empty">Click a session or bot to attach</div>';
+  container.innerHTML = workspaceEmptyHtml();
 }
 
 // Single document-level capture-phase wheel handler for ALL slots.
@@ -8512,7 +8850,8 @@ document.addEventListener('wheel', (e) => {
     }
     return;
   }
-  if (state.slotViewModes[slot] === 'chat' || state.slotViewModes[slot] === 'asset') return;
+  // Only Terminal hands the wheel to tmux; Chat, Status and assets scroll natively.
+  if (state.slotViewModes[slot] !== 'terminal') return;
   e.preventDefault();
   e.stopImmediatePropagation();
   const now = Date.now();

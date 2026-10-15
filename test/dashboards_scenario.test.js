@@ -19,9 +19,12 @@ function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', 
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 23);
+  assert.equal(SCENARIOS.length, 26);
   const names = SCENARIOS.map(([name]) => name);
   assert.ok(names.includes('cross-origin-boundary'));
+  assert.equal(names[0], 'default-pane-assistant');
+  assert.ok(names.indexOf('pane-count-selector') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('chat-first-style') < names.indexOf('closed-chat-slot'));
   const index = names.indexOf('web-dashboards-revamp');
   assert.ok(index >= 0 && index < names.indexOf('closed-chat-slot'));
   const catalog = names.indexOf('dashboard_catalog');
@@ -232,7 +235,7 @@ for (const message of TRANSIENT_RELOAD_ERRORS) {
   test(`dashboard reload retries a transient context rollover: ${message}`, async () => {
     const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
     let evaluations = 0; let reloads = 0;
-    const session = { send: async () => { reloads++; }, eval: async expression => {
+    const session = { send: async method => { if (method === 'Page.reload') reloads++; return { identifier: 'fresh' }; }, eval: async expression => {
       if (expression === 'window.__dashboardReloadMarker = true') return true;
       if (++evaluations === 1) throw new Error(message);
       return true;
@@ -245,7 +248,7 @@ for (const message of TRANSIENT_RELOAD_ERRORS) {
   test(`dashboard reload re-arms after a previous navigation is still settling: ${message}`, async () => {
     const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
     let arms = 0; let reloads = 0;
-    const session = { send: async () => { reloads++; }, eval: async expression => {
+    const session = { send: async method => { if (method === 'Page.reload') reloads++; return { identifier: 'fresh' }; }, eval: async expression => {
       if (expression === 'window.__dashboardReloadMarker = true' && ++arms === 1) throw new Error(message);
       return true;
     } };
@@ -253,6 +256,19 @@ for (const message of TRANSIENT_RELOAD_ERRORS) {
     assert.equal(arms, 2); assert.equal(reloads, 1);
   });
 }
+test('dashboard reload starts the next document with a fresh workspace unless asked to keep it', async () => {
+  const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
+  const calls = [];
+  const session = { send: async (method, params) => { calls.push([method, params]); return { identifier: 'fresh-1' }; }, eval: async () => true };
+  await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 });
+  assert.deepEqual(calls.map(([method]) => method),
+    ['Page.addScriptToEvaluateOnNewDocument', 'Page.reload', 'Page.removeScriptToEvaluateOnNewDocument']);
+  assert.match(calls[0][1].source, /pentacle\.workspace\.v1/);
+  assert.deepEqual(calls[2][1], { identifier: 'fresh-1' });
+  calls.length = 0;
+  await reloadDashboardPage({ session, cdp: { sleep: async () => {} }, timeoutMs: 1000 }, { keepWorkspace: true });
+  assert.deepEqual(calls.map(([method]) => method), ['Page.reload']);
+});
 test('dashboard reload waits for the old document marker to disappear', async () => {
   const { reloadDashboardPage } = require('./e2e/lib/dashboard_scenario');
   let evaluations = 0;

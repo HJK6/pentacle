@@ -19,12 +19,23 @@
        `.cosmic`, so it only applies inside the opted-in chat surface. -->
   <link rel="stylesheet" href="cosmic_chat_surface.css">
   <link rel="stylesheet" href="chat_v3.css">
+  <link rel="stylesheet" href="workspace.css">
+  <!-- Optional chat-first look; every rule is scoped to html.chat-first-style. -->
+  <link rel="stylesheet" href="chat_first_style.css">
 </head>
 <body>
   <!-- Titlebar (draggable) -->
   <div class="titlebar">
+    <button id="sidebar-toggle" class="workspace-icon-button" type="button" aria-label="Toggle sidebar" aria-expanded="true" title="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     <img class="pentacle-logo" src="assets/favicon-180.png" alt="Pentacle" width="28" height="28">
     <div class="titlebar-right">
+      <div class="workspace-layout-control" role="group" aria-label="Pane layout">
+        <span>Panes</span>
+        <button type="button" data-pane-count-button="1" aria-label="One pane" aria-pressed="false" title="One pane">1</button>
+        <button type="button" data-pane-count-button="2" aria-label="Two panes" aria-pressed="false" title="Two panes">2</button>
+        <button type="button" data-pane-count-button="3" aria-label="Three panes" aria-pressed="false" title="Three panes">3</button>
+        <button type="button" data-pane-count-button="4" aria-label="Four panes" aria-pressed="false" title="Four panes">4</button>
+      </div>
       <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
       <button class="web-refresh-btn" id="web-refresh-btn" title="Update available — reload" aria-label="Update available — reload" hidden><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path fill-rule="evenodd" d="M8 3a5 5 0 0 1 4.546 2.914.5.5 0 0 0 .908-.417A6 6 0 0 0 3.53 3.53l.708.708A5 5 0 0 1 8 3zm-4.546 8.086A5 5 0 0 0 12.47 12.47l-.708-.708A5 5 0 0 1 3.454 10.5a.5.5 0 1 0-.908.417z"/></svg></button>
     </div>
@@ -113,6 +124,8 @@
         </div>
       </div>
     </div>
+
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="Close sidebar" tabindex="-1"></button>
 
     <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Sidebar width" aria-orientation="vertical" tabindex="0" title="Drag to resize the sidebar. Arrow keys adjust its width."></div>
 

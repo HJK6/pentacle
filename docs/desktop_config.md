@@ -91,7 +91,8 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | Key | Type and default | Effect |
 | --- | --- | --- |
 | `features` | Object; example flags below | Defaults before saved Settings overrides. |
-| `features.chatUi` | Boolean; false | Experimental structured Chat. Terminals are the default session surface. Reload after changing. |
+| `features.defaultChatView` | Boolean; Chat when unset | Default view for newly opened sessions: Chat unless false (Terminal). Both views remain available per pane. Settings → Default view. A legacy saved `chatUi: false` migrates to Terminal. |
+| `features.chatFirstStyle` | Boolean; false | Optional chat-first look: warm Light/Dark palettes (Light when no theme is saved), workspace typography and sidebar styling. Layout and behaviour are unchanged. Reload after changing. See [workspace](chat_first_workspace.md). |
 | `features.inputBar` | Boolean; example true | Retained compatibility flag; currently unused. |
 | `features.usage` | Boolean; example false | Sidebar usage setting. Explicit false excludes live limits.update subscription frames; enabling it requires reload. Cached snapshot values may still paint. |
 | `features.dashboards` | Boolean; false | Dashboard/widgets controls; actual backends require external adapters. |
@@ -227,9 +228,9 @@ its own settings across reloads.
 
 Settings overrides are stored under `pentacle.settings.v1` in the renderer's
 localStorage. They override config defaults both before and after asynchronous
-configuration arrives. Existing saved Chat opt-in therefore survives an upgrade
-and a config containing chatUi:false. Change the toggle in Settings and reload
-to opt out. Preserve the application profile to retain these overrides; a new
+configuration arrives. A saved Default view or Chat-first style choice therefore
+survives an upgrade or config change; change it in Settings (Chat-first style
+needs a reload). Preserve the application profile to retain these overrides; a new
 profile starts with config defaults.
 
 ## Limits health contract

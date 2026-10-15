@@ -1,0 +1,232 @@
+/* Optional chat-first ("Claude-like") look, enabled by features.chatFirstStyle
+   (default off), which adds html.chat-first-style. Every rule is scoped to that
+   class, so with the flag off this file changes nothing. Palette values live in
+   renderer/app.js (CHAT_FIRST_THEME_VARS). Derived from PR #55 by Sai Yeluru:
+   his workspace chrome rules plus the declarations his PR changed in
+   styles.css and chat_v3.css. */
+
+/* Workspace chrome */
+html.chat-first-style { --workspace-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; --workspace-mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
+html.chat-first-style body { font-family: var(--workspace-font); height: 100dvh; }
+html.chat-first-style button, html.chat-first-style input, html.chat-first-style textarea, html.chat-first-style select { font-family: inherit; }
+html.chat-first-style button:focus-visible, html.chat-first-style a:focus-visible { outline: 2px solid var(--pc-accent); outline-offset: 3px; }
+html.chat-first-style button { touch-action: manipulation; }
+html.chat-first-style ::selection { background: color-mix(in srgb, var(--pc-accent) 23%, transparent); }
+html.chat-first-style .titlebar { height: 56px; padding: 0 16px 0 14px; gap: 20px; background: var(--pc-pane); }
+html.chat-first-style .workspace-brand { display: flex; align-items: center; gap: 15px; flex: 0 0 230px; }
+html.chat-first-style .workspace-brand > span { font: 500 26px/1 Georgia, 'Times New Roman', serif; letter-spacing: -.7px; }
+html.chat-first-style .workspace-icon-button { -webkit-app-region: no-drag; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 32px; background: transparent; border: 0; color: var(--pc-dim); border-radius: 6px; cursor: pointer; }
+html.chat-first-style .workspace-icon-button:hover { background: var(--pc-chip-bg); color: var(--pc-text); }
+html.chat-first-style .workspace-title { display: flex; gap: 13px; align-items: center; color: var(--pc-soft); font-size: 12px; }
+html.chat-first-style .workspace-title > span:last-child { color: var(--pc-text); }
+html.chat-first-style .workspace-title-separator { color: var(--pc-faint); }
+html.chat-first-style .titlebar-right { gap: 12px; }
+html.chat-first-style .workspace-layout-control { -webkit-app-region: no-drag; display: flex; align-items: center; gap: 3px; }
+html.chat-first-style .workspace-layout-control > span { font-size: 11px; color: var(--pc-soft); margin-right: 7px; }
+html.chat-first-style .workspace-layout-control button { width: 28px; height: 28px; border: 1px solid transparent; border-radius: 6px; color: var(--pc-soft); background: transparent; cursor: pointer; font-size: 12px; }
+html.chat-first-style .workspace-layout-control button:hover { background: var(--pc-chip-bg); }
+html.chat-first-style .workspace-layout-control button[aria-pressed="true"] { border-color: var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); }
+html.chat-first-style .settings-btn { width: 30px; height: 30px; color: var(--pc-dim); font-size: 17px; }
+html.chat-first-style .sidebar { background: var(--pc-side); }
+html.chat-first-style .view-switcher { padding: 12px 14px 4px; border-bottom: 0; gap: 4px; }
+html.chat-first-style .view-btn { text-transform: none; font-size: 12px; font-weight: 500; border-radius: 6px; letter-spacing: 0; padding: 7px 10px; }
+html.chat-first-style .view-btn.active { background: var(--pc-chip-bg); color: var(--pc-text); box-shadow: none; }
+html.chat-first-style #btn-new { width: calc(100% - 28px); height: 40px; flex: 0 0 40px; margin: 10px 14px 7px; gap: 10px; justify-content: flex-start; padding: 0 11px; border: 1px solid var(--pc-line); border-radius: 9px; background: var(--pc-pane); color: var(--pc-text); font-size: 13px; font-weight: 500; }
+html.chat-first-style #btn-new:hover { background: var(--pc-chip-bg); }
+html.chat-first-style .sidebar-search-row { padding: 0 14px 10px; }
+html.chat-first-style .sidebar-search { border: 1px solid transparent; background: transparent; min-height: 34px; border-radius: 7px; padding: 0 10px; }
+html.chat-first-style .sidebar-search:focus-within { background: var(--pc-pane); border-color: var(--pc-line); }
+html.chat-first-style .sidebar-search input { font-size: 12px; }
+html.chat-first-style .sidebar-stats { border: 0; font-size: 10px; color: var(--pc-soft); padding: 10px 22px 7px; }
+html.chat-first-style .session-list { padding: 2px 10px 16px; scrollbar-width: thin; scrollbar-color: var(--pc-line) transparent; }
+html.chat-first-style .session-item { border: 0; border-radius: 8px; margin: 2px 0; padding: 10px 11px; background: transparent; min-height: 42px; }
+html.chat-first-style .session-item:hover { background: color-mix(in srgb, var(--pc-chip-bg) 65%, transparent); }
+html.chat-first-style .session-item.active { background: var(--pc-chip-bg); box-shadow: none; border: 0; }
+html.chat-first-style .session-name { font-size: 13px; font-weight: 450; line-height: 1.5; color: var(--pc-text); }
+html.chat-first-style .session-preview { font-size: 11px; color: var(--pc-soft); line-height: 1.5; }
+html.chat-first-style .session-item .activity-badge, html.chat-first-style .session-item .source-tag { font-size: 9px; }
+html.chat-first-style .sidebar-section-header { padding: 10px 18px; }
+html.chat-first-style .sidebar-section-title { font-size: 10px; letter-spacing: .3px; font-weight: 500; text-transform: none; }
+html.chat-first-style .workspace-sidebar-footer { flex-shrink: 0; border-top: 1px solid var(--pc-line); padding: 16px 20px; display: flex; align-items: center; gap: 11px; }
+html.chat-first-style .workspace-avatar { width: 29px; height: 29px; border-radius: 50%; display: grid; place-items: center; background: var(--pc-chip-bg); color: var(--pc-dim); font: 500 12px Georgia, serif; }
+html.chat-first-style .workspace-sidebar-footer > div { display: flex; flex-direction: column; gap: 3px; }
+html.chat-first-style .workspace-sidebar-footer strong { font-size: 11px; font-weight: 500; }
+html.chat-first-style .workspace-sidebar-footer div > span { font-size: 10px; color: var(--pc-soft); }
+html.chat-first-style body.web-sidebar-resizable .sidebar-resizer::after { background: transparent; }
+html.chat-first-style body.web-sidebar-resizable .sidebar-resizer:hover::after { background: var(--pc-line); }
+html.chat-first-style .grid-cell { min-width: 0; min-height: 0; background: var(--pc-pane); }
+html.chat-first-style .cell-header { min-height: 48px; height: auto; padding: 8px 16px; gap: 8px; background: var(--pc-pane); border-bottom: 1px solid var(--pc-line-soft); }
+html.chat-first-style .cell-label, html.chat-first-style .cell-label.has-session { color: var(--pc-text); font-size: 13px; font-weight: 550; flex: 1; min-width: 24px; }
+html.chat-first-style .cell-actions { gap: 4px; flex-shrink: 0; }
+html.chat-first-style .cell-actions > button { color: var(--pc-soft); }
+html.chat-first-style .cell-view-toggle-group { gap: 1px !important; border: 1px solid var(--pc-line); border-radius: 7px; padding: 2px; }
+html.chat-first-style .cell-view-toggle { font-size: 10px; line-height: 1; padding: 6px 7px; border: 0; border-radius: 4px; background: transparent; color: var(--pc-soft); cursor: pointer; }
+html.chat-first-style .cell-view-toggle:hover { color: var(--pc-text); }
+html.chat-first-style .cell-view-toggle.active { background: var(--pc-chip-bg); color: var(--pc-text); }
+html.chat-first-style .cell-source-tag, html.chat-first-style .cell-provider-tag { font-size: 9px; }
+html.chat-first-style .cell-activity-strip { height: 2px; }
+html.chat-first-style .workspace-empty { opacity: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; height: 100%; padding: 32px; color: var(--pc-dim); text-align: center; }
+html.chat-first-style .workspace-mark { font-size: 42px; color: var(--pc-accent-dim); font-weight: 300; margin-bottom: 3px; }
+html.chat-first-style .workspace-empty h1 { font: 400 clamp(23px, 2.5vw, 34px)/1.3 Georgia, 'Times New Roman', serif; letter-spacing: -.7px; color: var(--pc-text); }
+html.chat-first-style .workspace-empty p { font: 400 13px/1.6 var(--workspace-font); max-width: 300px; }
+html.chat-first-style .workspace-empty button, html.chat-first-style .terminal-unavailable button { background: var(--pc-text); border: 0; border-radius: 8px; color: var(--pc-pane); padding: 10px 17px; font-size: 12px; cursor: pointer; margin-top: 4px; }
+html.chat-first-style .workspace-empty button > span { margin-left: 24px; }
+html.chat-first-style .workspace-empty-hint { font-size: 10px; color: var(--pc-soft); margin-top: 16px; }
+html.chat-first-style .terminal-unavailable { padding: 28px; color: var(--pc-dim); font-size: 13px; line-height: 1.6; }
+html.chat-first-style .terminal-unavailable p { margin-bottom: 12px; }
+html.chat-first-style .slot-status-layer, html.chat-first-style .slot-asset-layer { background: var(--pc-pane); color: var(--pc-text); }
+html.chat-first-style .slot-status-layer { padding: 24px; }
+html.chat-first-style .slot-chat-status-card { border-radius: 10px; }
+html.chat-first-style .modal-overlay, html.chat-first-style .settings-overlay { backdrop-filter: blur(3px); }
+html.chat-first-style .modal, html.chat-first-style .settings-modal { border-radius: 14px; }
+html.chat-first-style .modal input, html.chat-first-style .modal select { border-radius: 7px; }
+html.chat-first-style body.web-sidebar-narrow .workspace-title { display: none; }
+html.chat-first-style body.web-sidebar-narrow .workspace-brand { flex-basis: auto; gap: 8px; }
+html.chat-first-style body.web-sidebar-narrow .workspace-brand > span { font-size: 22px; }
+html.chat-first-style body.web-sidebar-narrow .titlebar { gap: 8px; padding-inline: 10px; }
+html.chat-first-style body.web-sidebar-narrow .workspace-layout-control > span { display: none; }
+html.chat-first-style body.web-sidebar-narrow .workspace-layout-control button { width: 25px; }
+html.chat-first-style body.web-sidebar-narrow .titlebar-right { gap: 5px; }
+html.chat-first-style body.web-sidebar-narrow .grid .narrow-slot-nav { grid-column: 1; grid-row: 1; padding: 4px 12px; background: var(--pc-pane); }
+html.chat-first-style body.web-sidebar-narrow .grid .cell-header { padding: 8px 12px; flex-wrap: wrap; }
+html.chat-first-style body.web-sidebar-narrow .cell-actions { margin-left: auto; }
+html.chat-first-style body.web-sidebar-narrow .cosmic .slot-chat-scroll { padding: 22px 16px calc(var(--slot-chat-dock-height, 130px) + 18px); }
+html.chat-first-style body.web-sidebar-narrow .cosmic .slot-chat-dock { padding: 16px 12px max(12px, env(safe-area-inset-bottom)); }
+html.chat-first-style body.web-sidebar-narrow .workspace-empty { padding: 24px; }
+@media (prefers-reduced-motion: reduce) { html.chat-first-style * { scroll-behavior: auto !important; } }
+
+/* Token-based colors for panes, tabs and status views (styles.css) */
+html.chat-first-style .mic-status-dot.active-awake { background: var(--green); box-shadow: 0 0 6px var(--green); }
+html.chat-first-style .mic-status-dot.active-capturing { background: var(--green); box-shadow: 0 0 6px var(--green); }
+html.chat-first-style .slot-asset-tab { border: 1px solid var(--pc-line); background: var(--pc-side); color: var(--pc-dim); }
+html.chat-first-style .slot-asset-tab:hover { color: var(--pc-text); border-color: var(--pc-accent); }
+html.chat-first-style .slot-asset-tab.active { color: var(--pc-text); background: var(--pc-chip-bg); border-color: var(--pc-accent); }
+html.chat-first-style .slot-asset-tab-close { color: var(--pc-dim); }
+html.chat-first-style .slot-asset-layer { background: var(--pc-pane); color: var(--pc-text); }
+html.chat-first-style .slot-asset-view-header { border-bottom: 1px solid var(--pc-line); }
+html.chat-first-style .slot-asset-view-title { color: var(--pc-text); }
+html.chat-first-style .slot-asset-view-type { color: var(--pc-dim); }
+html.chat-first-style .slot-asset-view-popout, html.chat-first-style .asset-popout-dock { color: var(--pc-text); }
+html.chat-first-style .slot-asset-view-popout:hover, html.chat-first-style .asset-popout-dock:hover { border-color: var(--pc-dim); }
+html.chat-first-style .slot-asset-view-body { color: var(--pc-text); }
+html.chat-first-style .slot-status-layer { background: var(--pc-pane); color: var(--pc-text); }
+html.chat-first-style .slot-status-view-header { border-bottom: 1px solid var(--pc-line); }
+html.chat-first-style .slot-status-view-title { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-return { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-return:hover { border-color: var(--pc-dim); }
+html.chat-first-style .slot-status-view-model { color: var(--pc-dim); }
+html.chat-first-style .slot-status-view-goal { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-step.is-active .slot-status-view-step-text { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-update-latest { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-update-text { color: var(--pc-text); }
+html.chat-first-style .slot-status-view-spec-label { color: var(--pc-text); }
+html.chat-first-style .asset-popout-body { color: var(--pc-text); }
+html.chat-first-style .asset-popout-toolbar { border-bottom: 1px solid var(--pc-line); }
+html.chat-first-style .asset-popout-meta { color: var(--pc-dim); }
+html.chat-first-style .slot-asset-report-approve-btn { color: var(--green); }
+html.chat-first-style .slot-asset-report-pill.is-active { color: var(--st, var(--green)); }
+html.chat-first-style .slot-asset-report-list.is-ordered .slot-asset-report-list-marker { color: var(--green); }
+html.chat-first-style .slot-asset-report-chip-link { color: var(--green); }
+html.chat-first-style .slot-asset-report-link { color: var(--green); }
+html.chat-first-style .slot-chat-session-hero { border: 1px solid var(--machine-border, var(--pc-line)); background: var(--machine-surface, var(--pc-side)); }
+html.chat-first-style .slot-chat-session-band { background: var(--machine, var(--pc-accent)); }
+html.chat-first-style .slot-status-card { background: var(--pc-chip-bg, var(--pc-side)); }
+html.chat-first-style .slot-status-card-row.is-goal { color: var(--pc-text); }
+html.chat-first-style .slot-status-card-row.is-step { color: var(--pc-accent, var(--pc-accent)); }
+html.chat-first-style .slot-chat-session-kicker { color: var(--machine, var(--pc-accent)); }
+html.chat-first-style .slot-chat-session-provider { color: var(--pc-text); }
+html.chat-first-style .slot-chat-session-title { color: var(--pc-text); }
+html.chat-first-style .slot-chat-user-bubble { color: var(--pc-text); }
+html.chat-first-style .slot-chat-assistant-card { color: var(--pc-text); }
+html.chat-first-style .slot-chat-activity { border: 1px solid var(--machine-border, var(--pc-line)); background: var(--machine-surface, var(--pc-side)); }
+html.chat-first-style .slot-chat-activity-dot { background: var(--machine, var(--pc-accent)); }
+html.chat-first-style .slot-chat-activity b { color: var(--machine, var(--pc-accent)); }
+html.chat-first-style .slot-chat-command-card, html.chat-first-style .slot-chat-file-card { border: 1px solid var(--machine-border, var(--pc-line)); background: var(--machine-surface, var(--pc-side)); }
+html.chat-first-style .slot-chat-command-card b, html.chat-first-style .slot-chat-file-card b { color: var(--machine, var(--pc-accent)); }
+html.chat-first-style .slot-chat-terminal-divider span { background: var(--pc-line); }
+html.chat-first-style .slot-chat-md-code { border: 1px solid var(--machine-border, var(--pc-line)); }
+html.chat-first-style .slot-chat-md-table th { border-bottom: 1px solid var(--machine-border, var(--pc-line)); }
+html.chat-first-style .slot-chat-md-link { color: var(--pc-accent); }
+html.chat-first-style .slot-chat-compose-input:focus { box-shadow: 0 0 0 1px color-mix(in srgb, var(--machine, var(--pc-accent)) 22%, transparent); }
+html.chat-first-style .new-session-options { gap: 8px; margin-top: 8px; }
+html.chat-first-style .new-session-option { border-radius: 6px; padding: 10px; }
+html.chat-first-style .new-session-option:hover { border-color: var(--fg-dim); }
+html.chat-first-style .new-session-option-mark { width: 24px; height: 24px; border-radius: 4px; }
+html.chat-first-style .spawn-profile-control { border-radius: 6px; }
+html.chat-first-style .cell-provider-tag { border: 1px solid var(--pc-line); background: var(--pc-side); color: var(--pc-dim); }
+html.chat-first-style .pipeline-reason-label { color: var(--fg-dim); }
+html.chat-first-style .pipeline-flow .pipeline-stage.success { border-color: var(--blue); box-shadow: 0 0 12px color-mix(in srgb, var(--blue) 40%, transparent); }
+html.chat-first-style .slot-chat-reply-preview:not([hidden]) { border-left: 2px solid var(--machine-accent, var(--pc-accent)); }
+
+/* Chat transcript (chat_v3.css) */
+html.chat-first-style .slot-chat-layer.cosmic { background: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-shell { background: var(--pc-pane); font-family: var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-scroll { padding: 38px 32px calc(var(--slot-chat-dock-height, 130px) + 22px); scrollbar-color: var(--pc-line) var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-scroll::-webkit-scrollbar-track { background: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-scroll::-webkit-scrollbar-thumb { background: var(--pc-chip-bg); }
+html.chat-first-style .cosmic .slot-chat-row { font-family: var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-user-bubble { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); font: 400 15.5px/1.55 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-assistant-card { color: var(--pc-text); font: 400 16px/1.7 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-assistant-card strong { color: var(--pc-text); }
+html.chat-first-style .cosmic .slot-chat-assistant-card .slot-chat-line { line-height: 1.7; }
+html.chat-first-style .cosmic .slot-chat-assistant-card li::marker { color: var(--green); }
+html.chat-first-style .cosmic .slot-chat-assistant-card code, html.chat-first-style .cosmic .slot-chat-assistant-card pre, html.chat-first-style .cosmic .slot-chat-timestamp { font-family: var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-status { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); color: var(--green); font: 600 10px/1.2 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-status.is-blocker, html.chat-first-style .cosmic .slot-chat-v3-status.is-reject { border-color: var(--pc-line); background: var(--pc-chip-bg); color: var(--yellow); }
+html.chat-first-style .cosmic .slot-chat-timestamp { color: var(--pc-dim); font: 400 11px/1.4 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-subagent, html.chat-first-style .cosmic .slot-chat-v3-subagent-group, html.chat-first-style .cosmic .slot-chat-v3-answers { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); font-family: var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-subagent > summary, html.chat-first-style .cosmic .slot-chat-v3-subagent-group > summary, html.chat-first-style .cosmic .slot-chat-v3-answers > summary { font: 400 11px/1.35 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-subagent summary time, html.chat-first-style .cosmic .slot-chat-v3-subagent-group summary time { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-v3-chevron { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-v3-agent-id { color: var(--pc-text); }
+html.chat-first-style .cosmic .slot-chat-v3-agent-summary, html.chat-first-style .cosmic .slot-chat-v3-answer-preview { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-v3-agent-status, html.chat-first-style .cosmic .slot-chat-v3-blocker-count { color: var(--yellow); }
+html.chat-first-style .cosmic .slot-chat-v3-dot { background: var(--pc-chip-bg); }
+html.chat-first-style .cosmic .slot-chat-v3-dot.is-blocker, html.chat-first-style .cosmic .slot-chat-v3-dot.is-reject { background: var(--pc-chip-bg); }
+html.chat-first-style .cosmic .slot-chat-v3-answer-check { color: var(--green); }
+html.chat-first-style .cosmic .slot-chat-v3-subagent-body, html.chat-first-style .cosmic .slot-chat-v3-subagent-group-body, html.chat-first-style .cosmic .slot-chat-v3-answer-body { color: var(--pc-text); font: 400 12px/1.55 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-v3-answer-entry p { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-dock { background: linear-gradient(0deg, var(--pc-pane) 74%, transparent); }
+html.chat-first-style .cosmic .slot-chat-dock > .slot-chat-status { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-status-badge { color: var(--pc-dim); font: 400 11px/1.2 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-compose { border: 1px solid var(--pc-line); background: var(--pc-pane); box-shadow: 0 4px 20px rgba(0,0,0,.055); }
+html.chat-first-style .cosmic .slot-chat-compose:focus-within { border-color: var(--pc-line); }
+html.chat-first-style .cosmic .slot-chat-compose-input { color: var(--pc-text); font: 400 15px/1.5 var(--workspace-font); scrollbar-color: var(--pc-line) var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-compose-input::placeholder { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-attach, html.chat-first-style .cosmic .slot-chat-compose-mic { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-attach { font: 400 25px/1 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-attach:hover, html.chat-first-style .cosmic .slot-chat-compose-mic:hover { background: var(--pc-chip-bg); color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-compose-send { background: var(--pc-chip-bg); color: var(--pc-dim); font: 700 22px/1 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-compose-send[data-action="stop"] { background: var(--pc-chip-bg); color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-compose-send:disabled { background: var(--pc-chip-bg); color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-plus-menu { border: 1px solid var(--pc-line); background: var(--pc-pane); box-shadow: 0 4px 20px rgba(0,0,0,.055); }
+html.chat-first-style .cosmic .slot-chat-plus-menu button { color: var(--pc-dim); font: 400 12px/1.3 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-plus-menu button:hover { background: var(--pc-chip-bg); }
+html.chat-first-style .cosmic .slot-chat-plus-menu button:disabled { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-plus-menu p { color: var(--pc-dim); font: 400 10px/1.4 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-attachment-chip { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); }
+html.chat-first-style .cosmic .slot-chat-attachment-meta { color: var(--pc-dim); font: 400 10px/1.3 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-attachment-meta b { color: var(--pc-text); }
+html.chat-first-style .cosmic .slot-chat-attachment-meta small { color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-jump-latest { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); box-shadow: 0 4px 20px rgba(0,0,0,.055); font: 600 19px/1 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-jump-latest .slot-chat-jump-count { background: var(--pc-chip-bg); color: var(--pc-dim); font: 700 9px/1 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-question-open { border: 1px solid var(--pc-line); background: var(--pc-chip-bg); color: var(--pc-text); box-shadow: 0 4px 20px rgba(0,0,0,.055); animation: none; }
+html.chat-first-style .cosmic .slot-chat-question-count { background: var(--pc-chip-bg); color: var(--pc-dim); font: 700 10px/1 var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-drop-overlay { border: 2px dashed var(--pc-line); background: color-mix(in srgb, var(--pc-pane) 92%, transparent); color: var(--pc-text); font: 600 17px/1.4 var(--workspace-font); }
+html.chat-first-style .cosmic { --cosmic-ink: var(--pc-pane); --cosmic-panel: var(--pc-side); --cosmic-text: var(--pc-text); --cosmic-dim: var(--pc-dim); --cosmic-muted: var(--pc-soft); --cosmic-line: var(--pc-line); --cosmic-codepanel: var(--pc-code-bg); --cosmic-green: var(--green); --cosmic-amber: var(--yellow); --cosmic-red: var(--red); --cosmic-font-display: var(--workspace-font); --cosmic-font-display-medium: var(--workspace-font); --cosmic-font-display-bold: var(--workspace-font); --cosmic-font-myth: var(--workspace-font); --cosmic-font-mono: var(--workspace-mono); --cosmic-font-mono-medium: var(--workspace-mono); --cosmic-font-mono-bold: var(--workspace-mono); }
+html.chat-first-style .cosmic .slot-chat-compose { background: var(--pc-pane); border-color: var(--pc-line); }
+html.chat-first-style .cosmic .slot-chat-compose:focus-within { border-color: var(--pc-accent-dim); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pc-accent) 8%, transparent); }
+html.chat-first-style .cosmic .slot-chat-compose-send { background: var(--pc-text); color: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-compose-send:hover { background: var(--pc-accent); color: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-compose-send:disabled { opacity: .3; }
+html.chat-first-style .cosmic .slot-chat-question-open { background: var(--pc-accent); color: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-question-count, html.chat-first-style .cosmic .slot-chat-jump-latest .slot-chat-jump-count { background: var(--pc-accent); color: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-user-bubble { background: var(--pc-user-bg); border: 0; border-radius: 16px; }
+html.chat-first-style .cosmic .slot-chat-assistant-card code:not(pre code) { color: var(--pc-accent); background: var(--pc-code-bg); border: 1px solid var(--pc-code-line); border-radius: 4px; padding: 1px 4px; font-size: .88em; }
+html.chat-first-style .cosmic .slot-chat-assistant-card pre { background: var(--pc-code-bg); border: 1px solid var(--pc-code-line); border-radius: 10px; padding: 16px; overflow-x: auto; font-size: 13px; }
+html.chat-first-style .cosmic .slot-chat-row { min-width: 0; overflow-wrap: anywhere; }
+html.chat-first-style .cosmic .slot-chat-scroll { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+html.chat-first-style .cosmic .slot-chat-compose-input { min-height: 40px; }
+html.chat-first-style .cosmic .slot-chat-empty { color: var(--pc-soft); font: 400 15px/1.6 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-compose-hint { color: var(--pc-soft); font: 400 11px/1.5 var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-question { background: transparent; }
