@@ -255,3 +255,136 @@ async def test_first_bind_cannot_create_anchor_after_start_changes_during_open(t
         assert await s.h.run(s.reader, s.state) == 0
         assert await binding(s) == before and "transcript" not in before
         assert await s.store.fetch_session_event_tail("h:v2-root", limit=500) == []
+
+
+# Real Claude seats carry a launch-recorded jsonl_path/claude_session_id and do
+# not hold their transcript open, so no writable descriptor is visible to lsof.
+@asynccontextmanager
+async def claude_seat(tmp_path, monkeypatch, session_id="native-a"):
+    async with subject(tmp_path, monkeypatch, "claude") as s:
+        await s.store.update_session("h", "v2-root", jsonl_path=str(s.path), claude_session_id=session_id)
+        await s.h.sessions.refresh()
+        s.h.descriptors = []
+        yield s
+
+
+def claude_anchor(path):
+    info = path.stat()
+    return {"path": str(path), "provider": "claude", "session_id": "native-a",
+            "file_id": [info.st_dev, info.st_ino]}
+
+
+@pytest.mark.asyncio
+async def test_claude_launch_recorded_seat_mints_anchor_on_healthy_pass(tmp_path, monkeypatch):
+    async with claude_seat(tmp_path, monkeypatch) as s:
+        assert await s.h.run(s.reader, s.state) == 1
+        assert (await binding(s))["transcript"] == claude_anchor(s.path)
+
+
+@pytest.mark.asyncio
+async def test_claude_launch_recorded_same_pid_shift_recovers_and_keeps_ingesting(tmp_path, monkeypatch):
+    async with claude_seat(tmp_path, monkeypatch) as s:
+        assert await s.h.run(s.reader, s.state) == 1
+        before = await binding(s)
+        append(s.path, "claude", "two"); s.h.birth = CHANGED
+        assert await s.h.run(s.reader, s.state) == 1
+        assert await binding(s) == {**before, "pane_pid": PID, "pane_started_at": CHANGED}
+        assert s.state.identity_incident_id is None
+        assert await s.h.run(s.reader, s.state) == 0
+        append(s.path, "claude", "three")
+        assert await s.h.run(s.reader, s.state) == 1
+        restarted = _StreamIngest()
+        try:
+            assert await s.h.run(s.h.ingest(), restarted) == 0
+        finally:
+            _close_stream(restarted)
+        assert len(await s.store.fetch_session_event_tail("h:v2-root", limit=500)) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["session_mismatch", "empty_session", "usage_partial"])
+async def test_claude_launch_recorded_seat_never_mints_unproven_anchor(tmp_path, monkeypatch, case):
+    sid = {"session_mismatch": "native-other", "empty_session": ""}.get(case, "native-a")
+    async with claude_seat(tmp_path, monkeypatch, session_id=sid) as s:
+        if case == "usage_partial":
+            partial = {**await binding(s), "transcript": {
+                "source_file_identity_digest": "0" * 64, "native_session_id": "native-a", "provider": "claude"}}
+            await s.store.update_session("h", "v2-root", observer_binding=partial)
+            await s.h.sessions.refresh()
+        before = await binding(s)
+        await s.h.run(s.reader, s.state)
+        assert await binding(s) == before
+        append(s.path, "claude", "two"); s.h.birth = CHANGED
+        assert await s.h.run(s.reader, s.state) == 0
+        assert await binding(s) == before
+        assert s.state.identity_incident_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["other_pid", "native", "inode", "path_moved", "session_changed",
+                                  "uid", "executable"])
+async def test_claude_anchored_shift_refuses_unproven_continuity(tmp_path, monkeypatch, case):
+    async with claude_seat(tmp_path, monkeypatch) as s:
+        assert await s.h.run(s.reader, s.state) == 1
+        append(s.path, "claude", "two"); s.h.birth = CHANGED
+        if case == "other_pid":
+            # The reconciler already followed a replacement pane; Claude has no
+            # writer proof for a different process, so this stays refused.
+            s.h.pid = "8124"
+            await s.store.update_session("h", "v2-root", pane_pid="8124")
+        if case == "native": s.path.write_text(s.path.read_text().replace("native-a", "native-b"))
+        if case == "inode":
+            other = s.path.with_name("replacement"); other.write_bytes(s.path.read_bytes()); os.replace(other, s.path)
+        if case == "path_moved":
+            moved = s.path.with_name("moved.jsonl"); os.link(s.path, moved)
+            await s.store.update_session("h", "v2-root", jsonl_path=str(moved))
+        if case == "session_changed":
+            await s.store.update_session("h", "v2-root", claude_session_id="native-other")
+        if case == "uid":
+            async def record(pid):
+                return {"pid": int(pid), "uid": os.getuid()+1, "start_id": s.h.birth, "command": EXE}
+            monkeypatch.setattr(module, "process_record", record)
+        if case == "executable": s.h.command = "/other/provider"
+        await s.h.sessions.refresh()
+        before = await binding(s)
+        assert await s.h.run(s.reader, s.state) == 0
+        assert await binding(s) == before
+        assert s.state.identity_incident_id
+        assert len(await s.store.fetch_session_event_tail("h:v2-root", limit=500)) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_mint_refuses_path_replaced_between_open_and_stat(tmp_path, monkeypatch):
+    async with claude_seat(tmp_path, monkeypatch) as s:
+        original = s.path.read_text()
+        stat = module._file_stat
+        def replace_then_stat(path):
+            if not s.state.file_id:
+                other = s.path.with_name("foreign"); other.write_text(original.replace("native-a", "native-b"))
+                os.replace(other, s.path)
+            return stat(path)
+        monkeypatch.setattr(module, "_file_stat", replace_then_stat)
+        async def forbidden(*args, **kwargs): pytest.fail("a descriptor/path identity split must not reach the CAS")
+        bind = s.store.bind_observer_transcript
+        monkeypatch.setattr(s.store, "bind_observer_transcript", forbidden)
+        before = await binding(s)
+        assert await s.h.run(s.reader, s.state) == 0
+        assert await binding(s) == before
+        monkeypatch.setattr(module, "_file_stat", stat)
+        monkeypatch.setattr(s.store, "bind_observer_transcript", bind)
+        restored = s.path.with_name("restored"); restored.write_text(original); os.replace(restored, s.path)
+        for _ in range(3):
+            await s.h.run(s.reader, s.state)
+        assert (await binding(s))["transcript"] == claude_anchor(s.path)
+
+
+@pytest.mark.asyncio
+async def test_claude_lost_anchor_cas_keeps_legacy_ingest(tmp_path, monkeypatch):
+    async with claude_seat(tmp_path, monkeypatch) as s:
+        async def lost(*args, **kwargs): return False
+        monkeypatch.setattr(s.store, "bind_observer_transcript", lost)
+        before = await binding(s)
+        assert await s.h.run(s.reader, s.state) == 1
+        append(s.path, "claude", "two")
+        assert await s.h.run(s.reader, s.state) == 1
+        assert await binding(s) == before

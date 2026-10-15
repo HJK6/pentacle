@@ -337,6 +337,16 @@ then reruns the strict check and keeps the ordinary lifecycle/native-ID checks
 and durable event dedup. A recorded path or first bind cannot seed recovery.
 An unchanged strict identity still tolerates an ordinary writer gap/restart.
 
+Claude seats carry a launch-recorded `jsonl_path` and need not keep their
+transcript open, so they have no writer to census. A healthy strict pass anchors
+such a row once, best effort: only for the recorded path, through a descriptor
+whose fstat identity is still that path's file, carrying the recorded
+`claude_session_id`; a refused anchor leaves the legacy path unchanged. An
+anchored Claude row recovers only a same-PID changed start: the anchor's path
+and session ID must equal the row's launch record, and the path's device/inode
+and native session ID must equal the anchor. A changed Claude pane PID stays
+refused. Bindings refused before this anchor existed are not repaired.
+
 Refused identities produce [historical integrity incidents](../../docs/contracts/error-alerts-v1.md#historical-ingest-identity-incidents),
 not idle-timeout claims. This detector belongs to local `Ingest`; satellite
 `event.push` ownership must be inspected separately when investigating a remote

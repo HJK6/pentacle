@@ -540,8 +540,21 @@ class Ingest:
             return 0
         # Fallback authority survives a writer gap/restart in the lifecycle row.
         # Legacy launch-recorded paths keep their existing native identity guard.
-        if isinstance(binding, dict) and not row.get("jsonl_path"):
-            native = await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
+        # A launch-recorded Claude row is also anchored once, best effort, so a
+        # start-presentation shift can be repaired (issue 201; approach proposed
+        # by JOI, @Mchighlight): only for the recorded path, read through a
+        # descriptor that is still that path's file, carrying the recorded id.
+        claude_anchor = ""
+        if (isinstance(binding, dict) and provider == "claude" and row.get("jsonl_path")
+                and binding.get("transcript") is None and row.get("claude_session_id")
+                and st.path == row.get("jsonl_path")):
+            opened = await asyncio.to_thread(os.fstat, st.fd)
+            if (opened.st_dev, opened.st_ino) == file_id[:2]:
+                native = await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
+                if native == row.get("claude_session_id"):
+                    claude_anchor = native
+        if isinstance(binding, dict) and (not row.get("jsonl_path") or claude_anchor):
+            native = claude_anchor or await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
             if not native:
                 return 0
             transcript = {"path": st.path, "provider": provider, "session_id": native,
@@ -550,14 +563,14 @@ class Ingest:
             if prior is not None and prior != transcript:
                 _close_stream(st)
                 return 0
-            if prior is None:
-                if await self._provider_root(row, name) is None:
-                    return 0  # A first-bind probe cannot seed recovery during a mismatch.
-                if not await self.store.bind_observer_transcript(
-                    sid, generation=generation, pane_pid=str(row.get("pane_pid") or ""),
-                    expected=binding, transcript=transcript,
-                ):
-                    return 0
+            bound = (prior is None and await self._provider_root(row, name) is not None
+                     and await self.store.bind_observer_transcript(
+                         sid, generation=generation, pane_pid=str(row.get("pane_pid") or ""),
+                         expected=binding, transcript=transcript,
+                     ))
+            if prior is None and not bound and not claude_anchor:
+                return 0  # A first-bind probe cannot seed recovery during a mismatch.
+            if bound:  # A refused Claude anchor stays optional: keep the legacy path.
                 binding = {**binding, "transcript": transcript}
                 self.sessions.apply_durable(sid, observer_binding=binding)
                 log.info("observer transcript bound sid=%s generation=%s pid=%s",
@@ -911,11 +924,28 @@ class Ingest:
         if provider not in {"codex", "claude"} or transcript.get("provider") != provider:
             observation["reason"] = "foreign_identity"
             return row
-        fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
-        candidates = [c for c in await _open_writable_transcripts(pid) if fragment in c[0]]
-        if len(candidates) != 1:
-            return row  # ambiguous (or no) writable transcript on the new pane
-        path, identity = candidates[0]
+        if provider == "claude" and row.get("jsonl_path"):
+            # Claude Code need not keep its transcript open, so there is no
+            # writer to census. Only the SAME process may resume its anchored,
+            # launch-recorded transcript (a shifted start presentation).
+            if binding.get("pane_pid") != pid:
+                return row
+            if (transcript.get("path") != row.get("jsonl_path")
+                    or transcript.get("session_id") != row.get("claude_session_id")):
+                observation["reason"] = "foreign_identity"
+                return row
+            path = str(transcript["path"])
+            try:
+                info = await asyncio.to_thread(os.stat, path)
+            except OSError:
+                return row
+            identity = (info.st_dev, info.st_ino)
+        else:
+            fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
+            candidates = [c for c in await _open_writable_transcripts(pid) if fragment in c[0]]
+            if len(candidates) != 1:
+                return row  # ambiguous (or no) writable transcript on the new pane
+            path, identity = candidates[0]
         expected_id = transcript.get("file_id")
         if not isinstance(expected_id, (list, tuple)) or list(identity) != list(expected_id):
             observation["reason"] = "foreign_identity"
