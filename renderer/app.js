@@ -1,4 +1,4 @@
-const { bindComposerMic, uploadVoiceBlob } = require('./web_voice');
+const { bindComposerMic, createBrowserRecorder, uploadVoiceBlob } = require('./web_voice');
 const { createQuestionVoiceBar } = require('./question_voice_bar');
 /* global Terminal, FitAddon */
 
@@ -34,6 +34,9 @@ const {
   shouldRenderAlwaysOnUi,
   shouldShowAlwaysOn,
   computeMicPanelView,
+  computeMicSourceState,
+  micRoomSourceLabel,
+  micSourceStorage,
 } = require('./mic-state');
 const { createRemoteClipboardPoller } = require('./remote-clipboard-poll');
 const { createWakeDelivery } = require('./wake_delivery');
@@ -2867,6 +2870,7 @@ function ensureSlotChatSurface(slot) {
       const voiceController = bindComposerMic({
         web: window.HOST.isWeb === true, env: window, button: micEl, panel: voicePanel, composer: composeEl, takeMount: scrollEl,
         roomToggle: () => document.getElementById('mic-btn-toggle')?.click(),
+        recorder: createBrowserRecorder(window, micSourceRecorderOptions()),
         getStreamId: () => {
           const target = chatControlTargetForSlot(slot);
           return target && !target.error ? target.streamSession?.stream_id : null;
@@ -3817,6 +3821,7 @@ function renderSlotChat(slot) {
     if (!refs.questionVoiceController) {
       refs.questionVoiceController = createQuestionVoiceBar({
         env: window, mount: refs.questionEl, takeMount: refs.scrollEl, scope: refs.chatMount,
+        recorder: createBrowserRecorder(window, micSourceRecorderOptions()),
         canRecord: () => !!questionVoiceTarget(),
         getStreamId: () => assertAssistantDirectSlot(slot) ? questionVoiceTarget()?.streamSession.stream_id || null : null,
         upload: blob => uploadVoiceBlob(window.cc, blob),
@@ -7776,6 +7781,106 @@ for (const btn of document.querySelectorAll('.cell-voice')) {
   });
 }
 
+// ── Mic Source (web) ──────────────────────────────────────────
+// Which microphone this browser's chat voice and question voice use: the
+// default input (the room Source, unchanged behaviour) or a chosen local
+// input (`This device`). The room controls below do not depend on it.
+
+const micSource = { enabled: false, audioInputs: [], note: '' };
+// A declaration, so slot surfaces may build recorders before this line runs.
+function micSourceRecorderOptions() {
+  return {
+    getDeviceId: () => micSourceDeviceId(),
+    onDeviceFailure: deviceId => {
+      if (micSourceView().selectedDeviceId === deviceId) fallBackToRoom();
+    },
+    onCaptureStart: () => { if (micSource.enabled) void refreshMicInputs(); },
+  };
+}
+
+function micSourceRoomLabel() {
+  return micRoomSourceLabel({ hostNames: CONFIG.hostNames, localHost: CONFIG.chatStream?.localHost });
+}
+
+function micSourceStore() {
+  try { return window.localStorage; } catch (_) { return null; }
+}
+
+function micSourceView() {
+  return computeMicSourceState({
+    secureContext: window.isSecureContext === true,
+    audioInputs: micSource.audioInputs,
+    stored: micSourceStorage.read(micSourceStore()),
+  });
+}
+
+function micSourceDeviceId() {
+  if (!micSource.enabled) return null;
+  const view = micSourceView();
+  return view.active === 'device' ? view.selectedDeviceId || null : null;
+}
+
+function fallBackToRoom() {
+  micSourceStorage.write(micSourceStore(), null);
+  micSource.note = `The selected microphone is no longer available. Switched to ${micSourceRoomLabel()}.`;
+  renderMicSource();
+}
+
+function renderMicSource() {
+  const root = document.getElementById('mic-source');
+  if (!root || !micSource.enabled) return;
+  const view = micSourceView();
+  if (view.deviceLost) { fallBackToRoom(); return; }
+  root.hidden = false;
+  root.querySelector('[data-mic-source="room"]').textContent = micSourceRoomLabel();
+  for (const button of root.querySelectorAll('[data-mic-source]')) {
+    button.hidden = !view.options.includes(button.dataset.micSource);
+    button.setAttribute('aria-checked', String(view.active === button.dataset.micSource));
+  }
+  const note = document.getElementById('mic-source-note');
+  note.textContent = micSource.note;
+  note.hidden = !micSource.note;
+  document.getElementById('mic-local-section').hidden = view.active !== 'device';
+  const select = document.getElementById('mic-device-select');
+  select.replaceChildren(...view.devices.map((device, index) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label;
+    // Before permission inputs have no id; they are listed but not selectable.
+    option.disabled = index > 0 && !device.deviceId;
+    return option;
+  }));
+  select.value = view.selectedDeviceId;
+  document.getElementById('mic-local-active').textContent = view.active === 'device' ? `Active: ${view.activeLabel}` : '';
+}
+
+async function refreshMicInputs() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    micSource.audioInputs = devices.filter(device => device.kind === 'audioinput');
+  } catch (_) {
+    micSource.audioInputs = [];
+  }
+  renderMicSource();
+}
+
+function selectMicSource(source, deviceId = '') {
+  micSource.note = '';
+  micSourceStorage.write(micSourceStore(), { source, deviceId });
+  renderMicSource();
+}
+
+function initMicSource() {
+  micSource.enabled = true;
+  document.getElementById('mic-source')?.addEventListener('click', event => {
+    const source = event.target?.closest?.('[data-mic-source]')?.dataset.micSource;
+    if (source && source !== micSourceView().active) selectMicSource(source);
+  });
+  document.getElementById('mic-device-select')?.addEventListener('change', event => selectMicSource('device', event.target.value));
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => { void refreshMicInputs(); });
+  void refreshMicInputs();
+}
+
 // ── Mic Control ───────────────────────────────────────────────
 
 let wakeDelivery = null;
@@ -8503,6 +8608,7 @@ CFG_READY.then((cfg) => {
     });
     fetchMicStatus();
     setInterval(fetchMicStatus, 100);
+    if (window.HOST?.isWeb === true) initMicSource();
   } else {
     const section = document.getElementById('mic-section');
     if (section) section.style.display = 'none';
