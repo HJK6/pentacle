@@ -74,6 +74,16 @@ def _boot_observed(*_a, **_k):
     return deploy_mod.BootReadback(deploy_mod.BOOT_OBSERVED, "boot line observed", 0.3, 999, 111)
 
 
+def _synthetic_boot_log(tmp_path, monkeypatch):
+    # Stamp/schedule tests exercise the real scanner against owned boot evidence,
+    # never the execution host's installed plist or accumulated daemon logs.
+    log = tmp_path / "synthetic-daemon.log"
+    log.write_text(deploy_mod.V2_BOOT_LINE + " synthetic\n")
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _label: {
+        "StandardOutPath": str(log),
+    })
+
+
 def test_v2_service_config_has_no_v1_requirements_reference() -> None:
     assert set(deploy_mod.SERVICES) == {"chat-streamd-v2"}
     service = deploy_mod.SERVICES["chat-streamd-v2"]
@@ -324,9 +334,10 @@ def test_main_slow_consumer_failure_maps_to_exit_8_and_names_clients(monkeypatch
     assert "desktop-main" in err
 
 
-def test_apply_post_activation_records_fleet_smoke_failure_without_raising(monkeypatch) -> None:
+def test_apply_post_activation_records_fleet_smoke_failure_without_raising(tmp_path, monkeypatch) -> None:
     """The laneM/laneN reproduction at deploy() glue level: smoke rc!=0 records failed, does
     not raise, and leaves no post_activation_error (so main maps it to exit 6, not 2/7)."""
+    _synthetic_boot_log(tmp_path, monkeypatch)
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, _stamp: None)
     runner = _ScriptedRunner({"spawn_fleet_smoke.py": (1, "", '{"host": "hostb", "ok": false}')})
     stamp: dict = {"sha": TARGET_SHA}
@@ -348,8 +359,9 @@ def test_apply_post_activation_records_fleet_smoke_failure_without_raising(monke
     assert any("kickstart" in " ".join(c) for c in runner.calls)
 
 
-def test_apply_post_activation_treats_quota_exhausted_smoke_as_untested(monkeypatch) -> None:
+def test_apply_post_activation_treats_quota_exhausted_smoke_as_untested(tmp_path, monkeypatch) -> None:
     """Quota-only smoke is explicitly UNTESTED, never a deploy PASS."""
+    _synthetic_boot_log(tmp_path, monkeypatch)
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, _stamp: None)
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
     quota_stdout = json.dumps({
@@ -388,6 +400,7 @@ def test_main_quota_exhausted_smoke_is_untested_with_operator_line(monkeypatch, 
 @pytest.fixture
 def synthetic_smoke_pass(tmp_path, monkeypatch) -> str:
     """Explicit passing evidence for stamp/schedule tests, not an empty rc=0 oracle."""
+    _synthetic_boot_log(tmp_path, monkeypatch)
     machines_file = tmp_path / "synthetic-machines.json"
     machines_file.write_text(json.dumps([{"name": "local-fixture", "ssh_target": None}]))
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _label: {
