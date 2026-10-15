@@ -502,6 +502,43 @@ def test_private_daemon_null_intent_is_interruption(tmp_path):
         assert cell.reservations("null-seat") == [] and cell.panes("null-seat") == []
 
 
+def test_batch_resolution_retains_each_input_recovery_origin():
+    """The integrated batching callback cannot replace admission's recovery fence."""
+    from tests.test_assistant_duplicate_reply_sources import (
+        _accept, _landed_composite, _final, ROOT,
+    )
+
+    async def run():
+        sends = []
+        store, composite, generation = await _landed_composite(sends)
+        try:
+            binding = await composite.load_binding()
+            expected = {"name": composite.config.name, "stream_id": ROOT,
+                        "generation": generation, "revision": binding["revision"]}
+            head = await _accept(composite, store, "recovery-batch-head", "first synthetic input")
+            member = await _accept(composite, store, "recovery-batch-member", "second synthetic input")
+            assert member["batched_into_dispatch_id"] == head["dispatch_id"]
+            for route in (head, member):
+                assert json.loads(route["route_json"])["direct_binding_origin"] == expected
+            result = await composite.publish(
+                _final(head["dispatch_id"], head["input_identity"], "One synthetic answer.",
+                       reply_to_message_ids=[head["input_identity"], member["input_identity"]]),
+                actor_stream_id=ROOT,
+            )
+            assert result["closed_dispatch_ids"] == [member["dispatch_id"]]
+            assert len(sends) == 2
+            for route in (head, member):
+                stored = await store.get_assistant_composite_route(
+                    stream_id=composite.config.stream_id, input_identity=route["input_identity"],
+                )
+                assert json.loads(stored["route_json"])["direct_binding_origin"] == expected
+        finally:
+            await composite.stop()
+            store.stop()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--daemon-null":
         asyncio.run(daemon_null_claim(Path(sys.argv[2]), sys.argv[3]))
