@@ -206,6 +206,8 @@ def test_unavailable_after_bind_is_sustained_and_not_fabricated_health(setup, mo
         # Keep journal secure in its original directory, use a bad snapshot dir.
         nested = directory / "insecure"
         nested.mkdir(mode=0o755)
+        nested.chmod(0o755)  # Deliberately insecure regardless of the gate umask.
+        assert stat.S_IMODE(nested.stat().st_mode) == 0o755
         path = nested / "progress.json"
         write_snapshot(path, snapshot(0))
     elif fault == "oversized":

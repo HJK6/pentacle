@@ -1,5 +1,8 @@
 import importlib.util
+import os
 from pathlib import Path
+import socket
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +12,29 @@ pytestmark = pytest.mark.usefixtures("isolated_tmux_env")
 spec = importlib.util.spec_from_file_location("public_claude_usage", Path(__file__).parents[3] / "scripts/check_claude_usage.py")
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+
+
+@pytest.fixture
+def socket_transport(monkeypatch):
+    # Keep actual AF_UNIX paths below the macOS length bound, with no live tmux.
+    with tempfile.TemporaryDirectory(prefix="usage-", dir="/tmp") as root:
+        monkeypatch.setenv("TMUX_TMPDIR", root)
+        directory = Path(root) / f"tmux-{os.geteuid()}"
+        directory.mkdir(mode=0o700)
+
+        def wrap(run):
+            def transport(command, **kwargs):
+                result = run(command, **kwargs)
+                path = directory / command[2]
+                if command[3] == "new-session":
+                    with socket.socket(socket.AF_UNIX) as endpoint:
+                        endpoint.bind(str(path))
+                if command[3] == "display-message":
+                    return SimpleNamespace(stdout=str(path), returncode=0)
+                return result
+            return transport
+
+        yield wrap
 
 
 def test_weekly_labels_do_not_confuse_session_or_other_model_limits():
@@ -77,7 +103,7 @@ def test_only_explicit_weekly_fable_label_populates_fable():
     assert value["week_fable_resets"] == "Friday"
 
 
-def test_probe_sends_only_usage_and_cleans_its_dedicated_socket():
+def test_probe_sends_only_usage_and_cleans_its_dedicated_socket(socket_transport):
     calls = []
     screens = iter(["Claude Code\n❯ ", "Current week (all models)\n42% used\nResets tomorrow"])
 
@@ -85,14 +111,14 @@ def test_probe_sends_only_usage_and_cleans_its_dedicated_socket():
         calls.append(command)
         return SimpleNamespace(stdout=next(screens) if "capture-pane" in command else "", returncode=0)
 
-    assert probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=run, sleep=lambda _: None)["week_all_pct"] == 42
+    assert probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=socket_transport(run), sleep=lambda _: None)["week_all_pct"] == 42
     assert len({tuple(c[:3]) for c in calls}) == 1
     assert calls[0][2].startswith("pentacle-usage-")
     assert calls[-1][3:] == ["kill-server"]
     assert [c[3:] for c in calls if "send-keys" in c] == [["send-keys", "-t", "probe", "-l", "/usage"], ["send-keys", "-t", "probe", "Enter"]]
 
 
-def test_trust_prompt_is_not_accepted_and_cleanup_still_runs():
+def test_trust_prompt_is_not_accepted_and_cleanup_still_runs(socket_transport):
     calls = []
 
     def run(command, **kwargs):
@@ -100,29 +126,29 @@ def test_trust_prompt_is_not_accepted_and_cleanup_still_runs():
         return SimpleNamespace(stdout="Do you trust this folder?", returncode=0)
 
     with pytest.raises(RuntimeError, match="trust"):
-        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=run, sleep=lambda _: None)
+        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=socket_transport(run), sleep=lambda _: None)
     assert calls[-1][3:] == ["kill-server"]
     assert not any("send-keys" in c for c in calls)
 
 
-def test_trust_error_names_the_configured_cwd_and_the_remedy():
+def test_trust_error_names_the_configured_cwd_and_the_remedy(socket_transport):
     def run(command, **kwargs):
         return SimpleNamespace(stdout="Quick safety check: Yes, I trust this folder", returncode=0)
 
     with pytest.raises(RuntimeError) as exc:
-        probe.collect(claude="claude", tmux="tmux", cwd="/opt/probe-home", run=run, sleep=lambda _: None)
+        probe.collect(claude="claude", tmux="tmux", cwd="/opt/probe-home", run=socket_transport(run), sleep=lambda _: None)
     message = str(exc.value)
     assert "/opt/probe-home" in message          # operator-configured cwd surfaced for diagnosis
     assert "PENTACLE_USAGE_CWD" in message        # remedy: repoint at a trusted folder
     assert "trust" in message                     # remedy also covers re-trusting that folder
 
 
-def test_login_prompt_is_distinct_from_trust():
+def test_login_prompt_is_distinct_from_trust(socket_transport):
     def run(command, **kwargs):
         return SimpleNamespace(stdout="Please sign in to continue", returncode=0)
 
     with pytest.raises(RuntimeError, match="logged in"):
-        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=run, sleep=lambda _: None)
+        probe.collect(claude="claude", tmux="tmux", cwd="/tmp", run=socket_transport(run), sleep=lambda _: None)
 
 
 def test_default_cwd_is_home_not_process_cwd(monkeypatch):
@@ -195,3 +221,216 @@ def test_oauth_path_runs_only_when_opted_in(monkeypatch, capsys):
     assert probe.main() == 0
     assert captured["token"] == "secure-value"
     assert json.loads(capsys.readouterr().out)["week_all_pct"] == 7
+
+
+@pytest.fixture
+def owned_probe_socket(monkeypatch):
+    import uuid
+    with tempfile.TemporaryDirectory(prefix="usage-", dir="/tmp") as root:
+        monkeypatch.setenv("TMUX_TMPDIR", root)
+        directory = Path(root) / f"tmux-{os.geteuid()}"
+        directory.mkdir(mode=0o700)
+        endpoints = []
+
+        def create(live=False):
+            name = "pentacle-usage-" + uuid.uuid4().hex
+            path = directory / name
+            endpoint = socket.socket(socket.AF_UNIX)
+            endpoint.bind(str(path))
+            if live:
+                endpoint.listen(1)
+                endpoints.append(endpoint)
+            else:
+                endpoint.close()
+            return path, probe._capture_probe_socket(name, str(path))
+
+        yield create
+        for endpoint in endpoints:
+            endpoint.close()
+
+
+def test_dead_captured_socket_is_removed_and_missing_is_idempotent(owned_probe_socket):
+    path, captured = owned_probe_socket()
+    probe._remove_dead_probe_socket(captured)
+    assert not path.exists()
+    probe._remove_dead_probe_socket(captured)
+
+
+def test_live_socket_is_preserved(owned_probe_socket):
+    path, captured = owned_probe_socket(live=True)
+    with pytest.raises(RuntimeError, match="still live"):
+        probe._remove_dead_probe_socket(captured)
+    assert path.exists()
+
+
+@pytest.mark.parametrize("replacement", ["socket", "file", "symlink", "directory"])
+def test_changed_entry_or_parent_is_preserved(owned_probe_socket, replacement):
+    path, captured = owned_probe_socket()
+    if replacement == "directory":
+        path.parent.rename(path.parent.with_name("retained-original"))
+        path.parent.mkdir(mode=0o700)
+        path.write_text("new directory entry")
+    else:
+        path.rename(path.with_name(path.name + "-original"))
+        if replacement == "socket":
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(path))
+        elif replacement == "file":
+            path.write_text("unrelated file")
+        else:
+            target = path.parent / "unrelated-file"
+            target.write_text("preserve")
+            path.symlink_to(target)
+    with pytest.raises(RuntimeError, match="changed"):
+        probe._remove_dead_probe_socket(captured)
+    assert path.exists()
+
+
+@pytest.mark.parametrize("invalid", ["name", "parent_symlink", "entry_symlink", "file", "public_directory", "wrong_uid"])
+def test_capture_rejects_unowned_or_unexpected_paths(owned_probe_socket, monkeypatch, invalid):
+    path, _ = owned_probe_socket()
+    name = path.name
+    if invalid == "name":
+        name += "-other"
+    elif invalid == "parent_symlink":
+        actual = path.parent.with_name("actual-directory")
+        path.parent.rename(actual)
+        path.parent.symlink_to(actual, target_is_directory=True)
+    elif invalid in {"entry_symlink", "file"}:
+        path.unlink()
+        if invalid == "file":
+            path.write_text("not a socket")
+        else:
+            target = path.parent / "unrelated-file"
+            target.write_text("preserve")
+            path.symlink_to(target)
+    elif invalid == "public_directory":
+        path.parent.chmod(0o755)
+    else:
+        original = Path.lstat
+        def different_owner(value, *args, **kwargs):
+            result = original(value, *args, **kwargs)
+            if value.resolve() == path.parent.resolve():
+                fields = list(result)
+                fields[4] = os.geteuid() + 1
+                return os.stat_result(fields)
+            return result
+        monkeypatch.setattr(Path, "lstat", different_owner)
+    with pytest.raises(RuntimeError):
+        probe._capture_probe_socket(name, str(path))
+    assert path.exists()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "denied"])
+def test_unknown_endpoint_liveness_preserves_socket(owned_probe_socket, monkeypatch, failure):
+    import errno
+    path, captured = owned_probe_socket()
+    class Endpoint:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def connect(self, value):
+            if failure == "timeout":
+                raise TimeoutError()
+            raise PermissionError(errno.EACCES, "synthetic denied endpoint")
+    monkeypatch.setattr(probe.unix_socket, "socket", lambda *args: Endpoint())
+    with pytest.raises(RuntimeError, match="liveness unavailable"):
+        probe._remove_dead_probe_socket(captured)
+    assert path.exists()
+
+
+def test_replacement_during_dead_endpoint_probe_is_not_unlinked(owned_probe_socket, monkeypatch):
+    import errno
+    path, captured = owned_probe_socket()
+    original = socket.socket
+    retained = path.with_name(path.name + "-original")
+    class Endpoint:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def connect(self, value):
+            path.rename(retained)
+            with original(socket.AF_UNIX) as replacement:
+                replacement.bind(str(path))
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic dead endpoint")
+    monkeypatch.setattr(probe.unix_socket, "socket", lambda *args: Endpoint())
+    with pytest.raises(RuntimeError, match="changed"):
+        probe._remove_dead_probe_socket(captured)
+    assert path.exists() and retained.exists()
+
+
+@pytest.mark.parametrize("kill_failure", ["nonzero", "timeout", "oserror"])
+@pytest.mark.parametrize("primary_failure", [False, True])
+def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport, kill_failure, primary_failure):
+    import subprocess
+    commands = []
+    captures = 0
+    def run(command, **kwargs):
+        nonlocal captures
+        commands.append(command)
+        if command[3] == "kill-server":
+            if kill_failure == "timeout":
+                raise subprocess.TimeoutExpired(command, 5, stderr="DO_NOT_LEAK")
+            if kill_failure == "oserror":
+                raise OSError("DO_NOT_LEAK")
+            return SimpleNamespace(returncode=1, stdout="DO_NOT_LEAK")
+        if command[3] == "capture-pane":
+            captures += 1
+            screen = "Do you trust this folder?" if primary_failure else (
+                "❯" if captures == 1 else "Current week (all models)\n42% used")
+            return SimpleNamespace(returncode=0, stdout=screen)
+        return SimpleNamespace(returncode=0, stdout="")
+    with pytest.raises(RuntimeError, match="trust" if primary_failure else "socket kill failed") as error:
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=socket_transport(run), sleep=lambda _: None)
+    assert "DO_NOT_LEAK" not in str(error.value)
+    name = commands[0][2]
+    path = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.geteuid()}" / name
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("timeout_kind", ["overall", "subprocess"])
+def test_probe_timeouts_remove_the_owned_dead_socket(socket_transport, timeout_kind):
+    import subprocess
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[3] == "capture-pane" and timeout_kind == "subprocess":
+            raise subprocess.TimeoutExpired(command, 5)
+        return SimpleNamespace(returncode=0, stdout="❯" if command[3] == "capture-pane" else "")
+    ticks = iter([0, 1, 3])
+    with pytest.raises(subprocess.TimeoutExpired if timeout_kind == "subprocess" else RuntimeError):
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", timeout=2,
+                      run=socket_transport(run), sleep=lambda _: None,
+                      monotonic=lambda: next(ticks))
+    path = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.geteuid()}" / commands[0][2]
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("failure", ["capture", "creation_timeout"])
+def test_missing_ownership_capture_kills_but_never_guesses_an_unlink(owned_probe_socket, monkeypatch, failure):
+    import subprocess
+    path, _ = owned_probe_socket()
+    monkeypatch.setattr(probe.uuid, "uuid4", lambda: SimpleNamespace(hex=path.name.removeprefix("pentacle-usage-")))
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[3] == "new-session" and failure == "creation_timeout":
+            raise subprocess.TimeoutExpired(command, 5)
+        return SimpleNamespace(returncode=0, stdout="/unrelated/socket")
+    with pytest.raises(subprocess.TimeoutExpired if failure == "creation_timeout" else RuntimeError) as error:
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run)
+    assert commands[-1][3] == "kill-server"
+    assert path.exists()
+    assert any("no unlink attempted" in note for note in error.value.__notes__)
+
+
+def test_successful_usage_with_live_endpoint_reports_cleanup_failure(owned_probe_socket, monkeypatch):
+    path, _ = owned_probe_socket(live=True)
+    monkeypatch.setattr(probe.uuid, "uuid4", lambda: SimpleNamespace(hex=path.name.removeprefix("pentacle-usage-")))
+    screens = iter(["❯", "Current week (all models)\n42% used"])
+    def run(command, **kwargs):
+        text = str(path) if command[3] == "display-message" else next(screens) if command[3] == "capture-pane" else ""
+        return SimpleNamespace(returncode=0, stdout=text)
+    with pytest.raises(RuntimeError, match="cleanup unconfirmed"):
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run, sleep=lambda _: None)
+    assert path.exists()
