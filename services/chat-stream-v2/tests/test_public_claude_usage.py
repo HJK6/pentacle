@@ -404,3 +404,33 @@ def test_probe_timeouts_remove_the_owned_dead_socket(socket_transport, timeout_k
                       monotonic=lambda: next(ticks))
     path = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.geteuid()}" / commands[0][2]
     assert not path.exists()
+
+
+@pytest.mark.parametrize("failure", ["capture", "creation_timeout"])
+def test_missing_ownership_capture_kills_but_never_guesses_an_unlink(owned_probe_socket, monkeypatch, failure):
+    import subprocess
+    path, _ = owned_probe_socket()
+    monkeypatch.setattr(probe.uuid, "uuid4", lambda: SimpleNamespace(hex=path.name.removeprefix("pentacle-usage-")))
+    commands = []
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[3] == "new-session" and failure == "creation_timeout":
+            raise subprocess.TimeoutExpired(command, 5)
+        return SimpleNamespace(returncode=0, stdout="/unrelated/socket")
+    with pytest.raises(subprocess.TimeoutExpired if failure == "creation_timeout" else RuntimeError) as error:
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run)
+    assert commands[-1][3] == "kill-server"
+    assert path.exists()
+    assert any("no unlink attempted" in note for note in error.value.__notes__)
+
+
+def test_successful_usage_with_live_endpoint_reports_cleanup_failure(owned_probe_socket, monkeypatch):
+    path, _ = owned_probe_socket(live=True)
+    monkeypatch.setattr(probe.uuid, "uuid4", lambda: SimpleNamespace(hex=path.name.removeprefix("pentacle-usage-")))
+    screens = iter(["❯", "Current week (all models)\n42% used"])
+    def run(command, **kwargs):
+        text = str(path) if command[3] == "display-message" else next(screens) if command[3] == "capture-pane" else ""
+        return SimpleNamespace(returncode=0, stdout=text)
+    with pytest.raises(RuntimeError, match="cleanup unconfirmed"):
+        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run, sleep=lambda _: None)
+    assert path.exists()
