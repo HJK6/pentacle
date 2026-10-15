@@ -648,7 +648,8 @@ test('mobile parity: pane and durable questions share one complete submission fl
   const doc = h.dom.window.document;
   assert.equal(doc.querySelectorAll('.desktop-question-dot').length, 2, 'pane and durable are both reachable');
   doc.querySelector('.slot-chat-question-option[data-option="1"]').click();
-  assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, true);
+  assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, false);
+  assert.equal(doc.querySelector('.slot-chat-question-submit').textContent, 'Send 1 of 2');
   doc.querySelectorAll('.desktop-question-dot')[1].click();
   doc.querySelector('.slot-chat-question-option[data-option="1"]').click();
   assert.equal(doc.querySelector('.slot-chat-question-submit').disabled, false);

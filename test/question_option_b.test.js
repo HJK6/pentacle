@@ -366,3 +366,12 @@ test('zero-option custom-enabled free text is visible, labeled and submits once'
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(submissions, [[{ customText: 'typed answer' }]]);
 });
+
+test('partial deck uses completed unlocked entries for labels and excludes incomplete pane groups', () => {
+  const doc=freshDoc(),container=doc.getElementById('q');
+  const question={multi:true,questions:[{index:0,prompt:'One',_source:'durable',question_id:'q1',options:[{index:1,label:'Yes'}]},{index:1,prompt:'Two',_source:'durable',question_id:'q2',options:[{index:1,label:'Yes'}]}]};
+  renderQuestionOptionB({container,doc,question,streamId:'deck',questionSig:'sig',drafts:{},answeredSig:{},buildAnswerText:()=>'',partialSubmit:true});
+  const button=container.querySelector('.slot-chat-question-submit');assert.equal(button.disabled,true);
+  container.querySelector('[data-question-index="0"][data-option="1"]').click();assert.equal(button.disabled,false);assert.equal(button.textContent,'Send 1 of 2');
+  container.querySelector('[data-question-index="1"][data-option="1"]').click();assert.equal(button.textContent,'Send all answers');
+});

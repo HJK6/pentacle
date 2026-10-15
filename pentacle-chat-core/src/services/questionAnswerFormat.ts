@@ -1,5 +1,8 @@
 import type { PentacleQuestion, PentacleQuestionItem, PentacleQuestionOption } from '../types/pentacle';
 
+// Reserved ordinary text answer used when the operator declines a durable question.
+export const QUESTION_SKIP_TEXT = 'Skipped by operator';
+
 export interface PentacleQuestionAnswerValue {
   selectedOptionLabel?: string;
   selectedOptionLabels?: readonly string[];

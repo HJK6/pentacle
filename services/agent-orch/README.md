@@ -218,6 +218,11 @@ With `--await-answer`, the CLI requires a discoverable publishing stream (or `--
 
 `agent-orch prompt` is the standard protocol for agent-to-operator questions. It is provider-agnostic: stream ids and optional provider labels are metadata only, so Codex and Claude callers use the same `agent_question.v1` envelope. Agents should use `prompt ask` instead of ad hoc chat questions when operator input is needed.
 
+A client Skip is an ordinary text answer equal to chat-core `QUESTION_SKIP_TEXT`
+(`Skipped by operator`). Treat this reserved answer as the operator declining the
+question. It is stored as `answered` and uses the usual `[notification.answer]`
+tell, `notification.await`, and prompt status/list paths.
+
 `prompt ask` validates the envelope, sends `prompt.ask` to `chat_streamd`, persists the question by `question_id`, and publishes an operator Updates card through the notification store. Repeating the same open `question_id`/dedup key refreshes that card instead of creating another one. The command returns `prompt.ask.ok` immediately unless `--await-answer` is set; answers still come only through the authenticated notification resolve path.
 
 When the producing seat has a lineage parent, the daemon also sends that live
@@ -1516,3 +1521,9 @@ cannot insert another copy or rewrite immutable historical USER rows. Queued
 timestamps and delivery-state metadata retain their existing behavior. Stored
 USER records retain their existing operator attribution; the new reservation
 applies at source normalization.
+
+The existing protocol stores/reports a choice Skip as `custom_text` and a
+free-text Skip as `text`. Both carry the same reserved value. Mobile's canonical
+`prompt.answer` always sends `text`; the daemon maps choice text to the existing
+`custom_text` storage path. Web's existing notification resolver sends that
+choice alias directly. Asking agents recognize either field.
