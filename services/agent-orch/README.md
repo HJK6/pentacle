@@ -343,6 +343,31 @@ URL rule, token/unknown-mode refusal and isolation requirements. Full package
 publication must preserve current hosted records/order/visibility as described in
 [Runtime catalog](../../docs/dashboards_view.md#runtime-catalog).
 
+To recover an orphaned catalog owner, the currently bound front desk generation
+or an authenticated operator connection can transfer the configured catalog to
+an open internal fleet seat:
+
+```sh
+agent-orch dashboard transfer-owner --to-stream node-alpha:new-seat \
+  --target-generation TARGET_GENERATION --expected-owner node-alpha:old-seat \
+  --reason 'Recover catalog publication after owner closure'
+```
+
+Read the target's current generation and the catalog's owner before submitting.
+The command requires both to match; stale generations and changed owners refuse
+without a write. An ordinary seat token, including one with operator elevation,
+does not grant transfer authority. A credential-authenticated operator connection
+can submit without a seat token. The command selects only the server-configured
+catalog; it accepts no asset selector or replacement body.
+
+A successful `dashboard.owner.transfer.ok` receipt includes the old and new owner,
+target generation and durable `audit_id`. Ownership and comment anchors move in
+one transaction with the audit; content, provenance and review history remain.
+A same-owner request is a validated no-op with `unchanged:true` and no audit row.
+If `broadcast_delivered:false`, the transfer still committed: read back the catalog
+owner before publishing. The new owner can use the existing full-catalog publish
+path. Transfer does not publish a package or reopen the former owner.
+
 ## Self-titling
 
 Agents self-title with `agent-orch title "<succinct durable goal>"` once they understand the session goal. The shared AGENTS.md rule is the primary mechanism; the daemon only backstops desktop-opened interactive chats with a low-frequency naming nudge through the same peer-delivery path when they remain unnamed.

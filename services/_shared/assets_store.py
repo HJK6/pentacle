@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -243,6 +244,11 @@ class AssetStore:
                 "CREATE INDEX IF NOT EXISTS idx_asset_comments_asset "
                 "ON asset_comments(host, session_name, asset_id, resolved, created_at)"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS catalog_owner_transfers ("
+                "audit_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, "
+                "request_id TEXT NOT NULL, details TEXT NOT NULL)"
+            )
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._conn.commit()
 
@@ -378,6 +384,60 @@ class AssetStore:
                 "host", "session_name", "stream_id", "asset_id", "title", "content_type", "tags", "producer", "spec_id")},
                 body=json.dumps(catalog, ensure_ascii=False))
             return updated, outcome
+
+    def transfer_catalog_owner(self, *, spec_id: str, expected_owner: str,
+                               target_stream_id: str, target_generation: str,
+                               actor: dict, reason: str, request_id: str) -> tuple[dict, dict, dict]:
+        """Move one catalog and its comments with an audit in the same transaction.
+
+        Caller/target seat admission belongs to the handler. The expected owner
+        is checked here against the row being moved, never a prior snapshot.
+        """
+        with self._lock, self._conn:
+            self._require_open()
+            rows = self._conn.execute(
+                "SELECT * FROM assets WHERE spec_id = ? AND asset_id = ?",
+                (spec_id, "dashboard-catalog"),
+            ).fetchall()
+            if not rows:
+                raise AssetNotFound("dashboard-catalog")
+            if len(rows) != 1:
+                raise ValueError("dashboard_catalog_ambiguous")
+            before = _row_to_dict(rows[0])
+            if before["content_type"] != "dashboard-catalog":
+                raise InvalidAsset("configured catalog has the wrong content type")
+            old_owner = f'{before["host"]}:{before["session_name"]}'
+            if old_owner != expected_owner:
+                raise ValueError("dashboard_owner_mismatch")
+            outcome = {"old_owner": old_owner, "new_owner": target_stream_id,
+                       "target_generation": target_generation, "unchanged": old_owner == target_stream_id,
+                       "audit_id": None}
+            if outcome["unchanged"]:
+                return before, before, outcome
+            host, name = target_stream_id.split(":", 1)
+            if self._get_locked(host, name, "dashboard-catalog") is not None:
+                raise ValueError("dashboard_owner_collision")
+            timestamp, audit_id = _iso_now(), str(uuid.uuid4())
+            self._conn.execute(
+                "UPDATE assets SET host = ?, session_name = ?, stream_id = ?, updated_at = ? "
+                "WHERE host = ? AND session_name = ? AND asset_id = ?",
+                (host, name, target_stream_id, timestamp, before["host"], before["session_name"], "dashboard-catalog"),
+            )
+            self._conn.execute(
+                "UPDATE asset_comments SET host = ?, session_name = ? "
+                "WHERE host = ? AND session_name = ? AND asset_id = ?",
+                (host, name, before["host"], before["session_name"], "dashboard-catalog"),
+            )
+            details = {"actor": actor, "reason": reason, "spec_id": spec_id,
+                       "asset_id": "dashboard-catalog", "old_owner": old_owner,
+                       "new_owner": target_stream_id, "target_generation": target_generation,
+                       "body_sha256": hashlib.sha256(before["body"].encode("utf-8")).hexdigest()}
+            self._conn.execute(
+                "INSERT INTO catalog_owner_transfers (audit_id, created_at, request_id, details) VALUES (?, ?, ?, ?)",
+                (audit_id, timestamp, request_id, json.dumps(details, sort_keys=True)),
+            )
+            outcome["audit_id"] = audit_id
+            return before, self._get_locked(host, name, "dashboard-catalog"), outcome
 
     def list_assets(
         self,

@@ -658,7 +658,8 @@ async def run(args: argparse.Namespace) -> int:
     # connection's in-flight uploads down through this reference.
     server.blobs = blobs
     assets = Assets(args.assets_db, sessions=sessions, comms=comms, broadcast=server.broadcast,
-                    fleet_hosts={args.local_host, *peers}, catalog_spec_id=args.dashboard_catalog_spec_id)
+                    fleet_hosts={args.local_host, *peers}, catalog_spec_id=args.dashboard_catalog_spec_id,
+                    assistant_binding=assistant_composite.binding if assistant_composite.enabled else None)
     server.handlers.update(assets.wire_handlers())
     # UI-sent verb group (mobile/desktop day-1): models/grant_token/register_push
     # lifted clean; send.interrupt/close.cancel/question.dismiss/enroll/specs.*

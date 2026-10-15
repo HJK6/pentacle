@@ -2771,16 +2771,24 @@ def dashboard(args: argparse.Namespace) -> int:
     try:
         config = load_config()
         caller = discover_leader_stream_id_short(config)
-        if not caller:
+        if not caller and command != "transfer-owner":
             raise ValueError("authenticated internal seat identity is required")
-        payload = {"type":f"dashboard.{command}", "from_stream_id":caller, "id":args.id}
+        verb = "dashboard.owner.transfer" if command == "transfer-owner" else f"dashboard.{command}"
+        payload = {"type": verb}
+        if caller:
+            payload["from_stream_id"] = caller
+        if command == "transfer-owner":
+            payload.update(to_stream_id=args.to_stream, target_generation=args.target_generation,
+                           expected_owner=args.expected_owner, reason=args.reason)
+        else:
+            payload["id"] = args.id
         if command == "add":
             payload.update(title=args.title, url=args.url)
             if args.order is not None: payload["order"] = args.order
             if args.hidden is not None: payload["hidden"] = args.hidden
         response = asyncio.run(dashboard_once(config, payload, timeout=args.timeout))
         _print_response(response)
-        return 0 if response.get("type") == f"dashboard.{command}.ok" else 1
+        return 0 if response.get("type") == f"{verb}.ok" else 1
     except ValueError as exc:
         _print_response({"type":"dashboard.error", "error_code":"dashboard_invalid", "error":str(exc)})
         return 2
@@ -5702,6 +5710,14 @@ def build_parser() -> argparse.ArgumentParser:
             dp.add_argument("--order", type=int)
             dp.add_argument("--hidden", action="store_true", default=None)
         dp.set_defaults(func=dashboard)
+
+    transfer_owner = dashboard_commands.add_parser("transfer-owner")
+    transfer_owner.add_argument("--to-stream", required=True)
+    transfer_owner.add_argument("--target-generation", required=True)
+    transfer_owner.add_argument("--expected-owner", required=True)
+    transfer_owner.add_argument("--reason", required=True)
+    transfer_owner.add_argument("--timeout", type=float, default=30.0)
+    transfer_owner.set_defaults(func=dashboard)
 
     asset_parser = subparsers.add_parser("asset")
     asset_parser.add_argument("asset_command", nargs="?", choices=["publish", "list", "get", "comments", "health"], default="publish")

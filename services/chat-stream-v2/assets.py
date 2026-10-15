@@ -70,11 +70,13 @@ class Assets:
 
     def __init__(self, db_path: str = DEFAULT_ASSETS_DB, *, sessions: Any = None,
                  comms: Any = None, broadcast: Any = None, fleet_hosts: Any = (),
-                 catalog_spec_id: str = DEFAULT_DASHBOARD_CATALOG_SPEC_ID) -> None:
+                 catalog_spec_id: str = DEFAULT_DASHBOARD_CATALOG_SPEC_ID,
+                 assistant_binding: Callable[[], Awaitable[dict]] | None = None) -> None:
         self._db_path = db_path
         self._sessions = sessions
         self._fleet_hosts = frozenset(fleet_hosts)
         self._catalog_spec_id = catalog_spec_id
+        self._assistant_binding = assistant_binding
         self._comms = comms
         self._broadcast = broadcast
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asset-store")
@@ -111,7 +113,8 @@ class Assets:
                  "comment.add", "comment.edit", "comment.delete", "comment.resolve",
                  "comments.list", "comments.send_to_chat")
         return {**{f"asset.{v}": self.asset for v in verbs},
-                "dashboard.add": self.dashboard, "dashboard.remove": self.dashboard}
+                "dashboard.add": self.dashboard, "dashboard.remove": self.dashboard,
+                "dashboard.owner.transfer": self.transfer_catalog_owner}
 
     def _catalog_writer(self, msg: dict) -> dict:
         auth = msg.get("_auth_context") or {}
@@ -120,16 +123,100 @@ class Assets:
                 or any(auth.get(k) for k in ("service_authenticated", "dot_principal", "scoped_principal", "scope"))
                 or self._sessions is None):
             raise ValueError("asset_unauthorized")
-        row = self._sessions.get(sid)
+        return self._catalog_seat(sid, auth.get("session_generation"))
+
+    def _catalog_seat(self, sid: str, generation: str | None = None) -> dict:
+        row = self._sessions.get(sid) if self._sessions is not None else None
         if (not isinstance(row, dict) or row.get("status") != "open"
                 or row.get("host") not in self._fleet_hosts
                 or sid.split(":", 1)[0] != row.get("host")
                 or row.get("role") in {"external", "dot", "report-producer", "report_producer"}
-                or row.get("scope") or row.get("dot_principal")
-                or (auth.get("session_generation") is not None
-                    and row.get("session_generation") != auth["session_generation"])):
+                or row.get("scope") or row.get("dot_principal") or row.get("scoped_principal")
+                or (generation is not None and row.get("session_generation") != generation)):
             raise ValueError("asset_unauthorized")
         return {**row, "stream_id": sid}
+
+    async def transfer_catalog_owner(self, msg: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(msg.get("request_id") or "")
+        try:
+            await self._await_ready()
+            if any(key in msg for key in ("spec_id", "asset_id", "body", "content_type")):
+                raise InvalidAsset("owner transfer selects only the configured catalog and cannot change its body")
+            for key in ("to_stream_id", "expected_owner"):
+                value = msg.get(key)
+                if not isinstance(value, str) or not re.fullmatch(r"[^:\s]+:[^:\s]+", value):
+                    raise InvalidAsset(f"{key} must be a canonical host:session")
+            generation = msg.get("target_generation")
+            if not isinstance(generation, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", generation):
+                raise InvalidAsset("target_generation is required")
+            reason = msg.get("reason")
+            if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500:
+                raise InvalidAsset("reason must be 1-500 characters")
+            if not request_id.strip() or len(request_id) > 200:
+                raise InvalidAsset("request_id is required and must be at most 200 characters")
+            auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+            if any(auth.get(k) for k in ("service_authenticated", "dot_principal", "scoped_principal", "scope")):
+                raise ValueError("asset_unauthorized")
+            credential = auth.get("credential_id")
+            connection_operator = bool(
+                auth.get("operator_authenticated") is True and auth.get("operator_trusted") is True
+                and auth.get("transport") == "v2" and isinstance(credential, str) and credential
+                and auth.get("operator_principal") == f"operator:{credential}"
+            )
+            if connection_operator:
+                actor = {"kind": "operator", "identity": auth["operator_principal"], "generation": None}
+            else:
+                self._catalog_writer(msg)
+                actor_generation = auth.get("session_generation")
+                if not isinstance(actor_generation, str) or not actor_generation or self._assistant_binding is None:
+                    raise ValueError("asset_unauthorized")
+                try:
+                    binding = await self._assistant_binding()
+                except Exception:
+                    raise ValueError("asset_unauthorized") from None
+                if (not isinstance(binding, dict) or binding.get("stream_id") != auth["stream_id"]
+                        or binding.get("generation") != actor_generation):
+                    raise ValueError("asset_unauthorized")
+                actor = {"kind": "front_desk", "identity": auth["stream_id"], "generation": actor_generation}
+            before, record, outcome = await self._run(self._transfer_catalog_checked, msg, actor, reason.strip())
+        except AssetNotFound:
+            return self._dashboard_error(request_id, "dashboard_catalog_missing")
+        except InvalidAsset as exc:
+            return self._dashboard_error(request_id, "dashboard_invalid", message=str(exc))
+        except ValueError as exc:
+            code = "dashboard_unauthorized" if str(exc) == "asset_unauthorized" else str(exc)
+            return self._dashboard_error(request_id, code if code.startswith("dashboard_") else "dashboard_invalid")
+        except asyncio.TimeoutError:
+            return self._dashboard_error(request_id, "asset_store_not_ready")
+        except Exception:
+            log.exception("catalog owner transfer failed before commit")
+            return self._dashboard_error(request_id, "asset_store_error")
+        reply = {"type": "dashboard.owner.transfer.ok", "request_id": request_id,
+                 "asset": asset_metadata(record), **outcome}
+        if not outcome["unchanged"]:
+            delivered = self._broadcast is not None
+            for send, item in ((self._broadcast_removed, before), (self._broadcast_update, record)):
+                try:
+                    await send(item)
+                except Exception:
+                    delivered = False
+                    log.exception("catalog ownership committed but broadcast failed audit_id=%s", outcome["audit_id"])
+            reply["broadcast_delivered"] = delivered
+        return reply
+
+    def _transfer_catalog_checked(self, msg: dict, actor: dict, reason: str) -> tuple[dict, dict, dict]:
+        # Seat state is checked on the serialized worker directly before the
+        # transaction, not just before awaiting the assistant binding.
+        if actor["kind"] == "front_desk":
+            self._catalog_writer(msg)
+        self._catalog_seat(msg["to_stream_id"], msg["target_generation"])
+        if self._store is None:
+            raise AssetStoreError("asset store not started")
+        return self._store.transfer_catalog_owner(
+            spec_id=self._catalog_spec_id, expected_owner=msg["expected_owner"],
+            target_stream_id=msg["to_stream_id"], target_generation=msg["target_generation"],
+            actor=actor, reason=reason, request_id=str(msg["request_id"]),
+        )
 
     async def dashboard(self, msg: dict[str, Any]) -> dict[str, Any]:
         request_id = str(msg.get("request_id") or "")

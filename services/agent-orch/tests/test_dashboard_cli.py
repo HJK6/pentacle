@@ -43,3 +43,30 @@ def test_dashboard_transport_supplies_seat_token_and_expected_response_family(mo
     monkeypatch.setattr(wsclient,"_one_shot_rpc",rpc)
     result=asyncio.run(wsclient.dashboard_once(Config("ws://unused","","node-alpha",tmp_path),{"type":"dashboard.remove","id":"hosted-example","from_stream_id":"node-alpha:seat"}))
     assert result["type"]=="dashboard.remove.ok"
+
+
+@pytest.mark.parametrize("caller", ["node-alpha:front-desk", None])
+def test_catalog_owner_transfer_payload_and_operator_connection(monkeypatch, capsys, caller):
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _: caller)
+    async def rpc(config, payload, **kwargs):
+        calls.append(payload)
+        return {"type": "dashboard.owner.transfer.ok", "audit_id": "audit-1"}
+    monkeypatch.setattr(cli, "dashboard_once", rpc)
+    args = cli.build_parser().parse_args(["dashboard", "transfer-owner", "--to-stream", "node-alpha:new",
+        "--target-generation", "new-generation", "--expected-owner", "node-alpha:closed", "--reason", "Recover catalog"])
+    assert cli.dashboard(args) == 0
+    expected = {"type": "dashboard.owner.transfer", "to_stream_id": "node-alpha:new", "target_generation": "new-generation",
+                "expected_owner": "node-alpha:closed", "reason": "Recover catalog"}
+    if caller: expected["from_stream_id"] = caller
+    assert calls == [expected]
+    async def denied(*args, **kwargs):
+        return {"type": "dashboard.error", "error_code": "dashboard_owner_mismatch"}
+    monkeypatch.setattr(cli, "dashboard_once", denied)
+    assert cli.dashboard(args) == 1
+
+
+def test_catalog_owner_transfer_requires_generation_and_expected_owner():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["dashboard", "transfer-owner", "--to-stream", "node-alpha:new", "--reason", "Recover"])
