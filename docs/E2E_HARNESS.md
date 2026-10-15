@@ -259,23 +259,43 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 #### Full aggregate and evidence boundaries
 
 The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**15 named scenarios**:
+**23 named scenarios**:
 
 1. `transport-and-config`
-2. `settings-version-line`
-3. `sidebar-from-inventory`
-4. `coloured-host-glyphs`
-5. `slot-attach-type-resize-kill`
-6. `chat-transcript-paint`
-7. `chat-file-delivery`
-8. `web-chat-voice`
-9. `public-chat-renderer-contracts`
-10. `mic-panel-answer-window`
-11. `slot-survives-cc-reconnect`
-12. `slot-column-split`
-13. `question-free-text`
-14. `closed-chat-slot`
-15. `host-restart-restores-input`
+2. `cross-origin-boundary`
+3. `settings-version-line`
+4. `sidebar-from-inventory`
+5. `coloured-host-glyphs`
+6. `slot-attach-type-resize-kill`
+7. `chat-transcript-paint`
+8. `chat-file-delivery`
+9. `web-chat-voice`
+10. `public-chat-renderer-contracts`
+11. `mic-panel-answer-window`
+12. `mic-source-selector`
+13. `slot-survives-cc-reconnect`
+14. `slot-column-split`
+15. `question-free-text`
+16. `question-partial-send`
+17. `question-skip`
+18. `web-voice-answers`
+19. `web-dashboards-revamp`
+20. `dashboard_catalog`
+21. `web-work-lanes`
+22. `closed-chat-slot`
+23. `host-restart-restores-input`
+
+`cross-origin-boundary` is hermetic-only. A page on a second loopback origin
+must get the host's own 403 for a `fetch` (read from Chrome's network log, not
+a generic CORS failure), must fail to open the unauthenticated `/cc` bridge
+(the host's connection count is read while the page holds the attempt), and
+must receive `authentication_required`, never a snapshot, from the daemon. The
+same page, holding the gate's isolated operator credential, is admitted (hello,
+snapshot, `list_sessions`); only the single-use proof enters the page. A
+DNS-rebinding hostname, mapped to loopback by a Chrome `--host-resolver-rules`
+entry merged into the fixture's rules, must get `origin_refused`. The served
+same-origin page and an Origin-less native daemon client are the positive
+controls.
 
 After a successful no-profile main run, the command also runs both
 [history retention](../test/e2e/web_chat_history_retention_gate.cjs) and
@@ -292,7 +312,7 @@ Keep these evidence levels explicit in a candidate report:
   the tested logic and renderer contract, not physical capture, real Chrome
   layout/animation or deployed backend behavior
 - **Hermetic Chrome, local or hosted:** the built web bundle, real browser
-  recorder and computed UI, real fixture blob upload, 15 scenarios and both
+  recorder and computed UI, real fixture blob upload, every registered scenario and both
   history child gates. The existing [Public checks workflow](../.github/workflows/predeploy-tests.yml)
   runs the unit/build commands above and installs Chrome before the web gate.
   Bind a hosted result to the

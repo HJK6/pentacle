@@ -179,3 +179,72 @@ test('hosted auth mode is derived from the effective server auth object only', (
     assert.equal(hostedDashboardAuthMode(auth), 'unknown');
   }
 });
+
+test('unauthenticated loopback admits local tools and same-origin pages, not foreign sites or DNS rebinding', async (t) => {
+  const { profile, home } = scratch();
+  const host = await startHost(t, ['--profile', profile, '--port', '0'], home);
+  const authority = `127.0.0.1:${host.port}`;
+  const origin = `http://${authority}`;
+  // Raw requests let duplicate Host fields reach the SERVER. Node's HTTP
+  // client rejects a Host array before sending, which is not security evidence.
+  const request = (headers, upgrade = false) => new Promise((resolve, reject) => {
+    const socket = require('node:net').connect(host.port, '127.0.0.1');
+    const timer = setTimeout(() => { socket.destroy(); reject(Error('raw HTTP timeout')); }, 3000);
+    socket.once('close', () => clearTimeout(timer));
+    socket.once('error', reject);
+    let response = '';
+    socket.on('data', chunk => {
+      response += chunk;
+      if (!response.includes('\r\n')) return;
+      const status = Number(response.match(/^HTTP\/1\.1 (\d{3})/)?.[1]);
+      socket.destroy(); resolve(status);
+    });
+    socket.once('connect', () => {
+      const fields = { Host: authority, ...headers };
+      const lines = [`GET ${upgrade ? '/cc' : '/api/config'} HTTP/1.1`];
+      for (const [key, value] of Object.entries(fields)) {
+        for (const item of Array.isArray(value) ? value : [value]) lines.push(`${key}: ${item}`);
+      }
+      lines.push(...(upgrade ? ['Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='] : ['Connection: close']));
+      socket.write(lines.join('\r\n') + '\r\n\r\n');
+    });
+  });
+  for (const headers of [
+    {}, { Origin: origin },
+    { Host: `localhost:${host.port}`, Origin: `http://localhost:${host.port}` },
+    { Host: `[::1]:${host.port}`, Origin: `http://[::1]:${host.port}` },
+    { Host: `[::ffff:7f00:1]:${host.port}`, Origin: `http://[::ffff:7f00:1]:${host.port}` },
+  ]) {
+    assert.equal(await request(headers), 200, JSON.stringify(headers));
+    assert.equal(await tryWs(host.port, headers), 'open', JSON.stringify(headers));
+  }
+  // Fetch metadata: the app's own requests, typed/bookmarked navigations and a
+  // top-level link from another site load; the initiator cannot read those.
+  for (const headers of [
+    { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty', Origin: origin },
+    { 'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+  ]) {
+    assert.equal(await request(headers), 200, JSON.stringify(headers));
+  }
+  assert.equal(await tryWs(host.port, { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'websocket', Origin: origin }), 'open');
+  for (const headers of [
+    { Origin: 'https://untrusted.example' }, { Origin: 'null' }, { Origin: `${origin}/` },
+    { Origin: `http://127.0.0.1:${host.port + 1}` },
+    { Origin: `https://${authority}`, 'X-Forwarded-Proto': 'https' },
+    { Host: `rebind.example:${host.port}`, Origin: `http://rebind.example:${host.port}` },
+    { Host: `rebind.example:${host.port}` }, { Host: `127.0.0.1:${host.port + 1}` },
+    { Host: `[::ffff:c0a8:1]:${host.port}`, Origin: `http://[::ffff:c0a8:1]:${host.port}` },
+    { Host: `127.1:${host.port}`, Origin: origin },
+    { Host: `localhost@${authority}`, Origin: origin }, { Host: `${authority}/path`, Origin: origin },
+    { Origin: [origin, origin] }, { Host: [authority, authority], Origin: origin },
+    // A no-cors GET carries no Origin; its fetch metadata still names the site.
+    { 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'empty' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'script' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' },
+    { 'Sec-Fetch-Site': ['same-origin', 'same-origin'] }, { 'Sec-Fetch-Site': 'unexpected' },
+  ]) {
+    assert.equal(await request(headers), 403, JSON.stringify(headers));
+    assert.equal(await request(headers, true), 403, `upgrade ${JSON.stringify(headers)}`);
+  }
+});

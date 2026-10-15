@@ -15,6 +15,7 @@ const { chatFileDelivery } = require('./chat_file_delivery_scenario');
 const { webDashboardsRevamp, reloadDashboardPage } = require('./dashboard_scenario');
 const { dashboardCatalog } = require('./dashboard_catalog_scenario');
 const { webWorkLanes } = require('./work_lanes_scenario');
+const { crossOriginBoundary } = require('./cross_origin_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -487,6 +488,8 @@ async function settingsVersionLine(ctx) {
 
 const SCENARIOS = [
   ['transport-and-config', transportAndConfig],
+  // Opens and closes its own foreign-origin targets; the served page is untouched.
+  ['cross-origin-boundary', crossOriginBoundary],
   ['settings-version-line', settingsVersionLine],
   ['sidebar-from-inventory', sidebarFromInventory],
   ['coloured-host-glyphs', colouredHostGlyphs],

@@ -73,6 +73,15 @@ for(const protectedMode of [false,true])test(`actual web server origin admission
   for(const ch of channels)server.handlers[ch].handler=()=>{calls++;return {fixture:true};}; // never invoke a provider
   for(const origin of ['https://evil.invalid','null',undefined,base]) {
     const headers={...(cookie?{Cookie:cookie}:{}),...(origin?{Origin:origin}:{})};
+    if(!protectedMode&&origin&&origin!==base) {
+      // Unauthenticated loopback now refuses foreign pages at the upgrade,
+      // before any operator RPC is exposed. Origin-less CLI sockets still
+      // open below, but may not use the stricter provider sign-in surface.
+      const before=calls;
+      await assert.rejects(connect(`ws://127.0.0.1:${server.port}/cc`,headers),/Unexpected server response: 403/);
+      assert.equal(calls,before);
+      continue;
+    }
     const ws=await connect(`ws://127.0.0.1:${server.port}/cc`,headers);sockets.push(ws);
     const before=calls;
     for(const ch of channels){const result=await request(ws,ch);assert.equal(result.ok,origin===base);if(origin!==base)assert.equal(result.error.code,'relogin_origin_refused');}
