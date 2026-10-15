@@ -161,7 +161,7 @@ def test_every_activation_stamps_prior_checkout_before_restart(isolated_release,
     assert stamp["sha"] == expected
     assert stamp["prior_sha"] == prior
     assert module._read_stamp(repo, service) == stamp
-    assert module._git(repo, "rev-parse", "HEAD") == expected
+    assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == expected
     assert [call[1] for call in calls if call[0] == "launchctl"] == (
         ["bootout", "bootstrap"] if reload else ["kickstart"]
     )
@@ -174,7 +174,7 @@ def test_restart_failure_retains_applied_stamp(isolated_release, reload):
     assert "post_activation_error" in stamp
     assert (stamp["sha"], stamp["prior_sha"]) == (target, prior)
     assert module._read_stamp(repo, service) == stamp
-    assert module._git(repo, "rev-parse", "HEAD") == target
+    assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == target
 
 
 @pytest.mark.parametrize("missing", ["default", "override"])
@@ -186,7 +186,7 @@ def test_missing_guard_refuses_and_restores_before_restart(isolated_release, mis
     with pytest.raises(module.DeployError, match="log guard unavailable"):
         activate(override=override)
     assert not any(call[0] == "launchctl" for call in calls)
-    assert module._git(repo, "rev-parse", "HEAD") == prior
+    assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == prior
     assert module._stamp_path(repo, service).read_bytes() == before
 
 

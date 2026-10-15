@@ -118,3 +118,18 @@ on. The installed plist meets its checks when you keep the default `--python`: t
 interpreter is inside the release checkout, and the log directory exists. A later
 `deploy.py` run adds its own environment keys to the plist; after that, re-running
 this installer needs `--replace`.
+
+
+Imported `deploy.py` command helpers require an explicit `runner`, including
+`deploy`, environment edits, usage-collector install/rollback and restart helpers.
+Omitting it raises before helper-body file or native effects. The CLI entrypoint
+passes its native runner explicitly; direct library callers must do the same only
+inside their authorized live path. Collector bootstrap failures propagate instead
+of being reported as a successful install.
+
+Proof harnesses must pass a no-native runner to every helper and redirect every
+written descriptor to owned scratch paths. Block subprocess entrypoints before
+importing the module as a second containment boundary. Scratch plist paths alone
+do not isolate `launchctl` service labels. Never invoke the CLI entrypoint as an
+offline proof, and never use `--skip-kickstart` as a substitute for containment: it
+still permits checkout and stamp changes.

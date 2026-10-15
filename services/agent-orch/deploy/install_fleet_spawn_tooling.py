@@ -9,11 +9,13 @@ read back from the target before the command reports success.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import ast
 import errno
 import fcntl
 import hashlib
 import importlib.metadata
+import ipaddress
 import json
 import os
 import re
@@ -100,7 +102,6 @@ class Target:
     ssh: str
     root: str
     local: bool = False
-    loopback: bool = False
 
 
 def _sha256(path: Path) -> str:
@@ -262,7 +263,7 @@ def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = Non
 
 
 def _remote_argv(target: Target, command: str) -> list[str]:
-    if target.local and not target.loopback:
+    if target.local:
         return ["sh", "-lc", command]
     return ["ssh", "-o", "BatchMode=yes", target.ssh, f"sh -lc {shlex.quote(command)}"]
 
@@ -750,7 +751,7 @@ def stage(
             f"mkdir -m 700 {_remote_quote(staging)}",
         )), dry_run=dry_run, runner=runner)
         if not dry_run:
-            if target.local and not target.loopback:
+            if target.local:
                 staging_path = Path(staging)
                 shutil.copy2(bundle / "pentacle.tar", staging_path / "pentacle.tar")
                 shutil.copy2(bundle / "manifest.json", staging_path / "manifest.json")
@@ -925,6 +926,16 @@ def _parse_ssh_target_overrides(values: list[str], hosts: dict[str, tuple[str, s
     return overrides
 
 
+def _is_loopback_alias(alias: str) -> bool:
+    host = alias.rsplit("@", 1)[-1].strip("[]").lower().rstrip(".")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _targets(names: list[str], run_host: str, ssh_overrides: dict[str, str], hosts: dict[str, tuple[str, str]] | None = None) -> list[Target]:
     hosts = HOSTS if hosts is None else hosts
     targets: list[Target] = []
@@ -932,7 +943,9 @@ def _targets(names: list[str], run_host: str, ssh_overrides: dict[str, str], hos
         default_ssh, root = hosts[name]
         ssh = ssh_overrides.get(name, default_ssh)
         local = name == run_host
-        targets.append(Target(name, ssh, root, local=local, loopback=local and ssh in {"localhost", "127.0.0.1", "::1"}))
+        if not local and _is_loopback_alias(ssh):
+            raise ValueError(f"loopback_target_not_run_host:{name}")
+        targets.append(Target(name, ssh, root, local=local))
     return targets
 
 
@@ -941,6 +954,74 @@ def _rollout_lock_path() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".local" / "share" / "pentacle" / "agent-orch-release-rollout.lock"
+
+
+PREFLIGHT_SCHEMA = "PentacleFleetPreflightV1"
+
+
+def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest: dict[str, object]) -> dict[str, object]:
+    # Do not resolve the executable symlink: its venv path selects site-packages.
+    executable = os.path.abspath(sys.executable)
+    config = Path(args.host_config).expanduser().resolve() if args.host_config else None
+    return {
+        "installer": str(Path(__file__).resolve()),
+        "installer_sha256": _sha256(Path(__file__)),
+        "commit": args.commit,
+        "repo": str(Path(args.repo).expanduser().resolve()),
+        "host_config": str(config) if config else None,
+        "host_config_sha256": _sha256(config) if config else None,
+        "run_host": args.run_host,
+        "targets": [vars(target) for target in targets],
+        "sftp_timeout": args.sftp_timeout,
+        "resume": args.resume,
+        "python": {"executable": executable, "prefix": sys.prefix,
+                   "version": sys.version, "sha256": _sha256(Path(executable))},
+        "runtime_package": manifest.get("runtime_package"),
+    }
+
+
+def _apply_argv(args: argparse.Namespace, receipt: Path) -> list[str]:
+    argv = [os.path.abspath(sys.executable), str(Path(__file__).resolve()),
+            "--commit", args.commit, "--repo", str(Path(args.repo).expanduser().resolve()),
+            "--hosts", args.hosts, "--run-host", args.run_host,
+            "--sftp-timeout", str(args.sftp_timeout), "--preflight-receipt", str(receipt)]
+    if args.host_config:
+        argv += ["--host-config", str(Path(args.host_config).expanduser().resolve())]
+    for override in args.ssh_target:
+        argv += ["--ssh-target", override]
+    if args.resume:
+        argv += ["--resume", args.resume]
+    return argv
+
+
+def _write_preflight(path: Path, binding: dict[str, object], argv: list[str]) -> None:
+    payload = {"schema": PREFLIGHT_SCHEMA, "ok": True, "mode": "full_main_dry_run",
+               "target_verification": "not_executed", "binding": binding, "apply_argv": argv}
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".fleet-preflight-", delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _verify_preflight(path: str, binding: dict[str, object]) -> None:
+    try:
+        receipt = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("preflight_receipt_invalid") from exc
+    if (not isinstance(receipt, dict) or receipt.get("schema") != PREFLIGHT_SCHEMA
+            or receipt.get("ok") is not True or receipt.get("mode") != "full_main_dry_run"):
+        raise ValueError("preflight_receipt_invalid")
+    if receipt.get("binding") != binding:
+        raise ValueError("preflight_binding_mismatch: rerun preflight with the exact prepared interpreter and install inputs")
 
 
 def main() -> int:
@@ -957,6 +1038,8 @@ def main() -> int:
     parser.add_argument("--sftp-timeout", type=_positive_seconds, default=DEFAULT_SFTP_TIMEOUT_SECONDS, metavar="SECONDS")
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--preflight", metavar="OUTPUT", help="full dry-run; write a bound receipt before opening the update window")
+    parser.add_argument("--preflight-receipt", metavar="PATH", help="required for forward live installs; validate exact preparation inputs")
     parser.add_argument("--resume", metavar="STAMP", help="resume the exact staged immutable rollout stamp")
     parser.add_argument("--rollback", metavar="STAMP", help="restore the previous pointer recorded for rollout stamp")
     args = parser.parse_args()
@@ -970,44 +1053,53 @@ def main() -> int:
         if args.run_host not in hosts:
             raise ValueError("--run-host must name a configured host")
         ssh_overrides = _parse_ssh_target_overrides(args.ssh_target, hosts)
+        targets = _targets(names, args.run_host, ssh_overrides, hosts)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.resume and args.rollback:
         parser.error("--resume and --rollback are mutually exclusive")
     if (args.resume and not STAMP.fullmatch(args.resume)) or (args.rollback and not STAMP.fullmatch(args.rollback)):
         parser.error("rollout stamp is invalid")
-    targets = _targets(names, args.run_host, ssh_overrides, hosts)
+    if args.preflight and (args.rollback or args.preflight_receipt):
+        parser.error("--preflight cannot be combined with --rollback or --preflight-receipt")
+    if args.rollback and args.preflight_receipt:
+        parser.error("--rollback does not use a forward preflight receipt")
+    args.dry_run = args.dry_run or bool(args.preflight)
     records: dict[str, object] = {"schema": "PentacleFleetInstallV1", "commit": args.commit, "hosts": {}}
     try:
-        repo = Path(args.repo)
+        repo = Path(args.repo).expanduser().resolve()
         lock_stamp = _rollout_stamp(repo, args.commit, resume=args.resume, rollback_stamp=args.rollback)
-        with RolloutLock(_rollout_lock_path(), lock_stamp):
-            _progress("rollout_start", stamp=lock_stamp, hosts=names, dry_run=args.dry_run)
-            if args.rollback:
-                for target in targets:
-                    old = _read_pointer(target, f"rollouts/{args.rollback}.previous", dry_run=args.dry_run)
-                    records["hosts"][target.name] = {"rollback": rollback(target, old, stamp=args.rollback, dry_run=args.dry_run)}
-            else:
-                with tempfile.TemporaryDirectory(prefix="pentacle-release-") as temp:
-                    manifest = _archive(repo, args.commit, Path(temp), args.resume)
-                    records["manifest"] = manifest
+        # Archive/dependency construction and receipt validation precede the lock
+        # and every target action. Dry-runs never acquire the production lock.
+        if not args.rollback and not args.dry_run and not args.preflight_receipt:
+            raise ValueError("preflight_receipt_required: run --preflight before opening the update window")
+        with tempfile.TemporaryDirectory(prefix="pentacle-release-") as temp:
+            manifest = None
+            binding = None
+            if not args.rollback:
+                manifest = _archive(repo, args.commit, Path(temp), args.resume)
+                records["manifest"] = manifest
+                binding = _preflight_binding(args, targets, manifest)
+                if args.preflight_receipt:
+                    _verify_preflight(args.preflight_receipt, binding)
+            lock = nullcontext() if args.dry_run else RolloutLock(_rollout_lock_path(), lock_stamp)
+            with lock:
+                _progress("rollout_start", stamp=lock_stamp, hosts=names, dry_run=args.dry_run)
+                if args.rollback:
+                    for target in targets:
+                        old = _read_pointer(target, f"rollouts/{args.rollback}.previous", dry_run=args.dry_run)
+                        records["hosts"][target.name] = {"rollback": rollback(target, old, stamp=args.rollback, dry_run=args.dry_run)}
+                else:
                     for target in targets:
                         records["hosts"][target.name] = {
-                            "stage": stage(
-                                target,
-                                Path(temp),
-                                args.commit,
-                                manifest,
-                                dry_run=args.dry_run,
-                                sftp_timeout=args.sftp_timeout,
-                            )
+                            "stage": stage(target, Path(temp), args.commit, manifest,
+                                           dry_run=args.dry_run, sftp_timeout=args.sftp_timeout)
                         }
                     activated: list[tuple[Target, str | None]] = []
                     try:
                         for target in targets:
                             previous = _read_pointer(target, "active", dry_run=args.dry_run)
-                            # Append before switching: an activation whose readback
-                            # transport fails may already have moved active.
+                            # Append before switching: a failed readback may follow a switch.
                             activated.append((target, previous))
                             state = activate(target, args.commit, manifest, previous, dry_run=args.dry_run)
                             records["hosts"][target.name]["activation"] = state
@@ -1015,11 +1107,17 @@ def main() -> int:
                         for target, previous in reversed(activated):
                             records["hosts"][target.name]["rollback"] = rollback(target, previous, stamp=str(manifest["stamp"]), dry_run=args.dry_run)
                         raise
+            if args.preflight:
+                output = Path(args.preflight).expanduser().absolute()
+                _write_preflight(output, binding, _apply_argv(args, output))
+                records["preflight_receipt"] = str(output)
+        records["dry_run"] = args.dry_run
         records["ok"] = True
         print(json.dumps(records, sort_keys=True), flush=True)
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-        records.update({"ok": False, "error": str(exc) or type(exc).__name__})
+        records.update({"ok": False, "error": str(exc) or type(exc).__name__,
+                        "interpreter": os.path.abspath(sys.executable)})
         print(json.dumps(records, sort_keys=True), flush=True)
         return 1
 

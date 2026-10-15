@@ -44,7 +44,7 @@ def main():
  receipt={'result':{'passed':False},'facts':{}}
  try:
   sys.path.insert(0,str(Path(__file__).resolve().parents[2]));from deploy import deploy
-  actual_manifest=deploy.runtime_manifest(runtime,deploy.SERVICES['chat-streamd-v2'])
+  actual_manifest=deploy.runtime_manifest(runtime,deploy.SERVICES['chat-streamd-v2'],runner=deploy._run)
   receipt['runtime_manifest']=actual_manifest
   assert actual_manifest==json.loads(manifest.read_text()),'installed runtime manifest differs'
   config=plistlib.loads(plist.read_bytes());argv=config['ProgramArguments']

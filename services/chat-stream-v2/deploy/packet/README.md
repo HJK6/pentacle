@@ -4,6 +4,11 @@ These helpers are adopted from the reviewed deployment packet. The caller owns
 accepted configuration, preimages, private paths, resource limits and output
 receipts. They do not restart a service or grant deployment authority.
 
+Before window admission and before any web activation, complete the
+[fleet installer preflight](../../../agent-orch/README.md#fleet-installer-preflight)
+and retain/revalidate its exact interpreter and `apply_argv`. A failed preflight
+prevents opening the window; its dry-run is not installed-runtime evidence.
+
 - `health-probe.py EXPECTED_SHA [URL]` waits for welcome, the expected runtime SHA
   and pong. Readiness exceptions are caught inside the socket lifetime, so failed
   attempts close normally before retry. Transport failures remain failures.

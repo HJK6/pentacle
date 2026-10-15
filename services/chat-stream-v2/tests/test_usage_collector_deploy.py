@@ -107,3 +107,71 @@ def test_usage_probe_launchd_rollback_restores_original_bytes(tmp_path: Path, mo
     assert all(cwd == repo for _command, cwd in calls)
     assert any("bootout" in command for command, _cwd in calls)
     assert any("bootstrap" in command for command, _cwd in calls)
+
+
+def test_omitted_runner_refuses_before_descriptor_or_native_effects(tmp_path, monkeypatch):
+    import inspect
+    import pytest
+
+    attempts = []
+
+    def blocked(*args, **kwargs):
+        attempts.append(args)
+        raise AssertionError("native subprocess attempted")
+
+    for name in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, name, blocked)
+    daemon = tmp_path / "daemon.plist"
+    before = plistlib.dumps({"ProgramArguments": [str(tmp_path / "python"), "--claude-bin", "/shim"]})
+    daemon.write_bytes(before)
+    collector = tmp_path / "collector.plist"
+    monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _: daemon)
+    monkeypatch.setattr(deploy_mod, "_usage_collector_plist_path", lambda: collector)
+    for call in (
+        lambda: deploy_mod._ensure_v2_usage_probe_launchd(tmp_path),
+        lambda: deploy_mod._v2_usage_probe_rollback(tmp_path),
+        lambda: deploy_mod._ensure_launchd_environment(deploy_mod.SERVICES["chat-streamd-v2"]),
+        lambda: deploy_mod.deploy(deploy_mod.SERVICES["chat-streamd-v2"], release_checkout=tmp_path, ref="origin/main"),
+    ):
+        with pytest.raises(TypeError, match="runner"):
+            call()
+    assert daemon.read_bytes() == before
+    assert not collector.exists() and not attempts
+    for name, function in vars(deploy_mod).items():
+        if inspect.isfunction(function) and function.__module__ == deploy_mod.__name__:
+            parameter = inspect.signature(function).parameters.get("runner")
+            if parameter is not None:
+                assert parameter.default is inspect.Parameter.empty, name
+
+
+def test_collector_bootstrap_failure_is_not_reported_as_success(tmp_path, monkeypatch):
+    import pytest
+
+    repo = tmp_path / "repo"
+    daemon = tmp_path / "daemon.plist"
+    daemon.write_bytes(plistlib.dumps({"ProgramArguments": [str(repo / "python")]}))
+    collector = tmp_path / "collector.plist"
+    monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _: daemon)
+    monkeypatch.setattr(deploy_mod, "_usage_collector_plist_path", lambda: collector)
+    monkeypatch.setattr(deploy_mod, "_render_v2_usage_collector_plist", lambda _: b"scratch collector")
+    calls = []
+
+    def fake(command, cwd):
+        calls.append(tuple(command))
+        return subprocess.CompletedProcess(command, 5, "", "simulated failure")
+
+    with pytest.raises(deploy_mod.DeployError, match="bootstrap"):
+        deploy_mod._ensure_v2_usage_probe_launchd(repo, fake)
+    assert [cmd[1] for cmd in calls] == ["bootout", "bootstrap"]
+
+
+def test_cli_entrypoint_explicitly_supplies_native_runner(monkeypatch):
+    seen = {}
+
+    def fake_deploy(service, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(deploy_mod, "deploy", fake_deploy)
+    assert deploy_mod.main(["chat-streamd-v2"]) == 0
+    assert seen["runner"] is deploy_mod._run

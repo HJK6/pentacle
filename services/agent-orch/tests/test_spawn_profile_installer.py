@@ -61,6 +61,8 @@ def _localhost_bundle(tmp_path: Path, commit: str) -> tuple[Path, dict[str, obje
 
 
 def _localhost_runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    if argv[0] == "sh":
+        return subprocess.run(argv, text=True, capture_output=True, check=False)
     if argv[0] == "ssh":
         return subprocess.run(argv[-1], shell=True, text=True, capture_output=True, check=False)
     if argv[0] == "scp":
@@ -89,7 +91,7 @@ def test_configured_local_target_does_not_depend_on_its_name(tmp_path):
     path.write_text(json.dumps({"office": {"ssh": "localhost", "release_root": "/tmp/releases"}}))
     hosts = installer._load_hosts(str(path))
     target = installer._targets(["office"], "office", {}, hosts)[0]
-    assert (target.name, target.root, target.local, target.loopback) == ("office", "/tmp/releases", True, True)
+    assert (target.name, target.root, target.local) == ("office", "/tmp/releases", True)
 
 
 def test_macos_path_launchers_include_homebrew_precedence() -> None:
@@ -156,6 +158,7 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
             "hub=hub-alias",
             "--sftp-timeout",
             "5",
+            "--dry-run",
         ],
     )
 
@@ -191,16 +194,14 @@ def test_main_selects_local_run_host_and_ssh_target_alias(monkeypatch, tmp_path:
     ]
 
 
-def test_default_transport_argv_and_sftp_bound_are_unchanged(monkeypatch, tmp_path: Path) -> None:
-    target = installer._targets(["local"], "local", {})[0]
-    assert target.local is True
-    assert target.loopback is True
+def test_remote_transport_argv_and_sftp_bound_are_unchanged(monkeypatch, tmp_path: Path) -> None:
+    target = installer.Target("local", "remote-alias", "/tmp/releases")
     command = "printf '%s' 'alpha beta'"
     assert installer._remote_argv(target, command) == [
         "ssh",
         "-o",
         "BatchMode=yes",
-        "localhost",
+        "remote-alias",
         f"sh -lc {shlex.quote(command)}",
     ]
 
@@ -234,7 +235,7 @@ def test_default_transport_argv_and_sftp_bound_are_unchanged(monkeypatch, tmp_pa
         "scp",
         str(tmp_path / "pentacle.tar"),
         str(tmp_path / "manifest.json"),
-        f"localhost:{staging}/",
+        f"remote-alias:{staging}/",
     ]
     assert scp_kwargs["timeout"] == 120
 
@@ -500,16 +501,21 @@ def test_main_serializes_overlapping_rollouts_and_reports_running_stamp(monkeypa
     monkeypatch.setenv("PENTACLE_RELEASE_ROLLOUT_LOCK", str(tmp_path / "rollout.lock"))
     monkeypatch.setattr(installer, "_rollout_stamp", lambda *_args, **_kwargs: "rollout-running")
 
-    def blocked_archive(*_args, **_kwargs):
-        started.set()
-        assert release.wait(timeout=5)
-        return {"stamp": "rollout-running"}
+    def blocked_stage(*_args, **kwargs):
+        if not kwargs["dry_run"]:
+            started.set()
+            assert release.wait(timeout=5)
+        return "staged_verified"
 
-    monkeypatch.setattr(installer, "_archive", blocked_archive)
-    monkeypatch.setattr(installer, "stage", lambda *_args, **_kwargs: "staged_verified")
+    monkeypatch.setattr(installer, "_archive", lambda *_args, **_kwargs: {"stamp": "rollout-running"})
+    monkeypatch.setattr(installer, "stage", blocked_stage)
     monkeypatch.setattr(installer, "_read_pointer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(installer, "activate", lambda *_args, **_kwargs: {"active": None, "previous": None})
-    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", "a" * 40, "--hosts", "local"])
+    argv = ["install", "--commit", "a" * 40, "--hosts", "local"]
+    receipt = tmp_path / "preflight.json"
+    monkeypatch.setattr(installer.sys, "argv", argv + ["--preflight", str(receipt)])
+    assert installer.main() == 0
+    monkeypatch.setattr(installer.sys, "argv", argv + ["--preflight-receipt", str(receipt)])
 
     worker = threading.Thread(target=lambda: first_result.append(installer.main()))
     worker.start()
@@ -1147,3 +1153,149 @@ def test_same_sha_verified_resume_preserves_shared_generated_assets(tmp_path):
         assert installer.stage(target, bundle, commit, manifest, dry_run=False, runner=_localhost_runner) == "resumed_verified"
         assert _release_preimage(root / commit) == before
         assert {name: os.readlink(root / name) for name in pointers} == pointers
+
+
+@pytest.mark.parametrize("alias", ["localhost", "127.0.0.1", "::1", "local-alias", "user@localhost"])
+def test_declared_local_target_never_uses_ssh(alias, tmp_path):
+    target = installer._targets(["here"], "here", {}, {"here": (alias, str(tmp_path))})[0]
+    assert installer._remote_argv(target, "true") == ["sh", "-lc", "true"]
+    (tmp_path / "active").symlink_to("expected-release")
+    assert installer._read_pointer(target, "active", dry_run=False) == "expected-release"
+
+
+@pytest.mark.parametrize("alias", ["localhost", "LOCALHOST.", "127.0.0.1", "127.0.0.2", "::1", "user@[::1]"])
+def test_remote_target_cannot_alias_loopback(alias):
+    with pytest.raises(ValueError, match="loopback_target_not_run_host:peer"):
+        installer._targets(["peer"], "here", {}, {"peer": (alias, "/tmp/releases")})
+
+
+def test_actual_local_stage_activate_and_rollback_without_ssh(tmp_path):
+    root = tmp_path / ".local/share/pentacle/releases"
+    target = installer._targets(["here"], "here", {}, {"here": ("localhost", str(root))})[0]
+    calls = []
+
+    def local_only(argv, **kwargs):
+        assert argv[0] == "sh", argv
+        calls.append(argv)
+        return subprocess.run(argv, **kwargs)
+
+    old, new = "a" * 40, "b" * 40
+    old_bundle, old_manifest = _localhost_bundle(tmp_path, old)
+    new_bundle, new_manifest = _localhost_bundle(tmp_path, new)
+    assert installer.stage(target, old_bundle, old, old_manifest, dry_run=False, runner=local_only) == "staged_verified"
+    installer.activate(target, old, old_manifest, None, dry_run=False, runner=local_only)
+    assert installer.stage(target, new_bundle, new, new_manifest, dry_run=False, runner=local_only) == "staged_verified"
+    installer.activate(target, new, new_manifest, str(root / old), dry_run=False, runner=local_only)
+    assert (root / "active").resolve() == root / new
+    installer.rollback(target, str(root / old), stamp=new_manifest["stamp"], dry_run=False, runner=local_only)
+    assert (root / "active").resolve() == root / old
+    assert calls
+
+
+@pytest.fixture
+def preflight_main(monkeypatch, tmp_path):
+    lock = tmp_path / "rollout.lock"
+    monkeypatch.setenv("PENTACLE_RELEASE_ROLLOUT_LOCK", str(lock))
+    monkeypatch.setattr(installer, "_rollout_stamp", lambda *_a, **_kw: "rollout-test")
+    manifest = {"stamp": "rollout-test", "runtime_package": {"dependencies": {"websockets": {"version": "test", "sha256": "c" * 64}}}}
+    monkeypatch.setattr(installer, "_archive", lambda *_a, **_kw: manifest)
+    calls = []
+    monkeypatch.setattr(installer, "stage", lambda target, *_a, **kw: calls.append(("stage", target.name, kw["dry_run"])) or "planned")
+    monkeypatch.setattr(installer, "activate", lambda target, *_a, **kw: calls.append(("activate", target.name, kw["dry_run"])) or {})
+    monkeypatch.setattr(installer, "_read_pointer", lambda *_a, **_kw: None)
+    config = tmp_path / "hosts.json"
+    config.write_text(json.dumps({"here": {"ssh": "here-alias", "release_root": str(tmp_path / "here")},
+                                  "peer": {"ssh": "peer-alias", "release_root": "/tmp/peer"}}))
+    argv = ["install", "--commit", "a" * 40, "--repo", str(tmp_path), "--hosts", "here,peer",
+            "--run-host", "here", "--host-config", str(config)]
+
+    def invoke(*extra):
+        monkeypatch.setattr(installer.sys, "argv", argv + list(extra))
+        return installer.main()
+
+    return invoke, calls, lock, tmp_path / "preflight.json", config, manifest
+
+
+def test_preflight_runs_full_plan_without_lock_and_emits_exact_interpreter(preflight_main):
+    invoke, calls, lock, receipt, config, _ = preflight_main
+    assert invoke("--preflight", str(receipt)) == 0
+    assert calls == [("stage", "here", True), ("stage", "peer", True),
+                     ("activate", "here", True), ("activate", "peer", True)]
+    assert not lock.exists()
+    value = json.loads(receipt.read_text())
+    assert value["target_verification"] == "not_executed"
+    assert value["apply_argv"][:2] == [os.path.abspath(sys.executable), str(SCRIPT.resolve())]
+    assert value["binding"]["python"]["prefix"] == sys.prefix
+    calls.clear()
+    assert invoke("--preflight-receipt", str(receipt)) == 0
+    assert lock.exists()
+    assert calls == [("stage", "here", False), ("stage", "peer", False),
+                     ("activate", "here", False), ("activate", "peer", False)]
+
+
+@pytest.mark.parametrize("change", ["commit", "repo", "run_host", "alias", "root", "config", "timeout", "resume", "python", "dependency", "script"])
+def test_preflight_refuses_changed_inputs_before_lock_or_targets(preflight_main, monkeypatch, tmp_path, change, capsys):
+    invoke, calls, lock, receipt, config, manifest = preflight_main
+    assert invoke("--preflight", str(receipt)) == 0
+    calls.clear()
+    extra = []
+    if change == "commit": extra = ["--commit", "b" * 40]
+    elif change == "repo": extra = ["--repo", str(tmp_path / "other")]
+    elif change == "run_host": extra = ["--run-host", "peer"]
+    elif change == "alias": extra = ["--ssh-target", "peer=another-alias"]
+    elif change == "timeout": extra = ["--sftp-timeout", "9"]
+    elif change == "resume": extra = ["--resume", "rollout-other"]
+    elif change == "config": config.write_text(config.read_text() + "\n")
+    elif change == "root":
+        data = json.loads(config.read_text()); data["here"]["release_root"] += "-other"; config.write_text(json.dumps(data))
+    elif change == "python":
+        alternate = tmp_path / "python-alias"; alternate.symlink_to(sys.executable)
+        monkeypatch.setattr(installer.sys, "executable", str(alternate))
+    elif change == "dependency": manifest["runtime_package"]["dependencies"]["websockets"]["sha256"] = "d" * 64
+    elif change == "script":
+        real_hash = installer._sha256
+        monkeypatch.setattr(installer, "_sha256", lambda path: "e" * 64 if Path(path).resolve() == SCRIPT.resolve() else real_hash(path))
+    assert invoke("--preflight-receipt", str(receipt), *extra) == 1
+    assert "preflight_binding_mismatch" in capsys.readouterr().out
+    assert not lock.exists() and not calls
+
+
+@pytest.mark.parametrize("payload", [None, "bad JSON", "[]", '{"schema":"wrong","ok":true}', '{"schema":"PentacleFleetPreflightV1","ok":false}'])
+def test_missing_or_invalid_preflight_cannot_install(preflight_main, payload):
+    invoke, calls, lock, receipt, _, _ = preflight_main
+    if payload is not None:
+        receipt.write_text(payload)
+    assert invoke(*(["--preflight-receipt", str(receipt)] if payload is not None else [])) == 1
+    assert not lock.exists() and not calls
+
+
+def test_rollback_needs_neither_forward_receipt_nor_dependency_bundle(preflight_main, monkeypatch):
+    invoke, calls, lock, _, _, _ = preflight_main
+    monkeypatch.setattr(installer, "_archive", lambda *_a, **_kw: pytest.fail("rollback must not bundle dependencies"))
+    monkeypatch.setattr(installer, "rollback", lambda target, *_a, **_kw: calls.append(("rollback", target.name)) or {})
+    assert invoke("--rollback", "rollout-old") == 0
+    assert calls == [("rollback", "here"), ("rollback", "peer")]
+    assert lock.exists()
+
+
+def test_full_cli_preflight_with_real_archive_and_missing_dependency_refusal(tmp_path):
+    repo = SCRIPT.parents[3]
+    sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    receipt, lock = tmp_path / "receipt.json", tmp_path / "lock"
+    env = dict(os.environ, PENTACLE_RELEASE_ROLLOUT_LOCK=str(lock))
+    args = [str(SCRIPT), "--commit", sha, "--repo", str(repo), "--preflight", str(receipt)]
+    result = subprocess.run([sys.executable, *args], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not lock.exists()
+    record = json.loads(result.stdout)
+    assert record["dry_run"] is True and "activation" in record["hosts"]["local"]
+    bound = json.loads(receipt.read_text())
+    assert bound["binding"]["commit"] == sha
+    assert bound["binding"]["runtime_package"]["dependencies"]["websockets"]["sha256"]
+    empty_venv = tmp_path / "no-deps"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(empty_venv)], check=True)
+    args[-1] = str(tmp_path / "bad-receipt.json")
+    failed = subprocess.run([str(empty_venv / "bin/python"), *args], env=env, text=True, capture_output=True)
+    assert failed.returncode == 1
+    assert "runtime_dependency_missing" in failed.stdout
+    assert not lock.exists() and not Path(args[-1]).exists()

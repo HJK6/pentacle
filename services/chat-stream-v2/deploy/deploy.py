@@ -76,7 +76,7 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _checked(cmd: Sequence[str], cwd: Path, runner: Runner = _run) -> subprocess.CompletedProcess[str]:
+def _checked(cmd: Sequence[str], cwd: Path, runner: Runner) -> subprocess.CompletedProcess[str]:
     result = runner(cmd, cwd)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
@@ -84,11 +84,11 @@ def _checked(cmd: Sequence[str], cwd: Path, runner: Runner = _run) -> subprocess
     return result
 
 
-def _git(repo: Path, *args: str, runner: Runner = _run) -> str:
+def _git(repo: Path, *args: str, runner: Runner) -> str:
     return _checked(("git", *args), repo, runner).stdout.strip()
 
 
-def _dirty_entries(repo: Path, runner: Runner = _run) -> list[str]:
+def _dirty_entries(repo: Path, runner: Runner) -> list[str]:
     result = _checked(("git", "status", "--porcelain"), repo, runner)
     allowed_prefixes = (
         "?? .pentacle-deploy/",
@@ -97,7 +97,7 @@ def _dirty_entries(repo: Path, runner: Runner = _run) -> list[str]:
     return [line for line in result.stdout.splitlines() if line and not line.startswith(allowed_prefixes)]
 
 
-def _attached_branch(repo: Path, runner: Runner = _run) -> str | None:
+def _attached_branch(repo: Path, runner: Runner) -> str | None:
     result = runner(("git", "symbolic-ref", "--quiet", "--short", "HEAD"), repo)
     if result.returncode == 1:
         return None
@@ -108,7 +108,7 @@ def _attached_branch(repo: Path, runner: Runner = _run) -> str | None:
     return branch or None
 
 
-def verify_release_checkout(repo: Path, runner: Runner = _run) -> None:
+def verify_release_checkout(repo: Path, runner: Runner) -> None:
     """Reject a development checkout before a deploy can mutate it."""
     dirty = _dirty_entries(repo, runner)
     if dirty:
@@ -122,7 +122,7 @@ _RUNTIME_SUFFIXES = {".json", ".plist", ".py", ".sh", ".toml", ".txt", ".yaml", 
 _NON_RUNTIME_PARTS = {".venv", "__pycache__", "docs", "harness", "tests"}
 
 
-def runtime_manifest(repo: Path, service: ServiceConfig, runner: Runner = _run) -> dict[str, object]:
+def runtime_manifest(repo: Path, service: ServiceConfig, runner: Runner) -> dict[str, object]:
     """Return the file-level bytes that can affect this service at runtime."""
     paths = service.runtime_roots or (V2_SERVICE_PATH,)
     result = _checked(("git", "ls-files", "-z", "--", *paths), repo, runner)
@@ -143,11 +143,11 @@ def runtime_manifest(repo: Path, service: ServiceConfig, runner: Runner = _run) 
     return {"schema": "PentacleRuntimeManifestV1", "service": service.name, "files": files, "digest": digest}
 
 
-def _resolve_sha(repo: Path, ref: str, runner: Runner = _run) -> str:
+def _resolve_sha(repo: Path, ref: str, runner: Runner) -> str:
     return _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", runner=runner)
 
 
-def _origin_refs_containing(repo: Path, sha: str, runner: Runner = _run) -> list[str]:
+def _origin_refs_containing(repo: Path, sha: str, runner: Runner) -> list[str]:
     out = _git(
         repo,
         "for-each-ref",
@@ -160,7 +160,7 @@ def _origin_refs_containing(repo: Path, sha: str, runner: Runner = _run) -> list
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def _verify_origin_reachable(repo: Path, sha: str, runner: Runner = _run) -> None:
+def _verify_origin_reachable(repo: Path, sha: str, runner: Runner) -> None:
     refs = _origin_refs_containing(repo, sha, runner)
     if not refs:
         raise DeployError(f"ref {sha} is not reachable from any origin ref")
@@ -476,7 +476,7 @@ def run_gate_and_write_evidence(
     tiers: Sequence[str],
     out_path: Path,
     sha: str,
-    runner: Runner = _run,
+    runner: Runner,
 ) -> dict[str, object]:
     """Run and validate the canonical v2 merge gate in the release checkout."""
     if tuple(tiers) != (GATE_REQUIRED_TIER,):
@@ -532,7 +532,7 @@ def _venv_python(repo: Path, service: ServiceConfig | None = None) -> Path:
     return repo / service_dir / ".venv" / "bin" / "python"
 
 
-def verify_venv(repo: Path, service: ServiceConfig, stamp: dict[str, object], runner: Runner = _run) -> str:
+def verify_venv(repo: Path, service: ServiceConfig, stamp: dict[str, object], runner: Runner) -> str:
     requirements = repo / service.requirements_path
     requirements_hash = _sha256(requirements)
     python = _venv_python(repo, service)
@@ -571,7 +571,7 @@ def verify_log_guard(path: str | Path | None) -> None:
         raise DeployError(f"log guard unavailable: {guard}")
 
 
-def _kickstart(label: str, runner: Runner = _run) -> None:
+def _kickstart(label: str, runner: Runner) -> None:
     _checked(("launchctl", "kickstart", "-k", _launchctl_target(label)), Path.cwd(), runner)
 
 
@@ -610,7 +610,7 @@ def _write_plist(path: Path, payload: dict) -> None:
     _write_bytes(path, plistlib.dumps(payload))
 
 
-def _v2_usage_probe_rollback(repo: Path, runner: Runner = _run) -> Callable[[], None]:
+def _v2_usage_probe_rollback(repo: Path, runner: Runner) -> Callable[[], None]:
     daemon_path = _launchd_plist_path(V2_DAEMON_LABEL)
     collector_path = _usage_collector_plist_path()
     daemon_bytes = daemon_path.read_bytes()
@@ -624,7 +624,7 @@ def _v2_usage_probe_rollback(repo: Path, runner: Runner = _run) -> Callable[[], 
             collector_path.unlink(missing_ok=True)
         else:
             _write_bytes(collector_path, collector_bytes)
-            runner(("launchctl", "bootstrap", domain, str(collector_path)), repo)
+            _checked(("launchctl", "bootstrap", domain, str(collector_path)), repo, runner)
 
     return restore
 
@@ -665,7 +665,7 @@ def _validate_v2_launchd_program(repo: Path, arguments: Sequence[str]) -> Path:
     return program
 
 
-def _ensure_v2_usage_probe_launchd(repo: Path, runner: Runner = _run) -> bool:
+def _ensure_v2_usage_probe_launchd(repo: Path, runner: Runner) -> bool:
     daemon_path = _launchd_plist_path(V2_DAEMON_LABEL)
     daemon = plistlib.loads(daemon_path.read_bytes())
     arguments = daemon.get("ProgramArguments")
@@ -695,13 +695,13 @@ def _ensure_v2_usage_probe_launchd(repo: Path, runner: Runner = _run) -> bool:
         _write_bytes(destination, source_bytes)
         domain = f"gui/{os.getuid()}"
         runner(("launchctl", "bootout", f"{domain}/{USAGE_COLLECTOR_LABEL}"), repo)
-        runner(("launchctl", "bootstrap", domain, str(destination)), repo)
+        _checked(("launchctl", "bootstrap", domain, str(destination)), repo, runner)
     return daemon_changed or collector_changed
 
 
 def _ensure_launchd_environment(
     service: ServiceConfig,
-    runner: Runner = _run,
+    runner: Runner,
     *,
     launchd_environment: Sequence[tuple[str, str]] | None = None,
 ) -> bool:
@@ -731,7 +731,7 @@ RELOAD_UNLOAD_POLL_S = 0.25
 
 def _reload_launchd(
     label: str,
-    runner: Runner = _run,
+    runner: Runner,
     *,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1042,7 +1042,7 @@ def _previous_log_offset(previous_size: LogOffsets | None, path: Path) -> int | 
     return previous_size
 
 
-def _launchd_state(label: str, runner: Runner = _run) -> LaunchdState:
+def _launchd_state(label: str, runner: Runner) -> LaunchdState:
     """Ask launchd whether the job is loaded and which pid is running it."""
     result = runner(("launchctl", "print", _launchctl_target(label)), Path.cwd())
     if result.returncode != 0:
@@ -1140,7 +1140,7 @@ def verify_fresh_daemon_log_line(
     previous_size: LogOffsets | None,
     prior_pid: int | None = None,
     wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
-    runner: Runner = _run,
+    runner: Runner,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> BootReadback:
@@ -1285,7 +1285,7 @@ def _verify_runtime_sha(
         sleep(min(RUNTIME_READBACK_INTERVAL_SECONDS, remaining))
 
 
-def _install_fleet_smoke_schedule(repo: Path, runner: Runner = _run) -> None:
+def _install_fleet_smoke_schedule(repo: Path, runner: Runner) -> None:
     schedule = Path.home() / "Library/LaunchAgents/com.pentacle.spawn-fleet-smoke.plist"
     schedule.parent.mkdir(parents=True, exist_ok=True)
     _write_bytes(schedule, _render_v2_spawn_fleet_smoke_plist(repo))
@@ -1304,7 +1304,7 @@ def _apply_post_activation(
     prior_pid: int | None,
     reload_launchd: bool,
     boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
-    runner: Runner = _run,
+    runner: Runner,
     verify_boot: Callable[..., BootReadback] = verify_fresh_daemon_log_line,
     verify_runtime: Callable[..., tuple[bool, dict[str, object]]] = _verify_runtime_sha,
 ) -> None:
@@ -1406,7 +1406,7 @@ def _resolve_agent_orch(repo: Path, service: ServiceConfig | None = None) -> str
 def verify_deploy_guard(
     service: ServiceConfig,
     deployer_stream_id: str,
-    runner: Runner = _run,
+    runner: Runner,
     *,
     repo: Path = REPO_ROOT,
     sha: str,
@@ -1511,7 +1511,7 @@ def deploy(
     skip_kickstart: bool = False,
     log_guard_dir: str | Path | None = None,
     boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
-    runner: Runner = _run,
+    runner: Runner,
 ) -> dict[str, object]:
     repo = release_checkout.expanduser().resolve()
     if not (repo / ".git").exists():
@@ -1701,6 +1701,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_kickstart=args.skip_kickstart,
             log_guard_dir=args.log_guard_dir,
             boot_wait_seconds=args.boot_wait_seconds,
+            runner=_run,
         )
     except DeployError as exc:
         print(f"deploy refused: {exc}", file=sys.stderr)

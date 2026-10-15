@@ -377,7 +377,53 @@ agent-orch spawn --handoff --host linux-workstation --initial-prompt-file /tmp/h
 
 The daemon stores `handoff_from_stream_id` on the session row and echoes it in `snapshot.sessions`, `session.inventory`, and `chat.event` session summaries. The field is audit lineage only: it does not make the new session a child and does not hide it from default subscribers.
 
-Fleet activation uses `deploy/install_fleet_spawn_tooling.py --commit <full-main-sha> --host-config /path/to/release-hosts.json --hosts coordinator,workstation --run-host coordinator`. The installer stages and verifies every immutable release before switching any active pointer, then reads every pointer back; daemon-side handoff rejection must not deploy until all configured targets report the same CLI SHA.
+### Fleet installer preflight
+
+Before opening an update window or activating its web release, run the **full
+installer entrypoint** with the absolute prepared Python 3.11+ interpreter whose
+environment contains `websockets`. A stage-only helper call does not check that
+environment. Use the same immutable source, repository and host configuration
+that the window will install:
+
+```sh
+/absolute/prepared/venv/bin/python /absolute/checkout/services/agent-orch/deploy/install_fleet_spawn_tooling.py \
+  --commit <full-main-sha> --repo /absolute/checkout \
+  --host-config /absolute/release-hosts.json --hosts coordinator,workstation \
+  --run-host coordinator --preflight /absolute/window/cli-preflight.json
+```
+
+A successful preflight runs archive/dependency construction and the complete
+stage/activation plan without target commands, target copies, pointer writes or
+the production rollout lock. It writes a receipt binding the installer hash,
+source SHA, repository, host configuration, resolved target names/aliases/roots,
+timeout/resume options, interpreter path/prefix/version/binary hash and runtime
+dependency hashes. The interpreter path preserves the venv symlink: substituting
+its resolved base Python changes the environment. Preflight performs **no target
+verification** and grants no deployment authority.
+
+Require successful preflight as a window-admission condition, before any web
+step. Retain the receipt's `apply_argv` array in the execution packet. Immediately
+before opening the window, execute that array with `--dry-run` appended to
+revalidate it without target actions; a nonzero result prevents admission. After
+admission, the CLI step executes the original array, without shell reconstruction
+or replacing its interpreter with ambient `python3`. Forward live installation
+requires `--preflight-receipt`; missing, malformed or changed bindings refuse
+before acquiring the rollout lock or contacting a target. If inputs change,
+regenerate the preflight and execution packet before opening the window.
+
+The configured `--run-host` always executes and copies locally as the current
+user, even when its SSH alias is `localhost`, `127.0.0.1` or `::1`. Other targets
+use their SSH aliases; loopback aliases for those targets are rejected. Set
+`--run-host` explicitly for a custom host map. No hostname/DNS inference or SSH
+key change is needed.
+
+Actual installation still stages and hash-verifies every immutable release
+before switching any active pointer, then reads every pointer back. Dry-run
+results do not replace installed runtime/CLI parity and health checks. Daemon-side
+handoff rejection must not deploy until all configured targets report the same
+CLI SHA. Emergency `--rollback STAMP` uses the existing pointer/manifest
+verification and does not require a forward preflight receipt or dependency
+bundle; retain its original interpreter, host mapping and rollback stamp.
 
 Staging resumes an existing release only when its complete manifest and CLI
 runtime verify. If verification fails and any same-SHA release entry exists,
