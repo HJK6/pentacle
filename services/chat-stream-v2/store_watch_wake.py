@@ -596,6 +596,13 @@ def _fleet_interval(name, default):
     return max(0, value)
 
 
+def _fleet_busy(observation):
+    """Seat busy for idle/digest purposes: the roster's `busy` (generating,
+    provider-reported background work or a busy descendant), else `working`."""
+    busy = observation.get("busy")
+    return busy if busy in (True, False) else observation.get("working")
+
+
 def _fleet_seat_idle(conn, sid, generation, observation, now):
     previous = conn.execute(
         "SELECT * FROM v2_fleet_seat_idle WHERE stream_id=? AND generation=?",
@@ -603,7 +610,7 @@ def _fleet_seat_idle(conn, sid, generation, observation, now):
     ).fetchone()
     valid = (observation.get("session_generation") == generation
              and observation.get("_fleet_observed", True) is True)
-    working = observation.get("working") if valid else None
+    working = _fleet_busy(observation) if valid else None
     if working not in (True, False):
         working = None
     activity = observation.get("genuine_activity_at")
@@ -767,7 +774,7 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         card = json.loads(lane["status_card"]) if lane.get("status_card") else {}
         overrun = _fleet_overrun(card, now)
         observation = observations.get(lane_sid, {})
-        working = (observation.get("working") if
+        working = (_fleet_busy(observation) if
                    observation.get("session_generation") == lane["session_generation"]
                    and observation.get("_fleet_observed", True) is True else None)
         facts = {

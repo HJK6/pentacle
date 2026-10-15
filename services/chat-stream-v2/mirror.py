@@ -109,6 +109,58 @@ def _extract_claude_working_status(lines: list[str]) -> tuple[bool, str]:
     return True, live[0]
 
 
+# Provider-reported background work, read only from the footer region below the
+# composer so scrollback that quotes a footer can never count. Claude Code's
+# footer pills are `·`-separated (`1 shell`, `2 local agents`); a running
+# background subagent also lists panel rows under a `● main` row. `← N agent`,
+# `/tasks to see subagents` and monitor/team pills are not owned running work.
+_CLAUDE_COMPOSER_RE = re.compile(r"^[❯>›](?:\s|$)")
+_CLAUDE_FOOTER_PILL_RE = re.compile(r"(?:^|·)\s*(\d+)\s+(shells?|local agents?)\s*(?=·|$)")
+_CLAUDE_PANEL_ROW_RE = re.compile(r"^[●◯]\s+(\S.*)$")
+_CODEX_BACKGROUND_RE = re.compile(r"\b(\d+) background terminals? running\b")
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _extract_claude_background(lines: list[str]) -> list[str]:
+    composer = next(
+        (index for index in range(len(lines) - 1, -1, -1) if _CLAUDE_COMPOSER_RE.match(lines[index])),
+        None,
+    )
+    if composer is None:
+        return []
+    shells = agents = rows = 0
+    panel = False
+    for line in lines[composer + 1:composer + 13]:
+        for count, kind in _CLAUDE_FOOTER_PILL_RE.findall(line):
+            if kind.startswith("shell"):
+                shells += int(count)
+            else:
+                agents += int(count)
+        match = _CLAUDE_PANEL_ROW_RE.match(line)
+        if match and match.group(1).strip() == "main":
+            panel = True
+        elif match and panel:
+            rows += 1
+        else:
+            panel = panel and bool(match)
+    labels = []
+    if shells:
+        labels.append(_plural(shells, "shell"))
+    if max(agents, rows):
+        labels.append(_plural(max(agents, rows), "subagent"))
+    return labels
+
+
+def _extract_codex_background(normalized: list[str]) -> list[str]:
+    for line in reversed(normalized[-8:]):
+        if match := _CODEX_BACKGROUND_RE.search(line):
+            return [_plural(int(match.group(1)), "background terminal")]
+    return []
+
+
 def _extract_codex_working_status(normalized: list[str]) -> tuple[bool, str]:
     """Keep the lifted Codex ``Working (`` / waiting behavior unchanged."""
     status_line = ""
@@ -143,7 +195,9 @@ def _extract_live_state(pane_text: str, provider: str) -> dict[str, object]:
     working-state core does not depend on them."""
     text = _normalize_pane(pane_text)
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    normalized = [re.sub(r"^[•⎿]\s+", "", line) for line in lines]
+    # Codex alternates `•`/`◦` spinner frames; strip both so neither frame
+    # hides `Working (`.
+    normalized = [re.sub(r"^[•◦⎿]\s+", "", line) for line in lines]
     last_line = normalized[-1] if normalized else ""
     if str(provider or "").lower() == "claude":
         is_working, working_label = _extract_claude_working_status(normalized)
@@ -152,13 +206,16 @@ def _extract_live_state(pane_text: str, provider: str) -> dict[str, object]:
         # real Claude v5 spinner takes precedence when present.
         if not is_working:
             is_working, working_label = _extract_codex_working_status(normalized)
+        background = _extract_claude_background(lines)
     else:
         is_working, working_label = _extract_codex_working_status(normalized)
+        background = _extract_codex_background(normalized)
     return {
         "text": "",            # draft parser not lifted (see docstring)
         "pending": last_line.startswith("Messages to be submitted after next tool call"),
         "working": is_working,
         "working_label": working_label,
+        "background": background,
         "question": None,      # pane_question parser not lifted (lane 6)
     }
 

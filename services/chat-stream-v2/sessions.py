@@ -51,7 +51,8 @@ TITLE_SOURCE_PLACEHOLDER = "placeholder"
 # and the observer metadata are included because the close/presence paths also
 # use ``apply_live`` for their short-lived safety/transport observations.
 LIVE_OVERLAY_FIELDS = frozenset({
-    "preview", "working", "working_label", "online", "last_activity",
+    "preview", "working", "working_label", "background_busy", "background_label",
+    "online", "last_activity",
     "pane_status", "pane_pid", "local_mirror", "mirror_local",
     "mirror_generation", "local_mirror_generation", "capture_liveness",
     "observer_source", "host_status", "host_status_reason",

@@ -107,6 +107,7 @@ class _RemoteCaptureState:
     working: bool = False
     working_label: str = ""
     last_working_ms: int = 0
+    background_label: str = ""
     last_activity: str = ""
     observer_source: str = "reconciler-fallback"
     capture_liveness: str = ""
@@ -486,6 +487,7 @@ class RemotePresence:
                 )
                 applied, _changed = self._apply_overlay(sid, {
                     "online": False, "working": False, "working_label": "",
+                    "background_busy": False, "background_label": "",
                     "pane_status": "pane_dead", "host_status": "online",
                     "host_status_reason": "",
                 })
@@ -770,6 +772,7 @@ class RemotePresence:
                 existing.working = False
                 existing.working_label = ""
                 existing.last_working_ms = 0
+                existing.background_label = ""
             return 0
         state = self._capture_state.setdefault(key, _RemoteCaptureState())
         state.capture_liveness = liveness
@@ -780,6 +783,7 @@ class RemotePresence:
         state.working = False
         state.working_label = ""
         state.last_working_ms = 0
+        state.background_label = ""
         return await self._apply_capture_state(self.sessions.get(sid) or {}, key, state)
 
     def _hot_working_targets(self, now: float) -> list[tuple[str, dict[str, Any]]]:
@@ -889,6 +893,10 @@ class RemotePresence:
             state.preview = preview
             state.working = working
             state.working_label = working_label
+            # Footer pills are static text (no spinner frames), so background
+            # work needs no clear grace: the next capture is authoritative.
+            background = live.get("background")
+            state.background_label = " · ".join(background) if isinstance(background, list) else ""
             state.observer_source = "reconciler-fallback"
 
         prior_generation = self._tracker_generation.get(sid)
@@ -916,6 +924,8 @@ class RemotePresence:
             "preview": state.preview,
             "working": state.working,
             "working_label": state.working_label,
+            "background_busy": bool(state.background_label),
+            "background_label": state.background_label,
             "last_activity": state.last_activity,
             "observer_source": state.observer_source,
         }
