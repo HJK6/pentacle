@@ -211,8 +211,21 @@ function singleHeader(req, name) {
 // The unauthenticated single-user exception is for local tools and pages, not
 // arbitrary websites. Pin Host to a literal loopback authority (DNS rebinding)
 // and any browser-supplied Origin to that exact listener (cross-site WebSocket
-// hijacking). Origin-less local CLI clients remain supported. Authenticated
-// proxy modes have their own boundary and do not use this local-only rule.
+// hijacking). Browsers omit Origin on a no-cors GET but label every request
+// with Sec-Fetch-Site, so a request another site initiated is refused too,
+// except a top-level navigation, whose response the initiator cannot read.
+// Origin-less local CLI clients (no Sec-Fetch headers) remain supported.
+// Authenticated proxy modes have their own boundary and do not use this
+// local-only rule.
+function fetchSiteAllowed(req) {
+  const sites = headerValues(req, 'sec-fetch-site');
+  if (sites.length === 0) return true;
+  const site = singleHeader(req, 'sec-fetch-site');
+  if (site === 'same-origin' || site === 'none') return true;
+  return (site === 'same-site' || site === 'cross-site') && req.method === 'GET'
+    && singleHeader(req, 'sec-fetch-mode') === 'navigate' && singleHeader(req, 'sec-fetch-dest') === 'document';
+}
+
 function loopbackRequestAllowed(req) {
   const authority = singleHeader(req, 'host');
   if (!authority) return false;
@@ -227,6 +240,7 @@ function loopbackRequestAllowed(req) {
     && ipv6[5] === 0xffff && (ipv6[6] >> 8) === 127;
   if (!isLoopbackBind(hostname) && !mappedLoopback) return false;
   if (Number(target.port || 80) !== req.socket?.localPort) return false;
+  if (!fetchSiteAllowed(req)) return false;
   const origins = headerValues(req, 'origin');
   return origins.length === 0 || (origins.length === 1 && origins[0] === target.origin);
 }

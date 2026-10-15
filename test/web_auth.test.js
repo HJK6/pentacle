@@ -218,6 +218,16 @@ test('unauthenticated loopback admits local tools and same-origin pages, not for
     assert.equal(await request(headers), 200, JSON.stringify(headers));
     assert.equal(await tryWs(host.port, headers), 'open', JSON.stringify(headers));
   }
+  // Fetch metadata: the app's own requests, typed/bookmarked navigations and a
+  // top-level link from another site load; the initiator cannot read those.
+  for (const headers of [
+    { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty', Origin: origin },
+    { 'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+  ]) {
+    assert.equal(await request(headers), 200, JSON.stringify(headers));
+  }
+  assert.equal(await tryWs(host.port, { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'websocket', Origin: origin }), 'open');
   for (const headers of [
     { Origin: 'https://untrusted.example' }, { Origin: 'null' }, { Origin: `${origin}/` },
     { Origin: `http://127.0.0.1:${host.port + 1}` },
@@ -228,6 +238,11 @@ test('unauthenticated loopback admits local tools and same-origin pages, not for
     { Host: `127.1:${host.port}`, Origin: origin },
     { Host: `localhost@${authority}`, Origin: origin }, { Host: `${authority}/path`, Origin: origin },
     { Origin: [origin, origin] }, { Host: [authority, authority], Origin: origin },
+    // A no-cors GET carries no Origin; its fetch metadata still names the site.
+    { 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'empty' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'script' },
+    { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' },
+    { 'Sec-Fetch-Site': ['same-origin', 'same-origin'] }, { 'Sec-Fetch-Site': 'unexpected' },
   ]) {
     assert.equal(await request(headers), 403, JSON.stringify(headers));
     assert.equal(await request(headers, true), 403, `upgrade ${JSON.stringify(headers)}`);

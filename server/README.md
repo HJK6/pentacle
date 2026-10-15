@@ -271,8 +271,11 @@ no token: any client that can reach the port gets the operator's full
 Unauthenticated HTTP and WebSocket requests must name a literal loopback or
 `localhost` Host at the actual listening port. A supplied Origin must exactly
 match that HTTP origin; foreign/null/duplicate origins and DNS-rebinding Hosts
-are rejected with 403. Local tools may omit Origin. This is browser isolation,
-not authentication against other local processes; use token auth on shared hosts.
+are rejected with 403. Browsers omit Origin on simple cross-site GETs, so a
+request whose `Sec-Fetch-Site` names another site is also refused, except a
+top-level navigation (the initiating page cannot read it). Local tools may omit
+Origin and fetch metadata. This is browser isolation, not authentication
+against other local processes; use token auth on shared hosts.
 
 A **routable** bind (anything else — `0.0.0.0`, a tailnet IP) **refuses to
 start** without `--token-file <path>`; there is no way to publish the surface
