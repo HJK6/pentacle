@@ -33,7 +33,7 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate():
     gate = next(step for step in job['steps'] if step.get('name') == 'Daemon and CLI checks')
     assert gate['env']['V2_UNIT_TIMEOUT_S'] == '1200'
     assert 'V2_SMOKE_TIMEOUT_S' not in gate['env'] and 'V2_SOAK_TIMEOUT_S' not in gate['env']
-    assert '--basetemp "${RUNNER_TEMP}/pentacle-scratch-' in gate['run']
+    assert '--basetemp "/tmp/pentacle-scratch-' in gate['run']
     assert 'V2_GATE_EVIDENCE_DIR' in gate['env']
     upload = next(step for step in job['steps'] if step.get('uses') == 'actions/upload-artifact@v4')
     assert upload['if'] == 'failure()'
@@ -44,3 +44,27 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate():
     assert all('scratch' not in path and '.db' not in path for path in paths)
     assert paths[-1].endswith('/u4-upload/**')
     assert not any(path.endswith('/**') for path in paths[:-1])
+
+
+def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(monkeypatch):
+    import os
+    import shlex
+    import yaml
+    from tests.cosmo_e2e import harness
+
+    workflow = yaml.safe_load(PREDEPLOY.read_text())
+    assert workflow['jobs']['checks']['runs-on'] == 'ubuntu-latest'
+    step = next(s for s in workflow['jobs']['checks']['steps']
+                if s.get('name') == 'Daemon and CLI checks')
+    monkeypatch.setenv('RUNNER_TEMP', '/home/runner/work/_temp')
+    monkeypatch.setenv('GITHUB_RUN_ID', '12345')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    monkeypatch.setenv('V2_GATE_EVIDENCE_DIR', '/home/runner/work/_temp/pentacle-gate-12345-2')
+    monkeypatch.delenv('COSMO_E2E_DISPOSABLE_BASE', raising=False)
+    monkeypatch.setattr(harness, '_disposable_base', lambda: Path('/tmp').resolve())
+    line = next(line for line in step['run'].splitlines() if 'run_gate.py merge' in line)
+    argv = shlex.split(os.path.expandvars(line))
+    scratch = Path(argv[argv.index('--basetemp') + 1])
+    accepted = harness.assert_disposable_root(scratch / 'unit' / 'owned-case')
+    assert accepted == (scratch / 'unit' / 'owned-case').resolve()
+    assert scratch.resolve() != Path(os.environ['V2_GATE_EVIDENCE_DIR']).resolve()
