@@ -365,7 +365,7 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--confirmation-question-id")
     p.set_defaults(func=cmd_set_state)
 
-    p = mutator("set-lead", "FD: link the visible lead (never resumes)")
+    p = mutator("set-lead", "FD: link the lead (hidden lead/nexus allowed on FD lanes; never resumes)")
     p.add_argument("--lead-stream-id")
     p.add_argument("--lead-generation")
     p.add_argument("--clear", action="store_true")

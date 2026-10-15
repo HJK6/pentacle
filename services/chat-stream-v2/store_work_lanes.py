@@ -257,24 +257,32 @@ def _binding_streams_conn(conn: sqlite3.Connection, env_binding: dict[str, str] 
     return streams
 
 
-def lead_static_eligible(row: dict[str, Any] | None) -> bool:
-    """Role/visibility/kind part of lead eligibility (no open/generation test)."""
+def lead_static_eligible(row: dict[str, Any] | None, owner_kind: str | None = None) -> bool:
+    """Role/visibility/kind part of lead eligibility (no open/generation test).
+
+    Separate from visible-chat eligibility: an FD-owned lane may be led by a
+    hidden ``lead``/``nexus`` seat (FD-managed chats stay hidden). Operator-owned
+    lanes, and callers that pass no owner, keep the visible-only rule.
+    """
     if row is None or _is_composite(row) or _protected(row):
         return False
     if (row.get("role") or "") == "qa":
         return False
-    if (row.get("visibility") or "default") not in ("default", "visible"):
+    visibility = row.get("visibility") or "default"
+    if visibility == "hidden" and owner_kind == "fd":
+        return row.get("role") in ("lead", "nexus")
+    if visibility not in ("default", "visible"):
         return False
     return (row.get("role") in ("lead", "nexus")) or not row.get("parent_stream_id")
 
 
 def work_lane_lead_qualifies(lane: dict[str, Any], row: dict[str, Any] | None) -> bool:
-    """The one visible-lead predicate (operation guard, reconciler and projection)."""
+    """The one lead predicate (operation guard, reconciler and projection)."""
     if not lane.get("bound_stream_id") or row is None:
         return False
     if row.get("status") != "open" or row.get("session_generation") != lane.get("bound_generation"):
         return False
-    return lead_static_eligible(row)
+    return lead_static_eligible(row, lane.get("owner_kind"))
 
 
 def _chat_available(conn: sqlite3.Connection, lane: dict[str, Any]) -> tuple[str, str]:
@@ -664,7 +672,7 @@ class _WorkLanesStoreMixin:
         return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
 
     async def reconcile_work_lanes(self) -> list[dict[str, Any]]:
-        """Daemon-side lead-loss reconciliation: stored ``active`` without a visible lead -> ``paused``."""
+        """Daemon-side lead-loss reconciliation: stored ``active`` without a qualifying lead -> ``paused``."""
         def _op(conn):
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -912,7 +920,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 row = _session_conn(conn, str(lead["stream_id"]))
                 if row is None or row.get("session_generation") != lead["generation"]:
                     raise ValueError("work_lane_lead_unknown")
-                if not lead_static_eligible(row):
+                if not lead_static_eligible(row, lane.get("owner_kind")):
                     raise ValueError("work_lane_lead_ineligible")
                 changes.update(bound_stream_id=lead["stream_id"], bound_generation=lead["generation"],
                                bound_backend_kind="lead")
@@ -1052,7 +1060,7 @@ def _adopt_conn(conn, *, stream_id, request_id, payload, actor, generation, env_
         row = _session_conn(conn, str(lead["stream_id"]))
         if row is None or row.get("session_generation") != lead["generation"]:
             raise ValueError("work_lane_lead_unknown")
-        if not lead_static_eligible(row):
+        if not lead_static_eligible(row, owner):
             raise ValueError("work_lane_lead_ineligible")
         bound = (lead["stream_id"], lead["generation"], "lead")
     if owner == "fd" and not _fd_lineage_conn(conn, stream_id, payload, env_binding):
