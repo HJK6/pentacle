@@ -164,7 +164,10 @@ class Report {
   }
 }
 
-function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = null) {
+// `mic` (one scenario only): { micServerUrl, hostNames } enables the MIC panel
+// against an unused loopback port, with no start command, so no mic service
+// can run; hostNames names the web host for the room Source label.
+function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = null, mic = null) {
   const dashboards = {
     // Dashboard scenarios opt in to a seeded catalog; the default gate
     // profile has no catalog (the public empty default).
@@ -172,7 +175,8 @@ function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = n
   };
   const config = {
     appName: 'Pentacle',
-    features: { mic: false, chatUi: true, inputBar: true, dashboards: true },
+    features: { mic: !!mic, chatUi: true, inputBar: true, dashboards: true },
+    ...(mic ? { micServerUrl: mic.micServerUrl, hostNames: mic.hostNames } : {}),
     ...(modelerFixtureUrl ? { dashboardHub: { url: modelerFixtureUrl, scraperBotUrl: modelerFixtureUrl } } : {}),
     ...(Object.keys(dashboards).length ? { dashboards } : {}),
     tmux: 'tmux',
@@ -393,6 +397,15 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       remove: () => catalogFixtures.deleteCatalog(catalogFixture, catalogEnv),
     } : null;
 
+    // Scenario-scoped mic profile (hermetic runs only); false restores the default.
+    const configureMic = fixture ? async enabled => {
+      const mic = enabled ? { micServerUrl: `http://127.0.0.1:${await freePort()}`, hostNames: { local: 'Gate Room' } } : null;
+      writeProfile(scratch, daemon.port, runtime.modelerFixture.url, null, mic);
+      await restartHost();
+      await session.send('Page.navigate', { url });
+      await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs: args.timeoutMs });
+    } : null;
+
     // Daemon lifecycle primitives (hermetic runs only), so a scenario can model
     // a chat-stream daemon blip around a host restart — the real trigger for the
     // input-freeze bug: the browser latches connected:false at a high state
@@ -461,7 +474,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
     const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
-      configureModeler, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
+      configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS) {
       console.log(`\n▸ ${name}`);

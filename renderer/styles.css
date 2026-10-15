@@ -687,6 +687,27 @@ body.chat-stream-degraded button[data-cleanup-action] {
 .mic-btn-silent.active { background: var(--yellow); color: var(--bg); border-color: var(--yellow); }
 .mic-btn:disabled { opacity: 0.25; cursor: not-allowed; pointer-events: none; }
 
+/* Web Source choice: the room mic or this browser's microphone. */
+.mic-source { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.mic-source-label { font-size: 10px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.mic-source-options { display: flex; flex: 1; gap: 4px; }
+.mic-source-option { transition: none; }
+.mic-source-option[aria-checked="true"] { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
+.mic-local-section { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.mic-device-select {
+  width: 100%;
+  padding: 3px 4px;
+  border: 1px solid var(--pc-code-line);
+  border-radius: 4px;
+  background: var(--pc-chip-bg);
+  color: var(--pc-text);
+  font-family: inherit;
+  font-size: 10px;
+}
+.mic-local-active { font-size: 10px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mic-source-note { font-size: 10px; color: var(--yellow); margin-bottom: 6px; }
+.mic-source[hidden], .mic-local-section[hidden], .mic-source-note[hidden] { display: none; }
+
 .mic-status-dot.active-on { background: var(--cyan); animation: mic-pulse 2s infinite; }
 .mic-status-dot.active-awake { background: #00ff66; box-shadow: 0 0 6px #00ff66; animation: mic-pulse-fast 0.6s infinite; }
 .mic-status-dot.active-capturing { background: #00ff66; box-shadow: 0 0 6px #00ff66; }

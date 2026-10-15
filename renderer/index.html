@@ -69,6 +69,18 @@
         </button>
         <div class="sidebar-section-body" id="mic-section-body">
           <div class="mic-panel" id="mic-panel">
+            <div class="mic-source" id="mic-source" hidden>
+              <span class="mic-source-label" id="mic-source-label">Source</span>
+              <div class="mic-source-options" role="radiogroup" aria-labelledby="mic-source-label">
+                <button class="mic-btn mic-source-option" type="button" role="radio" data-mic-source="room" aria-checked="true">Room mic</button>
+                <button class="mic-btn mic-source-option" type="button" role="radio" data-mic-source="device" aria-checked="false" hidden>This device</button>
+              </div>
+            </div>
+            <div class="mic-source-note" id="mic-source-note" role="status" hidden></div>
+            <div class="mic-local-section" id="mic-local-section" hidden>
+              <select class="mic-device-select" id="mic-device-select" aria-label="Microphone input"></select>
+              <div class="mic-local-active" id="mic-local-active"></div>
+            </div>
             <div class="mic-modes">
               <button class="mic-btn mic-toggle" id="mic-btn-toggle" title="Toggle mic on/off">Off</button>
               <button class="mic-btn mic-btn-copy" id="mic-btn-copy" title="Start/stop clipboard capture">Copy</button>
