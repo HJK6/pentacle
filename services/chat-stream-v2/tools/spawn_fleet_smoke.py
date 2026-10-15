@@ -78,7 +78,8 @@ def smoke_plan() -> dict[str, object]:
     if not path.is_file():
         raise FileNotFoundError(f"machine file does not exist: {path}")
     path = path.resolve()
-    configured = tuple(machine.name for machine in load_machines({"PENTACLE_MACHINES_FILE": str(path)}))
+    machines = load_machines({"PENTACLE_MACHINES_FILE": str(path)})
+    configured = tuple(machine.name for machine in machines)
     raw_exclusions = os.environ.get("PENTACLE_SMOKE_EXCLUDED_HOSTS", "").strip()
     excluded = tuple(host.strip() for host in raw_exclusions.split(",")) if raw_exclusions else ()
     if any(not host for host in excluded) or len(excluded) != len(set(excluded)):
@@ -100,6 +101,7 @@ def smoke_plan() -> dict[str, object]:
             raise ValueError(f"PENTACLE_SMOKE_HOSTS names unknown or excluded hosts: {sorted(unknown)}")
     return {
         "source": str(path),
+        "optional_hosts": tuple(machine.name for machine in machines if machine.smoke_optional),
         "hosts": hosts,
         "excluded_present": tuple(sorted(excluded)),
         "excluded_absent": (),
@@ -911,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run and args.url is not None:
         parser.error("--dry-run accepts no URL or HOST")
+    optional_hosts = ()
     if args.host is not None:
         # Both positionals present: single post-deploy canary cell.
         url, cells = args.url, ((args.host, "codex", "promptless"),)
@@ -924,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "source": plan["source"],
                 "hosts": plan["hosts"],
+                "optional_hosts": plan["optional_hosts"],
                 "excluded_present": plan["excluded_present"],
                 "excluded_absent": plan["excluded_absent"],
                 "cells": [{"host": host, "provider": provider, "prompt_mode": mode}
@@ -932,11 +936,27 @@ def main(argv: list[str] | None = None) -> int:
             }, sort_keys=True))
             return 0
         url, cells = DEFAULT_URL, plan["cells"]
+        optional_hosts = plan["optional_hosts"]
     evidence: list[dict[str, object]] = []
     results = run_matrix(
         url, DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         allow_legacy_close=args.allow_legacy_close,
     )
+    # A successful verdict requires actual evidence for every planned cell.
+    # run_matrix returns nongreen rows and appends completed passes to evidence.
+    accounted = {(row.get("host"), row.get("provider"), row.get("prompt_mode"))
+                 for row in evidence if row.get("outcome") == "passed"}
+    accounted.update((row.get("host"), row.get("provider"), row.get("prompt_mode"))
+                     for row in results)
+    results.extend({"host": host, "provider": provider, "prompt_mode": mode,
+                    "class": "untested", "reason": "missing_evidence"}
+                   for host, provider, mode in cells if (host, provider, mode) not in accounted)
+    optional = set(optional_hosts)
+    skipped = [{**row, "outcome": "SKIPPED_OFFLINE"} for row in results
+               if row.get("host") in optional and row.get("class") == "untested"
+               and row.get("reason") == "host_unavailable"]
+    results = [row for row in results if not (row.get("host") in optional
+               and row.get("class") == "untested" and row.get("reason") == "host_unavailable")]
     untested = [row for row in results if row.get("class") == "untested"]
     failures = [row for row in results if row.get("class") != "untested"]
     status = "FAIL" if failures else ("UNTESTED" if untested else "PASS")
@@ -946,6 +966,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": status,
             "failures": failures,
             "untested": untested,
+            "skipped": skipped,
             "cells": evidence,
         },
         sort_keys=True,

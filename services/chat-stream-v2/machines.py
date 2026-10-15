@@ -43,6 +43,7 @@ class MachineConfig:
     cwd: str = ""
     agent_orch_bin_dir: str | None = None
     label: str | None = None
+    smoke_optional: bool = False
 
     @property
     def is_local(self) -> bool:
@@ -76,6 +77,8 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
     name = str(raw.get("name") or "").strip()
     if not name:
         raise ValueError("machine entry missing required field: name")
+    if not isinstance(raw.get("smoke_optional", False), bool):
+        raise ValueError("smoke_optional must be a boolean")
     defaults = _default_local_machine()
     raw_target = raw.get("ssh_target")
     if raw_target is None:
@@ -104,6 +107,7 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
     return MachineConfig(
         name=name,
         ssh_target=ssh_target,
+        smoke_optional=raw.get("smoke_optional", False),
         tmux_bin=_expand(str(raw.get("tmux_bin") or defaults.tmux_bin)),
         claude_bin=_expand(str(raw.get("claude_bin") or claude_default)),
         codex_bin=_expand(str(raw.get("codex_bin") or codex_default)),
