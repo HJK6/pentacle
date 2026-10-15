@@ -545,3 +545,213 @@ if __name__ == "__main__":
     else:
         assert sys.argv[1] == "--child"
         asyncio.run(child(Path(sys.argv[2]), sys.argv[3]))
+
+
+@pytest.mark.parametrize("phase", ["complete", "after_spawn", "before_probe", "after_bind"])
+def test_authorized_restore_during_input_death_probe_retains_input(tmp_path, monkeypatch, phase):
+    """Real restore may change the holder before its routing-completion wake."""
+    from tests.test_assistant_restore import Rig
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=True)
+        sent, tasks = [], []
+        reached, release = asyncio.Event(), asyncio.Event()
+        await rig.start()
+        proof = rig.restore.input_death_proof
+
+        async def dispatch(route):
+            sent.append(dict(route))
+            return {"delivery": "landed"}
+
+        async def pause(point):
+            if point == ("after_bind" if phase == "after_bind" else "after_spawn"):
+                reached.set()
+                await release.wait()
+
+        triggered = False
+
+        async def interleave(*args):
+            nonlocal triggered
+            if triggered:
+                return await proof(*args)
+            triggered = True
+            if phase == "before_probe":
+                tasks.append(asyncio.create_task(rig.restore.advance()))
+                await asyncio.wait_for(reached.wait(), 2)
+                return await proof(*args)
+            observed = await proof(*args)
+            assert observed[0] is True
+            if phase == "complete":
+                assert (await rig.restore.advance())["state"] == "restored"
+            else:
+                tasks.append(asyncio.create_task(rig.restore.advance()))
+                await asyncio.wait_for(reached.wait(), 2)
+            return observed
+
+        try:
+            rig.composite.dispatch = dispatch
+            if phase != "complete":
+                rig.restore._fault = pause
+            rig.composite.input_death_proof = interleave
+            accepted = await rig.composite.accept_input({
+                "optimistic_id": "restore-race-input", "text": "synthetic accepted input"})
+            await asyncio.wait_for(rig.composite._worker, 2)
+            current = await _route(rig, "restore-race-input")
+            assert current["routing_state"] in {"queued", "resolved"}
+            if phase in {"after_spawn", "before_probe"}:
+                assert current["routing_state"] == "queued"
+                assert current["dispatch_id"] is None and sent == []
+            release.set()
+            for task in tasks:
+                assert (await asyncio.wait_for(task, 2))["state"] == "restored"
+            await asyncio.wait_for(rig.composite._worker, 2)
+            final = await _route(rig, "restore-race-input")
+            binding = await rig.composite.binding()
+            assert final["routing_state"] == "resolved"
+            assert final["delivery_state"] == "landed"
+            assert final["event_id"] == accepted["event_id"]
+            assert final["route_target_generation"] == binding["generation"]
+            assert len(sent) == 1
+            duplicate = await rig.composite.accept_input({
+                "optimistic_id": "restore-race-input", "text": "synthetic accepted input"})
+            assert duplicate["duplicate"] is True
+            await asyncio.wait_for(rig.composite._worker, 2)
+            assert len(sent) == 1
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await rig.composite.stop()
+            rig.store.stop()
+
+    asyncio.run(run())
+
+
+def test_repeated_binding_conflicts_pause_without_dispatch(tmp_path, monkeypatch):
+    from tests.test_assistant_restore import Rig
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=True)
+        await rig.start()
+        calls, sent = [], []
+        proof = rig.restore.input_death_proof
+
+        async def changing(*args):
+            observed = await proof(*args)
+            if not calls:
+                assert (await rig.restore.advance())["state"] == "restored"
+            calls.append(True)
+            binding = await rig.composite.binding()
+            await rig.move_binding(binding["stream_id"], binding["generation"], binding["revision"] + 1)
+            return observed
+
+        async def dispatch(route):
+            sent.append(route)
+            return {"delivery": "landed"}
+
+        try:
+            rig.composite.input_death_proof = changing
+            rig.composite.dispatch = dispatch
+            await rig.composite.accept_input({"optimistic_id": "binding-churn", "text": "synthetic"})
+            await asyncio.wait_for(rig.composite._worker, 2)
+            route = await _route(rig, "binding-churn")
+            assert route["routing_state"] == "queued"
+            assert route["dispatch_id"] is None and sent == []
+            assert len(calls) == 2  # One fresh claim, then retain without spinning.
+        finally:
+            await rig.composite.stop()
+            rig.store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delivery", ["intent", "landed", "uncertain", "committed_pending"])
+def test_binding_conflict_hold_never_requeues_allocated_dispatch(tmp_path, monkeypatch, delivery):
+    from tests.test_assistant_restore import Rig
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=False)
+        sent = []
+        await rig.start()
+
+        async def dispatch(route):
+            sent.append(route["dispatch_id"])
+            return {"delivery": "landed"}
+
+        try:
+            rig.composite.dispatch = dispatch
+            await rig.composite.accept_input({"optimistic_id": "allocated-input", "text": "synthetic"})
+            await asyncio.wait_for(rig.composite._worker, 2)
+            original = await _route(rig, "allocated-input")
+            assert original["dispatch_id"] and len(sent) == 1
+            await rig.store.update_assistant_composite_route(
+                original["route_id"], routing_state="classifying", delivery_state=delivery)
+            held = await rig.store.update_assistant_composite_route(
+                original["route_id"], routing_state="queued",
+                error_code="assistant_route_binding_changed", predispatch_only=True)
+            assert held is None
+            actual = await _route(rig, "allocated-input")
+            assert actual["routing_state"] == "classifying"
+            assert actual["delivery_state"] == delivery
+            assert actual["dispatch_id"] == original["dispatch_id"]
+            assert len(sent) == 1
+        finally:
+            await rig.composite.stop()
+            rig.store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field,value", [("attempt_generation", "foreign-generation"), ("expected_revision", 999)])
+def test_unrelated_generation_is_not_held_as_recorded_restore(tmp_path, monkeypatch, field, value):
+    from tests.test_assistant_restore import Rig
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch, auto=True)
+        await rig.start()
+        reached, release = asyncio.Event(), asyncio.Event()
+        tasks, sent = [], []
+        proof = rig.restore.input_death_proof
+
+        async def pause(point):
+            if point == "after_spawn":
+                reached.set()
+                await release.wait()
+
+        async def dispatch(route):
+            sent.append(route)
+            return {"delivery": "landed"}
+
+        async def mismatched(*args):
+            tasks.append(asyncio.create_task(rig.restore.advance()))
+            await asyncio.wait_for(reached.wait(), 2)
+            episode = (await rig.episodes())[-1]
+            def alter(conn):
+                # Parameter names above are a fixed two-field fixture allowlist.
+                conn.execute(f"UPDATE v2_assistant_restore_episode SET {field}=? WHERE episode_id=?",
+                             (value, episode["episode_id"]))
+                conn.commit()
+            await rig.store.submit(alter)
+            return await proof(*args)
+
+        try:
+            rig.restore._fault = pause
+            rig.composite.input_death_proof = mismatched
+            rig.composite.dispatch = dispatch
+            await rig.composite.accept_input({"optimistic_id": "foreign-restore", "text": "synthetic"})
+            await asyncio.wait_for(rig.composite._worker, 2)
+            route = await _route(rig, "foreign-restore")
+            assert route["routing_state"] == "routing_failed"
+            assert route["error_code"] == "assistant_recovery_generation_mismatch"
+            assert route["dispatch_id"] is None and sent == []
+        finally:
+            for task in tasks:
+                task.cancel()
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await rig.composite.stop()
+            rig.store.stop()
+
+    asyncio.run(run())

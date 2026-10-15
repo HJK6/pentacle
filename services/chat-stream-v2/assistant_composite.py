@@ -68,6 +68,10 @@ class _DirectTargetUnbound(ValueError):
     """
 
 
+class _DirectBindingChanged(_DirectTargetUnbound):
+    """A pre-dispatch CAS lost; re-claim once with fresh binding authority."""
+
+
 def _env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
     raw = env.get(key)
     if raw is None:
@@ -1028,6 +1032,7 @@ class AssistantComposite:
         # independent conversations behind its completion.
         try:
             async with self._worker_lock:
+                binding_retry_route = None
                 while True:
                     # Reset before claiming so any wake during claim/classify is
                     # observed at the exit decisions below (worker-exit race).
@@ -1042,6 +1047,13 @@ class AssistantComposite:
                     await self.refresh_activity()
                     try:
                         await self._classify_one(route)
+                    except _DirectBindingChanged:
+                        # This route has no allocated dispatch. Re-claim normally
+                        # once; repeated mutation retains it for a later wake.
+                        if binding_retry_route == route["route_id"]:
+                            return
+                        binding_retry_route = route["route_id"]
+                        continue
                     except _DirectTargetUnbound:
                         # Direct target is unbound (pane dead, awaiting a rebind).
                         # The route was re-queued in order.  If a (re)bind wake
@@ -1111,6 +1123,19 @@ class AssistantComposite:
                                 )
                                 raise _DirectTargetUnbound("assistant_awaiting_recovery")
                             if health != "healthy" and reason != "remote_holder":
+                                if reason == "generation_mismatch" and observed:
+                                    episode = await self.store.restore_episode_for_binding(
+                                        name=guard["name"], stream_id=guard["stream_id"],
+                                        generation=guard["generation"],
+                                    )
+                                    if (episode and episode["generation"] == guard["generation"]
+                                            and episode["expected_revision"] == guard["revision"]
+                                            and episode["state"] in {"spawning", "spawned", "bound"}
+                                            and episode.get("attempt_generation")
+                                            and episode["attempt_generation"] == observed.get("session_generation")):
+                                        # The recorded restore opened its holder but
+                                        # has not yet completed the binding/wake.
+                                        raise _DirectTargetUnbound("assistant_awaiting_recovery")
                                 raise ValueError("assistant_recovery_" + str(reason or "successor_unavailable"))
                     generation = await self._direct_target_generation()
                     dispatch_id = "assistant-direct-" + uuid.uuid4().hex
@@ -1150,10 +1175,23 @@ class AssistantComposite:
                     # it.  Do NOT fail or dispatch to the stale generation.
                     await self._update_route(
                         str(route["route_id"]), routing_state="queued",
-                        error_code=str(exc),
+                        error_code=str(exc), predispatch_only=True,
                     )
                     raise
                 except ValueError as exc:
+                    if str(exc) in {"assistant_route_binding_changed",
+                                    "assistant_recovery_observation_changed",
+                                    "assistant_recovery_generation_changed"}:
+                        # The failed transaction allocated no provider action.
+                        # Retain the original input, then re-run all authority
+                        # and lineage checks rather than accepting a stale proof.
+                        held = await self._update_route(
+                            str(route["route_id"]), routing_state="queued",
+                            error_code=str(exc), predispatch_only=True,
+                        )
+                        if held is not None:
+                            raise _DirectBindingChanged(str(exc)) from exc
+                        return
                     await self._update_route(
                         str(route["route_id"]), routing_state="routing_failed", error_code=str(exc),
                     )

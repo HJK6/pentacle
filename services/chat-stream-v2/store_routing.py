@@ -1299,10 +1299,13 @@ class _RoutingStoreMixin:
         binding_env: dict[str, str] | None = None,
         recovery_observation: dict[str, Any] | None = None,
         transfer_successor: tuple[str, str] | None = None,
+        predispatch_only: bool = False,
     ) -> dict[str, Any] | None:
         """``direct_batch(open_dispatches) -> (route_payload, batched_into_dispatch_id)``
         builds a direct route's payload from the target's other open dispatches
-        inside this transaction, so membership and resolution commit together."""
+        inside this transaction, so membership and resolution commit together.
+        ``predispatch_only`` refuses retention once any dispatch/delivery was allocated.
+        """
         allowed_routing = {
             "queued", "classifying", "fallback_dispatched", "deferred", "resolved", "routing_failed",
         }
@@ -1318,6 +1321,12 @@ class _RoutingStoreMixin:
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone()
                 if row is None:
+                    conn.commit()
+                    return None
+                if predispatch_only and (
+                    row["routing_state"] not in {"queued", "classifying"}
+                    or row["dispatch_id"] is not None or row["delivery_state"] is not None
+                ):
                     conn.commit()
                     return None
                 if (expected_dispatch_id is not None and row["dispatch_id"] != expected_dispatch_id
