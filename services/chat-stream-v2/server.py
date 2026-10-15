@@ -301,6 +301,10 @@ DOT_FREETEXT_FIELDS = frozenset({
 DOT_LIST_FIELDS = DOT_METADATA_FIELDS | DOT_FREETEXT_FIELDS
 DOT_REQUIRES_TLS_CODE = "external_requires_tls"
 DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
+# Literal, case-sensitive peer alias for the same-named assistant composite's
+# current binding, recognized only by the tell/send entry branches (contract 3).
+ASSISTANT_ALIAS = "bart"
+_ASSISTANT_ALIAS_TARGET_MEMBERS = ("stream_id", "host", "session_name")
 #: Deny-by-default verb allowlist for a stream-scoped credential (the Cosmo
 #: client).  Every other registered handler denies with `scope_denied`.  Outbound
 #: server frames (welcome/snapshot/pong/chat.event/working.state/notification/
@@ -3954,6 +3958,8 @@ class Server:
         }
 
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if msg.get("to_stream_id") == ASSISTANT_ALIAS:
+            return await self._alias_tell(msg)
         host, name = await self.sessions.resolve(msg)
         target_stream_id = f"{host}:{name}"
         composite = self._composite_for(target_stream_id)
@@ -4115,7 +4121,84 @@ class Server:
         status = str(reply.get("delivery_status") or "")
         return status == "delivered" or status in COMMITTED_PENDING_PROOF_STATUSES
 
+    def _alias_admission(self, msg: dict[str, Any], *, verb: str) -> tuple[Any, dict[str, Any]]:
+        """Admit an assistant-alias peer tell/send and derive its peer context.
+
+        Alias spelling grants no authority: only a verified seat token whose
+        claimed sender matches (or, for tell, an already-allowlisted service)
+        may use it. Operator-elevation flags are cleared so a dual
+        operator+peer seat is admitted and digested as a peer.
+        """
+        if any(key in msg for key in _ASSISTANT_ALIAS_TARGET_MEMBERS):
+            raise VerbError("bad_request", "the assistant alias takes no other target member")
+        if "inbox" in msg and (
+            not isinstance(msg.get("inbox"), dict) or msg["inbox"].get("to") != ASSISTANT_ALIAS
+        ):
+            raise VerbError("bad_request", "inbox.to must match the assistant alias target")
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        if auth.get("dot_principal") or (verb == "tell" and auth.get("scoped_principal")):
+            raise VerbError(DOT_SCOPE_DENIED_CODE, "a scoped client may not use the assistant alias")
+        if auth.get("scoped_principal"):
+            raise VerbError(SCOPE_DENIED_CODE, "scoped client may send only to its own stream")
+        unauthorized = VerbError(f"assistant_{verb}_unauthorized",
+                                 f"assistant alias {verb} requires a verified agent stream token")
+        verified = str(auth.get("stream_id") or "").strip() if auth.get("token_verified") is True else ""
+        claim = str(msg.get("from_stream_id") or "").strip()
+        if verified:
+            # The sender claim is required, not inferred: an absent or blank
+            # claim never inherits the token's seat for alias addressing.
+            if claim != verified:
+                raise unauthorized
+        elif not (verb == "tell" and auth.get("service_authenticated") is True):
+            raise unauthorized
+        peer = {**auth, "operator_authenticated": False, "operator_principal": "",
+                "operator_trusted": False, "credential_id": ""}
+        peer.pop("operator_authority_source", None)
+        composite = self._composites().get(ASSISTANT_ALIAS)
+        if composite is None or not composite.enabled:
+            raise VerbError("assistant_composite_unavailable", "assistant composite not configured")
+        return composite, peer
+
+    async def _alias_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Peer alias tell: the existing composite tell, as a peer."""
+        composite, peer = self._alias_admission(msg, verb="tell")
+        composite_stream_id = composite.config.stream_id
+        return await self._composite_tell(
+            composite, composite_stream_id,
+            {**msg, "to_stream_id": composite_stream_id, "_auth_context": peer},
+        )
+
+    async def _alias_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Peer alias send: one ordinary physical send to the sampled binding.
+
+        The binding is sampled once for this attempt; there is no at-effect
+        fence, alias receipt, queue or retry. Ordinary Comms.send admission,
+        idempotency, digest and receipts then apply to the physical target.
+        """
+        composite, peer = self._alias_admission(msg, verb="send")
+        binding = await composite.binding()
+        target = str(binding.get("stream_id") or "").strip()
+        generation = str(binding.get("generation") or "").strip()
+        host, separator, name = target.partition(":")
+        seat = await self.store.fetch_session(host, name) if separator else None
+        if (seat is None or seat.get("status") != "open"
+                or seat.get("presumed_dead_at") or seat.get("closed_at")):
+            raise VerbError("assistant_alias_unbound",
+                            "no open bound assistant seat; nothing was accepted")
+        if generation and seat.get("session_generation") != generation:
+            raise VerbError("assistant_direct_generation_conflict",
+                            "assistant binding generation is stale")
+        # A transient physical-target copy: never the caller's object, and no
+        # private marker survives (only the server-derived peer context).
+        physical = {key: value for key, value in msg.items() if not str(key).startswith("_")}
+        physical.update(to_stream_id=target, host=host, session_name=name, _auth_context=peer)
+        if isinstance(msg.get("inbox"), dict):
+            physical["inbox"] = {**msg["inbox"], "to": target}
+        return await self._on_send(physical)
+
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if msg.get("to_stream_id") == ASSISTANT_ALIAS:
+            return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
         stream_id = f"{host}:{name}"
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}

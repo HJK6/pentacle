@@ -316,3 +316,94 @@ def test_agent_orch_send_auth_and_indeterminate_errors_print_json(monkeypatch, t
     second = capsys.readouterr()
     assert json.loads(second.out)["error_code"] == "connection_dropped"
 
+
+
+ALIAS = cli.ASSISTANT_ALIAS
+
+def _capture_send_transport(monkeypatch, tmp_path, responses):
+    """Mock only the one-shot RPC transport; the real parser, handler,
+    inline-INBOX builder and `send_once` request-id minting run unchanged."""
+    from agent_orch import wsclient
+    from agent_orch.config import Config
+
+    sent: list[dict] = []
+    queue = list(responses)
+
+    async def fake_one_shot(_config, payload, *, prefix, timeout=30.0, from_stream_id=None, **_kwargs):
+        sent.append({"prefix": prefix, "payload": json.loads(json.dumps(payload)), "from": from_stream_id})
+        return {**queue.pop(0), "request_id": payload.get("request_id")}
+
+    monkeypatch.setattr(wsclient, "_one_shot_rpc", fake_one_shot)
+    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "synthetic-seat-token")
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "example-host-s", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "example-sender:seat-s")
+    return sent
+
+
+_LANDED_AT_A = {
+    "type": "send.result", "delivery": "landed", "host": "example-host-a", "session_name": "seat-a",
+    "to_stream_id": "example-host-a:seat-a", "receipt_id": "receipt-example-a",
+    "reconcile_command": "agent-orch send-receipt example-host-a:seat-a send-x",
+}
+
+
+def test_send_literal_alias_emits_raw_target_and_inbox_to(monkeypatch, tmp_path, capsys) -> None:
+    sent = _capture_send_transport(monkeypatch, tmp_path, [_LANDED_AT_A, _LANDED_AT_A])
+    parser = cli.build_parser()
+
+    first = parser.parse_args(["send", ALIAS, "101", "synthetic commissioned task"])
+    assert first.func(first) == 0
+    retry = parser.parse_args(["send", ALIAS, "101", "synthetic commissioned task", "--retry"])
+    assert retry.func(retry) == 0
+
+    assert [item["prefix"] for item in sent] == ["send", "send"]
+    for item, retry_flag in zip(sent, (False, True)):
+        payload = item["payload"]
+        assert payload["type"] == "send"
+        assert payload["to_stream_id"] == ALIAS
+        assert payload["inbox"]["to"] == ALIAS
+        assert payload["inbox"]["from"] == "example-sender:seat-s"
+        assert payload["inbox"]["msg_id"] == 101
+        assert payload["from_stream_id"] == "example-sender:seat-s"
+        assert payload["msg_id"] == 101
+        assert payload["text"] == "synthetic commissioned task"
+        assert payload["retry"] is retry_flag
+        assert payload["stream_token"] == "synthetic-seat-token"
+        # No colon split: no host/session/stream_id alternative, and no
+        # synthetic optimistic identity is added for the alias.
+        assert not {"host", "session_name", "stream_id", "optimistic_id"} & set(payload)
+        assert payload["request_id"].startswith("send-")
+    # Separate CLI invocations (including --retry) rotate the request id.
+    assert sent[0]["payload"]["request_id"] != sent[1]["payload"]["request_id"]
+    out = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert out[0]["to_stream_id"] == "example-host-a:seat-a"
+
+
+def test_send_alias_displays_ordinary_committed_pending_guidance(monkeypatch, tmp_path, capsys) -> None:
+    pending = {
+        "type": "send.result", "delivery": "committed_pending_proof", "do_not_resubmit": True,
+        "to_stream_id": "example-host-a:seat-a",
+        "reconcile_command": "agent-orch send-receipt example-host-a:seat-a send-x",
+    }
+    _capture_send_transport(monkeypatch, tmp_path, [pending])
+    args = cli.build_parser().parse_args(["send", ALIAS, "101", "synthetic commissioned task"])
+
+    assert args.func(args) == 0
+    err = capsys.readouterr().err
+    assert "Do NOT resend" in err
+    assert "agent-orch send-receipt example-host-a:seat-a send-x" in err
+
+
+def test_send_alias_is_exact_literal_and_other_targets_unchanged(monkeypatch, tmp_path, capsys) -> None:
+    sent = _capture_send_transport(monkeypatch, tmp_path, [_LANDED_AT_A])
+    parser = cli.build_parser()
+    for target in (ALIAS.capitalize(), "daff", ALIAS + ":"):
+        args = parser.parse_args(["send", target, "101", "synthetic commissioned task"])
+        assert args.func(args) == 2, target
+    assert sent == []
+    explicit = parser.parse_args(["send", "example-host-a:seat-a", "101", "synthetic commissioned task"])
+    assert explicit.func(explicit) == 0
+    payload = sent[0]["payload"]
+    assert payload["host"] == "example-host-a" and payload["session_name"] == "seat-a"
+    assert payload["inbox"]["to"] == "example-host-a:seat-a"
+    assert "to_stream_id" not in payload

@@ -216,3 +216,79 @@ def test_tell_requires_text_positional():
     else:  # pragma: no cover
         raise AssertionError("argparse accepted tell without text")
 
+
+
+ALIAS = cli.ASSISTANT_ALIAS
+
+def _capture_transport(monkeypatch, tmp_path, response):
+    """Mock only the one-shot RPC transport; the real parser, handler and
+    `tell_once`/`send_once` wire shaping run unchanged."""
+    from agent_orch import wsclient
+
+    sent = []
+
+    async def fake_one_shot(_config, payload, *, prefix, timeout=30.0, from_stream_id=None, **_kwargs):
+        sent.append({"prefix": prefix, "payload": json.loads(json.dumps(payload)), "from": from_stream_id})
+        return {**response, "request_id": payload.get("request_id")}
+
+    monkeypatch.setattr(wsclient, "_one_shot_rpc", fake_one_shot)
+    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "synthetic-seat-token")
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "example-host-s", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "example-sender:seat-s")
+    return sent
+
+
+def test_tell_literal_alias_emits_raw_target_at_transport(monkeypatch, capsys, tmp_path):
+    sent = _capture_transport(monkeypatch, tmp_path, {"type": "tell.ok", "to_stream_id": f"{ALIAS}:assistant",
+                                                     "tell_id": "tell-example-1", "delivery_status": "delivered"})
+    args = cli.build_parser().parse_args(["tell", ALIAS, "synthetic status", "--tell-id", "tell-example-1"])
+
+    assert args.func(args) == 0
+
+    assert len(sent) == 1
+    payload = sent[0]["payload"]
+    assert sent[0]["prefix"] == "tell"
+    assert payload["type"] == "tell"
+    assert payload["to_stream_id"] == ALIAS
+    assert payload["tell_id"] == "tell-example-1"
+    assert payload["from_stream_id"] == "example-sender:seat-s"
+    assert payload["stream_token"] == "synthetic-seat-token"
+    assert not {"host", "session_name", "stream_id"} & set(payload)
+    assert json.loads(capsys.readouterr().out)["type"] == "tell.ok"
+
+
+def test_tell_alias_is_exact_literal_only(monkeypatch, capsys, tmp_path):
+    sent = _capture_transport(monkeypatch, tmp_path, {"type": "tell.ok"})
+    parser = cli.build_parser()
+    for target in (ALIAS.capitalize(), ALIAS.upper(), "daff", ALIAS + " ", ALIAS + ":"):
+        args = parser.parse_args(["tell", target, "synthetic status"])
+        assert args.func(args) == 2, target
+    assert sent == []
+    assert "validation failed" in capsys.readouterr().err
+
+
+def test_tell_explicit_targets_unchanged_by_alias(monkeypatch, tmp_path):
+    sent = _capture_transport(monkeypatch, tmp_path, {"type": "tell.ok"})
+    parser = cli.build_parser()
+    for target in (f"{ALIAS}:assistant", "example-host-a:seat-a"):
+        args = parser.parse_args(["tell", target, "synthetic status"])
+        assert args.func(args) == 0
+        assert sent[-1]["payload"]["to_stream_id"] == target
+
+
+def test_alias_not_accepted_by_other_stream_commands(monkeypatch, capsys, tmp_path):
+    sent = _capture_transport(monkeypatch, tmp_path, {"type": "unexpected.ok"})
+    parser = cli.build_parser()
+    for argv in (
+        ["send-receipt", ALIAS, "send-example"],
+        ["inspect", ALIAS],
+        ["await", ALIAS, "101"],
+        ["report", "--status", "done", "--msg-id", "0", "--from-stream-id", ALIAS, "--result", json.dumps({
+            "summary": "Synthetic report.", "next_action": "lead_merge",
+            "findings": [{"severity": "info", "where": "README.md:1", "issue": "none", "suggested_fix": "n/a"}],
+        })],
+    ):
+        args = parser.parse_args(argv)
+        assert args.func(args) == 2, argv
+        assert "expected stream id" in capsys.readouterr().err, argv
+    assert sent == []

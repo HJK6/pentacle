@@ -30,8 +30,8 @@ the standard `unsupported_in_v2` response.
 | `agent-orch schedule cancel <schedule_id>` | Cancel a pending schedule; terminal states return `schedule_terminal_state`. |
 | `agent-orch schedule reschedule <schedule_id> (--at ISO \| --delay DURATION) [--allow-past-time] [--allow-far-future]` | Re-arm a schedule for a new UTC fire time. Valid on every state; terminal-state re-arm resets retry bookkeeping and preserves the prior `fire_result_stream_id` until the next successful fire overwrites it. |
 | `agent-orch schedule run <schedule_id>` | Move a `pending` or `pending_retry` row to fire immediately. Terminal states and `fired_in_progress` return `schedule_terminal_state`; use `reschedule` to re-arm terminal rows. |
-| `agent-orch send [--retry] <stream_id> <msg_id> <prompt>` | Issue `send` RPC. `msg_id` is unique per target stream. `--retry` is accepted when the latest entry for `(msg_id, stream_id)` is `send.result` with `delivery:"not_landed"`, `send.error`, `transmit_failed`, `transmit_delivered_awaiting_result`, or `send_error`. The CLI builds and validates a minimal Inbox v1 envelope from the prompt, carries it inline to the daemon, and the daemon re-validates it. |
-| `agent-orch tell <peer_stream_id> <text> [--from STREAM_ID] [--ttl SECONDS] [--tell-id UUID] [--urgent]` | Direct one-way peer message. The daemon pastes immediately through the always-submit path and returns a durable completed-delivery receipt; `submission_confirmed` is post-hoc evidence, not a readiness gate. |
+| `agent-orch send [--retry] <stream_id> <msg_id> <prompt>` | Issue `send` RPC. The target may also be the assistant alias; see [Addressing the assistant by alias](#addressing-the-assistant-by-alias). `msg_id` is unique per target stream. `--retry` is accepted when the latest entry for `(msg_id, stream_id)` is `send.result` with `delivery:"not_landed"`, `send.error`, `transmit_failed`, `transmit_delivered_awaiting_result`, or `send_error`. The CLI builds and validates a minimal Inbox v1 envelope from the prompt, carries it inline to the daemon, and the daemon re-validates it. |
+| `agent-orch tell <peer_stream_id> <text> [--from STREAM_ID] [--ttl SECONDS] [--tell-id UUID] [--urgent]` | Direct one-way peer message. The target may also be the assistant alias; see [Addressing the assistant by alias](#addressing-the-assistant-by-alias). The daemon pastes immediately through the always-submit path and returns a durable completed-delivery receipt; `submission_confirmed` is post-hoc evidence, not a readiness gate. |
 | `agent-orch park <stream_id> --reason TEXT [--from STREAM_ID]` / `agent-orch unpark <stream_id> [--event-id ID --reason TEXT] [--from STREAM_ID]` | Declare or clear a session's parked state. The CLI is authorized for the target stream or its direct parent; the Pentacle desktop operator surface has the separate operator-confirmed path. A routing-integrity park requires its exact event id and a non-empty acknowledgement reason. Parked sessions receive no system nudges. |
 | `agent-orch notify (--message TEXT \| --ask TEXT) [--title TEXT] [--producer NAME] [--severity info\|warning\|critical] [--ttl SECONDS] [--button LABEL ... \| --actions JSON] [--await-answer] [--timeout SECONDS] [--from STREAM_ID]` | Publish an operator-facing notification through `chat_streamd`. `--message` creates a message-only Updates card with no buttons. `--ask` creates an actionable question; `--button` builds yes/no-style actions, while `--actions` accepts a JSON list of notification action objects (if both are supplied, `--actions` takes precedence). With `--await-answer`, the CLI records the publishing stream as `answer_to_stream_id`, blocks on `notification.await`, and prints the typed answer payload. |
 | `agent-orch prompt ask --title TEXT --body TEXT [--question-id ID] [--spec-id ID] [--response-mode single_choice\|multi_choice\|free_text] [--option LABEL[=VALUE] ...] [--from STREAM_ID] [--provider NAME] [--ttl SECONDS] [--await-answer] [--timeout SECONDS]` | Standard operator-question protocol (verified, operator-visible producer only). Creates or refreshes a durable `agent_question.v1` record through `chat_streamd`, publishes one deduped Updates card, and returns immediately by default. Admission caps: title ≤90, body ≤1200 code points in blocks of ≤300 / ≤3 lines, 1–5 options with labels ≤40 and descriptions ≤100; no `ack` mode and no separate `--context` (put context in `--body`). Every question admits free text. If daemon/auth/store failure prevents durable creation, returns `prompt.fallback` plus an `AGENT_QUESTION_V1` inline block. |
@@ -126,6 +126,68 @@ Success response:
 `delivery_status` is `"delivered"` after the unconditional paste and the durable completed-delivery record is written. `submission_confirmed` is post-hoc pane evidence; false does not void or retry the delivery. When a Codex paste committed (left the composer, no active draft) but its post-watermark USER-event proof is still ingesting, `delivery_status` is `"committed_pending_proof"` with `action_committed:true` and `do_not_resubmit:true` — a non-fatal, do-not-resend state. Ordinary tell receipts remain stored snapshots; a later provider event does not automatically update them (see the send section's `committed_pending_proof` note). `tell` still exits 0. If the target stream closed with a successor, the daemon forwards the tell to the final live successor and records `original_to_stream_id` plus route hops. `agent-orch ledger get <tell-id>` and `agent-orch audit inbound <stream-id>` expose the exact text and route evidence later. Stable daemon errors include `peer_session_unknown_from`, `peer_session_unknown_to`, `terminated`, `route_loop`, `route_depth_exceeded`, `text_too_large`, `invalid_ttl`, and `tell_id_replay_conflict`.
 
 `agent-orch list` and `agent-orch inspect` expose each session's computed `turn_state` (`idle`, `working`, `parked`, `limit_stalled`, or `unknown`), `turn_state_since`, and raw `turn_state_sources`. Source precedence is parked over limit-stalled over activity over unknown; lower-priority masked sources remain visible. `agent-orch park` sets the park source with a required reason and `agent-orch unpark` clears it. Stable park errors are `park_unauthorized`, `park_target_closed`, `park_not_found`, and `unpark_not_parked`.
+
+### Addressing the assistant by alias
+
+`tell` and `send` (only these two verbs) also accept one literal, case-sensitive
+alias: `bart`, the name of the primary assistant composite. It means "that
+composite's current binding" and is for agent peers: a verified seat stream token and an explicit
+sender claim (`from_stream_id`, always sent by the CLI) naming the same seat are required. Operator-only
+callers receive `assistant_tell_unauthorized` / `assistant_send_unauthorized`, Dot and scoped clients keep their scope errors, and
+a seat token that also carries operator authority is treated as a peer, so
+routine text is held by the front-desk digest while `GATE`/`BLOCKER` passes as
+usual. The alias grants no authority. `report`, `inspect`, `await` and
+`send-receipt` do not accept it.
+
+```sh
+agent-orch tell bart 'status: parser landed' --tell-id 6f1027b2-66f7-4422-a5fc-7b693cccb256
+agent-orch send bart 101 'review the parser change'
+```
+
+The CLI keeps the alias raw on the wire. `tell` sets `to_stream_id` to the
+alias. `send` sets both `to_stream_id` and inline `inbox.to` to the alias, with
+no `host`/`session_name` split and no optimistic ID. The daemon refuses an extra
+target member, or an inline INBOX `to` other than the alias, as `bad_request`.
+A daemon without alias support refuses the raw alias as `bad_request` before
+accepting anything. Nothing falls back to an explicit target.
+
+Each attempt samples the current binding once. An attempt that sampled seat A
+may still complete at A after the assistant moves to B. A later attempt reaches
+B. There is no lock on the binding at delivery time.
+
+- An alias tell is the existing composite tell, sent as a peer. The reply
+  names the composite stream id (`<alias>:assistant`). While no seat is bound the tell is queued
+  (`queued_unbound`) and delivered by the existing rebind/restore flush; a
+  transfer commit does not flush it. A stale bound generation is
+  `assistant_direct_generation_conflict`.
+- An alias send becomes one ordinary send to the sampled physical seat, with the
+  ordinary QA admission, idempotency, digest and receipts. The response names
+  that physical `to_stream_id`, its `receipt_id` and `reconcile_command`.
+  Look up the receipt with
+  `agent-orch send-receipt <physical stream> <request_id>`; the alias is not a
+  receipt target. With no open bound seat the send fails with
+  `assistant_alias_unbound` before any acceptance (no receipt, hold or queue).
+  A stale binding is `assistant_direct_generation_conflict`. Neither error retries
+  on its own.
+
+Retry limits are those of the underlying transport. They are not new
+guarantees:
+
+- A tell reusing a retained `--tell-id` and body replays at the same resolved
+  seat. After a move it returns `tell_id_conflict`. Once the ledger evicts the
+  key, the same tell may deliver again. A new tell ID is new work and may
+  duplicate meaning.
+- Send idempotency is per physical target. Each CLI invocation, `--retry`
+  included, mints a new request ID, so repeating an alias send can deliver twice
+  even at the same seat. `msg_id` alone is not deduplication. After a move, a
+  resubmitted send can be a second delivery at B, and if the digest holds both,
+  that is a separate hold at B. Resolving the alias never moves, rewrites or
+  cancels existing holds.
+- Responses report `do_not_resubmit`, `committed_pending_proof`,
+  `submission_confirmed` and `action_committed` exactly as for an explicit
+  target. To settle an uncertain result, run its physical `reconcile_command`;
+  do not resend by alias. A new `msg_id` means new commissioned work, not a way
+  around an uncertain result.
 
 System nudges route through the same delivery primitive as tells. `delivery_kind:"nudge"` uses backoff by `(target, kind, reason_key, state_epoch)`: first fire immediately, then 3 minutes, 15 minutes, and 60 minutes repeated at cap. Child-liveness nudges use the child's idle/spawn-inert episode as `state_epoch`; a stable watermark cannot suppress a due repeat. Their text includes a copy-paste park command. Parked targets suppress nudges completely. A working transition clears only the idle-nudge episode (cadence reset), never the park; park clears solely via an explicit `unpark` or a terminal report. A direct-parent inspect, tell, await, or park resets the no-action escalation count; after `PENTACLE_CHILD_LIVENESS_ESCALATE_CAP_FIRES` hourly-cap fires (default three) without one, the daemon emits one operator Updates warning. One-shot `delivery_kind:"reengage"` messages are event-id deduped separately and are not swallowed by nudge backoff.
 

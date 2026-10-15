@@ -305,6 +305,12 @@ def _require_stream_id(command: str, value: str) -> bool:
     return False
 
 
+# The only target alias: tell/send may address the same-named assistant
+# composite's current binding (literal, case-sensitive). It stays raw on the wire; the daemon
+# resolves the then-current binding per attempt (see README, Peer messaging).
+ASSISTANT_ALIAS = "bart"
+
+
 class _PromptOptionAction(argparse.Action):
     def __call__(
         self,
@@ -1351,18 +1357,24 @@ def spawn_unfreeze(args: argparse.Namespace) -> int:
 
 
 def send(args: argparse.Namespace) -> int:
-    if not _require_stream_id("send", args.stream_id):
+    alias = args.stream_id == ASSISTANT_ALIAS
+    if not alias and not _require_stream_id("send", args.stream_id):
         return 2
     config = load_config()
     from_stream_id = discover_leader_stream_id_short(config)
     if not from_stream_id:
         print("agent-orch send: validation failed: stream_id_unknown", file=sys.stderr)
         return 2
-    parsed_stream = args.stream_id.split(":", 1)
-    if len(parsed_stream) != 2 or not parsed_stream[0] or not parsed_stream[1]:
-        print("agent-orch send: validation failed: invalid_stream_id", file=sys.stderr)
-        return 2
-    host, session_name = parsed_stream
+    if alias:
+        # Raw alias target only: no host/session split and no optimistic ID.
+        target_fields: dict[str, object] = {"to_stream_id": ASSISTANT_ALIAS}
+    else:
+        parsed_stream = args.stream_id.split(":", 1)
+        if len(parsed_stream) != 2 or not parsed_stream[0] or not parsed_stream[1]:
+            print("agent-orch send: validation failed: invalid_stream_id", file=sys.stderr)
+            return 2
+        host, session_name = parsed_stream
+        target_fields = {"host": host, "session_name": session_name}
     try:
         inbox_payload = schema.build_inbox_payload(
             msg_id=args.msg_id,
@@ -1377,8 +1389,7 @@ def send(args: argparse.Namespace) -> int:
     request: dict[str, object] = {
         "type": "send",
         **_qa_request_fields(args),
-        "host": host,
-        "session_name": session_name,
+        **target_fields,
         "text": args.prompt_text,
         "from_stream_id": from_stream_id,
         "msg_id": args.msg_id,
@@ -1490,7 +1501,7 @@ def send_cancel(args: argparse.Namespace) -> int:
 
 
 def tell(args: argparse.Namespace) -> int:
-    if not _require_stream_id("tell", args.peer_stream_id):
+    if args.peer_stream_id != ASSISTANT_ALIAS and not _require_stream_id("tell", args.peer_stream_id):
         return 2
     ttl_seconds = int(args.ttl)
     if ttl_seconds < TELL_TTL_MIN_SECONDS or ttl_seconds > TELL_TTL_MAX_SECONDS:
@@ -5207,7 +5218,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry",
         action="store_true",
         help=(
-            "Retry the same msg_id after a previous not_landed or transport failure."
+            "Retry the same msg_id after a previous not_landed or transport failure. "
+            "Each invocation, --retry included, sends a new request id, and msg_id alone "
+            "does not deduplicate, so a repeat can deliver again; reconcile an uncertain "
+            "result with its reconcile_command instead."
         ),
     )
     send_parser.add_argument(
@@ -5221,7 +5235,10 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--qa-spec-id", type=_spec_id_arg)
     send_parser.add_argument("--qa-surface", help="Stable QA acceptance surface slug")
     send_parser.add_argument("--qa-cycle", type=int, help="Current diagnosis epoch; same-scope repair stays in this cycle, and only spec-issue diagnose advances it")
-    send_parser.add_argument("stream_id")
+    send_parser.add_argument(
+        "stream_id",
+        help=f"<host>:<session> stream id, or literal {ASSISTANT_ALIAS} for the assistant's current binding (resolved per attempt; a repeat can duplicate earlier work at the same seat, and after a seat move it can reach the new seat; reconcile an uncertain result at its physical target)",
+    )
     send_parser.add_argument("msg_id", type=int)
     send_parser.add_argument("prompt_text")
     send_parser.set_defaults(func=send)
@@ -5281,7 +5298,10 @@ def build_parser() -> argparse.ArgumentParser:
     send_cancel_parser.set_defaults(func=send_cancel)
 
     tell_parser = subparsers.add_parser("tell")
-    tell_parser.add_argument("peer_stream_id")
+    tell_parser.add_argument(
+        "peer_stream_id",
+        help=f"<host>:<session> stream id, or literal {ASSISTANT_ALIAS} for the assistant's current binding (resolved per attempt; a repeat can duplicate earlier work at the same seat, and after a seat move it can reach the new seat; reconcile an uncertain result at its physical target)",
+    )
     tell_parser.add_argument("text")
     tell_parser.add_argument("--from", dest="from_stream_id")
     tell_parser.add_argument("--ttl", type=_ttl_arg, default=300)
