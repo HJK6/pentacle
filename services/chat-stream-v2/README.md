@@ -118,6 +118,14 @@ unchanged. Previously stored events are retained without rewriting history.
 
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
+Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
+soak limits keep their defaults. Pytest scratch is separate from
+`V2_GATE_EVIDENCE_DIR`. On failure CI retains the gate logs/JUnit/receipt and the
+synthetic stall helper's complete output, result and fixed sidecar allowlist for
+seven days. Runtime databases, arbitrary scratch and linked files are excluded.
+Helper failures and timeouts remain failures; use the retained first cause rather
+than rerunning the whole gate. Hard job cancellation can prevent artifact upload.
+
 Broadcast queues replace pending `session.inventory` and `hosts.stats` snapshots,
 and `working.state` snapshots for the same stream, at every enqueue. The newest
 state stays at its arrival position after intervening events; an in-flight send

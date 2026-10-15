@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
 import shlex
 import shutil
+import socket as unix_socket
+import stat
 import subprocess
 import sys
 import time
@@ -156,6 +159,66 @@ def collect_oauth(token: str, *, timeout: float = 10,
     return parse_oauth_usage(payload) if isinstance(payload, dict) else None
 
 
+def _socket_identity(value):
+    return value.st_dev, value.st_ino, value.st_mode, value.st_uid
+
+
+def _capture_probe_socket(name: str, value: str):
+    """Capture this invocation's socket, never an arbitrary tmux-returned path."""
+    path = Path(value.strip())
+    base = Path(os.environ.get("TMUX_TMPDIR") or "/tmp").resolve()
+    parent = base / f"tmux-{os.geteuid()}"
+    if not path.is_absolute() or ".." in path.parts or path.name != name:
+        raise RuntimeError("usage socket ownership unavailable")
+    # /tmp itself is a legitimate platform alias; the uid directory is not.
+    if path.parent.resolve() != parent or path.parent.is_symlink():
+        raise RuntimeError("usage socket directory unavailable")
+    directory = parent.lstat()
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid()
+            or directory.st_mode & 0o077):
+        raise RuntimeError("usage socket directory is not private")
+    entry = path.lstat()
+    if not stat.S_ISSOCK(entry.st_mode) or entry.st_uid != os.geteuid():
+        raise RuntimeError("usage socket ownership unavailable")
+    return parent, _socket_identity(directory), name, _socket_identity(entry)
+
+
+def _remove_dead_probe_socket(captured):
+    """Remove only the captured inode after an independent dead-endpoint proof."""
+    parent, directory, name, identity = captured
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        def unchanged():
+            if (_socket_identity(os.fstat(fd)) != directory
+                    or _socket_identity(parent.lstat()) != directory):
+                raise RuntimeError("usage socket directory changed")
+            try:
+                current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if _socket_identity(current) != identity:
+                raise RuntimeError("usage socket changed")
+            return True
+
+        if not unchanged():
+            return
+        with unix_socket.socket(unix_socket.AF_UNIX) as endpoint:
+            endpoint.settimeout(0.25)
+            try:
+                endpoint.connect(str(parent / name))
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return
+                if exc.errno != errno.ECONNREFUSED:
+                    raise RuntimeError("usage socket liveness unavailable") from None
+            else:
+                raise RuntimeError("usage socket still live")
+        if unchanged():
+            os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
 def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
             run=subprocess.run, sleep=time.sleep, monotonic=time.monotonic) -> dict:
     socket = "pentacle-usage-" + uuid.uuid4().hex
@@ -168,9 +231,11 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
                    text=True, check=check, timeout=5)
 
     deadline = monotonic() + timeout
+    captured = None
     try:
         command = shlex.join([claude, "--disallowed-tools", "AskUserQuestion"])
         call("new-session", "-d", "-s", "probe", "-x", "140", "-y", "60", "-c", cwd, command)
+        captured = _capture_probe_socket(socket, call("display-message", "-p", "#{socket_path}").stdout)
         sent = False
         while monotonic() < deadline:
             screen = call("capture-pane", "-p", "-t", "probe", "-S", "-150").stdout
@@ -197,8 +262,25 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
             sleep(1)
         raise RuntimeError("Claude /usage did not provide labeled weekly account limits within the timeout")
     finally:
-        # The random dedicated socket contains only this probe, never user sessions.
-        call("kill-server", check=False)
+        primary = sys.exception()
+        cleanup_error = None
+        if captured is None and primary is not None:
+            primary.add_note("usage socket ownership not captured; no unlink attempted")
+        try:
+            if call("kill-server", check=False).returncode:
+                cleanup_error = RuntimeError("usage socket kill failed")
+        except (OSError, subprocess.SubprocessError):
+            cleanup_error = RuntimeError("usage socket kill failed")
+        try:
+            if captured is not None:
+                _remove_dead_probe_socket(captured)
+        except (OSError, RuntimeError):
+            cleanup_error = cleanup_error or RuntimeError("usage socket cleanup unconfirmed")
+        if cleanup_error is not None:
+            if primary is not None:
+                primary.add_note(str(cleanup_error))
+            else:
+                raise cleanup_error from None
 
 
 def default_cwd() -> str:
