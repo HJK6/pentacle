@@ -369,7 +369,7 @@ def _initial_prompt_payload(
         data = text.encode("utf-8")
         if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
             return {"initial_prompt": text}, len(data)
-        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", 30.0))))
+        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
         if upload.get("type") != "upload_prompt_blob.ok":
             raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
         return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)
@@ -379,7 +379,7 @@ def _initial_prompt_payload(
         data = baseline_content.encode("utf-8")
         if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
             return {"initial_prompt": baseline_content}, len(data)
-        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", 30.0))))
+        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
         if upload.get("type") != "upload_prompt_blob.ok":
             raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
         return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)
@@ -397,7 +397,7 @@ def _initial_prompt_payload(
         data = text.encode("utf-8")
     if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
         return {"initial_prompt": text}, len(data)
-    upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", 30.0))))
+    upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
     if upload.get("type") != "upload_prompt_blob.ok":
         raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
     return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)

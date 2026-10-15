@@ -656,6 +656,64 @@ def test_spawn_role_baseline_is_prepended_to_initial_prompt(monkeypatch, tmp_pat
     assert printed["role_baseline"]["content"] == "BASELINE\n"
 
 
+@pytest.mark.parametrize("prompt_form", ["inline", "file", "baseline_only", "inline_small"])
+@pytest.mark.parametrize("explicit_timeout", [None, 120.0])
+def test_spawn_parser_timeout_preserves_composed_prompt_delivery(
+    monkeypatch, tmp_path: Path, capsys, prompt_form, explicit_timeout,
+) -> None:
+    memory_repo = tmp_path / "memory"
+    agents = memory_repo / "agents"
+    agents.mkdir(parents=True)
+    baseline = "B" * (cli.INITIAL_PROMPT_INLINE_CAP_BYTES + 1 if prompt_form == "baseline_only" else 256)
+    (agents / "lead_baseline.md").write_text(baseline, encoding="utf-8")
+    prompt = None if prompt_form == "baseline_only" else (
+        "TASK" if prompt_form == "inline_small" else "T" * (cli.INITIAL_PROMPT_INLINE_CAP_BYTES - 128)
+    )
+    argv = ["spawn", "--provider", "codex", "--role", "lead", "--phase", "qa", "--parent", "hostc:leader",
+            "--visibility", "hidden", "--objective", "Verify prompt upload defaults"]
+    if explicit_timeout is not None:
+        argv.extend(["--timeout", str(explicit_timeout)])
+    if prompt_form == "file":
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        argv.extend(["--initial-prompt-file", str(prompt_file)])
+    elif prompt is not None:
+        argv.extend(["--initial-prompt", prompt])
+    args = cli.build_parser().parse_args(argv)
+    assert args.timeout == explicit_timeout
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path, memory_repo))
+    uploads = []
+    spawns = []
+
+    async def fake_upload(_config, data, timeout):
+        uploads.append((data, timeout))
+        return {"type": "upload_prompt_blob.ok", "prompt_blob_sha": hashlib.sha256(data).hexdigest()}
+
+    async def fake_spawn(_config, payload, timeout):
+        spawns.append((dict(payload), timeout))
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:codex-child"}}
+
+    monkeypatch.setattr(cli, "upload_prompt_blob_once", fake_upload)
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn)
+    expected = (baseline if prompt is None else baseline + "\n\n" + prompt).encode("utf-8")
+    assert cli.spawn(args) == 0
+    assert _printed_json(capsys)["type"] == "spawn.ok"
+    assert len(spawns) == 1
+    payload, rpc_timeout = spawns[0]
+    assert rpc_timeout == (185.0 if explicit_timeout is None else explicit_timeout)
+    if prompt_form == "inline_small":
+        assert uploads == []
+        assert payload["initial_prompt"] == expected.decode("utf-8")
+        assert "initial_prompt_blob_sha" not in payload
+    else:
+        assert len(expected) > cli.INITIAL_PROMPT_INLINE_CAP_BYTES
+        if prompt is not None:
+            assert len(prompt.encode("utf-8")) < cli.INITIAL_PROMPT_INLINE_CAP_BYTES
+        assert uploads == [(expected, 30.0 if explicit_timeout is None else explicit_timeout)]
+        assert payload["initial_prompt_blob_sha"] == hashlib.sha256(expected).hexdigest()
+        assert "initial_prompt" not in payload
+
+
 def test_spawn_role_baseline_uploads_composed_prompt_bytes(monkeypatch, tmp_path: Path, capsys) -> None:
     memory_repo = tmp_path / "memory"
     agents = memory_repo / "agents"
