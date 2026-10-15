@@ -392,6 +392,17 @@ that the window will install:
   --run-host coordinator --preflight /absolute/window/cli-preflight.json
 ```
 
+For private packet artifacts, inventory every copied/staged file whose reader
+requires owner-only storage and pass `--private-artifact /absolute/path` once per
+file. Include coordination records and private preimages required by the packet;
+the generic installer cannot infer private consumers. Preflight checks metadata
+only: no symlink in the absolute path, no `..`, immediate parent owned by the
+current user with mode `0700`, and a regular file owned by that user with mode
+`0600`. It neither reads contents nor repairs permissions. Revalidation checks
+the same inventory again before packaging, the rollout lock or target activity.
+Also rehearse the actual consumer's initial read against owned scratch artifacts
+with native commands blocked; metadata checks do not validate file contents.
+
 A successful preflight runs archive/dependency construction and the complete
 stage/activation plan without target commands, target copies, pointer writes or
 the production rollout lock. It writes a receipt binding the installer hash,
@@ -424,6 +435,13 @@ handoff rejection must not deploy until all configured targets report the same
 CLI SHA. Emergency `--rollback STAMP` uses the existing pointer/manifest
 verification and does not require a forward preflight receipt or dependency
 bundle; retain its original interpreter, host mapping and rollback stamp.
+
+Dependency tar entries use canonical timestamps, ownership and modes and omit
+`__pycache__` subtrees already excluded from the dependency hash. Rebuilding the
+same source and dependency bytes under the pinned toolchain yields the same
+archive and manifest. Old releases built with nondeterministic metadata still
+require their retained exact bundle or a distinct reviewed release SHA; never
+replace an existing immutable release to make a rebuilt archive fit.
 
 Staging resumes an existing release only when its complete manifest and CLI
 runtime verify. If verification fails and any same-SHA release entry exists,

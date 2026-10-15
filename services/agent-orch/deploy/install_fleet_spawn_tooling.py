@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -209,6 +210,19 @@ def _release_contract(repo: Path, commit: str) -> tuple[bytes, str]:
     return value, catalog
 
 
+def _runtime_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    # Cache bytes are excluded from the dependency identity. Directory creation
+    # times, umask and host ownership must not change an immutable release hash.
+    if "__pycache__" in Path(member.name).parts:
+        return None
+    member.mtime = 0
+    member.uid = member.gid = 0
+    member.uname = member.gname = ""
+    member.mode = 0o755 if member.isdir() else 0o644
+    member.pax_headers = {}
+    return member
+
+
 def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = None) -> dict[str, object]:
     canonical = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", f"{commit}^{{commit}}"], text=True
@@ -242,7 +256,7 @@ def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = Non
         requires_python = _agent_orch_requires_python(repo, commit)
         dependency_bundle, dependency = _runtime_dependency_bundle(destination)
         with tarfile.open(archive, "a") as bundle:
-            bundle.add(dependency_bundle.parent, arcname="runtime-deps")
+            bundle.add(dependency_bundle.parent, arcname="runtime-deps", filter=_runtime_tar_member)
         manifest["runtime_package"] = {
             "path": runtime_package,
             "sha256": runtime_tree,
@@ -959,7 +973,34 @@ def _rollout_lock_path() -> Path:
 PREFLIGHT_SCHEMA = "PentacleFleetPreflightV1"
 
 
-def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest: dict[str, object]) -> dict[str, object]:
+def _private_artifact_metadata(value: str) -> dict[str, object]:
+    """Inspect the private reader's owner/mode contract without reading content."""
+    path = Path(value).expanduser()
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"private_artifact_unsafe_path:{path}")
+    directory = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in path.parent.parts[1:]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        parent = os.fstat(directory)
+        if parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+            raise ValueError(f"private_artifact_insecure_parent:{path}")
+        info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError(f"private_artifact_insecure_file:{path}")
+        return {"path": str(path), "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode),
+                "parent_uid": parent.st_uid, "parent_mode": stat.S_IMODE(parent.st_mode)}
+    except OSError as exc:
+        raise ValueError(f"private_artifact_unavailable:{path}:{type(exc).__name__}") from exc
+    finally:
+        os.close(directory)
+
+
+def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest: dict[str, object],
+                       private_artifacts: list[dict[str, object]]) -> dict[str, object]:
     # Do not resolve the executable symlink: its venv path selects site-packages.
     executable = os.path.abspath(sys.executable)
     config = Path(args.host_config).expanduser().resolve() if args.host_config else None
@@ -977,6 +1018,7 @@ def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest
         "python": {"executable": executable, "prefix": sys.prefix,
                    "version": sys.version, "sha256": _sha256(Path(executable))},
         "runtime_package": manifest.get("runtime_package"),
+        "private_artifacts": private_artifacts,
     }
 
 
@@ -989,6 +1031,8 @@ def _apply_argv(args: argparse.Namespace, receipt: Path) -> list[str]:
         argv += ["--host-config", str(Path(args.host_config).expanduser().resolve())]
     for override in args.ssh_target:
         argv += ["--ssh-target", override]
+    for artifact in args.private_artifact:
+        argv += ["--private-artifact", str(Path(artifact).expanduser())]
     if args.resume:
         argv += ["--resume", args.resume]
     return argv
@@ -1038,6 +1082,8 @@ def main() -> int:
     parser.add_argument("--sftp-timeout", type=_positive_seconds, default=DEFAULT_SFTP_TIMEOUT_SECONDS, metavar="SECONDS")
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--private-artifact", action="append", default=[], metavar="ABS_PATH",
+                        help="owner-only packet file to check before forward preflight/install; repeat for the packet inventory")
     parser.add_argument("--preflight", metavar="OUTPUT", help="full dry-run; write a bound receipt before opening the update window")
     parser.add_argument("--preflight-receipt", metavar="PATH", help="required for forward live installs; validate exact preparation inputs")
     parser.add_argument("--resume", metavar="STAMP", help="resume the exact staged immutable rollout stamp")
@@ -1068,6 +1114,7 @@ def main() -> int:
     records: dict[str, object] = {"schema": "PentacleFleetInstallV1", "commit": args.commit, "hosts": {}}
     try:
         repo = Path(args.repo).expanduser().resolve()
+        private_artifacts = [] if args.rollback else [_private_artifact_metadata(path) for path in args.private_artifact]
         lock_stamp = _rollout_stamp(repo, args.commit, resume=args.resume, rollback_stamp=args.rollback)
         # Archive/dependency construction and receipt validation precede the lock
         # and every target action. Dry-runs never acquire the production lock.
@@ -1079,7 +1126,7 @@ def main() -> int:
             if not args.rollback:
                 manifest = _archive(repo, args.commit, Path(temp), args.resume)
                 records["manifest"] = manifest
-                binding = _preflight_binding(args, targets, manifest)
+                binding = _preflight_binding(args, targets, manifest, private_artifacts)
                 if args.preflight_receipt:
                     _verify_preflight(args.preflight_receipt, binding)
             lock = nullcontext() if args.dry_run else RolloutLock(_rollout_lock_path(), lock_stamp)

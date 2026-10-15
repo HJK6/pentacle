@@ -1299,3 +1299,145 @@ def test_full_cli_preflight_with_real_archive_and_missing_dependency_refusal(tmp
     assert failed.returncode == 1
     assert "runtime_dependency_missing" in failed.stdout
     assert not lock.exists() and not Path(args[-1]).exists()
+
+
+def test_real_preflight_never_executes_target_commands(monkeypatch, tmp_path):
+    repo = SCRIPT.parents[3]
+    sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    original_popen = subprocess.Popen
+    commands = []
+
+    def only_source_git(argv, *args, **kwargs):
+        assert isinstance(argv, list) and argv[:3] == ["git", "-C", str(repo)], argv
+        assert argv[3] in {"rev-parse", "show", "archive"}, argv
+        commands.append(argv)
+        return original_popen(argv, *args, **kwargs)
+
+    # Popen also intercepts run/check_output defaults captured when imported.
+    monkeypatch.setattr(subprocess, "Popen", only_source_git)
+    lock = tmp_path / "lock"
+    monkeypatch.setenv("PENTACLE_RELEASE_ROLLOUT_LOCK", str(lock))
+    monkeypatch.setattr(installer.sys, "argv", ["install", "--commit", sha, "--repo", str(repo),
+                                               "--preflight", str(tmp_path / "receipt.json")])
+    assert installer.main() == 0
+    assert commands and not lock.exists()
+
+
+def test_private_artifact_preflight_binds_metadata_and_rechecks_permissions(preflight_main, tmp_path):
+    invoke, calls, lock, receipt, _, _ = preflight_main
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    artifact = directory / "coordination.json"
+    artifact.write_text('{"synthetic":true}')
+    artifact.chmod(0o600)
+    options = ["--private-artifact", str(artifact)]
+    assert invoke("--preflight", str(receipt), *options) == 0
+    value = json.loads(receipt.read_text())
+    assert value["binding"]["private_artifacts"] == [{"path": str(artifact), "uid": os.getuid(), "mode": 0o600,
+                                                     "parent_uid": os.getuid(), "parent_mode": 0o700}]
+    assert value["apply_argv"][-2:] == options
+    calls.clear()
+    directory.chmod(0o755)
+    assert invoke("--preflight-receipt", str(receipt), *options) == 1
+    assert not lock.exists() and not calls
+
+
+@pytest.mark.parametrize("fault", ["parent_mode", "file_mode", "parent_owner", "file_owner", "directory_leaf", "fifo", "missing", "leaf_symlink", "parent_symlink", "ancestor_symlink", "dotdot", "relative"])
+def test_private_artifact_refuses_before_archive_lock_or_target(preflight_main, monkeypatch, tmp_path, fault):
+    invoke, calls, lock, receipt, _, _ = preflight_main
+    outer = tmp_path / "outer"
+    directory = outer / "private"
+    directory.mkdir(parents=True, mode=0o700)
+    artifact = directory / "coordination.json"
+    artifact.write_text('{"synthetic":true}')
+    artifact.chmod(0o600)
+    target = artifact
+    if fault == "parent_mode": directory.chmod(0o755)
+    elif fault == "file_mode": artifact.chmod(0o644)
+    elif fault in {"parent_owner", "file_owner"}:
+        from types import SimpleNamespace
+        method = "fstat" if fault == "parent_owner" else "stat"
+        original = getattr(installer.os, method)
+        def different_owner(*args, **kwargs):
+            info = original(*args, **kwargs)
+            return SimpleNamespace(st_uid=os.getuid() + 1, st_mode=info.st_mode)
+        monkeypatch.setattr(installer.os, method, different_owner)
+    elif fault == "directory_leaf": artifact.unlink(); artifact.mkdir(mode=0o600)
+    elif fault == "fifo": artifact.unlink(); os.mkfifo(artifact, 0o600)
+    elif fault == "missing": artifact.unlink()
+    elif fault == "leaf_symlink":
+        actual = directory / "actual"; artifact.rename(actual); artifact.symlink_to(actual)
+    elif fault == "parent_symlink":
+        link = outer / "link"; link.symlink_to(directory, target_is_directory=True); target = link / artifact.name
+    elif fault == "ancestor_symlink":
+        link = tmp_path / "outer-link"; link.symlink_to(outer, target_is_directory=True); target = link / "private" / artifact.name
+    elif fault == "dotdot": target = directory / ".." / "private" / artifact.name
+    elif fault == "relative": target = Path("private") / artifact.name
+    monkeypatch.setattr(installer, "_archive", lambda *_a, **_kw: pytest.fail("invalid private file reached archive"))
+    assert invoke("--preflight", str(receipt), "--private-artifact", str(target)) == 1
+    assert not lock.exists() and not calls and not receipt.exists()
+
+
+def test_archive_rebuild_is_identical_and_resume_preserves_immutable_release(tmp_path, monkeypatch):
+    repo = SCRIPT.parents[3]
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    original_bundle = installer._runtime_dependency_bundle
+    artifacts = []
+    for index in range(4):
+        def dependency_bundle(destination):
+            bundle, identity = original_bundle(destination)
+            cache = bundle / "websockets" / "__pycache__"
+            cache.mkdir(exist_ok=True)
+            (cache / "unbound.pyc").write_bytes(bytes([index]))
+            if index == 2:
+                for cached in sorted(bundle.rglob("__pycache__"), key=lambda path: len(path.parts), reverse=True):
+                    shutil.rmtree(cached)
+            if index == 3:
+                with (bundle / "websockets" / "__init__.py").open("a") as handle:
+                    handle.write("\n# changed dependency content\n")
+                identity["sha256"] = installer._tree_sha256(bundle)
+            metadata_variant = 1 if index == 1 else 0
+            for path in [bundle.parent, bundle, *bundle.rglob("*")]:
+                path.chmod((0o755 if metadata_variant else 0o700) if path.is_dir() else
+                           (0o644 if metadata_variant else 0o600))
+                os.utime(path, (1000000000 + metadata_variant, 1000000000 + metadata_variant))
+            return bundle, identity
+
+        monkeypatch.setattr(installer, "_runtime_dependency_bundle", dependency_bundle)
+        destination = tmp_path / f"build-{index}"
+        destination.mkdir()
+        previous_umask = os.umask(0o022 if index == 1 else 0o077)
+        try:
+            manifest = installer._archive(repo, commit, destination)
+        finally:
+            os.umask(previous_umask)
+        artifacts.append((destination, manifest))
+    first, second, cache_only, altered = artifacts
+    assert first[1]["runtime_package"] == second[1]["runtime_package"]
+    assert first[1] == second[1] == cache_only[1]
+    for filename in ("pentacle.tar", "manifest.json"):
+        assert (first[0] / filename).read_bytes() == (second[0] / filename).read_bytes() == (cache_only[0] / filename).read_bytes()
+    assert first[1]["archive_sha256"] != altered[1]["archive_sha256"]
+    with tarfile.open(first[0] / "pentacle.tar") as archive:
+        dependency_members = [member for member in archive.getmembers() if member.name.startswith("runtime-deps")]
+        assert dependency_members
+        assert not any("__pycache__" in Path(member.name).parts for member in dependency_members)
+        assert all(member.mtime == 0 and member.uid == 0 and member.gid == 0 for member in dependency_members)
+        assert all(member.mode == (0o755 if member.isdir() else 0o644) for member in dependency_members)
+
+    root = tmp_path / "home/.local/share/pentacle/releases"
+    target = installer.Target("here", "localhost", str(root), local=True)
+
+    def local_only(argv, **kwargs):
+        assert argv[0] == "sh", argv
+        return subprocess.run(argv, **kwargs)
+
+    assert installer.stage(target, first[0], commit, first[1], dry_run=False, runner=local_only) == "staged_verified"
+    installer.activate(target, commit, first[1], None, dry_run=False, runner=local_only)
+    assert installer.stage(target, second[0], commit, second[1], dry_run=False, runner=local_only) == "resumed_verified"
+    installed_archive = root / commit / "pentacle.tar"
+    before = installer._sha256(installed_archive)
+    with pytest.raises(RuntimeError, match="active_release_failed_verification"):
+        installer.stage(target, altered[0], commit, altered[1], dry_run=False, runner=local_only)
+    assert installer._sha256(installed_archive) == before
+    assert (root / "active").resolve() == root / commit
