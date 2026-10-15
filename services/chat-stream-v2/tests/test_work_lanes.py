@@ -410,11 +410,16 @@ def test_fd_lane_unaffected_and_adoption_owner_rules_v15():
 
 @pytest.mark.parametrize("path", ["visibility_hidden", "role_qa", "new_generation", "reconciled_dead"])
 def test_each_lead_loss_path_reconciles_once_v4(path):
+    # A hidden lead still leads an FD-owned lane (test_work_lane_hidden_fd_leads.py);
+    # hiding is a lead loss only on an operator-owned lane.
+    owner = "operator" if path == "visibility_hidden" else "fd"
+
     async def body(env):
         lead = await env.seat("loss-lead", role="lead", parent_stream_id=FD)
-        lid = (await env.adopt(key="stream:loss", lead=lead))["lane"]["lane_id"]
+        lid = (await env.adopt(key="stream:loss", lead=lead, owner=owner))["lane"]["lane_id"]
         blk_lead = await env.seat("loss-blk", role="lead", parent_stream_id=FD)
-        blk = (await env.adopt(key="stream:loss-blk", state="blocked", lead=blk_lead, blocker="b"))["lane"]
+        blk = (await env.adopt(key="stream:loss-blk", state="blocked", lead=blk_lead, blocker="b",
+                               owner=owner))["lane"]
         for name in ("loss-lead", "loss-blk"):
             if path == "visibility_hidden":
                 await env.store.update_session("host-a", name, visibility="hidden")
