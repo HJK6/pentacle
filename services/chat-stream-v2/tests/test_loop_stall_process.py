@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -52,18 +53,33 @@ def _run_retained_helper(command, env, output, *, timeout=100):
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            # Preserve the existing owned process-group TERM/KILL cleanup.
-            for sig in (signal.SIGTERM, signal.SIGKILL):
+            # Parent exit does not prove the owned process group is drained:
+            # a child may ignore TERM while continuing to write retained output.
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5
+            while True:
+                proc.poll()
                 try:
-                    os.killpg(proc.pid, sig)
+                    os.killpg(proc.pid, 0)
                 except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
                     break
-                except subprocess.TimeoutExpired:
-                    if sig == signal.SIGKILL:
-                        raise
+                except PermissionError:
+                    # Some hosts refuse a zero-signal probe while a dying
+                    # child is not yet reapable. Ambiguous is not drained;
+                    # keep polling and retain the bounded KILL escalation.
+                    pass
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(.05, remaining))
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
     return proc.returncode, timed_out
 
 

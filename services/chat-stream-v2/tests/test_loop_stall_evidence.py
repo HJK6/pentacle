@@ -74,3 +74,44 @@ def test_unsafe_allowlisted_entry_blocks_upload_before_any_copy(tmp_path, kind):
         subject._stage_helper_artifacts(raw, upload)
     assert not upload.exists()
     assert private.read_text() == "DO_NOT_UPLOAD_PRIVATE"
+
+
+@pytest.mark.parametrize("parent_ignores_term", [False, True])
+def test_timeout_reaps_group_even_if_parent_exits_before_child(tmp_path, parent_ignores_term):
+    import signal
+    import time
+
+    heartbeat = tmp_path / "heartbeat"
+    pidfile = tmp_path / "child.pid"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os,pathlib,signal,sys,time\n"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True:\n"
+        " pathlib.Path(sys.argv[2]).write_text(str(time.monotonic_ns()))\n"
+        " time.sleep(.02)\n")
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import pathlib,signal,subprocess,sys,time\n" +
+        ("signal.signal(signal.SIGTERM,signal.SIG_IGN)\n" if parent_ignores_term else "") +
+        "subprocess.Popen([sys.executable,*sys.argv[1:]])\n"
+        "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n"
+        "print('FIRST_CAUSE_GROUP',flush=True)\n"
+        "time.sleep(30)\n")
+    try:
+        code, timed_out = subject._run_retained_helper(
+            [sys.executable, str(parent), str(child), str(pidfile), str(heartbeat)],
+            dict(os.environ), tmp_path / "output.log", timeout=.5)
+        assert timed_out and code != 0
+        assert pidfile.exists()
+        before = heartbeat.read_text()
+        time.sleep(.15)
+        assert heartbeat.read_text() == before, "owned child still running after timeout cleanup"
+        assert "FIRST_CAUSE_GROUP" in (tmp_path / "output.log").read_text()
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
