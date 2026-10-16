@@ -814,6 +814,7 @@ async def run(args: argparse.Namespace) -> int:
             deliver_notice=_deliver_restore_notice, broadcast=server.broadcast,
             ps_runner=_restore_ps, fault=_restore_fault,
         )
+        assistant_composite.input_death_proof = server.assistant_restore.input_death_proof
 
     usage_state_path = (
         Path(args.db).with_name("usage_state.json")

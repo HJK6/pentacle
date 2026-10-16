@@ -963,6 +963,8 @@ class _RoutingStoreMixin:
         direct_primary: bool = False,
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
+        direct_binding: dict[str, Any] | None = None,
+        binding_env: dict[str, str] | None = None,
         voice_answers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the visible USER event and its routing receipt.
@@ -1084,6 +1086,12 @@ class _RoutingStoreMixin:
                     conn.commit()
                     return record
                 if direct_primary:
+                    if direct_binding is not None:
+                        from store_assistant_binding import _route_binding_conn
+                        _route_binding_conn(conn, direct_binding, binding_env or {})
+                        if (direct_target_stream_id, direct_target_generation) != (direct_binding["stream_id"], direct_binding["generation"]):
+                            raise ValueError("assistant_route_binding_changed")
+                        admission_payload["direct_binding_origin"] = dict(direct_binding)
                     if not direct_target_stream_id or not direct_target_generation:
                         raise ValueError("assistant_direct_binding_invalid")
                     try:
@@ -1287,10 +1295,18 @@ class _RoutingStoreMixin:
         expected_route_target: str | None = None,
         expected_route_target_generation: str | None = None,
         direct_batch: Any = None,
+        binding_guard: dict[str, Any] | None = None,
+        binding_env: dict[str, str] | None = None,
+        recovery_observation: dict[str, Any] | None = None,
+        transfer_successor: tuple[str, str] | None = None,
+        predispatch_only: bool = False,
+        decision_observation: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """``direct_batch(open_dispatches) -> (route_payload, batched_into_dispatch_id)``
         builds a direct route's payload from the target's other open dispatches
-        inside this transaction, so membership and resolution commit together."""
+        inside this transaction, so membership and resolution commit together.
+        ``predispatch_only`` refuses retention once any dispatch/delivery was allocated.
+        """
         allowed_routing = {
             "queued", "classifying", "fallback_dispatched", "deferred", "resolved", "routing_failed",
         }
@@ -1306,6 +1322,12 @@ class _RoutingStoreMixin:
                     "SELECT * FROM v2_assistant_composite_routes WHERE route_id=?", (route_id,),
                 ).fetchone()
                 if row is None:
+                    conn.commit()
+                    return None
+                if predispatch_only and (
+                    row["routing_state"] not in {"queued", "classifying"}
+                    or row["dispatch_id"] is not None or row["delivery_state"] is not None
+                ):
                     conn.commit()
                     return None
                 if (expected_dispatch_id is not None and row["dispatch_id"] != expected_dispatch_id
@@ -1327,7 +1349,46 @@ class _RoutingStoreMixin:
                         if item["route_id"] != route_id
                     ])
                 prior_payload = json.loads(row["route_json"] or "{}")
-                merged_payload = dict(payload) if payload is not None else prior_payload
+                merged_payload = dict(payload) if payload is not None else dict(prior_payload)
+                origin = prior_payload.get("direct_binding_origin")
+                if binding_guard is not None:
+                    if row["routing_state"] == "routing_failed" or row["delivery_state"] == "failed":
+                        conn.commit()
+                        return None
+                    from store_assistant_binding import (_route_binding_conn, _route_continuation_conn,
+                                                        _route_death_snapshot_conn, _route_holder_snapshot_conn)
+                    _route_binding_conn(conn, binding_guard, binding_env or {})
+                    if decision_observation is not None:
+                        if not predispatch_only:
+                            raise ValueError("assistant_recovery_not_predispatch")
+                        _route_holder_snapshot_conn(
+                            conn, binding_guard["stream_id"], decision_observation["holder"])
+                        episode = decision_observation.get("episode")
+                        if episode is not None:
+                            current = conn.execute(
+                                "SELECT * FROM v2_assistant_restore_episode WHERE episode_id=?",
+                                (episode["episode_id"],),
+                            ).fetchone()
+                            keys = ("episode_id", "name", "stream_id", "generation", "expected_revision",
+                                    "attempt_generation", "attempt_seq", "state")
+                            if current is None or any(current[k] != episode[k] for k in keys):
+                                raise ValueError("assistant_recovery_observation_changed")
+                    if recovery_observation is not None:
+                        if not origin or row["dispatch_id"] or row["delivery_state"]:
+                            raise ValueError("assistant_recovery_not_predispatch")
+                        _route_death_snapshot_conn(conn, origin, recovery_observation)
+                        merged_payload["recovery_origin"] = {**origin, "observed_at": stamp}
+                    if dispatch_id and origin:
+                        if (route_target, route_target_generation) != (binding_guard["stream_id"], binding_guard["generation"]):
+                            raise ValueError("assistant_route_binding_changed")
+                        same = all(origin[k] == binding_guard[k] for k in ("stream_id", "generation", "revision"))
+                        if not same or prior_payload.get("recovery_origin"):
+                            if not _route_continuation_conn(conn, origin, binding_guard, transfer_successor=transfer_successor):
+                                raise ValueError("assistant_recovery_successor_unverified")
+                        _assistant_actor_conn(conn, binding_guard["stream_id"], binding_guard["generation"])
+                for key in ("direct_binding_origin", "recovery_origin"):
+                    if key in prior_payload:
+                        merged_payload[key] = prior_payload[key]
                 # Admission owns this input; classifier/rebind/retry cannot replace it.
                 if "input_meta" in prior_payload:
                     merged_payload["input_meta"] = prior_payload["input_meta"]

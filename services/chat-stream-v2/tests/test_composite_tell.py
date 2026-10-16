@@ -4,6 +4,7 @@ across a rebind."""
 from __future__ import annotations
 
 import asyncio
+import pytest
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from server import Server
@@ -264,11 +265,12 @@ def test_flush_retains_tell_when_delivery_unconfirmed():
     asyncio.run(run())
 
 
-def test_direct_send_during_dead_window_replays_to_new_generation():
+@pytest.mark.parametrize("with_lineage_proof", [False, True])
+def test_direct_send_during_dead_window_requires_proved_continuation(with_lineage_proof):
     """E queued-input replay for SENDS: a direct-primary input that the router
     resolves while the bound pane is preserved-dead must be re-queued (not failed,
     not pinned to the dead generation) and replayed to the live successor after
-    the recovery owner rebinds."""
+    an exactly proved successor. A rebind alone grants no old input."""
     async def run():
         store = Store(":memory:")
         store.start()
@@ -311,11 +313,20 @@ def test_direct_send_during_dead_window_replays_to_new_generation():
             assert route["routing_state"] == "queued"
             assert not dispatched
 
-            # Recovery owner spawns a live successor, rebinds, and replays.
+            # Model the exact persisted handoff proof, separately from a rebind.
             s2 = await store.open_session(
                 "fixture-daffs", "visible2", provider="codex", role="assistant",
                 visibility="default", pane_status="pane_alive",
                 effective_model="gpt-6-sol", effective_effort="high")
+            if with_lineage_proof:
+                def record(conn):
+                    conn.execute(
+                        "INSERT INTO v2_assistant_direct_handoff_proofs VALUES(?,?,?,?,?)",
+                        ("fixture-daffs:visible2", s2["session_generation"],
+                         DAFF_SEAT, s1["session_generation"], "synthetic-proof"),
+                    )
+                    conn.commit()
+                await store.submit(record)
             await store.recover_assistant_binding(
                 name="daff", target_stream_id="fixture-daffs:visible2",
                 target_generation=s2["session_generation"])
@@ -324,12 +335,17 @@ def test_direct_send_during_dead_window_replays_to_new_generation():
             for _ in range(100):
                 route = await store.get_assistant_composite_route(
                     stream_id=DAFF_CHAT, input_identity="m1")
-                if route["routing_state"] == "resolved" and dispatched:
+                if route["routing_state"] == "routing_failed" or route["routing_state"] == "resolved" and dispatched:
                     break
                 await asyncio.sleep(0.01)
-            assert route["routing_state"] == "resolved"
-            assert route["route_target_generation"] == s2["session_generation"]
-            assert dispatched  # replayed in order to the live successor
+            if with_lineage_proof:
+                assert route["routing_state"] == "resolved"
+                assert route["route_target_generation"] == s2["session_generation"]
+                assert len(dispatched) == 1
+            else:
+                assert route["routing_state"] == "routing_failed"
+                assert route["error_code"] == "assistant_recovery_successor_unverified"
+                assert not dispatched
         finally:
             store.stop()
 

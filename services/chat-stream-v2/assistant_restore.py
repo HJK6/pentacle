@@ -348,16 +348,24 @@ class AssistantRestore:
         recorded pane process is gone.
         """
         host, _, session_name = stream_id.partition(":")
+        row = await self.store.fetch_session(host, session_name) if host == self.local_host else None
+        if row is not None and (str(row.get("provider") or "") != "claude" or not str(row.get("claude_session_id") or "")):
+            return False, "ineligible", "not_resumable", row
+        policy = getattr(self.sessions, "assistant", None)
+        if policy is not None and policy.protects(row):
+            return False, "ineligible", "protected_row", row
+        return await self.input_death_proof(stream_id, expected_generation, episode)
+
+    async def input_death_proof(
+        self, stream_id: str, expected_generation: str, episode: dict[str, Any] | None = None,
+    ) -> tuple[bool, str, str | None, dict[str, Any] | None]:
+        """Provider-neutral absence proof; grants preservation, never restoration."""
+        host, _, session_name = stream_id.partition(":")
         if host != self.local_host:
             return False, "ineligible", "remote_holder", None
         row = await self.store.fetch_session(host, session_name)
         if row is None:
             return False, "ineligible", "holder_unknown", None
-        if str(row.get("provider") or "") != "claude" or not str(row.get("claude_session_id") or ""):
-            return False, "ineligible", "not_resumable", row
-        policy = getattr(self.sessions, "assistant", None)
-        if policy is not None and policy.protects(row):
-            return False, "ineligible", "protected_row", row
         if str(row.get("session_generation") or "") != expected_generation:
             return False, "ineligible", "generation_mismatch", row
         is_open = str(row.get("status") or "") == "open"
