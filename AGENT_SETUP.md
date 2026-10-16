@@ -52,8 +52,9 @@ Keep the defaults if the owner has no preference.
    `npm run build:web` and serve it with `node server` as in the README (behind `tailscale serve` with identity auth for
    remote use — see [server/README.md](server/README.md)); open the URL in a
    browser or install it as a PWA. The Electron desktop app is deprecated (no
-   upgrades); set it up only if the owner explicitly asks for it. Keep `features.chatUi: false`:
-   structured Chat is experimental. The normal session surface is the terminal.
+   upgrades); set it up only if the owner explicitly asks for it. Sessions open in Chat by
+   default (`features.defaultChatView: false` for Terminal-first); the chat-first look
+   (`features.chatFirstStyle`) is optional and off by default. See [workspace](docs/chat_first_workspace.md).
    Read [config reference](docs/desktop_config.md). For multiple hosts,
    populate hostNames/hostColors and exact chatStream.hostMap aliases; verify
    the local badge. The public [microphone service](mic-server/README.md) includes the runnable

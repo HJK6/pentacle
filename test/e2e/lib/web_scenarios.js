@@ -16,6 +16,7 @@ const { webDashboardsRevamp, reloadDashboardPage } = require('./dashboard_scenar
 const { dashboardCatalog } = require('./dashboard_catalog_scenario');
 const { webWorkLanes } = require('./work_lanes_scenario');
 const { crossOriginBoundary } = require('./cross_origin_scenario');
+const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -487,6 +488,9 @@ async function settingsVersionLine(ctx) {
 }
 
 const SCENARIOS = [
+  // Must run first: it needs the gate's fresh browser profile (no saved
+  // workspace) and leaves a saved classic four-pane choice for the rest.
+  ['default-pane-assistant', defaultPaneAssistant],
   ['transport-and-config', transportAndConfig],
   // Opens and closes its own foreign-origin targets; the served page is untouched.
   ['cross-origin-boundary', crossOriginBoundary],
@@ -516,6 +520,8 @@ const SCENARIOS = [
   ['dashboard_catalog', dashboardCatalog],
   // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.
   ['web-work-lanes', webWorkLanes],
+  ['pane-count-selector', paneCountSelector],
+  ['chat-first-style', chatFirstStyle],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.

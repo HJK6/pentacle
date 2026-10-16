@@ -545,6 +545,13 @@ if (require.main === module) {
           stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
         });
       } catch (error) { console.error('History paging gate failed:', error.message); code = 1; }
+      try {
+        // First-visit workspace default with and without an assistant composite.
+        await execWithRuntimeDirectory(execFileSync, process.execPath, [path.join(__dirname, 'web_default_pane_gate.cjs'),
+          path.join(allocateReportDir(), 'default-pane')], {
+          stdio: 'inherit', env: { ...process.env, PENTACLE_TEST_BROWSER: resolveChrome() },
+        });
+      } catch (error) { console.error('Default pane gate failed:', error.message); code = 1; }
     }
     process.exit(code);
   });

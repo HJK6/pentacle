@@ -259,31 +259,34 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 #### Full aggregate and evidence boundaries
 
 The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**23 named scenarios**:
+**26 named scenarios**:
 
-1. `transport-and-config`
-2. `cross-origin-boundary`
-3. `settings-version-line`
-4. `sidebar-from-inventory`
-5. `coloured-host-glyphs`
-6. `slot-attach-type-resize-kill`
-7. `chat-transcript-paint`
-8. `chat-file-delivery`
-9. `web-chat-voice`
-10. `public-chat-renderer-contracts`
-11. `mic-panel-answer-window`
-12. `mic-source-selector`
-13. `slot-survives-cc-reconnect`
-14. `slot-column-split`
-15. `question-free-text`
-16. `question-partial-send`
-17. `question-skip`
-18. `web-voice-answers`
-19. `web-dashboards-revamp`
-20. `dashboard_catalog`
-21. `web-work-lanes`
-22. `closed-chat-slot`
-23. `host-restart-restores-input`
+1. `default-pane-assistant`
+2. `transport-and-config`
+3. `cross-origin-boundary`
+4. `settings-version-line`
+5. `sidebar-from-inventory`
+6. `coloured-host-glyphs`
+7. `slot-attach-type-resize-kill`
+8. `chat-transcript-paint`
+9. `chat-file-delivery`
+10. `web-chat-voice`
+11. `public-chat-renderer-contracts`
+12. `mic-panel-answer-window`
+13. `mic-source-selector`
+14. `slot-survives-cc-reconnect`
+15. `slot-column-split`
+16. `question-free-text`
+17. `question-partial-send`
+18. `question-skip`
+19. `web-voice-answers`
+20. `web-dashboards-revamp`
+21. `dashboard_catalog`
+22. `web-work-lanes`
+23. `pane-count-selector`
+24. `chat-first-style`
+25. `closed-chat-slot`
+26. `host-restart-restores-input`
 
 `cross-origin-boundary` is hermetic-only. A page on a second loopback origin
 must get the host's own 403 for a `fetch` (read from Chrome's network log, not
@@ -297,11 +300,34 @@ entry merged into the fixture's rules, must get `origin_refused`. The served
 same-origin page and an Origin-less native daemon client are the positive
 controls.
 
-After a successful no-profile main run, the command also runs both
-[history retention](../test/e2e/web_chat_history_retention_gate.cjs) and
-[history paging](../test/e2e/web_chat_history_paging_gate.cjs) child gates, each
-with its own browser/services and evidence directory. Either child failing
-makes the command fail. A printed main `web_gate: PASS` alone is not full
+`default-pane-assistant` runs first on the gate's fresh browser profile: one
+pane holding the seeded assistant composite chat, no spawn, then a saved
+four-pane choice wins on reload and remains for later scenarios.
+`pane-count-selector` checks the 1-4 pane geometry, hidden panes keeping their
+sessions and live tmux clients (no detach), placement into an empty visible
+pane and replacement of the focused pane when all visible panes are full,
+maximize/restore, persistence and the phone-width drawer.
+`chat-first-style` checks the flag-off classic palette, copy and chrome and the
+flag-on chat-first look for both saved themes and densities, with screenshots.
+At a fixed 1440x900 viewport it records a flag-off probe (every stylesheet
+custom property, theme, title, default view, sidebar labels, empty-pane copy,
+chrome computed styles) and screenshot per theme/density. With
+`PENTACLE_FLAG_OFF_BASELINE_DIR` set to a run directory recorded on main, it
+requires the probe to equal main's and every changed pixel to lie in a named
+region: the titlebar (sidebar toggle and pane selector) or live data (working
+spinners, machine stats). Gate page reloads (`reloadDashboardPage`) start the next document
+with an empty four-pane workspace so scenarios see a fresh renderer.
+
+After a successful no-profile main run, the command also runs the
+[history retention](../test/e2e/web_chat_history_retention_gate.cjs),
+[history paging](../test/e2e/web_chat_history_paging_gate.cjs) and
+[first-visit default pane](../test/e2e/web_default_pane_gate.cjs) child gates,
+each with its own browser/services and evidence directory. The last proves one
+pane bound to the direct-assistant target exactly as a sidebar click binds it
+when the daemon has an assistant composite, keeps that pane and its draft
+across a reload, and retires it (never opening a stale target, never
+reopening later) when a reload finds the target on another generation; without
+a composite it shows one empty pane. Any child failing makes the command fail. A printed main `web_gate: PASS` alone is not full
 aggregate success; inspect the child results, final exit status and cleanup.
 Those general history gates do not replace the voice-specific caption tests.
 
@@ -312,8 +338,8 @@ Keep these evidence levels explicit in a candidate report:
   the tested logic and renderer contract, not physical capture, real Chrome
   layout/animation or deployed backend behavior
 - **Hermetic Chrome, local or hosted:** the built web bundle, real browser
-  recorder and computed UI, real fixture blob upload, every registered scenario and both
-  history child gates. The existing [Public checks workflow](../.github/workflows/predeploy-tests.yml)
+  recorder and computed UI, real fixture blob upload, every registered scenario and the
+  child gates. The existing [Public checks workflow](../.github/workflows/predeploy-tests.yml)
   runs the unit/build commands above and installs Chrome before the web gate.
   Bind a hosted result to the
   exact candidate SHA, harness and complete job output. An installation step

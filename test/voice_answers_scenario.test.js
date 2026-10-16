@@ -92,7 +92,11 @@ test('M3 plain oracle counts a daemon row and its client-origin row as one turn'
 test('M3 cleanup reload survives the navigation it causes and is the only reload', async () => {
   const scenario = require('./e2e/lib/voice_answers_scenario');
   let evaluations = 0; let reloads = 0;
-  const session = { send: async method => { assert.equal(method, 'Page.reload'); reloads++; }, eval: async expression => {
+  const session = { send: async method => {
+    if (method === 'Page.reload') reloads++;
+    else assert.match(method, /^Page\.(add|remove)ScriptToEvaluateOnNewDocument$/, 'only the fresh-workspace seed wraps the reload');
+    return { identifier: 'fresh' };
+  }, eval: async expression => {
     if (/=\s*true$/.test(expression)) return true;
     if (++evaluations === 1) throw new Error('Inspected target navigated or closed (-32000)');
     return true;

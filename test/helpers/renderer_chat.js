@@ -15,9 +15,14 @@ answerModule._compile(esbuild.buildSync({ entryPoints: [answerModule.id], bundle
 const { buildPentacleQuestionAnswerText } = answerModule.exports;
 
 
-function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, ccOverrides = null } = {}) {
+function installRenderer({ dismissResult, questionOverride, assistantRole = '', initialSessions = [], popoutContext = null, selectSessionDetail = null, renderTranscriptTimelineHtml = null, requestStreamEvents = null, setTimeout: setTimer = null, ccOverrides = null, storage = {}, features = {}, freshWorkspace = false } = {}) {
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'http://pentacle.test/renderer/index.html' });
+  // Existing renderer tests model a returning user on the classic four-pane
+  // grid; `freshWorkspace` exercises the first-visit default instead.
+  const seeded = freshWorkspace || 'pentacle.workspace.v1' in storage ? storage
+    : { ...storage, 'pentacle.workspace.v1': JSON.stringify({ paneCount: 4, activeSlot: 0 }) };
+  for (const [key, value] of Object.entries(seeded)) dom.window.localStorage.setItem(key, value);
   const dismissCalls = [];
   const notificationResolveCalls = [];
   const sendCalls = [];
@@ -40,6 +45,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
       sourceTags: false,
       showTurnDuration: false,
       ...(assistantRole ? { assistantRole } : {}),
+      ...features,
     },
   };
   const question = {
@@ -89,6 +95,9 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     getChatStreamState: async () => ({ connected: true, events: [], sessions: initialSessions, schedules: [] }),
     chatPopoutContext: () => popoutContext,
     killPty() {},
+    createPty: async slot => `%fixture-${slot}`,
+    resizePty() {},
+    writePty() {},
     listChatSessions: async () => ({ ok: true, active: [], trashed: [] }),
     getLimits: async () => [],
     getMachineStats: async () => ({}),
@@ -132,8 +141,18 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
   };
   dom.window.DASHBOARDS = [];
 
+  // Enough of xterm for a full attachSession of an ordinary session.
+  const disposable = () => ({ dispose() {} });
+  class XtermStub {
+    constructor() { this.unicode = {}; this.cols = 80; this.rows = 24; this.element = dom.window.document.createElement('div'); }
+    loadAddon() {} open() {} write() {} dispose() {} focus() {} resize() {} refresh() {} reset() {} clear() {}
+    scrollToBottom() {} clearSelection() {} attachCustomKeyEventHandler() {}
+    hasSelection() { return false; } getSelection() { return ''; }
+    onData() { return disposable(); } onResize() { return disposable(); } onSelectionChange() { return disposable(); }
+  }
   const context = {
     Buffer,
+    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     console,
     document: dom.window.document,
     global: dom.window,
@@ -156,7 +175,7 @@ function installRenderer({ dismissResult, questionOverride, assistantRole = '', 
     __dirname: path.join(root, 'renderer'),
     __filename: path.join(root, 'renderer', 'app.js'),
     require(name) {
-      if (name === '@xterm/xterm') return { Terminal: class { loadAddon() {} open() {} write() {} dispose() {} } };
+      if (name === '@xterm/xterm') return { Terminal: XtermStub };
       if (name === '@xterm/addon-fit') return { FitAddon: class { fit() {} } };
       if (name === '@xterm/addon-unicode11') return { Unicode11Addon: class {} };
       if (name === '@xterm/addon-webgl') return { WebglAddon: class {} };

@@ -22,7 +22,7 @@ const extraSessions = [1, 2].map(index => ({ ...target,
   session_name: `history-extra-${index}`, stream_id: `mock-host:history-extra-${index}`,
   display_name: `Disposable history extra ${index}` }));
 
-async function startDaemon({ artifactsDir, includeReport = false }) {
+async function startDaemon({ artifactsDir, includeReport = false, omitAssistant = false }) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise(resolve => server.once('listening', resolve));
   const authDir = path.join(artifactsDir, 'fixture-auth');
@@ -64,7 +64,9 @@ async function startDaemon({ artifactsDir, includeReport = false }) {
   }
   events.push(event('ASSIST_TEXT', 'Existing disposable transcript'));
   const send = (socket, frame) => socket.send(JSON.stringify(frame));
-  const sessions = () => historyPressure ? [source, target, noise, ...extraSessions] : [source, target];
+  // omitAssistant models an install without an assistant composite.
+  const sessions = () => (historyPressure ? [source, target, noise, ...extraSessions] : [source, target])
+    .filter(session => !omitAssistant || session !== source);
   const snapshotEvents = () => historyPressure
     ? [...events, ...noiseEvents, ...[...extraEvents.values()].flat()]
       .sort((a, b) => a.daemon_seq - b.daemon_seq).slice(-500)
