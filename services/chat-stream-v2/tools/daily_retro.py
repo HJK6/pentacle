@@ -29,7 +29,7 @@ sys.path.insert(0, str(SERVICES / "agent-orch"))
 sys.path.insert(0, str(SERVICES))
 sys.path.insert(0, str(SERVICES / "chat-stream-v2"))
 from agent_orch.config import Config  # noqa: E402
-from agent_orch.triage import parse_frontmatter  # noqa: E402
+from agent_orch.triage import _uses_memory_command, parse_frontmatter  # noqa: E402
 from agent_orch import prompt_protocol, wsclient  # noqa: E402
 from tools.live_window import authenticated_operator_connection  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
@@ -44,6 +44,7 @@ PROPOSAL_START = "<!-- daily-retro-proposals -->"
 PROPOSAL_END = "<!-- /daily-retro-proposals -->"
 ACTIVE_STATUSES = ("backlog", "analysis", "ready_for_dev", "in_progress", "needs_qa", "blocked")
 RECOMMENDATIONS = {"no_change", "resolved", "duplicate", "future_work", "immediate_work", "investigate"}
+MEMORY_TIMEOUT = 180
 
 
 def encoded(value):
@@ -2548,17 +2549,27 @@ class Pipeline:
                 "text": f"REPORT daily-retro decision blocked proposal={record['id']} version={record['version']} state=ask_blocked reason=ask_parent path={path}. No authorization or retry loop; after the current-assistant prompt admission is live, resume explicitly with decision --retry-blocked."}}
             attempt["blocked_report"] = notice
         records[record["id"]] = record
-        preimage = save_proposals(path, preimage, records)
+        preimage = self._save_proposals(path, preimage, records)
         if notice.get("confirmed"):
             return record
         receipts = checked(await self.rpc.send_receipt_once(self.config, notice["target"], notice["request_id"]), "send.receipt.get.ok")
         landed = next((r for r in receipts.get("receipts", []) if r.get("delivery") == "landed" or r.get("state") == "landed"), None)
         response = landed or await self.rpc.send_once(self.config, dict(notice["payload"]))
         notice.update(receipt=response, confirmed=response.get("delivery") == "landed" or response.get("state") == "landed")
-        save_proposals(path, preimage, records)
+        self._save_proposals(path, preimage, records)
         if not notice["confirmed"]:
             raise RuntimeError("blocked decision REPORT pending; exact notice retained")
         return record
+
+    def _read_work(self, path):
+        if _uses_memory_command(self.settings.memory_root):
+            return memory_read(self.settings.memory_root, path)[0]
+        return path.read_bytes()
+
+    def _save_proposals(self, path, preimage, records):
+        if _uses_memory_command(self.settings.memory_root):
+            return save_proposals_api(self.settings, path, preimage, records)
+        return save_proposals(path, preimage, records)
 
     async def decision(self, work_id, proposal, *, retry_blocked=False):
         binding = await self.actor()
@@ -2592,7 +2603,7 @@ class Pipeline:
                 baseline = path.resolve().parent.parent.name
                 if baseline in {"completed", "deprecated"}:
                     raise ValueError("refused: use resolved or duplicate")
-            preimage = path.read_bytes()
+            preimage = self._read_work(path)
             text = preimage.decode()
             records = proposals(text)
             record = records.get(identity, {"attempts": []})
@@ -2679,7 +2690,7 @@ class Pipeline:
                 record.update(state="pending")
                 record.pop("answer", None)
                 records[identity] = record
-                preimage = save_proposals(path, preimage, records)  # Durable intent BEFORE ask.
+                preimage = self._save_proposals(path, preimage, records)  # Durable intent BEFORE ask.
                 reply = await self.rpc.prompt_ask_once(self.config, {"type": "prompt.ask", "envelope": envelope,
                                                        "actions": prompt_protocol.notification_actions(envelope),
                                                        "request_id": question_id})
@@ -2690,7 +2701,7 @@ class Pipeline:
                 checked(reply, "prompt.ask.ok")
                 attempt.update(state="asked", receipt=reply, asked_at=now_iso())
             records[identity] = record
-            save_proposals(path, preimage, records)
+            self._save_proposals(path, preimage, records)
             receipt_path = self.settings.state_root / "decision-receipts" / (digest([work_id, identity, version, record["state"]]) + ".json")
             if not receipt_path.exists():
                 atomic(receipt_path, {"work_id": work_id, "proposal_id": identity, "version": version,
@@ -2730,9 +2741,7 @@ def proposals(text):
     return json.loads(block.removeprefix("```json\n").removesuffix("\n```"))
 
 
-def save_proposals(path, preimage, records):
-    if path.read_bytes() != preimage:
-        raise RuntimeError("work preimage moved; no mutation")
+def with_proposals(preimage, records):
     text = preimage.decode()
     block = PROPOSAL_START + "\n```json\n" + encoded(records).decode() + "\n```\n" + PROPOSAL_END
     if PROPOSAL_START in text:
@@ -2741,8 +2750,69 @@ def save_proposals(path, preimage, records):
         text = text[:start] + block + text[end:]
     else:
         text += "\n\n" + block + "\n"
-    atomic(path, text.encode())
     return text.encode()
+
+
+def save_proposals(path, preimage, records):
+    if path.read_bytes() != preimage:
+        raise RuntimeError("work preimage moved; no mutation")
+    text = with_proposals(preimage, records)
+    atomic(path, text)
+    return text
+
+
+def memory_call(root, request):
+    """One publisher request; a lost reply is retried once under the same ID."""
+    command = [sys.executable, str(root / "scripts/memory_client.py"), "apply"]
+    for _ in range(2):
+        try:
+            result = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True,
+                                    timeout=MEMORY_TIMEOUT)
+            response = json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            response = None
+        if not isinstance(response, dict):
+            response = {"ok": False, "code": "UNAVAILABLE"}
+        if response.get("code") != "UNAVAILABLE":
+            return response
+    return response
+
+
+def memory_read(root, path):
+    """Accepted bytes and revision of one shared-memory document."""
+    reply = memory_call(root, {"operation": "read", "path": str(path.relative_to(root))})
+    if not reply.get("ok") or not isinstance(reply.get("content"), str):
+        raise RuntimeError(f"memory read refused: {reply.get('code', 'UNAVAILABLE')}")
+    content = reply["content"].encode()
+    if hashlib.sha256(content).hexdigest() != reply.get("revision"):
+        raise RuntimeError("memory read revision mismatch")
+    return content, reply["revision"]
+
+
+def save_proposals_api(settings, path, preimage, records):
+    """Save through the publisher: same records, expected revision, replayable ID."""
+    text = with_proposals(preimage, records)
+    if text == preimage:
+        return preimage
+    if not preimage.startswith(b"---\n") or len(text.split(b"---\n", 2)) != 3:
+        raise ValueError("work document frontmatter required")
+    relative = str(path.relative_to(settings.memory_root))
+    expected = hashlib.sha256(preimage).hexdigest()
+    body = text.decode().split("---\n", 2)[2]
+    request_id = "daily-retro-" + digest([settings.namespace, relative, expected,
+                                          hashlib.sha256(body.encode()).hexdigest()])[:48]
+    reply = memory_call(settings.memory_root, {"operation": "update", "request_id": request_id,
+                                               "expected": {relative: expected},
+                                               "documents": {relative: {"body": body}}})
+    if reply.get("code") == "REVISION_CONFLICT":
+        raise RuntimeError("work preimage moved; no mutation")
+    if not reply.get("ok"):
+        raise RuntimeError(f"memory save refused: {reply.get('code', 'UNAVAILABLE')} request_id={request_id}")
+    # The publisher renders frontmatter itself; its accepted bytes are the next preimage.
+    current, revision = memory_read(settings.memory_root, path)
+    if revision != (reply.get("revisions") or {}).get(relative):
+        raise RuntimeError("work preimage moved; no mutation")
+    return current
 
 
 class ProducerTransport:
