@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from server import Server
 from sessions import Sessions
@@ -47,6 +49,17 @@ async def _spec_seat(store, stream_id):
         spec_id=RECOVERY_SPEC, qualified_spec_ids=[RECOVERY_SPEC],
         spec_binding_provenance=[{"spec_id": RECOVERY_SPEC, "provenance": "spawn_explicit",
                                   "granting_principal": "operator", "granted_at": "2026-10-03T00:00:00Z"}])
+
+
+async def _record_lineage(store, predecessor, successor_stream, successor):
+    """Seed the exact durable handoff; rebind authorization alone is insufficient."""
+    def record(conn):
+        conn.execute(
+            "INSERT INTO v2_assistant_direct_handoff_proofs VALUES(?,?,?,?,?)",
+            (successor_stream, successor["session_generation"], S1,
+             predecessor["session_generation"], "synthetic-proof"))
+        conn.commit()
+    await store.submit(record)
 
 
 async def _preserve_dead(store, stream_id, row):
@@ -94,9 +107,10 @@ async def _await_route(store, input_id, predicate, tries=100):
     return route
 
 
-def test_manual_rebind_replays_queued_direct_input_to_successor():
+@pytest.mark.parametrize("with_lineage", [False, True])
+def test_manual_rebind_replays_queued_direct_input_to_successor(with_lineage):
     """Defect (a): a direct input re-queued during a dead window must replay to the
-    live successor through the SUPPORTED Server._on_assistant_rebind path."""
+    proved successor through Server._on_assistant_rebind; bare rebind cannot replay."""
     async def run():
         store = Store(":memory:")
         store.start()
@@ -120,12 +134,19 @@ def test_manual_rebind_replays_queued_direct_input_to_successor():
             assert not dispatched
 
             s2 = await _spec_seat(store, "fixture-daff:s2")
+            if with_lineage:
+                await _record_lineage(store, s1, "fixture-daff:s2", s2)
             await server.sessions.refresh()
             receipt = await _rebind_to_successor(server, "fixture-daff:s2", s2)
             assert receipt["new_binding"]["stream_id"] == "fixture-daff:s2"
 
             resolved = await _await_route(store, "m1",
                                           lambda r: r["routing_state"] == "resolved")
+            if not with_lineage:
+                assert resolved["routing_state"] == "routing_failed"
+                assert resolved["error_code"] == "assistant_recovery_successor_unverified"
+                assert dispatched == []
+                return
             assert resolved["routing_state"] == "resolved"
             assert resolved["route_target_generation"] == s2["session_generation"]
             assert dispatched and dispatched[0]["route_target"] == "fixture-daff:s2"
@@ -170,6 +191,7 @@ def test_correlated_message_reply_admitted_and_replayed_during_dead_window():
 
             # And it replays to the successor after a manual rebind.
             s2 = await _spec_seat(store, "fixture-daff:s2")
+            await _record_lineage(store, s1, "fixture-daff:s2", s2)
             await server.sessions.refresh()
             await _rebind_to_successor(server, "fixture-daff:s2", s2)
             resolved = await _await_route(store, "m1", lambda r: r["routing_state"] == "resolved")
@@ -266,6 +288,7 @@ def test_dead_window_replay_preserves_submission_order_under_delay():
             assert not submitted
 
             s2 = await _spec_seat(store, "fixture-daff:s2")
+            await _record_lineage(store, s1, "fixture-daff:s2", s2)
             await server.sessions.refresh()
             await _rebind_to_successor(server, "fixture-daff:s2", s2)
 
@@ -314,11 +337,17 @@ def test_automatic_recovery_path_replays_queued_direct_input():
                 "to_stream_id": DAFF_CHAT, "text": "during-dead", "msg_id": "m1", "request_id": "r1",
                 "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
             })
-            await _await_route(store, "m1", lambda r: r["routing_state"] == "queued")
+            # Wait for the old binding's routing attempt to finish before the
+            # daemon recovery changes it; otherwise this fixture races the CAS.
+            held = await _await_route(store, "m1", lambda r:
+                r["routing_state"] == "queued"
+                and r.get("error_code") == "assistant_direct_target_unbound")
+            assert held["error_code"] == "assistant_direct_target_unbound"
             assert not dispatched
 
             # Daemon-owned recovery rebind (not the operator assistant.rebind path).
             s2 = await _seat(store, "fixture-daff:s2")
+            await _record_lineage(store, s1, "fixture-daff:s2", s2)
             await store.recover_assistant_binding(
                 name="daff", target_stream_id="fixture-daff:s2",
                 target_generation=s2["session_generation"])

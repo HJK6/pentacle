@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from server import Server
 from sessions import Sessions
@@ -144,7 +146,8 @@ def test_flush_keeps_tell_without_durable_hold():
     asyncio.run(run())
 
 
-def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed():
+@pytest.mark.parametrize("with_lineage", [False, True])
+def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed(with_lineage):
     async def run():
         store = Store(":memory:")
         store.start()
@@ -172,8 +175,16 @@ def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed():
                 await asyncio.sleep(0.01)
             assert route["routing_state"] == "queued" and not dispatched
 
-            # Resume (same stream, new generation), then the FD's CAS self-rebind.
+            # Same-name resume is not itself proof of authorized continuation.
             resumed = await _seat(store, FD)
+            if with_lineage:
+                def record(conn):
+                    conn.execute(
+                        "INSERT INTO v2_assistant_direct_handoff_proofs VALUES(?,?,?,?,?)",
+                        (FD, resumed["session_generation"], FD,
+                         seat["session_generation"], "synthetic-proof"))
+                    conn.commit()
+                await store.submit(record)
             await store.recover_assistant_binding(name="bart", target_stream_id=FD,
                                                   target_generation=resumed["session_generation"])
             await bart.load_binding()
@@ -183,6 +194,11 @@ def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed():
                 if route["routing_state"] == "resolved" and dispatched:
                     break
                 await asyncio.sleep(0.01)
+            if not with_lineage:
+                assert route["routing_state"] == "routing_failed"
+                assert route["error_code"] == "assistant_recovery_successor_unverified"
+                assert dispatched == []
+                return
             assert route["route_target_generation"] == resumed["session_generation"]
             assert len(dispatched) == 1
         finally:
