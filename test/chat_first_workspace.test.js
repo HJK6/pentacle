@@ -4,7 +4,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { installRenderer, mountRaceSlot } = require('./helpers/renderer_chat');
+const { installRenderer, mountRaceSlot, STREAM } = require('./helpers/renderer_chat');
+// The helper's fixture host and race session, so this file names neither.
+const [HOST, RACE] = STREAM.split(':');
 const {
   WORKSPACE_STORAGE_KEY, normalizeWorkspace, loadWorkspace, visibleWorkspaceSlots,
   placementSlot, defaultSessionView, uniqueAssistantComposite,
@@ -12,11 +14,11 @@ const {
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 const composite = (name = 'assistant', extra = {}) => ({
-  host: 'hostc', stream_id: `hostc:${name}`, session_name: name, name, display_name: 'Assistant',
+  host: HOST, stream_id: `${HOST}:${name}`, session_name: name, name, display_name: 'Assistant',
   session_kind: 'assistant_composite', provider: 'composite', status: 'open', visibility: 'default', ...extra,
 });
 const ordinary = name => ({
-  host: 'hostc', stream_id: `hostc:${name}`, session_name: name, name, provider: 'claude', status: 'open', visibility: 'default',
+  host: HOST, stream_id: `${HOST}:${name}`, session_name: name, name, provider: 'claude', status: 'open', visibility: 'default',
 });
 
 test('workspace preferences are bounded and default to one pane', () => {
@@ -130,7 +132,7 @@ test('a saved choice always wins over the assistant default', async () => {
 });
 
 test('saved bindings and drafts restore only from the daemon inventory', async () => {
-  const session = ordinary('claude-hostc-race');
+  const session = ordinary(RACE);
   const h = installRenderer({ questionOverride: null, initialSessions: [session], storage: {
     [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 3, activeSlot: 2, bindings: [
       { name: session.session_name, hostId: 'local', mode: 'chat', draft: 'Unsent draft' },
@@ -157,7 +159,7 @@ test('pane-count controls persist and hide panes without closing sessions', () =
     assert.equal(control.getAttribute('aria-pressed'), 'true');
     assert.equal(JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY)).paneCount, count);
     assert.equal(document.querySelectorAll('.grid-cell:not(.workspace-hidden)').length, count);
-    assert.equal(vm.runInContext('state.slots[0].name', h.context), 'claude-hostc-race');
+    assert.equal(vm.runInContext('state.slots[0].name', h.context), RACE);
   }
   assert.equal(h.closeCalls.length, 0);
   assert.equal(h.killCalls.length, 0);
@@ -167,7 +169,7 @@ test('reselecting an open chat focuses its composer, not the hidden terminal', (
   const h = installRenderer({ questionOverride: null });
   mountRaceSlot(h.context);
   vm.runInContext(`state.terminals[0] = { term: { focus() { throw Error('hidden xterm focused'); } } };
-    assignToSlot('claude-hostc-race', 'Race Fixture', 'local');`, h.context);
+    assignToSlot(${JSON.stringify(RACE)}, 'Race Fixture', 'local');`, h.context);
   assert.equal(h.dom.window.document.activeElement, h.dom.window.document.querySelector('.slot-chat-compose-input'));
 });
 
@@ -194,7 +196,7 @@ test('the sidebar toggle collapses the sidebar and reports its state', () => {
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
 });
 
-const directTarget = { sourceStreamId: 'hostc:assistant', streamId: 'hostc:worker', generation: 'g1' };
+const directTarget = { sourceStreamId: `${HOST}:assistant`, streamId: `${HOST}:worker`, generation: 'g1' };
 const directWorker = (generation = 'g1') => ({ ...ordinary('worker'), session_generation: generation, online: true, host_status: 'online' });
 const inventory = (h, sessions) => vm.runInContext(`applyChatStreamState(${JSON.stringify({ connected: true, sessions })})`, h.context);
 const savedBindings = h => JSON.parse(h.dom.window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).bindings;
@@ -205,7 +207,7 @@ test('first visit opens a configured direct assistant exactly as its sidebar row
   await settle();
   assert.equal(vm.runInContext('state.slots[0]?.name', h.context), 'worker');
   assert.equal(vm.runInContext('JSON.stringify(state.slots[0]?.assistantDirect)', h.context),
-    JSON.stringify({ sourceId: 'hostc:assistant', targetId: 'hostc:worker', generation: 'g1' }));
+    JSON.stringify({ sourceId: `${HOST}:assistant`, targetId: `${HOST}:worker`, generation: 'g1' }));
   assert.equal(vm.runInContext('state.slotViewModes[0]', h.context), 'chat');
 });
 
@@ -238,16 +240,16 @@ test('a direct-assistant pane persists through its assistant entry with its draf
   input.value = 'Unsent to the assistant';
   input.dispatchEvent(new h.dom.window.Event('input', { bubbles: true }));
   assert.deepEqual(savedBindings(h)[0],
-    { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Unsent to the assistant', assistantSourceId: 'hostc:assistant' });
+    { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Unsent to the assistant', assistantSourceId: `${HOST}:assistant` });
 });
 
 test('a saved direct-assistant pane reopens only through a valid binding; otherwise it is retired', async () => {
   const storage = { [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 1, activeSlot: 0, bindings: [
-    { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Keep me', assistantSourceId: 'hostc:assistant' }] }) };
+    { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Keep me', assistantSourceId: `${HOST}:assistant` }] }) };
   const ok = installRenderer({ questionOverride: null, storage,
     features: { assistantDirectTarget: directTarget }, initialSessions: [composite(), directWorker()] });
   await settle();
-  assert.equal(vm.runInContext('state.slots[0]?.assistantDirect?.sourceId', ok.context), 'hostc:assistant');
+  assert.equal(vm.runInContext('state.slots[0]?.assistantDirect?.sourceId', ok.context), `${HOST}:assistant`);
   assert.equal(ok.dom.window.document.querySelector('#cell-0 .slot-chat-compose-input').value, 'Keep me');
 
   // The target moved to another generation: no stale target opens, the pane
@@ -272,7 +274,7 @@ test('a saved direct-assistant pane reopens only through a valid binding; otherw
 test('a session the user opened before restore is never opened twice', async () => {
   // A hidden saved pane, then the user opens the same session in the visible
   // pane before the first non-empty inventory arrives: the user's pane wins.
-  const session = ordinary('claude-hostc-race');
+  const session = ordinary(RACE);
   const plain = installRenderer({ questionOverride: null, initialSessions: [], storage: {
     [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 1, activeSlot: 1, visibleSlots: [1], bindings: [
       { name: session.session_name, hostId: 'local', mode: 'chat', draft: 'Old draft' }] }) } });
@@ -290,7 +292,7 @@ test('a session the user opened before restore is never opened twice', async () 
   const direct = installRenderer({ questionOverride: null, initialSessions: [],
     features: { assistantDirectTarget: directTarget }, storage: {
       [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 1, activeSlot: 1, visibleSlots: [1], bindings: [
-        { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Old draft', assistantSourceId: 'hostc:assistant' }] }) } });
+        { name: 'worker', hostId: 'local', mode: 'chat', draft: 'Old draft', assistantSourceId: `${HOST}:assistant` }] }) } });
   await settle();
   vm.runInContext("assignToSlot('worker', 'Worker', 'local')", direct.context);
   inventory(direct, [composite(), directWorker()]);
@@ -309,7 +311,7 @@ test('a session the user opened before restore is never opened twice', async () 
 });
 
 test('an empty first inventory does not erase saved panes', async () => {
-  const session = ordinary('claude-hostc-race');
+  const session = ordinary(RACE);
   const h = installRenderer({ questionOverride: null, initialSessions: [], storage: {
     [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 2, activeSlot: 0, bindings: [
       { name: session.session_name, hostId: 'local', mode: 'chat', draft: 'Still here' }] }),
