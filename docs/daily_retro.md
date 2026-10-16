@@ -237,6 +237,21 @@ Include the authority reference when work is already authorized. The helper stor
 the version hash, question attempts and answer provenance inside that work spec.
 The helper locks `state_root/locks/<work_id>.lock`, outside shared memory, and
 checks the `spec.md` byte preimage before each update so concurrent edits survive.
+
+When `memory_root` is the configured shared tree whose publisher owns writes (the
+same `~/agent-workspace/triforce-memory` plus `scripts/memory_client.py` check
+that triage uses), the helper never writes that tree directly. It reads accepted
+bytes and revision with the memory command's `read`. Each save is one `update`
+whose expected revision is the SHA-256 of that preimage and whose body replaces
+everything after the frontmatter. The request ID is derived from the namespace,
+path, expected revision and new body, so an identical retry replays the accepted
+receipt. A lost reply is retried once with the same ID; a second unconfirmed reply
+fails closed and names that ID. `REVISION_CONFLICT` is the same `work preimage
+moved; no mutation` refusal. After acceptance the helper reads the document back.
+Those publisher-rendered bytes, including its `updated_at`, are the next
+preimage only when their revision matches the receipt; otherwise it refuses
+before any ask. An unchanged record sends no request. Other memory roots keep the
+direct atomic write.
 Approval remains authorization until an observed success or honest blocker is
 recorded there through the normal delivery process.
 

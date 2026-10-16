@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import asyncio
 import json
+import os
 import re
 import sqlite3
 
@@ -4054,3 +4055,204 @@ def test_fd_budget_coordinator_count_and_selection_share_snapshot(config, monkey
     assert mutated == [motion]
     assert packet['turns_over_budget']['count'] == 1 and packet['turns_over_budget']['complete']
     assert packet['coverage']['fd_turn_budget'] == {'observed':1,'scanned':1,'valid':1,'overflow':0,'complete':True}
+
+
+FAKE_MEMORY_CLIENT = r'''
+"""Fixture publisher: accepted-bytes revisions, ID replay and a lost reply."""
+import hashlib, json, os, pathlib, sys
+root = pathlib.Path(__file__).resolve().parents[1]
+log = root.parent / "publisher-log.jsonl"
+request = json.load(sys.stdin)
+request.setdefault("request_id", "fixture-generated")
+sha = lambda data: hashlib.sha256(data).hexdigest()
+fingerprint = sha(json.dumps(request, sort_keys=True).encode())
+history = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+def reply(value, lost=False):
+    lost = lost or (request["operation"] == "update" and (root.parent / "lose-all-replies").exists())
+    with log.open("a") as handle:
+        handle.write(json.dumps({"request": request, "reply": value, "fingerprint": fingerprint}) + "\n")
+    print("lost" if lost else json.dumps(value))
+    raise SystemExit(0 if value.get("ok") and not lost else 1)
+if request["operation"] == "read":
+    path = root / request["path"]
+    data = path.read_bytes() if path.exists() else None
+    reply({"ok": True, "path": request["path"], "revision": sha(data) if data else None,
+           "content": data.decode() if data else None})
+accepted = [h for h in history if h["request"].get("request_id") == request["request_id"] and h["reply"].get("saved")]
+if accepted:
+    if accepted[0]["fingerprint"] != fingerprint:
+        reply({"ok": False, "code": "REQUEST_ID_REUSED"})
+    reply(accepted[0]["reply"])
+(path_name, change), = request["documents"].items()
+path = root / path_name
+if request["expected"] != {path_name: sha(path.read_bytes())}:
+    reply({"ok": False, "code": "REVISION_CONFLICT", "revisions": {path_name: sha(path.read_bytes())}})
+front = path.read_text().split("---\n", 2)[1]
+lines = [line for line in front.splitlines(keepends=True) if not line.startswith("updated_at:")]
+text = "---\n" + "".join(lines) + "updated_at: '2026-10-16'\n---\n" + change["body"]
+os.chmod(path.parent, 0o755)
+path.write_text(text)
+os.chmod(path.parent, 0o555)
+lose = root.parent / "lose-next-reply"
+lost = lose.exists()
+if lost:
+    lose.unlink()
+reply({"ok": True, "request_id": request["request_id"], "saved": sha(text.encode())[:40], "paths": [path_name],
+       "revisions": {path_name: sha(text.encode())}, "validation": "passed", "publication": "pending"}, lost=lost)
+'''
+
+
+@pytest.fixture
+def shared_memory(config, tmp_path, monkeypatch):
+    """The configured shared tree: read-only work folders, publisher-only writes."""
+    home = tmp_path / "home"
+    memory = home / "agent-workspace" / "triforce-memory"
+    (memory / "scripts").mkdir(parents=True)
+    (memory / "scripts" / "memory_client.py").write_text(FAKE_MEMORY_CLIENT)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    settings = replace(config, memory_root=memory.resolve())
+    folders = []
+
+    def item(name, status="completed"):
+        path = source(settings.memory_root, name, status=status)
+        os.chmod(path.parent, 0o555)
+        folders.append(path.parent)
+        return path
+
+    def published():
+        log = memory.parent / "publisher-log.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    yield settings, item, published
+    for folder in folders:
+        os.chmod(folder, 0o755)
+
+
+def test_shared_tree_decision_renewal_writes_only_through_memory_api(config, shared_memory):
+    settings, item, published = shared_memory
+    path = item("one")
+    twin = source(config.memory_root, "one")
+    rpc = Transport()
+    first = asyncio.run(retro.Pipeline(settings, rpc).decision("spec_one", proposal2()))
+    renewal = proposal2()
+    renewal["citations"] = [*renewal["citations"], "renewal-receipt:fixture"]
+    before = {p for p in settings.memory_root.rglob("*")}
+    record = asyncio.run(retro.Pipeline(settings, rpc).decision("spec_one", renewal))
+    assert {p for p in settings.memory_root.rglob("*")} == before
+    legacy = retro.Pipeline(config, Transport())
+    asyncio.run(legacy.decision("spec_one", proposal2()))
+    expected = asyncio.run(legacy.decision("spec_one", renewal))
+    assert record == expected and record["version"] == retro.proposal_version(renewal) != first["version"]
+    assert retro.proposals(path.read_text()) == retro.proposals(twin.read_text())
+    assert path.read_text().split("---\n", 2)[2] == twin.read_text().split("---\n", 2)[2]
+    updates = [h for h in published() if h["request"]["operation"] == "update"]
+    assert len(updates) == 2 and all(h["request"]["request_id"].startswith("daily-retro-") for h in updates)
+    assert updates[0]["request"]["documents"].keys() == {"work/completed/one/spec.md"}
+    receipts = [retro.read(p) for p in (settings.state_root / "decision-receipts").glob("*.json")]
+    assert {(r["version"], r["state"]) for r in receipts} == {(first["version"], "defer"), (record["version"], "defer")}
+
+
+def test_shared_tree_revision_conflict_keeps_preimage_refusal(config, shared_memory, monkeypatch):
+    settings, item, published = shared_memory
+    path = item("one")
+    concurrent = path.read_text() + "\n## Concurrent note\nKeep this edit.\n"
+    original = retro.memory_read
+
+    def moved(root, work):
+        current = original(root, work)
+        os.chmod(path.parent, 0o755); path.write_text(concurrent); os.chmod(path.parent, 0o555)
+        return current
+    monkeypatch.setattr(retro, "memory_read", moved)
+    rpc = Transport()
+    with pytest.raises(RuntimeError, match="preimage moved; no mutation"):
+        asyncio.run(retro.Pipeline(settings, rpc).decision("spec_one", proposal2()))
+    assert path.read_text() == concurrent and not rpc.questions
+    assert [h["reply"]["code"] for h in published() if h["request"]["operation"] == "update"] == ["REVISION_CONFLICT"]
+    assert not (settings.state_root / "decision-receipts").exists()
+
+
+def test_shared_tree_lost_reply_replays_one_transaction(config, shared_memory):
+    settings, item, published = shared_memory
+    path = item("one")
+    (settings.memory_root.parent / "lose-next-reply").touch()
+    record = asyncio.run(retro.Pipeline(settings, Transport()).decision("spec_one", proposal2()))
+    updates = [h for h in published() if h["request"]["operation"] == "update"]
+    assert len(updates) == 2 and updates[0]["request"] == updates[1]["request"]
+    assert updates[1]["reply"] == updates[0]["reply"]
+    assert retro.proposals(path.read_text())[record["id"]]["version"] == record["version"]
+    again = asyncio.run(retro.Pipeline(settings, Transport()).decision("spec_one", proposal2()))
+    assert again == record and len([h for h in published() if h["request"]["operation"] == "update"]) == 2
+
+
+def test_shared_tree_ask_saves_intent_before_prompt_and_blocked_report(config, shared_memory):
+    settings, item, published = shared_memory
+    path = item("one")
+    order = []
+
+    class Ordered(Transport):
+        async def prompt_ask_once(self, config, payload):
+            order.append(("ask", retro.proposals(path.read_text())["fix-one"]["state"]))
+            return {"type": "prompt.error", "error_code": "ask_parent"}
+    record = asyncio.run(retro.Pipeline(settings, Ordered()).decision("spec_one", proposal2("propose")))
+    assert order == [("ask", "pending")] and record["state"] == "ask_blocked"
+    stored = retro.proposals(path.read_text())["fix-one"]
+    assert stored["state"] == "ask_blocked" and stored["attempts"][0]["blocked_report"]["confirmed"]
+    saved = [h for h in published() if h["request"]["operation"] == "update" and h["reply"].get("ok")]
+    assert len(saved) == 3
+    for before, after in zip(saved, saved[1:]):
+        assert after["request"]["expected"] == before["reply"]["revisions"]
+    rendered = path.read_bytes()
+    assert retro.hashlib.sha256(rendered).hexdigest() == saved[-1]["reply"]["revisions"]["work/completed/one/spec.md"]
+    assert rendered.split(b"---\n", 2)[1].endswith(b"updated_at: '2026-10-16'\n")
+
+
+def test_shared_tree_unchanged_record_sends_no_update(config, shared_memory):
+    settings, item, published = shared_memory
+    item("one")
+    pipeline = retro.Pipeline(settings, Transport())
+    record = asyncio.run(pipeline.decision("spec_one", proposal2()))
+    count = len([h for h in published() if h["request"]["operation"] == "update"])
+    assert asyncio.run(pipeline.decision("spec_one", proposal2())) == record
+    assert len([h for h in published() if h["request"]["operation"] == "update"]) == count == 1
+
+
+def test_unconfigured_tree_keeps_direct_write_even_with_a_client(config, tmp_path, monkeypatch):
+    path = source(config.memory_root, "one")
+    (config.memory_root / "scripts").mkdir()
+    (config.memory_root / "scripts" / "memory_client.py").write_text("raise SystemExit('must not run')\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
+    record = asyncio.run(retro.Pipeline(config, Transport()).decision("spec_one", proposal2()))
+    assert retro.proposals(path.read_text())[record["id"]]["version"] == record["version"]
+
+
+def test_shared_tree_readback_move_fails_closed_before_ask(config, shared_memory, monkeypatch):
+    settings, item, published = shared_memory
+    path = item("one")
+    original = retro.memory_read
+    reads = []
+
+    def moved(root, work):
+        reads.append(work)
+        if len(reads) == 2:  # the readback after the accepted durable-intent save
+            os.chmod(path.parent, 0o755); path.write_text(path.read_text() + "\nConcurrent.\n"); os.chmod(path.parent, 0o555)
+        return original(root, work)
+    monkeypatch.setattr(retro, "memory_read", moved)
+    rpc = Transport()
+    with pytest.raises(RuntimeError, match="preimage moved; no mutation"):
+        asyncio.run(retro.Pipeline(settings, rpc).decision("spec_one", proposal2("propose")))
+    assert not rpc.questions and not (settings.state_root / "decision-receipts").exists()
+    assert [h["reply"].get("ok") for h in published() if h["request"]["operation"] == "update"] == [True]
+
+
+def test_shared_tree_unconfirmed_twice_fails_closed_with_one_request_id(config, shared_memory):
+    settings, item, published = shared_memory
+    item("one")
+    (settings.memory_root.parent / "lose-all-replies").touch()
+    with pytest.raises(RuntimeError) as failure:
+        asyncio.run(retro.Pipeline(settings, Transport()).decision("spec_one", proposal2()))
+    updates = [h["request"] for h in published() if h["request"]["operation"] == "update"]
+    assert len(updates) == 2 and updates[0] == updates[1]
+    assert updates[0]["request_id"] in str(failure.value)
+    assert not (settings.state_root / "decision-receipts").exists()
