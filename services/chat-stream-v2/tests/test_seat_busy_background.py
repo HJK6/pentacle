@@ -95,10 +95,10 @@ class _Tmux:
 
 
 class _Hosts:
-    local_host = "hosta"
+    local_host = "node-a"
 
     def __init__(self, tmux: _Tmux) -> None:
-        self.peers = {"hostb": object()}
+        self.peers = {"node-b": object()}
         self._tmux = tmux
 
     def is_online(self, host: str) -> bool:
@@ -108,7 +108,7 @@ class _Hosts:
         return self._tmux
 
     def snapshot(self) -> dict[str, dict[str, object]]:
-        return {"hostb": {"online": True, "host_status": "online", "host_status_reason": ""}}
+        return {"node-b": {"online": True, "host_status": "online", "host_status_reason": ""}}
 
 
 def _capture_once(presence: RemotePresence) -> None:
@@ -121,16 +121,16 @@ def _capture_once(presence: RemotePresence) -> None:
 
 
 def test_capture_sets_background_busy_and_returns_to_idle() -> None:
-    sessions = Sessions(Store(":memory:"), tmux=None, local_host="hosta")
-    sessions._inv = {"hostb:v2-bg": {
-        "host": "hostb", "session_name": "v2-bg", "stream_id": "hostb:v2-bg",
+    sessions = Sessions(Store(":memory:"), tmux=None, local_host="node-a")
+    sessions._inv = {"node-b:v2-bg": {
+        "host": "node-b", "session_name": "v2-bg", "stream_id": "node-b:v2-bg",
         "provider": "claude", "session_generation": "g1", "status": "open",
     }}
     tmux = _Tmux((FIXTURES / "claude_bg_shell_idle.txt").read_text())
     presence = RemotePresence(sessions, _Hosts(tmux), config=PresenceConfig(preview_cache_ttl_s=0))
 
     _capture_once(presence)
-    row = next(r for r in sessions.list_open() if r["stream_id"] == "hostb:v2-bg")
+    row = next(r for r in sessions.list_open() if r["stream_id"] == "node-b:v2-bg")
     assert row["working"] is False
     assert row["background_busy"] is True
     assert row["background_label"] == "1 shell"
@@ -139,7 +139,7 @@ def test_capture_sets_background_busy_and_returns_to_idle() -> None:
 
     tmux.pane = (FIXTURES / "claude_bg_done_idle.txt").read_text()
     _capture_once(presence)
-    row = next(r for r in sessions.list_open() if r["stream_id"] == "hostb:v2-bg")
+    row = next(r for r in sessions.list_open() if r["stream_id"] == "node-b:v2-bg")
     assert row["background_busy"] is False
     assert row["background_label"] == ""
     assert row["busy"] is False
@@ -237,14 +237,14 @@ def test_background_busy_lane_is_not_idle_and_digest_renders_working(monkeypatch
         store = Store(":memory:")
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
-            root = await sessions.open("hosta", "root", provider="shell", no_watch=True)
-            await store.update_session("hosta", "root", pane_status="pane_alive")
-            lead = await sessions.open("hosta", "lead", provider="shell", role="lead",
-                                       no_watch=True, parent_stream_id="hosta:root")
-            binding = ("hosta:root", root["session_generation"])
-            obs = {"hosta:root": _live_root(root),
-                   "hosta:lead": {"session_generation": lead["session_generation"],
+            sessions = Sessions(store, local_host="node-a")
+            root = await sessions.open("node-a", "root", provider="shell", no_watch=True)
+            await store.update_session("node-a", "root", pane_status="pane_alive")
+            lead = await sessions.open("node-a", "lead", provider="shell", role="lead",
+                                       no_watch=True, parent_stream_id="node-a:root")
+            binding = ("node-a:root", root["session_generation"])
+            obs = {"node-a:root": _live_root(root),
+                   "node-a:lead": {"session_generation": lead["session_generation"],
                                   "working": False, "busy": True, "busy_reasons": ["background"]}}
             for now in (100, 1600, 2900, 4000):
                 await store.evaluate_watch_wake(obs, now=now, root_binding=binding)
@@ -257,7 +257,7 @@ def test_background_busy_lane_is_not_idle_and_digest_renders_working(monkeypatch
             assert match_message_envelope(digests[-1])["lanes"][0]["working"] is True
 
             # Background work ends -> the seat starts its idle clock again.
-            obs["hosta:lead"].update(busy=False, busy_reasons=[])
+            obs["node-a:lead"].update(busy=False, busy_reasons=[])
             await store.evaluate_watch_wake(obs, now=4001, root_binding=binding)
             await store.evaluate_watch_wake(obs, now=5202, root_binding=binding)
             idle = await store.submit(lambda c: c.execute(
