@@ -63,7 +63,10 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
         "stream_id": lane["bound_stream_id"], "generation": lane.get("bound_generation"),
         "qualifies": qualifies, "status": row.get("status") or "unknown",
         "visibility": row.get("visibility") or "default",
-        "presence": {"online": online, "working": bool(live.get("working")),
+        # Lane presence is display-only: the lead reads working while it or its
+        # descendants are busy (generating or provider-reported background).
+        "presence": {"online": online,
+                     "working": bool(live.get("busy") if "busy" in live else live.get("working")),
                      "capture_liveness": live.get("capture_liveness") or ("idle" if online else "transport_unknown"),
                      "last_activity": live.get("last_activity")},
         "status_card": card,

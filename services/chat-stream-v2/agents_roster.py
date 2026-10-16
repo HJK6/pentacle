@@ -34,10 +34,48 @@ def project(rows, transitions):
             })
     for key in set(transitions) - live_keys:
         del transitions[key]
+    busy = _busy_reasons(rows)
     result = []
     for row in rows:
         clean = {k: v for k, v in row.items() if k not in {"agents", "_agent_report_status", "_agent_report_ts"}}
         if agents := by_parent.get(row.get("stream_id")):
             clean["agents"] = agents
+        reasons = busy.get(str(row.get("stream_id") or ""), [])
+        clean["busy"] = bool(reasons)
+        clean["busy_reasons"] = reasons
         result.append(clean)
+    return result
+
+
+def _busy_reasons(rows):
+    """Display busy truth per open row: generating, provider-reported
+    background work, or a busy open descendant. `working` keeps its foreground
+    meaning; an open but idle descendant contributes nothing."""
+    own, children = {}, {}
+    for row in rows:
+        if row.get("status", "open") != "open":
+            continue
+        sid = str(row.get("stream_id") or "")
+        reasons = set()
+        if row.get("online") is not False and row.get("pane_status") != "pane_dead":
+            if row.get("working") is True:
+                reasons.add("generating")
+            if row.get("background_busy") is True:
+                reasons.add("background")
+        own[sid] = reasons
+        if parent := row.get("parent_stream_id"):
+            children.setdefault(str(parent), []).append(sid)
+    result = {}
+    for sid, reasons in own.items():
+        # Reachability, not a memoized walk: a parent cycle must not make the
+        # answer depend on input order. A seat is not its own descendant.
+        seen, stack, child_busy = {sid}, list(children.get(sid, ())), False
+        while stack and not child_busy:
+            child = stack.pop()
+            if child in seen:
+                continue
+            seen.add(child)
+            child_busy = bool(own.get(child))
+            stack.extend(children.get(child, ()))
+        result[sid] = sorted(reasons | ({"child_seat"} if child_busy else set()))
     return result

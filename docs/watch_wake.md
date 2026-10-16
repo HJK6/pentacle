@@ -33,6 +33,8 @@ at `PENTACLE_LANE_DIGEST_S` intervals (1800 seconds by default). Membership and
 generation, title/role, status update time, descendant/report counts, ETA times
 and the 50% overrun threshold participate in change identity. Transient working
 state and elapsed ages are rendered in a changed snapshot but do not cause one.
+A lane's rendered `working` and the tree-idle clock use the seat's [`busy`](seat_busy.md)
+state, so owned background work or a busy descendant is never reported as idle.
 Child reports and decision notices retain their own prompt delivery paths.
 
 The digest baseline is a durable enqueue, not proof of delivery. An equal pending
