@@ -71,12 +71,14 @@ class Assets:
     def __init__(self, db_path: str = DEFAULT_ASSETS_DB, *, sessions: Any = None,
                  comms: Any = None, broadcast: Any = None, fleet_hosts: Any = (),
                  catalog_spec_id: str = DEFAULT_DASHBOARD_CATALOG_SPEC_ID,
-                 assistant_binding: Callable[[], Awaitable[dict]] | None = None) -> None:
+                 assistant_binding: Callable[[], Awaitable[dict]] | None = None,
+                 chat_roots: Callable[[str], Awaitable[list[dict]]] | None = None) -> None:
         self._db_path = db_path
         self._sessions = sessions
         self._fleet_hosts = frozenset(fleet_hosts)
         self._catalog_spec_id = catalog_spec_id
         self._assistant_binding = assistant_binding
+        self._chat_roots = chat_roots
         self._comms = comms
         self._broadcast = broadcast
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asset-store")
@@ -428,9 +430,8 @@ class Assets:
                 "store": await self._call("identity")}
 
     async def _asset_list(self, msg: dict, request_id: str) -> dict:
-        # v1 parity (chat_streamd.py asset.list): explicit spec-ids with no
-        # session identity → union of list_by_spec_id; otherwise scope to the
-        # caller session + its spec tags. The pre-v2 handler listed every asset.
+        # Explicit spec-only searches are for dashboards. Chat selection is
+        # ownership-based: shared specification tags never imply a commission.
         explicit_spec_ids = _normalize_spec_ids(msg.get("spec_ids"), msg.get("spec_id"))
         raw_limit = msg.get("limit")
         limit = int(raw_limit) if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
@@ -440,6 +441,7 @@ class Assets:
         # authorization is unchanged. Spec-scoped lists only.
         window = _list_window(msg, limit)
         session_key: dict | None = None
+        scope: list[str] | None = None
         if explicit_spec_ids and not (
             _nullable_text(msg.get("stream_id")) or _nullable_text(msg.get("host"))
         ):
@@ -462,13 +464,53 @@ class Assets:
             session_key = self._session_key_from_msg(msg)
             if session_key is None:
                 raise InvalidAsset("stream_id (or host + session_name) is required")
-            records = await self._call(
-                "list_for_session_and_specs",
-                host=session_key["host"], session_name=session_key["session_name"],
-                spec_ids=self._spec_ids_from_msg(msg, session_key), limit=limit)
+            scope = await self._chat_scope(session_key["stream_id"])
+            records = []
+            for stream_id in scope:
+                owner = self._stream_session_key(stream_id)
+                if owner is not None:
+                    records.extend(await self._call("list_assets", host=owner["host"],
+                                                    session_name=owner["session_name"]))
+            records.sort(key=lambda r: (r.get("updated_at") or "", r.get("asset_id") or ""), reverse=True)
+            if limit is not None:
+                records = records[:limit]
         return {"type": "asset.list.ok", "request_id": request_id,
                 "session_key": session_key,
+                "scope_stream_ids": scope,
                 "assets": [asset_metadata(r) for r in records]}
+
+    async def _chat_scope(self, viewer: str) -> list[str]:
+        """Durable ownership, including closed workers and handoff continuity."""
+        store = getattr(self._sessions, "store", None)
+        rows = await store.list_sessions(status=None) if store is not None else []
+        records = {row["stream_id"]: row for row in rows}
+        roots = {viewer}
+        if self._chat_roots is not None:
+            for binding in await self._chat_roots(viewer):
+                sid = binding.get("stream_id")
+                row = records.get(sid)
+                if row and binding.get("generation") and row.get("session_generation") == binding["generation"]:
+                    roots.add(sid)
+        # A handed-off seat retains its predecessor's commissioned reports.
+        pending = list(roots)
+        while pending:
+            previous = records.get(pending.pop(), {}).get("handoff_from_stream_id")
+            if previous and previous not in roots:
+                roots.add(previous)
+                pending.append(previous)
+        children: dict[str, list[str]] = {}
+        for sid, row in records.items():
+            for field in ("parent_stream_id", "handoff_from_stream_id"):
+                if parent := row.get(field):
+                    children.setdefault(parent, []).append(sid)
+        scoped = set(roots)
+        pending = list(roots)
+        while pending:
+            for child in children.get(pending.pop(), []):
+                if child not in scoped:
+                    scoped.add(child)
+                    pending.append(child)
+        return sorted(scoped)
 
     async def _asset_get(self, msg: dict, request_id: str) -> dict:
         record = await self._require_record(msg)

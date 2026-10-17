@@ -712,12 +712,12 @@ function unreadReportCountForStream(streamId) {
 // report-discovery read-state tracker is loaded. Counts non-dismissed unread
 // report assets in the stream's bucket (report_read_state.js owns the rule).
 function unreadReportCountForStreamImpl(streamId) {
-  const bucket = state.chatStream.assets[streamId];
-  if (!bucket) return 0;
-  return reportUnreadCount(
-    bucket,
-    (key) => !!(bucket.dismissedById || {})[assetTabKey(streamId, key)],
-  );
+  const scope = state.chatStream.assets[streamId]?.scopeStreamIds || [streamId];
+  return scope.reduce((total, owner) => {
+    const bucket = state.chatStream.assets[owner];
+    return total + reportUnreadCount(bucket,
+      key => !!bucket?.dismissedById?.[assetTabKey(owner, key)]);
+  }, 0);
 }
 
 // refreshSidebarUnread re-renders the sidebar when report unread state may have
@@ -1285,51 +1285,29 @@ function slotMatchesAssetSession(slot, sessionKey = {}) {
   return !streamSession?.stream_id || streamSession.stream_id === sessionKey.stream_id;
 }
 
-function slotSpecIds(slot) {
-  const session = state.slots[slot];
-  if (!session || state.botSlots[slot]) return [];
-  const host = streamHostForHostId(session.hostId);
-  const streamSession = chatSessionStateForSession(session);
-  return normalizeSpecIds(streamSession?.spec_ids, streamSession?.spec_id);
-}
-
-function slotMatchesAssetSpec(slot, metadata) {
-  const specId = String(metadata?.spec_id || '').trim();
-  return !!specId && slotSpecIds(slot).includes(specId);
+function slotOwnsAsset(slot, metadata) {
+  const context = assetContextForSlot(slot);
+  if (!context) return false;
+  const scope = context.bucket?.scopeStreamIds || [context.streamId];
+  return scope.includes(metadata?.session_key?.stream_id);
 }
 
 function routeAssetMetadataToSlots(metadata) {
   if (!metadata?.session_key) return [];
   const routed = [];
   for (let slot = 0; slot < 4; slot++) {
-    const sessionMatch = slotMatchesAssetSession(slot, metadata.session_key);
-    const specMatch = !sessionMatch && slotMatchesAssetSpec(slot, metadata);
-    if (!sessionMatch && !specMatch) continue;
-    let routedMetadata = metadata;
-    if (specMatch) {
-      const context = assetContextForSlot(slot);
-      if (!context) continue;
-      const result = upsertAssetMetadata({
-        ...metadata,
-        session_key: {
-          host: context.host,
-          session_name: context.session.name,
-          stream_id: context.streamId,
-        },
-      });
-      routedMetadata = result?.metadata || metadata;
-    }
+    if (!slotOwnsAsset(slot, metadata)) continue;
     routed.push(slot);
     ensureSlotAssetTabs(slot);
     const active = state.slotActiveAsset[slot];
-    if (active?.streamId === routedMetadata.session_key.stream_id && active?.assetKey === routedMetadata.asset_key) {
+    if (active?.streamId === metadata.session_key.stream_id && active?.assetKey === metadata.asset_key) {
       refreshActiveSlotAsset(slot);
     }
     window.PentacleHarness?.emit?.('asset:update', {
       slot,
       data: {
-        streamId: routedMetadata.session_key.stream_id,
-        assetId: routedMetadata.asset_id,
+        streamId: metadata.session_key.stream_id,
+        assetId: metadata.asset_id,
       },
     });
   }
@@ -1386,10 +1364,13 @@ function normalizeAssetListResponse(reply, fallbackSessionKey) {
       : Array.isArray(reply.results)
         ? reply.results
         : [];
-  return records.map((record) => ({
-    ...(record || {}),
-    session_key: (record && record.session_key) || fallbackSessionKey,
-  }));
+  return records.map((record) => {
+    const owner = String(record?.stream_id || '');
+    const colon = owner.indexOf(':');
+    return { ...(record || {}), session_key: record?.session_key || (colon > 0
+      ? { stream_id: owner, host: owner.slice(0, colon), session_name: owner.slice(colon + 1) }
+      : fallbackSessionKey) };
+  });
 }
 
 function assetListArgsForSession(session) {
@@ -1397,10 +1378,7 @@ function assetListArgsForSession(session) {
   const host = streamHostForHostId(session.hostId);
   const streamSession = chatUi.findStreamSessionForDesktopSession(state.chatStream, session, host);
   if (streamSession?.stream_id) {
-    const args = { stream_id: streamSession.stream_id };
-    const specIds = normalizeSpecIds(streamSession.spec_ids, streamSession.spec_id);
-    if (specIds.length) args.spec_ids = specIds;
-    return args;
+    return { stream_id: streamSession.stream_id };
   }
   return { host, session_name: session.name };
 }
@@ -1425,6 +1403,9 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
   try {
     const reply = await window.cc.assetList(args);
     if (state.slotGen[slot] !== gen || state.slots[slot] !== session) return null;
+    const viewerBucket = assetBucketForStream(fallbackSessionKey.stream_id);
+    viewerBucket.scopeStreamIds = Array.isArray(reply?.scope_stream_ids)
+      ? reply.scope_stream_ids : [fallbackSessionKey.stream_id];
     const records = normalizeAssetListResponse(reply, fallbackSessionKey);
     const applied = [];
     for (const record of records) {
@@ -1433,6 +1414,12 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
         routeAssetMetadataToSlots(result.metadata);
         applied.push(result.metadata);
       }
+    }
+    ensureSlotAssetTabs(slot);
+    const active = state.slotActiveAsset[slot];
+    if (active && !viewerBucket.scopeStreamIds.includes(active.streamId)) {
+      state.slotActiveAsset[slot] = null;
+      updateSlotViewMode(slot, 'chat');
     }
     return applied;
   } catch (error) {
@@ -1495,10 +1482,12 @@ function assetContextForSlot(slot) {
 
 function visibleAssetsForSlot(slot) {
   const context = assetContextForSlot(slot);
-  if (!context?.bucket) return [];
-  return context.bucket.order
-    .map((assetKey) => context.bucket.itemsById[assetKey])
-    .filter((item) => item && !context.bucket.dismissedById[assetTabKey(context.streamId, item.asset_key)]);
+  if (!context) return [];
+  return (context.bucket?.scopeStreamIds || [context.streamId]).flatMap(streamId => {
+    const bucket = state.chatStream.assets[streamId];
+    return (bucket?.order || []).map(key => bucket.itemsById[key])
+      .filter(item => item && !bucket.dismissedById[assetTabKey(streamId, item.asset_key)]);
+  }).sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
 }
 
 function assetPayloadForRender(contentType, body) {
@@ -1716,14 +1705,13 @@ function dockAssetFromPayload(payload) {
   const metadata = result?.metadata || item;
   let targetSlot = -1;
   for (let slot = 0; slot < 4; slot++) {
-    if (slotMatchesAssetSession(slot, metadata.session_key) || slotMatchesAssetSpec(slot, metadata)) {
+    if (slotOwnsAsset(slot, metadata)) {
       targetSlot = slot;
       break;
     }
   }
   if (targetSlot < 0) return false;
-  const context = assetContextForSlot(targetSlot);
-  const streamId = context?.streamId || metadata.session_key.stream_id;
+  const streamId = metadata.session_key.stream_id;
   openSlotAsset(targetSlot, streamId, metadata.asset_id, metadata.asset_key);
   window.PentacleHarness?.emit?.('asset:dock', {
     slot: targetSlot,
@@ -1789,18 +1777,15 @@ function removeAssetFromBucket(streamId, bucket, key) {
 function applyAssetRemoved(payload) {
   const sessionKey = payload?.session_key || {};
   const assetId = String(payload?.asset_id || '').trim();
-  const specId = String(payload?.spec_id || '').trim();
   if (!assetId) return;
-  // Remove from the producer bucket and any spec-routed copies in other slots.
+  // Asset ids may collide across owners, even within the same specification.
   for (const streamId of Object.keys(state.chatStream.assets || {})) {
     const bucket = state.chatStream.assets[streamId];
     if (!bucket?.itemsById) continue;
     for (const key of Object.keys(bucket.itemsById)) {
       const item = bucket.itemsById[key];
       if (!item || item.asset_id !== assetId) continue;
-      const producerMatch = streamId === sessionKey.stream_id;
-      const specMatch = !!specId && String(item.spec_id || '').trim() === specId;
-      if (producerMatch || specMatch) removeAssetFromBucket(streamId, bucket, key);
+      if (streamId === assetStreamIdFromSessionKey(sessionKey)) removeAssetFromBucket(streamId, bucket, key);
     }
   }
   refreshSidebarUnread();
@@ -1834,17 +1819,18 @@ function ensureSlotAssetTabs(slot) {
   tabs.innerHTML = '';
   tabs.style.display = assets.length ? 'flex' : 'none';
   if (!assets.length || !context) return tabs;
-  const bucket = state.chatStream.assets[context.streamId];
-  const isDismissed = (key) => !!(bucket?.dismissedById || {})[assetTabKey(context.streamId, key)];
   for (const item of assets) {
+    const streamId = item.session_key.stream_id;
+    const bucket = state.chatStream.assets[streamId];
+    const isDismissed = key => !!bucket?.dismissedById?.[assetTabKey(streamId, key)];
     const tab = document.createElement('button');
     tab.type = 'button';
     tab.className = 'slot-asset-tab';
     tab.dataset.assetId = item.asset_id;
     tab.dataset.assetKey = item.asset_key;
-    tab.dataset.streamId = context.streamId;
+    tab.dataset.streamId = streamId;
     tab.title = item.title || item.asset_id;
-    const active = state.slotActiveAsset[slot]?.streamId === context.streamId
+    const active = state.slotActiveAsset[slot]?.streamId === streamId
       && state.slotActiveAsset[slot]?.assetKey === item.asset_key;
     tab.classList.toggle('active', active);
     // Unread report indicator (spec item 5): a dot on report tabs whose current
@@ -1872,10 +1858,10 @@ function ensureSlotAssetTabs(slot) {
     tab.addEventListener('click', (event) => {
       event.stopPropagation();
       if (event.target && event.target.closest('.slot-asset-tab-close')) {
-        deleteSlotAsset(slot, context.streamId, item.asset_id, item.asset_key);
+        deleteSlotAsset(slot, streamId, item.asset_id, item.asset_key);
         return;
       }
-      openSlotAsset(slot, context.streamId, item.asset_id, item.asset_key);
+      openSlotAsset(slot, streamId, item.asset_id, item.asset_key);
     });
     tabs.appendChild(tab);
   }

@@ -657,9 +657,23 @@ async def run(args: argparse.Namespace) -> int:
     # The blob store owns partial upload state; the server tears a closed
     # connection's in-flight uploads down through this reference.
     server.blobs = blobs
+    async def _asset_chat_roots(viewer: str) -> list[dict]:
+        composite = server._composite_for(viewer)
+        if composite is None:
+            return []
+        if composite.config.direct_primary:
+            return [await composite.binding()]
+        roots = []
+        for sid in (composite.config.astra_stream_id, composite.config.luna_stream_id):
+            row = sessions.get(sid)
+            if row:
+                roots.append({"stream_id": sid, "generation": row.get("session_generation")})
+        return roots
+
     assets = Assets(args.assets_db, sessions=sessions, comms=comms, broadcast=server.broadcast,
                     fleet_hosts={args.local_host, *peers}, catalog_spec_id=args.dashboard_catalog_spec_id,
-                    assistant_binding=assistant_composite.binding if assistant_composite.enabled else None)
+                    assistant_binding=assistant_composite.binding if assistant_composite.enabled else None,
+                    chat_roots=_asset_chat_roots)
     server.handlers.update(assets.wire_handlers())
     # UI-sent verb group (mobile/desktop day-1): models/grant_token/register_push
     # lifted clean; send.interrupt/close.cancel/question.dismiss/enroll/specs.*
