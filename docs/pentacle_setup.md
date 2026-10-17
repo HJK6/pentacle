@@ -41,7 +41,8 @@ favicon and touch icon; `renderer/manifest.webmanifest` references the PWA
 icons. Keep those paths if replacing files in place. The manifest's `name`,
 `short_name`, `background_color` and `theme_color`, and the HTML `theme-color`
 meta tag, control installation labels and browser chrome separately from UI
-colors. These assets do not replace host sigils or provider badges.
+colors. These assets do not replace host sigils or provider badges. The in-app
+header remains the visible text wordmark **Pentacle**, separate from the logo.
 
 ### Bring your own colors
 
@@ -72,8 +73,19 @@ a running host keeps the old branding. Reload the page and verify the primary
 controls and favicon. Choose dark/light
 in Settings to inspect both palettes. The build copies assets/CSS and bundles
 the token source; editing `renderer/dist/web/` directly is temporary. An already
-installed PWA may retain old icons: reinstall it to verify the new installation
-artwork, and hard-reload the page if cached artwork persists.
+installed PWA may retain old icon resources even when a fresh browser tab shows
+the new artwork. First close/reopen that app and inspect its icon and taskbar
+pin. Confirm that the shortcut targets the browser app and the expected origin;
+an old Electron shortcut is a separate, retired installation.
+
+If the browser app retains the old icon, the bounded fallback is to remove and
+reinstall only that app from the same origin and browser profile, leaving any
+option to delete site data unchecked, then replace only its stale taskbar pin.
+Preserve the existing shortcut/icon resources and profile data first. Verify the
+new installation's app identity, selected icon resource, visible window and pin;
+record whether close/reopen refreshed automatically or reinstall was needed.
+Do not clear all browser data or the global Windows icon cache. This is a
+platform-dependent fallback, not a promise of automatic installed-icon refresh.
 
 ### Start from or reset to the shipped defaults
 
