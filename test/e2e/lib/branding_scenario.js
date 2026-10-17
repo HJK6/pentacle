@@ -7,6 +7,19 @@ const ROOT = path.resolve(__dirname, '../../..');
 const MASTER = '6f6533d7585b3532e63ec8226b218e3c47658d212734e3c9ff181f8be7c35117';
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
+async function waitForDocument(page, url, cdp) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      const state = await page.eval('({href:location.href,ready:document.readyState,pending:!!window.__brandingNavigationPending})');
+      if (state.href === url && state.ready === 'complete' && !state.pending) return state.href;
+    } catch (error) {
+      if (!/Execution context was destroyed|Cannot find context/.test(error.message)) throw error;
+    }
+    await cdp.sleep(100);
+  }
+  throw new Error(`HARNESS_ERROR: branding document did not load: ${url}`);
+}
+
 // Real browser decoding/network bytes and Chrome's selected favicon metadata.
 // Installed Windows app/shortcut caches require their separate release proof.
 async function branding(ctx) {
@@ -24,6 +37,10 @@ async function branding(ctx) {
   session.ws.on('message', network);
   await session.send('Network.enable');
   try {
+    // Observe a complete main-page navigation, including its initial favicon.
+    await session.eval('window.__brandingNavigationPending = true');
+    await session.send('Page.navigate', { url });
+    await waitForDocument(session, url, cdp);
     report.ok('approved branding master is unchanged', sha(fs.readFileSync(path.join(ROOT, 'renderer/assets/pentacle-logo-source.png'))) === MASTER);
     const links = await session.eval(`[...document.querySelectorAll('link[rel="icon"],link[rel="apple-touch-icon"],link[rel="manifest"]')].map(l => ({rel:l.rel,url:l.href}))`);
     report.ok('page declares favicon, touch icon and manifest', ['icon', 'apple-touch-icon', 'manifest'].every(rel => links.some(l => l.rel === rel)));
@@ -74,16 +91,22 @@ async function branding(ctx) {
     // dashboard pages are external content and do not inherit app branding.
     const auxiliary = fs.readdirSync(path.join(ROOT, 'renderer/dist/web')).filter(f => f.endsWith('.html') && f !== 'web.html');
     for (const file of auxiliary) {
-      const { targetId } = await session.send('Target.createTarget', { url: new URL(file, url).href });
+      const expectedUrl = new URL(file, url).href;
+      const { targetId } = await session.send('Target.createTarget', { url: 'about:blank' });
       let page;
       try {
-        page = await cdp.connect(cdpPort, { match: new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
-        await page.waitFor('document.readyState === "complete"');
+        page = await cdp.connect(cdpPort, { match: /^about:blank$/ });
+        if (page.target.id !== targetId) throw new Error(`HARNESS_ERROR: expected auxiliary target ${targetId}, attached to ${page.target.id}`);
+        // Attach before navigation so auxiliary fallback requests are counted.
+        page.ws.on('message', network);
+        await page.send('Network.enable');
+        await page.send('Page.navigate', { url: expectedUrl });
+        const observedUrl = await waitForDocument(page, expectedUrl, cdp);
         const declared = await page.eval(`document.querySelector('link[rel="icon"]')?.href`);
         const selected = await selectedFavicon(page);
-        observations.auxiliary.push({ file, declared, selected });
+        observations.auxiliary.push({ file, expectedTargetId: targetId, observedTargetId: page.target.id, expectedUrl, observedUrl, declared, selected });
         report.ok(`auxiliary window selects approved favicon: ${file}`, declared === favicon && selected === favicon, observations.auxiliary.at(-1));
-      } finally { page?.close(); await session.send('Target.closeTarget', { targetId }); }
+      } finally { page?.ws.off('message', network); page?.close(); await session.send('Target.closeTarget', { targetId }); }
     }
 
     for (const style of [false, true]) for (const theme of ['dark', 'light']) for (const width of [360, 1600]) {
