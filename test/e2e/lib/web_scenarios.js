@@ -17,6 +17,7 @@ const { dashboardCatalog } = require('./dashboard_catalog_scenario');
 const { webWorkLanes } = require('./work_lanes_scenario');
 const { crossOriginBoundary } = require('./cross_origin_scenario');
 const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
+const { branding } = require('./branding_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -492,6 +493,7 @@ const SCENARIOS = [
   // workspace) and leaves a saved classic four-pane choice for the rest.
   ['default-pane-assistant', defaultPaneAssistant],
   ['transport-and-config', transportAndConfig],
+  ['branding', branding],
   // Opens and closes its own foreign-origin targets; the served page is untouched.
   ['cross-origin-boundary', crossOriginBoundary],
   ['settings-version-line', settingsVersionLine],

@@ -95,7 +95,7 @@ body {
   padding: 0 16px;
 }
 
-.pentacle-logo { display: block; object-fit: contain; border-radius: 6px; }
+.pentacle-wordmark { flex-shrink: 0; color: var(--pc-text); font-size: 16px; font-weight: 600; line-height: 1; }
 
 .titlebar-right { display: flex; align-items: center; margin-left: auto; }
 
