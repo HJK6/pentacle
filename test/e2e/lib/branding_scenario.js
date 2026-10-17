@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const ROOT = path.resolve(__dirname, '../../..');
 const MASTER = '6f6533d7585b3532e63ec8226b218e3c47658d212734e3c9ff181f8be7c35117';
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const mimeEssence = value => String(value || '').split(';', 1)[0].trim().toLowerCase();
 
 async function waitForDocument(page, url, cdp) {
   for (let i = 0; i < 100; i++) {
@@ -50,26 +51,28 @@ async function branding(ctx) {
       && manifest.scope === '/' && manifest.start_url === '/' && manifest.icons.length === 4
       && manifest.icons.filter(i => i.purpose === 'maskable').length === 2, manifest);
     const resources = [...links, ...manifest.icons.map(icon => ({ ...icon, url: new URL(icon.src, manifestLink.url).href }))];
+    report.ok('manifest MIME comparison rejects application/json', mimeEssence('application/json; charset=utf-8') !== 'application/manifest+json');
     for (const resource of resources) {
       const fetched = await session.eval(`(async () => {
         const response = await fetch(${JSON.stringify(resource.url)});
         const blob = await response.blob();
         const bytes = new Uint8Array(await blob.arrayBuffer());
         let dimensions = null;
-        if (blob.type === 'image/png') { const image = await createImageBitmap(blob); dimensions = [image.width, image.height]; image.close(); }
-        return {status:response.status,mime:blob.type,bytes:Array.from(bytes),dimensions};
+        if (blob.type.split(';', 1)[0].trim().toLowerCase() === 'image/png') { const image = await createImageBitmap(blob); dimensions = [image.width, image.height]; image.close(); }
+        return {status:response.status,mime:blob.type,contentType:response.headers.get('content-type'),bytes:Array.from(bytes),dimensions};
       })()`);
       const relative = new URL(resource.url).pathname.slice(1);
       const source = fs.readFileSync(path.join(ROOT, 'renderer', relative));
       const built = fs.readFileSync(path.join(ROOT, 'renderer/dist/web', relative));
-      const record = { ...resource, status: fetched.status, mime: fetched.mime, dimensions: fetched.dimensions,
+      const mime = mimeEssence(fetched.contentType);
+      const record = { ...resource, status: fetched.status, mime, blobType: fetched.mime, contentType: fetched.contentType, dimensions: fetched.dimensions,
         sourceSha256: sha(source), builtSha256: sha(built), browserSha256: sha(Buffer.from(fetched.bytes)) };
       observations.assets.push(record);
       report.ok(`browser bytes match source and build: ${relative}`, record.status === 200 && record.sourceSha256 === record.builtSha256 && record.builtSha256 === record.browserSha256, record);
-      if (resource.rel === 'manifest') report.ok('manifest MIME is correct', fetched.mime === 'application/manifest+json');
+      if (resource.rel === 'manifest') report.ok('manifest MIME is correct', mime === 'application/manifest+json', record);
       else {
         const expected = resource.sizes ? resource.sizes.split('x').map(Number) : resource.rel === 'icon' ? [64, 64] : [180, 180];
-        report.ok(`browser decodes declared PNG dimensions: ${relative}`, fetched.mime === 'image/png' && JSON.stringify(fetched.dimensions) === JSON.stringify(expected), record);
+        report.ok(`browser decodes declared PNG dimensions: ${relative}`, mime === 'image/png' && JSON.stringify(fetched.dimensions) === JSON.stringify(expected), record);
       }
     }
     observations.manifest = await session.send('Page.getAppManifest');
