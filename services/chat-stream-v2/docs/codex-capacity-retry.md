@@ -49,8 +49,9 @@ No automatic paste starts after the hold acknowledgement. Supported UI
 interrupts latch a generation hold before Escape, even if Escape delivery is
 uncertain. Close invalidates the generation. New input does not lift a hold;
 only explicit resume does. Resume consumes the existing error frontier and
-cannot revive an old error. A cancelled unresolved episode remains cancelled
-until verified provider progress.
+cannot revive an old error. Explicit resume allows a distinct new capacity
+stop while retaining the unresolved episode attempt count. Other cancelled episodes remain cancelled
+until verified provider progress. Unknown composer/footer layouts defer input.
 
 These controls do not parse natural-language STOP instructions and do not
 implement the legacy generic park/hold verbs. A direct physical keyboard is not

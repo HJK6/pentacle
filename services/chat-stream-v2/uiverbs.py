@@ -186,9 +186,12 @@ class UIVerbs:
     async def send_interrupt(self, msg: dict[str, Any]) -> dict[str, Any]:
         policy = self.capacity_retry
         if policy is not None:
-            host, name = str(msg.get("host") or ""), str(msg.get("session_name") or "")
+            host = str(msg.get("host") or "").strip()
+            name = str(msg.get("session_name") or "").strip()
+            expected = str(msg.get("expected_session_generation") or "").strip()
+            msg = {**msg, "host": host, "session_name": name,
+                   "expected_session_generation": expected}
             if host and name:
-                expected = msg.get("expected_session_generation")
                 if host != self.sessions.local_host:
                     hosts = getattr(self.spawnctl, "hosts", None)
                     if not expected or hosts is None or host not in getattr(hosts, "peers", {}):

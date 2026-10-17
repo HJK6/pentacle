@@ -587,3 +587,93 @@ def test_refused_remote_interrupt_cannot_latch_a_hold(known):
             assert h.tmux.keys==[]
         finally:h.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('composer', [
+    '› \x1b[38;2;255;255;255moperator draft\x1b[0m',
+    '› \n  please investigate gpt-6 behavior',
+    '› \n  !!!',
+    '› \n  gpt-6-test high',
+])
+def test_occupied_composer_cannot_reach_capacity_paste(composer):
+    async def run():
+        h = Harness()
+        try:
+            await h.open(); await h.error('terminal-turn')
+            h.tmux.screen = 'OpenAI Codex\n' + composer + '\n gpt-6-test high'
+            await h.due()
+            assert h.tmux.pastes == []
+            assert (await h.state())['attempts_used'] == 0
+        finally: h.close()
+    asyncio.run(run())
+
+
+def test_distinct_native_same_text_input_cancels_after_one_automatic_echo():
+    async def run():
+        h = Harness()
+        try:
+            await h.open(); await h.error('first'); await h.due()
+            original = await h.state()
+            assert original['proof_event_id'] is not None
+            h.now += 1; await h.message('user', 'continue')
+            state = await h.state()
+            assert state['cancelled'] is True
+            assert state['proof_event_id'] == original['proof_event_id']
+            h.now += 1; await h.error('fresh-after-manual'); await h.controller.tick()
+            assert h.tmux.pastes == ['continue']
+            assert (await h.state())['state'] == 'idle'
+        finally: h.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('all_seats', [False, True])
+@pytest.mark.parametrize('prior_attempt', [False, True])
+def test_explicit_resume_allows_distinct_error_and_preserves_budget(all_seats, prior_attempt):
+    async def run():
+        h = Harness()
+        try:
+            await h.open(); old = await h.error('first')
+            if prior_attempt: await h.due()
+            used = (await h.state())['attempts_used']
+            await h.control('hold', all=all_seats)
+            await h.control('resume', all=all_seats)
+            assert not (await h.state())['cancelled']
+            await h.append(old)
+            assert (await h.state())['state'] == 'idle'
+            h.now += 1; await h.error('distinct-after-explicit-resume')
+            assert (await h.state())['state'] == 'waiting'
+            assert (await h.state())['attempts_used'] == used
+            await h.due()
+            assert len(h.tmux.pastes) == used + 1
+        finally: h.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('remote', [False, True])
+@pytest.mark.parametrize('target', ['host', 'session_name', 'generation'])
+def test_canonical_interrupt_target_holds_before_escape(remote, target):
+    from uiverbs import UIVerbs
+    async def run():
+        h = Harness()
+        try:
+            await h.open(); await h.error('first')
+            if remote:
+                h.sessions.local_host = 'coordinator'; h.hosts.peers = {'fixture': object()}
+                async def reachable(host, what): pass
+                async def session_state(name): return 'alive'
+                async def identity(name): return {'pane_pid':'8123', 'pane_id':'%42', 'session_name':'v2-capacity'}
+                h.hosts.ensure_reachable = reachable
+                h.tmux.session_state = session_state; h.tmux.pane_identity = identity
+                h.comms.spawnctl.hosts = h.hosts
+            ui = UIVerbs(h.store, h.sessions, h.comms.spawnctl); ui.capacity_retry = h.controller
+            msg = {'host':'fixture', 'session_name':'v2-capacity', 'expected_session_generation':'test-generation'}
+            key = 'expected_session_generation' if target == 'generation' else target
+            msg[key] = ' ' + msg[key] + ' '
+            result = await ui.send_interrupt(msg)
+            assert result['type'] == 'send.interrupt.ok'
+            assert (await h.state())['held'] is True
+            assert h.tmux.keys[-1][-1] == 'Escape'
+            h.now += 100; await h.controller.tick()
+            assert h.tmux.pastes == []
+        finally: h.close()
+    asyncio.run(run())

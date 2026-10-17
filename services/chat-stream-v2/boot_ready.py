@@ -102,24 +102,40 @@ def codex_composer_empty(pane_text: str) -> bool:
     for match in sgr.finditer(content):
         if content[cursor:match.start()].strip() and not dim:
             return False
-        codes = [int(c) for c in (match.group(1) or "0").split(";")]
-        for code in codes:
+        codes = [int(c or "0") for c in (match.group(1) or "0").split(";")]
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            if code in (38, 48, 58):
+                # Extended-color mode/components are parameters, not SGR
+                # attributes: the 2 in 38;2;R;G;B never means faint.
+                if index + 1 >= len(codes) or codes[index + 1] not in (2, 5):
+                    return False
+                size = 5 if codes[index + 1] == 2 else 3
+                if index + size > len(codes):
+                    return False
+                index += size
+                continue
             if code in (0, 22):
                 dim = False
             elif code == 2:
                 dim = True
+            index += 1
         cursor = match.end()
     if content[cursor:].strip() and not dim:
         return False
-    # A wrapped/multiline draft below an empty first line is also occupied.
-    for line in lines[inputs[-1] + 1:]:
-        clean = sgr.sub("", line).strip()
-        if not clean:
-            continue
-        if clean.startswith("gpt-") or re.search(r"\bgpt-[\w.-]+", clean, re.I):
-            break
-        if not _codex_draft_chrome_line(clean):
-            return False
+    if "\x1b" in sgr.sub("", content):
+        return False
+    # The final model/effort footer must be the ONLY nonblank row below
+    # the composer. Even punctuation or a model-looking wrapped row is a
+    # possible draft. Unknown/footer-wrapped layouts defer automatic input.
+    below = [sgr.sub("", line).strip() for line in lines[inputs[-1] + 1:]
+             if sgr.sub("", line).strip()]
+    if len(below) != 1 or not re.fullmatch(
+        r"gpt-[\w.-]+\s+(?:minimal|low|medium|high|xhigh|max|ultra)(?:\s+·\s+[^\n]+)?",
+        below[0], re.I,
+    ):
+        return False
     return True
 
 

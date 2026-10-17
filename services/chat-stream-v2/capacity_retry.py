@@ -124,7 +124,13 @@ class CapacityRetry:
                     # Every current error is consumed on both edges; resume cannot
                     # revive the error that existed before the control action.
                     for row in conn.execute("SELECT host,session_name FROM sessions WHERE status='open'"):
-                        policy.cancel(conn, f"{row['host']}:{row['session_name']}", reason="global_" + action)
+                        target = f"{row['host']}:{row['session_name']}"
+                        policy.cancel(conn, target, reason="global_" + action)
+                        if action == "resume":
+                            state = policy.load(conn, target)
+                            if state:
+                                state["cancelled"] = False
+                                policy.save(conn, target, state)
                 return finish({"held": policy.globally_held(conn)})
             row = policy.current(conn, sid)
             if not row or row["status"] != "open" or row["generation"] != generation:
@@ -134,7 +140,7 @@ class CapacityRetry:
                 state = policy.new_state(row)
             if action != "status":
                 state.update(held=action == "hold", state="held" if action == "hold" else "idle",
-                             cancelled=bool(state.get("episode_id")),
+                             cancelled=action == "hold" and bool(state.get("episode_id")),
                              next_retry_at=None, revision=state["revision"] + 1, reason="explicit_" + action)
                 policy.save(conn, sid, state)
             return finish({"held": state["held"], "capacity_retry": policy.projection(
@@ -230,7 +236,7 @@ class CapacityRetry:
                     or self.clock() < state["next_retry_at"] or state["attempts_used"] >= policy.MAX_ATTEMPTS):
                 raise VerbError("capacity_retry_deferred", "episode cancelled or changed", phase="not_started")
             state.update(state="reserved", attempts_used=state["attempts_used"] + 1,
-                         attempt_id=msg["tell_id"], proof_event_id=None, next_retry_at=None,
+                         attempt_id=msg["tell_id"], proof_event_id=None, echo_identity=None, next_retry_at=None,
                          revision=state["revision"] + 1)
             policy.save(conn, sid, state)
         await self._transaction(reserve)
