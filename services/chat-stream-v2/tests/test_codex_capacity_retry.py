@@ -154,7 +154,7 @@ def test_ordinal_free_three_attempts_require_new_errors_and_keep_budget():
             h.now = deadline; await h.controller.tick()
             assert h.tmux.pastes == ['continue']
             state = await h.state()
-            assert state['attempts_used'] == 1 and state['proof_event_id']
+            assert state['attempts_used'] == 1 and state['echo_identity']['event_id']
             assert state['state'] == 'submitted'
             await h.controller.tick(); await h.append(first); await h.controller.tick()
             assert h.tmux.pastes == ['continue']
@@ -614,11 +614,11 @@ def test_distinct_native_same_text_input_cancels_after_one_automatic_echo():
         try:
             await h.open(); await h.error('first'); await h.due()
             original = await h.state()
-            assert original['proof_event_id'] is not None
+            assert original['echo_identity']['event_id'] is not None
             h.now += 1; await h.message('user', 'continue')
             state = await h.state()
             assert state['cancelled'] is True
-            assert state['proof_event_id'] == original['proof_event_id']
+            assert state['echo_identity']['event_id'] == original['echo_identity']['event_id']
             h.now += 1; await h.error('fresh-after-manual'); await h.controller.tick()
             assert h.tmux.pastes == ['continue']
             assert (await h.state())['state'] == 'idle'
@@ -675,5 +675,29 @@ def test_canonical_interrupt_target_holds_before_escape(remote, target):
             assert h.tmux.keys[-1][-1] == 'Escape'
             h.now += 100; await h.controller.tick()
             assert h.tmux.pastes == []
+        finally: h.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('all_seats', [False, True])
+def test_explicit_resume_from_waiting_retains_proven_attempt(all_seats):
+    async def run():
+        h = Harness()
+        try:
+            await h.open(); await h.error('initial'); await h.due()
+            proof = (await h.state())['echo_identity']
+            h.now += 1; old = await h.error('waiting-for-second')
+            assert (await h.state())['state'] == 'waiting'
+            await h.control('hold', all=all_seats)
+            await h.control('resume', all=all_seats)
+            await h.append(old)
+            assert (await h.state())['state'] == 'idle'
+            h.now += 1; await h.error('fresh-after-resume-from-waiting')
+            state = await h.state()
+            assert state['state'] == 'waiting'
+            assert state['echo_identity'] == proof and state['attempts_used'] == 1
+            await h.due()
+            assert h.tmux.pastes == ['continue', 'continue']
+            assert (await h.state())['attempts_used'] == 2
         finally: h.close()
     asyncio.run(run())

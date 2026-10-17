@@ -236,7 +236,7 @@ class CapacityRetry:
                     or self.clock() < state["next_retry_at"] or state["attempts_used"] >= policy.MAX_ATTEMPTS):
                 raise VerbError("capacity_retry_deferred", "episode cancelled or changed", phase="not_started")
             state.update(state="reserved", attempts_used=state["attempts_used"] + 1,
-                         attempt_id=msg["tell_id"], proof_event_id=None, echo_identity=None, next_retry_at=None,
+                         attempt_id=msg["tell_id"], echo_identity=None, next_retry_at=None,
                          revision=state["revision"] + 1)
             policy.save(conn, sid, state)
         await self._transaction(reserve)

@@ -39,7 +39,7 @@ def new_state(row):
             "state": "idle", "held": False, "cancelled": False, "attempts_used": 0,
             "next_retry_at": None, "frontier": "", "consumed_turns": [],
             "revision": 0, "episode_id": None, "attempt_id": None,
-            "proof_event_id": None, "echo_identity": None}
+            "echo_identity": None}
 
 
 def cancel(conn, sid, *, hold=False, reason="input", generation=None):
@@ -96,12 +96,11 @@ def observe(conn, sid, event, event_id, lifecycle, now):
                                (attempt,)).fetchone() if attempt else None
         delivery = json.loads(receipt[0]).get("delivery", {}) if receipt else {}
         # An own echo is recognized through a committed pre-input receipt and watermark.
-        own_echo = (not state.get("echo_identity") and not state.get("proof_event_id")
+        own_echo = (not state.get("echo_identity")
                     and delivery.get("notification_answer_generation") == row["generation"]
                     and event_id > int(delivery.get("proof_watermark") or 0)
                     and event.get("text", "").strip() == delivery.get("text", "").strip())
         if own_echo:
-            state["proof_event_id"] = event_id
             state["echo_identity"] = {"event_id": event_id, "native_session_id": raw.get("source_session_identity"),
                                       "uuid": raw.get("uuid"), "timestamp": event["timestamp"]}
             if state["state"] in {"reserved", "uncertain"}:
@@ -113,7 +112,7 @@ def observe(conn, sid, event, event_id, lifecycle, now):
     elif kind in {"ASSIST_TEXT", "TOOL_USE", "TOOL_RESULT"}:
         # Verified provider work ends the unresolved episode, but cannot lift a hold.
         state.update(state="held" if state["held"] else "idle", next_retry_at=None,
-                     attempts_used=0, episode_id=None, attempt_id=None, proof_event_id=None,
+                     attempts_used=0, episode_id=None, attempt_id=None,
                      cancelled=False, echo_identity=None,
                      revision=state["revision"] + 1, reason="provider_progress")
     elif kind == "ERROR" and raw.get("subtype") == "provider-turn-error":
@@ -128,7 +127,7 @@ def observe(conn, sid, event, event_id, lifecycle, now):
         elif state.get("cancelled"):
             state.update(state="idle", next_retry_at=None, reason="cancelled_until_progress")
         elif state["attempts_used"] and (
-            not state.get("proof_event_id") or event_id <= state["proof_event_id"]
+            not state.get("echo_identity") or event_id <= state["echo_identity"]["event_id"]
         ):
             state.update(state="uncertain", next_retry_at=None, reason="prior_submission_unproved")
         elif state["attempts_used"] >= MAX_ATTEMPTS:
@@ -142,7 +141,7 @@ def observe(conn, sid, event, event_id, lifecycle, now):
                          error_turn_id=turn, error_event_id=event_id,
                          native_session_id=raw.get("source_session_identity"),
                          binding=binding, pane_pid=row.get("pane_pid"),
-                         proof_event_id=None, revision=state["revision"] + 1,
+                         revision=state["revision"] + 1,
                          reason="capacity")
     else:
         return
