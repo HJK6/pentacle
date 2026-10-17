@@ -50,7 +50,9 @@ create both empty managed files so the deployment tool can capture a start
 inode/device/offset. Keep the previous `PENTACLE_LOG_PATH` and launchd paths as
 rollback/emergency configuration; a managed pair takes precedence for readers.
 Boot readiness follows a captured inode through retained generations and only
-accepts a listening marker after that boundary. Complete-window scans join
+accepts complete, strictly decoded records after that boundary. An unfinished
+record leaves the cursor unchanged for the next poll. Pending boot evidence is
+bounded to 4 MiB; a larger unread window is explicitly incomplete. Complete-window scans join
 record fragments across generations. Missing/expired boundaries, inconsistent
 rotation, incomplete records or invalid encoding fail closed. A high-volume
 window can expire before a reader completes; it must not be certified as green.
