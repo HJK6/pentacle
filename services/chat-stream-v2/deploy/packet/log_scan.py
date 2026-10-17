@@ -19,34 +19,43 @@ def freeze(path, start=0, inode=None, device=None):
             'inode': stat.st_ino, 'device': stat.st_dev, 'bytes_read': stat.st_size-start}
 
 def lines(item):
-    path = Path(item['path'])
+    yield from lines_many([item])
+
+def lines_many(items):
+    """Decode one frozen stream, including records split between generations."""
     decoder = codecs.getincrementaldecoder('utf-8')('strict')
     pending = ''
-    with path.open('rb') as stream:
-        opened = os.fstat(stream.fileno())
-        if (opened.st_ino, opened.st_dev) != (item['inode'], item['device']):
-            raise IncompleteScan('log rotated before read')
-        stream.seek(item['start_offset'])
-        remaining = item['bytes_read']
-        while remaining:
-            chunk = stream.read(min(CHUNK_BYTES, remaining))
-            if not chunk:
-                raise IncompleteScan('log truncated during read')
-            remaining -= len(chunk)
-            pending += decoder.decode(chunk, final=False)
-            pieces = pending.split('\n')
-            pending = pieces.pop()
-            for line in pieces:
-                if len(line.encode('utf-8')) + 1 > MAX_RECORD_BYTES:
+    items = list(items)
+    for item in items:
+        path = Path(item['path'])
+        with path.open('rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_ino, opened.st_dev) != (item['inode'], item['device']):
+                raise IncompleteScan('log rotated before read')
+            stream.seek(item['start_offset'])
+            remaining = item['bytes_read']
+            while remaining:
+                chunk = stream.read(min(CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise IncompleteScan('log truncated during read')
+                remaining -= len(chunk)
+                pending += decoder.decode(chunk, final=False)
+                pieces = pending.split('\n')
+                pending = pieces.pop()
+                for line in pieces:
+                    if len(line.encode('utf-8')) + 1 > MAX_RECORD_BYTES:
+                        raise IncompleteScan('record exceeds resource limit')
+                    yield line + '\n'
+                if len(pending.encode('utf-8')) > MAX_RECORD_BYTES:
                     raise IncompleteScan('record exceeds resource limit')
-                yield line + '\n'
-            if len(pending.encode('utf-8')) > MAX_RECORD_BYTES:
-                raise IncompleteScan('record exceeds resource limit')
-        pending += decoder.decode(b'', final=True)
-        if pending:
-            # A frozen end through a partial record cannot establish its meaning.
-            raise IncompleteScan('unfinished record at frozen end')
-        closed = os.fstat(stream.fileno())
+            closed = os.fstat(stream.fileno())
+            if closed.st_size < item['end_offset']:
+                raise IncompleteScan('log truncated during read')
+    pending += decoder.decode(b'', final=True)
+    if pending:
+        raise IncompleteScan('unfinished record at frozen end')
+    for item in items:
+        path = Path(item['path'])
         current = path.stat()
-        if (current.st_ino, current.st_dev) != (item['inode'], item['device']) or closed.st_size < item['end_offset'] or current.st_size < item['end_offset']:
+        if (current.st_ino, current.st_dev) != (item['inode'], item['device']) or current.st_size < item['end_offset']:
             raise IncompleteScan('log rotated/truncated during read')

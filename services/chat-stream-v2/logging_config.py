@@ -7,7 +7,12 @@ class UTCFormatter(logging.Formatter):
     converter = time.gmtime
 
 
-def configure_logging(level: int | str) -> None:
+def configure_logging(level: int | str, *, daemon: bool = False) -> None:
+    if logging.getLogger().handlers:
+        return
+    if daemon:
+        from managed_logs import install
+        install()
     handler = logging.StreamHandler()
     handler.setFormatter(UTCFormatter(
         "%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s %(message)s",

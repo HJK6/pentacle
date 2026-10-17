@@ -155,6 +155,7 @@ def test_other_abnormal_closes_fail_even_without_probe_attempts(tmp_path, code):
 def test_deploy_guard_reads_late_failure_and_detects_rotation(tmp_path, monkeypatch):
     log=tmp_path/'daemon.log';log.write_text('old\n')
     monkeypatch.setattr(deploy_mod,'_daemon_log_paths',lambda _: (log,))
+    monkeypatch.setattr(deploy_mod,'_launchd_environment',lambda _: {})
     offsets=deploy_mod._capture_log_offsets((log,))
     with log.open('a') as output:
         output.write(BOOT+('INFO '+('x'*1000)+'\n')*4300+diag('close',close_code=1011))
