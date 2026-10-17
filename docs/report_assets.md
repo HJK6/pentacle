@@ -106,13 +106,15 @@ The agent then **regenerates the report** — re-publishing the same `asset_id` 
 
 ## Spec-Anchored Reports
 
-Pass `--spec-id <spec_id>` when the report is durable work-product for a spec rather than a session-only exchange. Spec-anchored assets remain discoverable from any chat carrying that spec id:
+Pass `--spec-id <spec_id>` when the report is durable work-product for a spec rather than a session-only exchange. Spec-anchored assets remain discoverable through an explicit spec search:
 
 ```bash
 agent-orch asset list --spec-id <spec_id>
 ```
 
-Session-scoped assets stay tied to the producing stream. Use session scope for ordinary review loops with one live agent; use spec scope for artifacts that another future agent must find after the producer closes.
+Chat report tabs list the chat's producing seat and its descendants, including closed workers and handoff continuity. Composite chats use their generation-verified backend binding as an additional ownership root. Shared spec tags do not add reports to chat tabs. Session-mode `asset.list` returns `scope_stream_ids`; each listed row retains its publisher `stream_id`, which clients must use for detail and review actions. Identical asset ids from different publishers remain separate reports.
+
+Use session scope for ordinary review loops; use explicit spec searches for artifacts that another future agent must find after the producer closes. Spec-only dashboard searches retain their existing behavior.
 
 ## Report-Producer Principal
 
