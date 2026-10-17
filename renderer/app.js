@@ -1297,6 +1297,8 @@ function routeAssetMetadataToSlots(metadata) {
   const routed = [];
   for (let slot = 0; slot < 4; slot++) {
     if (!slotOwnsAsset(slot, metadata)) continue;
+    const viewer = assetContextForSlot(slot)?.bucket;
+    viewer?.snapshotAssetKeys?.add(assetTabKey(metadata.session_key.stream_id, metadata.asset_key));
     routed.push(slot);
     ensureSlotAssetTabs(slot);
     const active = state.slotActiveAsset[slot];
@@ -1400,13 +1402,18 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
   const args = assetListArgsForSession(session);
   if (!args) return null;
   const fallbackSessionKey = fallbackAssetSessionKeyForSession(session);
+  state.slotAssetSnapshotGen ||= [0, 0, 0, 0];
+  const requestGen = ++state.slotAssetSnapshotGen[slot];
   try {
     const reply = await window.cc.assetList(args);
-    if (state.slotGen[slot] !== gen || state.slots[slot] !== session) return null;
+    if (state.slotGen[slot] !== gen || state.slots[slot] !== session
+      || state.slotAssetSnapshotGen[slot] !== requestGen) return null;
     const viewerBucket = assetBucketForStream(fallbackSessionKey.stream_id);
     viewerBucket.scopeStreamIds = Array.isArray(reply?.scope_stream_ids)
       ? reply.scope_stream_ids : [fallbackSessionKey.stream_id];
     const records = normalizeAssetListResponse(reply, fallbackSessionKey);
+    viewerBucket.snapshotAssetKeys = new Set(records.map(normalizeAssetMetadata).filter(Boolean)
+      .map(item => assetTabKey(item.session_key.stream_id, item.asset_key)));
     const applied = [];
     for (const record of records) {
       const result = upsertAssetMetadata(record);
@@ -1417,7 +1424,8 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
     }
     ensureSlotAssetTabs(slot);
     const active = state.slotActiveAsset[slot];
-    if (active && !viewerBucket.scopeStreamIds.includes(active.streamId)) {
+    if (active && (!viewerBucket.scopeStreamIds.includes(active.streamId)
+      || !viewerBucket.snapshotAssetKeys.has(assetTabKey(active.streamId, active.assetKey)))) {
       state.slotActiveAsset[slot] = null;
       updateSlotViewMode(slot, 'chat');
     }
@@ -1486,7 +1494,8 @@ function visibleAssetsForSlot(slot) {
   return (context.bucket?.scopeStreamIds || [context.streamId]).flatMap(streamId => {
     const bucket = state.chatStream.assets[streamId];
     return (bucket?.order || []).map(key => bucket.itemsById[key])
-      .filter(item => item && !bucket.dismissedById[assetTabKey(streamId, item.asset_key)]);
+      .filter(item => item && !bucket.dismissedById[assetTabKey(streamId, item.asset_key)]
+        && (!context.bucket?.snapshotAssetKeys || context.bucket.snapshotAssetKeys.has(assetTabKey(streamId, item.asset_key))));
   }).sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
 }
 
@@ -2029,6 +2038,24 @@ function applyChatStreamPayload(payload) {
   }
   if (payload.type === 'asset.removed') {
     applyAssetRemoved(payload);
+    return;
+  }
+  if (payload.type === 'assistant.binding.changed') {
+    // A binding change does not emit session.inventory. Hide the old scope
+    // immediately; the newer request generation refuses any late old list.
+    for (let slot = 0; slot < 4; slot++) {
+      const context = assetContextForSlot(slot);
+      if (!context) continue;
+      const bucket = assetBucketForStream(context.streamId);
+      bucket.scopeStreamIds = [context.streamId];
+      bucket.snapshotAssetKeys = new Set();
+      if (state.slotActiveAsset[slot]) {
+        state.slotActiveAsset[slot] = null;
+        updateSlotViewMode(slot, 'chat');
+      }
+      ensureSlotAssetTabs(slot);
+    }
+    refetchAssetSnapshotsForActiveSlots();
     return;
   }
   if (payload.type === 'snapshot') {

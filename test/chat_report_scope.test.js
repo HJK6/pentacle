@@ -49,3 +49,26 @@ test('duplicate ids across owners stay separate and removal affects only the tru
   assert.deepEqual(read('visibleAssetsForSlot(0).map(x => x.title)'), ['lead']);
   assert.deepEqual(read('visibleAssetsForSlot(1).map(x => x.title)'), ['other']);
 });
+
+test('binding changes refresh scope, reject late lists, and reconcile an empty snapshot', async t => {
+  const { run, read, h } = await boot(t);
+  const pending = [];
+  h.dom.window.cc.assetList = args => new Promise(resolve => pending.push({ args, resolve }));
+  const oldRequest = run('fetchSlotAssetSnapshot(0)');
+  const old = pending.at(-1);
+  run(`applyChatStreamPayload({type:'assistant.binding.changed',stream_id:'hostc:child',generation:'g2'})`);
+  assert.ok(pending.length > 1);
+  // There are two attached slots; locate the refreshed lead request.
+  const fresh = pending.findLast(x => x.args.stream_id === 'hostc:lead');
+  fresh.resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[
+    {asset_id:'same',title:'fresh',content_type:'report',stream_id:'hostc:child'}]});
+  await flush();
+  old.resolve({scope_stream_ids:['hostc:lead','hostc:old'],assets:[
+    {asset_id:'same',title:'stale',content_type:'report',stream_id:'hostc:old'}]});
+  await oldRequest;
+  assert.deepEqual(read('visibleAssetsForSlot(0).map(x=>x.title)'), ['fresh']);
+  const empty = run('fetchSlotAssetSnapshot(0)');
+  pending.at(-1).resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[]});
+  await empty;
+  assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
+});
