@@ -2235,9 +2235,10 @@ class Server:
                     # Never treat a service token as a seat token to get a stamp.
                     actor = service_auth["service_actor"]
                     dispatch_msg["from_stream_id"] = actor
+                    dispatch_msg["_wmi_brief_ingress_body"] = sanitize_injectable(msg["text"])
                     dispatch_msg["text"] = (
                         f"[from {actor}] [tell:{msg['tell_id']}]\n"
-                        + sanitize_injectable(msg["text"])
+                        + dispatch_msg["_wmi_brief_ingress_body"]
                     )
                 elif report_actor is not None and service_auth["service_actor"] == report_actor:
                     if verb != "asset.publish":
@@ -4008,6 +4009,7 @@ class Server:
         )
         delivered = await self._deliver_composite_tell(
             composite, composite_stream_id, from_stream_id, body, tell_id, str(msg.get("request_id") or ""),
+            service_ingress_body=msg.get("_wmi_brief_ingress_body"),
         )
         if delivered is not None:
             return delivered
@@ -4015,6 +4017,7 @@ class Server:
         await self.store.enqueue_composite_tell(
             name=composite.config.name, tell_id=tell_id, from_stream_id=from_stream_id,
             body=body, request_id=str(msg.get("request_id") or ""),
+            service_ingress_body=msg.get("_wmi_brief_ingress_body"),
         )
         return {
             "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
@@ -4024,6 +4027,7 @@ class Server:
     async def _deliver_composite_tell(
         self, composite: Any, composite_stream_id: str, from_stream_id: str,
         body: str, tell_id: str, request_id: str,
+        *, service_ingress_body: str | None = None,
     ) -> dict[str, Any] | None:
         """Deliver one composite tell to the current bound pane.
 
@@ -4053,6 +4057,9 @@ class Server:
             "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
             "from_stream_id": from_stream_id or composite_stream_id, "message": body,
             "tell_id": tell_id, "request_id": request_id,
+            # Only authenticated service dispatch or its durable queue entry
+            # supplies the sanitized original. Never infer trust from a header.
+            "_wmi_brief_ingress_body": service_ingress_body,
             # Addressed composite delivery bypasses the routine backend-ingress
             # filter (it is an explicit tell to the bound pane, not incidental peer
             # chatter persisted without a paste).
@@ -4084,6 +4091,7 @@ class Server:
                 result = await self._deliver_composite_tell(
                     composite, composite.config.stream_id, row["from_stream_id"],
                     row["body"], row["tell_id"], row.get("request_id") or "",
+                    service_ingress_body=row.get("service_ingress_body"),
                 )
             except VerbError:
                 break

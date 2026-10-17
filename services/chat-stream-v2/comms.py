@@ -613,7 +613,19 @@ class Comms:
                     ledger_row_id = await self.store.put_tell_delivery(tell_id, {
                         "payload_digest": digest,
                         "reply": reply,
-                        "delivery": {"tell_id": tell_id, "delivery_status": suppressed["delivery_status"]},
+                        "delivery": {
+                            "tell_id": tell_id,
+                            "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+                            "to_stream_id": str(route["final_target"]),
+                            "original_to_stream_id": str(route["original_target"]),
+                            "route_hops": list(route.get("hops") or []),
+                            "text": wire,
+                            "delivery_status": suppressed["delivery_status"],
+                            "assistant_backend_ingress": suppressed.get("assistant_backend_ingress"),
+                            "front_desk_hold_id": suppressed.get("front_desk_hold_id"),
+                            "submission_confirmed": False,
+                            "delivered_at": None,
+                        },
                     })
                     reply["ledger_row_id"] = ledger_row_id
                     outcome = ("ok", reply)

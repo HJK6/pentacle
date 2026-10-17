@@ -53,6 +53,10 @@ that marker; copying the daemon dispatch header in a peer tell, addressed to
 either the desk or its composite, does not make it operator input. GATE/BLOCKER classification applies
 to the tell's leading label (after the notice prefix), not references to another
 seat's GATE buried in a progress update.
+Authenticated daily-brief service tells classify the sanitized original supplied
+by the server before its provenance stamp. Queue replay requires explicit stored
+service provenance; arbitrary copied peer headers and legacy rows do not gain
+that exemption. See [service tells](wmi_brief_tell.md).
 
 The front-desk Claude advisory/compact thresholds are 150K/200K tokens, configured
 with `PENTACLE_CONTEXT_ASSISTANT_ADVISORY_ABS` and
