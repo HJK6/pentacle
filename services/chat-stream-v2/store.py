@@ -1645,6 +1645,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             conn.execute(ASSISTANT_RESTORE_AUDIT_DDL)
             conn.execute(ASSISTANT_RESTORE_AUDIT_REQUEST_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TELL_QUEUE_DDL)
+            if "service_ingress_body" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_tell_queue)")
+            }:
+                # Legacy sender/header text cannot prove service admission.
+                conn.execute("ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN service_ingress_body TEXT")
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
             conn.execute(BART_LANE_OWNERSHIP_DDL)

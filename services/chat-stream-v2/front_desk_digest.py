@@ -81,7 +81,12 @@ class FrontDeskDigest:
             if held is not None:
                 return held
         kind = msg.get('_outbound_notice_kind')
-        text = re.sub(r'^\[pentacle-notice:[^\]]+\]\s*', '', body).lstrip()
+        # The authenticated service dispatcher retains its sanitized original
+        # before stamping. Queue replay carries explicit durable provenance;
+        # copied peer headers and legacy queue rows cannot supply this field.
+        original = msg.get('_wmi_brief_ingress_body')
+        classification_body = original if isinstance(original, str) else body
+        text = re.sub(r'^\[pentacle-notice:[^\]]+\]\s*', '', classification_body).lstrip()
         drop = kind == 'tree_idle' or (
             text.startswith('context_advisory:') and not text.startswith('context_advisory: '+target_stream_id+' '))
         if kind == 'assistant_lane_ruling_result':
