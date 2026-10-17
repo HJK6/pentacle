@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+from server import ASSISTANT_ALIAS
 from test_wmi_brief_tell_principal import (
     ACTOR, COMPOSITE, FD, OPS, Harness, Peer, authenticate, credentials, dispatch, frame,
 )
@@ -14,13 +15,13 @@ class DigestHarness(Harness):
         await super().__aenter__()
         seat = await self.store.fetch_session("localhost", "frontdesk")
         self.composite = AssistantComposite(self.store, config=AssistantCompositeConfig(
-            enabled=True, name="bart", stream_id=COMPOSITE,
+            enabled=True, name=ASSISTANT_ALIAS, stream_id=COMPOSITE,
             direct_primary_stream_id=FD,
             direct_primary_generation=seat["session_generation"] if seat else "pending",
         ))
         await self.composite.load_binding()
         await self.composite.ensure_projection()
-        self.server.assistant_composites = {"bart": self.composite}
+        self.server.assistant_composites = {ASSISTANT_ALIAS: self.composite}
         self.comms.assistant_ingress_policy = self.composite.suppress_routine_backend_ingress
         return self
 
@@ -33,7 +34,7 @@ def test_authenticated_stamped_gate_reaches_real_digest(credentials, tmp_path, t
             if target == OPS:
                 ops = await h.store.fetch_session("localhost", "ops")
                 desk = AssistantComposite(h.store, config=AssistantCompositeConfig(
-                    enabled=True, name="bart", stream_id=COMPOSITE,
+                    enabled=True, name=ASSISTANT_ALIAS, stream_id=COMPOSITE,
                     direct_primary_stream_id=OPS,
                     direct_primary_generation=ops["session_generation"],
                 ))
@@ -59,14 +60,14 @@ def test_queued_stamped_gate_survives_restart_and_digest_flush(credentials, tmp_
         async with DigestHarness(path, bound=False) as h:
             peer = Peer(); await authenticate(h.server, peer)
             assert (await dispatch(h.server, peer, frame()))["delivery_status"] == "queued_unbound"
-            rows = await h.store.claim_composite_tells(name="bart")
+            rows = await h.store.claim_composite_tells(name=ASSISTANT_ALIAS)
             assert rows[0]["body"] == f"[from {ACTOR}] [tell:brief-tell]\nGATE synthetic brief"
             assert rows[0]["service_ingress_body"] == "GATE synthetic brief"
         async with DigestHarness(path) as h:
             assert await h.server._flush_composite_tells(h.composite) == 1
             assert h.tmux.pastes == [f"[from {ACTOR}] [tell:brief-tell]\nGATE synthetic brief"]
             assert not await h.composite.front_desk_digest._rows(FD)
-            assert not await h.store.claim_composite_tells(name="bart")
+            assert not await h.store.claim_composite_tells(name=ASSISTANT_ALIAS)
     asyncio.run(run())
 
 
@@ -179,7 +180,7 @@ def test_omitted_sender_reserved_seat_queue_cannot_gain_service_trust(tmp_path, 
                 "to_stream_id": COMPOSITE, "stream_token": token, "text": body,
             })
             assert result["delivery_status"] == "queued_unbound", result
-            rows = await h.store.claim_composite_tells(name="bart")
+            rows = await h.store.claim_composite_tells(name=ASSISTANT_ALIAS)
             assert rows[0]["from_stream_id"] == "fixture:wmi-daily-brief"
             assert rows[0]["service_ingress_body"] is None
         async with DigestHarness(path) as h:
@@ -199,11 +200,11 @@ def test_legacy_queue_schema_migrates_without_granting_service_trust(tmp_path):
         "body TEXT NOT NULL,request_id TEXT NOT NULL,created_at TEXT NOT NULL)")
     conn.execute("INSERT INTO v2_assistant_composite_tell_queue "
         "(name,tell_id,from_stream_id,body,request_id,created_at) VALUES (?,?,?,?,?,?)",
-        ("bart", "legacy", ACTOR, body, "legacy-request", "2026-01-01T00:00:00Z"))
+        (ASSISTANT_ALIAS, "legacy", ACTOR, body, "legacy-request", "2026-01-01T00:00:00Z"))
     conn.commit(); conn.close()
     async def run():
         async with DigestHarness(path) as h:
-            rows = await h.store.claim_composite_tells(name="bart")
+            rows = await h.store.claim_composite_tells(name=ASSISTANT_ALIAS)
             assert rows[0]["service_ingress_body"] is None
             assert await h.server._flush_composite_tells(h.composite) == 1
             assert not h.tmux.pastes
@@ -215,11 +216,11 @@ def test_service_retry_cannot_upgrade_legacy_queued_provenance(credentials, tmp_
     async def run():
         async with DigestHarness(tmp_path / "no-upgrade.db", bound=False) as h:
             body = f"[from {ACTOR}] [tell:brief-tell]\nGATE synthetic brief"
-            await h.store.enqueue_composite_tell(name="bart", tell_id="brief-tell",
+            await h.store.enqueue_composite_tell(name=ASSISTANT_ALIAS, tell_id="brief-tell",
                 from_stream_id=ACTOR, body=body, request_id="prior-request")
             peer = Peer(); await authenticate(h.server, peer)
             assert (await dispatch(h.server, peer, frame()))["delivery_status"] == "queued_unbound"
-            rows = await h.store.claim_composite_tells(name="bart")
+            rows = await h.store.claim_composite_tells(name=ASSISTANT_ALIAS)
             assert len(rows) == 1
             assert rows[0]["service_ingress_body"] is None
             assert rows[0]["request_id"] == "prior-request"
