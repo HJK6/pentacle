@@ -12,6 +12,17 @@ Without peer configuration, the daemon runs locally. To keep specs and QA record
 
 `python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The desktop smoke explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
 
+## Waiting for notification answers
+
+`notification.await` holds the host-transfer lock only while projecting committed
+transfers, registering its waiter and inspecting the durable notification. It
+releases the lock before waiting, so `prompt.answer`, `notification.resolve` and
+host transfer can proceed while a request is parked. Registration precedes the
+database read to avoid losing an answer during that read. Each request removes
+its own waiter on success, timeout, error or cancellation; other waiters survive.
+Already saved answers return immediately. A terminal notification without an
+answer retains the ordinary timeout behavior.
+
 ## Connecting during startup
 
 The listener binds before startup adoption finishes. A connecting client waits
