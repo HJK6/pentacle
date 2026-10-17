@@ -1421,6 +1421,7 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
     const reply = await window.cc.assetList(args);
     if (state.slotGen[slot] !== gen || state.slots[slot] !== session
       || viewerBucket.snapshotRequestGen !== requestGen) return null;
+    if (reply?.ok === false) return null;
     viewerBucket.scopeStreamIds = Array.isArray(reply?.scope_stream_ids)
       ? reply.scope_stream_ids : [fallbackSessionKey.stream_id];
     const rows = normalizeAssetListResponse(reply, fallbackSessionKey);

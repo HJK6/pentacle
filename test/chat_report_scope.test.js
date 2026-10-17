@@ -104,3 +104,43 @@ test('shared viewer epochs and live mutations win over in-flight snapshots', asy
   assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
   assert.equal(run("unreadReportCountForStreamImpl('local:lead')"), 0);
 });
+
+test('failed snapshots preserve valid report membership; successful empty and rotation still clear it', async t => {
+  const { run, read, h } = await boot(t);
+  h.dom.window.cc.assetList = async () => ({ ok: true,
+    scope_stream_ids: ['local:lead', 'local:child'], assets: [
+      { asset_id: 'own', title: 'Own', content_type: 'report', stream_id: 'local:child' },
+    ] });
+  await run('fetchSlotAssetSnapshot(0)');
+  const before = read(`({
+    scope: state.chatStream.assets['local:lead'].scopeStreamIds,
+    membership: [...state.chatStream.assets['local:lead'].snapshotAssetKeys],
+    visible: visibleAssetsForSlot(0).map(x => x.asset_id),
+    unread: unreadReportCountForStreamImpl('local:lead'),
+    tabs: [...document.querySelectorAll('#header-0 .slot-asset-tab')].map(x => x.dataset.assetId),
+  })`);
+  assert.deepEqual(before.visible, ['own']);
+  h.dom.window.cc.assetList = async () => ({ ok: false,
+    error: { code: 'disconnected', message: 'synthetic transport failure' } });
+  await run('fetchSlotAssetSnapshot(0)');
+  assert.deepEqual(read(`({
+    scope: state.chatStream.assets['local:lead'].scopeStreamIds,
+    membership: [...state.chatStream.assets['local:lead'].snapshotAssetKeys],
+    visible: visibleAssetsForSlot(0).map(x => x.asset_id),
+    unread: unreadReportCountForStreamImpl('local:lead'),
+    tabs: [...document.querySelectorAll('#header-0 .slot-asset-tab')].map(x => x.dataset.assetId),
+  })`), before);
+  h.dom.window.cc.assetList = async () => ({ ok: true,
+    scope_stream_ids: ['local:lead', 'local:child'], assets: [] });
+  await run('fetchSlotAssetSnapshot(0)');
+  assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
+  assert.equal(run("unreadReportCountForStreamImpl('local:lead')"), 0);
+  run(`applyAssetUpdate({asset_id:'own',title:'Own',content_type:'report',
+    session_key:{stream_id:'local:child',host:'local',session_name:'child'}})`);
+  assert.deepEqual(read('visibleAssetsForSlot(0).map(x=>x.asset_id)'), ['own']);
+  h.dom.window.cc.assetList = async () => ({ ok: false, error: { code: 'disconnected' } });
+  run(`applyChatStreamPayload({type:'assistant.binding.changed',stream_id:'local:new',generation:'g2'})`);
+  await flush();
+  assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
+  assert.equal(run("unreadReportCountForStreamImpl('local:lead')"), 0);
+});
