@@ -79,6 +79,50 @@ def codex_tui_readiness(pane_text: str) -> str:
     return "not_ready"
 
 
+def codex_composer_empty(pane_text: str) -> bool:
+    """Prove an empty Codex composer, retaining dim-placeholder SGR evidence.
+
+    Unknown styling fails closed. Plain captures cannot distinguish a hint
+    from a human draft, so a nonempty plain input is never accepted.
+    """
+    sgr = re.compile(r"\x1b\[([0-9;]*)m")
+    lines = pane_text.splitlines()
+    if any(_CODEX_NATIVE_QUEUE_HEADER_RE.match(sgr.sub("", line).strip()) for line in lines[-40:]):
+        return False
+    inputs = [i for i, line in enumerate(lines)
+              if sgr.sub("", line).lstrip().startswith(("›", "❯"))]
+    if not inputs or not codex_tui_ready(sgr.sub("", pane_text)):
+        return False
+    first = lines[inputs[-1]]
+    # Split after the caret without throwing away the styles following it.
+    marker = max(first.find("›"), first.find("❯"))
+    content = first[marker + 1:]
+    dim = False
+    cursor = 0
+    for match in sgr.finditer(content):
+        if content[cursor:match.start()].strip() and not dim:
+            return False
+        codes = [int(c) for c in (match.group(1) or "0").split(";")]
+        for code in codes:
+            if code in (0, 22):
+                dim = False
+            elif code == 2:
+                dim = True
+        cursor = match.end()
+    if content[cursor:].strip() and not dim:
+        return False
+    # A wrapped/multiline draft below an empty first line is also occupied.
+    for line in lines[inputs[-1] + 1:]:
+        clean = sgr.sub("", line).strip()
+        if not clean:
+            continue
+        if clean.startswith("gpt-") or re.search(r"\bgpt-[\w.-]+", clean, re.I):
+            break
+        if not _codex_draft_chrome_line(clean):
+            return False
+    return True
+
+
 def claude_prompt_ready(pane_text: str) -> bool:
     # A booted Claude TUI in bypass mode persistently renders the
     # permission-mode footer and an input caret; the welcome banner scrolls

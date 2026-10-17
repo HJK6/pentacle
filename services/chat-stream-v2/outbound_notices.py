@@ -48,6 +48,7 @@ ASSISTANT_AUTHORITY_REQUEST_TOKEN = object()
 _NON_URGENT_KINDS = frozenset({
     NOTICE_KIND_FD_TURN_BUDGET,
     "error_alert",
+    "codex_capacity_exhausted",
     NOTICE_KIND_REPORT,
     NOTICE_KIND_RECONCILER,
     NOTICE_KIND_SPAWN_FAILURE,

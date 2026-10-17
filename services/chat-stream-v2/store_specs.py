@@ -64,6 +64,8 @@ def _session_row(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str,
         out["_agent_report_status"], out["_agent_report_ts"] = state
     from store_usage import snapshot_conn
     out['usage'] = snapshot_conn(conn, out)
+    from store_capacity_retry import projection
+    out['capacity_retry'] = projection(conn, out)
     return out
 
 def normalize_spec_ids(spec_ids: object = None, spec_id: object = None) -> list[str]:

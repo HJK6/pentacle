@@ -91,6 +91,7 @@ class UIVerbs:
         self.store = store
         self.sessions = sessions
         self.spawnctl = spawnctl
+        self.capacity_retry = None
         self._spec_catalog = specs
         self.enrollment_registry = enrollment_registry or EnrollmentRegistry()
         self.token_telemetry = (
@@ -183,6 +184,29 @@ class UIVerbs:
     # -- functional-degraded ----------------------------------------------
 
     async def send_interrupt(self, msg: dict[str, Any]) -> dict[str, Any]:
+        policy = self.capacity_retry
+        if policy is not None:
+            host, name = str(msg.get("host") or ""), str(msg.get("session_name") or "")
+            if host and name:
+                expected = msg.get("expected_session_generation")
+                if host != self.sessions.local_host:
+                    hosts = getattr(self.spawnctl, "hosts", None)
+                    if not expected or hosts is None or host not in getattr(hosts, "peers", {}):
+                        # Preserve original admission before any durable hold.
+                        return await self._send_interrupt_locked(msg)
+                sid = f"{host}:{name}"
+                async with policy.locks(sid):
+                    row = await self.store.fetch_session(host, name)
+                    if expected and (not row or expected != row.get("session_generation")):
+                        return {"type": "send.interrupt.error", "request_id": msg.get("request_id"),
+                                "error_code": "stale_session_generation", "error": "selected generation changed"}
+                    # A stale remote selection must not hold a replacement.
+                    if row and row.get("status") == "open":
+                        await policy.interrupt(sid, row["session_generation"])
+                    return await self._send_interrupt_locked(msg)
+        return await self._send_interrupt_locked(msg)
+
+    async def _send_interrupt_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
         rid = str(msg.get("request_id") or "")
         host = str(msg.get("host") or "").strip()
         name = str(msg.get("session_name") or "").strip()

@@ -49,6 +49,7 @@ import attachment_locks
 import store_exchange
 import store_attachments
 import store_usage
+import store_capacity_retry
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
 import store_host_transfer as host_transfer
@@ -3095,6 +3096,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 return None
             store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
+            store_capacity_retry.cancel(conn, stream_id, reason="close")
             if close_kind == "operator_offline_close":
                 generation_row = conn.execute(
                     "SELECT generation FROM v2_session_generations WHERE host=? AND session_name=?",
@@ -5354,6 +5356,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                         # lifecycle's history, but it is not a new event.
                         inserted.append(None)
                         continue
+                    if source_id is not None:
+                        store_capacity_retry.observe(conn, stream_id, json.loads(event_json),
+                                                     source_id, lifecycle, recorded_at)
                     # The prose mirror must run for every admitted source event,
                     # whichever fence proved the append. A remote claude seat
                     # (satellite event.push) carries a `claude_binding`, not a

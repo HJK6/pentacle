@@ -1885,6 +1885,14 @@ async def park_once(config: Config, payload: dict[str, Any], *, timeout: float =
     return await _one_shot_rpc(config, payload, prefix=str(payload.get("type") or "park"), timeout=timeout, from_stream_id=from_stream_id)
 
 
+async def capacity_retry_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    actor = payload.get("from_stream_id")
+    if actor and "stream_token" not in payload and _stream_token_from_env():
+        payload["stream_token"] = _stream_token_from_env()
+    payload.setdefault("request_id", f"capacity-retry-{uuid.uuid4()}")
+    return await _one_shot_rpc(config, payload, prefix="capacity_retry", timeout=timeout, from_stream_id=actor)
+
+
 async def coordination_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
     if from_stream_id and "stream_token" not in payload and _stream_token_from_env():

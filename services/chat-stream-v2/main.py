@@ -659,6 +659,10 @@ async def run(args: argparse.Namespace) -> int:
     # degrade honestly where their subsystem is not in v2 yet. No store to open.
     uiverbs = UIVerbs(store, sessions, spawnctl, specs=specs)
     server.handlers.update(uiverbs.wire_handlers())
+    from capacity_retry import CapacityRetry
+    capacity_retry = CapacityRetry(store, sessions, comms, hosts, outbound=outbound)
+    uiverbs.capacity_retry = capacity_retry
+    server.handlers["capacity_retry.control"] = capacity_retry.control
     # Presence remains observation-only; the durable reconciler owns the
     # thresholded state transition and the read-only reconcile.status verb.
     presence = None
@@ -723,7 +727,8 @@ async def run(args: argparse.Namespace) -> int:
 
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.
-        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm, watch_wake.tick]
+        callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,
+                     watch_wake.tick, capacity_retry.tick]
         if server.assistant_restore is not None:
             callbacks.append(server.assistant_restore.tick)
         await run_reconcile_callbacks(*callbacks)

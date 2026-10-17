@@ -32,6 +32,7 @@ from .wsclient import (
     await_report_once,
     close_once,
     coordination_once,
+    capacity_retry_once,
     external_work_once,
     drain_sessions_once,
     fetch_snapshot,
@@ -1779,6 +1780,30 @@ def _park_rpc(args: argparse.Namespace, *, command: str) -> int:
 
 def park(args: argparse.Namespace) -> int:
     return _park_rpc(args, command="park")
+
+
+def capacity_retry_control(args: argparse.Namespace) -> int:
+    config = load_config()
+    actor = args.from_stream_id or discover_leader_stream_id_short(config)
+    payload = {"type": "capacity_retry.control", "action": args.action,
+               "request_id": args.request_id or f"capacity-retry-{uuid.uuid4()}",
+               "from_stream_id": actor}
+    if args.all:
+        payload["all"] = True
+    else:
+        if not args.generation:
+            print("agent-orch capacity-retry: --generation is required for a seat", file=sys.stderr)
+            return 2
+        payload.update(target_stream_id=args.target, expected_session_generation=args.generation)
+    try:
+        reply = asyncio.run(capacity_retry_once(config, payload, timeout=args.timeout))
+    except Exception as exc:
+        reply, code, message = _direct_rpc_transport_error("capacity_retry.control", payload["request_id"], exc)
+        _print_response(reply)
+        print(f"agent-orch capacity-retry: {message}", file=sys.stderr)
+        return code
+    _print_response(reply)
+    return 0 if reply.get("type") == "capacity_retry.control.ok" else 1
 
 
 def unpark(args: argparse.Namespace) -> int:
@@ -5419,6 +5444,17 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_ruling_parser.add_argument("--conditions")
     assistant_ruling_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_ruling_parser.set_defaults(func=assistant_ruling)
+
+    capacity_parser = subparsers.add_parser("capacity-retry", help="hold, explicitly resume, or inspect Codex capacity retries")
+    capacity_parser.add_argument("action", choices=("hold", "resume", "status"))
+    capacity_target = capacity_parser.add_mutually_exclusive_group(required=True)
+    capacity_target.add_argument("--target")
+    capacity_target.add_argument("--all", action="store_true")
+    capacity_parser.add_argument("--generation")
+    capacity_parser.add_argument("--request-id")
+    capacity_parser.add_argument("--from", dest="from_stream_id")
+    capacity_parser.add_argument("--timeout", type=float, default=30.0)
+    capacity_parser.set_defaults(func=capacity_retry_control)
 
     park_parser = subparsers.add_parser("park")
     park_parser.add_argument("stream_id")

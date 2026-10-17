@@ -163,8 +163,27 @@ function statusCardSpecIssues(streamSession) {
     : [];
 }
 
+function capacityRetryText(session) {
+  const retry = session && session.capacity_retry;
+  if (!retry || typeof retry !== 'object') return '';
+  const labels = {
+    waiting: 'Codex capacity: waiting to retry', reserved: 'Codex capacity: continuation in flight',
+    submitted: 'Codex capacity: continuation submitted', held: 'Codex capacity: retries held',
+    uncertain: 'Codex capacity: submission uncertain; manual action needed',
+    exhausted: 'Codex capacity: retries exhausted; manual action needed',
+  };
+  if (!labels[retry.state]) return '';
+  const used = Math.max(0, Math.min(3, Number(retry.attempts_used) || 0));
+  const deadline = Number(retry.next_retry_at);
+  const due = retry.state === 'waiting' && Number.isFinite(deadline) && deadline > 0
+    ? ` · after ${new Date(deadline * 1000).toISOString()}` : '';
+  return `${labels[retry.state]} · ${used}/3 attempts${due}`;
+}
+
 function statusCardIndicators(streamSession, card) {
   const badges = [];
+  const capacity = capacityRetryText(streamSession);
+  if (capacity) badges.push(`<span class="slot-status-card-badge is-capacity">${escapeHtml(capacity)}</span>`);
   if (card && card.handoff_planned === true) {
     badges.push('<span class="slot-status-card-badge is-handoff" title="This session plans to hand off">handoff planned</span>');
   }
@@ -382,8 +401,10 @@ function statusCardAttentionState(streamSession = {}) {
   // advisory/compact level" contract can never contradict a disabled glyph. The
   // daemon always sends context_tokens alongside a level, so this only matters
   // as a defensive invariant.
-  const hasIndicators = specIssues.length > 0 || hasContext || levelSignal;
+  const hasCapacity = !!capacityRetryText(s);
+  const hasIndicators = specIssues.length > 0 || hasContext || levelSignal || hasCapacity;
   const attention = specIssues.length > 0
+    || hasCapacity
     || levelSignal
     || (card ? card.handoff_planned === true : false);
   return { hasCard: !!card, hasIndicators, hasContent: !!card || hasIndicators, attention };
@@ -419,6 +440,8 @@ function renderSessionStatusCardView(streamSession = {}, { nowMs = Date.now() } 
   const age = card ? formatCardAge(card.updated_at, nowMs) : '';
   const ageHtml = age ? `<span class="session-status-age" title="Last status update">updated ${escapeHtml(age)}</span>` : '';
   const ctxBadge = statusCardContextBadge(s);
+  const capacity = capacityRetryText(s);
+  const capacityHtml = capacity ? `<div class="session-status-section is-capacity">${escapeHtml(capacity)}</div>` : '';
   const handoffChip = card && card.handoff_planned === true
     ? '<span class="session-status-handoff" title="This session plans to hand off">handoff planned</span>'
     : '';
@@ -471,7 +494,7 @@ function renderSessionStatusCardView(streamSession = {}, { nowMs = Date.now() } 
         <div class="session-status-title"><span class="session-status-glyph" aria-hidden="true"></span><span class="session-status-title-label">SESSION STATUS</span></div>
         <div class="session-status-header-meta">${ageHtml}${ctxBadge}${handoffChip}<button type="button" class="session-status-close" title="Close session status" aria-label="Close session status">&times;</button></div>
       </div>
-      ${goalHtml}${planHtml}${updateHtml}${specHtml}
+      ${capacityHtml}${goalHtml}${planHtml}${updateHtml}${specHtml}
     </div>`;
 }
 

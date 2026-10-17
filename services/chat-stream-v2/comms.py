@@ -386,6 +386,7 @@ class Comms:
         # narrow target filter; ordinary Comms users remain unchanged.
         self.assistant_ingress_policy: Any = None
         self.front_desk_digest: Any = None
+        self.capacity_retry: Any = None
         # The observer seam is attached after bind-first construction. A single
         # queue/drain serializes buffered replays with live arrivals even while
         # an observer awaits broadcasts, so receipt order cannot invert.
@@ -646,6 +647,24 @@ class Comms:
             self._inflight.pop(tell_id, None)
             if not fut.done():
                 fut.set_result(outcome)
+
+    async def deliver_capacity_continue(self, target, state, attempt_id):
+        """One plain continuation; caller owns the original lifecycle lock.
+
+        The trusted token is an in-process object, never a wire capability.
+        A prior receipt is reconciled before entering the ordinary tell path.
+        """
+        if self.capacity_retry is None:
+            raise VerbError("capacity_retry_deferred", "capacity policy unavailable", phase="not_started")
+        prior = await self.reconcile_notification_answer(attempt_id, target, state["generation"])
+        if prior is not None:
+            return prior["reply"]
+        return await self.tell({
+            "stream_id": target, "message": "continue", "tell_id": attempt_id,
+            "urgent": False, "_durable_notice_proof": True,
+            "_notification_answer_generation": state["generation"],
+            "_capacity_retry_token": self.capacity_retry.token, "_capacity_attempt": state,
+        })
 
     async def deliver_outbound_notice(
         self, msg: dict[str, Any], *, check_existing: bool = False
@@ -1254,6 +1273,8 @@ class Comms:
     ) -> tuple[bool, int, str, bool, EventProof, EventWatermark]:
         """Deliver ``body`` and return proof, attempts, provider, and active-draft evidence."""
         target = str(route["final_target"])
+        if self.capacity_retry is not None and msg.get("_capacity_retry_token") is not self.capacity_retry.token:
+            await self.capacity_retry.cancel_input(target)
         host, name = self.sessions.split(target)
         row = self.sessions.get(target) or await self.store.fetch_session(host, name)
         provider = str((row or {}).get("provider") or "")
@@ -1279,6 +1300,8 @@ class Comms:
             raise VerbError("answer_proof_unavailable", "cannot establish a pre-input USER watermark")
         tell_id = str(msg["tell_id"])
         target = str(route["final_target"])
+        if self.capacity_retry is not None and msg.get("_capacity_retry_token") is self.capacity_retry.token:
+            await self.capacity_retry.before_input(msg, route, watermark)
         if target != str(route["original_target"]):
             raise VerbError("unknown_session", "answer cannot follow a replacement producer")
         reply = self._tell_reply(tell_id, route, submission_confirmed=False,
@@ -1831,6 +1854,8 @@ class Comms:
                             phase="not_started",
                         )
                 await self._assert_claude_send_ready(plan.route)
+                if self.capacity_retry is not None:
+                    await self.capacity_retry.cancel_input(target)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
                 provider_queued = (
                     not active_draft and pane_mode_reason is None
@@ -1996,6 +2021,9 @@ class Comms:
             msg = {**msg, "request_id": request_id}
         try:
             plan = await self._prepare_send_plan(msg)
+            if self.capacity_retry is not None:
+                async with self._pane_input_lock(str(plan.route["final_target"])):
+                    await self.capacity_retry.cancel_input(str(plan.route["final_target"]))
         except VerbError as exc:
             if exc.code in {CODEX_RESET_BLOCKED, CODEX_INITIAL_PROMPT_PENDING, "bootstrap_not_ready"}:
                 await self._record_blocked_input(msg, request_id, exc)

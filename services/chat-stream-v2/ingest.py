@@ -795,6 +795,8 @@ class Ingest:
                     if seq is not None
                 ]
                 projected = await self.store.project_session_events(inserted)
+                from store_capacity_retry import refresh_projection
+                await refresh_projection(self.store, self.sessions, sid)
                 projected_index = 0
                 for entry, seq in zip(entries, sequences):
                     if seq is not None:
