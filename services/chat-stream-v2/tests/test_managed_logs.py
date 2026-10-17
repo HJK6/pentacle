@@ -460,3 +460,17 @@ def test_machine_sampler_captures_child_errors_and_uses_logging(monkeypatch, cap
     monkeypatch.setattr(machine_stats.subprocess, 'check_output', fail_output)
     assert machine_stats._sysctl_int('fixture-counter') == 0
     assert 'machine sampler command failed' in caplog.text
+
+
+@pytest.mark.parametrize('tail', [b'', b'\xff\n'])
+def test_real_readiness_rejects_unfinished_or_corrupt_boot_record(tmp_path, monkeypatch, tail):
+    cfg = config(tmp_path, 1024)
+    cfg.stdout.touch(); cfg.stderr.touch()
+    monkeypatch.setattr(deploy_mod, '_launchd_environment', lambda _: env_for(cfg))
+    monkeypatch.setattr(deploy_mod, '_launchd_state', lambda *_: deploy_mod.LaunchdState(True, 222))
+    before = deploy_mod._capture_log_offsets((cfg.stdout, cfg.stderr))
+    cfg.stdout.write_bytes(deploy_mod.V2_BOOT_LINE.encode() + b' fixture:0' + tail)
+    result = deploy_mod.verify_fresh_daemon_log_line(V2_SERVICE, previous_size=before,
+        prior_pid=111, wait_seconds=0, runner=lambda *_: None)
+    assert result.outcome == deploy_mod.BOOT_NOT_OBSERVED
+    assert 'incomplete' in result.detail

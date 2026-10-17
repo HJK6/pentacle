@@ -1134,50 +1134,30 @@ class _AppendedLogScanner:
 
 
 class _ManagedAppendedLogScanner:
-    """Advance a bounded boot-read cursor through retained inode generations."""
+    """Advance only after complete, strictly decoded retained boot records."""
 
     def __init__(self, path: Path, previous_size: LogOffsets | None, managed) -> None:
         self.path, self.previous, self.managed = path, previous_size, managed
-        self.carry = ""
         self.incomplete_reason: str | None = None
 
     def read_new(self) -> str:
+        from deploy.packet.log_scan import lines_many
         try:
             ranges = _frozen_log_ranges(self.path, self.previous, self.managed)
-            chunks = []
-            budget = _MAX_SCAN_BYTES
-            cursor = None
-            visited = []
-            for item in ranges:
-                with Path(item["path"]).open("rb") as stream:
-                    opened = os.fstat(stream.fileno())
-                    if (opened.st_ino, opened.st_dev) != (item["inode"], item["device"]):
-                        raise ValueError("managed boot log rotated before read")
-                    stream.seek(item["start_offset"])
-                    expected = min(item["bytes_read"], budget)
-                    raw = stream.read(expected)
-                    if len(raw) != expected:
-                        raise ValueError("managed boot log truncated during read")
-                visited.append(item)
-                chunks.append(raw)
-                cursor = {"size": item["start_offset"] + len(raw),
-                          "inode": item["inode"], "device": item["device"]}
-                budget -= len(raw)
-                if budget == 0:
-                    break
-            for item in visited:
-                current = Path(item["path"]).stat()
-                if ((current.st_ino, current.st_dev) != (item["inode"], item["device"])
-                        or current.st_size < item["end_offset"]):
-                    raise ValueError("managed boot log rotated/truncated during read")
-            self.previous = {str(self.path): cursor}
-            text = self.carry + b"".join(chunks).decode("utf-8", errors="replace")
-            self.carry = text[-_CARRY_CHARS:]
+            if sum(item["bytes_read"] for item in ranges) > _MAX_SCAN_BYTES:
+                raise ValueError("managed boot log exceeds bounded pending scan window")
+            # An unfinished record leaves the cursor unchanged. A later poll can
+            # finish it, even when its bytes now span retained generations.
+            text = "".join(lines_many(ranges))
+            last = ranges[-1]
+            self.previous = {str(self.path): {"size": last["end_offset"],
+                             "inode": last["inode"], "device": last["device"]}}
             self.incomplete_reason = None
             return text
         except (OSError, ValueError) as exc:
             self.incomplete_reason = str(exc)
             return ""
+
 
 
 def _scan_slow_consumer_window(
