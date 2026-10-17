@@ -1292,13 +1292,13 @@ function slotOwnsAsset(slot, metadata) {
   return scope.includes(metadata?.session_key?.stream_id);
 }
 
-function routeAssetMetadataToSlots(metadata) {
+function routeAssetMetadataToSlots(metadata, { admit = true } = {}) {
   if (!metadata?.session_key) return [];
   const routed = [];
   for (let slot = 0; slot < 4; slot++) {
     if (!slotOwnsAsset(slot, metadata)) continue;
     const viewer = assetContextForSlot(slot)?.bucket;
-    viewer?.snapshotAssetKeys?.add(assetTabKey(metadata.session_key.stream_id, metadata.asset_key));
+    if (admit) viewer?.snapshotAssetKeys?.add(assetTabKey(metadata.session_key.stream_id, metadata.asset_key));
     routed.push(slot);
     ensureSlotAssetTabs(slot);
     const active = state.slotActiveAsset[slot];
@@ -1418,7 +1418,7 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
     for (const record of records) {
       const result = upsertAssetMetadata(record);
       if (result) {
-        routeAssetMetadataToSlots(result.metadata);
+        routeAssetMetadataToSlots(result.metadata, { admit: false });
         applied.push(result.metadata);
       }
     }
