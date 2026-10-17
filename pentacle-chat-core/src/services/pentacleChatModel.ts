@@ -412,7 +412,6 @@ type TranscriptEventSortKey = {
   hasSeq: boolean;
   time: number;
   hasTime: boolean;
-  pairRank: number;
   deterministicTie: string;
 };
 
@@ -428,64 +427,25 @@ function transcriptEventDeterministicTie(event: PentacleEvent): string {
   ].join('\u0000');
 }
 
-function shouldPreferClaudeToolUseCandidate(candidate: PentacleEvent, current: PentacleEvent): boolean {
-  const candidateSeq = authoritativeEventSeq(candidate);
-  const currentSeq = authoritativeEventSeq(current);
-  const candidateHasSeq = Number.isFinite(candidateSeq);
-  const currentHasSeq = Number.isFinite(currentSeq);
-  if (candidateHasSeq && currentHasSeq && candidateSeq !== currentSeq) return candidateSeq < currentSeq;
-  if (candidateHasSeq !== currentHasSeq) return candidateHasSeq;
-
-  const candidateTime = eventTimestampMs(candidate);
-  const currentTime = eventTimestampMs(current);
-  const candidateHasTime = Number.isFinite(candidateTime);
-  const currentHasTime = Number.isFinite(currentTime);
-  if (candidateHasTime && currentHasTime && candidateTime !== currentTime) return candidateTime < currentTime;
-  if (candidateHasTime !== currentHasTime) return candidateHasTime;
-
-  return transcriptEventDeterministicTie(candidate).localeCompare(transcriptEventDeterministicTie(current)) < 0;
-}
-
 function buildTranscriptEventSortKeys(events: readonly PentacleEvent[]): Map<PentacleEvent, TranscriptEventSortKey> {
-  const claudeToolUseById = new Map<string, PentacleEvent>();
-  for (const event of events) {
-    if (event.raw?.source !== 'claude-jsonl') continue;
-    if (event.kind !== 'TOOL_USE') continue;
-    const toolUseId = String(event.raw?.tool_use_id || '').trim();
-    if (!toolUseId) continue;
-    const current = claudeToolUseById.get(toolUseId);
-    if (!current || shouldPreferClaudeToolUseCandidate(event, current)) {
-      claudeToolUseById.set(toolUseId, event);
-    }
-  }
-
-  const keys = new Map<PentacleEvent, TranscriptEventSortKey>();
-  for (const event of events) {
-    const toolUseId = String(event.raw?.tool_use_id || '').trim();
-    const matchedToolUse = event.raw?.source === 'claude-jsonl' && event.kind === 'TOOL_RESULT' && toolUseId
-      ? claudeToolUseById.get(toolUseId)
-      : undefined;
-    const primary = matchedToolUse || event;
-    const seq = authoritativeEventSeq(primary);
-    const time = eventTimestampMs(primary);
-    keys.set(event, {
+  return new Map(events.map((event) => {
+    const seq = authoritativeEventSeq(event);
+    const time = eventTimestampMs(event);
+    return [event, {
       seq,
       hasSeq: Number.isFinite(seq),
       time,
       hasTime: Number.isFinite(time),
-      pairRank: matchedToolUse ? 1 : 0,
       deterministicTie: transcriptEventDeterministicTie(event),
-    });
-  }
-  return keys;
+    }];
+  }));
 }
 
 function compareTranscriptEventSortKeys(left: TranscriptEventSortKey, right: TranscriptEventSortKey): number {
-  if (left.hasSeq && right.hasSeq && left.seq !== right.seq) return left.seq - right.seq;
   if (left.hasTime && right.hasTime && left.time !== right.time) return left.time - right.time;
   if (left.hasTime !== right.hasTime) return left.hasTime ? -1 : 1;
+  if (left.hasSeq && right.hasSeq && left.seq !== right.seq) return left.seq - right.seq;
   if (left.hasSeq !== right.hasSeq) return left.hasSeq ? -1 : 1;
-  if (left.pairRank !== right.pairRank) return left.pairRank - right.pairRank;
   return left.deterministicTie.localeCompare(right.deterministicTie);
 }
 
@@ -1789,6 +1749,10 @@ function buildSessionTranscriptRows(
       visibleEvents.push(item);
     }
   }
+  const visibleSortKeys = buildTranscriptEventSortKeys(visibleEvents.map((item) => item.event));
+  visibleEvents.sort((left, right) => compareTranscriptEventSortKeys(
+    visibleSortKeys.get(left.event)!, visibleSortKeys.get(right.event)!,
+  ));
   const transcriptItems: PentacleTranscriptItem[] = [];
   let lastTimestampMinute = '';
 

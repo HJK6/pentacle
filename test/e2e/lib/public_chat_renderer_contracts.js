@@ -43,6 +43,36 @@ async function publicChatRendererContracts(ctx) {
         && ordering.text.split('Synthetic first reply').length === 2, ordering);
     report.note('steering assertion is merged renderer order only; no steering-ledger or provider-delivery proof');
 
+    const lateAnswer = await session.eval(`(() => {
+      const store = window.PentacleChatStore;
+      const saved = store.getState();
+      const row = saved.sessions.find(row => row.stream_id === ${stream});
+      const event = { daemon_seq: 4, stream_id: ${stream}, host: row.host, provider: row.provider,
+        session_name: row.session_name, session_id: 'synthetic-renderer-session',
+        timestamp: new Date(1700000000500).toISOString(), kind: 'USER',
+        text: JSON.stringify({ type: 'notification.answer', answer: {
+          notification_id: 'timestamp-answer', text: 'Synthetic earlier answer' } }) };
+      store.applyFrame({ type: 'chat.event', event });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      try {
+        container.innerHTML = window.PentacleChatView.renderTranscriptTimelineHtml(store.selectSessionDetail(${stream}), undefined, {
+          resolvedQuestions: [{ notification_id: 'timestamp-restored', state: 'answered',
+            resolved_at: new Date(1700000000750).toISOString(),
+            question: { state: 'answered', answer: { text: 'Synthetic restored answer' } } }],
+        });
+        return { text: container.textContent,
+          times: store.selectSessionDetail(${stream}).transcriptItems.map(item => item.timestamp) };
+      } finally {
+        container.remove();
+        store.applyFrame({ type: 'snapshot', sessions: saved.sessions, events: saved.events, drafts: {} });
+      }
+    })()`);
+    const latePositions = ['Synthetic earlier answer', 'Synthetic restored answer', 'Synthetic first request',
+      'Synthetic first reply', 'Synthetic steering request'].map(text => lateAnswer.text.indexOf(text));
+    report.ok('late and restored question answers render in timestamp order before newer chat',
+      latePositions.every((position, index) => position >= 0 && (!index || position > latePositions[index - 1])), lateAnswer);
+
     await session.eval(`(() => {
       window.__publicRenderer = { sends: [], cancels: [], forbidden: [] };
       window.cc.createPty = async () => '%unused-public-renderer-fixture';

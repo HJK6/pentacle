@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   applyFetchedStreamEvents,
   applyPentacleEvent,
+  applyPentacleSnapshotMessage,
   initialPentacleStreamState,
   selectCurrentTailEvents,
   selectSessionDetail,
@@ -639,11 +640,11 @@ test('session detail maps Claude JSONL Read tool results to code-block rows', ()
 
   const items = selectSessionDetail(state, STREAM_ID, { includeTools: true, visibleCount: 'all' })?.transcriptItems;
 
-  assert.deepEqual(items?.map((item) => item.id), ['1201', '1005']);
-  assert.equal(items?.at(-1)?.displayRule, 'activity:code-block');
+  assert.deepEqual(items?.map((item) => item.id), ['1005', '1201']);
+  assert.equal(items?.[0]?.displayRule, 'activity:code-block');
 });
 
-test('session detail produces stable Claude tool pair order across permutations', () => {
+test('session detail orders skewed Claude tool results by their own timestamp across permutations', () => {
   const toolUse = event({
     daemon_seq: 1201,
     provider: 'claude',
@@ -690,8 +691,8 @@ test('session detail produces stable Claude tool pair order across permutations'
 
     const items = selectSessionDetail(state, STREAM_ID, { includeTools: true, visibleCount: 'all' })?.transcriptItems;
 
-    assert.deepEqual(items?.map((item) => item.id), ['1100', '1201', '1005']);
-    assert.equal(items?.[2]?.displayRule, 'activity:code-block');
+    assert.deepEqual(items?.map((item) => item.id), ['1005', '1100', '1201']);
+    assert.equal(items?.[0]?.displayRule, 'activity:code-block');
   }
 });
 
@@ -803,4 +804,35 @@ test('session detail collapses Claude JSONL Agent tool rows with child count', (
   assert.deepEqual(items?.map((item) => item.id), ['10']);
   assert.equal(items?.[0]?.displayRule, 'activity:collapsed-tool');
   assert.match(items?.[0]?.text || '', /1 child event/);
+});
+
+// The timestamp belongs to the event; delivery/backfill sequence is only a tie-break.
+for (const arrival of ['live', 'backfill', 'reconnect'] as const) {
+  test(`late question answers stay chronological after ${arrival}`, () => {
+    const later = event({daemon_seq: 10, timestamp: '2026-10-17T06:26:00Z', kind: 'USER', text: 'later request'});
+    const reply = event({daemon_seq: 11, timestamp: '2026-10-17T06:26:20Z', text: 'later reply'});
+    const answer = event({daemon_seq: 12, timestamp: '2026-10-17T05:48:00Z', kind: 'USER', text: JSON.stringify({type: 'notification.answer', answer: {notification_id: 'ordering-answer', text: 'earlier answer'}})});
+    let state = applyPentacleEvent(applyPentacleEvent(buildState(), later), reply);
+    state = arrival === 'live' ? applyPentacleEvent(state, answer)
+      : arrival === 'backfill' ? applyFetchedStreamEvents(state, [answer], {requestedStreamId: STREAM_ID})
+      : applyPentacleSnapshotMessage(state, {sessions: [session()], events: [reply, answer, later]});
+    const all = selectSessionDetail(state, STREAM_ID, {visibleCount: 'all'})!.transcriptItems;
+    assert.deepEqual(all.map(row => row.id), ['12', '10', '11']);
+    assert.equal(all[0].eventCase, 'agent-question-answer');
+    const bounded = selectSessionDetail(state, STREAM_ID, {visibleCount: 2})!.transcriptItems;
+    assert.deepEqual(bounded.map(row => row.id), ['10', '11']);
+  });
+}
+
+
+test('bounded transcript keeps an older pending send visible in chronological position', () => {
+  let state = sendOptimisticMessage(buildState(), {
+    streamId: STREAM_ID, text: 'pending earlier send', optimisticId: 'optimistic_pending_older',
+    requestId: 'pending-older', createdAt: Date.parse('2026-10-17T05:48:00Z'),
+    windowStartedAt: Date.parse('2026-10-17T05:48:00Z'),
+  });
+  state = applyPentacleEvent(state, event({daemon_seq: 50, timestamp: '2026-10-17T06:26:00Z', text: 'latest reply'}));
+  const rows = selectSessionDetail(state, STREAM_ID, {visibleCount: 1})!.transcriptItems;
+  assert.deepEqual(rows.map(row => row.id), ['optimistic_pending_older', '50']);
+  assert.equal(rows[0].pending, true);
 });

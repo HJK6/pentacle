@@ -418,7 +418,8 @@ test('plain preview guard preserves ordering, hidden, foreign, replay, progressi
     ...orderedSession,
     last_event_at: progressiveLatest.timestamp,
     last_text: progressiveLatest.text,
-  }), 'intervening newest row');
+  // Coalescing retains the updated event timestamp, so that row is now newest.
+  }), 'Deploying the exact immutable candidate to production now');
 
   assert.equal(preview([orderedLatest], {
     ...orderedSession,

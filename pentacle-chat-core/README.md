@@ -34,3 +34,9 @@ Vendor this directory into a consumer and reference it with a local `file:`
 dependency (for example `"pentacle-chat-core": "file:./pentacle-chat-core"`);
 the consumer's bundler compiles the TypeScript source. There is no separate
 compiled artifact to publish.
+
+Transcript display uses each item's own timestamp, oldest first, with the existing
+sequence and stable identity breaking ties. Arrival/backfill sequence never wins
+over a different timestamp, and tool results keep their own time. The visible
+window is selected chronologically; retained pending sends stay visible in their
+chronological position. Ingestion cursors and message identity are unchanged.
