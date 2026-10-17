@@ -27,6 +27,7 @@ sys.path.insert(0, str(script.parent))
 module = runpy.run_path(str(script), run_name='deploy_import_probe')
 scan = module['_scan_slow_consumer_window']
 scan.__globals__['_daemon_log_paths'] = lambda _: (log,)
+scan.__globals__['_launchd_environment'] = lambda _: {}
 result = scan(module['SERVICES']['chat-streamd-v2'], 0)
 result['scanner_module'] = sys.modules['deploy.packet.log_scan'].__file__
 print(json.dumps(result))

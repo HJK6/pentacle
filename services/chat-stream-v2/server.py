@@ -5016,6 +5016,7 @@ class Server:
             yield await asyncio.to_thread(_encoded_stream_events_error, request_id, str(exc))
 
     async def _on_daemon_stats(self, _msg: dict[str, Any]) -> dict[str, Any]:
+        from managed_logs import status as managed_log_status
         lifecycle = None
         snapshot = getattr(self.lifecycle, "snapshot", None)
         if callable(snapshot):
@@ -5029,6 +5030,9 @@ class Server:
             stats["boot_queue_depth"] = boot_queue_depths()
         if lifecycle is not None:
             stats["lifecycle"] = lifecycle
+        managed = managed_log_status()
+        if managed is not None:
+            stats["managed_logs"] = managed
         return {
             "type": "daemon.stats.ok",
             "stats": stats,

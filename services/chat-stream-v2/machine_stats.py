@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import os
 import platform
 import re
@@ -10,6 +11,9 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+
+log = logging.getLogger("chat_streamd_v2.machine_stats")
 
 
 STATS_INTERVAL_S = 30.0
@@ -28,16 +32,18 @@ CPU_USAGE_FIELD = "cpu_usage_pct"
 
 def _sysctl_int(name: str) -> int:
     try:
-        return int(subprocess.check_output(["sysctl", "-n", name], text=True, timeout=2).strip())
-    except (OSError, ValueError, subprocess.SubprocessError):
+        return int(subprocess.check_output(["sysctl", "-n", name], text=True, stderr=subprocess.PIPE, timeout=2).strip())
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
         return 0
 
 
 def _darwin_available_bytes() -> int:
     page_size = _sysctl_int("hw.pagesize") or 4096
     try:
-        output = subprocess.check_output(["vm_stat"], text=True, timeout=2)
-    except (OSError, subprocess.SubprocessError):
+        output = subprocess.check_output(["vm_stat"], text=True, stderr=subprocess.PIPE, timeout=2)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
         return 0
     available_pages = 0
     for line in output.splitlines():
@@ -79,11 +85,11 @@ def _uptime_seconds() -> int:
         pass
     if platform.system() == "Darwin":
         try:
-            raw = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True, timeout=2)
+            raw = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True, stderr=subprocess.PIPE, timeout=2)
             boot = int(raw.split("sec =", 1)[1].split(",", 1)[0].strip())
             return max(0, int(time.time()) - boot)
-        except (IndexError, ValueError, OSError, subprocess.SubprocessError):
-            pass
+        except (IndexError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            log.warning("machine sampler command failed: %s", exc)
     clock = getattr(time, "CLOCK_BOOTTIME", getattr(time, "CLOCK_MONOTONIC", None))
     return max(0, int(time.clock_gettime(clock))) if clock is not None else 0
 
@@ -106,11 +112,12 @@ def _darwin_cpu_usage_pct() -> float | None:
     try:
         output = subprocess.check_output(
             ["top", "-l", "2", "-n", "0", "-s", "1"],
-            text=True,
+            text=True, stderr=subprocess.PIPE,
             timeout=5,
             env={**os.environ, "LC_ALL": "C"},
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("machine sampler command failed: %s", exc)
         return None
     lines = [line for line in output.splitlines() if "CPU usage:" in line]
     if len(lines) < 2:

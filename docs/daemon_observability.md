@@ -13,7 +13,7 @@ python3 services/chat-stream-v2/tools/read_daemon_stats.py \
 
 The tool opens a websocket, sends a correlated `daemon.stats` request, waits for `daemon.stats.ok`, and prints the frame as JSON. `--timeout` controls both connection and receive timeout.
 
-The response's `stats` object has only these keys:
+The response's `stats` object has these keys (plus the optional managed-log state below):
 
 | Key | Source | Meaning |
 |---|---|---|
@@ -73,3 +73,9 @@ progress, not failure.
 Do not configure `--daemon-stats-*` options or `PENTACLE_DAEMON_STATS_*` variables: `services/chat-stream-v2/main.py --help` exposes neither. There is no v2 `daemon_stats.jsonl` output path to tail or rotate.
 
 Release verification uses the deploy tool's launchd and `welcome.runtime_sha` readbacks described in README § Daemon releases. `daemon.stats` does not contain deploy stamps or a running SHA.
+
+## Managed log health
+
+When managed streams are installed, `stats.managed_logs` contains stdout/stderr
+`failed_writes` counters and the last error class. See [managed daemon logs](daemon_logs.md)
+for the byte limits, emergency-output boundary and deployment/legacy-file procedure.

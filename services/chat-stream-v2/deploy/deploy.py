@@ -782,6 +782,9 @@ def _asset_store_identity(service: ServiceConfig) -> dict[str, object]:
 
 
 def _daemon_log_path(service: ServiceConfig) -> Path | None:
+    managed = _managed_log_config(service)
+    if managed is not None:
+        return managed.stdout
     raw = _launchd_environment(service.launchd_label).get("PENTACLE_LOG_PATH")
     if raw:
         return Path(raw).expanduser()
@@ -798,6 +801,9 @@ def _daemon_log_path(service: ServiceConfig) -> Path | None:
 
 def _daemon_log_paths(service: ServiceConfig) -> tuple[Path, ...]:
     """Return the daemon stdout/stderr logs, preserving launchd's configured order."""
+    managed = _managed_log_config(service)
+    if managed is not None:
+        return managed.stdout, managed.stderr
     paths: list[Path] = []
     stdout = _daemon_log_path(service)
     if stdout is not None:
@@ -812,6 +818,39 @@ def _daemon_log_paths(service: ServiceConfig) -> tuple[Path, ...]:
         if stderr not in paths:
             paths.append(stderr)
     return tuple(paths)
+
+
+def _managed_log_config(service: ServiceConfig):
+    service_path = str(Path(__file__).resolve().parent.parent)
+    if service_path not in sys.path:
+        sys.path.insert(0, service_path)
+    from managed_logs import Config
+    try:
+        return Config.from_env(_launchd_environment(service.launchd_label))
+    except ValueError as exc:
+        raise DeployError(str(exc)) from exc
+
+
+def _frozen_log_ranges(path: Path, previous_size: LogOffsets | None, managed=None):
+    service_path = str(Path(__file__).resolve().parent.parent)
+    if service_path not in sys.path:
+        sys.path.insert(0, service_path)
+    from deploy.packet.log_scan import freeze
+    from managed_logs import retained_paths
+    offset = _previous_log_offset(previous_size, path)
+    if offset is None:
+        raise ValueError("missing frozen start offset")
+    identity = previous_size.get(str(path)) if isinstance(previous_size, dict) else None
+    identity = identity if isinstance(identity, dict) else {}
+    inode, device = identity.get("inode"), identity.get("device")
+    if managed is None:
+        return [freeze(path, offset, inode, device)]
+    if inode is None or device is None:
+        raise ValueError("missing managed log start identity")
+    paths = retained_paths(path, inode, device, managed.backups)
+    return [freeze(segment, offset if index == 0 else 0,
+                   inode if index == 0 else None, device if index == 0 else None)
+            for index, segment in enumerate(paths)]
 
 
 def _capture_log_offsets(paths: Sequence[Path]) -> LogOffsets | None:
@@ -1094,29 +1133,75 @@ class _AppendedLogScanner:
         return text
 
 
+class _ManagedAppendedLogScanner:
+    """Advance a bounded boot-read cursor through retained inode generations."""
+
+    def __init__(self, path: Path, previous_size: LogOffsets | None, managed) -> None:
+        self.path, self.previous, self.managed = path, previous_size, managed
+        self.carry = ""
+        self.incomplete_reason: str | None = None
+
+    def read_new(self) -> str:
+        try:
+            ranges = _frozen_log_ranges(self.path, self.previous, self.managed)
+            chunks = []
+            budget = _MAX_SCAN_BYTES
+            cursor = None
+            visited = []
+            for item in ranges:
+                with Path(item["path"]).open("rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (opened.st_ino, opened.st_dev) != (item["inode"], item["device"]):
+                        raise ValueError("managed boot log rotated before read")
+                    stream.seek(item["start_offset"])
+                    expected = min(item["bytes_read"], budget)
+                    raw = stream.read(expected)
+                    if len(raw) != expected:
+                        raise ValueError("managed boot log truncated during read")
+                visited.append(item)
+                chunks.append(raw)
+                cursor = {"size": item["start_offset"] + len(raw),
+                          "inode": item["inode"], "device": item["device"]}
+                budget -= len(raw)
+                if budget == 0:
+                    break
+            for item in visited:
+                current = Path(item["path"]).stat()
+                if ((current.st_ino, current.st_dev) != (item["inode"], item["device"])
+                        or current.st_size < item["end_offset"]):
+                    raise ValueError("managed boot log rotated/truncated during read")
+            self.previous = {str(self.path): cursor}
+            text = self.carry + b"".join(chunks).decode("utf-8", errors="replace")
+            self.carry = text[-_CARRY_CHARS:]
+            self.incomplete_reason = None
+            return text
+        except (OSError, ValueError) as exc:
+            self.incomplete_reason = str(exc)
+            return ""
+
+
 def _scan_slow_consumer_window(
     service: ServiceConfig,
     previous_size: LogOffsets | None,
 ) -> dict[str, object]:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from deploy.packet.log_scan import freeze, lines
+    from deploy.packet.log_scan import lines_many
     paths = _daemon_log_paths(service)
     inputs = []
+    groups = []
     try:
+        managed = _managed_log_config(service)
         for path in paths:
-            offset = _previous_log_offset(previous_size, path)
-            if offset is None:
-                raise ValueError("missing frozen start offset")
-            identity = previous_size.get(str(path)) if isinstance(previous_size, dict) else None
-            identity = identity if isinstance(identity, dict) else {}
-            inputs.append(freeze(path, offset, identity.get("inode"), identity.get("device")))
-        boot_marker_seen = any(V2_BOOT_LINE in line for item in inputs for line in lines(item))
+            group = _frozen_log_ranges(path, previous_size, managed)
+            groups.append(group)
+            inputs.extend(group)
+        boot_marker_seen = any(V2_BOOT_LINE in line for group in groups for line in lines_many(group))
         def selected():
-            for item in inputs:
+            for group in groups:
                 seen = False
                 # stderr has no boot marker; pre-restart offsets delimit it.
-                has_boot = any(V2_BOOT_LINE in line for line in lines(item))
-                for line in lines(item):
+                has_boot = any(V2_BOOT_LINE in line for line in lines_many(group))
+                for line in lines_many(group):
                     seen |= V2_BOOT_LINE in line
                     if boot_marker_seen and (seen or not has_boot):
                         yield line
@@ -1126,7 +1211,7 @@ def _scan_slow_consumer_window(
         return {**scan, "scan_complete": True, "inputs": inputs,
                 "bytes_read": sum(i["bytes_read"] for i in inputs),
                 "log_paths": [str(path) for path in paths]}
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, DeployError) as error:
         return {"class": "slow_consumer", "outcome": SLOW_CONSUMER_FAILED,
                 "scan_complete": False, "incomplete_reason": str(error),
                 "boot_marker_seen": False, "failures": [],
@@ -1158,7 +1243,9 @@ def verify_fresh_daemon_log_line(
     if path is None:
         raise DeployError("daemon log path is not configured in launchd")
 
-    scanner = _AppendedLogScanner(path, previous_size)
+    managed = _managed_log_config(service)
+    scanner = (_ManagedAppendedLogScanner(path, previous_size, managed) if managed is not None
+               else _AppendedLogScanner(path, previous_size))
     boot_line = V2_BOOT_LINE if service.name == "chat-streamd-v2" else BOOT_LINE
     started = clock()
     deadline = started + wait_seconds
@@ -1170,6 +1257,9 @@ def verify_fresh_daemon_log_line(
     traceback_seen = False
 
     def _readback(outcome: str, detail: str) -> BootReadback:
+        incomplete = getattr(scanner, "incomplete_reason", None)
+        if incomplete:
+            detail += f"; log scan incomplete: {incomplete}"
         if traceback_seen and outcome != BOOT_OBSERVED:
             detail = f"{detail}; startup traceback present in {path}"
         return BootReadback(outcome, detail, round(clock() - started, 1), state.pid, prior_pid)

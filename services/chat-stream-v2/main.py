@@ -1113,7 +1113,7 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    configure_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
+    configure_logging(getattr(logging, str(args.log_level).upper(), logging.INFO), daemon=True)
     return run_bounded(run(args))
 
 
