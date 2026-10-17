@@ -71,4 +71,34 @@ test('binding changes refresh scope, reject late lists, and reconcile an empty s
   pending.at(-1).resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[]});
   await empty;
   assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
+  assert.equal(run("unreadReportCountForStreamImpl('hostc:lead')"), 0);
+});
+
+test('shared viewer epochs and live mutations win over in-flight snapshots', async t => {
+  const { run, read, h } = await boot(t);
+  const pending = [];
+  h.dom.window.cc.assetList = args => new Promise(resolve => pending.push({ args, resolve }));
+  run("state.slots[1] = {name:'lead',hostId:'local'}");
+  const first = run('fetchSlotAssetSnapshot(0)');
+  const old = pending.at(-1);
+  const second = run('fetchSlotAssetSnapshot(1)');
+  const fresh = pending.at(-1);
+  fresh.resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[]});
+  await second;
+  old.resolve({scope_stream_ids:['hostc:lead','hostc:old'],assets:[]});
+  await first;
+  assert.deepEqual(read("state.chatStream.assets['hostc:lead'].scopeStreamIds"), ['hostc:lead','hostc:child']);
+  const update = {asset_id:'live',title:'live',content_type:'report',stream_id:'hostc:child',
+    session_key:{host:'hostc',session_name:'child',stream_id:'hostc:child'}};
+  const beforePush = run('fetchSlotAssetSnapshot(0)');
+  run(`applyAssetUpdate(${JSON.stringify(update)})`);
+  pending.at(-1).resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[]});
+  await beforePush;
+  assert.deepEqual(read('visibleAssetsForSlot(0).map(x=>x.title)'), ['live']);
+  const beforeRemove = run('fetchSlotAssetSnapshot(1)');
+  run(`applyAssetRemoved({asset_id:'live',session_key:{stream_id:'hostc:child'}})`);
+  pending.at(-1).resolve({scope_stream_ids:['hostc:lead','hostc:child'],assets:[update]});
+  await beforeRemove;
+  assert.deepEqual(read('visibleAssetsForSlot(0)'), []);
+  assert.equal(run("unreadReportCountForStreamImpl('hostc:lead')"), 0);
 });

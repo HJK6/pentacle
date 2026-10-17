@@ -716,7 +716,9 @@ function unreadReportCountForStreamImpl(streamId) {
   return scope.reduce((total, owner) => {
     const bucket = state.chatStream.assets[owner];
     return total + reportUnreadCount(bucket,
-      key => !!bucket?.dismissedById?.[assetTabKey(owner, key)]);
+      key => !!bucket?.dismissedById?.[assetTabKey(owner, key)]
+        || (state.chatStream.assets[streamId]?.snapshotAssetKeys
+          && !state.chatStream.assets[streamId].snapshotAssetKeys.has(assetTabKey(owner, key))));
   }, 0);
 }
 
@@ -1319,10 +1321,20 @@ function routeAssetMetadataToSlots(metadata, { admit = true } = {}) {
 function applyAssetUpdate(payload) {
   const result = upsertAssetMetadata(payload);
   if (!result) return null;
+  recordAssetMutation(result.metadata.session_key.stream_id, result.metadata.asset_id, result.metadata);
   routeAssetMetadataToSlots(result.metadata);
   // New or republished report evidence may change the stream's unread count.
   refreshSidebarUnread();
   return result;
+}
+
+function recordAssetMutation(owner, assetId, metadata = null) {
+  if (!owner || !assetId) return;
+  state.chatStream.assetMutations ||= new Map();
+  state.chatStream.assetMutationGen = (state.chatStream.assetMutationGen || 0) + 1;
+  state.chatStream.assetMutations.set(JSON.stringify([owner, assetId]), {
+    gen: state.chatStream.assetMutationGen, owner, assetId, metadata,
+  });
 }
 
 // Metadata update for the slot's mounted asset. A changed render signature
@@ -1402,16 +1414,25 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
   const args = assetListArgsForSession(session);
   if (!args) return null;
   const fallbackSessionKey = fallbackAssetSessionKeyForSession(session);
-  state.slotAssetSnapshotGen ||= [0, 0, 0, 0];
-  const requestGen = ++state.slotAssetSnapshotGen[slot];
+  const viewerBucket = assetBucketForStream(fallbackSessionKey.stream_id);
+  const requestGen = viewerBucket.snapshotRequestGen = (viewerBucket.snapshotRequestGen || 0) + 1;
+  const mutationGen = state.chatStream.assetMutationGen || 0;
   try {
     const reply = await window.cc.assetList(args);
     if (state.slotGen[slot] !== gen || state.slots[slot] !== session
-      || state.slotAssetSnapshotGen[slot] !== requestGen) return null;
-    const viewerBucket = assetBucketForStream(fallbackSessionKey.stream_id);
+      || viewerBucket.snapshotRequestGen !== requestGen) return null;
     viewerBucket.scopeStreamIds = Array.isArray(reply?.scope_stream_ids)
       ? reply.scope_stream_ids : [fallbackSessionKey.stream_id];
-    const records = normalizeAssetListResponse(reply, fallbackSessionKey);
+    const rows = normalizeAssetListResponse(reply, fallbackSessionKey);
+    const recordsByOwner = new Map(rows.map(row => [JSON.stringify([row.session_key.stream_id, row.asset_id]), row]));
+    // Preserve pushes committed while this snapshot was in flight, including
+    // removal tombstones. A response cannot roll back live metadata.
+    for (const [key, change] of state.chatStream.assetMutations || []) {
+      if (change.gen <= mutationGen || !viewerBucket.scopeStreamIds.includes(change.owner)) continue;
+      if (change.metadata) recordsByOwner.set(key, change.metadata);
+      else recordsByOwner.delete(key);
+    }
+    const records = [...recordsByOwner.values()];
     viewerBucket.snapshotAssetKeys = new Set(records.map(normalizeAssetMetadata).filter(Boolean)
       .map(item => assetTabKey(item.session_key.stream_id, item.asset_key)));
     const applied = [];
@@ -1422,13 +1443,17 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
         applied.push(result.metadata);
       }
     }
-    ensureSlotAssetTabs(slot);
-    const active = state.slotActiveAsset[slot];
-    if (active && (!viewerBucket.scopeStreamIds.includes(active.streamId)
-      || !viewerBucket.snapshotAssetKeys.has(assetTabKey(active.streamId, active.assetKey)))) {
-      state.slotActiveAsset[slot] = null;
-      updateSlotViewMode(slot, 'chat');
+    for (let viewerSlot = 0; viewerSlot < 4; viewerSlot++) {
+      if (assetContextForSlot(viewerSlot)?.streamId !== fallbackSessionKey.stream_id) continue;
+      ensureSlotAssetTabs(viewerSlot);
+      const active = state.slotActiveAsset[viewerSlot];
+      if (active && (!viewerBucket.scopeStreamIds.includes(active.streamId)
+        || !viewerBucket.snapshotAssetKeys.has(assetTabKey(active.streamId, active.assetKey)))) {
+        state.slotActiveAsset[viewerSlot] = null;
+        updateSlotViewMode(viewerSlot, 'chat');
+      }
     }
+    refreshSidebarUnread();
     return applied;
   } catch (error) {
     console.warn('[asset] list failed:', error?.message || error);
@@ -1787,6 +1812,7 @@ function applyAssetRemoved(payload) {
   const sessionKey = payload?.session_key || {};
   const assetId = String(payload?.asset_id || '').trim();
   if (!assetId) return;
+  recordAssetMutation(assetStreamIdFromSessionKey(sessionKey), assetId);
   // Asset ids may collide across owners, even within the same specification.
   for (const streamId of Object.keys(state.chatStream.assets || {})) {
     const bucket = state.chatStream.assets[streamId];
