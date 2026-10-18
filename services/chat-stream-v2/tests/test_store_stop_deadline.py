@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -164,6 +165,39 @@ def test_non_finite_timeout_is_rejected_not_an_indefinite_wait(bad):
     assert Store(":memory:").stop(timeout=-1) is True
 
 
+def test_transition_lock_and_join_share_one_timeout_budget(monkeypatch):
+    clock = [0.0]
+    waits = {}
+
+    class Lock:
+        def acquire(self, *, timeout):
+            waits["lock"] = timeout
+            clock[0] += 0.15
+            return True
+
+        def release(self):
+            pass
+
+    class Worker:
+        def is_alive(self):
+            return True
+
+        def join(self, *, timeout):
+            waits["join"] = timeout
+            clock[0] += timeout
+
+    store = Store(":memory:")
+    worker = Worker()
+    store._lock = Lock()
+    store._thread = worker
+    monkeypatch.setattr(store_mod, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    assert store.stop(timeout=0.3) is False
+    assert waits == {"lock": pytest.approx(0.3), "join": pytest.approx(0.15)}
+    assert clock[0] == pytest.approx(0.3)
+    assert store._thread is worker and store._closing
+
+
 def test_transition_lock_pressure_shares_the_one_deadline():
     async def go():
         store = Store(":memory:", max_pending=1)
@@ -173,8 +207,9 @@ def test_transition_lock_pressure_shares_the_one_deadline():
         store._lock.acquire()
         threading.Timer(0.15, store._lock.release).start()
         stopped, elapsed = await asyncio.to_thread(_timed_stop, store, 0.3)
-        # Lock wait and join share 0.3 s rather than each getting a full timeout.
-        assert stopped is False and elapsed < 0.45, elapsed
+        # Timed joins can return late. The deterministic test above verifies
+        # budget sharing; this real-worker check retains bounded return.
+        assert stopped is False and elapsed < 0.5, elapsed
         await held.settle()
         assert store.stop(timeout=2) is True
 
