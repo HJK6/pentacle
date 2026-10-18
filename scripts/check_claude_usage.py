@@ -202,17 +202,26 @@ def _remove_dead_probe_socket(captured):
 
         if not unchanged():
             return
-        with unix_socket.socket(unix_socket.AF_UNIX) as endpoint:
-            endpoint.settimeout(0.25)
-            try:
-                endpoint.connect(str(parent / name))
-            except OSError as exc:
-                if exc.errno == errno.ENOENT:
-                    return
-                if exc.errno != errno.ECONNREFUSED:
-                    raise RuntimeError("usage socket liveness unavailable") from None
-            else:
-                raise RuntimeError("usage socket still live")
+        for attempt in range(2):
+            with unix_socket.socket(unix_socket.AF_UNIX) as endpoint:
+                endpoint.settimeout(0.25)
+                try:
+                    endpoint.connect(str(parent / name))
+                except OSError as exc:
+                    if exc.errno == errno.ENOENT:
+                        return
+                    if exc.errno != errno.ECONNREFUSED:
+                        raise RuntimeError("usage socket liveness unavailable") from None
+                    break
+                # tmux kill-server returns before the server exits; a live server
+                # holds this connection open, an exiting one drops it.
+                endpoint.settimeout(2)
+                try:
+                    dropped = endpoint.recv(1) == b""
+                except OSError:
+                    dropped = False
+                if attempt or not dropped:
+                    raise RuntimeError("usage socket still live")
         if unchanged():
             os.unlink(name, dir_fd=fd)
     finally:

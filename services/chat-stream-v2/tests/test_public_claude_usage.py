@@ -263,6 +263,26 @@ def test_live_socket_is_preserved(owned_probe_socket):
     assert path.exists()
 
 
+def test_endpoint_that_dies_after_kill_server_returns_is_removed(owned_probe_socket, monkeypatch):
+    # tmux kill-server returns before the server exits; the first connect is then dropped.
+    import errno
+    path, captured = owned_probe_socket()
+    connects = []
+    class Endpoint:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def connect(self, value):
+            connects.append(value)
+            if len(connects) > 1:
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic exited server")
+        def recv(self, size):
+            return b""
+    monkeypatch.setattr(probe.unix_socket, "socket", lambda *args: Endpoint())
+    probe._remove_dead_probe_socket(captured)
+    assert len(connects) == 2 and not path.exists()
+
+
 @pytest.mark.parametrize("replacement", ["socket", "file", "symlink", "directory"])
 def test_changed_entry_or_parent_is_preserved(owned_probe_socket, replacement):
     path, captured = owned_probe_socket()
