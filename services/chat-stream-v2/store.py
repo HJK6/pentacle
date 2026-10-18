@@ -1428,10 +1428,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         # source_generation, enabled_default, name).
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
-        self._fd_turn_budget_config = None
-        self._fd_turn_budget_binding = {}
-        self._fd_turn_budget_archive = None
-        self._fd_opened_generations = {}
 
     @property
     def path(self) -> str:
@@ -2518,732 +2514,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             )
         return previous or None
 
-    # -- observation-only front-desk turn budget ---------------------------
-
-    def configure_fd_turn_budget(self, *, config, env_binding, archive_path=None) -> None:
-        """Observer-off skips all reads; delivery-off alone remains record-only."""
-        from fd_turn_budget import FdTurnBudgetConfig
-        if not isinstance(config, FdTurnBudgetConfig):
-            raise TypeError("FdTurnBudgetConfig required")
-        if not hasattr(self, "_fd_config_lock"):
-            self._fd_config_lock = threading.RLock()
-        with self._fd_config_lock:
-            self._fd_config_revision = getattr(self, "_fd_config_revision", 0) + 1
-            self._fd_turn_budget_config = config if config.observer_enabled else None
-            self._fd_turn_budget_binding = dict(env_binding)
-            self._fd_turn_budget_archive = str(archive_path) if archive_path else None
-
-    @staticmethod
-    def _fd_recovery_key(binding):
-        # Exact tuple encoding: neither separators in a component nor a rebind
-        # revision can change or collide with this lifecycle's spent claim.
-        encoded = json.dumps([binding["stream_id"], binding["generation"], binding["lifecycle"]],
-                             ensure_ascii=True, separators=(",", ":"))
-        return "fd_turn_budget.recovery:" + hashlib.sha256(encoded.encode()).hexdigest()
-
-    @staticmethod
-    def _fd_encode(state):
-        return json.dumps(state, sort_keys=True, separators=(",", ":"))
-
-    @staticmethod
-    def _fd_recovery_value(raw):
-        try:
-            value = json.loads(raw)
-            if (not isinstance(value, dict) or value.get("spent") != 100000
-                    or type(value.get("used")) is not int or not 0 <= value["used"] <= 100000
-                    or value.get("status") not in {"claimed", "succeeded", "failed"}
-                    or type(value.get("usage_complete")) is not bool):
-                raise ValueError("invalid spent claim")
-            return value
-        except (TypeError, ValueError):
-            return {"spent": 100000, "used": 0, "status": "failed", "usage_complete": False,
-                    "reason": "recovery_claim_corrupt"}
-
-    @staticmethod
-    def _fd_unknown(state, reason):
-        result = {k: v for k, v in state.items() if k not in {
-            "pending_state", "pending_proofs", "pending_receipts", "history_proofs"}}
-        result["continuity_gap"] = reason
-        return result
-
-    async def _fd_retry_pending(self, sid):
-        """An exact durable receipt admits at most one off-path recovery for K.
-
-        Duplicate callbacks perform only fixed-row indexed metadata reads.
-        The separate K-addressed kv claim survives any cursor replacement.
-        """
-        if self._fd_turn_budget_config is None or not isinstance(sid, str):
-            return
-        from fd_turn_budget import decode_state, RecoveryBudget
-        expected_revision = self._fd_config_revision
-        def claim_conn(conn):
-            row = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_cursor_key(sid),)).fetchone()
-            if row is None:
-                return None
-            try:
-                value = json.loads(row[0])
-                state = decode_state(row[0], sid, value["generation"], value["lifecycle"])
-            except (TypeError, ValueError, KeyError):
-                return None
-            if state.get("continuity_gap") != "peer_provenance_pending" or "pending_state" not in state:
-                return None
-            binding = self._fd_binding_conn(conn, sid)
-            if (not binding or binding.get("evidence_gap")
-                    or binding["generation"] != state["generation"] or binding["lifecycle"] != state["lifecycle"]):
-                return None
-            recovery_key = self._fd_recovery_key(binding)
-            prior = conn.execute("SELECT v FROM kv WHERE k=?", (recovery_key,)).fetchone()
-            if prior is not None:
-                return None
-            receipts = state.get("pending_receipts")
-            if not receipts or any(not self._fd_receipt_conn(conn, fact, binding) for fact in receipts):
-                return None
-            recovery = {"spent": 100000, "used": 0, "status": "claimed", "usage_complete": False}
-            state = {**state, "recovery": recovery, "continuity_gap": "recovery_incomplete"}
-            encoded = self._fd_encode(state)
-            conn.execute("BEGIN")
-            try:
-                inserted = conn.execute("INSERT OR IGNORE INTO kv(k,v) VALUES (?,?)",
-                    (recovery_key, self._fd_encode(recovery))).rowcount
-                if not inserted:
-                    conn.rollback()
-                    return None
-                conn.execute("UPDATE kv SET v=? WHERE k=? AND v=?",
-                    (encoded, self._fd_cursor_key(sid), row[0]))
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-            return {"binding": binding, "state": state, "encoded": encoded,
-                    "recovery_key": recovery_key, "config": self._fd_turn_budget_config,
-                    "config_revision": self._fd_config_revision,
-                    "archive_path": self._fd_turn_budget_archive or str(__import__("pathlib").Path(self.path).with_name("sessions_archive.db"))}
-        def claim(conn):
-            with self._fd_config_lock:
-                if self._fd_turn_budget_config is None or self._fd_config_revision != expected_revision:
-                    return None
-                return claim_conn(conn)
-        snapshot = await self.submit(claim)
-        if snapshot is None:
-            return
-        budget = RecoveryBudget()
-        snapshot["budget"] = budget
-        try:
-            result = await self._fd_prepare(snapshot)
-        except asyncio.CancelledError:
-            # The claim is already durable. A cancelled/crashed job cannot be
-            # retried and cannot claim that its final usage was observed.
-            raise
-        except Exception:
-            result = {"reason": "recovery_failed"}
-        await self.submit(lambda conn: self._fd_commit_recovery(conn, snapshot, result))
-
-    def _fd_commit_recovery(self, conn, snapshot, result):
-        """The Store alone owns the final atomic state/effect transaction."""
-        budget, binding = snapshot["budget"], snapshot["binding"]
-        sid, key = binding["stream_id"], self._fd_cursor_key(binding["stream_id"])
-        reason = result.get("reason")
-        if result.get("archive_sources"):
-            # Separate archive facts cannot be fenced by the Store-owned hot
-            # transaction. Never promote an unfenced archive read into proof.
-            reason = "recovery_archive_fence_unavailable"
-        state = None
-        with self._fd_config_lock:
-            try:
-                same = (self._fd_turn_budget_config is snapshot["config"]
-                        and self._fd_config_revision == snapshot["config_revision"])
-                if same:
-                    budget.attach(conn)
-                    conn.execute("BEGIN")
-                    current = conn.execute("SELECT v=? FROM kv WHERE k=?", (snapshot["encoded"], key)).fetchone()
-                    same = (self._fd_binding_conn(conn, sid) == binding
-                            and current is not None and current[0])
-                if same and not reason:
-                    latest = conn.execute("SELECT event_id FROM session_event_tail WHERE stream_id=? "
-                        "AND session_created_at=? ORDER BY event_id DESC LIMIT 1", (sid, binding["lifecycle"])).fetchone()
-                    same = bool(latest and latest[0] == snapshot["state"]["cursor"])
-                    for proof in result["hot_sources"]:
-                        if conn.execute("SELECT 1 FROM session_event_tail WHERE event_id=? AND identity=? AND event_json=? "
-                                "AND stream_id=? AND session_created_at=?", (*proof, sid, binding["lifecycle"])).fetchone() is None:
-                            same = False
-                            break
-                    # Receipt facts are revalidated too. This remains fixed-row,
-                    # indexed hot evidence and uses the same remaining allowance.
-                    for sql, params in result["receipt_checks"]:
-                        if conn.execute(sql, params).fetchone() is None:
-                            same = False
-                            break
-                if same:
-                    state = self._fd_unknown(snapshot["state"], reason) if reason else result["state"]
-                    if not reason:
-                        self._fd_effects_conn(conn, binding=binding, crossings=result["crossings"])
-                else:
-                    reason = reason or "recovery_stale"
-            except Exception:
-                conn.set_progress_handler(None, 0)
-                conn.rollback()
-                reason = "recovery_allowance_exhausted" if budget.exhausted else "recovery_failed"
-                state = None
-            finally:
-                # Terminal accounting must remain durable even when no evidence
-                # work can be admitted. These fixed-row metadata writes neither
-                # renew the allowance nor perform further evidence reads.
-                conn.set_progress_handler(None, 0)
-            record = {"spent": 100000, "used": budget.used,
-                      "status": "failed" if reason else "succeeded", "usage_complete": True}
-            if reason:
-                record["reason"] = reason
-            if not conn.in_transaction:
-                conn.execute("BEGIN")
-            try:
-                if state is not None:
-                    state["recovery"] = record
-                    conn.execute("UPDATE kv SET v=? WHERE k=? AND v=?", (self._fd_encode(state), key, snapshot["encoded"]))
-                conn.execute("UPDATE kv SET v=? WHERE k=?", (self._fd_encode(record), snapshot["recovery_key"]))
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-
-    @staticmethod
-    def _fd_cursor_key(stream_id: str) -> str:
-        return "fd_turn_budget.cursor:" + hashlib.sha256(stream_id.encode()).hexdigest()
-
-    def _fd_binding_conn(self, conn, stream_id):
-        try:
-            binding = _binding_conn(conn, self._fd_turn_budget_binding, include_target=False)
-        except ValueError as exc:
-            if str(exc) != "assistant_binding_corrupt":
-                raise
-            return {"stream_id": stream_id, "generation": "", "revision": -1,
-                    "lifecycle": "", "evidence_gap": "assistant_binding_corrupt"}
-        if binding["stream_id"] != stream_id or not binding["generation"]:
-            return None
-        host, _, name = stream_id.partition(":")
-        row = conn.execute("SELECT s.created_at,s.status,g.generation FROM sessions s "
-            "JOIN v2_session_generations g ON g.host=s.host AND g.session_name=s.session_name "
-            "WHERE s.host=? AND s.session_name=?", (host, name)).fetchone()
-        if row is None or row["status"] != "open" or row["generation"] != binding["generation"]:
-            return None
-        return {**binding, "lifecycle": str(row["created_at"] or "")}
-
-    async def fd_turn_budget_status(self, stream_id: str) -> dict[str, Any] | None:
-        raw = await self.get(self._fd_cursor_key(stream_id))
-        if raw is None:
-            return None
-        from fd_turn_budget import decode_state
-        try:
-            value = json.loads(raw)
-            if isinstance(value, dict) and set(value) == {"continuity_gap"} and isinstance(value["continuity_gap"], str):
-                return value
-            if not isinstance(value, dict):
-                raise ValueError("cursor object required")
-            state = decode_state(raw, stream_id, str(value.get("generation")), str(value.get("lifecycle")))
-            if "recovery" in state or "pending_state" in state:
-                saved = await self.get(self._fd_recovery_key({"stream_id": stream_id,
-                    "generation": state["generation"], "lifecycle": state["lifecycle"]}))
-                if saved:
-                    recovery = self._fd_recovery_value(saved)
-                    state["recovery"] = recovery
-                    if state["continuity_gap"] in {"peer_provenance_pending", "recovery_incomplete"}:
-                        state = self._fd_unknown(state, "recovery_incomplete")
-            return state
-        except (TypeError, ValueError):
-            return {"continuity_gap": "cursor_corrupt"}
-
-    async def fd_turn_budget_notice_valid(self, notice: dict[str, Any]) -> bool:
-        """Read the same exact target/revision predicate again at delivery."""
-        if self._fd_turn_budget_config is None or not self._fd_turn_budget_config.enabled:
-            return False
-        try:
-            meta = notice.get("metadata") or {}
-            meta = json.loads(meta) if isinstance(meta, str) else meta
-            if not isinstance(meta, dict):
-                return False
-            expected = meta["fd_turn_budget_binding"]
-            if not isinstance(expected, dict):
-                return False
-        except (TypeError, ValueError, KeyError):
-            return False
-        def check(conn):
-            current = self._fd_binding_conn(conn, str(notice.get("recipient_stream_id") or ""))
-            return bool(current and not current.get("evidence_gap") and all(current.get(k) == expected.get(k)
-                                       for k in ("stream_id", "generation", "revision", "lifecycle")))
-        return await self.submit(check)
-
-    async def _fd_prepare(self, snapshot):
-        """Only receipt-eligible, already-charged recovery reaches a reader."""
-        return await asyncio.to_thread(self._fd_archive_evidence, snapshot)
-
-    def _fd_prepare_conn(self, conn, stream_id):
-        """Read admitted-source metadata inside its committing transaction."""
-        from fd_turn_budget import decode_state, initial_state
-        binding = self._fd_binding_conn(conn, stream_id)
-        if binding is None:
-            return None
-        row = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_cursor_key(stream_id),)).fetchone()
-        state = initial_state(stream_id, binding["generation"], binding["lifecycle"])
-        try:
-            old = json.loads(row[0]) if row else None
-            if old and old.get("generation") == binding["generation"]:
-                state = decode_state(row[0], stream_id, binding["generation"], binding["lifecycle"])
-            elif self._fd_opened_generations.get(stream_id, (None,))[0] == binding["generation"]:
-                state["origin_cursor"] = self._fd_opened_generations[stream_id][1]
-            else:
-                state["continuity_gap"] = "ordinal_history_unproven"
-        except (TypeError, ValueError, AttributeError):
-            state["continuity_gap"] = "cursor_corrupt_or_lifecycle_unproved"
-        if binding.get("evidence_gap"):
-            state["continuity_gap"] = binding["evidence_gap"]
-        return binding, state, row[0] if row else None
-
-    def _fd_archive_evidence(self, snapshot):
-        """Single read-only recovery; archive access is exclusively event_id PK."""
-        from pathlib import Path
-        from contextlib import ExitStack, closing
-        from fd_turn_budget import decode_state, FdTurnBudgetConfig, observe
-        budget, binding, state = snapshot["budget"], snapshot["binding"], snapshot["state"]
-        if self.path in {"", ":memory:"}:
-            return {"reason": "recovery_unavailable"}
-        hot_sources, archive_sources = [], []
-        budget.receipt_checks = []
-        try:
-            with ExitStack() as stack:
-                hot = stack.enter_context(closing(sqlite3.connect(Path(self.path).absolute().as_uri() + "?mode=ro", uri=True, timeout=0.1)))
-                hot.row_factory = sqlite3.Row
-                budget.attach(hot)
-                hot.execute("PRAGMA query_only=ON")
-                hot.execute("BEGIN")
-                readers = [hot]
-                archive = None
-                def source(proof):
-                    nonlocal archive
-                    for index in range(2):
-                        if index == 1:
-                            path = Path(snapshot["archive_path"])
-                            if not path.is_file():
-                                break
-                            if archive is None:
-                                archive = stack.enter_context(closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=0.1)))
-                                archive.row_factory = sqlite3.Row
-                                budget.attach(archive)
-                                archive.execute("PRAGMA query_only=ON")
-                                archive.execute("BEGIN")
-                                readers.append(archive)
-                        reader = readers[index]
-                        size = reader.execute("SELECT length(CAST(event_json AS BLOB)),length(CAST(identity AS BLOB)) FROM session_event_tail "
-                            "WHERE event_id=? AND stream_id=? AND session_created_at=?",
-                            (proof[0], binding["stream_id"], binding["lifecycle"])).fetchone()
-                        if size is None:
-                            continue
-                        # One charge for decoding and one for hashing, both
-                        # reserved before SQLite fetches the raw body.
-                        budget.charge(2 * size[0] + (size[1] or 0))
-                        row = reader.execute("SELECT identity,CAST(event_json AS BLOB) AS body FROM session_event_tail "
-                            "WHERE event_id=? AND stream_id=? AND session_created_at=?",
-                            (proof[0], binding["stream_id"], binding["lifecycle"])).fetchone()
-                        if row is None or row["identity"] != proof[1] or hashlib.sha256(row["body"]).hexdigest() != proof[2]:
-                            raise ValueError("pending source changed")
-                        raw = row["body"].decode("utf-8")
-                        event = json.loads(raw)
-                        if not isinstance(event, dict):
-                            raise ValueError("pending source corrupt")
-                        if index == 0:
-                            hot_sources.append((proof[0], proof[1], raw))
-                        else:
-                            archive_sources.append(proof)
-                        return event
-                    raise ValueError("pending source unavailable")
-                checkpoint = decode_state(self._fd_encode(state["pending_state"]), binding["stream_id"],
-                    binding["generation"], binding["lifecycle"])
-                consumed = set()
-                for proof in checkpoint.get("history_proofs", []):
-                    event = source(proof)
-                    boundary, gap = self._fd_dispatch_conn(hot, event, proof[1], binding, budget=budget)
-                    if gap:
-                        raise ValueError("prior dispatch unproved")
-                    if boundary:
-                        consumed.add(boundary)
-                crossings = []
-                for proof in state["pending_proofs"]:
-                    event = source(proof)
-                    boundary, gap = self._fd_dispatch_conn(hot, event, proof[1], binding, budget=budget)
-                    if gap:
-                        raise ValueError("pending receipt unproved")
-                    if boundary and boundary in consumed:
-                        checkpoint.update(cursor=proof[0], cursor_identity=proof[1])
-                    else:
-                        if boundary:
-                            consumed.add(boundary)
-                        config = FdTurnBudgetConfig(snapshot["config"].calls, snapshot["config"].seconds, proof[3])
-                        checkpoint, crossing = observe(event, checkpoint, config=config, identity=proof[1],
-                            cursor=proof[0], boundary=boundary)
-                        if crossing:
-                            crossings.append(crossing)
-                    checkpoint.setdefault("history_proofs", []).append(proof)
-                    if len(checkpoint["history_proofs"]) > 128:
-                        raise ValueError("history exceeds bound")
-                    checkpoint["cursor_hash"] = proof[2]
-                for crossing in crossings:
-                    if crossing["turn_id"][2] != checkpoint["ordinal"]:
-                        crossing.update(record_only=True, notice_suppressed_reason="completed_provenance_recovery")
-                if checkpoint["continuity_gap"]:
-                    raise ValueError("recovery cannot heal an independent gap")
-                return {"state": checkpoint, "crossings": crossings, "hot_sources": hot_sources, "archive_sources": archive_sources, "receipt_checks": budget.receipt_checks}
-        except (sqlite3.Error, OSError, TypeError, ValueError, KeyError):
-            return {"reason": "recovery_allowance_exhausted" if budget.exhausted else "pending_provenance_history_unproved"}
-
-    @staticmethod
-    def _fd_peer_fact(event):
-        from claude_jsonl_norm import _parse_peer_tell
-        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
-        if raw.get("is_sidechain") is True:
-            return None
-        peer = _parse_peer_tell(str(event.get("text") or "")) if event.get("kind") == "USER" else None
-        anchor = raw.get("tell_id") if event.get("kind") == "TELL" else (peer or {}).get("tell_id")
-        if not anchor:
-            return None
-        body = str(event.get("text") or "") if event.get("kind") == "TELL" else peer.get("payload", "")
-        return {"anchor": str(anchor), "sender": raw.get("sender") if event.get("kind") == "TELL" else peer.get("sender"),
-                "wire_digest": _send_wire_digest(body), "body_digest": hashlib.sha256(body.encode()).hexdigest(),
-                "payload_digest": hashlib.sha256(f"{event.get('stream_id')}\0{body}".encode()).hexdigest(),
-                "receipt_id": event.get("receipt_id")}
-
-    def _fd_receipt_conn(self, conn, fact, binding, budget=None):
-        """Exact indexed receipt proof; never source history or archive lookup."""
-        from claude_jsonl_norm import _parse_peer_tell
-        if budget:
-            size = conn.execute("SELECT length(CAST(state AS BLOB))+length(CAST(COALESCE(from_stream_id,'') AS BLOB))"
-                "+length(CAST(wire_digest AS BLOB))+length(CAST(receipt_id AS BLOB)) FROM v2_send_receipts "
-                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",
-                (binding["stream_id"], fact["anchor"])).fetchone()
-            if size:
-                budget.charge(size[0])
-        receipt = conn.execute("SELECT rowid,state,actor_trusted,from_stream_id,wire_digest,receipt_id "
-            "FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",
-            (binding["stream_id"], fact["anchor"])).fetchone()
-        if (receipt and receipt["state"] != "not_landed" and receipt["actor_trusted"]
-                and receipt["from_stream_id"] == fact["sender"] and receipt["wire_digest"] == fact["wire_digest"]):
-            if budget:
-                budget.receipt_checks.append(("SELECT 1 FROM v2_send_receipts WHERE rowid=? AND state=? "
-                    "AND actor_trusted=? AND from_stream_id=? AND wire_digest=? AND receipt_id=? "
-                    "AND rowid=(SELECT rowid FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1)",
-                    (receipt["rowid"], receipt["state"], receipt["actor_trusted"], receipt["from_stream_id"],
-                     receipt["wire_digest"], receipt["receipt_id"], binding["stream_id"], fact["anchor"])))
-            return True
-        row = conn.execute("SELECT length(CAST(reply AS BLOB)) FROM v2_tell_deliveries WHERE tell_id=?",
-            (fact["anchor"],)).fetchone()
-        if row is None or row[0] > 65536:
-            return False
-        if budget is None:
-            return True
-        budget.charge(row[0] * 2)
-        row = conn.execute("SELECT CAST(reply AS BLOB) FROM v2_tell_deliveries WHERE tell_id=?", (fact["anchor"],)).fetchone()
-        try:
-            encoded = row[0].decode()
-            envelope = json.loads(encoded)
-            if not isinstance(envelope, dict) or not isinstance(envelope.get("delivery"), dict):
-                return False
-            delivery = envelope["delivery"]
-            peer = _parse_peer_tell(str(delivery.get("text") or ""))
-            valid = bool(peer and delivery.get("to_stream_id") == binding["stream_id"]
-                and envelope.get("payload_digest") == fact["payload_digest"]
-                and peer.get("sender") == fact["sender"] and peer.get("tell_id") == fact["anchor"]
-                and hashlib.sha256(str(peer.get("payload") or "").encode()).hexdigest() == fact["body_digest"])
-            if valid:
-                budget.receipt_checks.append(("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=? AND reply=?", (fact["anchor"], encoded)))
-            return valid
-        except (ValueError, TypeError, AttributeError):
-            return False
-
-    def _fd_dispatch_conn(self, conn, event, identity, binding, budget=None):
-        from claude_jsonl_norm import _classify_user_string, _parse_peer_tell
-        from codex_rollout_norm import _is_primary_address
-        from submission_events import submission_text_matches
-        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
-        kind, text = event.get("kind"), str(event.get("text") or "")
-        if kind not in {"USER", "TELL"} or raw.get("is_sidechain") is True:
-            return None, None
-        if raw.get("user_delivery_state") in {"returned_to_prompt", "interrupted"} or raw.get("returned_to_prompt") is True:
-            return None, None
-        if kind == "USER" and _classify_user_string(text) == "system":
-            return None, None
-        if (kind == "TELL" and event.get("provider") == "codex" and raw.get("transport") == "codex-rollout"
-                and raw.get("codex_record_type") == "response_item" and raw.get("codex_payload_type") == "agent_message"
-                and _is_primary_address(str(raw.get("recipient") or ""))):
-            return "native:" + str(identity), None
-        if budget:
-            # Any body hashing in dispatch proof is covered before it runs.
-            budget.charge(len(text.encode()))
-        marker = re.match(r"^\[pentacle-notice:([^\]\s]+)\]", text)
-        if marker:
-            if budget:
-                sizes = conn.execute("SELECT length(CAST(body AS BLOB)),length(CAST(metadata AS BLOB)) "
-                    "FROM v2_outbound_notices WHERE tell_id=? AND recipient_stream_id=?",
-                    (marker.group(1), binding["stream_id"])).fetchone()
-                if sizes is None:
-                    return None, "notice_provenance_unavailable"
-                budget.charge(2 * (sizes[0] or 0) + (sizes[1] or 0))
-            notice = conn.execute("SELECT body,metadata FROM v2_outbound_notices WHERE tell_id=? AND recipient_stream_id=?",
-                (marker.group(1), binding["stream_id"])).fetchone()
-            if notice is None or not submission_text_matches(event, notice["body"]):
-                return None, "notice_provenance_unavailable"
-            try:
-                meta = json.loads(notice["metadata"] or "{}")
-            except (TypeError, ValueError):
-                return None, "notice_provenance_corrupt"
-            if not isinstance(meta, dict) or ("fd_turn_budget_binding" in meta and not isinstance(meta["fd_turn_budget_binding"], dict)):
-                return None, "notice_provenance_corrupt"
-            generations = [meta[k] for k in ("root_generation", "recipient_generation", "producer_session_generation") if meta.get(k)]
-            if meta.get("fd_turn_budget_binding"):
-                generations.append(meta["fd_turn_budget_binding"].get("generation"))
-            if any(g != binding["generation"] for g in generations):
-                return None, "notice_generation_unproved"
-            if budget:
-                budget.receipt_checks.append(("SELECT 1 FROM v2_outbound_notices WHERE tell_id=? AND recipient_stream_id=? AND body=? AND metadata=?",
-                    (marker.group(1), binding["stream_id"], notice["body"], notice["metadata"])))
-            return "notice:" + marker.group(1), None
-        peer = _parse_peer_tell(text) if kind == "USER" else None
-        anchor = raw.get("tell_id") if kind == "TELL" else (peer or {}).get("tell_id")
-        sender = raw.get("sender") if kind == "TELL" else (peer or {}).get("sender")
-        body = text if kind == "TELL" else (peer or {}).get("payload", text)
-        if anchor and budget:
-            budget.charge(3 * len(text.encode()) + len(binding["stream_id"].encode()) + 1)
-            fact = self._fd_peer_fact(event)
-            if fact and self._fd_receipt_conn(conn, fact, binding, budget=budget):
-                return "peer:" + str(anchor), None
-            return None, "peer_provenance_unavailable"
-        if anchor:
-            receipt = conn.execute("SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? "
-                "ORDER BY rowid DESC LIMIT 1", (binding["stream_id"], anchor)).fetchone()
-            if (receipt and receipt["state"] != "not_landed" and receipt["actor_trusted"]
-                    and receipt["from_stream_id"] == sender
-                    and (receipt["wire_digest"] == _send_wire_digest(body)
-                         or (event.get("receipt_id") == receipt["receipt_id"] and body == receipt["display_text"]))):
-                return "peer:" + str(anchor), None
-            row = conn.execute("SELECT reply FROM v2_tell_deliveries WHERE tell_id=?", (anchor,)).fetchone()
-            try:
-                envelope = json.loads(row[0]) if row else {}
-                if not isinstance(envelope, dict) or not isinstance(envelope.get("delivery", {}), dict):
-                    return None, "peer_provenance_corrupt"
-                delivery = envelope.get("delivery", {})
-                delivered_peer = _parse_peer_tell(str(delivery.get("text") or ""))
-            except (TypeError, ValueError):
-                delivered_peer = None
-            if (delivered_peer and delivery.get("to_stream_id") == binding["stream_id"]
-                    and envelope.get("payload_digest") == hashlib.sha256(f"{binding['stream_id']}\0{body}".encode()).hexdigest()
-                    and delivered_peer.get("sender") == sender and delivered_peer.get("tell_id") == anchor
-                    and delivered_peer.get("payload") == body):
-                return "peer:" + str(anchor), None
-            return None, "peer_provenance_unavailable"
-        if kind == "TELL" or text.startswith("[from "):
-            return None, "inbound_provenance_unavailable"
-        return "user:" + str(identity), None
-
-    def _fd_history_conn(self, conn, state, binding):
-        """Prove the complete retained source interval within the 128-row bound.
-
-        A hot miss is never evidence of absence in an archive. The saved exact
-        source proofs make missing prefixes and interior rows detectable.
-        """
-        proofs = state.get("history_proofs")
-        if proofs is None or len(proofs) > 128 or state.get("history_truncated"):
-            return None, "dispatch_proof_delta_exceeds_bound"
-        rows = []
-        total = 0
-        for proof in proofs:
-            size = conn.execute("SELECT length(CAST(event_json AS BLOB)),identity FROM session_event_tail "
-                "WHERE event_id=? AND stream_id=? AND session_created_at=?",
-                (proof[0], binding["stream_id"], binding["lifecycle"])).fetchone()
-            if size is None or size[1] != proof[1]:
-                return None, "cursor_evidence_unavailable"
-            total += size[0]
-            if total > 100000:
-                return None, "retained_history_oversized"
-            row = conn.execute("SELECT event_id,event_json,identity FROM session_event_tail WHERE event_id=?", (proof[0],)).fetchone()
-            if hashlib.sha256(row["event_json"].encode()).hexdigest() != proof[2]:
-                return None, "cursor_evidence_unavailable"
-            try:
-                event = json.loads(row["event_json"])
-                if not isinstance(event, dict):
-                    raise ValueError()
-            except (TypeError, ValueError):
-                return None, "history_corrupt"
-            rows.append((row, event))
-        return rows, None
-
-    def _fd_prior_dispatch_conn(self, conn, boundary, binding, rows):
-        for row, event in rows:
-            previous, gap = self._fd_dispatch_conn(conn, event, row["identity"], binding)
-            if gap:
-                return False, "prior_dispatch_provenance_unproved"
-            if previous == boundary:
-                return True, None
-        return False, None
-
-    def _fd_pending_conn(self, state, event, proof):
-        """Retain exact admitted facts only; ingestion never retries recovery."""
-        proofs = state["pending_proofs"]
-        if len(proofs) >= 128:
-            return self._fd_unknown(state, "pending_provenance_history_unproved")
-        proofs.append(proof)
-        fact = self._fd_peer_fact(event)
-        if fact and fact not in state["pending_receipts"]:
-            state["pending_receipts"].append(fact)
-        state.update(cursor=proof[0], cursor_identity=proof[1], cursor_hash=proof[2])
-        return state
-
-    def _fd_observe_conn(self, conn, *, stream_id, event, identity, event_id, prepared=None):
-        if self._fd_turn_budget_config is None:
-            return
-        with self._fd_config_lock:
-            return self._fd_observe_admitted_conn(conn, stream_id=stream_id, event=event,
-                identity=identity, event_id=event_id)
-
-    def _fd_observe_admitted_conn(self, conn, *, stream_id, event, identity, event_id):
-        from fd_turn_budget import observe, turn_key
-        if self._fd_turn_budget_config is None:
-            return
-        config = self._fd_turn_budget_config
-        snapshot = self._fd_prepare_conn(conn, stream_id)
-        if snapshot is None:
-            return
-        binding, state, original = snapshot
-        # Preparation and source admission share this transaction. In-memory
-        # reconfiguration may still occur concurrently, so fence it too.
-        if self._fd_turn_budget_config is not config or self._fd_binding_conn(conn, stream_id) != binding:
-            return
-        key = self._fd_cursor_key(stream_id)
-        if state["continuity_gap"] and state["continuity_gap"] != "peer_provenance_pending":
-            try:
-                unchanged = original is not None and json.loads(original) == state
-            except (TypeError, ValueError):
-                unchanged = False
-            if not unchanged:
-                conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-            return  # A saved permanent gap does not read history or receipts.
-        if event_id <= state["cursor"]:
-            return
-        encoded = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-        proof = [event_id, identity, hashlib.sha256(encoded.encode()).hexdigest(), config.enabled]
-        if not isinstance(identity, str) or not 0 < len(identity) <= 2048:
-            state = self._fd_unknown(state, "source_identity_missing_or_invalid")
-            conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-            return
-        if "pending_state" in state:
-            saved = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_recovery_key(binding),)).fetchone()
-            if saved:
-                state = self._fd_unknown(state, "recovery_spent")
-                state["recovery"] = self._fd_recovery_value(saved[0])
-            else:
-                state = self._fd_pending_conn(state, event, proof)
-            conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-            return
-        if not state["cursor"]:
-            saved = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_recovery_key(binding),)).fetchone()
-            if saved:
-                state = self._fd_unknown(state, "recovery_spent")
-                state["recovery"] = self._fd_recovery_value(saved[0])
-                conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-                return
-            origin = state.get("origin_cursor")
-            if type(origin) is not int or event_id <= origin:
-                state = self._fd_unknown(state, "ordinal_history_unproven")
-            else:
-                intervening = conn.execute("SELECT event_id,stream_id,session_created_at FROM session_event_tail "
-                    "WHERE event_id>? AND event_id<? ORDER BY event_id LIMIT 129", (origin, event_id)).fetchall()
-                if (event_id - origin - 1 > 128 or len(intervening) != event_id - origin - 1
-                        or any(r["event_id"] != origin + i + 1 or
-                               (r["stream_id"] == stream_id and r["session_created_at"] == binding["lifecycle"])
-                               for i, r in enumerate(intervening))):
-                    state = self._fd_unknown(state, "ordinal_history_unproven")
-                else:
-                    state["history_proofs"] = []
-        else:
-            # The latest retained row must be this cursor or its one valid
-            # derived crossing. Other admitted but unobserved source work gaps.
-            previous = conn.execute("SELECT event_id,identity FROM session_event_tail WHERE stream_id=? "
-                "AND session_created_at=? AND event_id<? ORDER BY event_id DESC LIMIT 2",
-                (stream_id, binding["lifecycle"], event_id)).fetchall()
-            latest = next((r for r in previous if r["identity"] != turn_key(stream_id, binding["generation"], state["ordinal"])), None)
-            if latest is None or latest["event_id"] != state["cursor"]:
-                state = self._fd_unknown(state, "cursor_evidence_unavailable" if latest is None else "unobserved_history_continuity_unproved")
-        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
-        harmless = (raw.get("is_sidechain") is True or event.get("kind") in {"SYSTEM", "THINKING"}
-                    or state["crossed"] and event.get("kind") in {"ASSIST_TEXT", "TOOL_USE", "TOOL_RESULT"})
-        if harmless and state["cursor"] and not state["continuity_gap"]:
-            # No identity absence or older dispatch interval is needed to prove
-            # that excluded/already-crossed work cannot create another effect.
-            # Keep the cursor's exact proof; don't impose a generation-length
-            # cutoff on such rows. A later boundary must prove older history.
-            size = conn.execute("SELECT length(CAST(event_json AS BLOB)) FROM session_event_tail WHERE event_id=?",
-                (state["cursor"],)).fetchone()
-            floor = None
-            if size and size[0] <= 100000:
-                floor = conn.execute("SELECT identity,event_json FROM session_event_tail WHERE event_id=?", (state["cursor"],)).fetchone()
-            if (floor is None or floor[0] != state["cursor_identity"]
-                    or hashlib.sha256(floor[1].encode()).hexdigest() != state.get("cursor_hash")):
-                state = self._fd_unknown(state, "cursor_evidence_unavailable")
-            else:
-                state, _ = observe(event, state, config=config, identity=identity, cursor=event_id)
-                history = [*state.get("history_proofs", []), proof]
-                state["history_truncated"] = bool(state.get("history_truncated") or len(history) > 128)
-                state["history_proofs"] = history[-128:]
-                state["cursor_hash"] = proof[2]
-                if state["continuity_gap"]:
-                    state = self._fd_unknown(state, state["continuity_gap"])
-                conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-                return
-        rows, history_gap = (None, None) if state["continuity_gap"] else self._fd_history_conn(conn, state, binding)
-        if history_gap:
-            state = self._fd_unknown(state, history_gap)
-        if not state["continuity_gap"] and len(state["history_proofs"]) >= 128:
-            state = self._fd_unknown(state, "dispatch_proof_delta_exceeds_bound")
-        crossing = None
-        if not state["continuity_gap"]:
-            boundary, gap = self._fd_dispatch_conn(conn, event, identity, binding)
-            if gap == "peer_provenance_unavailable":
-                spent = conn.execute("SELECT v FROM kv WHERE k=?", (self._fd_recovery_key(binding),)).fetchone()
-                if spent:
-                    state = self._fd_unknown(state, "recovery_spent")
-                    state["recovery"] = self._fd_recovery_value(spent[0])
-                else:
-                    fact = self._fd_peer_fact(event)
-                    state = {**state, "pending_state": dict(state), "continuity_gap": "peer_provenance_pending",
-                             "pending_proofs": [proof], "pending_receipts": [fact] if fact else []}
-                    state.update(cursor=event_id, cursor_identity=identity, cursor_hash=proof[2])
-            else:
-                prior, prior_gap = self._fd_prior_dispatch_conn(conn, boundary, binding, rows) if boundary else (False, None)
-                if prior:
-                    state.update(cursor=event_id, cursor_identity=identity)
-                else:
-                    state, crossing = observe(event, state, config=config, identity=identity, cursor=event_id,
-                        boundary=boundary, provenance_gap=gap or prior_gap)
-                state.setdefault("history_proofs", []).append(proof)
-                state["cursor_hash"] = proof[2]
-        if state["continuity_gap"] and state["continuity_gap"] != "peer_provenance_pending":
-            state = self._fd_unknown(state, state["continuity_gap"])
-        self._fd_effects_conn(conn, binding=binding, crossings=[crossing] if crossing else [])
-        conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, self._fd_encode(state)))
-
-    def _fd_effects_conn(self, conn, *, binding, crossings):
-        from fd_turn_budget import turn_key
-        from outbound_notices import ensure_notice_marker
-        from store_routing import _insert_outbound_notice_conn
-        stream_id = binding["stream_id"]
-        for crossing in crossings:
-            identity_key = turn_key(*crossing["turn_id"])
-            encoded = self._fd_encode(crossing)
-            cur = conn.execute("INSERT OR IGNORE INTO session_event_tail "
-                "(stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) VALUES (?,?,?,?,?,?,?)",
-                (stream_id, binding["lifecycle"], hashlib.sha256(encoded.encode()).hexdigest(), encoded,
-                 crossing["at"], time.time(), identity_key))
-            if cur.rowcount and self._fd_turn_budget_config.enabled and not crossing["record_only"]:
-                body = f"Turn budget crossed ({crossing['calls']} calls / {crossing['seconds']:g} s). Delegate the remainder and end the turn."
-                _insert_outbound_notice_conn(conn, notice_id=identity_key, kind="fd_turn_budget", dedupe_key=identity_key,
-                    recipient_stream_id=stream_id, tell_id=identity_key, body=ensure_notice_marker(identity_key, body),
-                    metadata={"turn_id": crossing["turn_id"], "fd_turn_budget_binding": binding})
-
     # -- sessions table ----------------------------------------------------
 
     async def open_session(
@@ -3457,14 +2727,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     "DELETE FROM v2_nudge_state WHERE stream_id=?",
                     (stream_id,),
                 )
-            if generation_changed and self._fd_turn_budget_config is not None:
-                budget_binding = _binding_conn(conn, self._fd_turn_budget_binding, include_target=False)
-                if budget_binding["stream_id"] == stream_id:
-                    from fd_turn_budget import initial_state
-                    cursor = initial_state(stream_id, generation, str(cols["created_at"]))
-                    cursor["origin_cursor"] = int((conn.execute("SELECT seq FROM sqlite_sequence WHERE name='session_event_tail'").fetchone() or [0])[0])
-                    conn.execute("INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)",
-                        (self._fd_cursor_key(stream_id), json.dumps(cursor, sort_keys=True, separators=(",", ":"))))
             try:
                 lifecycle_watch_conn(conn, time.time())
                 install_default_conn(conn, f"{host}:{session_name}", time.time())
@@ -3472,11 +2734,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.rollback()
                 raise
             conn.commit()
-            if generation_changed:
-                if len(self._fd_opened_generations) >= 4096:
-                    self._fd_opened_generations.clear()
-                self._fd_opened_generations[stream_id] = (generation,
-                    int((conn.execute("SELECT seq FROM sqlite_sequence WHERE name='session_event_tail'").fetchone() or [0])[0]))
             return _session_row(conn, conn.execute(
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
             ).fetchone())
@@ -3749,6 +3006,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         close_kind: str | None = None,
         reason: str | None = None,
         attribution: dict[str, Any] | None = None,
+        request_task: asyncio.Task | None = None,
     ) -> dict[str, Any] | None:
         """Close one open generation with a durable compare-and-set.
 
@@ -3853,6 +3111,11 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         lifecycle_lock = self.routing_integrity_lifecycle_lock(stream_id)
         try:
             async with lifecycle_lock:
+                # A shielded close can wait here after its requester disconnects.
+                # Without confirmed death, cancellation still prevents enqueue;
+                # once queued, the transaction and inventory follow-up must finish.
+                if request_task is not None and request_task.cancelling():
+                    raise asyncio.CancelledError
                 def transaction(conn: sqlite3.Connection) -> dict[str, Any] | None:
                     with conn:
                         return _op(conn)
@@ -4386,7 +3649,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     async def record_spawn_intent(
         self, host: str, session_name: str, payload: dict[str, Any], *,
         request_id: str | None = None, nonce: str | None = None,
-        expected_spec_sources=(), prepared_qa=None, require_work_lane: bool = False,
+        expected_spec_sources=(), prepared_qa=None,
     ) -> bool:
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
@@ -4412,9 +3675,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # and record_spawn_intent runs before payload exists.
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
-            if require_work_lane and res.get("payload") is None:
-                from work_lane_admission import require_work_lane_membership
-                require_work_lane_membership(conn, payload.get("open_fields") or {})
             prior_intent = json.loads(res.get("payload") or "{}")
             if "exchange_binding" in prior_intent:
                 prior_intent = {**payload, "exchange_binding": prior_intent["exchange_binding"]}
@@ -4634,8 +3894,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return row_id
 
         row_id = await self.submit(_op)
-        delivery = envelope.get("delivery")
-        await self._fd_retry_pending(delivery.get("to_stream_id") if isinstance(delivery, dict) else None)
         return row_id
 
     async def promote_tell_delivery(
@@ -5997,7 +5255,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             return []
 
         def _op(conn: sqlite3.Connection) -> list[int | None | _EntryDropped] | None:
-            budget_lock = None
             conn.execute("BEGIN")
             try:
                 inserted: list[int | None | _EntryDropped] = []
@@ -6070,12 +5327,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                         ),
                     )
                     source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
-                    if source_id is not None and self._fd_turn_budget_config is not None:
-                        if budget_lock is None:
-                            budget_lock = self._fd_config_lock
-                            budget_lock.acquire()
-                        self._fd_observe_conn(conn, stream_id=stream_id, event=json.loads(event_json),
-                            identity=identity, event_id=source_id)
                     if source_id is not None and self._recorded_by_other_lifecycle_conn(
                             conn, stream_id, session_created_at, identity, source_id):
                         # Re-read history of a resumed seat: the row stays for this
@@ -6105,9 +5356,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             except BaseException:
                 conn.rollback()
                 raise
-            finally:
-                if budget_lock is not None:
-                    budget_lock.release()
 
         return await self.submit(_op)
 
@@ -6177,7 +5425,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             )
 
         receipt = await self.submit(_op)
-        await self._fd_retry_pending(target)
         return receipt
 
     async def get_send_receipt(self, to_stream_id: str, request_id: str) -> dict[str, Any] | None:
@@ -6761,7 +6008,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
         event_key = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
         recorded_at = time.time()
-        budget_locks = []
 
         def _op(conn: sqlite3.Connection) -> int | None:
             conn.execute("BEGIN")
@@ -6786,12 +6032,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             # lastrowid is the AUTOINCREMENT event_id only on a real insert; an
             # IGNORE'd duplicate leaves it stale, so gate on rowcount.
             event_id = int(cur.lastrowid) if cur.rowcount > 0 else None
-            if event_id is not None and self._fd_turn_budget_config is not None:
-                budget_lock = self._fd_config_lock
-                budget_lock.acquire()
-                budget_locks.append(budget_lock)
-                self._fd_observe_conn(conn, stream_id=stream_id, event=event,
-                    identity=identity, event_id=event_id)
             if event_id is not None and self._recorded_by_other_lifecycle_conn(
                     conn, stream_id, session_created_at, identity, event_id):
                 event_id = None  # re-read history of a resumed seat; kept, not new
@@ -6804,9 +6044,6 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             except BaseException:
                 conn.rollback()
                 raise
-            finally:
-                if budget_locks:
-                    budget_locks.pop().release()
         return await self.submit(transaction)
 
     async def tell_event_identity(

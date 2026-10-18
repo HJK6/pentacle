@@ -1,173 +1,15 @@
-# Lane completion and lead admission guards
+# Lead WIP admission and lifecycle completion
 
-U1 completion enforcement checks a fresh preparation of member Custom criteria
-for lane `done` and current-generation open-lane lead closes. Preparation runs
-off the main/event-loop thread and off the Store worker. U2 spawn-WIP admission
-and the existing authority, confirmation, lifecycle, CAS and replay checks stay
-active.
+Lane completion and session close do not read spec Markdown, parse acceptance
+criteria or follow-up receipts, or fence on source-file fingerprints. Spec
+and lane tracking remain available; agents and owners are responsible for
+recording honest completion and unfinished work in their specs.
 
-Both checks use the existing `PENTACLE_MEMORY_ROOT` work tree. They neither edit
-specs nor activate policy, and add no store schema, service, CLI option, identity
-registry, reservation counter or fleet lock. A passing fixture run proves
-source behavior, not installation or activation.
-
-## Lane completion
-
-A lane transition to `done` evaluates the Custom criteria of exactly its member
-specs, plus required follow-up receipts; fresh identity resolution observes the
-namespace. Closing a session evaluates members of every open (`active`, `paused`, `blocked`) first-class lane
-whose bound stream **and generation** identify that session as current lead.
-Worker, QA, planner, helper, unbound, former-generation and done-lane closes do
-not acquire a completion obligation from attached specs alone. Pausing and
-re-leading a lane do not evaluate acceptance text.
-
-Existing actor, generation, child-preservation, lane CAS and ownership rules
-remain first. On session close, visibility and the idle/deferred decisions
-already reached by that local or remote route remain first. A route that would
-actually close, including either remote offline logical-close route, must then
-pass completion. Existing liveness probes are not repeated.
-
-### Preparation and commit boundaries
-
-Each completion request with member obligations has exactly one fresh namespace
-preparation. It resolves identities, rejects ambiguity, parses only the consumed
-members' criteria and reads required follow-ups. The preparation retains the
-bytes, identity fingerprints and directory metadata it observed. This is not an
-atomic filesystem snapshot. There is no hidden retry or second namespace scan.
-An empty member set needs no filesystem scan.
-
-For lane `done`, the short Store transaction preserves the existing actor and
-binding generation, replay, conflict, lane-version and confirmation ordering.
-It compares the exact prepared lane identity, state, version and members, and
-checks metadata only for consumed member/follow-up files and captured directory
-paths. It does not parse, walk or stat the whole namespace, or wait for an
-off-thread scan. Producer, lane, action, answer and single-use confirmation
-checks stay in that transaction; completion and confirmation use commit together.
-
-Already missing, unreadable, ambiguous or unresolved input fails closed at
-preparation. A detected consumed-input change before lane commit also refuses
-with `member_spec_unreadable`, leaving the confirmation unspent. The caller can
-restore the source and submit a new request. An already committed replay still
-returns its original committed result, even if a new preparation finds a problem.
-
-For session close, preparation and consumed-input revalidation are admission
-checks under the existing lifecycle and graph fences, before any termination
-attempt. Changes detected there refuse without terminating. The existing
-terminate, confirm, then generation-fenced mark-closed ordering is unchanged.
-Once that route has confirmed termination/death, a later consumed-source
-freshness failure does not veto recording the same generation as closed. The
-captured metadata is revalidated once off the main thread and Store worker,
-outside the write transaction, before enqueueing the original close callback.
-This check neither parses nor rescans the namespace. The existing closed audit's
-reason includes `u1_source_changed_after_termination`, the target generation,
-member IDs, affected relative paths and the source refusal. This flag is atomic with close persistence,
-readable through `inspect_stream`'s `close_audit.reason`, and also returned on the
-successful session as `completion_source_changed` and
-`completion_source_warning`. It is a recorded limitation, not an undo or a fix
-of the namespace gap below.
-
-Only that late source check is advisory after confirmed death. Authority,
-target-generation, child-preservation, idle, visibility and process-death checks
-remain mandatory. Failed or uncertain termination never becomes confirmed death;
-a replacement generation is never closed. A killed seat does not mark its lane
-done. Offline operator/manager closes record deferred intent, not confirmed
-death: their source guard is admission-only, with no post-admission source check
-or source-changed flag. A later source edit therefore does not undo their admitted
-intent; the existing target-generation CAS still applies. The existing close confirmation and replay behavior is unchanged; the
-flag creates no new confirmation, retry, send or compensation mechanism.
-
-Cancellation during preparation never enqueues completion. Cancellation after
-lane enqueue is not proof of rollback: its outcome is unknown until the durable
-result is read back, and no automatic retry is issued. Session finalization
-continues once death is confirmed, including if the original caller cancels.
-Before that irreversible point, cancellation while waiting to enqueue a logical
-close cannot later cause a hidden close.
-
-### Accepted remaining namespace gap
-
-An unrelated existing spec's declared id can be rewritten in place to duplicate
-a member's id after preparation, leaving the captured directory metadata
-unchanged. Completion can then commit and spend the confirmation. The
-consumed-input checks do not cover every identity-only file, and metadata checks
-do not promise to detect every content edit. A later fresh check can refuse the
-ambiguity but cannot undo the completion. There is no automatic undo. Ordinary
-edits can reach this gap; there is no time-bound guarantee. The conformance test
-expects this completion to succeed, then a fresh evaluation to refuse it. This
-is an accepted limitation, not a fixed race.
-
-### Criteria and refusal details
-
-Within `## Acceptance Criteria`, only the `### Custom` subsection is checked.
-It ends at its next peer or parent heading; nested headings stay in scope.
-Common and Closure criteria outside Custom are unaffected. ATX headings accept
-ordinary indentation and closing hashes. Fenced code, inline code examples,
-non-task prose and ordinary bullets are not completion criteria.
-
-Ordinary unordered or ordered task checkboxes need no bold title or em dash:
-
-```text
-- [x] Completed outcome
-- [ ] Remaining outcome (waived: a non-empty reason)
-- [ ] Remaining outcome tracked: spec_alpha__follow (new_scope)
-```
-
-Checked state is evaluated first, including when the wording quotes disposition
-syntax. An unchecked criterion needs one valid operative suffix at line end:
-a nonempty waiver or a tracked target/class. Matched inline backtick spans and
-paired ASCII or curly quotes are examples, not operative markers; apostrophes
-inside words and escaped quotes do not begin/end quoted spans. An unmatched
-quote does not hide a suffix. Multiple operative markers, empty reasons or
-malformed suffixes leave a criterion undisposed. Empty unchecked criteria are
-also retained as residuals. Formatting alone never causes a parse refusal.
-
-Tracked criteria need class `external_event`, `operator_action` or `new_scope`,
-a distinct resolver-proven follow-up, nonempty frontmatter `owner:`, and a live
-receipt in that follow-up's `## Tracking` section:
-
-```text
-- deferred_from: spec_alpha__member — Remaining outcome: a concrete reason
-```
-
-Criterion identity uses a leading bold title when present; otherwise it uses
-the full checkbox body before its operative disposition, with whitespace
-normalized. Other literal Markdown is preserved. The receipt must identify
-exactly one source identity before the reason delimiter. Duplicate identities
-cannot grant tracked completion. Prefix collisions such as `Ship` and
-`Ship: west` make a receipt ending `Ship: west: delayed` ambiguous; neither is
-disposed by that receipt. Colon-bearing identities without a competing source
-prefix and colon-bearing reasons remain valid. Code-example-only receipts and
-bare deferred-with-reason notes grant nothing. No ID registry is introduced.
-
-The follow-up must be in `backlog`, `analysis`, `ready_for_dev`, `in_progress`,
-`needs_qa` or `blocked`; `completed` and `deprecated` are terminal. The returned
-disposition records class, receipt reason and receiving owner. This is syntax
-and linkage validation, not a judgment about whether deferral was appropriate.
-Readable specs with no Custom section or no Custom checkboxes pass. Missing or
-unreadable members fail closed; an unconfigured root is not a waiver.
-A real affected lane remains open, and its current lead cannot close through
-these paths until its owner restores the configured tree and readable member
-spec at its correct identity, or corrects obsolete membership through the
-existing authorized lane operation. The owner then disposes any remaining
-Custom criteria and retries completion/close. A missing file cannot be cleared
-by pretending it has an empty Custom section or by using a new bypass flag.
-
-`CompletionRefusal` separates a stable code from its explanation and `items`:
-
-- `lane_residuals_undisposed`: all undisposed member/criterion pairs in stable
-  member/line order, including per-item `follow_up_not_found`,
-  `follow_up_terminal`, `follow_up_is_self`, `class_invalid`,
-  `follow_up_unlinked` or `follow_up_unowned` reasons; malformed operative
-  suffixes use `disposition_invalid`, duplicate identities use
-  `criterion_ambiguous`, and an ambiguous receipt adds `receipt_ambiguous` detail
-- `member_spec_unreadable`: member identity and `retriable: true`
-
-Refusal leaves lane state, version, events, publication and confirmation use
-unchanged. A separate committed existing lifecycle audit records a refused
-lane completion. A session source-admission refusal writes one existing close
-audit with `fenced` disposition and does not terminate or close the session.
-Late source drift after confirmed death is instead recorded on the closed audit
-as described above. The report ledger retains an already durable report if its
-later requested close refuses.
+Authenticated lifecycle authority, generation identity, lane version/CAS,
+ownership, idle/safety checks, child/report obligations and transactional
+lifecycle state remain enforced. Mandatory work-lane membership is not a
+spawn prerequisite. Ordinary spawn authorization, attribution and
+idempotency remain enforced.
 
 ## Lead admission
 
@@ -243,28 +85,7 @@ shared evaluator and the real spawn admission path with synthetic transports.
 The same data is suitable for a separately owned memory-validator adapter;
 that adapter and policy activation are outside this change.
 
-From the repository root, use one isolated Python 3.13 environment consistently
-for the source-only completion checks. The `python3` below must be Python 3.13;
-missing declared dependencies are environment errors, not skips:
-
-```sh
-python3 -m venv /tmp/pentacle-lane-guard-venv
-/tmp/pentacle-lane-guard-venv/bin/python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
-export PYTHONPATH="$PWD/services:$PWD/services/agent-orch"
-env -u TMUX /tmp/pentacle-lane-guard-venv/bin/python -m pytest services/chat-stream-v2/tests/test_lane_close_residual_guard.py services/chat-stream-v2/tests/test_lane_completion_deferred.py services/chat-stream-v2/tests/test_work_lane_completion.py services/chat-stream-v2/tests/test_work_lane_progress.py services/chat-stream-v2/tests/test_assistant_composite.py -q -rs
-/tmp/pentacle-lane-guard-venv/bin/python -m compileall -q services/_shared/custom_ac.py services/chat-stream-v2/store_work_lanes.py services/chat-stream-v2/sessions.py services/chat-stream-v2/assistant_composite.py services/chat-stream-v2/tests
-```
-
-These are direct synthetic pytest checks using invented specs and owned canonical
-temporary roots. They run no tmux, Unix-socket or live-daemon tests and no gate
-wrapper. Race cells verify the exact qualified callback, retain checked bytes
-and fingerprints, and assert preparation, mutation, enqueue and callback order.
-An early mutation or unmatched callback is `HARNESS_ERROR`.
-
-Fleet runs at intake own the canonical merge gate on supported platforms, the
-command-line, smoke and web gates, preserved spawn-admission controls,
-independent final review of the exact candidate, and activation proof. A denied
-required environment test stays authored/collected with its exact denial and
-is labelled "fleet runs at intake"; it is not a pass or a reason to weaken an
-assertion. A passing fixture run proves source behavior, not installation or
-activation.
+Run `services/chat-stream-v2/tests/test_spawn_wip_cap.py` for the retained
+WIP policy, `test_enforcement_retirement.py` for removal acceptance, and
+the canonical `services/chat-stream-v2/tools/run_gate.py merge` gate
+before release. Source checks do not establish runtime activation.

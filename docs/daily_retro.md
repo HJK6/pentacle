@@ -82,6 +82,12 @@ manifest is reused on retry; adoption after that cutoff enters the next pass.
 
 ## Primary evidence and coverage
 
+Turn-budget observation is retired. Collection does not import its module,
+collect crossings or recommend repairing missing turn telemetry. Historical
+events remain in the stores. The immutable release archive below omits the
+retired module; activate that release in the scheduled launch target as well
+as updating daemon source.
+
 `primary_store` and `primary_archive` are explicit local paths, opened with
 SQLite `mode=ro`, `query_only` and a read transaction. Missing configuration or
 unavailable projections are gaps, never all-clear. Primary coverage runs from
@@ -98,9 +104,11 @@ delivery only by an exact report-ID publication reference; otherwise publication
 is **unknown**. Transport delivery to the assistant and operator publication remain
 different observations. Current badges do not reconstruct historical state.
 The provider `working` flag distinguishes active execution; the specific tool
-remains unknown. Only the exact routine suppression codes `persisted_suppressed`
-and `folded_into_digest` are excluded from delivery failures, with a coverage
-count. Other recorded errors still require inspection.
+remains unknown. The exact routine suppression codes `persisted_suppressed`,
+`folded_into_digest` and legacy turn notices with `fd_turn_budget_stale_or_disabled`
+are excluded from delivery failures, with a coverage count. The daemon terminally
+retires pending turn notices without delivery or retries. Other recorded errors
+still require inspection.
 
 Each projection counts its observed denominator and reads at most 1,000 rows;
 failures are prioritized. One primary original enters the existing worker packet,
@@ -424,7 +432,6 @@ test ! -L "$RETRO_RELEASE"
 install -d -m 0755 "$RETRO_RELEASE"
 git -C "$RETRO_CHECKOUT" archive "$RETRO_CANDIDATE" \
   services/chat-stream-v2/tools/daily_retro.py \
-  services/chat-stream-v2/fd_turn_budget.py \
   services/chat-stream-v2/message_envelopes.py \
   services/chat-stream-v2/provider_wrappers.py \
   services/chat-stream-v2/retention.py services/chat-stream-v2/v2_runtime.py \

@@ -525,56 +525,13 @@ reconciliation tuple, retaining pending delivery and proofs. Do not run an older
 binary that rejects this kind, narrow the CHECK, delete rows or restore the whole
 DB. Review the concrete rollback artifact before activation.
 
-## Spec-bound spawn admission
+## Spec attribution and completion
 
-`PENTACLE_WORK_LANE_ADMISSION_ENFORCE=1` enables blocking admission on the
-central daemon. It defaults off; deployment and activation require the release
-owner's gate. This switch has no warning-only mode and changes no existing rows.
+Spec attribution and lane membership support tracking and display. Spawning an
+authorized spec-bound session does not require lane membership. Existing spawn
+authorization, idempotency and optional lead WIP policy still apply.
 
-When enabled, every effective commissioned spec must be an exact member of a
-first-class lane in `active`, `paused` or `blocked` state. A done or routing-only
-lane does not qualify. The check uses the final resolved spawn fields, including
-inherited and resume-preserved specs, and commits in the same SQLite transaction
-as the first durable spawn intent. A membership change committed first therefore
-controls admission. A later authorized lane edit does not revoke an admitted
-intent. No filesystem scan, background enforcement or second registry is added.
-
-All roles and visibility levels share the rule. QA and advisory children inherit
-spec membership without taking the lane's lead binding. Genuinely unspecced
-operator conversations, front-desk/bootstrap seats, recovery and rehearsal starts
-are exempt because their effective spec set is empty. Operator authentication,
-assistant roles, resume/handoff fields, `harness_run_id` and explicit commands do
-not bypass the check when effective specs are present.
-
-`work_lane_required` names every missing spec. The lane owner selects the existing
-product lane and reads its **full** membership before updating it:
-
-```sh
-agent-orch work-lane list --json
-agent-orch work-lane show LANE_ID --json
-agent-orch work-lane set-members LANE_ID --expected-version VERSION \
-  --request-id MEMBERSHIP_REQUEST --member spec_demo__existing \
-  --member spec_demo__new
-```
-
-`set-members` replaces the list. Include **every** existing ID from the raw
-`lane.members_json`, then the new IDs; the inventory projection can truncate its
-member list. Retry the refused spawn using a fresh `--idempotency-key`. The
-original key retains its terminal failed result. A valid replay of an already
-admitted key, an intent receipt refresh or crash recovery retains its original
-authority and does not acquire a new membership precondition.
-
-Keep the existing order: add members, spawn the lead, bind its returned stream
-and generation with `set-lead`, then activate the lane when appropriate. Paused
-or blocked lanes can receive a successor without clearing their state first.
-For a new product area, a paused operator-owned adoption can precede its lead;
-existing routing-lane adoption also remains available. A fresh FD-owned lane
-still needs the existing FD lineage evidence. Admission does not invent that
-evidence, create a lane, rebind a lead or roll back an independent member edit.
-
-This is an admission-time guarantee. Existing open seats, later spec attachment
-with `session.spec_update`, later lane edits and unspecced prose are outside this
-rule. Before activation, inspect the full lane membership of spec-bearing
-recovery/handoff predecessors too; those new generations have no role bypass.
-Rollback disables the switch or restores the prior accepted daemon artifact.
-Neither action requires a lane/session migration or retroactive close.
+Lane `done` and session close do not parse spec acceptance Markdown or follow-up
+receipts and do not check source-file fingerprints. Owners record honest
+completion and remaining work in specs. Actor authorization, generation identity,
+lane version/CAS, ownership, idle/safety and child/report checks remain enforced.

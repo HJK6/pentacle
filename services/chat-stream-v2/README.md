@@ -2,6 +2,12 @@
 
 The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated desktop/mobile transport.
 
+Turn-budget observation, recovery and settings are retired. Existing history is
+retained; pending legacy turn notices become terminal without delivery. Spec and
+lane tracking remain available, but spawning does not require lane membership
+and completion does not parse spec Markdown or fence source-file fingerprints.
+See [retained WIP and lifecycle controls](../../docs/completion-admission-guards.md).
+
 Use the complete [local startup recipe](../../README.md#local-setup) first. It aligns the desktop and daemon host identity (`local`), native transcript directory, loopback endpoint and desktop credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
 ## Private configuration

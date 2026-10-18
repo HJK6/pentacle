@@ -269,13 +269,8 @@ class SpawnCtl:
         token_telemetry: SeatTokenTelemetry | None = None,
         owner_instance_id: str = "",
         submission_proof: Any = None,
-        work_lane_admission_enforce: bool | None = None,
     ) -> None:
         self.store = store
-        self.work_lane_admission_enforce = (
-            os.environ.get("PENTACLE_WORK_LANE_ADMISSION_ENFORCE", "0") == "1"
-            if work_lane_admission_enforce is None else work_lane_admission_enforce
-        )
         self.sessions = sessions
         self.window_schedule = None
         self.tmux = tmux or tmux_transport.Tmux()
@@ -2101,7 +2096,7 @@ class SpawnCtl:
                     f"{host}:{name} already has a live tmux session with no open row; "
                     "v2 never kills a pane it did not create",
                 )
-            if isinstance(deferred_launch_plan, launch.LaunchPlan) and not self.work_lane_admission_enforce:
+            if isinstance(deferred_launch_plan, launch.LaunchPlan):
                 await self._stage_launch_token(
                     deferred_launch_plan,
                     host=host,
@@ -2133,46 +2128,30 @@ class SpawnCtl:
                     parent = await self.store.fetch_session(*self.sessions.split(parent_id))
                     if parent is None or parent.get("status") != "open":
                         raise VerbError("spawn_parent_closed", f"{parent_id} is not an open parent")
-                from work_lane_admission import WorkLaneRequired
-                try:
-                    recorded = await self.store.record_spawn_intent(
-                        host, name,
-                        {
-                            "open_fields": open_flds,
-                            "brief": brief,
-                            "delivery_receipt": delivery_receipt,
-                            "operator_initiated_top_level": (
-                                not open_flds.get("parent_stream_id")
-                                and not open_flds.get("handoff_from_stream_id")
-                                and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
-                            ),
-                        }, request_id=request_id, nonce=nonce,
-                        expected_spec_sources=(
-                            *getattr(spec_binding, "source_checks", ()),
-                            *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
+                recorded = await self.store.record_spawn_intent(
+                    host, name,
+                    {
+                        "open_fields": open_flds,
+                        "brief": brief,
+                        "delivery_receipt": delivery_receipt,
+                        "operator_initiated_top_level": (
+                            not open_flds.get("parent_stream_id")
+                            and not open_flds.get("handoff_from_stream_id")
+                            and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
                         ),
-                        prepared_qa=prepared_qa,
-                        require_work_lane=self.work_lane_admission_enforce,
-                    )
-                except WorkLaneRequired as exc:
-                    raise VerbError(exc.code, str(exc), missing_spec_ids=exc.spec_ids) from None
+                    }, request_id=request_id, nonce=nonce,
+                    expected_spec_sources=(
+                        *getattr(spec_binding, "source_checks", ()),
+                        *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
+                    ),
+                    prepared_qa=prepared_qa,
+                )
             if not recorded:
                 raise VerbError("spawn_fence_lost", "spawn intent reservation expired or was cancelled")
             # From here the reservation carries a durable spawn intent — the
             # recovery handle a mid-spawn crash or cancellation is settled from
             # (INV-3). It must never be blind-released on a teardown.
             intent_recorded = True
-            # Lane refusal must not create or overwrite a token stage. Keep
-            # existing disabled-mode ordering; enabled admission stages only
-            # after its durable intent and still before any pane creation.
-            if isinstance(deferred_launch_plan, launch.LaunchPlan) and self.work_lane_admission_enforce:
-                await self._stage_launch_token(
-                    deferred_launch_plan,
-                    host=host,
-                    name=name,
-                    provider=provider,
-                    transport=tmux,
-                )
             total_attempts = (
                 1 if native_initial_prompt
                 else (PROMPT_SPAWN_RETRY_ATTEMPTS if full_brief else 1)

@@ -182,10 +182,8 @@ class OutboundNoticeQueue:
         self.register_kind(NOTICE_KIND_FD_TURN_BUDGET, guard=self._fd_turn_budget_guard)
 
     async def _fd_turn_budget_guard(self, row: dict[str, Any]) -> NoticeDecision | None:
-        valid = getattr(self.store, "fd_turn_budget_notice_valid", None)
-        if not callable(valid) or not await valid(row):
-            return NoticeDecision.terminal("fd_turn_budget_stale_or_disabled", "observation retained; never retarget")
-        return None
+        # Tombstone for persisted notices from the retired observer.
+        return NoticeDecision.terminal("fd_turn_budget_stale_or_disabled", "observation retained; observer retired")
 
     def register_kind(
         self,
@@ -355,8 +353,6 @@ class OutboundNoticeQueue:
             if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
-            if kind == NOTICE_KIND_FD_TURN_BUDGET:
-                message["_notification_answer_generation"] = metadata["fd_turn_budget_binding"]["generation"]
             if kind == "spawn_delivery_failed" and metadata.get("parent_generation"):
                 message["_notification_answer_generation"] = metadata["parent_generation"]
             if kind == "error_alert":

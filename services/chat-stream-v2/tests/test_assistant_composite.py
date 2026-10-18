@@ -689,11 +689,8 @@ async def _seed_dispatch(
     )
 
 
-def test_decision_and_terminal_report_enqueue_one_authority_wake_each(monkeypatch) -> None:
+def test_decision_and_terminal_report_enqueue_one_authority_wake_each() -> None:
     """Gate transitions use the established durable outbox, never routine progress."""
-    from unittest.mock import AsyncMock
-    preparation = AsyncMock(side_effect=AssertionError('Routing completion must not prepare product completion'))
-    monkeypatch.setattr(Store, 'prepare_work_lane_completion', preparation)
 
     class _OutboxComms:
         def __init__(self) -> None:
@@ -801,7 +798,6 @@ def test_decision_and_terminal_report_enqueue_one_authority_wake_each(monkeypatc
             store.stop()
 
     asyncio.run(_go())
-    preparation.assert_not_awaited()
 
 
 def _daff_inventory_fixture():

@@ -2039,15 +2039,11 @@ class AssistantComposite:
         confirmation = None
         if "operator_confirmation" in payload:
             confirmation = await self._read_work_lane_confirmation(payload["operator_confirmation"])
-        prepared = None
-        if operation == "set_state" and payload.get("to") == "done":
-            prepared = await self.store.prepare_work_lane_completion(lane_id)
         result = await self.store.apply_work_lane_operation(
             stream_id=self.config.stream_id, request_id=request_id, operation=operation,
             lane_id=lane_id, expected_lane_version=expected if operation != "adopt" else None,
             payload=payload, actor_stream_id=str(actor_stream_id or ""), actor_generation=actor_generation,
             binding_name=self.config.name, env_binding=self._env_binding(), confirmation=confirmation,
-            prepared=prepared,
         )
         published = result.pop("publication", None)
         if not result.get("duplicate"):

@@ -280,106 +280,6 @@ def digest_action(lane, evaluated_at, *, plan_statuses=(), waiting=False):
     return "unknown" if lane.get("working") is None else "below_checkpoint", None
 
 
-def fd_turn_budget_evidence(conn, archive, packet, start, cutoff, *, max_rows, max_bytes):
-    """Independent read-only sources, identity union, then exact window/limit.
-
-    SQLite owns the union, projecting only bounded metadata into Python. A
-    bounded query budget reports incomplete coverage rather than guessing zero.
-    """
-    import math
-    import time
-    from fd_turn_budget import timestamp, turn_key
-    coordinator = sqlite3.connect(":memory:", uri=True)
-    coordinator.row_factory = sqlite3.Row
-    coordinator.create_function("fd_timestamp", 1, timestamp, deterministic=True)
-    deadline = time.monotonic() + 2
-    coordinator.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
-    coordinator.execute("BEGIN")
-    sources, observations, rows, total = [], [], [], 0
-    complete = True
-    try:
-        for db, name in ((conn, "fd_turn_budget_hot"), (archive, "fd_turn_budget_archive")):
-            if db is None:
-                packet["gaps"].append({"source": name, "reason": "unavailable; budget coverage incomplete"})
-                complete = False
-                continue
-            try:
-                db.execute("SELECT identity,event_json FROM session_event_tail LIMIT 0")
-                path = db.execute("PRAGMA database_list").fetchone()[2]
-                coordinator.execute(f"ATTACH DATABASE ? AS {name}", (Path(path).resolve().as_uri() + "?mode=ro",))
-                table = name + ".session_event_tail"
-                corrupt = coordinator.execute(f"SELECT count(*) FROM {table} WHERE NOT json_valid(event_json)").fetchone()[0]
-                if corrupt:
-                    packet["gaps"].append({"source": name, "reason": "malformed events; budget coverage incomplete", "count": corrupt})
-                    complete = False
-                # Namespace identifies corrupted/changed-kind versions too.
-                sources.append(f"SELECT identity,event_json FROM {table}")
-                packet["coverage"][name] = {"available": True, "malformed_events": corrupt}
-            except sqlite3.Error:
-                complete = False
-                packet["gaps"].append({"source": name, "reason": "event projection unavailable"})
-        if sources:
-            union = " UNION ALL ".join(sources)
-            grouped = ("SELECT identity,min(event_json) AS event_json,count(DISTINCT event_json) AS versions FROM (" + union + ") "
-                "GROUP BY identity HAVING identity LIKE 'fd-turn-budget:%' OR max(CASE WHEN json_valid(event_json) "
-                "THEN json_extract(event_json,'$.kind')='fd_turn_budget' ELSE 0 END)")
-            parsed = "SELECT *,CASE WHEN json_valid(event_json) THEN fd_timestamp(json_extract(event_json,'$.at')) END AS epoch FROM (" + grouped + ")"
-            window = "(versions!=1 OR epoch IS NULL OR epoch BETWEEN ? AND ?)"
-            args = (start.timestamp(), cutoff.timestamp())
-            total = coordinator.execute("SELECT count(*) FROM (" + parsed + ") WHERE " + window, args).fetchone()[0]
-            fields = ("kind", "turn_id", "stream_id", "session_generation", "calls", "seconds", "dimension", "at")
-            projection = "json_object(" + ",".join(f"'{key}',json_extract(event_json,'$.{key}')" for key in fields) + ")"
-            rows = coordinator.execute("SELECT identity,versions,CASE WHEN json_valid(event_json) THEN " + projection +
-                " END AS event_json,CASE WHEN json_valid(event_json) THEN json_type(event_json,'$.calls') END AS calls_type,"
-                "CASE WHEN json_valid(event_json) THEN json_type(event_json,'$.seconds') END AS seconds_type FROM (" + parsed + ") WHERE " + window + " ORDER BY epoch,identity LIMIT ?", (*args, max_rows)).fetchall()
-    except sqlite3.Error:
-        complete = False
-        packet["gaps"].append({"source": "fd_turn_budget", "reason": "combined projection unavailable or query bound exceeded"})
-    finally:
-        coordinator.close()
-    invalid = 0
-    for row in rows:
-        try:
-            value = json.loads(row["event_json"])
-            key = value["turn_id"]
-            when = timestamp(value["at"])
-            if (row["calls_type"] != "integer" or row["seconds_type"] not in {"integer", "real"}
-                    or row["versions"] != 1 or value["kind"] != "fd_turn_budget" or not isinstance(key, list) or len(key) != 3
-                    or any(not isinstance(v, str) or not v or len(v) > 2048 for v in key[:2])
-                    or type(key[2]) is not int or key[2] < 1 or value["stream_id"] != key[0]
-                    or value.get("session_generation") != key[1] or row["identity"] != turn_key(*key)
-                    or type(value["calls"]) is not int or value["calls"] < 0
-                    or type(value["seconds"]) not in (int,float) or not math.isfinite(value["seconds"]) or value["seconds"] < 0
-                    or value["dimension"] not in {"calls","seconds"} or when is None):
-                raise ValueError()
-            if not start.timestamp() <= when <= cutoff.timestamp():
-                continue
-            observations.append({"kind":"fd_turn_budget", "source":"session_event_tail:" + row["identity"],
-                "created_at":value["at"], "turn_id":key, "stream_id":key[0],
-                "calls":value["calls"], "seconds":value["seconds"], "dimension":value["dimension"]})
-        except (ValueError, TypeError, KeyError, OverflowError):
-            complete = False
-            invalid += 1
-    if invalid:
-        packet["gaps"].append({"source":"fd_turn_budget", "reason":"invalid or conflicting immutable crossing", "count":invalid})
-    complete = complete and total == len(rows)
-    summary = {"count":len(observations), "turn_ids":[r["turn_id"] for r in observations],
-               "complete":complete, "deferred_turn_ids":0, "by_day":{}}
-    for row in observations:
-        day = aware(row["created_at"]).astimezone(ZONE).date().isoformat()
-        summary["by_day"][day] = summary["by_day"].get(day,0) + 1
-    while summary["turn_ids"] and len(encoded(summary)) > max_bytes // 4:
-        summary["turn_ids"].pop(); summary["deferred_turn_ids"] += 1
-    while summary["by_day"] and len(encoded(summary)) > max_bytes // 4:
-        summary["by_day"].pop(next(reversed(summary["by_day"])))
-        summary["deferred_days"] = summary.get("deferred_days", 0) + 1
-    packet["turns_over_budget"] = summary
-    packet["coverage"]["fd_turn_budget"] = {"observed":total,"scanned":len(rows),
-        "valid":len(observations),"overflow":total-len(rows),"complete":complete}
-    return observations
-
-
-
 def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576):
     """One bounded, read-only metadata snapshot of the existing receipt stores."""
     packet = {"window": {"start": start.isoformat(), "end": cutoff.isoformat()},
@@ -417,7 +317,6 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
         else:
             packet["gaps"].append({"source": "primary_archive", "reason": "not configured; retired recipients unknown"})
 
-        observations.extend(fd_turn_budget_evidence(conn, archive, packet, start, cutoff, max_rows=max_rows, max_bytes=max_bytes))
         if conn is None:
             return finalize_primary_evidence(packet, observations, max_bytes=max_bytes)
 

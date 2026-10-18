@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .custom_ac import SpecReader
+from .spec_reader import SpecReader
 from .tracking_lines import parse_tracking_line
 from .specs_service import SOURCE_READ_ERRORS, _resolve_specs_memory_root
 
