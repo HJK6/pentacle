@@ -92,6 +92,14 @@ The daemon derives `from_stream_id` from the authenticated principal and stamps
 and durable unbound queue retain this sender. The stamp survives restart and
 queue flush; service credentials are never treated as seat credentials.
 
+Front-desk admission classifies the authenticated sanitized original before the
+service stamp. Unbound entries retain that original in a nullable
+`service_ingress_body` column, written only by the service dispatcher. Flush uses
+this explicit provenance; sender names and copied headers do not confer it.
+Legacy queue entries have no such provenance and keep ordinary digest admission.
+Stamped payloads and tell identities remain unchanged. Existing held outcomes
+are reconciled before classification and are never automatically resent.
+
 ## Acknowledgement and release
 
 `tell.ok` describes the actual delivery result. `queued_unbound` with `queued:true`
@@ -103,10 +111,19 @@ existing delivery receipt/reconciliation path for uncertainty. Stable-ID retries
 reuse existing tell/queue behavior; this feature adds no exactly-once or expiry
 protocol. Ops acknowledgement is independent of the front desk acknowledgement.
 
+A held reply includes `assistant_backend_ingress:persisted_suppressed` and
+`front_desk_hold_id`. New suppressed ledger entries retain sender, route, stamped
+text and that hold ID with `submission_confirmed:false` and `delivered_at:null`.
+These are recoverable held receipts, not delivery proof. Existing rows are not
+rewritten; reconcile their retained reply and held notice before recovery.
+
 Source validation covers synthetic private configuration, the real dispatcher,
 Comms, SQLite queue/ledger and fake pane transport in
 `services/chat-stream-v2/tests/test_wmi_brief_tell_principal.py`. Run the v2 unit
 gate with the checked-in runner; its smoke preflight is a separate release check.
+The dispatcher-to-digest journey, forged headers, explicit queue provenance,
+legacy migration and receipt recovery are covered by
+`services/chat-stream-v2/tests/test_wmi_brief_digest_ingress.py`.
 Before deployment, the release owner must pass the applicable merge gate, review
 the private bindings and credentials, retain a rollback artifact, and verify the
 configured sender's bound FD/ops delivery, unbound recovery and revocation in an

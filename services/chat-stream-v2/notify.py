@@ -1415,11 +1415,15 @@ class Notify:
     # -- notification.* dispatch (lifted) ---------------------------------
 
     async def notification(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if msg.get("type") == "notification.await":
+            # Await owns a short setup lock; parking must not block answers or
+            # host transfer. Keep the normal error/diagnostic dispatch path.
+            return await self._notification_dispatch_logged(msg)
         async with self._host_transfer_lock:
             await self.project_host_transfer()
-            return await self._notification_locked(msg)
+            return await self._notification_dispatch_logged(msg)
 
-    async def _notification_locked(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _notification_dispatch_logged(self, msg: dict[str, Any]) -> dict[str, Any]:
         verb = str(msg.get("type") or "")
         reply = await self._dispatch_notification(msg)
         # Cutover diagnostic (forward-moving, no behavior change): a rejected
@@ -1696,19 +1700,21 @@ class Notify:
         if timeout < 0:
             return self._notif_error(request_id, "notification_invalid", notification_id=nid,
                                      message="timeout must be a non-negative number")
-        # Already terminal-with-answer? answer immediately from the durable row.
-        record = await self._db.call("get_notification", nid)
-        if record is None:
-            return self._notif_error(request_id, "notification_not_found", notification_id=nid)
-        answer = self._answer_payload(record)
-        if answer is not None:
-            return {"type": "notification.await.ok", "request_id": request_id, "ok": True,
-                    "notification_id": nid, "answer": answer}
-        # Park until resolved or timeout. One task per request (server model), so
-        # awaiting here parks only this request, never the socket.
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._await_waiters.setdefault(nid, set()).add(fut)
         try:
+            async with self._host_transfer_lock:
+                await self.project_host_transfer()
+                # Register before the asynchronous read so a resolution during
+                # that read cannot be missed. Setup remains transfer-serialized.
+                self._await_waiters.setdefault(nid, set()).add(fut)
+                record = await self._db.call("get_notification", nid)
+                if record is None:
+                    return self._notif_error(request_id, "notification_not_found", notification_id=nid)
+                answer = self._answer_payload(record)
+                if answer is not None:
+                    return {"type": "notification.await.ok", "request_id": request_id, "ok": True,
+                            "notification_id": nid, "answer": answer}
+            # Only this request parks; concurrent answers and transfer can run.
             answer = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             return {"type": "notification.await.timeout", "request_id": request_id, "ok": False,
