@@ -853,14 +853,26 @@ def _frozen_log_ranges(path: Path, previous_size: LogOffsets | None, managed=Non
             for index, segment in enumerate(paths)]
 
 
+# Open descriptors on captured logs, one per path. While open, a rotated-away start
+# generation keeps its inode, so a newer file cannot reuse the captured identity
+# (ext4 reuses freed inode numbers immediately); the scan then reports it expired.
+_CAPTURED_LOG_PINS: dict[str, int] = {}
+
+
 def _capture_log_offsets(paths: Sequence[Path]) -> LogOffsets | None:
     offsets: dict[str, int | dict[str, int] | None] = {}
     for path in paths:
+        previous = _CAPTURED_LOG_PINS.pop(str(path), None)
+        if previous is not None:
+            os.close(previous)
         try:
-            stat = path.stat()
-            offsets[str(path)] = {"size": stat.st_size, "inode": stat.st_ino, "device": stat.st_dev}
+            fd = os.open(path, os.O_RDONLY)
         except OSError:
             offsets[str(path)] = None
+            continue
+        stat = os.fstat(fd)
+        _CAPTURED_LOG_PINS[str(path)] = fd
+        offsets[str(path)] = {"size": stat.st_size, "inode": stat.st_ino, "device": stat.st_dev}
     return offsets or None
 
 

@@ -49,6 +49,8 @@ Deployment reads use the managed path pair when configured. Before activation,
 create both empty managed files so the deployment tool can capture a start
 inode/device/offset. Keep the previous `PENTACLE_LOG_PATH` and launchd paths as
 rollback/emergency configuration; a managed pair takes precedence for readers.
+The tool keeps each captured file open until its next capture, so a rotated-away
+boundary cannot be impersonated by a newer file reusing its inode number.
 Boot readiness follows a captured inode through retained generations and only
 accepts complete, strictly decoded records after that boundary. An unfinished
 record leaves the cursor unchanged for the next poll. Pending boot evidence is
