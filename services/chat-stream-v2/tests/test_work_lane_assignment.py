@@ -168,6 +168,23 @@ async def test_exempt_callers_are_never_refused(env, auth):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role, exempt", [("assistant", True), ("lead", False)])
+async def test_protected_assistant_caller_is_exempt_and_other_roles_are_not(env, role, exempt):
+    # A2/R5: a protected assistant seat is exempt; a seat's ordinary role never is.
+    env.monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
+    target = item(env.root, "demo__target")
+    ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
+    caller = await seat(env.store, "caller", role=role)  # unassigned, no spec, no lane
+    msg = agent(caller, spec=target, parent=False)
+    if exempt:
+        assert (await ctl.spawn(msg, HOST))["type"] == "spawn.ok"
+        assert tmux.created == 1
+    else:
+        assert (await refused(ctl, msg)).code == "work_lane_assignment_unlinked"
+        assert tmux.created == 0
+
+
+@pytest.mark.asyncio
 async def test_operator_elevated_seat_token_is_still_managed(env):
     target = item(env.root, "demo__target")
     ctl, _sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
