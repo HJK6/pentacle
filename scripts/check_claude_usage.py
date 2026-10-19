@@ -183,6 +183,10 @@ def _capture_probe_socket(name: str, value: str):
     return parent, _socket_identity(directory), name, _socket_identity(entry)
 
 
+# Dropped connections tolerated while a killed server finishes exiting.
+_LIVENESS_ATTEMPTS = 10
+
+
 def _remove_dead_probe_socket(captured):
     """Remove only the captured inode after an independent dead-endpoint proof."""
     parent, directory, name, identity = captured
@@ -202,7 +206,7 @@ def _remove_dead_probe_socket(captured):
 
         if not unchanged():
             return
-        for attempt in range(2):
+        for _ in range(_LIVENESS_ATTEMPTS):
             with unix_socket.socket(unix_socket.AF_UNIX) as endpoint:
                 endpoint.settimeout(0.25)
                 try:
@@ -214,14 +218,19 @@ def _remove_dead_probe_socket(captured):
                         raise RuntimeError("usage socket liveness unavailable") from None
                     break
                 # tmux kill-server returns before the server exits; a live server
-                # holds this connection open, an exiting one drops it.
+                # holds this connection open, an exiting one drops it (closing on
+                # macOS, resetting on Linux) and may accept again until it exits.
                 endpoint.settimeout(2)
                 try:
                     dropped = endpoint.recv(1) == b""
+                except ConnectionResetError:
+                    dropped = True
                 except OSError:
                     dropped = False
-                if attempt or not dropped:
+                if not dropped:
                     raise RuntimeError("usage socket still live")
+        else:
+            raise RuntimeError("usage socket still live")
         if unchanged():
             os.unlink(name, dir_fd=fd)
     finally:

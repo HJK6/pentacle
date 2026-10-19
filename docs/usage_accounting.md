@@ -388,7 +388,8 @@ effect that is verified per host, not assumed. The Codex read is quota-only
 
 The Claude probe captures its unique tmux socket's path and filesystem identity
 before reading usage. After killing that dedicated server, it removes only the
-same owned UNIX socket after a bounded connection proves the endpoint dead.
+same owned UNIX socket after a bounded connection proves the endpoint dead
+(an exiting server closes the connection on macOS and resets it on Linux).
 Live, replaced, linked or ambiguously identified entries stay untouched. Cleanup
 does not mask an earlier probe error; failed ownership capture is not permission
 to guess a socket path. This assumes a private per-user tmux directory and no

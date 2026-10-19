@@ -283,6 +283,78 @@ def test_endpoint_that_dies_after_kill_server_returns_is_removed(owned_probe_soc
     assert len(connects) == 2 and not path.exists()
 
 
+def test_endpoint_reset_by_exiting_server_is_removed(owned_probe_socket, monkeypatch):
+    # Linux: the exiting tmux server resets the accepted connection instead of closing it.
+    import errno
+    path, captured = owned_probe_socket()
+    connects = []
+    class Endpoint:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def connect(self, value):
+            connects.append(value)
+            if len(connects) > 1:
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic exited server")
+        def recv(self, size):
+            raise ConnectionResetError(errno.ECONNRESET, "synthetic exiting server")
+    monkeypatch.setattr(probe.unix_socket, "socket", lambda *args: Endpoint())
+    probe._remove_dead_probe_socket(captured)
+    assert len(connects) == 2 and not path.exists()
+
+
+@pytest.mark.parametrize("refused_after", [3, None])
+def test_exiting_server_may_drop_several_connections_within_a_bound(owned_probe_socket, monkeypatch, refused_after):
+    import errno
+    path, captured = owned_probe_socket()
+    connects = []
+    class Endpoint:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def settimeout(self, value): pass
+        def connect(self, value):
+            connects.append(value)
+            if refused_after is not None and len(connects) > refused_after:
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic exited server")
+        def recv(self, size):
+            if len(connects) % 2:
+                return b""
+            raise ConnectionResetError(errno.ECONNRESET, "synthetic exiting server")
+    monkeypatch.setattr(probe.unix_socket, "socket", lambda *args: Endpoint())
+    if refused_after is None:
+        with pytest.raises(RuntimeError, match="still live"):
+            probe._remove_dead_probe_socket(captured)
+        assert len(connects) == probe._LIVENESS_ATTEMPTS and path.exists()
+    else:
+        probe._remove_dead_probe_socket(captured)
+        assert len(connects) == refused_after + 1 and not path.exists()
+
+
+def test_real_tmux_server_socket_is_removed_after_kill_server(monkeypatch):
+    import shutil
+    import subprocess
+    import uuid
+    # The isolation wrapper pins every bare tmux call to the shared test socket.
+    search = os.pathsep.join(p for p in os.environ["PATH"].split(os.pathsep)
+                             if not p.endswith("isolated-tmux-bin"))
+    real = shutil.which("tmux", path=search)
+    if real is None:
+        pytest.skip("tmux is not installed")
+    with tempfile.TemporaryDirectory(prefix="usage-", dir="/tmp") as root:
+        monkeypatch.setenv("TMUX_TMPDIR", root)
+        name = "pentacle-usage-" + uuid.uuid4().hex
+        def tmux(*args):
+            return subprocess.run([real, "-L", name, "-f", "/dev/null", *args],
+                                  capture_output=True, text=True, timeout=5)
+        assert tmux("new-session", "-d", "-s", "probe", "sleep 30").returncode == 0
+        try:
+            captured = probe._capture_probe_socket(name, tmux("display-message", "-p", "#{socket_path}").stdout)
+        finally:
+            tmux("kill-server")
+        probe._remove_dead_probe_socket(captured)
+        assert not (Path(root) / f"tmux-{os.geteuid()}" / name).exists()
+
+
 @pytest.mark.parametrize("replacement", ["socket", "file", "symlink", "directory"])
 def test_changed_entry_or_parent_is_preserved(owned_probe_socket, replacement):
     path, captured = owned_probe_socket()
