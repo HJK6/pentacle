@@ -139,15 +139,29 @@ def normalize_spec_binding_provenance(
 def effective_assignment(row: dict[str, Any] | None) -> str | None:
     """A seat's one current work assignment; spec tags remain authority only.
 
-    The persisted assignment wins; a legacy single-spec row's only spec is its
-    assignment; a multi-spec row without one is unassigned."""
+    The persisted assignment wins; an explicit unassignment (``UNASSIGNED``) is
+    none; a legacy row (NULL) falls back to its only spec, and a multi-spec row
+    without one is unassigned."""
     if not row:
         return None
-    assigned = normalize_spec_ids(spec_id=row.get("assigned_spec_id"))
-    if assigned:
-        return assigned[0]
+    raw = row.get("assigned_spec_id")
+    if raw is not None:
+        assigned = normalize_spec_ids(spec_id=raw)
+        return assigned[0] if assigned else None
     spec_ids = normalize_spec_ids(row.get("spec_ids"), row.get("spec_id"))
     return spec_ids[0] if len(spec_ids) == 1 else None
+
+
+# Stored by `spec unassign` and by detaching the assigned spec: distinct from a
+# legacy NULL, so the single-spec fallback never re-assigns the seat.
+UNASSIGNED = ""
+
+
+def carried_assignment(row: dict[str, Any] | None) -> str | None:
+    """What a handoff successor inherits: the assignment, or an explicit unassignment."""
+    if row and row.get("assigned_spec_id") == UNASSIGNED:
+        return UNASSIGNED
+    return effective_assignment(row)
 
 
 def _hydrate_spec_row(row: dict[str, Any]) -> dict[str, Any]:

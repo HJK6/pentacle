@@ -89,6 +89,8 @@ from store_routing import (
     _routing_iso_now,
 )
 from store_specs import (
+    UNASSIGNED,
+    carried_assignment,
     effective_assignment,
     JSON_COLUMNS,
     SPEC_BINDING_PROVENANCE_KINDS,

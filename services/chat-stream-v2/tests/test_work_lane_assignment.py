@@ -9,7 +9,8 @@ import json
 import pytest
 
 from sessions import VerbError
-from store import Store
+from store import UNASSIGNED, Store, effective_assignment
+from store_work_lanes import _assigned_seats_conn
 from test_spawn_wip_cap import HOST, setup
 
 SUMMARY = "---\nid: work_{stem}\n---\n**Status** — Underway.\n\n**Next action** — Continue.\n"
@@ -268,7 +269,8 @@ async def test_fd_direct_execution_assign_checks_link_and_unassign_keeps_tags(en
     reply = await spec_update(env, ctl, sessions, "assign", fd[0], specs[0], agent_auth)
     assert reply["session"]["assigned_spec_id"] == specs[0] and reply["work_checkpoint"]["state"] == "valid"
     reply = await spec_update(env, ctl, sessions, "unassign", fd[0], auth=agent_auth)
-    assert reply["session"]["assigned_spec_id"] is None and reply["session"]["spec_ids"] == specs
+    assert reply["session"]["assigned_spec_id"] == UNASSIGNED and reply["session"]["spec_ids"] == specs
+    assert effective_assignment(reply["session"]) is None
 
 
 @pytest.mark.asyncio
@@ -280,7 +282,31 @@ async def test_operator_assign_is_recorded_without_refusal_and_detach_clears(env
     reply = await spec_update(env, ctl, sessions, "assign", chat[0], target, operator)
     assert reply["session"]["assigned_spec_id"] == target and reply["session"]["spec_ids"] == [target]
     reply = await spec_update(env, ctl, sessions, "detach", chat[0], target, operator)
-    assert reply["session"]["assigned_spec_id"] is None
+    assert reply["session"]["assigned_spec_id"] == UNASSIGNED and effective_assignment(reply["session"]) is None
+
+
+@pytest.mark.asyncio
+async def test_unassign_of_a_single_spec_seat_sticks_through_handoff(env):
+    # A6: the single-spec fallback is for legacy NULL rows only, never an explicit unassignment.
+    keep, other = item(env.root, "demo__keep"), item(env.root, "demo__other")
+    ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
+    await lane(env.store, "wl-keep", keep)
+    lead = await seat(env.store, "single", keep, assigned=keep)
+    operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+    reply = await spec_update(env, ctl, sessions, "unassign", lead[0], auth=operator)
+    assert reply["session"]["spec_ids"] == [keep] and effective_assignment(reply["session"]) is None
+    assert await env.store.submit(lambda c: _assigned_seats_conn(c, [keep])) == []  # no longer "in use"
+    # A new commission from it must name its spec; the tag is not an implicit assignment.
+    assert (await refused(ctl, agent(lead, name="kid"))).code == "work_assignment_required"
+    # A handoff successor inherits the unassignment, even when it names specs.
+    for name, extra in (("succ-a", {}), ("succ-b", {"spec_id": other})):
+        msg = agent(lead, parent=False, name=name, handoff=True, handoff_from_stream_id=lead[0], **extra)
+        await ctl.spawn(msg, HOST)
+        row = await env.store.fetch_session(HOST, name)
+        assert row["assigned_spec_id"] == UNASSIGNED and effective_assignment(row) is None
+    # A legacy NULL single-spec row still falls back to its only spec.
+    legacy = await seat(env.store, "legacy", keep)
+    assert effective_assignment(await env.store.fetch_session(*legacy[0].split(":", 1))) == keep
 
 
 def test_removing_a_live_assignment_needs_a_recorded_reason():

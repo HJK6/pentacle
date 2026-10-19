@@ -544,7 +544,7 @@ DB. Review the concrete rollback artifact before activation.
 ## Work assignment and checkpoints
 
 - **Assignment.** Sessions carry a nullable `assigned_spec_id`: the seat's one work assignment. Spec tags keep their authority meaning (QA, schedules) and are never stripped.
-  - The *effective* assignment is the persisted value. For a legacy single-spec row it is that row's only spec. A multi-spec row without one has none.
+  - The *effective* assignment is the persisted value. An explicit unassignment (stored as an empty value) is none. For a legacy row (NULL) with a single spec it is that spec; a multi-spec legacy row has none.
   - New commissions persist the assignment they resolved. Handoff, resume and host transfer carry it.
   - Store startup backfills open single-spec rows idempotently.
 - **New commissions.** A spawn from a token-verified agent stream that is not a handoff, resume, daemon fire or ruled release is a new commission. Seat operator elevation does not exempt it. Message text is never inspected.
@@ -553,7 +553,7 @@ DB. Review the concrete rollback artifact before activation.
   - An admitted idempotent retry replays.
   - Operator-authenticated callers without a seat token are exempt, as are anonymous loopback spawns (a known local bypass), daemon fires, host transfer and recovery.
   - `schedule.insert` checks a non-handoff seat schedule at insert and stores its assignment first among the spec ids. A lane-ruling spawn is checked when its ruling request is admitted, not at release.
-- **Existing seats.** `agent-orch spec assign <stream> <spec>` attaches the spec when it is absent and sets the assignment. An agent caller is lane-checked. `spec unassign <stream>` clears it and keeps tags. Detaching the assigned spec clears it. The FD's own direct work is `spec assign` on the FD seat.
+- **Existing seats.** `agent-orch spec assign <stream> <spec>` attaches the spec when it is absent and sets the assignment. An agent caller is lane-checked. `spec unassign <stream>` clears it and keeps tags. Detaching the assigned spec clears it. Both store an explicit unassignment, which a handoff successor inherits; the single-spec fallback never reassigns that seat. The FD's own direct work is `spec assign` on the FD seat.
 - **Member removal.** `set-members` that removes a spec an open seat is assigned to is refused with `work_lane_member_in_use`, naming the seats. `--reason` proceeds and records the reason and seats on the event.
 - **Checkpoint.** `_shared/work_checkpoint.py` reads the current spec/summary with the existing parser.
   - It reports missing `## Acceptance Criteria`, missing `**Status** —`, and, for open specs, missing `**Next action** —`. It also reports a last `remaining_work_h` declaration that is not numeric, not `n/a — umbrella|coordination` and not `unknown — <reason>`. Each finding carries its exact fix.

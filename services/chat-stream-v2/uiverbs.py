@@ -57,7 +57,7 @@ import boto3
 from sessions import VerbError
 from enrollment import EnrollmentError, EnrollmentRegistry
 from seat_token_telemetry import SeatTokenTelemetry
-from store import normalize_spec_binding_provenance, normalize_spec_ids
+from store import UNASSIGNED, normalize_spec_binding_provenance, normalize_spec_ids
 from v2_runtime import iso_now
 
 SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
@@ -368,8 +368,8 @@ class UIVerbs:
             # Only the work assignment ends; authority tags are untouched.
             if await self.store.fetch_session(host, name) is None:
                 raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
-            updated = await self.store.update_session(host, name, assigned_spec_id=None)
-            self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=None)
+            updated = await self.store.update_session(host, name, assigned_spec_id=UNASSIGNED)
+            self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=UNASSIGNED)
             return {"type": "session.spec_update.ok", "request_id": rid, "action": action, "session": updated}
         if not SPEC_ID_RE.fullmatch(spec_id):
             raise VerbError("invalid_spec_id", "spec_id must match <repo>__<topic>")
@@ -448,7 +448,7 @@ class UIVerbs:
             spec_ids = [existing for existing in spec_ids if not same(existing, spec_id)]
             bindings = [binding for binding in bindings if not same(binding["spec_id"], spec_id)]
             if assigned and same(assigned, spec_id):
-                assigned = None
+                assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
         updated = await self.store.update_session(

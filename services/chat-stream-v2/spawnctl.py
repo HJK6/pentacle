@@ -95,7 +95,7 @@ from _shared.spawn_profiles import (  # noqa: E402
     resolve_spawn,
     validate_v2,
 )
-from store import STREAM_TOKEN_HASH_VERSION, effective_assignment, normalize_spec_binding_provenance, normalize_spec_ids, spec_binding_source, SpecInputsUnavailable  # noqa: E402
+from store import STREAM_TOKEN_HASH_VERSION, UNASSIGNED, carried_assignment, effective_assignment, normalize_spec_binding_provenance, normalize_spec_ids, spec_binding_source, SpecInputsUnavailable  # noqa: E402
 
 log = logging.getLogger("chat_streamd_v2.spawnctl")
 
@@ -452,7 +452,7 @@ class SpawnCtl:
                 "qualified_spec_ids": [],
                 "spec_binding_provenance": [],
                 # A handoff/resume successor keeps its predecessor's assignment (R1).
-                "assigned_spec_id": effective_assignment(source_row) if msg.get("handoff_from_stream_id") else None,
+                "assigned_spec_id": carried_assignment(source_row) if msg.get("handoff_from_stream_id") else None,
             }
 
         resolver = getattr(self.specs, "resolution_for", None) if self.specs is not None else None
@@ -594,15 +594,17 @@ class SpawnCtl:
 
         # The work assignment is the first explicit spec; an inherited binding carries the
         # source seat's assignment, never an arbitrary tag from its portfolio.
-        if inherited:
+        if inherited and msg.get("handoff_from_stream_id") and carried_assignment(source_row) == UNASSIGNED:
+            assigned = UNASSIGNED  # an explicitly unassigned seat's successor stays unassigned (A6)
+        elif inherited:
             source_assignment = effective_assignment(source_row)
             assigned = next((spec_id for spec_id in explicit
                              if source_identity(spec_id) == source_identity(source_assignment)), None)
         else:
             # A handoff (including a scheduled one carrying the owner's ids) keeps its
             # predecessor's assignment when that spec is among them (R1/R4).
-            carried = effective_assignment(source_row) if msg.get("handoff_from_stream_id") else None
-            assigned = carried if carried in explicit else explicit[0]
+            carried = carried_assignment(source_row) if msg.get("handoff_from_stream_id") else None
+            assigned = carried if carried == UNASSIGNED or carried in explicit else explicit[0]
         binding = _SpecBinding({
             "spec_id": explicit[0],
             "spec_ids": explicit,
