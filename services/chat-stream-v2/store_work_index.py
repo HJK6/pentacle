@@ -1,8 +1,11 @@
 """Durable file observations on the existing Store's single SQLite writer."""
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +35,10 @@ def member_ids(lane: dict) -> list[str]:
 
 def members_conn(conn, lane: dict) -> list[dict]:
     members = []
+    state = _state_conn(conn)
     for spec_id in member_ids(lane):
         row = conn.execute("SELECT record_json FROM v2_work_item_observations WHERE spec_id=?", (spec_id,)).fetchone()
-        members.append(json.loads(row[0])["member"] if row else unresolved_member(spec_id))
+        members.append(_observed_record(json.loads(row[0]), state)["member"] if row else unresolved_member(spec_id))
     return members
 
 
@@ -54,6 +58,61 @@ def _candidate(scan: dict, spec_id: str, prior: dict | None) -> dict:
     if prior and prior.get("path") in scan["errors"]:
         return scan["errors"][prior["path"]]
     return {"quality": "missing", "error": "work_file_missing"}
+
+
+def _observed_record(record: dict, state: dict) -> dict:
+    """Fresh members share the last committed scan clock, including after boot."""
+    observation = record["member"]["observation"]
+    if observation["quality"] == "fresh" and state.get("snapshot_at") is not None:
+        observation["observed_at"] = state["snapshot_at"]
+    return record
+
+
+def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: bool):
+    """Compute a delta without retaining a second decoded population or a cache."""
+    known_ids = set()
+    delta = {}
+    accepted = False
+    now = float(scan["scanned_at"])
+
+    def advance(spec_id, previous):
+        nonlocal accepted
+        candidate = _candidate(scan, spec_id, previous)
+        record, transition = advance_observation(spec_id, previous, candidate,
+            now=now, settle_s=settle_s, sweep=sweep)
+        accepted |= candidate["quality"] == "fresh"
+        if previous is not None:
+            prior_quality = previous["member"]["observation"]["quality"]
+            quality = record["member"]["observation"]["quality"]
+            if prior_quality == quality == "fresh":
+                # The committed snapshot advances this clock for all fresh rows.
+                previous["member"]["observation"]["observed_at"] = record["member"]["observation"]["observed_at"]
+            elif (quality in ("missing", "ambiguous") and prior_quality == quality
+                  and previous.get("incident") == record.get("incident")
+                  and previous["bad_sweeps"] >= 2
+                  and now - previous["bad_since"] >= settle_s):
+                # Once settled, counting more sweeps cannot change the decision.
+                record["bad_sweeps"] = previous["bad_sweeps"]
+        if record != previous:
+            delta[spec_id] = (json.dumps(record, separators=(",", ":")),
+                              transition, record["member"]["obs_rev"])
+
+    for spec_id, raw in rows:
+        known_ids.add(spec_id)
+        advance(spec_id, _observed_record(json.loads(raw), state))
+    for spec_id in scan["candidates"].keys() - known_ids:
+        advance(spec_id, None)
+    known_ids.update(scan["candidates"])
+    return state, known_ids, delta, accepted
+
+
+def _prepare_file(path: str, scan: dict, *, settle_s: float, sweep: bool):
+    """Read one coherent SQLite snapshot, then release it before CPU preparation."""
+    with closing(sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.execute("BEGIN")
+        state = _state_conn(conn)
+        rows = conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations").fetchall()
+    return _prepare_records(rows, state, scan, settle_s=settle_s, sweep=sweep)
 
 
 class WorkIndexStoreMixin:
@@ -81,7 +140,19 @@ class WorkIndexStoreMixin:
         from store_work_lanes import _insert_event
         now = float(scan["scanned_at"])
         fault = self._work_index_fault
+        worker = self._thread
+        prepared = None
+        if self.path not in ("", ":memory:"):
+            # Also waits for schema initialization before opening the reader.
+            await self.submit(lambda conn: None)
+            prepared = await asyncio.to_thread(_prepare_file, self.path, scan,
+                                                settle_s=settle_s, sweep=sweep)
+        if worker is not self._thread:
+            raise RuntimeError("work index Store changed during preparation")
+
         def apply(conn):
+            if worker is not self._thread:
+                raise RuntimeError("work index Store changed during preparation")
             conn.execute("BEGIN IMMEDIATE")
             try:
                 state = _state_conn(conn)
@@ -94,25 +165,33 @@ class WorkIndexStoreMixin:
                 for lane in lanes:
                     for spec_id in member_ids(lane):
                         holders.setdefault(spec_id, []).append(lane)
-                records = {row[0]: json.loads(row[1]) for row in conn.execute(
-                    "SELECT spec_id,record_json FROM v2_work_item_observations")}
-                ids = records.keys() | scan["candidates"].keys() | holders.keys()
+                current = prepared
+                if current is None or current[0] != state:
+                    # Memory Stores and a concurrent accepted scan use the same
+                    # oracle here. Never publish a delta against a changed base.
+                    current = _prepare_records(conn.execute(
+                        "SELECT spec_id,record_json FROM v2_work_item_observations"),
+                        state, scan, settle_s=settle_s, sweep=sweep)
+                _, known_ids, delta, accepted = current
+                # Membership may have changed while the read-only snapshot was
+                # prepared. Resolve new unknown members against this transaction.
+                for spec_id in holders.keys() - known_ids:
+                    record, transition = advance_observation(spec_id, None, _candidate(scan, spec_id, None),
+                        now=now, settle_s=settle_s, sweep=sweep)
+                    delta[spec_id] = (json.dumps(record, separators=(",", ":")),
+                                      transition, record["member"]["obs_rev"])
                 changes = 0
-                accepted = False
-                for spec_id in sorted(ids):
-                    candidate = _candidate(scan, spec_id, records.get(spec_id))
-                    record, transition = advance_observation(spec_id, records.get(spec_id), candidate,
-                                                            now=now, settle_s=settle_s, sweep=sweep)
-                    accepted |= candidate["quality"] == "fresh"
+                for spec_id in sorted(delta):
+                    raw, transition, revision = delta[spec_id]
                     conn.execute("INSERT INTO v2_work_item_observations(spec_id,record_json) VALUES (?,?) "
                                  "ON CONFLICT(spec_id) DO UPDATE SET record_json=excluded.record_json",
-                                 (spec_id, json.dumps(record, separators=(",", ":"))))
+                                 (spec_id, raw))
                     if fault is not None:
                         fault()
                     if transition:
                         changes += 1
                         for lane in holders.get(spec_id, []):
-                            event_id = f"item:{lane['lane_id']}:{spec_id}:{record['member']['obs_rev']}"
+                            event_id = f"item:{lane['lane_id']}:{spec_id}:{revision}"
                             _insert_event(conn, event_id=event_id, lane=lane, operation="item_change",
                                           source_id=event_id, actor="daemon:index", generation=None,
                                           prior=lane["work_state"], nxt=lane["work_state"], expected=None,
