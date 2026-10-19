@@ -915,6 +915,12 @@ class Notify:
                                               parent_stream_id=parent, message=message)
         if generation is not None:
             envelope = {**envelope, "producer_session_generation": generation}
+        if not envelope.get("spec_id") and self._sessions is not None and isinstance(row, dict):
+            # A question belongs to the asker's work assignment unless it names one (D1).
+            from store_specs import effective_assignment
+            assigned = effective_assignment(row)
+            if assigned:
+                envelope = {**envelope, "spec_id": assigned}
 
         existing = await self._db.call("get_agent_question", question_id)
         if isinstance(existing, dict):
@@ -1271,6 +1277,17 @@ class Notify:
         else:
             response["notification"] = client
         return response
+
+    async def open_questions_by_spec(self) -> dict[str, dict[str, Any]]:
+        """Open question count and oldest open question per spec, for lane member rows."""
+        out: dict[str, dict[str, Any]] = {}
+        for question in await self._db.call("list_agent_questions", open_only=True):
+            spec_id = question.get("spec_id")
+            if spec_id:
+                entry = out.setdefault(spec_id, {"count": 0, "first_question_id": None})
+                entry["count"] += 1
+                entry["first_question_id"] = question.get("question_id")  # newest first: ends on the oldest
+        return out
 
     async def _prompt_list(self, msg: dict, request_id: str) -> dict:
         raw_open = msg.get("open")

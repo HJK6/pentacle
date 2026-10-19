@@ -38,6 +38,17 @@ export type WorkLaneVisibleChat = {
 
 export type WorkLaneEstimate = { p25: number; p75: number; median: number; as_of: string | null; provisional: boolean };
 
+/** A seat whose work assignment is this member spec. Activity is an observation, never progress. */
+export type WorkLaneSeat = {
+  stream_id: string;
+  role: string | null;
+  host: string | null;
+  visibility: string | null;
+  parent_stream_id: string | null;
+  activity: 'working' | 'idle' | 'offline' | 'unknown';
+  last_activity: string | null;
+};
+
 export type WorkLaneMember = {
   spec_id: string;
   title: string | null;
@@ -51,6 +62,10 @@ export type WorkLaneMember = {
   next_action_text: string | null;
   source_changed_at: string | null;
   observation: { quality: string | null; observed_at: string | null; error: string | null } | null;
+  /** Additive attribution; empty/zero from a daemon that predates it. */
+  seats: WorkLaneSeat[];
+  seats_total: number;
+  open_questions: { count: number; first_question_id: string | null };
 };
 
 /** Additive progress facts (work-lanes.md, file-derived work); null for a v1 lane without them. */
@@ -181,6 +196,20 @@ function normalizeRange(raw: unknown): { p25: number; p75: number; median: numbe
   return p25 === null || p75 === null || median === null ? null : { p25, p75, median };
 }
 
+const SEAT_ACTIVITY = new Set(['working', 'idle', 'offline', 'unknown']);
+
+function normalizeSeat(raw: unknown): WorkLaneSeat | null {
+  if (!isRec(raw)) return null;
+  const streamId = nonEmpty(raw.stream_id);
+  if (!streamId) return null;
+  const activity = typeof raw.activity === 'string' && SEAT_ACTIVITY.has(raw.activity)
+    ? (raw.activity as WorkLaneSeat['activity']) : 'unknown';
+  return {
+    stream_id: streamId, role: str(raw.role), host: str(raw.host), visibility: str(raw.visibility),
+    parent_stream_id: str(raw.parent_stream_id), activity, last_activity: str(raw.last_activity),
+  };
+}
+
 function normalizeMember(raw: unknown): WorkLaneMember | null {
   if (!isRec(raw)) return null;
   const specId = nonEmpty(raw.spec_id);
@@ -188,6 +217,8 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
   const range = normalizeRange(raw.estimate);
   const est = isRec(raw.estimate) ? raw.estimate : {};
   const obs = isRec(raw.observation) ? raw.observation : null;
+  const seats = (Array.isArray(raw.seats) ? raw.seats : []).map(normalizeSeat).filter((s): s is WorkLaneSeat => s !== null);
+  const questions = isRec(raw.open_questions) ? raw.open_questions : {};
   return {
     spec_id: specId,
     title: str(raw.title),
@@ -201,6 +232,12 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
     next_action_text: str(raw.next_action_text),
     source_changed_at: str(raw.source_changed_at),
     observation: obs ? { quality: str(obs.quality), observed_at: str(obs.observed_at), error: str(obs.error) } : null,
+    seats: seats,
+    seats_total: Math.max(finite(raw.seats_total) ?? seats.length, seats.length),
+    open_questions: {
+      count: Math.max(0, finite(questions.count) ?? 0),
+      first_question_id: str(questions.first_question_id),
+    },
   };
 }
 

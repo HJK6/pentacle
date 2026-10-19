@@ -74,10 +74,54 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
     }
 
 
+SEAT_CAP = 8
+_ROLE_ORDER = {"lead": 0, "nexus": 1, "planner": 2, "worker": 3, "qa": 4}
+
+
+def _activity(row: dict[str, Any]) -> str:
+    """An observation of the seat, never progress, intent or a pause."""
+    if row.get("online") is False:
+        return "offline"
+    if row.get("busy") or row.get("working"):
+        return "working"
+    return "idle" if row.get("online") else "unknown"
+
+
+def attribute_members(members: list[dict[str, Any]], sessions_by_stream: dict[str, dict[str, Any]],
+                      questions_by_spec: dict[str, dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """D1: each member row gains the open seats assigned to it and its open questions.
+
+    Only the effective work assignment attributes a seat; inherited authority
+    tags never do."""
+    from store_specs import effective_assignment
+    by_spec: dict[str, list[dict[str, Any]]] = {}
+    for stream_id, row in sessions_by_stream.items():
+        assigned = effective_assignment(row)
+        if assigned and str(row.get("status") or "open") == "open":
+            by_spec.setdefault(assigned, []).append({
+                "stream_id": stream_id, "role": row.get("role"), "host": row.get("host"),
+                "visibility": row.get("visibility"), "parent_stream_id": row.get("parent_stream_id"),
+                "activity": _activity(row), "last_activity": row.get("last_activity")})
+    out = []
+    for member in members:
+        seats = sorted(by_spec.get(member["spec_id"], []),
+                       key=lambda seat: (_ROLE_ORDER.get(str(seat["role"] or ""), 9), seat["stream_id"]))
+        question = (questions_by_spec or {}).get(member["spec_id"]) or {}
+        out.append({**member, "seats": seats[:SEAT_CAP], "seats_total": len(seats),
+                    "open_questions": {"count": int(question.get("count") or 0),
+                                       "first_question_id": question.get("first_question_id")}})
+    return out
+
+
 def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
-                 *, index_available: bool | None = None, all_members: bool = False) -> dict[str, Any]:
+                 *, index_available: bool | None = None, all_members: bool = False,
+                 sessions_by_stream: dict[str, dict[str, Any]] | None = None,
+                 questions_by_spec: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     stored = lane["work_state"]
     state, reason = stored, lane.get("work_state_reason")
+    progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
+    if sessions_by_stream is not None:
+        progress["members"] = attribute_members(progress["members"], sessions_by_stream, questions_by_spec)
     if lane_lead_lost(lane) and not lane.get("_qualifies"):
         # An unexpected owner loss is a fault the FD repairs, never an intentional pause.
         state, reason = "active", "lead_lost"
@@ -93,7 +137,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
-        **lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members),
+        **progress,
     }
 
 
@@ -106,19 +150,23 @@ def server_order(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
-                  now_iso: str | None = None, *, index_available: bool | None = None) -> list[dict[str, Any]]:
+                  now_iso: str | None = None, *, index_available: bool | None = None,
+                  questions_by_spec: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     now_iso = now_iso or _iso_now()
     lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso,
-                          index_available=index_available)
+                          index_available=index_available, sessions_by_stream=presence_by_stream,
+                          questions_by_spec=questions_by_spec)
              for row in rows]
     return server_order(lanes)
 
 
 def build_frame(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
                 *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP,
-                work_index: dict[str, Any] | None = None) -> dict[str, Any]:
+                work_index: dict[str, Any] | None = None,
+                questions_by_spec: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso,
-             index_available=bool(work_index["available"]) if work_index is not None else None)
+             index_available=bool(work_index["available"]) if work_index is not None else None,
+             questions_by_spec=questions_by_spec)
              if lane["state"] != "done"]
     counts = {"open": len(lanes), "active": 0, "paused": 0, "blocked": 0}
     for lane in lanes:
@@ -139,6 +187,9 @@ def frame_signature(frame: dict[str, Any]) -> str:
         presence = (lane.get("lead") or {}).get("presence")
         if isinstance(presence, dict):
             presence.pop("last_activity", None)
+        for member in lane.get("members") or []:
+            for seat in member.get("seats") or []:
+                seat.pop("last_activity", None)
     return json.dumps(body, sort_keys=True, default=str)
 
 
@@ -167,6 +218,8 @@ class WorkLanesInventory:
                                    os.environ.get("WORK_LANES_REFRESH_MIN_S", "2"))
         if not math.isfinite(self.refresh_min_s) or self.refresh_min_s < 0:
             raise ValueError("work_lanes_refresh_interval_invalid")
+        # Optional async reader of open operator questions keyed by spec (main wires notify).
+        self.open_questions: Callable[[], Awaitable[dict[str, dict[str, Any]]]] | None = None
         self._last_pass = float("-inf")
         self._last_sweep = float("-inf")
         self._index_dirty = specs is not None
@@ -283,17 +336,28 @@ class WorkLanesInventory:
             await asyncio.shield(self._watcher_start)
         self._periodic = self._task = self._watcher_start = None
 
+    async def questions_by_spec(self) -> dict[str, dict[str, Any]] | None:
+        if self.open_questions is None:
+            return None
+        try:
+            return await self.open_questions()
+        except Exception:  # noqa: BLE001 - question attribution is display-only
+            log.exception("work lanes question attribution unavailable")
+            return None
+
     async def current(self) -> dict[str, Any]:
         rows = await self.store.work_lane_rows()
         return build_frame(rows, presence_index(self.sessions.list_open()),
-                           work_index=await self.store.work_index_status())
+                           work_index=await self.store.work_index_status(),
+                           questions_by_spec=await self.questions_by_spec())
 
     async def list(self, *, include_done: bool = False, limit: int = 200,
                    before_updated_at: str | None = None, before_lane_id: str | None = None,
                    members: bool = False) -> dict[str, Any]:
         """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
         rows = await self.store.work_lane_rows(include_done=include_done)
-        lanes = project_lanes(rows, presence_index(self.sessions.list_open()))
+        lanes = project_lanes(rows, presence_index(self.sessions.list_open()),
+                              questions_by_spec=await self.questions_by_spec())
         key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
         lanes.sort(key=key, reverse=True)
         if before_updated_at:

@@ -136,6 +136,20 @@ def normalize_spec_binding_provenance(
         seen.add(binding_spec_id)
     return normalized
 
+def effective_assignment(row: dict[str, Any] | None) -> str | None:
+    """A seat's one current work assignment; spec tags remain authority only.
+
+    The persisted assignment wins; a legacy single-spec row's only spec is its
+    assignment; a multi-spec row without one is unassigned."""
+    if not row:
+        return None
+    assigned = normalize_spec_ids(spec_id=row.get("assigned_spec_id"))
+    if assigned:
+        return assigned[0]
+    spec_ids = normalize_spec_ids(row.get("spec_ids"), row.get("spec_id"))
+    return spec_ids[0] if len(spec_ids) == 1 else None
+
+
 def _hydrate_spec_row(row: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(row)
     spec_ids = normalize_spec_ids(hydrated.get("spec_ids"), hydrated.get("spec_id"))

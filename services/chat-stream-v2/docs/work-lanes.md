@@ -95,7 +95,8 @@ are invented examples.
 Each member has `spec_id`, `title`, `status`, `terminal`, `ac_checked`, `ac_total`,
 `estimate {p25,p75,median,as_of,provisional}` or null, `estimate_exempt` (default
 false for legacy or unresolved members), `status_text`, `next_action_text`,
-`source_changed_at`, `observation {quality,observed_at,error}` and `obs_rev`.
+`source_changed_at`, `observation {quality,observed_at,error}`, `obs_rev`, and the additive
+`seats`, `seats_total` and `open_questions` described in [Member attribution](#member-attribution).
 `terminal` is `completed`, `deprecated` or null. Quality is `fresh`, `stale`,
 `error`, `missing` or `ambiguous`; it does not describe lane activity.
 Transient loss or split writes retain last-good facts as stale. Malformed YAML
@@ -539,6 +540,17 @@ DB. Review the concrete rollback artifact before activation.
 - Lane code restarts nothing and never touches FD/operator `paused`/`blocked` lanes or holds. Restart goes through existing spawn idempotency after the FD verifies the prior execution is gone.
 - `work-lane list/show` human text shows `LEAD LOST — repair: …`.
 - Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK, episode rows and the `lane_lead_lost` adapter vocabulary. The supported rollback artifact removes only `lead_lost` from the reconciliation tuple: no new episode opens, pending ones still deliver, and nothing stores a pause. Do not run an older binary, which would retry pending `lead_lost` deliveries it cannot map.
+
+## Member attribution
+
+Spec: lane tracking minimal (D1–D2).
+
+Each projected member (inventory, list and `show --members`) adds:
+
+- `seats` (≤ 8, ordered lead, nexus, planner, worker, qa, other, then by stream), each `{stream_id, role, host, visibility, parent_stream_id, activity: working|idle|offline|unknown, last_activity}`, and `seats_total`. Only open seats whose effective assignment is the member spec attribute. A seat with exactly one spec is assigned to it. A multi-spec row is unassigned: its inherited or attached tags never attribute it to every member (`store_specs.effective_assignment`).
+- `open_questions {count, first_question_id}`, from open operator cards whose `spec_id` matches; `first_question_id` is the oldest. Counts may lag by one refresh pass.
+
+`prompt ask` without a `spec_id` defaults it to the asker's effective assignment; an explicit `spec_id` wins. Activity is an observation, never progress, intent or a pause: idle does not mean paused or waiting on the operator. `last_activity` is excluded from the frame signature. A client of an older daemon reads the fields as empty/zero.
 
 ## Spec attribution and completion
 

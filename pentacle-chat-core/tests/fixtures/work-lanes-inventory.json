@@ -1114,7 +1114,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -1139,7 +1145,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -1337,7 +1349,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -1362,7 +1380,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_3",
@@ -1387,7 +1411,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 3,
@@ -1535,7 +1565,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -1671,7 +1707,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -1803,7 +1845,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -1935,7 +1983,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -2171,7 +2225,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -2344,7 +2404,13 @@
                   "error": "work_file_missing"
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2369,7 +2435,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -2538,7 +2610,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2563,7 +2641,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -2756,7 +2840,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2781,7 +2871,13 @@
                   "error": null
                 },
                 "obs_rev": 1,
-                "estimate_exempt": false
+                "estimate_exempt": false,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -2954,7 +3050,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__remaining_only_2",
@@ -2979,7 +3081,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -3148,7 +3256,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__elapsed_only_ignored_2",
@@ -3167,7 +3281,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 2,
@@ -3363,7 +3483,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__umbrella_exempt_2",
@@ -3382,7 +3508,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               },
               {
                 "spec_id": "spec_demo__umbrella_exempt_3",
@@ -3401,7 +3533,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 3,
@@ -3569,7 +3707,13 @@
                   "observed_at": "2026-01-02T00:00:00.000Z",
                   "error": null
                 },
-                "obs_rev": 1
+                "obs_rev": 1,
+                "seats": [],
+                "seats_total": 0,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
               }
             ],
             "members_total": 1,
@@ -3635,6 +3779,337 @@
       "expected_error": {
         "error_code": "work_lane_member_conflict",
         "lane_id": "wl-20f4013702cc1ee6335bac2a"
+      }
+    },
+    {
+      "name": "member_attribution",
+      "rows": [
+        {
+          "lane_id": "wl-000000000000000000000001",
+          "title": "Build model bridges",
+          "summary": "Assemble and inspect miniature spans.",
+          "work_state": "active",
+          "work_state_reason": "fd",
+          "version": 2,
+          "owner_kind": "operator",
+          "updated_at": "2026-01-02T00:00:00.000Z",
+          "first_admitted_at": "2026-01-02T00:00:00.000Z",
+          "bound_stream_id": "fixture-host:lead",
+          "bound_generation": "fixture-generation",
+          "_lead_row": {
+            "status": "open",
+            "visibility": "default"
+          },
+          "visible_chat_stream_id": "fixture-chat:assistant",
+          "_chat_kind": "composite",
+          "_chat_available": "open",
+          "_qualifies": true,
+          "_members": [
+            {
+              "spec_id": "spec_demo__item_1",
+              "title": "Model bridge 1",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_checked": 1,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true,
+                "as_of": "2026-01-02"
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1,
+              "estimate_exempt": false
+            },
+            {
+              "spec_id": "spec_demo__item_2",
+              "title": "Model bridge 2",
+              "status": "completed",
+              "terminal": "completed",
+              "ac_checked": 2,
+              "ac_total": 2,
+              "estimate": {
+                "p25": 2,
+                "p75": 4,
+                "median": 3,
+                "provisional": true,
+                "as_of": "2026-01-02"
+              },
+              "status_text": "Model prepared.",
+              "next_action_text": "Inspect the paper span.",
+              "source_changed_at": "2026-01-02T00:00:00.000Z",
+              "observation": {
+                "quality": "fresh",
+                "observed_at": "2026-01-02T00:00:00.000Z",
+                "error": null
+              },
+              "obs_rev": 1,
+              "estimate_exempt": false
+            }
+          ],
+          "no_spec_reason": null,
+          "blocker": null
+        }
+      ],
+      "sessions": {
+        "fixture-host:lead": {
+          "stream_id": "fixture-host:lead",
+          "status": "open",
+          "role": "lead",
+          "host": "fixture-host",
+          "visibility": "default",
+          "parent_stream_id": null,
+          "spec_id": "spec_demo__item_1",
+          "spec_ids": [
+            "spec_demo__item_1"
+          ],
+          "online": true,
+          "busy": true,
+          "working": true,
+          "capture_liveness": "transport_unknown",
+          "last_activity": "2026-01-02T00:00:00.000Z"
+        },
+        "fixture-host:qa": {
+          "stream_id": "fixture-host:qa",
+          "status": "open",
+          "role": "qa",
+          "host": "fixture-host",
+          "visibility": "hidden",
+          "parent_stream_id": "fixture-host:lead",
+          "spec_id": "spec_demo__item_1",
+          "spec_ids": [
+            "spec_demo__item_1"
+          ],
+          "online": true,
+          "last_activity": null
+        },
+        "fixture-host:worker": {
+          "stream_id": "fixture-host:worker",
+          "status": "open",
+          "role": "worker",
+          "host": "fixture-host",
+          "visibility": "hidden",
+          "parent_stream_id": "fixture-host:lead",
+          "spec_id": "spec_demo__item_2",
+          "spec_ids": [
+            "spec_demo__item_2"
+          ],
+          "online": false,
+          "last_activity": null
+        },
+        "fixture-host:fd": {
+          "stream_id": "fixture-host:fd",
+          "status": "open",
+          "role": "lead",
+          "host": "fixture-host",
+          "visibility": "hidden",
+          "parent_stream_id": null,
+          "spec_id": "spec_demo__item_1",
+          "spec_ids": [
+            "spec_demo__item_1",
+            "spec_demo__item_2"
+          ],
+          "online": true,
+          "busy": true
+        }
+      },
+      "questions_by_spec": {
+        "spec_demo__item_1": {
+          "count": 2,
+          "first_question_id": "fixture-question-1"
+        }
+      },
+      "work_index": {
+        "available": true,
+        "root_configured": true,
+        "snapshot_at": "2026-01-02T00:00:00.000Z",
+        "last_sweep_at": "2026-01-02T00:00:00.000Z",
+        "error": null
+      },
+      "frame": {
+        "type": "work_lanes.inventory",
+        "lanes": [
+          {
+            "lane_id": "wl-000000000000000000000001",
+            "title": "Build model bridges",
+            "summary": "Assemble and inspect miniature spans.",
+            "state": "active",
+            "state_reason": "fd",
+            "blocker": null,
+            "owner_kind": "operator",
+            "version": 2,
+            "updated_at": "2026-01-02T00:00:00.000Z",
+            "first_admitted_at": "2026-01-02T00:00:00.000Z",
+            "done_at": null,
+            "lead": {
+              "stream_id": "fixture-host:lead",
+              "generation": "fixture-generation",
+              "qualifies": true,
+              "status": "open",
+              "visibility": "default",
+              "presence": {
+                "online": true,
+                "working": true,
+                "capture_liveness": "transport_unknown",
+                "last_activity": "2026-01-02T00:00:00.000Z"
+              },
+              "status_card": {
+                "goal": null,
+                "active_step": null,
+                "update": null,
+                "eta_at": null,
+                "eta_set_at": null,
+                "updated_at": null
+              },
+              "eta_stale": false
+            },
+            "visible_chat": {
+              "stream_id": "fixture-chat:assistant",
+              "generation": null,
+              "kind": "composite",
+              "available": "open"
+            },
+            "last_update": null,
+            "members": [
+              {
+                "spec_id": "spec_demo__item_1",
+                "title": "Model bridge 1",
+                "status": "in_progress",
+                "terminal": null,
+                "ac_checked": 1,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true,
+                  "as_of": "2026-01-02"
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1,
+                "estimate_exempt": false,
+                "seats": [
+                  {
+                    "stream_id": "fixture-host:lead",
+                    "role": "lead",
+                    "host": "fixture-host",
+                    "visibility": "default",
+                    "parent_stream_id": null,
+                    "activity": "working",
+                    "last_activity": "2026-01-02T00:00:00.000Z"
+                  },
+                  {
+                    "stream_id": "fixture-host:qa",
+                    "role": "qa",
+                    "host": "fixture-host",
+                    "visibility": "hidden",
+                    "parent_stream_id": "fixture-host:lead",
+                    "activity": "idle",
+                    "last_activity": null
+                  }
+                ],
+                "seats_total": 2,
+                "open_questions": {
+                  "count": 2,
+                  "first_question_id": "fixture-question-1"
+                }
+              },
+              {
+                "spec_id": "spec_demo__item_2",
+                "title": "Model bridge 2",
+                "status": "completed",
+                "terminal": "completed",
+                "ac_checked": 2,
+                "ac_total": 2,
+                "estimate": {
+                  "p25": 2,
+                  "p75": 4,
+                  "median": 3,
+                  "provisional": true,
+                  "as_of": "2026-01-02"
+                },
+                "status_text": "Model prepared.",
+                "next_action_text": "Inspect the paper span.",
+                "source_changed_at": "2026-01-02T00:00:00.000Z",
+                "observation": {
+                  "quality": "fresh",
+                  "observed_at": "2026-01-02T00:00:00.000Z",
+                  "error": null
+                },
+                "obs_rev": 1,
+                "estimate_exempt": false,
+                "seats": [
+                  {
+                    "stream_id": "fixture-host:worker",
+                    "role": "worker",
+                    "host": "fixture-host",
+                    "visibility": "hidden",
+                    "parent_stream_id": "fixture-host:lead",
+                    "activity": "offline",
+                    "last_activity": null
+                  }
+                ],
+                "seats_total": 1,
+                "open_questions": {
+                  "count": 0,
+                  "first_question_id": null
+                }
+              }
+            ],
+            "members_total": 2,
+            "no_spec_reason": null,
+            "items_total": 2,
+            "items_completed": 1,
+            "items_dropped": 0,
+            "items_open": 1,
+            "items_unresolved": 0,
+            "ac_checked": 3,
+            "ac_total": 4,
+            "ac_members": 2,
+            "open_estimate_h": {
+              "p25": 2,
+              "p75": 4,
+              "median": 3
+            },
+            "open_estimated": 1,
+            "estimate_complete": true,
+            "freshness_at": "2026-01-02T00:00:00.000Z",
+            "completion_pending": false,
+            "lead_reported_done": null,
+            "stale": false
+          }
+        ],
+        "counts": {
+          "open": 1,
+          "active": 1,
+          "paused": 0,
+          "blocked": 0
+        },
+        "truncated": false,
+        "generated_at": "2026-01-02T00:00:00.000Z",
+        "work_index": {
+          "available": true,
+          "root_configured": true,
+          "snapshot_at": "2026-01-02T00:00:00.000Z",
+          "last_sweep_at": "2026-01-02T00:00:00.000Z",
+          "error": null
+        }
       }
     }
   ]

@@ -574,6 +574,7 @@ async def run(args: argparse.Namespace) -> int:
         assistant_stream_id=assistant_composite.config.stream_id if assistant_composite.enabled else "",
     )
     server.notify = notify
+    work_lanes.open_questions = notify.open_questions_by_spec
 
     async def _work_lanes_changed() -> None:
         work_lanes.refresh()

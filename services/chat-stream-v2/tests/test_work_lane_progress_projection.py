@@ -51,9 +51,11 @@ def test_v2_golden_cells_and_deferred_keys():
     assert {cell["name"] for cell in fixture["progress_v2"]} == {
         "active_progress", "paused_leadless", "blocked", "missing_member", "ambiguous_member",
         "missing_estimate", "no_spec", "index_unavailable", "stale_observation_completed",
-        "completion_pending", "stale_lane", "remaining_only", "elapsed_only_ignored", "umbrella_exempt", "member_conflict"}
+        "completion_pending", "stale_lane", "remaining_only", "elapsed_only_ignored", "umbrella_exempt", "member_conflict",
+        "member_attribution"}
     for cell in fixture["progress_v2"]:
-        actual = build_frame(cell["rows"], {}, now_iso=cell["frame"]["generated_at"], work_index=cell["work_index"])
+        actual = build_frame(cell["rows"], cell.get("sessions", {}), now_iso=cell["frame"]["generated_at"],
+                             work_index=cell["work_index"], questions_by_spec=cell.get("questions_by_spec"))
         assert actual == cell["frame"]
         for lane in actual["lanes"]:
             assert {"completion_pending", "lead_reported_done", "stale"} <= lane.keys()

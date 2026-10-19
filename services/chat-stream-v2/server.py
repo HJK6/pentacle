@@ -4670,10 +4670,15 @@ class Server:
         projected = None
         if row is not None:
             row.update(shown["lane"], _members=shown["members"])
-            presence = presence_index(self.sessions.list_open()).get(str(row.get("bound_stream_id") or ""))
-            projected = project_lane(row, presence, _iso_now(), all_members=True)
+            open_sessions = presence_index(self.sessions.list_open())
+            questions = await self.work_lanes.questions_by_spec() if self.work_lanes is not None else None
+            projected = project_lane(row, open_sessions.get(str(row.get("bound_stream_id") or "")), _iso_now(),
+                                     all_members=True, sessions_by_stream=open_sessions,
+                                     questions_by_spec=questions)
         return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
-                "events": shown["events"], "updates": shown["updates"], "members": shown["members"],
+                "events": shown["events"], "updates": shown["updates"],
+                # Same shape as projected members, so the seat/question attribution shows here too.
+                "members": projected["members"] if projected is not None else shown["members"],
                 "work_index": await self.store.work_index_status()}
 
     async def _on_work_lanes_adopt_preview(self, msg: dict[str, Any]) -> dict[str, Any]:
