@@ -538,7 +538,7 @@ DB. Review the concrete rollback artifact before activation.
 - A faulted legacy stored `paused`/`lead_lost` lane may be restated `paused` with a reason; its stored reason becomes `fd`. Every other same-state request is still `work_lane_state_unchanged`.
 - Lane code restarts nothing and never touches FD/operator `paused`/`blocked` lanes or holds. Restart goes through existing spawn idempotency after the FD verifies the prior execution is gone.
 - `work-lane list/show` human text shows `LEAD LOST — repair: …`.
-- Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK and episode rows. The rollback artifact removes `lead_lost` from the reconciliation tuple; old code then stores faulted active lanes as paused again.
+- Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK, episode rows and the `lane_lead_lost` adapter vocabulary. The supported rollback artifact removes only `lead_lost` from the reconciliation tuple: no new episode opens, pending ones still deliver, and nothing stores a pause. Do not run an older binary, which would retry pending `lead_lost` deliveries it cannot map.
 
 ## Spec attribution and completion
 
