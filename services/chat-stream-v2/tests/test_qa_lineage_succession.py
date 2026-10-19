@@ -95,9 +95,9 @@ async def topology(**variant):
     return store, sessions, server
 
 
-async def _lineage(store, actor_generation=None):
+async def _lineage(store, actor_generation=None, actor_stream=FD):
     def check(conn):
-        actor = store_qa._session(conn, FD)
+        actor = store_qa._session(conn, actor_stream)
         if actor_generation is not None:
             actor = dict(actor, session_generation=actor_generation)
         rejects = store_qa._rejects(conn, SPEC, "admission", 1)
@@ -122,6 +122,27 @@ def test_real_topology_fd_successor_diagnoses_all_three(monkeypatch):
             assert sorted(json.loads(await store.submit(lambda c: c.execute(
                 "SELECT report_ids FROM v2_qa_diagnoses WHERE diagnosis_id='lineage-pivot'"
             ).fetchone()[0]))) == ["reject-qa1", "reject-qa2", "reject-qa4"]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_one_edge_verified_successor_of_ancestor_diagnoses(monkeypatch):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
+
+    async def run():
+        store, sessions, server = await topology()
+        try:
+            await sessions.open("localhost", "fdone", role="lead", spec_id=SPEC, spec_ids=[SPEC],
+                                handoff_from_stream_id=OLD_FD, token_hash=_hash("fdone-token"),
+                                token_hash_version="sha256:v1")
+            await _transfer(store, "move-one", [(OLD_FD, "localhost:fdone")])
+            assert await _lineage(store, actor_stream="localhost:fdone") == [True, True, True]
+            result = await issue(server, "diagnose", diagnosis_id="one-edge-pivot", diagnosis="wrong abstraction",
+                                 pivot="different acceptance scope", from_stream_id="localhost:fdone",
+                                 stream_token="fdone-token")
+            assert result["type"] == "coordination.spec_issue.diagnose.ok", result
         finally:
             store.stop()
 
@@ -218,16 +239,33 @@ def test_unrelated_actor_is_refused(monkeypatch, relation):
     asyncio.run(run())
 
 
-def test_cyclic_and_broken_chains_are_refused(monkeypatch):
+def test_cyclic_chain_with_proven_edges_is_refused(monkeypatch):
     monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()
         try:
+            # Both edges of fd <-> fdmid carry full custody, so only the cycle guard refuses.
+            fd_generation = await _generation(store, FD)
             await store.update_session("localhost", "fdmid", handoff_from_stream_id=FD)
-            assert await _lineage(store) == [False, False, False]  # cycle fd <-> fdmid
+            await store.submit(lambda c: (c.execute(
+                "UPDATE v2_host_transfer_seats SET source=?, source_generation=? WHERE command_id='move'",
+                (FD, fd_generation)), c.commit()))
+            assert await asyncio.wait_for(_lineage(store), 10) == [False, False, False]
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+def test_broken_chain_is_refused(monkeypatch):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
+
+    async def run():
+        store, _, _ = await topology()
+        try:
             await store.update_session("localhost", "fdmid", handoff_from_stream_id="localhost:gone")
-            assert await _lineage(store) == [False, False, False]  # broken chain
+            assert await _lineage(store) == [False, False, False]
         finally:
             store.stop()
 
