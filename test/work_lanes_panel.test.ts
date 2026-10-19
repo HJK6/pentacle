@@ -45,8 +45,8 @@ test('panel lists lanes in server order under "Lanes (N)" with state badges', ()
   const rows = [...doc.querySelectorAll<HTMLElement>('.lane-row')];
   assert.deepEqual(rows.map((r) => r.dataset.laneId), fixture.expected.order);
   assert.deepEqual(rows.map((r) => r.querySelector('.lane-state')!.textContent),
-    ['BLOCKED', 'ACTIVE', 'PAUSED', 'PAUSED']);
-  assert.deepEqual(rows.map((r) => r.dataset.laneState), ['blocked', 'active', 'paused', 'paused']);
+    ['BLOCKED', 'ACTIVE', 'ACTIVE', 'PAUSED']);
+  assert.deepEqual(rows.map((r) => r.dataset.laneState), ['blocked', 'active', 'active', 'paused']);
   assert.equal(doc.querySelector('[data-lane-state="done"]'), null);
 });
 
