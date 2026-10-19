@@ -236,15 +236,37 @@ def _check_cycle(conn, spec, surface, cycle, limits=True):
             )
 
 
+def _custody_edge(conn, prior, successor):
+    """One proven host-transfer handoff: pointer, ready completed seat, generations."""
+    if successor.get("handoff_from_stream_id") != prior["stream_id"]:
+        return False
+    # target is UNIQUE, so at most one seat row can name this successor.
+    row = conn.execute(
+        "SELECT s.source_generation,s.target_generation FROM v2_host_transfer_seats s "
+        "JOIN v2_host_transfers t USING(command_id) "
+        "WHERE s.source=? AND s.target=? AND s.ready=1 AND t.state='complete'",
+        (prior["stream_id"], successor["stream_id"]),
+    ).fetchone()
+    return bool(
+        row
+        and prior["session_generation"]
+        and successor["session_generation"]
+        and row[0] == prior["session_generation"]
+        and row[1] == successor["session_generation"]
+    )
+
+
 def _authorized_lineage(conn, actor, commission):
     """Current ancestors and explicit handoff chains; never a shared tag alone."""
     origin = commission["coordinator"]
     if actor["stream_id"] == origin:
         return actor["session_generation"] == commission["coordinator_generation"]
     seen = set()
+    authorities = set()
     cursor = _session(conn, origin)
     # Only the original coordinator generation supplies its ancestor edge.
     if cursor and cursor["session_generation"] == commission["coordinator_generation"]:
+        authorities.add(origin)
         while (
             cursor
             and cursor.get("parent_stream_id")
@@ -254,6 +276,7 @@ def _authorized_lineage(conn, actor, commission):
             parent = cursor["parent_stream_id"]
             if parent == actor["stream_id"]:
                 return True
+            authorities.add(parent)
             cursor = _session(conn, parent)
     seen = set()
     cursor = actor
@@ -261,7 +284,7 @@ def _authorized_lineage(conn, actor, commission):
         seen.add(cursor["stream_id"])
         prior = cursor.get("handoff_from_stream_id")
         if not prior:
-            return False
+            break
         if prior == origin:
             original = _session(conn, origin)
             return bool(
@@ -270,6 +293,19 @@ def _authorized_lineage(conn, actor, commission):
                 == commission["coordinator_generation"]
             )
         cursor = _session(conn, prior)
+    # A verified host-transfer successor of the coordinator or an ancestor.
+    current = _session(conn, actor["stream_id"])
+    if not current or current["session_generation"] != actor["session_generation"]:
+        return False
+    seen = set()
+    while current["stream_id"] not in seen:
+        seen.add(current["stream_id"])
+        prior = _session(conn, current.get("handoff_from_stream_id"))
+        if not prior or not _custody_edge(conn, prior, current):
+            return False
+        if prior["stream_id"] in authorities:
+            return True
+        current = prior
     return False
 
 
