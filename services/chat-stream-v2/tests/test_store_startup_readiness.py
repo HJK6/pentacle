@@ -22,7 +22,7 @@ def test_timeout_retry_waits_for_same_owner(monkeypatch):
     try:
         with pytest.raises(TimeoutError, match="initializ"):
             store.start(timeout=0.02)
-        assert entered.is_set() and not store._ready.is_set()
+        assert entered.wait(5) and not store._ready.is_set()
         owner = store._thread
         with pytest.raises(TimeoutError, match="initializ"):
             store.start(timeout=0.02)
