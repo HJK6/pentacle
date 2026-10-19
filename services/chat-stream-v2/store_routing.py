@@ -1189,10 +1189,7 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
-        def _guarded(conn):
-            with self.input_attachment_guard(conn, attachments):
-                return _op(conn)
-        return await self.submit(_guarded)
+        return await self.commit_attachment_input(attachments, _op)
 
     async def claim_assistant_composite_route(
         self, *, stream_id: str, owner: str, lease_seconds: float = 60.0,
@@ -1582,12 +1579,9 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
-        def _op(conn):
-            with self.publication_attachment_guard(conn, attachment_ids, stream_id,
-                    event.get('attachments') or [],
-                    {'stream_id': actor_stream_id, 'generation': actor_generation}):
-                return _locked_op(conn)
-        return await self.submit(_op)
+        return await self.commit_attachment_publication(
+            attachment_ids, stream_id, event.get('attachments') or [],
+            {'stream_id': actor_stream_id, 'generation': actor_generation}, _locked_op)
 
     async def apply_assistant_composite_operation(
         self,

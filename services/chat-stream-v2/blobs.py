@@ -355,7 +355,10 @@ class BlobStore:
         os.fsync(up.fd)
         os.close(up.fd)
         up.fd = -1  # cancellation cleanup must not close a recycled descriptor
-        sha, size, prefix = self._file_identity(Path(up.tmp_path))
+        try:
+            sha, size, prefix = self._file_identity(Path(up.tmp_path), expected_size=up.size)
+        except ValueError as exc:
+            raise AttachmentError('blob_digest_mismatch') from exc
         if size != up.size or sha != up.hasher.hexdigest():
             raise AttachmentError("blob_digest_mismatch")
         if size > ATTACHMENT_MAX_BYTES:
@@ -366,24 +369,40 @@ class BlobStore:
         return {"sha": sha, "mime": mime}
 
     @staticmethod
-    def _file_identity(path: Path) -> tuple[str, int, bytes]:
+    def _file_identity(path: Path, *, expected_size: int) -> tuple[str, int, bytes]:
+        """Reject wrong-sized/nonregular files before hashing; bound growth reads."""
+        import stat
         hasher, size, prefix = hashlib.sha256(), 0, b""
-        with path.open("rb") as source:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+                raise ValueError('blob_digest_mismatch')
             while True:
-                block = source.read(CHUNK_MAX_BYTES)
+                block = source.read(min(CHUNK_MAX_BYTES, expected_size + 1 - size))
                 if not block:
                     break
                 if size == 0:
                     prefix = block[:4]
                 size += len(block)
+                if size > expected_size:
+                    raise ValueError('blob_digest_mismatch')
                 hasher.update(block)
+            after = os.fstat(source.fileno())
+            if (size != expected_size or
+                    (before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                    (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                raise ValueError('blob_digest_mismatch')
         return hasher.hexdigest(), size, prefix
 
     def _materialize_managed(self, up: _Upload, sha: str) -> None:
-        # Called on the Store worker while its shared per-digest lock is held.
+        # Runs off Store while the asynchronous owner retains the digest lock.
         dest = self._path_for(sha)
         if dest.exists():
-            existing_sha, existing_size, _ = self._file_identity(dest)
+            try:
+                existing_sha, existing_size, _ = self._file_identity(dest, expected_size=up.size)
+            except ValueError as exc:
+                raise AttachmentError('blob_digest_mismatch') from exc
             if existing_sha != sha or existing_size != up.size:
                 raise AttachmentError("blob_digest_mismatch")
             os.unlink(up.tmp_path)
@@ -398,19 +417,24 @@ class BlobStore:
             os.close(directory)
 
     def _materialize_verified(self, source: Path, sha: str, size: int) -> str:
-        """Canonical voice materialization under Store's shared digest lock.
+        """Canonical voice materialization under the operation's digest lock.
 
         The source may be absent only after a crash following the prior move.
         Canonical bytes are rehashed in either case; a filename is never proof.
         """
         from voice_uploads import UploadError
         dest = self._path_for(sha)
+        def identity(path):
+            try:
+                return self._file_identity(path, expected_size=size)
+            except ValueError as exc:
+                raise UploadError('digest_mismatch') from exc
         if source.exists():
-            source_sha, source_size, _ = self._file_identity(source)
+            source_sha, source_size, _ = identity(source)
             if (source_sha, source_size) != (sha, size):
                 raise UploadError("digest_mismatch")
         if dest.exists():
-            existing_sha, existing_size, _ = self._file_identity(dest)
+            existing_sha, existing_size, _ = identity(dest)
             if (existing_sha, existing_size) != (sha, size):
                 raise UploadError("digest_mismatch")
             # A legacy producer may have materialized this digest without a
@@ -640,7 +664,8 @@ class BlobStore:
         landing bytes in whatever reuses the fd. Shield the future and JOIN it
         before re-raising, so the lock is held until the write actually finishes.
         """
-        return await BlobStore._join_task(asyncio.ensure_future(BlobStore._run(fn, *a)))
+        from attachment_locks import attachment_io
+        return await attachment_io(fn, *a)
 
     @staticmethod
     async def _join_task(fut: asyncio.Future) -> Any:
