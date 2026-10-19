@@ -604,17 +604,28 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         }
         records.append(classify(a6))
 
-        # A7: everything the dead window accepted delivers once after the rebind.
+        # A7: every tell the dead window accepted delivers once after the rebind.
         # A live peer tell to bart is delivered into the front-desk digest hold
         # (persisted, no paste; see the live control), so a tell counts as
-        # delivered once when exactly one hold for the successor carries it. A
-        # composite input is pasted as a direct dispatch to the successor pane.
+        # delivered once when exactly one hold for the successor carries it.
+        # A composite input queued for the dead generation is released only to
+        # verified lineage (restore episode, handoff proof or transfer
+        # successor). A same-stream resume plus self-rebind is not lineage, so
+        # each such input must end visibly unverified and never be pasted.
         phases = [p for p in (out["observed_result"], dead) if p]
         tells = [p["tell_text"] for p in phases if p["tell_rc"] == 0]
         inputs = [dead["input_text"]] if dead["input"].get("type") == "send.result" else []
         observed = out["observed_result"] or {}
         pre_reconcile = observed.get("input") or {}
-        rm.wait_for(lambda: all(fd.delivered(succ, t) for t in inputs) and not fd.tell_queue(), 60, 0.25)
+        def _input_route(text: str) -> dict[str, Any]:
+            return next((r for r in fd.cell.sql(
+                "SELECT r.routing_state, r.error_code FROM v2_assistant_composite_routes r "
+                "WHERE r.input_identity=?", (identities.get(text) or "",))), {})
+
+        identities = {p["input_text"]: p["input"].get("optimistic_id") for p in phases
+                      if p["input"].get("type") == "send.result"}
+        rm.wait_for(lambda: all(_input_route(t).get("routing_state") == "routing_failed" for t in inputs)
+                    and not fd.tell_queue(), 60, 0.25)
         holds = {t: [h for h in fd.held(t) if h["recipient_stream_id"] == succ_sid] for t in tells}
         routes = fd.routes()
         dispatch_ids = [r["dispatch_id"] for r in routes if r.get("dispatch_id")]
@@ -637,9 +648,14 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
             # Final QA N2: the dead-window tells reach the successor in send order.
             "tell_holds_in_send_order": len(hold_times) == len(tells) and hold_times == sorted(hold_times),
             "reconciled_window_input_accepted": bool(inputs),
-            "accepted_inputs_delivered_once": all(fd.delivered(succ, t) == 1 for t in inputs),
+            "accepted_inputs_unverified_never_pasted": all(
+                fd.delivered(succ, t) == 0 and _input_route(t).get("routing_state") == "routing_failed"
+                and _input_route(t).get("error_code") == "assistant_recovery_successor_unverified"
+                for t in inputs),
             "pre_reconcile_input_never_silent": not pre_reconcile or a7["pre_reconcile_input"]["delivered"] == 1
-                or (pre_route.get("delivery_state") == "failed" and bool(pre_route.get("error_code"))),
+                or (pre_route.get("delivery_state") == "failed" and bool(pre_route.get("error_code")))
+                or (pre_route.get("routing_state") == "routing_failed"
+                    and pre_route.get("error_code") == "assistant_recovery_successor_unverified"),
             "tell_queue_drained": not a7["tell_queue_after"],
             "dispatch_ids_unique": len(dispatch_ids) == len(set(dispatch_ids)),
             "unbound_refusals_never_delivered": fd.delivered(succ, "resumed-unbound") == 0,
