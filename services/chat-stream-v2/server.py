@@ -3822,6 +3822,10 @@ class Server:
         return await self.spawnctl.spawn(msg, self.local_host)
 
     async def _on_await_spawn(self, msg: dict[str, Any]) -> dict[str, Any]:
+        # A client reconnecting after a restart must read outcomes only after
+        # boot reconciliation has settled interrupted spawns; before that, a
+        # retained `indeterminate` is a stale pre-adoption snapshot.
+        await self.spawn_ready.wait()
         if self.lane_rulings is not None:
             ruling = await self.lane_rulings.await_spawn(msg)
             if ruling is not None:

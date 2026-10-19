@@ -49,7 +49,8 @@ def _wait_release() -> None:
 
 
 def _chrome() -> None:
-    sys.stdout.write("\n" + "─" * 40 + "\n❯\n" + "─" * 40 + "\n  ⏵⏵ bypass permissions on\n")
+    # Like Claude, request bracketed paste so a multi-line paste arrives as one submission.
+    sys.stdout.write("\x1b[?2004h\n" + "─" * 40 + "\n❯\n" + "─" * 40 + "\n  ⏵⏵ bypass permissions on\n")
     sys.stdout.flush()
 
 
@@ -80,7 +81,14 @@ def main() -> int:
         _wait_release()
     _chrome()
     transcript = None
+    pending: list[str] = []
     for raw in sys.stdin:
+        # A bracketed paste spans lines until ESC[201~; fold it into one submission.
+        if pending or ("\x1b[200~" in raw and "\x1b[201~" not in raw):
+            pending.append(raw)
+            if "\x1b[201~" not in raw:
+                continue
+            raw, pending = "".join(pending), []
         text = _ESC.sub("", raw).replace("\r", "").strip()
         if not text:
             continue

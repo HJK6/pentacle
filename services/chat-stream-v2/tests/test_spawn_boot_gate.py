@@ -1,10 +1,13 @@
-"""Spawn — and only spawn — waits for boot reconciliation to finish (test #18).
+"""Spawn and await_spawn wait for boot reconciliation to finish (test #18).
 
 `bind()` serves before init, so a spawn arriving in the boot window could have
 its reservation adopted or released underneath it. The server gates spawn on a
 `spawn_ready` event that `main.py` clears before bind and sets once
-`reconcile_spawn_intents()` returns. Every other verb must keep serving
-immediately (port-bind-first is spec constraint 1, non-negotiable).
+`reconcile_spawn_intents()` returns. `await_spawn` waits on the same gate: a
+client reconnecting after a restart must not read an interrupted spawn's
+retained `indeterminate` before startup adoption settles it. Every other verb
+must keep serving immediately (port-bind-first is spec constraint 1,
+non-negotiable).
 """
 
 from __future__ import annotations
@@ -18,6 +21,11 @@ from server import Server  # noqa: E402
 class StubSpawn:
     def __init__(self) -> None:
         self.calls = 0
+        self.awaits = 0
+
+    async def await_spawn(self, msg: dict) -> dict:
+        self.awaits += 1
+        return {"type": "await_spawn.ok", "ok": True, "state": "ready"}
 
     async def spawn(self, msg: dict, local_host: str) -> dict:
         self.calls += 1
@@ -52,5 +60,26 @@ def test_spawn_waits_for_the_gate_but_other_verbs_do_not() -> None:
         frames = await asyncio.wait_for(task, timeout=1)
         assert spawn.calls == 1
         assert frames[0]["type"] == "spawn.ok"
+
+    asyncio.run(_go())
+
+
+def test_await_spawn_waits_for_the_gate() -> None:
+    async def _go() -> None:
+        spawn = StubSpawn()
+        server = Server(spawnctl=spawn, local_host="localhost")
+        server.spawn_ready.clear()  # restarted daemon: startup reconcile running
+
+        task = asyncio.create_task(
+            server._dispatch('{"type": "await_spawn", "request_id": "a1", "spawn_request_id": "spawn-1"}')
+        )
+        await asyncio.sleep(0.05)
+        assert spawn.awaits == 0, "await_spawn read outcomes before boot reconciliation settled them"
+        assert not task.done()
+
+        server.spawn_ready.set()
+        frames = await asyncio.wait_for(task, timeout=1)
+        assert spawn.awaits == 1
+        assert frames[0]["type"] == "await_spawn.ok"
 
     asyncio.run(_go())
