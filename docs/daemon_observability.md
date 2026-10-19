@@ -58,15 +58,18 @@ request and reply semantics.
 
 ## Restart continuity
 
-A restart is expected to leave every admitted spawn finished once or durably
-failed; see [restart continuity](../services/chat-stream-v2/docs/restart-continuity.md).
+A restart is expected to leave every admitted spawn finished once, durably
+failed, or `indeterminate` when its prompt submission cannot be proved; see
+[restart continuity](../services/chat-stream-v2/docs/restart-continuity.md).
 The daemon log records the handoff and recovery: `drained in-flight spawns at
-shutdown: cancelled=N unfinished=M` on a graceful stop (unfinished should be 0),
+shutdown: cancelled=N unfinished=M` on a graceful stop that had spawns in flight
+(no line when none were pending; unfinished should be 0),
 `spawn intents: {...}` after the startup reconcile pass, and `adoption pasted the
 never-delivered brief once for <stream>` when a spawn interrupted before its paste
-is completed. `agent-orch spawn-status <key|request_id>` shows the durable outcome;
+is completed. `agent-orch spawn-status <key|request_id>` shows the durable outcome.
 `indeterminate` with a retained reservation means reconciliation is still in
-progress, not failure.
+progress, not failure; `spawn_delivery_unknown` (`do_not_respawn`) means the prompt
+may have been submitted: inspect or await the seat and do not respawn it.
 
 ## Nonexistent controls
 

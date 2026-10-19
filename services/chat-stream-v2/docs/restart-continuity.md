@@ -2,8 +2,10 @@
 
 A chat_streamd v2 restart (`launchctl kickstart -k`: SIGTERM to the daemon, SIGKILL
 after 20 s) must not lose admitted work. Clients see a temporary disconnect; each
-admitted spawn then either finishes once (one pane, one session row, one initial
-prompt delivery) or lands in a durable failure that `spawn-status` explains. "Once"
+admitted spawn then finishes once (one pane, one session row, one initial prompt
+delivery), lands in a durable failure that `spawn-status` explains, or, when the
+daemon cannot prove whether its prompt was submitted, stays `indeterminate`: the
+seat is kept and the prompt is never repeated. "Once"
 means relative to the daemon's acknowledgement records: idempotency keys, request
 ids, report ids and delivery receipts.
 
@@ -20,12 +22,16 @@ paste, and finally the `v2_spawn_outcomes` row.
 | claim, before intent | Startup reconcile records `failed` and releases the claim. A same-key retry replays that failure; a fresh key spawns normally. The staged file is content-addressed and unreferenced. |
 | intent, before the pane | `failed spawn_interrupted`, released; same replay rules. |
 | pane and row, before the paste | The pane is adopted by nonce. The intent has no pre-paste watermark, which proves no paste happened, so adoption waits for provider readiness and pastes the brief once. It then proves that paste like any post-paste adoption. A provider that is still booting leaves the outcome `indeterminate` and the reservation retained; a later reconcile pass delivers it. |
-| paste, before the outcome | Adoption proves delivery from the post-watermark USER event or the provider transcript. It never pastes again. |
+| paste, before the outcome | Adoption proves delivery from the post-watermark USER event or the provider transcript. It never pastes again. Without proof by the adoption deadline, a saved pre-paste watermark keeps the outcome `indeterminate` (`spawn_delivery_unknown`, `do_not_respawn`) rather than `failed`: the paste may have happened. |
+
+A seat whose prompt went in as a native launch argument (`native_argv`) is
+proof-only on adoption: its first USER event proves delivery, otherwise the
+outcome stays `indeterminate`.
 
 The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
 - **Budget:** 15 s by default. `PENTACLE_V2_SHUTDOWN_BUDGET_S` may lower it but never raise it.
-- **Every step:** gets min(its own cap, what remains). The steps are the spawn drain, background tasks, composites, lane rulings, `Server.close` (accepted sends, consent expiry, and the TLS and plain listeners), notify, assets and lifecycle.
+- **Every step:** gets min(its own cap, what remains). The steps are the spawn drain, the work index, background tasks, composites, lane rulings, `Server.close` (accepted sends, consent expiry, and the TLS and plain listeners), notify, assets, lifecycle and the loop-progress watchdog.
 - **Overruns:** a step that overruns is cancelled and abandoned, never awaited again, so a step that ignores cancellation cannot hold the stop open.
 - **Store reserve:** 1 s is held back for `store.stop()`.
 - **Loop teardown:** after the stop, teardown waits at most 0.5 s for leftover tasks (`run_bounded`).
@@ -34,18 +40,22 @@ The whole graceful stop shares one absolute deadline (`shutdown_budget.py`):
 
 A graceful stop first closes spawn admission (new spawns wait and reconnect after the
 restart). It then cancels in-flight spawn tasks while the store is still running,
-within at most 5 s (`SHUTDOWN_SPAWN_DRAIN_S`). Each spawn records its interruption
-handoff (retained intent, an `indeterminate` outcome for an admitted row, intent
-owner released) before the store stops. One step is never cut: a spawn that has
-persisted its pre-paste watermark gets up to half the drain window to land its
-paste before it is cancelled, because from that point adoption may only prove a
-paste, never make one. A SIGKILL inside that sub-second step remains the one
-window that ends `failed` with a live pane.
+within at most 5 s (`SHUTDOWN_SPAWN_DRAIN_S`). When the drain completes
+(`unfinished=0` in its log line), each spawn has recorded its interruption handoff
+(retained intent, an `indeterminate` outcome for an admitted row, intent owner
+released) before the store stops. A nonzero `unfinished` count or an abandoned
+drain step leaves that handoff unproven; check `spawn-status` before relying on
+restart recovery. One step is never cut: a spawn that has persisted its pre-paste
+watermark gets up to half the drain window to land its paste before it is
+cancelled, because from that point adoption may only prove a paste, never make
+one. A SIGKILL inside that sub-second step leaves the outcome `indeterminate`
+(`spawn_delivery_unknown`), never a second paste.
 
-`indeterminate` is a recovery handle, not a terminal state. While its reservation
-exists, reconcile keeps working on it until `delivered` or `failed`. A same-key spawn
-replays it as the in-flight `starting` handle, never as a failure and never as a
-second pane.
+`indeterminate` is a recovery handle, not a failure. While its reservation exists,
+reconcile keeps working on it until `delivered` or `failed`; a
+`spawn_delivery_unknown` or unproven native-argv outcome can stay `indeterminate`,
+and its seat must not be respawned automatically. A same-key spawn replays it as
+the in-flight `starting` handle, never as a failure and never as a second pane.
 
 ### Send cancellation during attachment materialization
 
@@ -86,7 +96,9 @@ the test's 8.5-second elapsed bound is fixture tolerance, not a production SLA.
   `AGENT_ORCH_RPC_RETRY_DEADLINE_S` sets the total window. An unanswered RPC
   timeout keeps its attempt bound.
 - A spawn that was already admitted (`spawn.ok state=starting`) and then loses its
-  socket resolves through `await_spawn` by request id. The result is `ready`, the
+  socket resolves through `await_spawn` by request id. After a restart, `await_spawn`
+  (like `spawn`) waits until the startup reconcile has settled interrupted spawns,
+  so it never returns a pre-adoption `indeterminate`. The result is `ready`, the
   recorded failure, or a typed `spawn.indeterminate` naming the request and stream
   id. The CLI prints `spawn key: <key>` before the RPC.
 - The whole post-admission wait runs under ONE absolute deadline set at admission:

@@ -151,7 +151,7 @@ bounds that window. The producer then re-awaits the same owned report from the
 ledger. It never spawns another worker and never reruns a completed stage. Only
 connection loss counts: an `OSError` such as a missing token file fails at once.
 
-A pass that still fails appends to `runs/<date>/failure.json`. The top level holds
+A pass that still fails with a primary error appends to `runs/<date>/failure.json`. The top level holds
 the latest failure (`seq`, `stage`, `error`, `notice`, `latest: true`), and
 earlier failures move to a bounded `history`, each with its own notice state.
 
@@ -160,25 +160,30 @@ exception text, because free text can carry a credential in a form that no
 pattern anticipates. Each record is `{class, reason, bytes, sha256}`:
 - `class`: the exception class name.
 - `reason`: a fixed code (`transport_loss`, `timeout`, `os_error[:ERRNO]`,
-  `error` or `interrupted`).
+  `error`, `interrupted`, `worker_failed`, or `legacy_text` for an older raw-text
+  failure record converted on read).
 - `bytes` and `sha256`: the raw message's byte length and SHA-256.
 
-The raw message is kept only at `runs/<date>/errors/<sha256>.txt` (mode 0600) for
-local diagnosis. It is never persisted elsewhere or delivered. The failure notice
-quotes the structured record. When the CLI exits on an uncaught error, it
-prints only `{"error": <record>}` to stderr (the scheduled job's log file) and
-exits 1. The traceback is kept beside the raw message as
-`errors/<sha256>.traceback.txt` (0600).
+The raw message is kept at `runs/<date>/errors/<sha256>.txt` (mode 0600) for
+local diagnosis and is never delivered; the failure notice quotes only the
+structured record. When the CLI exits on an uncaught error, it prints only
+`{"error": <record>}` to stderr (the scheduled job's log file) and exits 1. That
+path keeps its raw message and traceback under `<state_root>/errors/` as
+`<sha256>.txt` and `<sha256>.traceback.txt` (both 0600); the traceback also
+contains the exception text.
 
-Cleanup errors are recorded as `cleanup_error` and never replace the primary
-error; cleanup is retried on the next pass.
+A cleanup error that follows a primary failure is recorded as `cleanup_error` and
+never replaces the primary error; cleanup is retried on the next pass. A pass
+whose only error is cleanup raises that error to the CLI: no `failure.json` entry
+and no failure notice are created for it.
 
 The failure notice is queued in `failure-delivery.json` (`pending`) before any
 RPC, including on an interrupt, because the daemon may be unreachable. Its
 delivery key carries the failure `seq`, so each failure gets exactly one notice. A
 newer failure supersedes an older notice that never landed, and a recorded review
 supersedes a pending notice. The next scheduled or `--on-demand` pass flushes the
-pending notice once (receipt-reconciled, never resent), then resumes the retained
+pending notice (a landed receipt suppresses another send; an attempt without a
+landed receipt is retried under the same key), then resumes the retained
 stage. Apart from the single connection-refused notice retry described under
 failed runs, there is no timer or retry loop: while the daemon stays down past
 the reconnect window, the next attempt is the next pass.
