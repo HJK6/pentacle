@@ -915,14 +915,13 @@ class Notify:
                                               parent_stream_id=parent, message=message)
         if generation is not None:
             envelope = {**envelope, "producer_session_generation": generation}
-        spec_defaulted = False
-        if not envelope.get("spec_id") and self._sessions is not None and isinstance(row, dict):
+        spec_omitted = not envelope.get("spec_id")
+        if spec_omitted and self._sessions is not None and isinstance(row, dict):
             # A question belongs to the asker's work assignment unless it names one (D1).
             from store_specs import effective_assignment
             assigned = effective_assignment(row)
             if assigned:
                 envelope = {**envelope, "spec_id": assigned}
-                spec_defaulted = True
 
         existing = await self._db.call("get_agent_question", question_id)
         if isinstance(existing, dict):
@@ -948,8 +947,8 @@ class Notify:
                 and isinstance(existing_notification.get("actions"), list)
                 else []
             )
-            # A defaulted spec_id is not the caller's input: a retry replays the stored one.
-            retried = {**envelope, "spec_id": existing_envelope.get("spec_id")} if spec_defaulted else envelope
+            # An omitted spec_id is not the caller's input: a retry replays the stored one.
+            retried = {**envelope, "spec_id": existing_envelope.get("spec_id")} if spec_omitted else envelope
             if self._prompt_notice_material(
                 existing_envelope, existing_actions
             ) != self._prompt_notice_material(retried, actions):

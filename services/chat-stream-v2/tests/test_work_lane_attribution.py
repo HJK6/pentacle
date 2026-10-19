@@ -33,12 +33,12 @@ def test_only_effective_assignments_attribute_and_portfolios_never_do():
 def test_unknown_presence_and_no_questions():
     (row,) = attribute_members([MEMBER], {"host-a:x": seat("worker")}, None)
     assert row["seats"][0]["activity"] == "unknown"
+    assert row["open_questions"] == {"count": 0, "first_question_id": None}
 
 
 def test_dead_pane_seat_is_offline_even_if_last_seen_working():
     (row,) = attribute_members([MEMBER], {"host-a:x": seat("worker", working=True, pane_status="pane_dead")}, None)
     assert row["seats"][0]["activity"] == "offline"
-    assert row["open_questions"] == {"count": 0, "first_question_id": None}
 
 
 def test_seat_cap_and_signature_ignores_last_activity():
@@ -87,6 +87,12 @@ def test_question_defaults_to_asker_assignment_and_groups_by_spec(tmp_path):
             assert (await notify.prompt(_ask("q-3", producer="hosta:v2-free")))["type"] == "prompt.ask.ok"
             assert (await notify._db.call("get_agent_question", "q-1"))["spec_id"] == "spec_demo__span"
             assert (await notify._db.call("get_agent_question", "q-3"))["spec_id"] is None
+            # The asker became a portfolio (no assignment): an omitted spec_id still replays.
+            sessions._rows["hosta:v2-lead"].update(spec_ids=["spec_demo__a", "spec_demo__b"])
+            assert (await notify.prompt(_ask("q-1")))["type"] == "prompt.ask.ok"
+            retry = _ask("q-1")
+            retry["envelope"]["spec_id"] = "spec_demo__other"  # a different explicit spec still conflicts
+            assert (await notify.prompt(retry))["type"] == "prompt.error"
             grouped = await notify.open_questions_by_spec()
             assert grouped == {"spec_demo__span": {"count": 1, "first_question_id": "q-1"},
                                "spec_demo__other": {"count": 1, "first_question_id": "q-2"}}
