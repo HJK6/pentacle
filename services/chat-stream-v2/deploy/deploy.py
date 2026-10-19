@@ -593,6 +593,41 @@ def _launchd_environment(label: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()} if isinstance(values, dict) else {}
 
 
+# The fresh, small raw-fd-2 emergency sink StandardErrorPath is repointed to, replacing the
+# retained multi-GB legacy launchd.err. The daemon's own stderr is managed and size-capped
+# (managed_logs.py PENTACLE_DAEMON_STDERR_PATH), so this sink only receives early/native fd-2
+# output and is expected to stay small.
+LAUNCHD_EMERGENCY_STDERR_NAME = "launchd-emergency.err"
+
+
+def _launchd_plist_managed_digest(label: str) -> str:
+    """Digest the on-disk plist fields deploy manages, so a deploy can detect that the plist was
+    changed out of band since launchd last loaded it. `launchctl print` is deliberately NOT used:
+    it injects launchd-only keys (OSLogRateLimit, XPC_SERVICE_NAME) into the job environment and
+    truncates multi-line env values to their first line, so comparing against it false-diverges.
+    The on-disk plist read via plistlib preserves full values."""
+    plist = _launchd_plist(label)
+    projection = {
+        "EnvironmentVariables": plist.get("EnvironmentVariables") or {},
+        "StandardErrorPath": plist.get("StandardErrorPath"),
+        "StandardOutPath": plist.get("StandardOutPath"),
+        "ProgramArguments": plist.get("ProgramArguments"),
+    }
+    blob = json.dumps(projection, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _launchd_definition_out_of_sync(prior_stamp: dict[str, object], label: str) -> tuple[bool, str]:
+    """Return (diverged, current_digest). `diverged` is True when the prior deploy stamp has no
+    recorded managed-definition digest (first run, or a stamp predating the field) or its digest
+    differs from the current on-disk managed definition — i.e. the on-disk plist is not what the
+    last successful deploy bootstrapped, so launchd's loaded job is stale and a re-bootstrap is
+    required instead of a kickstart."""
+    current = _launchd_plist_managed_digest(label)
+    prior = prior_stamp.get("launchd_plist_digest") if isinstance(prior_stamp, dict) else None
+    return (prior != current), current
+
+
 def _usage_collector_plist_path() -> Path:
     return _launchd_plist_path(USAGE_COLLECTOR_LABEL)
 
@@ -720,6 +755,26 @@ def _ensure_launchd_environment(
         current[key] = value
         changed = True
     return changed
+
+
+def _ensure_launchd_standard_error_path(service: ServiceConfig, runner: Runner) -> bool:
+    """Repoint the daemon's launchd StandardErrorPath to a fresh emergency file in the same log
+    directory, so the retained legacy raw-fd-2 sink (multi-GB launchd.err) is released on the next
+    re-bootstrap and can be archived. Idempotent: once StandardErrorPath already points at the
+    emergency file, no edit is made. The preimage of the whole daemon plist is preserved by the
+    `_v2_usage_probe_rollback` registered immediately before this runs in `deploy()`."""
+    current = _launchd_plist(service.launchd_label).get("StandardErrorPath")
+    if not isinstance(current, str) or not current:
+        return False
+    emergency = str(Path(current).expanduser().parent / LAUNCHD_EMERGENCY_STDERR_NAME)
+    if current == emergency:
+        return False
+    _checked(
+        ("plutil", "-replace", "StandardErrorPath", "-string", emergency, str(_launchd_plist_path(service.launchd_label))),
+        REPO_ROOT,
+        runner,
+    )
+    return True
 
 
 # launchd sends SIGKILL 20 s after SIGTERM (ExitTimeOut), so a job leaves launchd within
@@ -1389,6 +1444,7 @@ def _apply_post_activation(
     runner: Runner,
     verify_boot: Callable[..., BootReadback] = verify_fresh_daemon_log_line,
     verify_runtime: Callable[..., tuple[bool, dict[str, object]]] = _verify_runtime_sha,
+    activated_plist_digest: str | None = None,
 ) -> None:
     """Restart the daemon and classify the result onto `stamp`. NEVER raises.
 
@@ -1413,6 +1469,12 @@ def _apply_post_activation(
         )
         stamp["daemon_boot_readback"] = readback.as_stamp()
         stamp["daemon_log_post_restart_verified"] = readback.outcome == BOOT_OBSERVED
+        # Advance the managed-definition digest only once the new definition is proven live
+        # (BOOT_OBSERVED). On a failed bootstrap (which raises before here) or any non-observed
+        # boot, the stamp keeps the prior digest, so the next deploy re-attempts the reload
+        # instead of kickstarting a stale job.
+        if activated_plist_digest is not None and readback.outcome == BOOT_OBSERVED:
+            stamp["launchd_plist_digest"] = activated_plist_digest
         if service.name == "chat-streamd-v2" and readback.outcome == BOOT_OBSERVED:
             runtime_confirmed, last_observed = verify_runtime(sha, readback.pid)
             stamp["daemon_runtime_readback"] = {
@@ -1664,6 +1726,8 @@ def deploy(
             activation_launchd_environment = _launchd_environment_for_release(repo, service)
         launchd_environment_changed = False
         usage_probe_launchd_changed = False
+        plist_digest_diverged = False
+        activated_plist_digest: str | None = None
         if not skip_kickstart:
             if service.name == "chat-streamd-v2":
                 daemon_arguments = _launchd_plist(service.launchd_label).get("ProgramArguments")
@@ -1682,9 +1746,25 @@ def deploy(
             if service.name == "chat-streamd-v2":
                 transaction.add_rollback(_v2_usage_probe_rollback(repo, runner))
                 usage_probe_launchd_changed = _ensure_v2_usage_probe_launchd(repo, runner)
+                # Repoint StandardErrorPath off the retained legacy launchd.err to a fresh
+                # emergency file. Runs after the usage-probe plist rewrite so it is not clobbered,
+                # and after the rollback above so the daemon-plist preimage covers this edit.
+                _ensure_launchd_standard_error_path(service, runner)
+            # Compute divergence AFTER every deploy-side plist edit, so the digest reflects the
+            # definition that will actually be bootstrapped. Reload when the on-disk managed
+            # definition is not what the last successful deploy bootstrapped (additive: only ever
+            # adds a reload, never removes one the prior triggers would have performed).
+            plist_digest_diverged, activated_plist_digest = _launchd_definition_out_of_sync(
+                prior_stamp, service.launchd_label
+            )
         stamp["launchd_environment"] = dict(activation_launchd_environment)
         stamp["launchd_environment_changed"] = launchd_environment_changed
         stamp["usage_probe_launchd_changed"] = usage_probe_launchd_changed
+        # Carry the last successfully bootstrapped digest forward unchanged; `_apply_post_activation`
+        # advances it to `activated_plist_digest` only on BOOT_OBSERVED.
+        stamp["launchd_plist_digest"] = (
+            prior_stamp.get("launchd_plist_digest") if isinstance(prior_stamp, dict) else None
+        )
         if not skip_kickstart:
             _assert_deploy_stamp_path(stamp_path, activation_launchd_environment)
             restart_guard = stamp.get("restart_guard")
@@ -1722,9 +1802,10 @@ def deploy(
             stamp,
             prior_log_size=prior_log_size,
             prior_pid=prior_pid,
-            reload_launchd=launchd_environment_changed or usage_probe_launchd_changed,
+            reload_launchd=launchd_environment_changed or usage_probe_launchd_changed or plist_digest_diverged,
             boot_wait_seconds=boot_wait_seconds,
             runner=runner,
+            activated_plist_digest=activated_plist_digest,
         )
     return stamp
 

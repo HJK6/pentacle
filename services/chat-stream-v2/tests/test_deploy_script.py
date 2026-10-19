@@ -1089,3 +1089,127 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
         assert _U2_CONN_B in error
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     assert len([call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Scope 1/2: managed-projection digest re-bootstrap + StandardErrorPath repoint
+# (spec_pentacle__daemon_launchd_followups_after_log_cap_2026_10)
+# ---------------------------------------------------------------------------
+
+
+def _boot_failed(*_a, **_k):
+    return deploy_mod.BootReadback(deploy_mod.BOOT_FAILED, "boot line not observed", 1.0, None, 111)
+
+
+def test_launchd_plist_managed_digest_is_key_order_stable_and_value_faithful(monkeypatch) -> None:
+    plist_a = {
+        "EnvironmentVariables": {"B": "2", "A": "multi\nline\nünïcødé"},
+        "StandardErrorPath": "/logs/launchd.err",
+        "StandardOutPath": "/logs/launchd.log",
+        "ProgramArguments": ["/release/python", "-m", "svc"],
+    }
+    # Identical content, different EnvironmentVariables insertion order.
+    plist_b = {
+        "ProgramArguments": ["/release/python", "-m", "svc"],
+        "StandardOutPath": "/logs/launchd.log",
+        "StandardErrorPath": "/logs/launchd.err",
+        "EnvironmentVariables": {"A": "multi\nline\nünïcødé", "B": "2"},
+    }
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: plist_a)
+    digest = deploy_mod._launchd_plist_managed_digest("lbl")
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: plist_b)
+    assert deploy_mod._launchd_plist_managed_digest("lbl") == digest  # order-independent
+    # Truncating the multi-line value (as `launchctl print` would) MUST change the digest,
+    # proving the on-disk read is value-faithful where launchctl-print comparison would not be.
+    truncated = dict(plist_a, EnvironmentVariables={"A": "multi", "B": "2"})
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: truncated)
+    assert deploy_mod._launchd_plist_managed_digest("lbl") != digest
+    # A StandardErrorPath repoint (scope 2) MUST change the digest so deploy re-bootstraps.
+    moved = dict(plist_a, StandardErrorPath="/logs/launchd-emergency.err")
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: moved)
+    assert deploy_mod._launchd_plist_managed_digest("lbl") != digest
+
+
+def test_launchd_definition_out_of_sync_divergence_and_in_sync(monkeypatch) -> None:
+    plist = {"EnvironmentVariables": {"A": "1"}, "StandardErrorPath": "/logs/e",
+             "StandardOutPath": "/logs/o", "ProgramArguments": ["x"]}
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: plist)
+    digest = deploy_mod._launchd_plist_managed_digest("lbl")
+    # In sync: prior stamp recorded this exact digest -> no reload needed.
+    diverged, now = deploy_mod._launchd_definition_out_of_sync({"launchd_plist_digest": digest}, "lbl")
+    assert diverged is False and now == digest
+    # Absent prior digest (first deploy after this ships, or a stamp predating the field).
+    diverged, now = deploy_mod._launchd_definition_out_of_sync({}, "lbl")
+    assert diverged is True and now == digest
+    # Stale prior digest (the 2026-10-19 incident: plist changed out of band since last bootstrap).
+    diverged, now = deploy_mod._launchd_definition_out_of_sync({"launchd_plist_digest": "stale"}, "lbl")
+    assert diverged is True and now == digest
+
+
+def test_ensure_launchd_standard_error_path_repoints_and_is_idempotent(monkeypatch) -> None:
+    monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _l: {"StandardErrorPath": "/logs/launchd.err"})
+    monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _l: Path("/LA/com.pentacle.chat-streamd-v2.plist"))
+    runner = _ScriptedRunner()
+    assert deploy_mod._ensure_launchd_standard_error_path(V2_SERVICE, runner) is True
+    cmd = runner.calls[-1]
+    assert cmd[0] == "plutil" and "-replace" in cmd and "StandardErrorPath" in cmd
+    assert "/logs/launchd-emergency.err" in cmd
+    # Idempotent: once StandardErrorPath already points at the emergency file, no plutil edit.
+    monkeypatch.setattr(deploy_mod, "_launchd_plist",
+                        lambda _l: {"StandardErrorPath": "/logs/launchd-emergency.err"})
+    runner2 = _ScriptedRunner()
+    assert deploy_mod._ensure_launchd_standard_error_path(V2_SERVICE, runner2) is False
+    assert runner2.calls == []
+
+
+def test_apply_post_activation_advances_digest_only_on_boot_observed(monkeypatch) -> None:
+    writes: list[dict] = []
+    monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _r, _s, stamp: writes.append(dict(stamp)))
+    runner = _ScriptedRunner()  # kickstart succeeds (rc 0)
+    stamp: dict = {"sha": TARGET_SHA, "launchd_plist_digest": "DPRIOR"}
+    deploy_mod._apply_post_activation(
+        V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
+        prior_log_size=0, prior_pid=111, reload_launchd=False, runner=runner,
+        verify_boot=_boot_observed,
+        verify_runtime=lambda _s, _p: (False, {"sha": TARGET_SHA}),  # skip fleet smoke
+        activated_plist_digest="DNOW",
+    )
+    assert stamp["launchd_plist_digest"] == "DNOW"
+    assert "post_activation_error" not in stamp
+
+
+def test_apply_post_activation_retains_prior_digest_when_boot_not_observed(monkeypatch) -> None:
+    monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _r, _s, _stamp: None)
+    # Reload path: bootout + bootstrap SUCCEED (launchd reports the job gone between them), but the
+    # boot is NOT observed. The reload itself did not fail, yet the new definition is not proven
+    # live -> the digest must not advance.
+    runner = _ScriptedRunner({"print": (deploy_mod._LAUNCHCTL_NO_SUCH_SERVICE, "", "Could not find service")})
+    stamp: dict = {"sha": TARGET_SHA, "launchd_plist_digest": "DPRIOR"}
+    deploy_mod._apply_post_activation(
+        V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
+        prior_log_size=0, prior_pid=111, reload_launchd=True, runner=runner,
+        verify_boot=_boot_failed,
+        activated_plist_digest="DNOW",
+    )
+    assert "post_activation_error" not in stamp  # the reload commands themselves succeeded
+    assert [c[1] for c in runner.calls if c[0] == "launchctl" and c[1] in ("bootout", "bootstrap")] == ["bootout", "bootstrap"]
+    assert stamp["launchd_plist_digest"] == "DPRIOR"  # not advanced: boot not observed
+
+
+def test_apply_post_activation_retains_prior_digest_on_bootstrap_failure(monkeypatch) -> None:
+    monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _r, _s, _stamp: None)
+    # Reload path: bootout succeeds, launchd reports the job gone, then bootstrap fails (rc 1).
+    runner = _ScriptedRunner({
+        "print": (deploy_mod._LAUNCHCTL_NO_SUCH_SERVICE, "", "Could not find service"),
+        "bootstrap": (1, "", "bootstrap failed"),
+    })
+    stamp: dict = {"sha": TARGET_SHA, "launchd_plist_digest": "DPRIOR"}
+    deploy_mod._apply_post_activation(
+        V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
+        prior_log_size=0, prior_pid=111, reload_launchd=True, runner=runner,
+        verify_boot=_boot_observed,  # never reached; _reload_launchd raises first
+        activated_plist_digest="DNOW",
+    )
+    assert stamp.get("post_activation_error", "").startswith("DeployError")
+    assert stamp["launchd_plist_digest"] == "DPRIOR"  # NOT advanced on a failed bootstrap
+    assert "daemon_boot_readback" not in stamp

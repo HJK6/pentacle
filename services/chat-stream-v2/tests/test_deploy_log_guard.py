@@ -80,12 +80,6 @@ def isolated_release(tmp_path, monkeypatch):
     python = module._venv_python(repo, service)
     python.parent.mkdir(parents=True)
     python.touch()
-    # A stale stamp must not replace the checkout's actual pre-activation identity.
-    module._write_stamp(repo, service, {
-        "sha": "c" * 40, "prior_sha": target,
-        "requirements_hash": module._sha256(repo / service.requirements_path),
-    })
-    before = module._stamp_path(repo, service).read_bytes()
     guard = Path(service.log_guard_dir)
     assert guard.is_relative_to(tmp_path), "test guard must stay inside the owned temporary home"
     guard.mkdir(parents=True)
@@ -96,6 +90,15 @@ def isolated_release(tmp_path, monkeypatch):
         "EnvironmentVariables": {"HOME": str(tmp_path / "home")},
     }))
     monkeypatch.setattr(module, "_launchd_plist_path", lambda _label: plist)
+    # A stale stamp must not replace the checkout's actual pre-activation identity. The managed
+    # digest is stamped to match the on-disk plist, so an unchanged definition still kickstarts
+    # (no spurious reload); out-of-band drift is covered by its own test below.
+    module._write_stamp(repo, service, {
+        "sha": "c" * 40, "prior_sha": target,
+        "requirements_hash": module._sha256(repo / service.requirements_path),
+        "launchd_plist_digest": module._launchd_plist_managed_digest(service.launchd_label),
+    })
+    before = module._stamp_path(repo, service).read_bytes()
     monkeypatch.setattr(module, "verify_deploy_guard", lambda *_a, **_k: {"sole_deployer": True})
     monkeypatch.setattr(module, "_ensure_v2_usage_probe_launchd", lambda *_a: False)
     monkeypatch.setattr(module, "_v2_usage_probe_rollback", lambda *_a: lambda: None)
@@ -165,6 +168,53 @@ def test_every_activation_stamps_prior_checkout_before_restart(isolated_release,
     assert [call[1] for call in calls if call[0] == "launchctl"] == (
         ["bootout", "bootstrap"] if reload else ["kickstart"]
     )
+
+
+def _make_stamp_stale(module, repo, service):
+    """Simulate the 2026-10-19 incident: the on-disk plist drifted from what the last deploy
+    bootstrapped, so the stamped managed digest no longer matches."""
+    stamp = module._read_stamp(repo, service)
+    stamp["launchd_plist_digest"] = "stale" + "0" * 59
+    module._write_stamp(repo, service, stamp)
+
+
+def test_out_of_band_plist_change_forces_rebootstrap(isolated_release):
+    """End-to-end scope 1: when the on-disk plist drifted from what the last deploy bootstrapped
+    (the 2026-10-19 incident), deploy must bootout+bootstrap even though its own env/usage edits
+    reported no change — not kickstart the stale loaded definition."""
+    module, service, repo, _prior, _target, _before, calls, activate = isolated_release
+    _make_stamp_stale(module, repo, service)
+    activate(reload=False)  # _ensure_launchd_environment reports no change (old contract: kickstart)
+    assert [call[1] for call in calls if call[0] == "launchctl"] == ["bootout", "bootstrap"]
+
+
+def test_unobserved_rebootstrap_is_retried_on_the_next_deploy(isolated_release):
+    """End-to-end scope 1 failure semantics: the fixture never observes boot, so a reload that
+    completes but is not confirmed must NOT advance the stamped digest; a follow-on deploy with the
+    same on-disk plist therefore still diverges and re-attempts the reload."""
+    module, service, repo, prior, _target, _before, calls, activate = isolated_release
+    _make_stamp_stale(module, repo, service)
+    activate(reload=False)  # diverge -> reload (bootout+bootstrap); boot NOT observed
+    assert module._read_stamp(repo, service)["launchd_plist_digest"] == "stale" + "0" * 59
+    # Reset the simulated launchd (loaded again) and HEAD, then drive a genuine follow-on deploy.
+    calls.clear()
+    subprocess.run(["git", "checkout", "-q", "--detach", prior], cwd=repo, check=True)
+    activate(reload=False)
+    assert [call[1] for call in calls if call[0] == "launchctl"] == ["bootout", "bootstrap"]
+
+
+def test_failed_rebootstrap_is_retried_on_the_next_deploy(isolated_release):
+    """End-to-end scope 1 failure semantics: a failed restart leaves the stamped digest at
+    D_prior, so a follow-on deploy still diverges and re-attempts the reload."""
+    module, service, repo, prior, _target, _before, calls, activate = isolated_release
+    _make_stamp_stale(module, repo, service)
+    stamp = activate(reload=False, fail=True)  # diverge -> reload attempted -> launchctl rc1 -> fails
+    assert "post_activation_error" in stamp
+    assert module._read_stamp(repo, service)["launchd_plist_digest"] == "stale" + "0" * 59
+    calls.clear()
+    subprocess.run(["git", "checkout", "-q", "--detach", prior], cwd=repo, check=True)
+    activate(reload=False, fail=False)  # follow-on retries the reload
+    assert [call[1] for call in calls if call[0] == "launchctl"] == ["bootout", "bootstrap"]
 
 
 @pytest.mark.parametrize("reload", [False, True])
