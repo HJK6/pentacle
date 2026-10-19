@@ -50,6 +50,17 @@ EXPECTED_CODES = {
 POLICY = {"effective_delivery_mode": "immediate"}
 VOICE = "voice_operation.v1"
 WORK_LANE = "work_lane.v1"
+LANE_DIGEST = {"effective_delivery_mode": "digest"}
+
+
+def _delivery_policy(family: str | None, episode_id: str | None) -> dict:
+    """Work-lane FLAGs ride the Work update digest; a lost lead alerts the FD directly.
+
+    Episode ids are ``<lane_id>:<kind>:<sequence>``. The immediate path keeps the
+    existing storm guard, which still holds a repeat or a burst."""
+    if family != WORK_LANE:
+        return POLICY
+    return POLICY if str(episode_id or "").split(":")[-2:-1] == ["lead_lost"] else LANE_DIGEST
 _PRINCIPAL = re.compile(r"(daemon|system):[A-Za-z0-9._:@-]{1,160}")
 DELIVERY_FIELDS = (
     "state", "notice_id", "tell_id", "recipient_stream_id", "recipient_generation",
@@ -699,7 +710,7 @@ class ErrorAlerts:
         ctx = row["error_context"]
         nid = row["notification_id"]
         lane = ctx["family"] == WORK_LANE
-        policy = {"effective_delivery_mode": "digest"} if lane else POLICY
+        policy = _delivery_policy(ctx["family"], ctx.get("episode_id"))
         notices = {r["notice_id"]: r for r in await self.notice_rows(
             notice_ids=ctx.get("notice_ids", ()), notification_ids=(nid,))}
         # A crash can commit enqueue before the cross-store link/watermark.
@@ -1026,7 +1037,7 @@ class ErrorAlerts:
         # a claim that the old input did not occur.
         if await self.store.get_tell_delivery(row["tell_id"]):
             return None
-        policy = {"effective_delivery_mode": "digest"} if lane else POLICY
+        policy = _delivery_policy(m.get("family"), m.get("episode_id"))
         if policy["effective_delivery_mode"] == "muted":
             return NoticeDecision.terminal("suppressed_policy")
         if (

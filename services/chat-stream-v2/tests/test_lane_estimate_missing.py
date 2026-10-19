@@ -147,9 +147,11 @@ async def test_pending_clear_before_sink_and_closed_lead(tmp_path, monkeypatch):
         await s.server.configure_error_alerts(s.queue, s.alerts)
         await drain(s)
         await s.queue.drain_once()
-        assert len(s.provider.pastes) == 1
+        # The lost lead alerts directly; the cleared estimate opening still rides the digest.
+        assert len(s.provider.pastes) == 2
+        assert sum("Work update lane_lead_lost" in str(p) for p in s.provider.pastes) == 1
         digest = next(r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest"))
-        assert "historical opening; condition cleared" in digest["body"]
+        assert "historical opening; condition cleared" in digest["body"] and "lane_lead_lost" not in digest["body"]
         estimate = [f for f in await facts(s) if f["error_context"]["code"] == "lane_estimate_missing"]
         assert [f["firing_count"] for f in estimate] == [1]
 

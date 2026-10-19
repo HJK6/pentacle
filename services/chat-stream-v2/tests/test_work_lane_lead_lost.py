@@ -214,8 +214,12 @@ def test_check_widened_for_estimate_missing_is_rewidened():
 
 
 @pytest.mark.asyncio
-async def test_lead_lost_reaches_fd_digest_with_repair(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["off", "record-only", "on"])
+async def test_lead_lost_alerts_the_fd_directly_with_repair(tmp_path, monkeypatch, mode):
+    # A lost lead is repaired, not reviewed later: it bypasses the Work update digest.
     from test_work_lane_alert_sink import subject, adopt as adopt_sink, drain as drain_sink, facts, notices
+    monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", mode)
+    monkeypatch.setenv("PENTACLE_VOICE_MODE", "off")
     monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
     async with subject(tmp_path) as s:
         lane = await adopt_sink(s, kind="stale")  # active with a qualifying lead
@@ -226,8 +230,11 @@ async def test_lead_lost_reaches_fd_digest_with_repair(tmp_path, monkeypatch):
         assert kinds == ["lead_lost"]
         codes = [f["error_context"]["code"] for f in await facts(s)]
         assert codes.count("lane_lead_lost") == 1
+        await s.server.error_alerts.reconcile()
+        (alert,) = [r for r in await notices(s) if "lane_lead_lost" in r["body"]]
+        assert alert["kind"] == "error_alert" and json.loads(alert["metadata"])["policy_mode"] == "immediate"
         await s.queue.drain_once()
-        digest = next(r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest"))
-        assert "lane_lead_lost" in digest["body"] and "fixture:v2-lead" in digest["body"]
-        assert "work-lane set-lead " + lane["lane_id"] in digest["body"]
+        (paste,) = [p for p in s.provider.pastes if "lane_lead_lost" in str(p)]
+        assert "fixture:v2-lead" in str(paste) and "work-lane set-lead " + lane["lane_id"] in str(paste)
+        assert not [r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest")]
         assert (await s.store.get_work_lane(lane["lane_id"]))["lane"]["work_state"] == "active"
