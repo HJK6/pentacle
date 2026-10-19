@@ -80,7 +80,7 @@ _ROLE_ORDER = {"lead": 0, "nexus": 1, "planner": 2, "worker": 3, "qa": 4}
 
 def _activity(row: dict[str, Any]) -> str:
     """An observation of the seat, never progress, intent or a pause."""
-    if row.get("online") is False:
+    if row.get("online") is False or row.get("pane_status") == "pane_dead":
         return "offline"
     if row.get("busy") or row.get("working"):
         return "working"
