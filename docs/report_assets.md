@@ -4,6 +4,10 @@
 
 Historical Markdown and JSON-table assets remain readable so existing tabs do not break, but neither legacy type can be newly published. Convert every new review artifact to this report schema instead of falling back when validation fails.
 
+## When to publish
+
+Publish a report asset only when the operator explicitly requests that artifact for review, or when a visible seat needs operator input and the artifact is needed for that decision. Task milestones, QA completion and task completion alone do not justify publication. Hidden and coordinator-commissioned workers send structured completion reports and evidence pointers to their parent; the visible parent publishes only under the same rule. Keep durable task evidence separately. This guidance does not replace completion reporting or the operator-question protocol.
+
 ## Publish Contract
 
 Publish with `agent-orch asset publish --type report --content-file <json> [--asset-id <id>] [--spec-id <spec>]`. The daemon and CLI validate the same schema from `services/_shared/asset_schema.py`.
