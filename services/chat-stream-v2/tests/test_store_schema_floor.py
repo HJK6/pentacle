@@ -103,6 +103,10 @@ def test_below_floor_ladder_is_absent_and_readiness_stays_live() -> None:
     statement = "ALTER TABLE sessions ADD COLUMN observer_binding TEXT"
     assert store_source.count(statement) == 1
     store_source = store_source.replace(statement, "")
+    # Lane work assignment adds one nullable session field above the floor.
+    statement = "ALTER TABLE sessions ADD COLUMN assigned_spec_id TEXT"
+    assert store_source.count(statement) == 1
+    store_source = store_source.replace(statement, "")
     # Usage accounting adds one report snapshot above the retained floor.
     statement = "ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT"
     assert store_source.count(statement) == 1

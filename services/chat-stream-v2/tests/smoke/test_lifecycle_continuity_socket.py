@@ -15,9 +15,13 @@ from spawnctl import SpawnCtl
 from store import Store, STREAM_TOKEN_HASH_VERSION
 from tmux_transport import Tmux
 from test_question_contract_d3 import _ask
+from test_window_schedule_contract import RouteProbeSpecs
+from work_lane_link import link_specs
 
 HOST = "fixture-lifecycle"
 SOURCE = HOST + ":source"
+# Children are lane-linked commissions: a seat-token spawn names an assigned spec in an open lane.
+SPEC = "spec_example__lifecycle_smoke"
 COMMAND = "echo READY; echo '⏵⏵ bypass permissions'; echo '❯'; exec sleep 600"
 
 
@@ -27,7 +31,7 @@ async def daemon(tmp_path):
     store.start()
     tmux = Tmux()
     sessions = Sessions(store, tmux=tmux, local_host=HOST)
-    ctl = SpawnCtl(store, sessions, tmux=tmux)
+    ctl = SpawnCtl(store, sessions, tmux=tmux, specs=RouteProbeSpecs())
     notify = Notify(str(tmp_path / "notifications.db"), sessions=sessions)
     ctl.consent_notify = notify
     server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions,
@@ -39,6 +43,7 @@ async def daemon(tmp_path):
         await notify.expire_questions_for_closed_producer(sid, generation=session_generation)
     sessions.set_awaiter_resolver(closed)
     try:
+        await link_specs(store, SPEC)
         await tmux.new_session("source", COMMAND)
         await sessions.open(HOST, "source", provider="claude",
                             effective_model="claude-sonnet-5", effective_effort="high")
@@ -94,7 +99,7 @@ def spawn_payload(name, **fields):
 def test_parent_close_refuses_open_child(tmp_path):
     async def run():
         async with daemon(tmp_path) as (store, sessions, ctl, notify, rpc):
-            child = await rpc(spawn_payload("child", parent_stream_id=SOURCE))
+            child = await rpc(spawn_payload("child", parent_stream_id=SOURCE, spec_id=SPEC))
             assert child["type"] == "spawn.ok", child
             reply = await rpc({"type": "close", "host": HOST, "session_name": "source",
                                "request_id": "close-source", "operator_confirm": True})
@@ -108,7 +113,7 @@ def test_parent_close_refuses_open_child(tmp_path):
 def test_handoff_reparent_failure_preserves_source(tmp_path, monkeypatch):
     async def run():
         async with daemon(tmp_path) as (store, sessions, ctl, notify, rpc):
-            child = await rpc(spawn_payload("child", parent_stream_id=SOURCE))
+            child = await rpc(spawn_payload("child", parent_stream_id=SOURCE, spec_id=SPEC))
             assert child["type"] == "spawn.ok", child
             async def broken(*args):
                 raise RuntimeError("injected child transfer failure")

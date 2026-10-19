@@ -21,6 +21,7 @@ from sessions import Sessions, VerbError
 from spawnctl import SpawnCtl
 from store import Store
 from window_schedule import WindowSchedule, receipt_id
+from work_lane_link import link_specs
 
 
 SPEC = "spec_example__schedule_contract"
@@ -817,6 +818,7 @@ def test_remote_scheduled_fire_routes_profile_tmux_prompt_and_child_token_to_pee
     surface.mark_store_ready()
     try:
         run(store.open_session("hosta", "requester"))
+        run(link_specs(store, SPEC))  # item (1): the real gate admits a lane-linked assignment
         inserted = schedule_insert(
             surface,
             provider="claude",
@@ -932,6 +934,7 @@ def test_schedule_generation_key_replays_once_and_rejects_changed_payload(tmp_pa
             store, FakeSessions(), FakeComms(), spawnctl, local_host="hosta",
         )
         surface.mark_store_ready()
+        run(link_specs(store, SPEC))  # item (1): the real gate admits a lane-linked assignment
         sid = schedule_insert(surface)["schedule"]["schedule_id"]
         fired = run(surface._fire_schedule(sid))
         assert fired["schedule"]["state"] == "fired"

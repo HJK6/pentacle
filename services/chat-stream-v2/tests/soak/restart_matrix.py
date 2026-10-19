@@ -679,6 +679,11 @@ def cli(cell: Cell, as_name: str | None, *args: str) -> subprocess.Popen[str]:
                             stderr=subprocess.PIPE, text=True)
 
 
+# A spawn reply is one JSON line (session row, delivery receipt, work_checkpoint
+# warning); the tail must hold the whole line for the typed-reply checks to parse it.
+STDOUT_TAIL = 16000
+
+
 def finish(proc: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -686,17 +691,59 @@ def finish(proc: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
     except subprocess.TimeoutExpired:
         proc.kill()
         out, err = proc.communicate()
-        return {"rc": "timeout", "stdout": out[-4000:], "stderr": err[-4000:]}
-    return {"rc": proc.returncode, "stdout": out[-4000:], "stderr": err[-4000:],
+        return {"rc": "timeout", "stdout": out[-STDOUT_TAIL:], "stderr": err[-4000:]}
+    return {"rc": proc.returncode, "stdout": out[-STDOUT_TAIL:], "stderr": err[-4000:],
             "waited_s": round(time.monotonic() - started, 2)}
 
 
-def seed_seats(cell: Cell, *names: str, parent: str | None = None) -> dict[str, dict[str, Any]]:
+COMMISSION_TOPIC = "restart__matrix_commission"
+COMMISSION_SPEC = "spec_" + COMMISSION_TOPIC
+
+
+def commission_work(cell: Cell) -> None:
+    """A lane-linked spec for cells whose seat commissions a child with its token.
+
+    A token-verified new commission must carry an assignment that is a member of
+    an open product lane. The seeded parent takes this spec (the child inherits
+    it) and the spec joins a fixture FD lane. Call before the daemon first starts."""
+    work = cell.root / "memory" / "work"
+    folder = work / "in_progress" / COMMISSION_TOPIC
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "spec.md").write_text(
+        f"---\nid: {COMMISSION_SPEC}\ntitle: Restart matrix commission\nstatus: in_progress\n---\n"
+        "## Acceptance Criteria\n- [ ] The child survives the restart.\n\n"
+        "## Estimate\n- remaining_work_h: n/a — coordination\n", encoding="utf-8")
+    (folder / "summary.md").write_text("---\nid: work_restart_matrix\n---\n**Status** — Fixture.\n\n"
+                                       "**Next action** — None.\n", encoding="utf-8")
+    statuses = [{"name": n, "order": i, "display_label": n, "is_terminal": n in {"completed", "deprecated"}}
+                for i, n in enumerate(("backlog", "ready_for_dev", "in_progress", "completed", "deprecated"), 1)]
+    (work / "statuses.json").write_text(json.dumps({"version": 2, "statuses": statuses}), encoding="utf-8")
+    cell.daemon.extra_env["PENTACLE_MEMORY_ROOT"] = str(cell.root / "memory")
+
+
+def link_commission_lane(cell: Cell) -> None:
+    """Insert the fixture FD lane naming COMMISSION_SPEC (the daemon has created its tables)."""
+    conn = sqlite3.connect(cell.daemon.db, timeout=10)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO v2_assistant_composite_lanes (lane_id,stream_id,phase,summary,version,created_at,"
+            "updated_at,work_state,work_state_reason,owner_kind,title,members_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("wl-restart-matrix", "fixture:assistant", "execution", "", 1, "2026-10-09T00:00:00Z",
+             "2026-10-09T00:00:00Z", "active", "fd", "fd", "Restart matrix", json.dumps([COMMISSION_SPEC])))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def seed_seats(cell: Cell, *names: str, parent: str | None = None,
+               spec_id: str | None = None) -> dict[str, dict[str, Any]]:
     replies: dict[str, dict[str, Any]] = {}
     for name in names:
         payload = spawn_payload(name, "", f"seed-{name}")
         payload.pop("initial_prompt")
         payload["visibility"] = "default"
+        if spec_id:
+            payload["spec_id"] = spec_id
         if parent and name != parent:
             payload["parent_stream_id"] = f"{LOCAL_HOST}:{parent}"
         reply = rpc(cell.daemon.url, payload, timeout=60)
@@ -763,8 +810,10 @@ def run_c2(root: Path, evidence: Path, *, variant: str = "pre_admission") -> dic
     record: dict[str, Any] = {"cell": f"C2-{variant}", "variant": variant}
     try:
         with cell_env(root, evidence) as cell:
+            commission_work(cell)
             cell.daemon.start()
-            seed_seats(cell, "parent")
+            link_commission_lane(cell)
+            seed_seats(cell, "parent", spec_id=COMMISSION_SPEC)
             if variant == "pre_admission":
                 (cell.control / "block_new_session").write_text("1")
             else:

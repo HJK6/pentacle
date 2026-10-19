@@ -285,12 +285,15 @@ def test_pass_migrates_sessions_archive_missing_additive_columns(db: Path) -> No
     legacy_ddl = ddl.replace(tail_definition, "", 1)
     assert "no_watch INTEGER NOT NULL DEFAULT 0," in legacy_ddl
     legacy_ddl = legacy_ddl.replace("no_watch INTEGER NOT NULL DEFAULT 0,", "", 1)
+    # The lane work assignment is newer still; a legacy archive predates it too.
+    assert "assigned_spec_id TEXT," in legacy_ddl
+    legacy_ddl = legacy_ddl.replace("assigned_spec_id TEXT,", "", 1)
 
     archive = sqlite3.connect(db.parent / "sessions_archive.db")
     try:
         archive.execute(legacy_ddl)
         archive.commit()
-        assert len(list(archive.execute("PRAGMA table_info(sessions)"))) == len(source_columns) - 4
+        assert len(list(archive.execute("PRAGMA table_info(sessions)"))) == len(source_columns) - 5
     finally:
         archive.close()
 

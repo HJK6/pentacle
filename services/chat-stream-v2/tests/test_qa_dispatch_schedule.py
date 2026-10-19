@@ -12,6 +12,7 @@ from spawnctl import SpawnCtl
 from window_schedule import WindowSchedule
 from test_spec_binding_provenance import SpawnTmux
 from test_window_schedule_contract import RouteProbeSpecs
+from work_lane_link import link_specs
 from test_qa_dispatch_counter import SPEC, LEAD, TOKEN, META, state, two_rejects, issue, send_msg, report_msg
 
 
@@ -87,6 +88,7 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
         )
         # Sessions' projection otherwise still has the pre-update fixture.
         await sessions.refresh()
+        await link_specs(store, SPEC)  # item (1): a scheduled commission names a lane-linked spec
         try:
             fields = dict(META)
             if case in ("worker", "off_legacy"):

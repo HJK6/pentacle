@@ -14,7 +14,8 @@ import pytest
 from store import STREAM_TOKEN_HASH_VERSION
 from sessions import VerbError
 from store_lifecycle_authority import AuthorityError
-from test_assistant_recovery_command import fixture, OLD, NEW, CHILD, ADVISOR, CHAT
+from test_assistant_recovery_command import fixture, OLD, NEW, CHILD, ADVISOR, CHAT, SPEC
+from work_lane_link import link_specs
 
 
 def checkpoint_pointers(store,members=(OLD,ADVISOR)):
@@ -461,8 +462,10 @@ def test_emergency_retirement_drains_detached_spawn_effect(tmp_path):
         panes = Panes()
         async with fixture(tmp_path, authority=True, tmux=panes) as (store, server, composite, gateway, _, __):
             row, _, auth, _ = await claim_bundle(store, server, gateway, composite)
-            ctl = SpawnCtl(store, server.sessions, tmux=panes)
+            from test_window_schedule_contract import RouteProbeSpecs
+            ctl = SpawnCtl(store, server.sessions, tmux=panes, specs=RouteProbeSpecs())
             server.spawnctl = ctl
+            await link_specs(store, SPEC)  # item (1): the detached spawn is an admitted, lane-linked commission
             reached, release = asyncio.Event(), asyncio.Event()
             original = panes.new_session
             async def paused(*args, **kwargs):
@@ -471,7 +474,8 @@ def test_emergency_retirement_drains_detached_spawn_effect(tmp_path):
                 await original(*args, **kwargs)
             panes.new_session = paused
             request = asyncio.create_task(ctl.spawn({'command':'run', 'session_name':'detached',
-                'request_id':'detached-spawn', 'objective':'Synthetic spawn race', '_auth_context':auth}, 'node-a'))
+                'request_id':'detached-spawn', 'objective':'Synthetic spawn race', 'spec_id':SPEC,
+                '_auth_context':auth}, 'node-a'))
             revoke = None
             try:
                 await asyncio.wait_for(reached.wait(), 3)
