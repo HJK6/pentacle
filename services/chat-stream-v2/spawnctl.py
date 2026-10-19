@@ -95,7 +95,7 @@ from _shared.spawn_profiles import (  # noqa: E402
     resolve_spawn,
     validate_v2,
 )
-from store import STREAM_TOKEN_HASH_VERSION, normalize_spec_binding_provenance, normalize_spec_ids, spec_binding_source, SpecInputsUnavailable  # noqa: E402
+from store import STREAM_TOKEN_HASH_VERSION, effective_assignment, normalize_spec_binding_provenance, normalize_spec_ids, spec_binding_source, SpecInputsUnavailable  # noqa: E402
 
 log = logging.getLogger("chat_streamd_v2.spawnctl")
 
@@ -115,7 +115,7 @@ REMOTE_RECEIPT_TIMEOUT_FACTOR = 3.0
 RESUME_PRESERVED_FIELDS = (
     "parent_stream_id", "handoff_from_stream_id", "role", "phase",
     "visibility", "spec_id", "spec_ids", "spec_resolution",
-    "qualified_spec_ids", "spec_binding_provenance", "opened_by_host_id",
+    "qualified_spec_ids", "spec_binding_provenance", "assigned_spec_id", "opened_by_host_id",
     "self_close_on_completion", "no_watch", "title", "objective",
     "objective_source", "harness_run_id", "claude_session_lineage",
 )
@@ -252,6 +252,21 @@ class _PreparingQaStore:
             except QaError as exc:
                 raise VerbError(exc.code, str(exc), **exc.extra) from exc
         return commit
+
+
+def new_work_commission(msg: dict[str, Any], *, resume: bool) -> bool:
+    """A2/R5: a token-verified agent commissioning new work, by operation only.
+
+    Handoffs, resumes, host transfers, daemon fires and recovery keep continuity
+    and are never refused. Operator chats without a seat token and anonymous
+    loopback spawns (a known local bypass) are independent work. Seat operator
+    elevation does not exempt a token-verified caller. Text is never inspected."""
+    auth = msg.get("_auth_context") or {}
+    if resume or msg.get("handoff") or msg.get("handoff_from_stream_id"):
+        return False
+    if auth.get("service_authenticated") or auth.get("ruled_release"):
+        return False
+    return bool(auth.get("token_verified"))
 
 
 class _SpecBinding(dict):
@@ -436,6 +451,8 @@ class SpawnCtl:
                 "spec_resolution": None,
                 "qualified_spec_ids": [],
                 "spec_binding_provenance": [],
+                # A handoff/resume successor keeps its predecessor's assignment (R1).
+                "assigned_spec_id": effective_assignment(source_row) if msg.get("handoff_from_stream_id") else None,
             }
 
         resolver = getattr(self.specs, "resolution_for", None) if self.specs is not None else None
@@ -575,16 +592,71 @@ class SpawnCtl:
                 for spec_id in explicit
             ]
 
+        # The work assignment is the first explicit spec; an inherited binding carries the
+        # source seat's assignment, never an arbitrary tag from its portfolio.
+        if inherited:
+            source_assignment = effective_assignment(source_row)
+            assigned = next((spec_id for spec_id in explicit
+                             if source_identity(spec_id) == source_identity(source_assignment)), None)
+        else:
+            # A handoff (including a scheduled one carrying the owner's ids) keeps its
+            # predecessor's assignment when that spec is among them (R1/R4).
+            carried = effective_assignment(source_row) if msg.get("handoff_from_stream_id") else None
+            assigned = carried if carried in explicit else explicit[0]
         binding = _SpecBinding({
             "spec_id": explicit[0],
             "spec_ids": explicit,
             "spec_resolution": "resolved",
             "qualified_spec_ids": [binding["spec_id"] for binding in provenance],
             "spec_binding_provenance": provenance,
+            "assigned_spec_id": assigned,
         })
         if source_row:
             binding.source_checks = ((source_id, spec_binding_source(source_row)),)
         return binding
+
+    async def _work_link_refusal(self, msg: dict[str, Any], binding: dict[str, Any]) -> VerbError | None:
+        """Item (1): name one assigned spec that belongs to an open product lane."""
+        auth = msg.get("_auth_context") or {}
+        caller_id = str(auth.get("stream_id") or "")
+        caller = None
+        if ":" in caller_id:
+            caller = await self.store.fetch_session(*caller_id.split(":", 1))
+        spec_id = binding.get("assigned_spec_id")
+        if not spec_id:
+            source_id = str(msg.get("parent_stream_id") or "")
+            source = await self.store.fetch_session(*source_id.split(":", 1)) if ":" in source_id else None
+            carried = len(normalize_spec_ids((source or {}).get("spec_ids"), (source or {}).get("spec_id")))
+            return VerbError(
+                "work_assignment_required",
+                "a managed commission needs one assigned spec: pass --spec-id naming this commission's spec"
+                + (f"; {source_id} carries {carried} specs and no assignment" if source_id else ""))
+        if await self.store.open_lanes_for_spec(spec_id):
+            return None
+        home = await self.store.open_lanes_for_spec(effective_assignment(caller)) if effective_assignment(caller) else []
+        if len(home) == 1:
+            lane = home[0]
+            members = " ".join(f"--member {member}" for member in [*lane["members"], spec_id])
+            repair = (f"agent-orch work-lane set-members {lane['lane_id']} {members} "
+                      f"--expected-version {lane['version']} --request-id <new id>")
+        else:
+            repair = ("agent-orch work-lane list; agent-orch work-lane show <lane_id> --members; then "
+                      f"agent-orch work-lane set-members <lane_id> <current --member ...> --member {spec_id} "
+                      "--expected-version <N> --request-id <new id>")
+        return VerbError("work_lane_assignment_unlinked",
+                         f"{spec_id} is not a member of any open product lane; the FD adds it first: {repair}",
+                         spec_id=spec_id)
+
+    async def work_checkpoint_warning(self, msg: dict[str, Any], stream_id: str) -> dict[str, Any] | None:
+        """A5: report the assignment's display deficiencies; never a refusal."""
+        if not new_work_commission(msg, resume=False) or ":" not in stream_id:
+            return None
+        row = await self.store.fetch_session(*stream_id.split(":", 1))
+        spec_id = effective_assignment(row)
+        if not spec_id:
+            return None
+        from _shared.work_checkpoint import work_checkpoint
+        return await asyncio.to_thread(work_checkpoint, spec_id, root=getattr(self.specs, "memory_root", None))
 
     def _tmux_for(self, host: str) -> tmux_transport.Tmux:
         """Local tmux, or a peer's ssh-scoped tmux when `hosts` knows it."""
@@ -1542,6 +1614,10 @@ class SpawnCtl:
         ):
             host = str(msg.get("host") or local_host).strip()
             reply.update(await self._admitted_for_key(host, idempotency_key))
+        if isinstance(reply, dict) and reply.get("type") == "spawn.ok":
+            checkpoint = await self.work_checkpoint_warning(msg, str(reply.get("stream_id") or ""))
+            if checkpoint is not None:
+                reply["work_checkpoint"] = checkpoint
         return reply
 
     async def _spawn_effect_guarded(self, msg, local_host, *, admission=None):
@@ -2006,6 +2082,13 @@ class SpawnCtl:
                 if replay := await recorded_reply():
                     return replay
                 raise VerbError(decision["error_code"], decision["message"], wip=decision)
+        if new_work_commission(msg, resume=resume_session_id is not None):
+            refusal = await self._work_link_refusal(msg, spec_binding)
+            if refusal is not None:
+                # As above: a same-key caller may have been admitted meanwhile.
+                if replay := await recorded_reply():
+                    return replay
+                raise refusal
 
         # Reserve the stream and its creation identity before any pane exists.
         # The existing atomic claim still decides concurrent NEW same-key fires.

@@ -251,6 +251,19 @@ class AssistantLaneRulings:
         if not message.get("session_name"):
             message["session_name"] = "v2-" + hashlib.sha256(key.encode()).hexdigest()[:12]
         target = f"{message.get('host') or self.server.local_host}:{message['session_name']}"
+        # R4: item (1)'s task link is checked when a new ruling request is admitted, not at release.
+        known = await self.store.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)).fetchone())
+        spawnctl = self.server.spawnctl
+        if known is None and hasattr(spawnctl, "_work_link_refusal"):
+            from spawnctl import new_work_commission
+            if new_work_commission(msg, resume=False):
+                host, name = target.split(":", 1)
+                authenticated = {**message, "_auth_context": auth}
+                refusal = await spawnctl._work_link_refusal(
+                    authenticated, await spawnctl._resolve_spec_binding(authenticated, host, name))
+                if refusal is not None:
+                    raise refusal
         request = await self._create(
             action="spawn", key="spawn:" + key, intent=message,
             requester=str(auth["stream_id"]), requester_generation=str(auth["session_generation"]),
@@ -869,6 +882,8 @@ class AssistantLaneRulings:
             intent["_auth_context"] = {
                 "token_verified": True, "stream_id": current["requester_stream_id"],
                 "session_generation": current["requester_generation"],
+                # The task link was checked when this request was admitted (R4).
+                "ruled_release": True,
             }
             requester_host, _, requester_name = current["requester_stream_id"].partition(":")
             requester = await self.store.fetch_session(requester_host, requester_name)

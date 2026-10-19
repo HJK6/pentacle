@@ -1812,6 +1812,13 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
+            if "assigned_spec_id" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN assigned_spec_id TEXT")
+            # The explicit work assignment of a single-spec seat is its only spec. Idempotent;
+            # multi-spec legacy seats stay unassigned until `spec assign` (spec R6).
+            conn.execute("UPDATE sessions SET assigned_spec_id=spec_id WHERE assigned_spec_id IS NULL"
+                         " AND status='open' AND spec_id IS NOT NULL AND json_valid(spec_ids)"
+                         " AND json_array_length(spec_ids)=1")
             if "usage_snapshot" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_reports)")}:
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN usage_snapshot TEXT")
             store_exchange.repair(conn)
@@ -2675,6 +2682,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     "presumed_dead_fired_at": None,
                     "qualified_spec_ids": None,
                     "spec_binding_provenance": None,
+                    "assigned_spec_id": None,
                     "title": None,
                     "dead_open_closed_at": None,
                     # A fresh generation has not closed; never inherit a close class.

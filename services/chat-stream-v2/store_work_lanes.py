@@ -96,6 +96,16 @@ class WorkLaneMemberConflict(ValueError):
         super().__init__(f"{self.code}: {lane_id} ({spec_id})")
 
 
+class WorkLaneMemberInUse(ValueError):
+    """A member removal that would strand a live assignment needs an explicit reason."""
+    code = "work_lane_member_in_use"
+
+    def __init__(self, seats: list[dict[str, str]]):
+        self.seats = seats
+        named = ", ".join(f"{seat['spec_id']} assigned to {seat['stream_id']}" for seat in seats)
+        super().__init__(f"{self.code}: {named}; pass --reason to remove it anyway")
+
+
 def member_conflicts_conn(conn, composite_stream_id: str, members: list[str],
                           target_lane_id: str | None = None, *, refuse: bool = False) -> list[dict[str, str]]:
     """One deterministic check, reused inside the writer transaction and previews."""
@@ -125,7 +135,7 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
     members = None
     try:
         if operation == "set_members" and lane["work_state"] != "done":
-            if set(payload) - {"members", "no_spec_reason"} or "members" not in payload:
+            if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 return
             members, _ = validate_members(payload["members"], payload.get("no_spec_reason"))
         elif operation == "set_state" and lane["work_state"] == "done" and payload.get("to") in OPEN_WORK_STATES:
@@ -496,6 +506,17 @@ class _WorkLanesStoreMixin:
             return {"lane": lane, "events": events, "updates": updates, "members": members_conn(conn, lane)}
         return await self.submit(_op)
 
+    async def open_lanes_for_spec(self, spec_id: str) -> list[dict[str, Any]]:
+        """Non-done product lanes whose membership names this canonical spec."""
+        def _op(conn):
+            return [{"lane_id": r["lane_id"], "version": int(r["version"]), "title": r["title"],
+                     "members": member_ids(dict(r))}
+                    for r in conn.execute(
+                        "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ('active','paused','blocked')"
+                        " AND EXISTS (SELECT 1 FROM json_each(COALESCE(members_json,'[]')) WHERE value=?)"
+                        " ORDER BY lane_id", (spec_id,))]
+        return await self.submit(_op)
+
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
 
@@ -605,6 +626,18 @@ def _require_qualifying_lead(lane: dict[str, Any], conn) -> None:
     lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
     if not work_lane_lead_qualifies(lane, lead):
         raise ValueError("work_lane_visible_lead_required")
+
+
+def _assigned_seats_conn(conn, spec_ids: list[str]) -> list[dict[str, str]]:
+    """Open seats whose effective work assignment is one of these specs (same transaction)."""
+    if not spec_ids:
+        return []
+    marks = ",".join("?" for _ in spec_ids)
+    return [{"spec_id": r[0], "stream_id": f"{r[1]}:{r[2]}"} for r in conn.execute(
+        "SELECT COALESCE(assigned_spec_id, spec_id), host, session_name FROM sessions WHERE status='open' AND ("
+        f"assigned_spec_id IN ({marks}) OR (assigned_spec_id IS NULL AND spec_id IN ({marks})"
+        " AND json_valid(spec_ids) AND json_array_length(spec_ids)=1)) ORDER BY host, session_name",
+        (*spec_ids, *spec_ids))]
 
 
 def _lead_lost_conn(lane: dict[str, Any], conn) -> bool:
@@ -748,9 +781,11 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if "summary" in payload:
                 changes["summary"] = _text(payload["summary"], SUMMARY_MAX, "work_lane_payload_invalid") or ""
         elif operation == "set_members":
-            if set(payload) - {"members", "no_spec_reason"} or "members" not in payload:
+            if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 raise ValueError("work_lane_payload_invalid")
             members, reason = validate_members(payload["members"], payload.get("no_spec_reason"))
+            removal_reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
+            in_use = _assigned_seats_conn(conn, [s for s in member_ids(lane) if s not in members])
             if members == member_ids(lane) and reason == lane.get("no_spec_reason"):
                 raise ValueError("work_lane_members_unchanged")
             changes.update(members_json=_canonical(members), no_spec_reason=reason)
@@ -762,6 +797,11 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                              "WHERE lane_id=? AND kind='completed' AND cleared_at IS NULL",
                              (stamp, lane["lane_id"]))
             event_payload = {"members": members, "no_spec_reason": reason}
+            if in_use:
+                # Removing a live assignment is explicit, never silent (A7).
+                if not removal_reason:
+                    raise WorkLaneMemberInUse(in_use)
+                event_payload.update(reason=removal_reason, assigned_seats=in_use)
         elif operation == "set_owner":
             if set(payload) - {"to", "reason", "operator_confirmation"} or payload.get("to") not in OWNER_KINDS:
                 raise ValueError("work_lane_payload_invalid")

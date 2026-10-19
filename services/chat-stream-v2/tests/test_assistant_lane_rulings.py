@@ -430,6 +430,10 @@ def test_approved_spawn_waits_for_independent_host_freeze_then_creates_one_pane(
             tmux = PaneTmux()
             sessions = Sessions(store, tmux=tmux, local_host="fixture-chat")
             ctl = SpawnCtl(store, sessions, tmux=tmux)
+
+            async def linked(_msg, _binding):  # item (1) is covered by its own ruling and spawn tests
+                return None
+            ctl._work_link_refusal = linked
             server = Server(store=store, sessions=sessions, spawnctl=ctl, local_host="fixture-chat")
             server.assistant_composite = AssistantComposite(store, config=config)
             pending = await server._on_spawn({"type": "spawn", "role": "lead", "host": "fixture-chat",
@@ -1053,3 +1057,42 @@ def test_notice_trim_ruling_detail_is_exact_and_conditions_are_not_truncated():
             assert "session" not in notice["outcome"]
         finally: store.stop()
     asyncio.run(run())
+
+
+class LinkCheckingSpawn(RecordingSpawn):
+    """The production item (1) gate's shape: refuse an unassigned commission."""
+    def __init__(self):
+        super().__init__()
+        self.resolved = []
+
+    async def _resolve_spec_binding(self, msg, host, name):
+        return {"assigned_spec_id": msg.get("spec_id")}
+
+    async def _work_link_refusal(self, msg, binding):
+        from sessions import VerbError
+        self.resolved.append(binding.get("assigned_spec_id"))
+        return None if binding.get("assigned_spec_id") == "spec_demo__linked" else VerbError(
+            "work_lane_assignment_unlinked", "not in an open lane")
+
+
+def test_ruled_lead_spawn_checks_its_task_link_at_admission_not_release():
+    from sessions import VerbError
+
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, _advisor, server, spawned = await _rulings_rig(store, spawnctl=LinkCheckingSpawn())
+            with pytest.raises(VerbError) as exc:
+                await server._on_spawn({**_spawn_msg(root, "unlinked"), "spec_id": "spec_demo__other"})
+            assert exc.value.code == "work_lane_assignment_unlinked"
+            reply = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
+            assert reply["type"] == "spawn.pending_ruling"
+            # A retry of the admitted request is never re-gated.
+            again = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
+            assert again["ruling_request_id"] == reply["ruling_request_id"]
+            assert spawned.resolved == ["spec_demo__other", "spec_demo__linked"]
+        finally:
+            store.stop()
+
+    asyncio.run(go())

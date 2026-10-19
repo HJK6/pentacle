@@ -3125,7 +3125,7 @@ class Server:
             "stream_id", "host", "session_name", "provider", "display_name",
             "last_event_at", "last_text", "last_kind", "draft", "question",
             "pending_peer_messages", "role", "role_source", "phase", "spec_id", "spec_ids",
-            "qualified_spec_ids", "spec_binding_provenance", "spec_resolution",
+            "qualified_spec_ids", "spec_binding_provenance", "assigned_spec_id", "spec_resolution",
             "visibility", "self_close_on_completion", "online", "pending",
             "working", "working_label", "background_busy", "background_label", "busy",
             "busy_reasons", "parent_stream_id", "handoff_from_stream_id",
@@ -4619,7 +4619,7 @@ class Server:
         return {"ok": bool(str(reply.get("type") or "").endswith(".ok")), "reply": reply}
 
     async def _on_assistant_operation(self, msg: dict[str, Any]) -> dict[str, Any]:
-        from store_work_lanes import WorkLaneMemberConflict
+        from store_work_lanes import WorkLaneMemberConflict, WorkLaneMemberInUse
         composite = self._composite_for_message(msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if composite is None or not auth.get("token_verified"):
@@ -4628,7 +4628,7 @@ class Server:
             composite.ruling_hook = self.lane_rulings.request_composite
         try:
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
-        except WorkLaneMemberConflict as exc:
+        except (WorkLaneMemberConflict, WorkLaneMemberInUse) as exc:
             raise VerbError(exc.code, str(exc)) from exc
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc

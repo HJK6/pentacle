@@ -172,7 +172,10 @@ def cmd_set_text(args: argparse.Namespace) -> int:
 
 def cmd_set_members(args: argparse.Namespace) -> int:
     members = args.member or []
-    return _operation(args, "set_members", {"members": members, "no_spec_reason": args.no_spec_reason})
+    payload = {"members": members, "no_spec_reason": args.no_spec_reason}
+    if args.reason:
+        payload["reason"] = args.reason
+    return _operation(args, "set_members", payload)
 
 
 def cmd_set_owner(args: argparse.Namespace) -> int:
@@ -390,6 +393,7 @@ def add_parser(subparsers: Any) -> None:
     p = mutator("set-members", "FD: replace ordered lane membership")
     p.add_argument("--member", action="append", help="canonical spec id; repeat in membership order")
     p.add_argument("--no-spec-reason", help="required when the member list is empty")
+    p.add_argument("--reason", help="required to remove a spec a live seat is assigned to")
     p.set_defaults(func=cmd_set_members)
 
     p = mutator("set-owner", "FD: owner kind (operator->fd needs a reason or confirmation)")

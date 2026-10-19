@@ -360,10 +360,17 @@ class UIVerbs:
         host = str(msg.get("host") or "").strip()
         name = str(msg.get("session_name") or "").strip()
         spec_id = str(msg.get("spec_id") or "").strip()
-        if action not in {"attach", "detach"}:
-            raise VerbError("invalid_action", "action must be attach or detach")
+        if action not in {"attach", "detach", "assign", "unassign"}:
+            raise VerbError("invalid_action", "action must be attach, detach, assign or unassign")
         if not host or not name:
             raise VerbError("invalid_stream_id", "host and session_name are required")
+        if action == "unassign":
+            # Only the work assignment ends; authority tags are untouched.
+            if await self.store.fetch_session(host, name) is None:
+                raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
+            updated = await self.store.update_session(host, name, assigned_spec_id=None)
+            self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=None)
+            return {"type": "session.spec_update.ok", "request_id": rid, "action": action, "session": updated}
         if not SPEC_ID_RE.fullmatch(spec_id):
             raise VerbError("invalid_spec_id", "spec_id must match <repo>__<topic>")
         resolver = getattr(self._spec_catalog, "resolution_for", None) if self._spec_catalog is not None else None
@@ -418,7 +425,16 @@ class UIVerbs:
             right_identity = canonical_identity(right)
             return bool(left_identity and left_identity == right_identity)
 
-        if action == "attach":
+        assigned = source.get("assigned_spec_id")
+        if action == "assign":
+            # The caller is classified from its authenticated context, never a wire field (R5).
+            auth = msg.get("_auth_context") or {}
+            if auth.get("token_verified"):
+                refusal = await self.spawnctl._work_link_refusal(msg, {"assigned_spec_id": spec_id})
+                if refusal is not None:
+                    raise refusal
+            assigned = spec_id
+        if action in {"attach", "assign"}:
             if not any(same(existing, spec_id) for existing in spec_ids):
                 spec_ids.append(spec_id)
             if not any(same(binding["spec_id"], spec_id) for binding in bindings):
@@ -431,6 +447,8 @@ class UIVerbs:
         else:
             spec_ids = [existing for existing in spec_ids if not same(existing, spec_id)]
             bindings = [binding for binding in bindings if not same(binding["spec_id"], spec_id)]
+            if assigned and same(assigned, spec_id):
+                assigned = None
 
         first_spec_id = spec_ids[0] if spec_ids else None
         updated = await self.store.update_session(
@@ -441,6 +459,7 @@ class UIVerbs:
             spec_ids=spec_ids,
             spec_resolution=resolver(first_spec_id) if first_spec_id else None,
             spec_binding_provenance=bindings,
+            assigned_spec_id=assigned,
         )
         if updated is None:
             raise VerbError("session_not_found", "session disappeared during spec update", stream_id=stream_id)
@@ -448,12 +467,17 @@ class UIVerbs:
             stream_id,
             **{key: value for key, value in updated.items() if key != "stream_id"},
         )
-        return {
+        reply = {
             "type": "session.spec_update.ok",
             "request_id": rid,
             "action": action,
             "session": updated,
         }
+        if action == "assign":
+            checkpoint = await self.spawnctl.work_checkpoint_warning(msg, stream_id)
+            if checkpoint is not None:
+                reply["work_checkpoint"] = checkpoint  # a warning, never a refusal (FD GO)
+        return reply
 
 
 def _err(verb: str, rid: str, error: str, *, message: str = "") -> dict[str, Any]:

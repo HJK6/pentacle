@@ -788,7 +788,7 @@ class Sessions:
         "observer_binding", "jsonl_path", "claude_session_id", "claude_session_lineage", "spec_ids", "status_card", "context_tokens",
         "model_context_window", "context_updated_at", "context_level", "requested_model",
         "requested_effort", "effective_model", "effective_effort", "provider",
-        "qualified_spec_ids", "spec_binding_provenance", "bootstrap_state", "title",
+        "qualified_spec_ids", "spec_binding_provenance", "assigned_spec_id", "bootstrap_state", "title",
         "objective", "objective_source",
     )
 

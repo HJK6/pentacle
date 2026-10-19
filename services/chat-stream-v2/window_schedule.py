@@ -23,6 +23,7 @@ import uuid
 from typing import Any, Awaitable, Callable
 
 from sessions import VerbError
+from store_specs import effective_assignment, normalize_spec_ids
 
 
 RESOURCE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]{0,127}\Z")
@@ -468,6 +469,19 @@ class WindowSchedule:
         admission_spec_ids = requested_spec_ids or owner_spec_ids
         if not admission_spec_ids:
             raise VerbError("not_authorized", "schedule owner must be spec-bound with provenance")
+        link_refusal = getattr(self.spawnctl, "_work_link_refusal", None)
+        if kind == "seat" and not handoff and link_refusal is not None:
+            # R4: a scheduled new commission is checked here, at insert; the fire never refuses.
+            # The assignment leads the stored ids, so the fire binds it instead of a portfolio tag.
+            assignment = requested_spec_ids[0] if requested_spec_ids else effective_assignment(seat)
+            refusal = await link_refusal(
+                {**msg, "parent_stream_id": msg.get("parent_stream_id") or actor},
+                {"assigned_spec_id": normalize_spec_ids(spec_id=assignment)[0] if assignment else None})
+            if refusal is not None:
+                raise refusal
+            canonical = normalize_spec_ids(spec_id=assignment)[0]
+            admission_spec_ids = [assignment, *[value for value in admission_spec_ids
+                                                if normalize_spec_ids(spec_id=value) != [canonical]]]
         fires_at = _parse_time(msg.get("fires_at_utc"))
         requested_provider = str(
             (msg.get("requested_provider") if "requested_provider" in msg else msg.get("provider")) or ""

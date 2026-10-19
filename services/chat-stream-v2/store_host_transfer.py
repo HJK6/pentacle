@@ -245,7 +245,7 @@ def claim(conn,msg,auth,*,name,composite,env_binding,advisor,helpers,trusted_hos
         # Preserve source metadata, not credentials or transcript fields.
         row['sources'][sid]={k:source.get(k) for k in (*SOURCE_FIELDS,'visibility','phase','objective',
             'objective_source','spec_id','spec_ids','spec_resolution','qualified_spec_ids',
-            'spec_binding_provenance','self_close_on_completion','no_watch')}
+            'spec_binding_provenance','assigned_spec_id','self_close_on_completion','no_watch')}
     if conn.execute('SELECT 1 FROM v2_host_transfer_authorizations WHERE command_id=? OR (composite=? AND input_identity=?)',(cid,composite,route['input_identity'])).fetchone():
         raise TransferError('transfer_input_consumed')
     if conn.execute('SELECT 1 FROM v2_host_transfers WHERE composite=? AND input_identity=?',
@@ -393,6 +393,7 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
         host,name=target.split(':',1)
         fields={k:source[k] for k in ('role','visibility','phase','objective','objective_source','spec_id','spec_ids','spec_resolution',
                                     'qualified_spec_ids','spec_binding_provenance','self_close_on_completion','no_watch')}
+        fields['assigned_spec_id']=source.get('assigned_spec_id')  # absent on transfers recorded before it
         fields['parent_stream_id']=mapping.get(source['parent_stream_id'],(source['parent_stream_id'],None))[0]
         fields['handoff_from_stream_id']=sid
         conn.execute('UPDATE sessions SET '+','.join(k+'=?' for k in fields)+' WHERE host=? AND session_name=?',

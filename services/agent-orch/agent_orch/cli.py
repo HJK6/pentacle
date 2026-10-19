@@ -4659,7 +4659,7 @@ def spec_update(args: argparse.Namespace) -> int:
                 config,
                 args.stream_id,
                 args.spec_command,
-                args.spec_id,
+                getattr(args, "spec_id", ""),
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                 from_stream_id=caller_stream_id,
             )
@@ -6084,10 +6084,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     spec_parser = subparsers.add_parser("spec")
     spec_sub = spec_parser.add_subparsers(dest="spec_command", required=True)
-    for _spec_cmd in ("attach", "detach"):
-        spec_cmd_parser = spec_sub.add_parser(_spec_cmd)
+    for _spec_cmd in ("attach", "detach", "assign", "unassign"):
+        spec_cmd_parser = spec_sub.add_parser(
+            _spec_cmd,
+            help={"assign": "set the seat's one work assignment (attaches the spec when absent)",
+                  "unassign": "clear the seat's work assignment; authority tags are kept"}.get(_spec_cmd))
         spec_cmd_parser.add_argument("stream_id")
-        spec_cmd_parser.add_argument("spec_id", type=_spec_id_arg)
+        if _spec_cmd != "unassign":
+            spec_cmd_parser.add_argument("spec_id", type=_spec_id_arg)
         spec_cmd_parser.add_argument("--from-stream-id")
         spec_cmd_parser.add_argument("--timeout", type=float, default=30.0)
         spec_cmd_parser.set_defaults(func=spec_update)

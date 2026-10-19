@@ -525,6 +525,9 @@ class Ledger:
             "to_stream_id": row.get("to_stream_id"),
         }
         reply.update(_claim_wire_fields(row.get("claim_verified"), row.get("ac_claim_mismatch")))
+        checkpoint = (row.get("extras") or {}).get("work_checkpoint") if isinstance(row.get("extras"), dict) else None
+        if checkpoint is not None:
+            reply["work_checkpoint"] = checkpoint
         if notice_delivery is not None:
             reply["notice_delivery"] = notice_delivery
         validation = row.get("qa_attestation_validation")
@@ -608,6 +611,31 @@ class Ledger:
             )
         except Exception:  # noqa: BLE001 - the raised schema rejection stays primary
             log.exception("record report rejection failed")
+
+    async def _owner_checkpoint(self, msg: dict[str, Any], report_id: str, from_stream_id: str,
+                                status: str) -> dict[str, Any] | None:
+        """Item (2): the spec owner's report cannot claim a checkpoint its source fails.
+
+        The owner is an open lead seat with a persisted assignment (the FD after
+        `spec assign` is one). Runs after attribution and before persistence; a
+        replay of an already-stored report is never re-gated. error/aborted are
+        never refused, and an unreadable memory root is reported, not refused."""
+        if ":" not in from_stream_id or await self.store.get_report(report_id) is not None:
+            return None
+        row = await self.store.fetch_session(*from_stream_id.split(":", 1))
+        spec_id = (row or {}).get("assigned_spec_id")
+        if not spec_id or row.get("status") != "open" or str(row.get("role") or "").lower() != "lead":
+            return None
+        from _shared.work_checkpoint import work_checkpoint
+        result = await asyncio.to_thread(work_checkpoint, spec_id)
+        if result["state"] == "invalid" and status in {"done", "progress"}:
+            fixes = "; ".join(item["fix"] for item in result["deficiencies"])
+            reason = f"work_checkpoint_invalid: {spec_id}: {fixes}"
+            await self._maybe_record_terminal_report_rejection(msg, reason)
+            raise self._error("work_checkpoint_invalid",
+                              f"{spec_id} does not show this checkpoint; fix and re-report: {fixes}",
+                              report_id, work_checkpoint=result)
+        return result
 
     async def _authenticated_caller(self, msg: dict[str, Any]) -> str | None:
         """The caller's proven identity, or None when the frame carries no
@@ -733,6 +761,7 @@ class Ledger:
             raise self._error(exc.code, str(exc), report_id, schema_violations=exc.violations) from exc
 
         claim_verified, claim_mismatch = await self.verify_ac_claim(validated.ac_claim)
+        checkpoint = await self._owner_checkpoint(msg, report_id, from_stream_id, str(validated.status))
 
         routing_snapshot = await self._report_routing_snapshot(from_stream_id)
         durable_parent = await self._parent_of(from_stream_id)
@@ -767,7 +796,10 @@ class Ledger:
             "findings": validated.findings,
             "next_action": validated.next_action,
             "details": validated.details,
-            "extras": validated.extras,
+            # The checkpoint snapshot is stored beside the report but is not part of
+            # its replay identity (request_payload_hash), so a retry still replays.
+            "extras": ({**(validated.extras or {}), "work_checkpoint": checkpoint}
+                       if checkpoint is not None else validated.extras),
             "reason": validated.reason,
             "completion_kind": validated.completion_kind,
             "qa_verdict": validated.qa_verdict,

@@ -541,21 +541,44 @@ DB. Review the concrete rollback artifact before activation.
 - `work-lane list/show` human text shows `LEAD LOST — repair: …`.
 - Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK, episode rows and the `lane_lead_lost` adapter vocabulary. The supported rollback artifact removes only `lead_lost` from the reconciliation tuple: no new episode opens, pending ones still deliver, and nothing stores a pause. Do not run an older binary, which would retry pending `lead_lost` deliveries it cannot map.
 
+## Work assignment and checkpoints
+
+- **Assignment.** Sessions carry a nullable `assigned_spec_id`: the seat's one work assignment. Spec tags keep their authority meaning (QA, schedules) and are never stripped.
+  - The *effective* assignment is the persisted value. For a legacy single-spec row it is that row's only spec. A multi-spec row without one has none.
+  - New commissions persist the assignment they resolved. Handoff, resume and host transfer carry it.
+  - Store startup backfills open single-spec rows idempotently.
+- **New commissions.** A spawn from a token-verified agent stream that is not a handoff, resume, daemon fire or ruled release is a new commission. Seat operator elevation does not exempt it. Message text is never inspected.
+  - It resolves its assignment from the first `--spec-id`, else from the source seat's effective assignment. Otherwise it is refused with `work_assignment_required`.
+  - The assignment must be a member of a non-done product lane. Otherwise it is refused with `work_lane_assignment_unlinked`, before any reservation or pane. The refusal prints the exact `set-members` repair, filled in when the caller's own assignment has exactly one lane.
+  - An admitted idempotent retry replays.
+  - Operator-authenticated callers without a seat token are exempt, as are anonymous loopback spawns (a known local bypass), daemon fires, host transfer and recovery.
+  - `schedule.insert` checks a non-handoff seat schedule at insert and stores its assignment first among the spec ids. A lane-ruling spawn is checked when its ruling request is admitted, not at release.
+- **Existing seats.** `agent-orch spec assign <stream> <spec>` attaches the spec when it is absent and sets the assignment. An agent caller is lane-checked. `spec unassign <stream>` clears it and keeps tags. Detaching the assigned spec clears it. The FD's own direct work is `spec assign` on the FD seat.
+- **Member removal.** `set-members` that removes a spec an open seat is assigned to is refused with `work_lane_member_in_use`, naming the seats. `--reason` proceeds and records the reason and seats on the event.
+- **Checkpoint.** `_shared/work_checkpoint.py` reads the current spec/summary with the existing parser.
+  - It reports missing `## Acceptance Criteria`, missing `**Status** —`, and, for open specs, missing `**Next action** —`. It also reports a last `remaining_work_h` declaration that is not numeric, not `n/a — umbrella|coordination` and not `unknown — <reason>`. Each finding carries its exact fix.
+  - `unknown — <reason>` stays a null estimate on the wire, so the `estimate_missing` FLAG keeps it visible.
+  - A new commission's reply and `spec assign` carry the result as a warning, never a refusal.
+  - A `done|progress` report from an open lead seat with a persisted assignment (the owner) is refused with `work_checkpoint_invalid` when its record fails. The refusal is traced like other rejected terminal reports, and nothing is persisted.
+  - `error`/`aborted` reports, replays of stored reports and other seats are never refused. An unreadable memory root returns `unverifiable`.
+  - Accepted owner reports return and store `work_checkpoint` (state, facts, deficiencies) in `extras`, outside the replay identity.
+
 ## Member attribution
 
 Spec: lane tracking minimal (D1–D2).
 
 Each projected member (inventory, list and `show --members`) adds:
 
-- `seats` (≤ 8, ordered lead, nexus, planner, worker, qa, other, then by stream), each `{stream_id, role, host, visibility, parent_stream_id, activity: working|idle|offline|unknown, last_activity}`, and `seats_total`. Only open seats whose effective assignment is the member spec attribute. A seat with exactly one spec is assigned to it. A multi-spec row is unassigned: its inherited or attached tags never attribute it to every member (`store_specs.effective_assignment`).
+- `seats` (≤ 8, ordered lead, nexus, planner, worker, qa, other, then by stream), each `{stream_id, role, host, visibility, parent_stream_id, activity: working|idle|offline|unknown, last_activity}`, and `seats_total`. Only open seats whose effective assignment (above) is the member spec attribute; inherited or attached tags never attribute a seat (`store_specs.effective_assignment`).
 - `open_questions {count, first_question_id}`, from open operator cards whose `spec_id` matches; `first_question_id` is the oldest. Counts may lag by one refresh pass.
 
 `prompt ask` without a `spec_id` defaults it to the asker's effective assignment; an explicit `spec_id` wins. Activity is an observation, never progress, intent or a pause: idle does not mean paused or waiting on the operator. `last_activity` is excluded from the frame signature. A client of an older daemon reads the fields as empty/zero.
 
 ## Spec attribution and completion
 
-Spec attribution and lane membership support tracking and display. Spawning an
-authorized spec-bound session does not require lane membership. Existing spawn
+Spec attribution and lane membership support tracking and display. A new
+managed commission requires its assignment to be in an open lane (above);
+handoffs, resumes and independent operator chats do not. Existing spawn
 authorization, idempotency and optional lead WIP policy still apply.
 
 Lane `done` and session close do not parse spec acceptance Markdown or follow-up

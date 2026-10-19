@@ -750,7 +750,7 @@ OPEN_FIELD_KEYS = (
     # effective tuple at launch. Unobserved stays explicit (req 2).
     "effective_model", "effective_effort", "opened_by_host_id", "title",
     "spec_resolution", "qualified_spec_ids",
-    "spec_binding_provenance",
+    "spec_binding_provenance", "assigned_spec_id",
 )
 
 
