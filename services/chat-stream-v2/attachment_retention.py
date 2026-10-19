@@ -171,7 +171,14 @@ def sweep_managed(conn, root, *, archive_path=None, now=None, limit=100, after_s
                     counts['retained'] += 1
                     continue
                 path, lock_directory = location
-                with digest_lock(root, sha, directory_fd=lock_directory):
+                with ExitStack() as locked:
+                    try:
+                        locked.enter_context(digest_lock(root, sha, timeout=0, directory_fd=lock_directory))
+                    except TimeoutError:
+                        # An off-Store owner may be awaiting this Store. Retain
+                        # busy bytes and revisit through the existing cursor.
+                        counts['retained'] += 1
+                        continue
                     conn.execute('BEGIN IMMEDIATE')
                     try:
                         rows = conn.execute('SELECT * FROM v2_attachment_uploads WHERE blob_sha=?', (sha,)).fetchall()

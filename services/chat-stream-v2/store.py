@@ -45,6 +45,7 @@ from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 from prockill import canonical_start
 
+import attachment_locks
 import store_exchange
 import store_attachments
 import store_usage
@@ -1454,12 +1455,19 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         self._spec_identity_resolver = resolver
         self._spec_identities_resolver = batch
 
-    def start(self) -> None:
+    def start(self, timeout: float = 10.0) -> None:
         """Start the worker; idempotent while it runs. A worker that exited
         (stopped, or failed to initialize) has closed its connection and failed
         its queued callers, so the Store may start a fresh one. While a timed-out
         stop's worker is still alive it owns the database: refuse rather than
-        open a second owner (F11)."""
+        open a second owner (F11).
+
+        Returns only once this call's worker is ready. A worker still
+        initializing at the deadline raises TimeoutError and stays the owner;
+        a retry waits on that same worker."""
+        timeout = float(timeout)
+        if timeout != timeout or abs(timeout) == float("inf") or timeout < 0:
+            raise ValueError(f"store start timeout must be finite and nonnegative, got {timeout!r}")
         with self._lock:
             thread = self._thread
             if thread is not None and thread.is_alive():
@@ -1471,9 +1479,16 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 self._start_error = None
                 thread = self._thread = threading.Thread(target=self._run, name="store", daemon=True)
                 thread.start()
-        self._ready.wait(timeout=10)
-        if self._start_error is not None:
-            raise self._start_error
+        ready = self._ready.wait(timeout=timeout)
+        with self._lock:
+            if self._thread is not thread:
+                raise RuntimeError("store worker was stopped or replaced before it became ready")
+            if self._start_error is not None:
+                raise self._start_error
+            if not ready:
+                raise TimeoutError(f"store worker still initializing after {timeout:g}s")
+            if self._closing:
+                raise RuntimeError("store is stopping: its worker is no longer the ready owner")
 
     def stop(self, timeout: float = 5.0) -> bool:
         """Stop the worker, waiting at most `timeout` s in total (one deadline
@@ -1863,8 +1878,12 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     # -- async API ---------------------------------------------------------
 
-    async def submit(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
-        """Run `fn(conn)` on the store thread; await its result."""
+    async def submit(self, fn: Callable[[sqlite3.Connection], Any], *, settle_on_cancel: bool = False) -> Any:
+        """Run `fn(conn)` on the store thread; await its result.
+
+        `settle_on_cancel` callers (attachment lock owners) keep awaiting an
+        enqueued callable through caller cancellation until it has actually
+        run or been drained, then re-raise the cancellation."""
         actor = host_transfer.actor_context.get()
         if actor is not None:
             operation = fn
@@ -1887,6 +1906,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                                       (fn, fut, loop, time.monotonic(), request_timing.get()))
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
+        if settle_on_cancel:
+            return await attachment_locks.settle_future(fut)
         return await fut
 
     async def transfer_authority_state(self, stream_id, generation):
