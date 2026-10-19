@@ -152,7 +152,12 @@ def test_distinct_store_workers_serialize_both_interleavings(tmp_path,monkeypatc
                     leading=asyncio.create_task(sweep(second,tmp_path))
                     assert await asyncio.to_thread(entered.wait,5)
                     following=asyncio.create_task(upload(blobs,rid='racing-rebuild'))
-                await asyncio.sleep(.02);assert not following.done()
+                if first=='upload':
+                    # GC never waits on a lock an upload owner holds: it retains busy bytes.
+                    skipped=await asyncio.wait_for(following,5)
+                    assert skipped['deleted']==0 and skipped['retained']>=1
+                else:
+                    await asyncio.sleep(.02);assert not following.done()
                 release.set();a,b=await asyncio.gather(leading,following)
                 receipt=a if first=='upload' else b
                 assert receipt['type']=='upload_blob.ok'

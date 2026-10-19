@@ -1,11 +1,11 @@
-"""Managed upload provenance, executed exclusively on Store's SQLite worker.
+"""Managed upload provenance with worker-owned filesystem preparation.
 
 No bearer secrets are persisted. A receipt's upload_id is a lookup identifier,
 not authority to publish or fetch. Pending rows are not referenceable.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 import uuid
 
-from attachment_locks import digest_lock
+from attachment_locks import attachment_io, check_deadline, settle_future, with_digest_locks
 from chat_attachment_types import ATTACHMENT_MAX_BYTES, validated_media_type, sanitized_filename
 
 DDL = (
@@ -87,7 +87,7 @@ def publication_attachment(row, stream_id, publisher=None):
 
 
 def verify_publication_bytes(root, row, *, directory_fd=None):
-    """Final bounded byte verification runs on Store worker inside digest lock."""
+    """Bounded byte verification; caller owns the digest lock outside Store."""
     sha = row['blob_sha']
     path = Path(root) / sha[:2] / sha
     try:
@@ -98,9 +98,9 @@ def verify_publication_bytes(root, row, *, directory_fd=None):
             if not stat.S_ISREG(before.st_mode) or before.st_size != row['size_bytes']:
                 raise ValueError('assistant_publish_attachment_unverified')
             hasher, size, prefix = hashlib.sha256(), 0, b''
-            while chunk := handle.read(1024 * 1024):
+            while chunk := handle.read(min(1024 * 1024, row['size_bytes'] + 1 - size)):
                 size += len(chunk)
-                if size > ATTACHMENT_MAX_BYTES:
+                if size > row['size_bytes'] or size > ATTACHMENT_MAX_BYTES:
                     raise ValueError('assistant_publish_attachment_unverified')
                 hasher.update(chunk)
                 if not prefix: prefix = chunk[:16]
@@ -123,73 +123,103 @@ class AttachmentStoreMixin:
             raise ValueError('attachment_root_conflict')
         self._attachment_root = root
 
-    @contextmanager
-    def publication_attachment_guard(self, conn, upload_ids, stream_id, expected, publisher):
-        if not upload_ids:
-            yield
-            return
-        root = getattr(self, '_attachment_root', None)
-        if root is None:
-            raise ValueError('assistant_publish_attachment_validation_unavailable')
+    async def _attachment_submit(self, operation):
+        return await self.submit(operation, settle_on_cancel=True)
+
+    @staticmethod
+    def _publication_rows(conn, upload_ids):
         rows = [conn.execute('SELECT * FROM v2_attachment_uploads WHERE upload_id=?', (key,)).fetchone() for key in upload_ids]
         if any(row is None for row in rows):
             raise ValueError('assistant_publish_attachment_unverified')
-        with ExitStack() as stack:
-            for sha in sorted({row['blob_sha'] for row in rows}):
-                stack.enter_context(digest_lock(root, sha))
-            # Recheck after locking. GC or another process may have changed rows
-            # while the lock was acquired. Never publish from a stale lookup.
-            current = [conn.execute('SELECT * FROM v2_attachment_uploads WHERE upload_id=?', (key,)).fetchone() for key in upload_ids]
-            for original, row in zip(rows, current):
-                if row is None or dict(original) != dict(row):
-                    raise ValueError('assistant_publish_attachment_unverified')
-            actual = [publication_attachment(row, stream_id, publisher) for row in current]
-            if actual != expected:
+        return [dict(row) for row in rows]
+
+    @contextmanager
+    def publication_attachment_guard(self, conn, upload_ids, stream_id, expected, publisher, *, prepared=None):
+        """Final provenance fence only; the async owner retains verified locks."""
+        if upload_ids:
+            current = self._publication_rows(conn, upload_ids)
+            if prepared is None or current != prepared:
+                raise ValueError('assistant_publish_attachment_unverified')
+            if [publication_attachment(row, stream_id, publisher) for row in current] != expected:
+                raise ValueError('assistant_publish_attachment_unverified')
+        yield
+
+    async def commit_attachment_publication(self, upload_ids, stream_id, expected, publisher, operation):
+        if not upload_ids:
+            return await self.submit(operation)
+        if len(upload_ids) > 16:
+            raise ValueError('assistant_publish_attachment_unverified')
+        root = getattr(self, '_attachment_root', None)
+        if root is None:
+            raise ValueError('assistant_publish_attachment_validation_unavailable')
+        original = await self._attachment_submit(lambda conn: self._publication_rows(conn, upload_ids))
+
+        async def locked(deadline):
+            current = await self._attachment_submit(lambda conn: self._publication_rows(conn, upload_ids))
+            if current != original or [publication_attachment(row, stream_id, publisher) for row in current] != expected:
                 raise ValueError('assistant_publish_attachment_unverified')
             for row in current:
-                verify_publication_bytes(root, row)
-            yield  # Held through BEGIN IMMEDIATE, event/reference insert, commit.
+                await attachment_io(verify_publication_bytes, root, row)
+            check_deadline(deadline)
+            def commit(conn):
+                with self.publication_attachment_guard(conn, upload_ids, stream_id, expected, publisher, prepared=current):
+                    return operation(conn)
+            return await self._attachment_submit(commit)
+
+        return await with_digest_locks(self, root, [row['blob_sha'] for row in original], locked)
 
     async def complete_attachment_upload(self, *, root, request_id, sha, size, media_type,
                                          filename, identity, materialize):
-        """Two-phase add under one digest lock; callback materializes verified bytes."""
+        """Durable pending -> worker materialize -> ready under one owned lock."""
         fingerprint = auth_fingerprint(identity)
-        def operation(conn):
-            with digest_lock(root, sha):
+        async def locked(deadline):
+            exists = await attachment_io((Path(root) / sha[:2] / sha).exists)
+            check_deadline(deadline)
+            def prepare(conn):
                 existing = conn.execute("SELECT * FROM v2_attachment_uploads WHERE auth_fingerprint=? AND request_id=?", (fingerprint, request_id)).fetchone()
                 if existing and any(existing[k] != v for k, v in {"blob_sha": sha, "size_bytes": size, "media_type": media_type, "filename": filename}.items()):
                     raise ValueError("upload_request_conflict")
+                if existing:
+                    return dict(existing)
                 stamp = now_iso()
-                upload_id = existing["upload_id"] if existing else str(uuid.uuid4())
-                if not existing:
-                    prior = conn.execute("SELECT 1 FROM v2_attachment_uploads WHERE blob_sha=? LIMIT 1", (sha,)).fetchone()
-                    legacy = int(not prior and (Path(root) / sha[:2] / sha).exists())
-                    try:
-                        conn.execute("BEGIN IMMEDIATE")
-                        conn.execute("""INSERT INTO v2_attachment_uploads
-                            (upload_id,request_id,auth_fingerprint,blob_sha,size_bytes,media_type,filename,purpose,
-                             auth_kind,principal_id,seat_stream_id,seat_generation,credential_id,assistant_scope,
-                             uploaded_at,updated_at,state,legacy_protected)
-                            VALUES (?,?,?,?,?,?,?,'chat_attachment',?,?,?,?,?,?,?,?,'pending',?)""",
-                            (upload_id, request_id, fingerprint, sha, size, media_type, filename,
-                             identity["auth_kind"], identity["principal_id"], identity["seat_stream_id"],
-                             identity["seat_generation"], identity["credential_id"], identity["assistant_scope"],
-                             stamp, stamp, legacy))
-                        conn.commit()  # pending row is durable before the blob file exists
-                    except BaseException:
-                        conn.rollback()
-                        raise
-                materialize()  # same per-digest lock spans the DB row and filesystem
+                upload_id = str(uuid.uuid4())
+                prior = conn.execute("SELECT 1 FROM v2_attachment_uploads WHERE blob_sha=? LIMIT 1", (sha,)).fetchone()
+                legacy = int(not prior and exists)
                 try:
                     conn.execute("BEGIN IMMEDIATE")
-                    conn.execute("UPDATE v2_attachment_uploads SET state='ready', updated_at=? WHERE upload_id=?", (stamp, upload_id))
+                    conn.execute("""INSERT INTO v2_attachment_uploads
+                        (upload_id,request_id,auth_fingerprint,blob_sha,size_bytes,media_type,filename,purpose,
+                         auth_kind,principal_id,seat_stream_id,seat_generation,credential_id,assistant_scope,
+                         uploaded_at,updated_at,state,legacy_protected)
+                        VALUES (?,?,?,?,?,?,?,'chat_attachment',?,?,?,?,?,?,?,?,'pending',?)""",
+                        (upload_id, request_id, fingerprint, sha, size, media_type, filename,
+                         identity["auth_kind"], identity["principal_id"], identity["seat_stream_id"],
+                         identity["seat_generation"], identity["credential_id"], identity["assistant_scope"],
+                         stamp, stamp, legacy))
                     conn.commit()
                 except BaseException:
                     conn.rollback()
                     raise
-                row = conn.execute("SELECT * FROM v2_attachment_uploads WHERE upload_id=?", (upload_id,)).fetchone()
-                return receipt(row)
-        return await self.submit(operation)
+                return dict(conn.execute("SELECT * FROM v2_attachment_uploads WHERE upload_id=?", (upload_id,)).fetchone())
+
+            prepared = await self._attachment_submit(prepare)
+            await attachment_io(materialize)
+            check_deadline(deadline)
+            def ready(conn):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT * FROM v2_attachment_uploads WHERE upload_id=?", (prepared['upload_id'],)).fetchone()
+                    if row is None or dict(row) != prepared:
+                        raise ValueError('upload_provenance_changed')
+                    conn.execute("UPDATE v2_attachment_uploads SET state='ready', updated_at=? WHERE upload_id=?", (now_iso(), prepared['upload_id']))
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                return receipt(conn.execute("SELECT * FROM v2_attachment_uploads WHERE upload_id=?", (prepared['upload_id'],)).fetchone())
+            return await self._attachment_submit(ready)
+
+        return await with_digest_locks(self, root, [sha], locked)
 
     async def attachment_upload(self, upload_id, *, ready_only=True):
         def operation(conn):
@@ -207,9 +237,10 @@ class AttachmentStoreMixin:
         return await self.submit(operation)
 
     async def complete_unmanaged_upload(self, *, root, sha, materialize):
-        """Generic/report/prompt reuse permanently excludes shared bytes from GC."""
-        def operation(conn):
-            with digest_lock(root, sha):
+        """Protect shared bytes before off-Store materialization, retaining lock."""
+        async def locked(deadline):
+            check_deadline(deadline)
+            def protect(conn):
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     conn.execute("UPDATE v2_attachment_uploads SET legacy_protected=1 WHERE blob_sha=?", (sha,))
@@ -217,27 +248,42 @@ class AttachmentStoreMixin:
                 except BaseException:
                     conn.rollback()
                     raise
-                # Failed materialization retains conservative protection. With
-                # no managed row, a future managed upload detects legacy bytes.
-                return materialize()
-        return await self.submit(operation)
+            await self._attachment_submit(protect)
+            return await attachment_io(materialize)
+        return await with_digest_locks(self, root, [sha], locked)
+
+    @staticmethod
+    def _input_rows(conn, keys):
+        return {sha: [dict(row) for row in conn.execute(
+            "SELECT * FROM v2_attachment_uploads WHERE blob_sha=? ORDER BY upload_id", (sha,))] for sha in keys}
 
     @contextmanager
-    def input_attachment_guard(self, conn, attachments):
+    def input_attachment_guard(self, conn, attachments, *, prepared=None):
+        if getattr(self, '_attachment_root', None) and attachments:
+            if prepared is None or self._input_rows(conn, sorted({a['key'] for a in attachments})) != prepared:
+                raise ValueError('attachment_missing')
+        yield
+
+    async def commit_attachment_input(self, attachments, operation):
         root = getattr(self, '_attachment_root', None)
         if not root or not attachments:
-            yield
-            return
+            return await self.submit(operation)
         keys = sorted({a['key'] for a in attachments})
-        with ExitStack() as stack:
-            for sha in keys:
-                stack.enter_context(digest_lock(root, sha))
-                rows = conn.execute("SELECT * FROM v2_attachment_uploads WHERE blob_sha=?", (sha,)).fetchall()
-                ready = [row for row in rows if row['state'] == 'ready']
-                if rows and not ready:
-                    raise ValueError('attachment_missing')
-                if ready:
-                    verify_publication_bytes(root, ready[0])
-                elif not (Path(root) / sha[:2] / sha).is_file():
-                    raise ValueError('attachment_missing')
-            yield  # Held through input route/event/receipt commit.
+        async def locked(deadline):
+            current = await self._attachment_submit(lambda conn: self._input_rows(conn, keys))
+            def verify():
+                for sha, rows in current.items():
+                    ready = [row for row in rows if row['state'] == 'ready']
+                    if rows and not ready:
+                        raise ValueError('attachment_missing')
+                    if ready:
+                        verify_publication_bytes(root, ready[0])
+                    elif not (Path(root) / sha[:2] / sha).is_file():
+                        raise ValueError('attachment_missing')
+            await attachment_io(verify)
+            check_deadline(deadline)
+            def commit(conn):
+                with self.input_attachment_guard(conn, attachments, prepared=current):
+                    return operation(conn)
+            return await self._attachment_submit(commit)
+        return await with_digest_locks(self, root, keys, locked)

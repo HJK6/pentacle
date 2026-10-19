@@ -2,7 +2,8 @@
 
 Only checkpointed raw bytes are acknowledged. Each upload has one joined writer;
 connection lifetime is deliberately independent of its seven-day disk lifetime.
-The Store's existing per-digest materializer owns canonical-blob coordination.
+The attachment operation retains its digest lock through joined materialization
+outside Store and the durable provenance commit.
 """
 from __future__ import annotations
 
@@ -307,7 +308,10 @@ class VoiceUploadStore:
             canonical = self.blobs._path_for(s["sha256"])
             if not canonical.is_file():
                 self._quarantine(path, "upload_conflict")
-            sha, size, _ = self.blobs._file_identity(canonical)
+            try:
+                sha, size, _ = self.blobs._file_identity(canonical, expected_size=s['total_bytes'])
+            except ValueError:
+                self._quarantine(path, 'digest_mismatch')
             if sha != s["sha256"] or size != s["total_bytes"]:
                 self._quarantine(path, "digest_mismatch")
             return s
@@ -324,7 +328,10 @@ class VoiceUploadStore:
                 out.truncate(s["next_offset"])
                 out.flush()
                 os.fsync(out.fileno())
-        sha, _, _ = self.blobs._file_identity(part)
+        try:
+            sha, _, _ = self.blobs._file_identity(part, expected_size=s['next_offset'])
+        except ValueError:
+            self._quarantine(path, 'digest_mismatch')
         if sha != s["prefix_sha256"]:
             self._quarantine(path, "digest_mismatch")
         return s
@@ -357,7 +364,7 @@ class VoiceUploadStore:
                 out.flush()
                 os.fsync(out.fileno())
             s = {**s, "next_offset": end,
-                 "prefix_sha256": self.blobs._file_identity(part)[0]}
+                 "prefix_sha256": self.blobs._file_identity(part, expected_size=end)[0]}
         if msg["final"]:
             if s["prefix_sha256"] != s["sha256"]:
                 # Keep the committed prefix. A digest-mismatching final has no

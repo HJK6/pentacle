@@ -264,10 +264,10 @@ async def test_hash_materialization_and_checkpoints_are_off_loop_with_fsync_befo
         calls.append("complete_checkpoint" if state["complete"] else "checkpoint")
         return result
     real_hash = h.blobs._file_identity
-    def identity(path):
+    def identity(path, **kwargs):
         assert threading.get_ident() != main_thread
         calls.append("hash")
-        return real_hash(path)
+        return real_hash(path, **kwargs)
     monkeypatch.setattr(os, "fsync", fsync)
     monkeypatch.setattr(h.blobs.voice_uploads, "_save", save)
     monkeypatch.setattr(h.blobs, "_file_identity", identity)
