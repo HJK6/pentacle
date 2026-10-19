@@ -77,8 +77,9 @@ def observe(conn, sid, event, event_id, lifecycle, now):
     row = current(conn, sid)
     if not row or row["status"] != "open" or row["generation"] != lifecycle["generation"]:
         return
-    raw = event.get("raw") or {}
-    if raw.get("transport") != "codex-rollout" or raw.get("source") != "structured":
+    raw = event.get("raw")
+    # Runs inside the ingest transaction: unstructured records must pass through untouched.
+    if not isinstance(raw, dict) or raw.get("transport") != "codex-rollout" or raw.get("source") != "structured":
         return
     state = load(conn, sid)
     if not state or state["generation"] != row["generation"]:
@@ -99,7 +100,7 @@ def observe(conn, sid, event, event_id, lifecycle, now):
         own_echo = (not state.get("echo_identity")
                     and delivery.get("notification_answer_generation") == row["generation"]
                     and event_id > int(delivery.get("proof_watermark") or 0)
-                    and event.get("text", "").strip() == delivery.get("text", "").strip())
+                    and (event.get("text") or "").strip() == (delivery.get("text") or "").strip())
         if own_echo:
             state["echo_identity"] = {"event_id": event_id, "native_session_id": raw.get("source_session_identity"),
                                       "uuid": raw.get("uuid"), "timestamp": event["timestamp"]}

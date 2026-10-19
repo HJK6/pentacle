@@ -325,6 +325,27 @@ def test_control_requires_connection_bound_operator_or_current_manager(auth):
     asyncio.run(run())
 
 
+def test_non_dict_raw_and_null_text_codex_events_append_without_arming():
+    async def run():
+        h=Harness()
+        try:
+            await h.open()
+            lifecycle = await h.store.fetch_open_session_lifecycle(SID, pane_pid='8123')
+            stamp = datetime.fromtimestamp(h.now, timezone.utc).isoformat()
+            events = [{'kind': 'ASSIST_TEXT', 'provider': 'codex', 'raw': 'unstructured',
+                       'stream_id': SID, 'timestamp': stamp, 'text': 'prose'},
+                      {'kind': 'USER', 'provider': 'codex', 'raw': None,
+                       'stream_id': SID, 'timestamp': stamp, 'text': None}]
+            seqs = await h.store.append_session_events_lifecycle_cas([
+                {'stream_id': SID, 'event': event, 'identity': f'raw-shape:{i}', 'lifecycle': lifecycle}
+                for i, event in enumerate(events)], limit=20)
+            assert all(seqs)
+            assert (await h.state()) is None
+        finally:
+            h.close()
+    asyncio.run(run())
+
+
 def test_unknown_error_and_old_generation_do_not_continue():
     async def run():
         h=Harness()
