@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import random
 import time
@@ -23,6 +24,16 @@ def _satellite(tmp_path, monkeypatch, **config):
     ))
     monkeypatch.setattr(sat, "_collect", lambda: ([], {}, False))
     return sat
+
+
+def _aim(sat, server):
+    """Point at the private test server through the public PENTACLE_SATELLITE_WS setting."""
+    url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    default = satellite.SatelliteConfig.from_env({})
+    target = satellite.SatelliteConfig.from_env({satellite.ENV_PREFIX + "WS": url})
+    endpoint = {f.name: getattr(target, f.name) for f in dataclasses.fields(target)
+                if getattr(target, f.name) != getattr(default, f.name)}
+    sat.config = dataclasses.replace(sat.config, **endpoint)
 
 
 def _retry_clock(monkeypatch, seed, stop_after):
@@ -70,7 +81,7 @@ def test_failed_service_peers_grow_and_spread_retries(tmp_path, monkeypatch, fai
                     closed += 1
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
-                sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+                _aim(sat, server)
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(sat.run_forever(), 3)
             assert closed == len(attempts) == 6
@@ -133,7 +144,7 @@ def test_only_complete_service_cycle_resets_retry(tmp_path, monkeypatch, mode):
                 closed += 1
 
         async with websockets.serve(handler, "127.0.0.1", 0) as server:
-            sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            _aim(sat, server)
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(sat.run_forever(), 3)
         assert closed == len(attempts) == 4
@@ -157,7 +168,7 @@ def test_orderly_return_still_backs_off(tmp_path, monkeypatch):
 
         monkeypatch.setattr(sat, "_session", orderly)
         async with websockets.serve(lambda ws: ws.wait_closed(), "127.0.0.1", 0) as server:
-            sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            _aim(sat, server)
             with pytest.raises(asyncio.CancelledError):
                 await sat.run_forever()
         assert calls == 4
@@ -220,7 +231,7 @@ def test_shutdown_cancels_receive_backoff_and_disabled_mode(tmp_path, monkeypatc
                 closed += 1
 
         async with websockets.serve(handler, "127.0.0.1", 0) as server:
-            sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            _aim(sat, server)
             task = asyncio.create_task(sat.run_forever())
             try:
                 await asyncio.wait_for(ready.wait(), 2)
@@ -308,7 +319,7 @@ def test_three_peers_recover_lost_ack_without_loss_or_duplicate_delivery(tmp_pat
                         closed += 1
 
                 async with websockets.serve(handler, "127.0.0.1", 0) as server:
-                    sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+                    _aim(sat, server)
                     with pytest.raises(asyncio.CancelledError):
                         await asyncio.wait_for(sat.run_forever(), 3)
                 assert closed == len(attempts) == 3
@@ -410,7 +421,7 @@ def test_held_contention_retains_data_and_backoff_until_real_recovery(tmp_path, 
                     closed += 1
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
-                sat.config.bart_ws = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+                _aim(sat, server)
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(sat.run_forever(), 3)
             assert closed == len(attempts) == 5
