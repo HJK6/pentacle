@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -27,10 +28,12 @@ def test_native_frontier_is_exact_and_rejects_ambiguity(tmp_path, variant):
     try:
         assert child.stdout.readline().strip() == 'ready'
         observed = subprocess.check_output(['ps','-ww','-p',str(child.pid),'-o','lstart='], text=True).strip()
+        # The host's own argv[0] for the child (a framework Python re-execs), as the probe reads it.
+        executable = shlex.split(subprocess.check_output(['ps','-ww','-p',str(child.pid),'-o','command='], text=True))[0]
         stat = path.stat()
         expected = {'pane_pid': str(child.pid), 'native_session_id': 'fixture-native',
             'error_turn_id': 'fixture-turn', 'binding': {'pane_pid': str(child.pid),
-            'pane_started_at': observed, 'executable': sys.executable,
+            'pane_started_at': observed, 'executable': executable,
             'transcript': {'path': str(path), 'file_id': [stat.st_dev,stat.st_ino], 'session_id': 'fixture-native'}}}
         if variant == 'satellite_anchor':
             import hashlib

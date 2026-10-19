@@ -71,7 +71,8 @@ for n,line in enumerate(sys.stdin,2):
             await store.open_session('fixture',name,provider='codex',pane_pid=pid,pane_status='pane_alive',
                 bootstrap_state='ready',session_generation='fixture-generation',
                 observer_binding={'generation':'fixture-generation','pane_pid':pid,
-                                  'pane_started_at':process['start_id'],'executable':sys.executable})
+                                  'pane_started_at':process['start_id'],
+                                  'executable':shlex.split(process['command'])[0]})
             sessions=Sessions(store,tmux=tmux,local_host='fixture'); await sessions.refresh()
             ingest=Ingest(store,sessions,tmux,broadcast,local_host='fixture',recent_limit=500)
             await ingest.run_pass()
