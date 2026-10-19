@@ -217,12 +217,12 @@ def test_paused_lead_lost_recovery_is_explicit_fd_set_state_t7():
         presented = (await refresh(inv))[lane["lane_id"]]
         assert (presented["state"], presented["state_reason"]) == ("paused", "lead_lost")
         assert presented["lead"]["qualifies"] is True  # eligible, but no automatic unpause
-        # An unintended stored pause stays a fault for the FD until it resumes or restates the hold.
-        assert [e["cleared_at"] for e in await lead_lost_episodes(env.store, lane["lane_id"])] == [None]
+        # A qualifying lead is no owner loss, so no episode opens; resuming the stored pause stays explicit.
+        assert await lead_lost_episodes(env.store, lane["lane_id"]) == []
         row, _ = await stored(env, lane["lane_id"])
         r = await env.op("set_state", {"to": "active"}, lane=lane["lane_id"], version=row["version"])
         assert r["lane"]["work_state"] == "active"
         assert (await refresh(inv))[lane["lane_id"]]["state"] == "active"
         assert "lead_lost" not in (await stored(env, lane["lane_id"]))[1]
-        assert (await lead_lost_episodes(env.store, lane["lane_id"]))[0]["cleared_at"] is not None
+        assert await lead_lost_episodes(env.store, lane["lane_id"]) == []
     run(body)

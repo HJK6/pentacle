@@ -128,6 +128,32 @@ def test_legacy_stored_pause_is_a_fault_restated_with_reason():
     run(body)
 
 
+def test_legacy_stored_pause_clears_on_qualifying_successor():
+    async def body(env):
+        lid = await lose_lead(env)
+        await drain(env.store)
+
+        def legacy(conn):
+            conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='paused',"
+                         " work_state_reason='lead_lost', version=version+1 WHERE lane_id=?", (lid,))
+            conn.commit()
+        await env.store.submit(legacy)
+        await drain(env.store)
+        assert [e["cleared_at"] for e in await episodes(env.store, lid)] == [None]
+        fresh = await env.seat("ll-successor", role="lead", parent_stream_id=FD)
+        version = (await env.store.get_work_lane(lid))["lane"]["version"]
+        await env.op("set_lead", {"lead": {"stream_id": fresh[0], "generation": fresh[1]}},
+                     lane=lid, version=version)
+        await drain(env.store)
+        assert (await episodes(env.store, lid))[0]["cleared_at"] is not None
+        row = [r for r in await env.store.work_lane_rows() if r["lane_id"] == lid][0]
+        # Reconnected: the fault is cleared; the stored pause is resumed only by an explicit set-state.
+        assert (presented(row)["state"], presented(row)["state_reason"]) == ("paused", "lead_lost")
+        version = (await env.store.get_work_lane(lid))["lane"]["version"]
+        assert (await env.op("set_state", {"to": "active"}, lane=lid, version=version))["lane"]["work_state"] == "active"
+    run(body)
+
+
 def test_same_state_is_still_unchanged_without_fault():
     async def body(env):
         lid = await lose_lead(env)

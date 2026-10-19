@@ -527,7 +527,7 @@ DB. Review the concrete rollback artifact before activation.
 
 ## Owner loss (`lead_lost` fault)
 
-- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows).
+- The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify.
 - It is delivered through the same `work_lane.v1` sink with code `lane_lead_lost` at digest cadence. Detection takes ≤ the 60 s pass plus one pass. The FD digest line names the lost lead and generation and the repair commands.
 - The same episode and notification survive a restart and an FD rebind. Delivery or acknowledgement never clears it.
 - It clears only when one of these holds:
@@ -535,7 +535,7 @@ DB. Review the concrete rollback artifact before activation.
   - the lane is deliberately set `paused` with a non-empty `--reason` (`work_lane_reason_required` otherwise);
   - the lane is set `blocked` with a blocker;
   - the lane is set `done`.
-- A legacy stored `paused`/`lead_lost` lane may be restated `paused` with a reason; its stored reason becomes `fd`. Every other same-state request is still `work_lane_state_unchanged`.
+- A faulted legacy stored `paused`/`lead_lost` lane may be restated `paused` with a reason; its stored reason becomes `fd`. Every other same-state request is still `work_lane_state_unchanged`.
 - Lane code restarts nothing and never touches FD/operator `paused`/`blocked` lanes or holds. Restart goes through existing spawn idempotency after the FD verifies the prior execution is gone.
 - `work-lane list/show` human text shows `LEAD LOST — repair: …`.
 - Startup widens the episode kind CHECK in place, keyed on `'lead_lost'`, preserving every row. A rollback keeps the widened CHECK and episode rows. The rollback artifact removes `lead_lost` from the reconciliation tuple; old code then stores faulted active lanes as paused again.
