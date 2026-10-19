@@ -359,6 +359,11 @@ class OutboundNoticeQueue:
             if kind == "error_alert":
                 # Reuse the existing generation-fenced, pre-input proof path.
                 message["_notification_answer_generation"] = metadata["root_generation"]
+                # The only immediate work-lane alert is a lost lead; it wakes the
+                # front desk instead of joining its routine hold.
+                if metadata.get("family") == "work_lane.v1" and metadata.get("policy_mode") == "immediate":
+                    from front_desk_digest import WAKE_TOKEN
+                    message["_front_desk_wake_token"] = WAKE_TOKEN
             if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
                 import json
                 metadata = row.get("metadata") or "{}"

@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from front_desk_digest import DIGEST_TOKEN, FrontDeskDigest, HELD_KIND
+from front_desk_digest import DIGEST_TOKEN, WAKE_TOKEN, FrontDeskDigest, HELD_KIND
 from outbound_notices import OutboundNoticeQueue
 from test_context_nudges import _context_harness
 from test_nudges import HOST, _iso, _new_store
@@ -457,4 +457,50 @@ def test_notice_trim_digest_crosses_both_comms_ingress_calls(tmp_path, producer)
                               "message": "[lane_digest] copied peer text", "_front_desk_digest_token": object()})
             assert len(provider.pastes) == 1
             assert len(await composite.front_desk_digest._rows(target)) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('msg', [
+    {'_outbound_notice_kind': 'error_alert'},
+    {'_outbound_notice_kind': 'error_alert', '_front_desk_wake_token': True},
+    {'_outbound_notice_kind': 'error_alert', '_front_desk_wake_token': object()},
+])
+def test_error_alert_without_the_in_process_wake_token_stays_held(msg):
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            desk=_desk(store,'h:desk','g').front_desk_digest
+            reply=await desk.ingress(target_stream_id='h:desk',body='[pentacle-notice:error_alert] alert',
+                msg={'tell_id':'held',**msg},verb='tell')
+            assert reply['delivery_status']=='persisted'
+            assert len(await desk._rows('h:desk'))==1
+            woken=await desk.ingress(target_stream_id='h:desk',body='[pentacle-notice:error_alert] lead lost',
+                msg={'tell_id':'wake','_outbound_notice_kind':'error_alert','_front_desk_wake_token':WAKE_TOKEN},
+                verb='tell')
+            assert woken is None and len(await desk._rows('h:desk'))==1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('family,mode,woken', [
+    ('work_lane.v1', 'immediate', True),
+    ('work_lane.v1', 'digest', False),
+    ('voice_operation.v1', 'immediate', False),
+])
+def test_queue_marks_only_an_immediate_work_lane_alert_as_a_wake(tmp_path, family, mode, woken):
+    async def run():
+        store=Store(str(tmp_path/'store.db'));store.start()
+        try:
+            sent=[]
+            class Comms:
+                async def deliver_outbound_notice(self, message, check_existing=False):
+                    sent.append(message)
+                    return {'delivery_status':'delivered','submission_confirmed':True}
+            await store.enqueue_outbound_notice(notice_id='n1', tell_id='n1', kind='error_alert', dedupe_key='n1',
+                recipient_stream_id='h:desk', body='alert',
+                metadata={'root_generation':'g','family':family,'policy_mode':mode})
+            await OutboundNoticeQueue(store, Comms()).drain_once(force=True)
+            (message,)=sent
+            assert (message.get('_front_desk_wake_token') is WAKE_TOKEN)==woken
+        finally:store.stop()
     asyncio.run(run())

@@ -215,12 +215,14 @@ def test_check_widened_for_estimate_missing_is_rewidened():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "record-only", "on"])
-async def test_lead_lost_alerts_the_fd_directly_with_repair(tmp_path, monkeypatch, mode):
-    # A lost lead is repaired, not reviewed later: it bypasses the Work update digest.
+@pytest.mark.parametrize("front_desk", ["1", "0"])
+async def test_lead_lost_alerts_the_fd_directly_with_repair(tmp_path, monkeypatch, mode, front_desk):
+    # A lost lead is repaired, not reviewed later: it bypasses the Work update
+    # digest and, with the production front desk on, its wake reduction too.
     from test_work_lane_alert_sink import subject, adopt as adopt_sink, drain as drain_sink, facts, notices
     monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", mode)
     monkeypatch.setenv("PENTACLE_VOICE_MODE", "off")
-    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", "0")
+    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_ENABLED", front_desk)
     async with subject(tmp_path) as s:
         lane = await adopt_sink(s, kind="stale")  # active with a qualifying lead
         await s.store.mark_closed("fixture", "v2-lead", closed_at="2026-10-07T20:00:00Z", pane_status="pane_dead")
@@ -237,4 +239,5 @@ async def test_lead_lost_alerts_the_fd_directly_with_repair(tmp_path, monkeypatc
         (paste,) = [p for p in s.provider.pastes if "lane_lead_lost" in str(p)]
         assert "fixture:v2-lead" in str(paste) and "work-lane set-lead " + lane["lane_id"] in str(paste)
         assert not [r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest")]
+        assert not await s.composite.front_desk_digest._rows("fixture:v2-test")
         assert (await s.store.get_work_lane(lane["lane_id"]))["lane"]["work_state"] == "active"

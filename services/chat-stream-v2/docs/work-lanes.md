@@ -529,7 +529,7 @@ DB. Review the concrete rollback artifact before activation.
 ## Owner loss (`lead_lost` fault)
 
 - The existing episode drain opens one `lead_lost` episode (`<lane_id>:lead_lost:<n>`) for a non-done lane in either of two states: stored `active` without a qualifying lead, or stored `paused` with reason `lead_lost` (legacy rows) while its lead does not qualify.
-- It is delivered through the same `work_lane.v1` sink with code `lane_lead_lost` as a direct FD alert, not in the Work update digest, because a lost lead needs repair before the lane looks idle. The other work-lane kinds stay on the digest. The existing storm guard can still hold a repeat or a burst for the digest. Detection takes ≤ the 60 s pass plus one pass. The alert names the lost lead and generation and the repair commands.
+- It is delivered through the same `work_lane.v1` sink with code `lane_lead_lost` as a direct FD alert, not in the Work update digest, because a lost lead needs repair before the lane looks idle. It also wakes the front desk past its routine-ingress hold: the notice queue marks it with an in-process wake token that no wire input can carry. The other work-lane kinds stay on the digest. The existing storm guard can still hold a repeat or a burst for the digest. Detection takes ≤ the 60 s pass plus one pass. The alert names the lost lead and generation and the repair commands.
 - The same episode and notification survive a restart and an FD rebind. Delivery or acknowledgement never clears it.
 - It clears only when one of these holds:
   - a qualifying lead is bound again (`set-lead`, handoff, or `set-owner fd` re-qualifying a hidden FD lead);

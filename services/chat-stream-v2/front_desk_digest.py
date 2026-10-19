@@ -19,6 +19,9 @@ from v2_runtime import env_number, iso_now
 log = logging.getLogger('chat_streamd_v2.front_desk_digest')
 HELD_KIND = 'front_desk_held'
 DIGEST_TOKEN = object()
+# Set in-process by the notice queue for an immediate work-lane alert (lost lead);
+# no wire input can carry this object.
+WAKE_TOKEN = object()
 
 
 def legacy_sanitize_source(msg, body):
@@ -103,6 +106,7 @@ class FrontDeskDigest:
                 or msg.get('_assistant_operator_authenticated') is True
                 or re.match(r'^(GATE|BLOCKER)\b', text, re.I)
                 or kind in {'report', 'notification_answer', 'wake', 'wake_urgent', 'wake_missed', 'external_work_due', 'spawn_delivery_failed'}
+                or msg.get('_front_desk_wake_token') is WAKE_TOKEN
                 or text.startswith('[child_report_ready'))
         if not drop and wake:
             return None
