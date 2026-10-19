@@ -43,6 +43,10 @@ def _lane_line(lane: dict[str, Any]) -> str:
     state = lane.get("state")
     if lane.get("state_reason") in ("lead_lost", "lead_lost_unreconciled"):
         state = f"{state}/{lane['state_reason']}"
+    if lane.get("state") == "active" and lane.get("state_reason") == "lead_lost":
+        # A daemon-presented fault: the FD repairs it; acknowledging a notice never clears it.
+        state = (f"{state} — LEAD LOST — repair: set-lead {lane.get('lane_id')} <qualifying seat>, "
+                 f"a verified restart, or set-state --to paused|blocked with a reason")
     if lane.get("blocker"):
         state = f"{state}: {lane['blocker']}"
     return (f"{lane.get('lane_id')}  v{lane.get('version')}  [{state}]  {lane.get('owner_kind')}  "

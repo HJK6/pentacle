@@ -17,7 +17,7 @@ from typing import Callable, Mapping
 #: family -> fixed codes. Add one line per accepted producer family.
 FAMILY_CODES: dict[str, frozenset[str]] = {
     "daemon_runtime.v1": frozenset({"loop_stalled"}),
-    "work_lane.v1": frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"}),
+    "work_lane.v1": frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"}),
     "session_lifecycle": frozenset({"session_dead", "close_failed", "close_carcass", "reap_exhausted", "reap_fenced"}),
     "integrity": frozenset({"pin_drift", "close_claim_mismatch", "ingest_identity_blocked"}),
     "system_deploy": frozenset({"deploy_failed"}),

@@ -7,7 +7,7 @@ import pytest
 
 from store_work_lane_episodes import DDL, LaneEpisodeFact, ensure_work_lane_episodes_schema
 
-LEGACY = DDL.replace(",'estimate_missing'", "")
+LEGACY = DDL.replace(",'estimate_missing'", "").replace(",'lead_lost'", "")
 
 
 def rows(conn):

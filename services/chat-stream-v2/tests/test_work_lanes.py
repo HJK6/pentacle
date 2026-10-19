@@ -84,6 +84,17 @@ def code(exc_info):
     return str(exc_info.value)
 
 
+async def lead_lost_episodes(store, lane_id):
+    """Drain the lane episodes once, then return this lane's lead_lost openings."""
+    await store.reconcile_work_lane_episodes(None)
+
+    def q(conn):
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM v2_work_lane_episodes WHERE lane_id=? AND kind='lead_lost' ORDER BY sequence",
+            (lane_id,))]
+    return await store.submit(q)
+
+
 async def lane_updates(store):
     def q(conn):
         return [json.loads(r[0]) for r in conn.execute(
@@ -225,15 +236,16 @@ def test_lead_loss_reconcile_and_restart_v1_v4():
                                     pane_status="pane_dead", close_kind="manager_close")
         rows = await env.store.work_lane_rows()
         assert rows[0]["work_state"] == "active" and rows[0]["_qualifies"] is False
-        assert [c["lane_id"] for c in await env.store.reconcile_work_lanes()] == [lid]
-        assert await env.store.reconcile_work_lanes() == []  # once
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
+        assert len(await lead_lost_episodes(env.store, lid)) == 1  # once
         state["lid"] = lid
 
     async def second(env):
         shown = await env.store.get_work_lane(state["lid"])
-        assert shown["lane"]["work_state"] == "paused"
-        assert shown["lane"]["work_state_reason"] == "lead_lost"
-        assert [e["operation"] for e in shown["events"]] == ["adopt", "set_lead", "lead_lost"]
+        # Lead loss is a fault episode, never a stored pause or lane event.
+        assert shown["lane"]["work_state"] == "active"
+        assert [e["operation"] for e in shown["events"]] == ["adopt", "set_lead"]
+        assert [e["cleared_at"] for e in await lead_lost_episodes(env.store, state["lid"])] == [None]
         assert shown["events"][1]["payload"]["prior_lead"]["stream_id"] == "host-a:lead-a"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -248,7 +260,7 @@ def test_blocked_survives_lead_loss_v4():
         lid = (await env.adopt(key="stream:blk", state="blocked", lead=lead, blocker="keys"))["lane"]["lane_id"]
         await env.store.mark_closed("host-a", "lead-blk", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead")
-        assert await env.store.reconcile_work_lanes() == []
+        assert await lead_lost_episodes(env.store, lid) == []
         lane = (await env.store.get_work_lane(lid))["lane"]
         assert lane["work_state"] == "blocked" and lane["blocker"] == "keys"
     run(body)
@@ -439,19 +451,20 @@ def test_each_lead_loss_path_reconciles_once_v4(path):
                 assert row is not None
         rows = {r["lane_id"]: r for r in await env.store.work_lane_rows()}
         assert rows[lid]["_qualifies"] is False and rows[lid]["work_state"] == "active"
-        assert [c["lane_id"] for c in await env.store.reconcile_work_lanes()] == [lid]
-        assert await env.store.reconcile_work_lanes() == []
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
         shown = await env.store.get_work_lane(lid)
-        assert (shown["lane"]["work_state"], shown["lane"]["work_state_reason"]) == ("paused", "lead_lost")
-        assert [e["operation"] for e in shown["events"]].count("lead_lost") == 1
+        assert shown["lane"]["work_state"] == "active"
         assert not [e for e in shown["events"] if e.get("update_kind")]  # lead loss posts no update
+        assert await lead_lost_episodes(env.store, blk["lane_id"]) == []
         blocked = (await env.store.get_work_lane(blk["lane_id"]))["lane"]
         assert (blocked["work_state"], blocked["blocker"]) == ("blocked", "b")
-        # a later qualifying set_lead does not resume
+        # a later qualifying set_lead is the repair: the lane never paused, and the fault clears
         fresh = await env.seat("fresh-lead", role="lead", parent_stream_id=FD)
         r = await env.op("set_lead", {"lead": {"stream_id": fresh[0], "generation": fresh[1]}},
                          lane=lid, version=shown["lane"]["version"])
-        assert r["lane"]["work_state"] == "paused"
+        assert r["lane"]["work_state"] == "active"
+        assert (await lead_lost_episodes(env.store, lid))[0]["cleared_at"] is not None
     run(body)
 
 
@@ -466,7 +479,7 @@ def test_handoff_follows_successor_d2():
         assert await env.store.work_lane_handoff(lead[0], succ[0]) == []
         await env.store.mark_closed("host-a", "ho-pred", closed_at="2026-10-07T20:00:00Z",
                                     pane_status="pane_dead", close_kind="handed_off")
-        assert await env.store.reconcile_work_lanes() == []
+        assert await lead_lost_episodes(env.store, lid) == []
         shown = await env.store.get_work_lane(lid)
         lane = shown["lane"]
         assert (lane["bound_stream_id"], lane["work_state"]) == (succ[0], "active")

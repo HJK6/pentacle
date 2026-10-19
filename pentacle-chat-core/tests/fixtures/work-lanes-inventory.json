@@ -103,8 +103,8 @@
         "lane_id": "wl-paused-0004",
         "title": "Voice answers web",
         "summary": "Paused after lead seat closed",
-        "state": "paused",
-        "state_reason": "lead_lost_unreconciled",
+        "state": "active",
+        "state_reason": "lead_lost",
         "blocker": null,
         "owner_kind": "operator",
         "version": 2,
@@ -146,7 +146,7 @@
         "title": "Household boards",
         "summary": "Deliberately paused by FD",
         "state": "paused",
-        "state_reason": "lead_lost",
+        "state_reason": "fd",
         "blocker": null,
         "owner_kind": "operator",
         "version": 5,
@@ -191,8 +191,8 @@
     ],
     "counts": {
       "open": 4,
-      "active": 1,
-      "paused": 2,
+      "active": 2,
+      "paused": 1,
       "blocked": 1
     },
     "truncated": false,
@@ -300,8 +300,8 @@
           "lane_id": "wl-paused-0004",
           "title": "Voice answers web",
           "summary": "Paused after lead seat closed",
-          "state": "paused",
-          "state_reason": "lead_lost_unreconciled",
+          "state": "active",
+          "state_reason": "lead_lost",
           "blocker": null,
           "owner_kind": "operator",
           "version": 2,
@@ -343,7 +343,7 @@
           "title": "Household boards",
           "summary": "Deliberately paused by FD",
           "state": "paused",
-          "state_reason": "lead_lost",
+          "state_reason": "fd",
           "blocker": null,
           "owner_kind": "operator",
           "version": 5,
@@ -388,8 +388,8 @@
       ],
       "counts": {
         "open": 4,
-        "active": 1,
-        "paused": 2,
+        "active": 2,
+        "paused": 1,
         "blocked": 1
       },
       "truncated": false,
@@ -498,8 +498,8 @@
         "lane_id": "wl-paused-0004",
         "title": "Voice answers web",
         "summary": "Paused after lead seat closed",
-        "state": "paused",
-        "state_reason": "lead_lost_unreconciled",
+        "state": "active",
+        "state_reason": "lead_lost",
         "blocker": null,
         "owner_kind": "operator",
         "version": 2,
@@ -541,7 +541,7 @@
         "title": "Household boards",
         "summary": "Deliberately paused by FD",
         "state": "paused",
-        "state_reason": "lead_lost",
+        "state_reason": "fd",
         "blocker": null,
         "owner_kind": "operator",
         "version": 5,
@@ -922,7 +922,6 @@
     "state_reason": [
       "fd",
       "lead_lost",
-      "lead_lost_unreconciled",
       "operator_confirmed",
       "reopened"
     ],
@@ -959,7 +958,7 @@
       "transport_unknown"
     ]
   },
-  "fixture_version": 2,
+  "fixture_version": 3,
   "progress_v2": [
     {
       "name": "active_progress",

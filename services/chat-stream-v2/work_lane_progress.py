@@ -61,6 +61,16 @@ def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None 
                and m.get("estimate") is None for m in members)
 
 
+def lane_lead_lost(lane: dict[str, Any]) -> bool:
+    """Unexpected owner loss is a fault until a qualifying lead or a deliberate hold.
+
+    Legacy rows stored ``paused/lead_lost`` by the former reconciler are the same fault."""
+    state = lane.get("work_state")
+    if state == "active":
+        return not lane.get("_qualifies")
+    return state == "paused" and lane.get("work_state_reason") == "lead_lost"
+
+
 def lane_progress(lane: dict[str, Any], *, all_members: bool = False,
                   now_iso: str | None = None, index_available: bool | None = None) -> dict[str, Any]:
     members = lane.get("_members") or []

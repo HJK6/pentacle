@@ -16,7 +16,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_progress
+from work_lane_progress import lane_lead_lost, lane_progress
 from store_work_lane_episodes import LaneEpisodeSink
 
 LANE_FRAME_CAP = 64
@@ -78,8 +78,9 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                  *, index_available: bool | None = None, all_members: bool = False) -> dict[str, Any]:
     stored = lane["work_state"]
     state, reason = stored, lane.get("work_state_reason")
-    if stored == "active" and not lane.get("_qualifies"):
-        state, reason = "paused", "lead_lost_unreconciled"
+    if lane_lead_lost(lane) and not lane.get("_qualifies"):
+        # An unexpected owner loss is a fault the FD repairs, never an intentional pause.
+        state, reason = "active", "lead_lost"
     return {
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
         "state": state, "state_reason": reason, "blocker": lane.get("blocker"),
@@ -201,7 +202,6 @@ class WorkLanesInventory:
             self._last_pass = time.monotonic()
             try:
                 await self.reconcile_index()
-                await self.store.reconcile_work_lanes()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths

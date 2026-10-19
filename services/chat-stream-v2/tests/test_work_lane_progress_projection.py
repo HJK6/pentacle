@@ -47,7 +47,7 @@ def test_v2_golden_cells_and_deferred_keys():
     from pathlib import Path
     from work_lanes_projection import build_frame
     fixture = json.loads((Path(__file__).resolve().parents[3] / "pentacle-chat-core/tests/fixtures/work-lanes-inventory.json").read_text())
-    assert fixture["capability"] == "work_lanes_v1" and fixture["fixture_version"] == 2
+    assert fixture["capability"] == "work_lanes_v1" and fixture["fixture_version"] == 3
     assert {cell["name"] for cell in fixture["progress_v2"]} == {
         "active_progress", "paused_leadless", "blocked", "missing_member", "ambiguous_member",
         "missing_estimate", "no_spec", "index_unavailable", "stale_observation_completed",

@@ -8,7 +8,7 @@ import pytest
 
 from sessions import Sessions
 from work_lanes_projection import WorkLanesInventory
-from test_work_lanes import FD, code, run
+from test_work_lanes import FD, code, lead_lost_episodes, run
 from test_assistant_prose_mirror import ASSISTANT
 
 
@@ -107,12 +107,12 @@ def test_fd_hidden_lead_loss_still_reconciles_once_t3(path):
             await env.store.submit(drop)
         _, inv = await inventory(env)
         lane = (await refresh(inv))[lid]
-        assert (lane["state"], lane["state_reason"]) == ("paused", "lead_lost")
+        assert (lane["state"], lane["state_reason"]) == ("active", "lead_lost")
         row, ops = await stored(env, lid)
-        assert (row["work_state"], row["work_state_reason"]) == ("paused", "lead_lost")
-        assert ops.count("lead_lost") == 1
+        assert row["work_state"] == "active" and "lead_lost" not in ops
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
         await refresh(inv)
-        assert (await stored(env, lid))[1].count("lead_lost") == 1
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
     run(body)
 
 
@@ -146,7 +146,7 @@ def test_operator_lanes_keep_visible_lead_rule_t5():
         sessions, inv = await inventory(env)
         await sessions.set_visibility("host-a", "t5-lead", "hidden")
         assert ((await refresh(inv))[lid]["state_reason"]) == "lead_lost"
-        assert (await stored(env, lid))[1].count("lead_lost") == 1
+        assert len(await lead_lost_episodes(env.store, lid)) == 1
         # A hidden seat cannot be bound to an operator lane.
         hidden = await env.seat("t5-hidden", role="lead", parent_stream_id=FD, visibility="hidden")
         row, _ = await stored(env, lid)
@@ -163,13 +163,15 @@ def test_operator_lanes_keep_visible_lead_rule_t5():
         rows = {r["lane_id"]: r for r in await env.store.work_lane_rows()}
         assert rows[fd_lane["lane_id"]]["_qualifies"] is False
         frame = {lane["lane_id"]: lane for lane in (await inv.current())["lanes"]}
-        assert frame[fd_lane["lane_id"]]["state_reason"] == "lead_lost_unreconciled"
+        assert frame[fd_lane["lane_id"]]["state_reason"] == "lead_lost"
         assert (await refresh(inv))[fd_lane["lane_id"]]["state_reason"] == "lead_lost"
-        # Handing it back to the FD never resumes it.
+        assert len(await lead_lost_episodes(env.store, fd_lane["lane_id"])) == 1
+        # Handing it back to the FD re-qualifies its hidden lead: the fault is repaired, never a pause.
         fd_lane, _ = await stored(env, fd_lane["lane_id"])
         back = (await env.op("set_owner", {"to": "fd", "reason": "FD resumes management"},
                              lane=fd_lane["lane_id"], version=fd_lane["version"]))["lane"]
-        assert back["work_state"] == "paused"
+        assert back["work_state"] == "active"
+        assert (await lead_lost_episodes(env.store, fd_lane["lane_id"]))[0]["cleared_at"] is not None
     run(body)
 
 
@@ -215,9 +217,12 @@ def test_paused_lead_lost_recovery_is_explicit_fd_set_state_t7():
         presented = (await refresh(inv))[lane["lane_id"]]
         assert (presented["state"], presented["state_reason"]) == ("paused", "lead_lost")
         assert presented["lead"]["qualifies"] is True  # eligible, but no automatic unpause
+        # An unintended stored pause stays a fault for the FD until it resumes or restates the hold.
+        assert [e["cleared_at"] for e in await lead_lost_episodes(env.store, lane["lane_id"])] == [None]
         row, _ = await stored(env, lane["lane_id"])
         r = await env.op("set_state", {"to": "active"}, lane=lane["lane_id"], version=row["version"])
         assert r["lane"]["work_state"] == "active"
         assert (await refresh(inv))[lane["lane_id"]]["state"] == "active"
         assert "lead_lost" not in (await stored(env, lane["lane_id"]))[1]
+        assert (await lead_lost_episodes(env.store, lane["lane_id"]))[0]["cleared_at"] is not None
     run(body)

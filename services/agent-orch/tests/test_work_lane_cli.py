@@ -197,3 +197,13 @@ def test_offline_requires_explicit_root_and_literal_stdin(args):
     with pytest.raises(SystemExit) as result:
         _run(["work-lane", "estimate-preview", *args])
     assert result.value.code == 2
+
+
+def test_lead_lost_fault_names_repair(monkeypatch, capsys):
+    lane = {"lane_id": "wl-9", "version": 3, "state": "active", "state_reason": "lead_lost",
+            "owner_kind": "fd", "title": "T", "lead": {"stream_id": "h:dead", "qualifies": False},
+            "visible_chat": {"stream_id": "h:composite", "available": "open"}}
+    _wire(monkeypatch, {"type": "work_lanes.list.ok", "lanes": [lane]})
+    assert _run(["work-lane", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "active/lead_lost — LEAD LOST — repair: set-lead wl-9" in out

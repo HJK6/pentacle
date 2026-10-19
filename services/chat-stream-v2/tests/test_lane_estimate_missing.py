@@ -134,20 +134,24 @@ async def test_pending_clear_before_sink_and_closed_lead(tmp_path, monkeypatch):
         await s.store.mark_closed("fixture", "v2-lead", closed_at="2026-10-09T00:00:00Z", pane_status="pane_dead")
         await seed_observations(s.store, [estimated()])
         await drain(s)
-        (opening,) = await episodes(s.store)
-        assert opening["kind"] == "estimate_missing" and opening["emitted_ref"] is None
+        # The closed lead is its own lead_lost fault; the estimate episode is independent of it.
+        by_kind = {r["kind"]: r for r in await episodes(s.store)}
+        assert set(by_kind) == {"estimate_missing", "lead_lost"}
+        assert by_kind["estimate_missing"]["emitted_ref"] is None
         shown = (await s.store.get_work_lane(lane["lane_id"]))["lane"]
-        assert shown["work_state"] == "paused"
+        assert shown["work_state"] == "active"
         await seed_observations(s.store, [estimated(VALID)])
         await drain(s)
-        assert (await episodes(s.store))[0]["cleared_at"]
+        by_kind = {r["kind"]: r for r in await episodes(s.store)}
+        assert by_kind["estimate_missing"]["cleared_at"] and not by_kind["lead_lost"]["cleared_at"]
         await s.server.configure_error_alerts(s.queue, s.alerts)
         await drain(s)
         await s.queue.drain_once()
         assert len(s.provider.pastes) == 1
         digest = next(r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest"))
         assert "historical opening; condition cleared" in digest["body"]
-        assert (await facts(s))[0]["firing_count"] == 1
+        estimate = [f for f in await facts(s) if f["error_context"]["code"] == "lane_estimate_missing"]
+        assert [f["firing_count"] for f in estimate] == [1]
 
 
 @pytest.mark.asyncio

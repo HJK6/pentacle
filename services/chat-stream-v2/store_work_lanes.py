@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
+from work_lane_progress import lane_lead_lost
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
@@ -498,36 +499,6 @@ class _WorkLanesStoreMixin:
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
 
-    async def reconcile_work_lanes(self) -> list[dict[str, Any]]:
-        """Daemon-side lead-loss reconciliation: stored ``active`` without a qualifying lead -> ``paused``."""
-        def _op(conn):
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                changed = []
-                for lane in [dict(r) for r in conn.execute(
-                        "SELECT * FROM v2_assistant_composite_lanes WHERE work_state='active'")]:
-                    lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
-                    if work_lane_lead_qualifies(lane, lead):
-                        continue
-                    stamp = _now()
-                    source = f"lead_lost:{lane['lane_id']}:{lane['version']}"
-                    payload = {"lead": {"stream_id": lane.get("bound_stream_id"),
-                                        "generation": lane.get("bound_generation")}}
-                    conn.execute(
-                        "UPDATE v2_assistant_composite_lanes SET work_state='paused', work_state_reason='lead_lost',"
-                        " version=version+1, updated_at=? WHERE lane_id=? AND version=?",
-                        (stamp, lane["lane_id"], lane["version"]))
-                    _insert_event(conn, event_id=source, lane=lane, operation="lead_lost", source_id=source,
-                                  actor=DAEMON_ACTOR, generation=None, prior="active", nxt="paused",
-                                  expected=lane["version"], payload=payload, stamp=stamp)
-                    changed.append({"lane_id": lane["lane_id"], "event_id": source})
-                conn.commit()
-                return changed
-            except BaseException:
-                conn.rollback()
-                raise
-        return await self.submit(_op)
-
     async def work_lane_handoff(self, predecessor: str, successor: str) -> list[dict[str, Any]]:
         """Decision D-2: lanes led by ``predecessor`` follow the handoff successor; state unchanged."""
         def _op(conn):
@@ -636,6 +607,11 @@ def _require_qualifying_lead(lane: dict[str, Any], conn) -> None:
         raise ValueError("work_lane_visible_lead_required")
 
 
+def _lead_lost_conn(lane: dict[str, Any], conn) -> bool:
+    lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
+    return lane_lead_lost({**lane, "_qualifies": work_lane_lead_qualifies(lane, lead)})
+
+
 def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: str,
                     reason: str) -> dict[str, Any]:
     """Typed audit on the existing mutation event; no schema or extra replay key."""
@@ -690,9 +666,15 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             if set(payload) - allowed or payload.get("to") not in WORK_STATES:
                 raise ValueError("work_lane_payload_invalid")
             to = payload["to"]
-            if to == prior_state:
+            lead_lost = _lead_lost_conn(lane, conn)
+            # A legacy stored paused/lead_lost is a fault, so a deliberate pause restates it.
+            if to == prior_state and not (lead_lost and to == "paused"):
                 raise ValueError("work_lane_state_unchanged")
-            reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
+            if lead_lost and to == "paused":
+                reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required",
+                               required=True)
+            else:
+                reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
             # Explicit confirmations retain their exact binding and single-use checks.
             # The verified bound FD can instead override operator ownership with a reason.
             if "operator_confirmation" in payload:

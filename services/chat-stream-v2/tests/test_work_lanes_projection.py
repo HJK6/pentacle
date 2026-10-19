@@ -21,7 +21,8 @@ def _stored_rows(fixture):
     """Invert the fixture's wire lanes into stored rows + presence (the projection's inputs)."""
     rows, presence = [], {}
     for lane in fixture["list_reply"]["lanes"]:
-        unreconciled = lane["state_reason"] == "lead_lost_unreconciled"
+        # An unqualified active lane presents active/lead_lost; its stored reason is the activation's.
+        unreconciled = lane["state"] == "active" and lane["state_reason"] == "lead_lost"
         lead = lane["lead"]
         row = {
             "lane_id": lane["lane_id"], "stream_id": ASSISTANT, "title": lane["title"], "summary": lane["summary"],
@@ -152,7 +153,7 @@ def test_presented_paused_before_reconcile_and_server_reads_v4_v8():
         server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
         frame = await server.work_lanes.current()
         lane = frame["lanes"][0]
-        assert (lane["state"], lane["state_reason"]) == ("paused", "lead_lost_unreconciled")
+        assert (lane["state"], lane["state_reason"]) == ("active", "lead_lost")
         assert lane["visible_chat"]["available"] == "history"
         operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
         msg = {"stream_id": lead[0], "generation": lead[1], "_auth_context": operator}

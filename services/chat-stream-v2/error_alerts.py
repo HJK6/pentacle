@@ -929,6 +929,23 @@ class ErrorAlerts:
                                         f"episode={ctx['episode_id']} {state}: remaining estimate missing at opening. "
                                         f"Current members/state: agent-orch work-lane show {opening['lane_id']} --members. "
                                         "Awareness only; FLAG, no admission block.")
+                if ctx["family"] == WORK_LANE and ctx["code"] == "lane_lead_lost":
+                    # Name the lost owner and the repair from the stored lane, never producer text.
+                    opening = conn.execute(
+                        "SELECT e.lane_id,e.cleared_at,l.bound_stream_id,l.bound_generation "
+                        "FROM v2_work_lane_episodes AS e LEFT JOIN v2_assistant_composite_lanes AS l "
+                        "ON l.lane_id=e.lane_id WHERE e.episode_id=? AND e.kind='lead_lost'",
+                        (ctx["episode_id"],)).fetchone()
+                    if opening is not None:
+                        state = "historical opening; condition cleared" if opening["cleared_at"] else "recorded opening"
+                        lane_id = opening["lane_id"]
+                        spec["body"] = (f"Work update lane_lead_lost lane={lane_id} episode={ctx['episode_id']} {state}: "
+                                        f"lead {opening['bound_stream_id'] or 'none'} "
+                                        f"(generation {opening['bound_generation'] or 'none'}) no longer qualifies. "
+                                        "The FD repairs: agent-orch work-lane set-lead "
+                                        f"{lane_id} <qualifying seat>, a verified restart, or "
+                                        f"agent-orch work-lane set-state {lane_id} --to paused|blocked with a reason. "
+                                        "Acknowledging this notice does not clear it.")
                 meta = spec["metadata"]
                 since = iso(now - 900)
                 # A superseded never-submitted predecessor was not an immediate

@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Literal, Protocol
 
-from work_lane_progress import lane_progress, lane_estimate_missing
+from work_lane_progress import lane_progress, lane_estimate_missing, lane_lead_lost
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS v2_work_lane_episodes (
     episode_id TEXT PRIMARY KEY,
     lane_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('completed','stale','estimate_missing')),
+    kind TEXT NOT NULL CHECK(kind IN ('completed','stale','estimate_missing','lead_lost')),
     sequence INTEGER NOT NULL CHECK(sequence >= 1),
     opened_at TEXT NOT NULL,
     cleared_at TEXT,
@@ -33,7 +33,7 @@ def ensure_work_lane_episodes_schema(conn) -> None:
         table = "v2_work_lane_episodes"
         existing = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
                                 (table,)).fetchone()
-        if existing and "'estimate_missing'" not in existing[0]:
+        if existing and "'lead_lost'" not in existing[0]:
             indexes = [r[0] for r in conn.execute(
                 "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
                 (table,))]
@@ -59,7 +59,7 @@ def ensure_work_lane_episodes_schema(conn) -> None:
 @dataclass(frozen=True)
 class LaneEpisodeFact:
     lane_id: str
-    kind: Literal["completed", "stale", "estimate_missing"]
+    kind: Literal["completed", "stale", "estimate_missing", "lead_lost"]
     episode_id: str
     opened_at: str
     family: str = "work_lane.v1"
@@ -130,7 +130,8 @@ class WorkLaneEpisodesStoreMixin:
                                  (lane["_lead_reported_done"], lane["lane_id"]))
                     facts = lane_progress(lane, now_iso=stamp)
                     for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]),
-                                            ("estimate_missing", lane_estimate_missing(lane))):
+                                            ("estimate_missing", lane_estimate_missing(lane)),
+                                            ("lead_lost", lane_lead_lost(lane))):
                         current = conn.execute("SELECT * FROM v2_work_lane_episodes "
                                                "WHERE lane_id=? AND kind=? AND cleared_at IS NULL",
                                                (lane["lane_id"], kind)).fetchone()

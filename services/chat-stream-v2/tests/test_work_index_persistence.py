@@ -139,9 +139,9 @@ def test_derived_and_lead_loss_writes_do_not_refresh_work_activity(tmp_path, mon
         await env.store.reconcile_work_observations(catalog.scan_work_observations(), settle_s=0, sweep=True)
         before = lane_progress((await env.store.work_lane_rows())[0])["freshness_at"]
         await env.store.mark_closed("host-a", "activity-lead", closed_at="2026-01-01T00:00:00Z", pane_status="pane_dead")
-        await env.store.reconcile_work_lanes()
+        await env.store.reconcile_work_lane_episodes(None)
         await env.store.reconcile_work_observations(catalog.scan_work_observations(), settle_s=0, sweep=True)
         row = (await env.store.work_lane_rows())[0]
-        assert row["work_state"] == "paused"
+        assert row["work_state"] == "active" and row["_qualifies"] is False  # a fault, not a stored pause
         assert lane_progress(row)["freshness_at"] == before
     run(body)

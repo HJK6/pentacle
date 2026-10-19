@@ -14,13 +14,13 @@ from test_error_alerts import subject  # noqa: F401
 
 
 def test_lane_family_registered():
-    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"})
+    assert error_adapters.FAMILY_CODES.get("work_lane.v1") == frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"})
 
 
 @pytest.fixture
 def lane_registry(monkeypatch):
     # Isolate downstream RED predicates from the missing registration.
-    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed", "lane_estimate_missing"}))
+    monkeypatch.setitem(error_adapters.FAMILY_CODES, "work_lane.v1", frozenset({"lane_stale", "lane_completed", "lane_estimate_missing", "lane_lead_lost"}))
 
 
 async def open_lane(s, code="lane_stale", episode="lane:stale:1"):

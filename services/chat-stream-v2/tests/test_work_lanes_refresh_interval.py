@@ -27,12 +27,12 @@ async def _burst(inv, seconds, gap):
 
 def _count_passes(store):
     passes = []
-    real = store.reconcile_work_lanes
+    real = store.reconcile_work_lane_episodes
 
-    async def counted():
+    async def counted(*args, **kwargs):
         passes.append(time.monotonic())
-        return await real()
-    store.reconcile_work_lanes = counted
+        return await real(*args, **kwargs)
+    store.reconcile_work_lane_episodes = counted
     return passes
 
 
