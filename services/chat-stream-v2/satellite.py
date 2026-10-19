@@ -56,6 +56,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import socket
 import subprocess
@@ -1540,8 +1541,10 @@ class Satellite:
         except OSError as exc:
             log.error("held-span file unavailable: %s", exc)
         self._held_tick_mono = time.monotonic()
+        stats_acknowledged = False
         if not cfg.disabled:
             ack = await self._send_host_stats(ws)
+            stats_acknowledged = isinstance(ack, dict) and ack.get("type") == "host.stats.ok"
             version = ack.get("version") if isinstance(ack, dict) else None
             target = version.get("target_sha") if isinstance(version, dict) else None
             if target:
@@ -1554,6 +1557,7 @@ class Satellite:
                 continue           # kill switch: stay connected, push nothing
             if time.monotonic() - self._last_stats_at >= STATS_INTERVAL_S:
                 ack = await self._send_host_stats(ws)
+                stats_acknowledged = isinstance(ack, dict) and ack.get("type") == "host.stats.ok"
                 version = ack.get("version") if isinstance(ack, dict) else None
                 target = version.get("target_sha") if isinstance(version, dict) else None
                 if target:
@@ -1566,6 +1570,22 @@ class Satellite:
             if ack is None:
                 continue           # no ack: offsets unmoved, re-read next pass
             target = self._apply_ack(ack, high_water)
+            unfenced = ack.get("usage_unfenced")
+            provenance = ack.get("usage_provenance")
+            # Delivery state is applied above, unchanged. A partial service ACK
+            # must not erase the outage, nor may the initial capability probe
+            # stand in for delivery of already-held records or losses.
+            if (
+                stats_acknowledged and ack.get("type") == "event.push.ok"
+                and not ack.get("dropped") and not ack.get("usage_rejected")
+                and not ack.get("losses_conflict")
+                and not (isinstance(unfenced, dict) and unfenced.get("rejected"))
+                and not (isinstance(provenance, dict)
+                         and (provenance.get("error") or provenance.get("rejected")))
+                and not self._held_spans().pending_count()
+                and not self._held_spans().frame_losses()
+            ):
+                self._session_acknowledged = True
             if target:
                 # Blocking git work (and a possible exec-restart) off the loop.
                 await asyncio.to_thread(self._maybe_update, target)
@@ -1585,7 +1605,10 @@ class Satellite:
     async def run_forever(self) -> None:
         cfg = self.config
         failures = 0
+        base = min(cfg.backoff_base_s, cfg.backoff_max_s)
+        backoff = base
         while True:
+            self._session_acknowledged = False
             try:
                 async with websockets.connect(
                     cfg.bart_ws, max_size=WS_MAX_SIZE,
@@ -1593,15 +1616,21 @@ class Satellite:
                 ) as ws:
                     log.info("connected to %s as host=%s sha=%s",
                              cfg.bart_ws, cfg.host, (self.sha or "?")[:12])
-                    failures = 0
                     await self._session(ws)
+                reason = "session ended"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on any transport fault
-                failures += 1
-                back = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** (failures - 1)))
-                log.warning("connection lost (%d): %s; reconnect in %.0fs", failures, exc, back)
-                await asyncio.sleep(back)
+                reason = str(exc)
+            if self._session_acknowledged:
+                failures = 0
+                backoff = base
+            failures += 1
+            back = random.uniform(backoff / 2, backoff)
+            log.warning("connection lost (%d): %s; reconnect in %.2fs", failures, reason, back)
+            await asyncio.sleep(back)
+            # Saturate before the next attempt; no exponent grows with outage age.
+            backoff = min(cfg.backoff_max_s, backoff * 2)
 
 
 async def _backfill(sat: Satellite, args) -> dict:
