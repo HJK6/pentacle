@@ -62,11 +62,13 @@ def test_question_defaults_to_asker_assignment_and_groups_by_spec(tmp_path):
     import asyncio
     from test_question_contract_d3 import _FakeSessions, _ask, _notify
 
+    lead, free = _ask("q-0")["from_stream_id"], "host-a:v2-free"  # the shared default asker, and a portfolio seat
+
     async def go():
         sessions = _FakeSessions({
-            "hosta:v2-lead": {"visibility": "visible", "status": "open", "session_generation": "g1",
+            lead: {"visibility": "visible", "status": "open", "session_generation": "g1",
                               "spec_id": "spec_demo__span", "spec_ids": ["spec_demo__span"]},
-            "hosta:v2-free": {"visibility": "visible", "status": "open", "session_generation": "g2",
+            free: {"visibility": "visible", "status": "open", "session_generation": "g2",
                               "spec_ids": ["spec_demo__a", "spec_demo__b"]},
         })
         notify = _notify(tmp_path, sessions=sessions)
@@ -76,19 +78,19 @@ def test_question_defaults_to_asker_assignment_and_groups_by_spec(tmp_path):
             named = _ask("q-2")
             named["envelope"]["spec_id"] = "spec_demo__other"  # an explicit spec always wins
             assert (await notify.prompt(named))["type"] == "prompt.ask.ok"
-            assert (await notify.prompt(_ask("q-3", producer="hosta:v2-free")))["type"] == "prompt.ask.ok"
+            assert (await notify.prompt(_ask("q-3", producer=free)))["type"] == "prompt.ask.ok"
             assert (await notify._db.call("get_agent_question", "q-1"))["spec_id"] == "spec_demo__span"
             assert (await notify._db.call("get_agent_question", "q-3"))["spec_id"] is None  # portfolio: no guess
             # A retry replays even when the default it would now derive differs (assignment
             # changed, or the stored question predates the default).
-            sessions._rows["hosta:v2-lead"].update(spec_id="spec_demo__moved", spec_ids=["spec_demo__moved"])
-            sessions._rows["hosta:v2-free"].update(spec_id="spec_demo__a", spec_ids=["spec_demo__a"])
+            sessions._rows[lead].update(spec_id="spec_demo__moved", spec_ids=["spec_demo__moved"])
+            sessions._rows[free].update(spec_id="spec_demo__a", spec_ids=["spec_demo__a"])
             assert (await notify.prompt(_ask("q-1")))["type"] == "prompt.ask.ok"
-            assert (await notify.prompt(_ask("q-3", producer="hosta:v2-free")))["type"] == "prompt.ask.ok"
+            assert (await notify.prompt(_ask("q-3", producer=free)))["type"] == "prompt.ask.ok"
             assert (await notify._db.call("get_agent_question", "q-1"))["spec_id"] == "spec_demo__span"
             assert (await notify._db.call("get_agent_question", "q-3"))["spec_id"] is None
             # The asker became a portfolio (no assignment): an omitted spec_id still replays.
-            sessions._rows["hosta:v2-lead"].update(spec_ids=["spec_demo__a", "spec_demo__b"])
+            sessions._rows[lead].update(spec_ids=["spec_demo__a", "spec_demo__b"])
             assert (await notify.prompt(_ask("q-1")))["type"] == "prompt.ask.ok"
             retry = _ask("q-1")
             retry["envelope"]["spec_id"] = "spec_demo__other"  # a different explicit spec still conflicts

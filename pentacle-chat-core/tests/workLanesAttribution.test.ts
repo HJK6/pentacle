@@ -15,16 +15,16 @@ function frameWith(member: Record<string, unknown>) {
 test('member seats and open questions normalize additively', () => {
   const inventory = normalizeWorkLanesInventory(frameWith({
     seats: [
-      { stream_id: 'hosta:lead', role: 'lead', host: 'hosta', visibility: 'hidden', parent_stream_id: 'hosta:fd',
+      { stream_id: 'host-a:lead', role: 'lead', host: 'host-a', visibility: 'hidden', parent_stream_id: 'host-a:fd',
         activity: 'working', last_activity: '2026-10-09T00:00:00Z' },
-      { stream_id: 'hosta:qa', role: 'qa', activity: 'sleeping' },
+      { stream_id: 'host-a:qa', role: 'qa', activity: 'sleeping' },
       { role: 'worker' },
     ],
     seats_total: 9,
     open_questions: { count: 2, first_question_id: 'q-1' },
   }));
   const member = inventory!.lanes[0].progress!.members[0];
-  assert.deepEqual(member.seats.map((s) => [s.stream_id, s.activity]), [['hosta:lead', 'working'], ['hosta:qa', 'unknown']]);
+  assert.deepEqual(member.seats.map((s) => [s.stream_id, s.activity]), [['host-a:lead', 'working'], ['host-a:qa', 'unknown']]);
   assert.equal(member.seats_total, 9);
   assert.deepEqual(member.open_questions, { count: 2, first_question_id: 'q-1' });
 });
