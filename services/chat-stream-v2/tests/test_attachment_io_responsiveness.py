@@ -1,6 +1,6 @@
 """Real file/SQLite contention; the lock owner is a separate owned process."""
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import hashlib
 import json
 import os
@@ -44,6 +44,7 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, env=env)
     pending = point = None
+    lock_released = False
     try:
         assert await asyncio.to_thread(owner.stdout.readline) == 'locked\n'
         pending = asyncio.create_task(operation())
@@ -61,6 +62,7 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
         trace['point_done_before_release'] = point.done()
         released = time.monotonic()
         owner.stdin.write('\n'); owner.stdin.flush()
+        lock_released = True
         assert await asyncio.wait_for(point, 10) == 'available'
         result = await asyncio.wait_for(pending, 10)
         assert isinstance(result, dict) and not result.get('error_code'), result
@@ -78,8 +80,10 @@ async def measure(store, root, sha, operation, monkeypatch, label, size):
                 f.write(json.dumps(record, sort_keys=True) + '\n')
         assert elapsed <= 0.2, record
     finally:
-        if owner.poll() is None:
-            owner.stdin.write('\n'); owner.stdin.flush()
+        # Release once; an owner that already exited (or is exiting) has closed its pipe.
+        if not lock_released and owner.poll() is None:
+            with suppress(BrokenPipeError):
+                owner.stdin.write('\n'); owner.stdin.flush()
         await asyncio.to_thread(owner.wait, 10)
         assert owner.returncode == 0, owner.stderr.read()
         for task in (point, pending):
