@@ -5,7 +5,7 @@ type: config
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-10-08'
+updated_at: '2026-10-19'
 source_path: docs/config/development_process.md
 tags:
 - pentacle
@@ -73,7 +73,7 @@ Before a certified run, complete one non-promoting rehearsal on real adapters: t
 
 ## Independent QA and bounded repairs
 
-Use [QA guidelines](qa_guidelines.md) for spec, implementation and documentation review. Freeze the review scope and candidate at dispatch. One valid rejection permits a bounded repair and a review of the repaired surface plus relevant regression checks. Preserve accepted evidence for unchanged inputs. After two valid rejections of the same surface, reassess the diagnosis and record a pivot, corrected scope or different investigative approach before continuing.
+Use [QA guidelines](qa_guidelines.md) for spec, implementation and documentation review. Freeze the review scope and candidate at dispatch. One valid rejection permits a bounded repair and a review of the repaired surface plus relevant regression checks. Preserve accepted evidence for unchanged inputs. After two valid rejections of the same surface, reassess the diagnosis and record a pivot, corrected scope or different investigative approach before continuing. With Pentacle, `--qa-spec-id`, `--qa-surface` and `--qa-cycle` on a QA commission let the daemon enforce this count; see [QA dispatch counter](../../../docs/qa-dispatch-counter.md).
 
 One fresh independent final review includes code, tests and a cold read of the as-shipped docs; do not commission a duplicate documentation review of the same candidate. [Typed reports](agent_orchestration.md#typed-completion-reports) bind QA and readiness to actual evidence. A lead's ordinary completion report is not a QA verdict.
 

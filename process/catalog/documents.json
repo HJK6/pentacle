@@ -5,7 +5,7 @@
     "title": "Assistant front desk baseline",
     "type": "agent-rules",
     "canonical": true,
-    "updated_at": "2026-10-09",
+    "updated_at": "2026-10-19",
     "source_path": "agents/assistant_baseline.md",
     "tags": [
       "pentacle",
@@ -107,7 +107,7 @@
     "title": "Agent orchestration",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-10-08",
+    "updated_at": "2026-10-19",
     "source_path": "docs/config/agent_orchestration.md",
     "tags": [
       "pentacle",
@@ -123,7 +123,7 @@
     "title": "Development process",
     "type": "config",
     "canonical": true,
-    "updated_at": "2026-10-08",
+    "updated_at": "2026-10-19",
     "source_path": "docs/config/development_process.md",
     "tags": [
       "pentacle",

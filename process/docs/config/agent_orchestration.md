@@ -5,7 +5,7 @@ type: config
 status: stable
 canonical: true
 created_at: '2026-09-09'
-updated_at: '2026-10-08'
+updated_at: '2026-10-19'
 source_path: docs/config/agent_orchestration.md
 tags:
 - pentacle
@@ -71,6 +71,10 @@ This section requires a separate Pentacle installation providing the daemon and 
 Point `AGENT_ORCH_MEMORY_REPO` at your spec workspace for supported agent-orch memory and role-baseline discovery. Configure the daemon's spec-memory setting separately as described in [workspace setup](../../README.md); one shell variable does not configure every consumer. Use your installed `agent-orch --help` and subcommand help for the supported command contract.
 
 Give a session a durable title that names the lasting product or goal, and give visible sessions a status card with a goal and plan. The card states the current phase and the next action, or what the seat is waiting for and from whom; refresh it at every phase change and keep the durable checkpoint in the spec. A lead sets an estimate on its first card with `agent-orch status --eta`, refreshes it at each milestone or decision request, and flags an overrun above 50% in its next decision request; a refreshed forecast does not reset the original estimate. Bind an ownership seat to its spec. For delegated work, include the objective and explicit provider/model/effort, and keep workers hidden unless operator visibility is needed.
+
+Keep one lane per product area; see [lane organization](../../../docs/web_work_lanes.md#lane-organization). Seats the front desk manages, including lane leads and coordinators, default to hidden; keep visible the chats the operator opened or is talking to, and expose a managed seat when the operator asks to inspect or steer it. Visibility changes neither ownership nor completion authority. On a front-desk-owned lane a hidden lead still qualifies as its lead; an operator-owned lane needs a visible one. Hidden seats route questions and estimates through their parent instead of a status card.
+
+Scope searches to named repositories or task directories, never the whole workspace, and run one heavy search at a time at reduced priority.
 
 Commission an execution lead with `--role lead --spec-id <spec id>` in the spawn request itself and name both in the brief; prose alone does not set the seat's metadata. Read the created seat back once with `agent-orch inspect` and confirm its role and attached spec before the lead commissions QA.
 

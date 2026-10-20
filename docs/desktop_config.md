@@ -91,6 +91,7 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | Key | Type and default | Effect |
 | --- | --- | --- |
 | `features` | Object; example flags below | Defaults before saved Settings overrides. |
+| `features.chatUi` | Boolean; false | Requests the single assistant composite chat from the daemon. Chat view itself is always on. |
 | `features.defaultChatView` | Boolean; Chat when unset | Default view for newly opened sessions: Chat unless false (Terminal). Both views remain available per pane. Settings → Default view. A legacy saved `chatUi: false` migrates to Terminal. |
 | `features.chatFirstStyle` | Boolean; false | Optional chat-first look: warm Light/Dark palettes (Light when no theme is saved), workspace typography and sidebar styling. Layout and behaviour are unchanged. Reload after changing. See [workspace](chat_first_workspace.md). |
 | `features.inputBar` | Boolean; example true | Retained compatibility flag; currently unused. |

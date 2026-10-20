@@ -18,7 +18,8 @@ requester's structured result notice still follows. Successful unchanged-scope s
 approvals produce no front-desk tell. Tree-idle and child context-advisory notices
 are dropped; their facts remain available through `agent-orch list` and `inspect`.
 The daemon's own [external-work reminder](../services/chat-stream-v2/docs/external-work.md)
-also arrives immediately; a wire client cannot mint one.
+and a [lost-lead lane alert](../services/chat-stream-v2/docs/work-lanes.md#owner-loss-lead_lost-fault)
+(`lane_lead_lost`) also arrive immediately; a wire client cannot mint either.
 
 Other inputs, including START/END, receipts, concurs and watched-child inactivity,
 are held in the existing durable outbound-notice store. The oldest held item's
@@ -65,12 +66,6 @@ An unproven compact input can retry after `PENTACLE_CONTEXT_COMPACT_COOLDOWN_S`
 when the seat remains over threshold, idle and has a proven-empty composer.
 Late proof prevents a repaste; a real draft still defers. A successful compact
 whose proof was missed can be repeated after the cooldown on an old high reading.
-
-The accepted spec in shared memory,
-`work/in_progress/pentacle__front_desk_wake_reduction_2026_10/spec.md`, owns rollout
-and live acceptance. Dot's email and pace contract lives in
-`docs/reference/dot_work_delivery.md` there. Runtime activation and the one-time
-Dot message remain with the accepting parent.
 
 ## Compact ruling results
 

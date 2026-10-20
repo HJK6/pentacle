@@ -75,7 +75,7 @@ may have been submitted: inspect or await the seat and do not respawn it.
 
 Do not configure `--daemon-stats-*` options or `PENTACLE_DAEMON_STATS_*` variables: `services/chat-stream-v2/main.py --help` exposes neither. There is no v2 `daemon_stats.jsonl` output path to tail or rotate.
 
-Release verification uses the deploy tool's launchd and `welcome.runtime_sha` readbacks described in README § Daemon releases. `daemon.stats` does not contain deploy stamps or a running SHA.
+Release verification uses the deploy tool's launchd and `welcome.runtime_sha` readbacks described in [Using it with `deploy.py`](../services/chat-stream-v2/deploy/daemon/README.md#using-it-with-deploypy-macos). `daemon.stats` does not contain deploy stamps or a running SHA.
 
 ## Managed log health
 

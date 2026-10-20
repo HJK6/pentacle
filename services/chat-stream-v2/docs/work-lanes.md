@@ -1,10 +1,10 @@
 # Work lanes wire contract (v1)
 
-Spec: `spec_pentacle__first_class_work_lanes_2026_10` (D6, D7). Fixture: `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json` (`schema: work_lanes_inventory_v1`). The daemon projection test and both chat-core TypeScript suites assert against that file; it is the contract.
+Fixture: `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json` (`schema: work_lanes_inventory_v2`). The daemon projection test and both chat-core TypeScript suites assert against that file; it is the contract.
 
 ## Capability
 
-Clients send `capabilities.work_lanes_v1: true` in `hello`. Only such non-scoped clients receive lane data. Scoped (Cosmo) clients never do.
+Clients send `capabilities.work_lanes_v1: true` in `hello`. Only such non-scoped clients receive lane data. Scoped clients never do.
 
 ## Inventory
 
@@ -28,10 +28,10 @@ Paging uses the compound key (`updated_at`, `lane_id`), descending, so lanes wit
 
 ## Tap target (per `visible_chat.available`)
 
-- `open`: open the chat. For a session, use `stream_id`; for the composite, open Bart's chat.
+- `open`: open the chat. For a session, use `stream_id`; for the composite, open the assistant composite's chat.
 - `history`: show a read-only transcript. Fetch it with `{"type":"request_stream_events","stream_id":…,"generation":…,…}` using the existing limits and paging. Scoped clients stay confined to their scope stream. The lane exception admits an operator-authenticated, non-scoped client when `(stream_id, generation)` is the visible chat of a first-class lane and the pointer still validates. Note that the inherited `request_stream_events` gate already serves a stream that is absent from the open inventory to non-scoped clients, so the lane check is not the only path to a closed tail.
 - The projection re-applies the pointer validator on every read. A visible chat that has since become hidden, protected, composite or a direct-primary binding presents `available: "unavailable"`.
-- `unavailable`: render an explicit "Chat unavailable" state and keep the lane visible. Never fall back to Bart, a hidden worker or a new generation.
+- `unavailable`: render an explicit "Chat unavailable" state and keep the lane visible. Never fall back to the assistant composite, a hidden worker or a new generation.
 
 ## Lane updates
 

@@ -170,8 +170,8 @@ build is older; refreshing updates that window.
 
 The top and bottom terminal rows have independent column dividers, and each row
 keeps its preferred split on this browser origin; the [shared configuration
-reference](desktop_config.md) covers divider controls and persistence. In the
-experimental structured Chat view, durable question cards support typed
+reference](desktop_config.md) covers divider controls and persistence. In Chat
+view, durable question cards support typed
 free-text answers, including prompts without choices.
 
 The web client also supports microphone input and voice actions through a
@@ -183,7 +183,7 @@ for the current behavior and setup.
 | Symptom | First check |
 |---|---|
 | Sidebar is empty | Check the WebSocket URL and `agent-orch list`. |
-| Experimental structured Chat is unavailable | Enable `features.chatUi` and inspect the daemon health result. |
+| The assistant shows as separate backend sessions | Set `features.chatUi: true` in the web host config; it requests the assistant composite from the daemon. |
 | Terminal attach fails | Check the selected host ID and its configured tmux transport. |
 | Local daemon exits | Run the daemon command directly and inspect its startup error. |
 

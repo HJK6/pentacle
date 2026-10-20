@@ -55,6 +55,8 @@ the standard `unsupported_in_v2` response.
 | `agent-orch reconcile status [--host HOST] [--json] [--timeout N]` | Read-only daemon reconciliation audit. Returns counts and row details for open rows whose session is dead, open rows whose host is unreachable, closed rows with unreaped survivor state, and unmanaged trees. Live sessions with no durable row are folded into `unmanaged_tree`. |
 | `agent-orch reparent <stream_id> --to <new-parent> --expected-generation G [--reason R] [--from-stream-id OWN_ID]` | Move an open seat to an open parent within the same daemon, including across hosts. The verified current parent or its live handoff successor may move its child. The verified lifecycle-grant holder may move any open non-protected seat, including one whose old parent is closed or absent; this manager path uses an explicit ruling waiver and requires a non-default reason. Run it from the holder's own seat with its own stream token and `--from-stream-id` set to that seat, never to the old parent. Read `session_generation` with `agent-orch inspect` and pass it as `--expected-generation` to fence stale moves. Manager admitted/applied/refused audit rows bind holder identity and generation, grant revision, target and destination, reason, and request ID. Cycles, protected workers, closed workers and closed new parents refuse. |
 | `agent-orch list` | Fetch the current daemon snapshot and print visible sessions as JSON. Direct snapshots include subagents. |
+| `agent-orch work-lane list \| show \| adopt \| set-state \| set-lead \| set-chat \| set-text \| set-members \| set-owner \| update \| request-confirmation \| estimate-preview` | Read and maintain first-class work lanes; mutations are front-desk-only. See [work lanes CLI](../chat-stream-v2/docs/work-lanes.md#cli). |
+| `agent-orch spec attach \| detach \| assign \| unassign <stream_id> [spec_id]` | Change a seat's spec tags or its one work assignment. See [work assignment](../chat-stream-v2/docs/work-lanes.md#work-assignment-and-checkpoints). |
 | `agent-orch usage --host <h> [--json] [--max-age-seconds N]` | Read one named host's **current account-period usage** (the Claude/Codex `/usage` weekly-limit percentages, resets, and health) once and exit — a read-only, on-demand snapshot distinct from the per-stream token accounting in `list`/`inspect`. The host name comes from `machines.json` (with no registry, only the local host is known). The local host is agent-orch's own host id (`AGENT_ORCH_HOST_ID`, then `~/.agent-orch/config.json` `local_host_id`, then the hostname; `PENTACLE_HOST_ID` overrides). For the local host it reads the cadence-written `usage_state.json` (`source: cadence-file`). A local host without that file runs the peer probes below locally, without SSH. For a peer it reads once over the existing SSH route: that host's own cadence file plus its `~/.claude.json` `cachedUsageUtilization` (both plucked on-host, allowlisted, so no OAuth token leaves the machine), then selects per provider the freshest account-matched observation (a collector-`ok` cadence row within the cutoff, else a newer cache observation, else the newest matched value as `stale`; a cache is used only when its `accountUuid` matches the logged-in `oauthAccount.accountUuid`). Only when nothing matches does it run the `check_claude_usage.py` probe; Codex falls back to `check_codex_usage.py`. Each row carries `host`, `provider`, `pct`, resets, `outcome` (also `status`), `source`, and the observation tuple: `observed_at`, `age_seconds`, `account_id` and `collector` (`ok`/`no_update`/`failed`). A reading older than the freshness cutoff (`--max-age-seconds`, env `PENTACLE_USAGE_MAX_AGE_SECONDS`, default 900), or whose collector last failed, is reported `stale` with the value still shown, never `ok`; any unavailable outcome (`account_mismatch`/`no_weekly_limits`/`auth_error`/`parser_error`/`provider_error`/`transport_error`/`timeout`) yields `pct: null`, never a fabricated `0`. `--json` prints the compact machine form. |
 | `agent-orch ssh <ssh args...>` | Thin passthrough to `ssh(1)` with `-o SendEnv=PENTACLE_STREAM_ID AGENT_ORCH_STREAM_ID AGENT_ORCH_STREAM_TOKEN_FILE AGENT_ORCH_STREAM_TOKEN` prepended, so the running session's leader stream id and private token-file path propagate across the SSH hop (the legacy token name remains for pre-file sessions). Dispatched via a pre-argparse `sys.argv` intercept so leading ssh flags (`-i`, `-v`, `-h`, `-p`, `-J`, `--`) pass through verbatim, then exec'd via `os.execvp("ssh", ...)`. The sshd side must accept those env names — see `deploy/README.md` for the matching `AcceptEnv` drop-in (redeploy on every host before enabling ownership enforcement). |
 
@@ -222,7 +224,7 @@ A dedup dismissal with no answer remains a dismissal: it creates no answer notic
 Use `agent-orch notify` when an agent or automation needs to publish into the operator Updates feed without spawning or sending a prompt to another agent:
 
 ```bash
-agent-orch notify --message "scrape done, populated 142 leads" --producer altum-scraper
+agent-orch notify --message "scrape done, populated 142 leads" --producer example-scraper
 agent-orch notify --ask "Re-run the scrape?" --button Yes --button No --await-answer --timeout 900
 ```
 
@@ -321,7 +323,7 @@ The optional top-level `note` field is the per-answer note channel for every ans
 
 ## Triage Queue
 
-`agent-orch triage` consumes follow-up specs created by the spec-closure retro hook. It reads the shared memory working tree directly instead of `catalog/*.json`, because catalogs can lag Syncthing. A triage item is a normal `work/backlog/<repo>__<topic>/` item whose spec frontmatter includes the `triage` tag.
+`agent-orch triage` consumes follow-up specs created by the spec-closure retro hook. It reads the memory workspace's working tree directly instead of `catalog/*.json`, because catalogs can lag file synchronization. A triage item is a normal `work/backlog/<repo>__<topic>/` item whose spec frontmatter includes the `triage` tag.
 
 `scan-publish` creates one sidecar file per item, `triage.json`, with the stable queue state: spec id, source path, generation, status, dedup key, decision fields, merge target, and defer reason. The Updates notification uses `yes_no` actions with explicit `value` fields (`keep`, `defer`, `deprecate`, or `merge:<target_spec_id>`), so `apply-answer` can consume either a typed `notification.await` answer object or an explicit CLI action. Duplicate answers are safe: terminal triage states (`kept`, `merged`, `deprecated`) are no-ops.
 
@@ -351,7 +353,7 @@ agent-orch asset --title "QA findings" --type report --content-file /tmp/qa-repo
 
 If `--session` is omitted, the CLI uses `discover_leader_stream_id_short()` and publishes to the caller's stream. If `--session` is supplied, the daemon still requires the caller's stream-ownership token for that exact stream; unauthorized or closed sessions fail with typed asset errors. The publisher is provider-agnostic and uses the `asset.publish` RPC exposed by `chat_streamd`.
 
-Republishing with the same `--asset-id` updates the existing asset tab and body in place. Omitting `--asset-id` creates a fresh asset id. The daemon broadcasts metadata only; desktop clients fetch the body lazily when the operator opens the tab. Protocol details live in [../chat-stream/docs/assets.md](../chat-stream/docs/assets.md).
+Republishing with the same `--asset-id` updates the existing asset tab and body in place. Omitting `--asset-id` creates a fresh asset id. The daemon broadcasts metadata only; desktop clients fetch the body lazily when the operator opens the tab. Protocol details live in [report assets](../../docs/report_assets.md).
 
 ## Dashboard commands
 
@@ -988,9 +990,8 @@ When `--msg-id` is supplied, `existing_report` follows daemon precedence: real a
 ## Attributed session deaths
 
 chat-stream `session.died` broadcasts now carry optional death-attribution
-fields. The authoritative wire schema, cause enum, audit table, and forensic
-snapshot caps are documented in
-[chat-stream Death Attribution](../chat-stream/README.md#death-attribution).
+fields; the daemon's `services/chat-stream-v2/reconciler.py` owns the cause
+values.
 
 `agent-orch inspect <stream>` shows an `Attribution:` block when the daemon's
 `inspect_stream` response includes `suspected_cause`.
@@ -1417,31 +1418,14 @@ sequenceDiagram
 
 ## Testing
 
-`services/agent-orch/tests/` is part of the Pentacle deploy gate alongside
-the retired v1 test suite. `deploy-mac.sh` runs agent-orch tests in both
-blocking pre-deploy phases:
+Run `python -m pytest services/agent-orch/tests` from the activated
+development environment. The repository gate
+(`python3 services/chat-stream-v2/tools/run_gate.py unit|merge`) covers the
+daemon suites; see [developer onboarding](../../docs/developer_onboarding.md#7-run-validation).
 
-- Gate 1: hermetic contract tests with `-m 'not live_daemon' --maxfail=1 -q -n auto`
-- Gate 2: local live-daemon tests with `-m live_daemon --maxfail=1 -q`
-
-Gate 1 is parallelized with pytest-xdist because these tests should not depend
-on real tmux or provider state. Gate 2 remains serial because live agent-orch
-round trips share the real daemon, tmux, provider credentials, and SSH-backed
-peer reach.
-
-Provider availability is decided before pytest by
-`scripts/preflight_provider.sh <provider>`, which returns `ok`, `missing`, or
-`unauthed`. `PENTACLE_REQUIRE_CLAUDE` and `PENTACLE_REQUIRE_CODEX` default to
-required; a required provider that does not preflight as `ok` aborts the
-deploy before tests start. The emergency bypass is `deploy-mac.sh --skip-tests`
-with `PENTACLE_EMERGENCY_DEPLOY=1`; without that environment variable the
-bypass is refused.
-
-Agent-orch tests should keep provider and daemon contracts observable at the
-CLI boundary: `spawn`, `send`, `await`, `report`, `inspect`, `close`, replay
-entries, and schema validation. Use `live_daemon` only for
-tests that need a real chat-stream daemon/provider/tmux path; otherwise keep
-coverage hermetic so it stays in the fast Gate 1 suite.
+Keep provider and daemon contracts observable at the CLI boundary: `spawn`,
+`send`, `await`, `report`, `inspect`, `close` and schema validation. Tests
+must stay hermetic: no real tmux, provider credentials or live daemon.
 
 ## Setup And Smoke
 
@@ -1479,14 +1463,12 @@ All paths below are repo-relative to the `pentacle` repo root.
   - `wsclient.py` — websocket client helpers for direct RPCs such as
     `spawn_once`, `send_once`, `await_report_once`, `report_once`, and
     `close_once`
-  - `workspace.py` — legacy cleanup helpers
   - `config.py` — configuration resolution, including optional `memory_repo_path`
   - `role_baseline.py` — memory repo resolution and `<memory_repo>/agents/<role>_baseline.md` loading for spawn ack decoration
   - `stream_id.py` — leader stream-id discovery
-  - `replay.py` — legacy JSONL replay helpers retained for compatibility tests
-  - `awaiting.py` — legacy completion-report matching helpers retained for
-    compatibility tests
   - `schema.py` — inbox v1 constants, validation, and aggregated violations
+  - `work_lane_cli.py` — `work-lane` commands
+  - `external_work_cli.py` — `external-work` commands
 - **Daemon-side completion ledger and blob store:** the v2 daemon's store and ledger modules — see [../../docs/chat_protocol.md](../../docs/chat_protocol.md).
 - **Shared report schema:** `services/_shared/report_payload_v1.py`.
 - **Tests:** `services/agent-orch/tests/` — including direct CLI tests for
