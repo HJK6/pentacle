@@ -15,7 +15,7 @@ function chicagoDay(now = new Date()) {
 function readCosmoVocabulary() {
   const source = fs.readFileSync(path.join(__dirname, '../../../services/chat-stream-v2/household.py'), 'utf8');
   return Object.fromEntries(Object.entries({ assistant: 'COSMO_ASSISTANT', app: 'COSMO_APP', partnerWho: 'COSMO_PARTNER_WHO', bothWho: 'COSMO_BOTH_WHO' }).map(([key, name]) => {
-    const match = source.match(new RegExp(`^${name} = ("[^"\\n]+")`, 'm'));
+    const match = source.match(new RegExp(`^${name} = (?:os\\.environ\\.get\\([^)]*\\)\\.strip\\(\\) or )?("[^"\\n]+")`, 'm'));
     if (!match) throw new Error(`Fixture cannot read daemon constant ${name}`);
     return [key, JSON.parse(match[1])];
   }));

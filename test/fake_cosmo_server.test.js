@@ -12,7 +12,7 @@ test('fixture vocabulary comes from daemon constants without duplicating private
   const values = readCosmoVocabulary();
   const source = fs.readFileSync(path.join(__dirname, '../services/chat-stream-v2/household.py'), 'utf8');
   for (const [key, name] of Object.entries({ assistant: 'COSMO_ASSISTANT', app: 'COSMO_APP', partnerWho: 'COSMO_PARTNER_WHO', bothWho: 'COSMO_BOTH_WHO' })) {
-    assert.ok(values[key] === JSON.parse(source.match(new RegExp(`^${name} = ("[^"\\n]+")`, 'm'))[1]), `matches ${name}`);
+    assert.ok(values[key] === JSON.parse(source.match(new RegExp(`^${name} = (?:os\\.environ\\.get\\([^)]*\\)\\.strip\\(\\) or )?("[^"\\n]+")`, 'm'))[1]), `matches ${name}`);
   }
 });
 test('synthetic seed covers every list and attribution, due and event distinction', () => {

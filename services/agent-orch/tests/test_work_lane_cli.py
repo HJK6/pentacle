@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from agent_orch import cli
+from agent_orch import cli, work_lane_cli
+
+
+@pytest.fixture(autouse=True)
+def _composite_stream_id(monkeypatch):
+    monkeypatch.setattr(work_lane_cli, "DEFAULT_COMPOSITE", "home:assistant")
 
 
 def _wire(monkeypatch, reply):
