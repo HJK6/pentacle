@@ -136,7 +136,7 @@ STALE_FENCE_REASONS = frozenset({
 #: so they need no separate root setting.
 DEFAULT_CLAUDE_PROJECTS_ROOT = "~/.claude/projects"
 
-DEFAULT_BART_WS = "ws://127.0.0.1:7791"
+DEFAULT_COORDINATOR_WS = "ws://127.0.0.1:7791"
 DEFAULT_INTERVAL_S = 1.0
 DEFAULT_MAX_EVENTS_PER_PASS = 500
 DEFAULT_MAX_READ_BYTES = 4 * 1024 * 1024
@@ -172,7 +172,7 @@ def _repo_root() -> str:
 
 @dataclass
 class SatelliteConfig:
-    bart_ws: str = DEFAULT_BART_WS
+    coordinator_ws: str = DEFAULT_COORDINATOR_WS
     host: str = ""                      # this machine's fleet name; MUST match registry host
     push_secret: str = ""
     host_secret: str = ""               # per-host HMAC proof for usage/event.push
@@ -214,7 +214,7 @@ class SatelliteConfig:
             return str(e.get(ENV_PREFIX + name) or "").strip().lower() in ("1", "true", "yes", "on")
 
         return cls(
-            bart_ws=e.get(ENV_PREFIX + "WS") or e.get(ENV_PREFIX + "BART_WS") or DEFAULT_BART_WS,
+            coordinator_ws=e.get(ENV_PREFIX + "WS") or DEFAULT_COORDINATOR_WS,
             host=(e.get(ENV_PREFIX + "HOST") or socket.gethostname().split(".")[0]).strip().lower(),
             # The shared bearer secret is intentionally the same env name coordinator reads.
             push_secret=e.get("PENTACLE_EVENT_PUSH_SECRET") or "",
@@ -1611,11 +1611,11 @@ class Satellite:
             self._session_acknowledged = False
             try:
                 async with websockets.connect(
-                    cfg.bart_ws, max_size=WS_MAX_SIZE,
+                    cfg.coordinator_ws, max_size=WS_MAX_SIZE,
                     ping_interval=20, ping_timeout=20, close_timeout=10,
                 ) as ws:
                     log.info("connected to %s as host=%s sha=%s",
-                             cfg.bart_ws, cfg.host, (self.sha or "?")[:12])
+                             cfg.coordinator_ws, cfg.host, (self.sha or "?")[:12])
                     await self._session(ws)
                 reason = "session ended"
             except asyncio.CancelledError:
@@ -1642,7 +1642,7 @@ async def _backfill(sat: Satellite, args) -> dict:
         roots["codex"] = args.codex_root or DEFAULT_CODEX_ROOT
     cursor = BackfillCursor(None if args.no_cursor else args.cursor)
     async with websockets.connect(
-        sat.config.bart_ws, max_size=WS_MAX_SIZE,
+        sat.config.coordinator_ws, max_size=WS_MAX_SIZE,
         ping_interval=20, ping_timeout=20, close_timeout=10,
     ) as ws:
         granted = {"version": 1}

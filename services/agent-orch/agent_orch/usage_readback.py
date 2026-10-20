@@ -6,12 +6,12 @@ view (weekly %, resets, health) — NOT the per-stream token-accounting usage th
 ``agent-orch inspect`` surfaces.
 
 Design (spec: spec_pentacle__per_host_usage_readback_on_demand_2026_10):
-  * ``thoth`` / the local host: read the live cadence file written by the
+  * the collector / local host: read the live cadence file written by the
     ``com.pentacle.usage-state-collector`` launchd job (no re-probe). The local
     host is agent-orch's own host id (``~/.agent-orch/config.json``
     ``local_host_id``, then the hostname). A satellite reading itself has no
     cadence file, so it runs the satellite probes below locally, without ssh.
-  * a satellite (merlin, amaterasu): read once over the existing authenticated
+  * a satellite: read once over the existing authenticated
     ssh/machine-profile route (spec_pentacle__satellite_usage_freshness_collector_2026_10):
       - the satellite's own cadence file (``usage_state.json`` written by its
         collector) and the on-host cache ``~/.claude.json`` →
@@ -687,7 +687,7 @@ def read_local(host: str, env: dict | None = None, *, now_ms: int | None = None,
 # --- percent history (usage_history.jsonl) -----------------------------------
 # Same line format as chat-stream-v2/usage_history.py (pinned by a parity test;
 # agent-orch cannot import daemon modules). Lines are written only on the host
-# whose ledger lives beside the file (sessions.db present), i.e. Thoth.
+# whose ledger lives beside the file (sessions.db present), i.e. the collector host.
 HISTORY_FIELDS = (
     "observed_at", "probed_at", "host", "provider", "account_id",
     "window_kind", "window_minutes", "pct", "resets_at", "source",
@@ -948,7 +948,7 @@ def read_host(name: str, *, max_age_s: int = DEFAULT_MAX_AGE_SECONDS,
     machine = resolve_host(name, env)
     if not is_local(machine, env):
         return read_remote(machine, max_age_s=max_age_s, env=env, runner=runner, now_ms=now_ms)
-    if local_usage_state_path(env).exists():  # the collector host (Thoth): live cadence file, no re-probe
+    if local_usage_state_path(env).exists():  # the collector host: live cadence file, no re-probe
         return read_local(machine.get("name", name), env, now_ms=now_ms, max_age_s=max_age_s)
     # A satellite runs no collector: run the satellite probes here, without ssh.
     return read_remote(machine, max_age_s=max_age_s, env=env, runner=local_runner or run_local, now_ms=now_ms)

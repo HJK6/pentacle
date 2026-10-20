@@ -1199,7 +1199,7 @@ def retired_hosts(src: Sources, config: dict[str, Any]) -> tuple[set[str], list[
     honoured: set[str] = set()
     report: list[dict[str, Any]] = []
     for host in sorted(set(listed)):
-        # Composite assistant rows (e.g. bart:assistant) are routing aliases with no usage of their own.
+        # Composite assistant rows (e.g. home:assistant) are routing aliases with no usage of their own.
         open_rows = [s for s in src.seats.values() if s.host == host and s.status == 'open']
         open_seats = [s for s in open_rows if s.provider != 'composite']
         composite = len(open_rows) - len(open_seats)

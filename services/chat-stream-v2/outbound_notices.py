@@ -35,7 +35,7 @@ NOTICE_KIND_TREE_IDLE = "tree_idle"
 NOTICE_KIND_LANE_DIGEST = "lane_digest"
 # A reminder that the front desk owes an external-work check; see external_work.py.
 NOTICE_KIND_EXTERNAL_WORK_DUE = "external_work_due"
-# A Bart composite terminal or decision gate is still delivered through this
+# A primary composite terminal or decision gate is still delivered through this
 # established durable outbox.  It is a narrow authority wake, not a second
 # inbox or routing queue.
 NOTICE_KIND_ASSISTANT_COMPOSITE_AUTHORITY = "assistant_composite_authority"

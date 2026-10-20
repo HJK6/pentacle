@@ -62,7 +62,7 @@ from store_assistant_binding import (
     ASSISTANT_COMPOSITE_TELL_QUEUE_DDL, SCOPED_OWNERSHIP_DDL,
     AssistantBindingStoreMixin, _binding_conn, migrate_binding_to_named,
 )
-from assistant_lane_rulings import RULING_REQUESTS_DDL, BART_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
+from assistant_lane_rulings import RULING_REQUESTS_DDL, ASSISTANT_LANE_OWNERSHIP_DDL, RULING_AUDIT_DDL
 from voice_answers import VOICE_ANSWER_ACKS_DDL, VOICE_ANSWER_BINDINGS_DDL, VoiceAnswersStoreMixin
 import store_consent as consent
 from store_qa import QaStoreMixin, SpecInputsUnavailable, spec_binding_source
@@ -105,7 +105,7 @@ from store_specs import (
 )
 from claude_jsonl_norm import strip_peer_delivery_envelope
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES, provider_text_digest
-from v2_runtime import iso_now
+from v2_runtime import iso_now, primary_assistant_name
 
 
 log = logging.getLogger("chat_streamd_v2.store")
@@ -1428,7 +1428,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         self._columns: set[str] = set()
         # Written and read on the store thread after the composite projection
         # is ready. Keyed by composite stream id so each named assistant
-        # (bart, daff) carries its own mirror; empty keeps every non-direct
+        # carries its own mirror; empty keeps every non-direct
         # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
         # source_generation, enabled_default, name).
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
@@ -1649,7 +1649,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DDL)
             conn.execute(ASSISTANT_BINDING_DDL)
             # One-time: convert the legacy single-row (id=1) binding to the
-            # name-keyed form, seeding the existing row as name='bart'.
+            # name-keyed form, seeding the existing row under the primary name.
             migrate_binding_to_named(conn)
             conn.execute(ASSISTANT_REBIND_AUDIT_DDL)
             conn.execute(ASSISTANT_REBIND_AUDIT_INDEX_DDL)
@@ -1667,7 +1667,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.execute("ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN service_ingress_body TEXT")
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
-            conn.execute(BART_LANE_OWNERSHIP_DDL)
+            conn.execute(ASSISTANT_LANE_OWNERSHIP_DDL)
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
@@ -1951,8 +1951,9 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     async def configure_assistant_mirror(
         self, *, composite_stream_id: str, source_stream_id: str,
-        source_generation: str, enabled_default: bool, name: str = "bart",
+        source_generation: str, enabled_default: bool, name: str | None = None,
     ) -> None:
+        name = name or primary_assistant_name()
         """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
             self._assistant_mirror_binding[composite_stream_id] = (
@@ -1962,9 +1963,10 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
 
     @staticmethod
     def _mirror_kv_key(name: str) -> str:
-        # Bart keeps the legacy unprefixed key byte-identical; other assistants
+        # The primary keeps the legacy unprefixed key byte-identical; other assistants
         # (daff) get their own per-name override key.
-        return "assistant.mirror.enabled" if name == "bart" else f"assistant.mirror.{name}.enabled"
+        return ("assistant.mirror.enabled" if name == primary_assistant_name()
+                else f"assistant.mirror.{name}.enabled")
 
     def _effective_mirror_source_conn(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
@@ -2031,7 +2033,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
     ) -> None:
         """Project an admitted source event for whichever named assistant owns it.
 
-        Each named assistant (bart, daff) has at most one mirror binding and a
+        Each named assistant has at most one mirror binding and a
         distinct source seat, so at most one binding matches ``source_stream_id``.
         """
         for binding in list(self._assistant_mirror_binding.values()):
@@ -2361,7 +2363,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     "assistant mirror skipped published turn source_event_id=%s dispatch_id=%s",
                     source_event_id, published_turn["dispatch_id"],
                     extra={"subsystem": "assistant_mirror",
-                           "bug_ref": "pentacle__bart_reply_dedup_2026_09"},
+                           "bug_ref": "assistant_reply_dedup"},
                 )
                 return
             proactive = self._proactive_turn_publication_conn(
@@ -2469,7 +2471,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             "assistant mirror committed source_event_id=%s canonical_event_id=%s",
             source_event_id, int(cur.lastrowid),
             extra={"subsystem": "assistant_mirror",
-                   "bug_ref": "pentacle__bart_chat_prose_mirror_2026_09"},
+                   "bug_ref": "assistant_chat_prose_mirror"},
         )
 
     async def assistant_mirror_event_for_source(self, source_event_id: int) -> dict[str, Any] | None:
@@ -5380,7 +5382,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     # a lifecycle). `_mirror_source_event_conn` re-validates the
                     # durable binding stream/generation itself, so firing it on
                     # the binding fence is safe.
-                    # bug_ref: pentacle__bart_proactive_chat_status_publish_2026_09
+                    # bug_ref: assistant_proactive_chat_status_publish
                     if source_id is not None and (lifecycle is not None or binding is not None):
                         self._mirror_source_event_conn(
                             conn, source_stream_id=stream_id,

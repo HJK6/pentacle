@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS v2_assistant_lane_rulings (
     mirror_sent INTEGER NOT NULL DEFAULT 0
 )
 """
-BART_LANE_OWNERSHIP_DDL = """
+ASSISTANT_LANE_OWNERSHIP_DDL = """
 CREATE TABLE IF NOT EXISTS v2_assistant_bart_lanes (
     target_stream_id TEXT NOT NULL,
     target_generation TEXT NOT NULL,

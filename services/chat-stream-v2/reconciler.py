@@ -420,7 +420,7 @@ class SessionReconciler:
         )
         if marked is None:
             # A protected seat is preserved, not closed.  A recovery owner (Daff
-            # only) may respawn it; Bart's preserve path is unchanged because its
+            # only) may respawn it; the primary's preserve path is unchanged because its
             # callback declines a non-Daff row.
             callback = getattr(self, "on_protected_dead", None)
             if callback is not None:

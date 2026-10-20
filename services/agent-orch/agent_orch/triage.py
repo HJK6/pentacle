@@ -93,11 +93,14 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 def _uses_memory_command(root: Path) -> bool:
     """Only the configured shared tree uses its publisher command.
 
-    Standalone work folders and the publisher's isolated extraction keep the
-    existing local state machine. No host or endpoint is embedded here.
+    The tree is agent-orch's configured memory repo (AGENT_ORCH_MEMORY_REPO or
+    memory_repo_path). Standalone work folders and the publisher's isolated
+    extraction keep the existing local state machine. No host or endpoint is embedded here.
     """
-    configured = Path.home() / "agent-workspace" / "triforce-memory"
-    return root.resolve() == configured.resolve() and (configured / "scripts/memory_client.py").is_file()
+    from .config import load_config
+    configured = load_config().memory_repo_path
+    return (configured is not None and root.resolve() == configured.resolve()
+            and (configured / "scripts/memory_client.py").is_file())
 
 
 def _memory_call(root: Path, request: dict[str, Any]) -> dict[str, Any]:

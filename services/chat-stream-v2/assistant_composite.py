@@ -22,6 +22,8 @@ import traceback
 import uuid
 from typing import Any, Awaitable, Callable, Protocol
 
+from v2_runtime import primary_assistant_name
+
 from assistant_router import AssistantRouterProcessError
 import voice_answers as voice_answers_v1
 from send_metadata import voice_context_from_route, voice_context_dispatch_block
@@ -92,7 +94,7 @@ class AssistantCompositeConfig:
     """Portable daemon configuration.  Feature remains off unless enabled."""
 
     enabled: bool = False
-    name: str = "bart"
+    name: str = primary_assistant_name()
     stream_id: str = ""
     router_endpoint: str = DEFAULT_ROUTER_ENDPOINT
     router_timeout_s: float = DEFAULT_ROUTER_TIMEOUT_S
@@ -112,15 +114,16 @@ class AssistantCompositeConfig:
 
     @classmethod
     def from_env(
-        cls, env: dict[str, str] | None = None, *, name: str = "bart", env_prefix: str = "",
+        cls, env: dict[str, str] | None = None, *, name: str | None = None, env_prefix: str = "",
     ) -> "AssistantCompositeConfig":
         """Build one named assistant's config from the environment.
 
         ``env_prefix`` is inserted after ``PENTACLE_ASSISTANT_`` so a second
         assistant reads its own key namespace (e.g. ``PENTACLE_ASSISTANT_DAFF_*``)
-        while ``bart`` keeps the existing unprefixed keys byte-identical.
+        while the primary assistant keeps the existing unprefixed keys byte-identical.
         """
         values = os.environ if env is None else env
+        name = name or primary_assistant_name(values)
         base = f"PENTACLE_ASSISTANT_{env_prefix}"
         def _k(suffix: str) -> str:
             return base + suffix
@@ -188,18 +191,18 @@ class AssistantCompositeConfig:
     @staticmethod
     def assistant_names() -> tuple[str, ...]:
         """The fixed set of assistants this daemon supports."""
-        return ("bart", "daff")
+        return (primary_assistant_name(), "daff")
 
     @classmethod
     def all_from_env(cls, env: dict[str, str] | None = None) -> "dict[str, AssistantCompositeConfig]":
         """Build the fixed name->config map.
 
-        ``bart`` reads the existing unprefixed keys (byte-identical to the
+        The primary assistant reads the existing unprefixed keys (byte-identical to the
         single-assistant daemon); ``daff`` reads ``PENTACLE_ASSISTANT_DAFF_*``
         and stays inert until those keys are configured.
         """
         return {
-            "bart": cls.from_env(env, name="bart", env_prefix=""),
+            primary_assistant_name(env): cls.from_env(env, name=primary_assistant_name(env), env_prefix=""),
             "daff": cls.from_env(env, name="daff", env_prefix="DAFF_"),
         }
 

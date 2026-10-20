@@ -47,6 +47,11 @@ RECOMMENDATIONS = {"no_change", "resolved", "duplicate", "future_work", "immedia
 MEMORY_TIMEOUT = 180
 
 
+def primary_name():
+    """The primary assistant's binding name (the daemon reads the same env)."""
+    return os.environ.get("PENTACLE_ASSISTANT_PRIMARY_NAME", "").strip() or "assistant"
+
+
 def encoded(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -102,7 +107,7 @@ class Settings:
     config_path: Path | None = None
     primary_store: Path | None = None
     primary_archive: Path | None = None
-    primary_composite: str = "bart:assistant"
+    primary_composite: str = ""
     self_assignment_exclusions: list[str] = field(default_factory=list)
     producers: list[str] = field(default_factory=lambda: ["sol"])
     usage_spec_id: str | None = None
@@ -142,7 +147,8 @@ class Settings:
                    bool(data.get("isolated")), path,
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
-                   data.get("primary_composite", cls.__dataclass_fields__["primary_composite"].default), exclusions, producers, usage_spec_id)
+                   data.get("primary_composite") or os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", ""),
+                   exclusions, producers, usage_spec_id)
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -333,7 +339,7 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                 return []
 
         bindings = query(conn, "binding", "name,stream_id,generation,revision,updated_at",
-                         "v2_assistant_direct_binding", "name='bart'")
+                         "v2_assistant_direct_binding", "name=?", (primary_name(),))
         roots = {r["stream_id"] for r in bindings if r["stream_id"] and aware(r["updated_at"]) <= cutoff}
         packet["binding"] = bindings
         rebinds = query(conn, "rebind_audit", "audit_id,outcome,created_at,"
@@ -351,9 +357,9 @@ def primary_evidence(settings, start, cutoff, *, max_rows=1000, max_bytes=24576)
                 else:
                     packet["gaps"].append({"source": "rebind:" + str(r["audit_id"]), "reason": prefix + " binding provenance incomplete"})
         packet["roots"] = sorted(roots)
-        packet["scope_limit"] = "Current/prior configured Bart roots and their retained descendants; no universal fleet or historical-state claim."
+        packet["scope_limit"] = "Current/prior configured assistant roots and their retained descendants; no universal fleet or historical-state claim."
         if not roots:
-            packet["gaps"].append({"source": "binding", "reason": "no scoped Bart root"})
+            packet["gaps"].append({"source": "binding", "reason": "no scoped assistant root"})
             return finalize_primary_evidence(packet, observations, max_bytes=max_bytes)
         placeholders = ",".join("?" for _ in roots)
         args = tuple(sorted(roots))
@@ -611,8 +617,10 @@ def collect(settings, stamp, *, max_sources=40, max_bytes=65536):
         start = datetime.combine(local.date() - timedelta(days=1), time(), ZONE)
         primary = primary_evidence(settings, start, stamp)
         if settings.primary_store:
-            original = "## Retro\nPrimary Bart receipts (metadata only)\n" + encoded(primary).decode()
-            identity = "primary:bart:" + run_id
+            if not settings.primary_composite:
+                raise ValueError("primary_composite required: set it in the retro config or PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID")
+            original = "## Retro\nPrimary assistant receipts (metadata only)\n" + encoded(primary).decode()
+            identity = f"primary:{primary_name()}:" + run_id
             sources = {identity: {"id": identity, "path": str(settings.primary_store), "status": "primary",
                 "intake": "primary", "terminal_date": local.date().isoformat(),
                 "fingerprint": digest(original), "original": original}, **sources}

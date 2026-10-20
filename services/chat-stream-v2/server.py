@@ -74,6 +74,7 @@ from store import STREAM_TOKEN_HASH_VERSION, role_source_for
 from machine_stats import validate_machine_stats
 from submission_events import COMMITTED_PENDING_PROOF_STATUSES
 from assistant_lane_rulings import AssistantLaneRulings
+from v2_runtime import primary_assistant_name
 
 log = logging.getLogger("chat_streamd_v2.server")
 
@@ -303,7 +304,7 @@ DOT_REQUIRES_TLS_CODE = "external_requires_tls"
 DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
 # Literal, case-sensitive peer alias for the same-named assistant composite's
 # current binding, recognized only by the tell/send entry branches (contract 3).
-ASSISTANT_ALIAS = "bart"
+ASSISTANT_ALIAS = primary_assistant_name()
 _ASSISTANT_ALIAS_TARGET_MEMBERS = ("stream_id", "host", "session_name")
 #: Deny-by-default verb allowlist for a stream-scoped credential (the Cosmo
 #: client).  Every other registered handler denies with `scope_denied`.  Outbound
@@ -679,8 +680,8 @@ class Server:
         self.comms = comms
         # Attached by main after the durable store is available.  Keeping it
         # optional makes old deployments and focused unit servers unchanged.
-        # ``assistant_composite`` is the primary (bart) alias; ``assistant_composites``
-        # is the fixed name->composite map (bart, daff).  Focused unit tests set
+        # ``assistant_composite`` is the primary assistant alias; ``assistant_composites``
+        # is the fixed name->composite map (primary and second assistant).  Focused unit tests set
         # only the single alias, so the resolver below falls back to it.
         self.assistant_composite: Any = None
         self.assistant_composites: dict[str, Any] = {}
@@ -3051,7 +3052,8 @@ class Server:
         composites = self.assistant_composites
         if composites:
             return composites
-        return {"bart": self.assistant_composite} if self.assistant_composite is not None else {}
+        return ({self.assistant_composite.config.name: self.assistant_composite}
+                if self.assistant_composite is not None else {})
 
     def _composite_for(self, stream_id: object) -> Any:
         """Return the named assistant composite that owns ``stream_id``, or None."""
@@ -3169,7 +3171,7 @@ class Server:
         # revoked Dot (loopback or not) is never dropped back onto the normal
         # fan-out. v1 (read OFF, the default): a Dot connection receives NO
         # broadcast frame at all — not even the projected inventory — so no
-        # subscription/push read path exists and Bart's reply frames
+        # subscription/push read path exists and the assistant's reply frames
         # (chat.event/peer delivery) never reach Dot. When the read toggle is on,
         # only the field-projected session inventory ever reaches it (never
         # chat.event/working.state/report/notification/schedule). A revoked Dot
@@ -4227,11 +4229,11 @@ class Server:
         composite = self._composite_for(stream_id)
         if composite is not None:
             if auth.get("dot_principal"):
-                # Attributed external handoff to the CURRENT Bart binding, not an
+                # Attributed external handoff to the CURRENT assistant binding, not an
                 # operator grant; bypasses the operator-only composite intake.
-                # `stream_id` is the stable composite id (e.g. bart:assistant),
+                # `stream_id` is the stable composite id (e.g. home:assistant),
                 # the only target identity Dot's ack is allowed to echo.
-                return await self._dot_send_to_bart(msg, auth, composite_stream_id=stream_id)
+                return await self._dot_send_to_assistant(msg, auth, composite_stream_id=stream_id)
             if auth.get("scoped_principal"):
                 # A scoped client (Cosmo) may send only into its own scope stream,
                 # with attachments it owns; its request id is recorded for receipts.
@@ -4293,7 +4295,7 @@ class Server:
         direct_msg = dict(msg)
         direct_msg.pop("_assistant_composite_backend_dispatch", None)
         # Routine backend-ingress suppression applies to a composite's hidden
-        # backend seats (bart's astra/luna); resolve the owning composite for the
+        # backend seats (the primary's astra/luna); resolve the owning composite for the
         # target.  A direct-primary assistant (daff) has no such backends.
         backend_composite = next(
             (c for c in self._composites().values()
@@ -4359,7 +4361,7 @@ class Server:
                 "update": "Request received; work started.",
             })
 
-    async def _dot_send_to_bart(
+    async def _dot_send_to_assistant(
         self, msg: dict[str, Any], auth: dict[str, Any], *, composite_stream_id: str,
     ) -> dict[str, Any]:
         """Deliver a Dot principal's message to the CURRENT assistant backend.
@@ -4368,13 +4370,13 @@ class Server:
         hardcoded seat), and delivered as an ordinary attributed peer `send`
         carrying the Dot's own `from_stream_id`, so the existing `[from <dot>]`
         envelope and token-verified provenance apply. It is NOT operator intake:
-        Bart receives it as an attributed external handoff and applies its normal
+        The assistant receives it as an attributed external handoff and applies its normal
         grant rules.
 
         v1 (parent ruling f4e6c3cf): the ack returned to Dot must disclose no
         fleet data. The resolved backend seat id (and its host/session_name) is
         live fleet binding state, so the ack echoes only the stable composite id
-        (`composite_stream_id`, e.g. bart:assistant) plus safe delivery status —
+        (`composite_stream_id`, e.g. home:assistant) plus safe delivery status —
         never the resolved backend seat/host/session_name.
         """
         composite = self._composite_for(composite_stream_id)

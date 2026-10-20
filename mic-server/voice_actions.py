@@ -187,7 +187,7 @@ class VoiceActions:
                 self._say(item, 'Please start again with the full request.')
                 return
         self._status(item, 'routed', route=route, latency_ms=round((time.monotonic()-start)*1000))
-        if route in ('spawn_agent', 'bart'):
+        if route in ('spawn_agent', 'assistant'):
             with self.listener.wake.lock:
                 if not self.valid(item):
                     return

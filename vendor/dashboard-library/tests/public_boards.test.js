@@ -363,7 +363,7 @@ test('filter controls are interactiveOnly (passive Pi wall hides search/dropdown
 });
 
 test('_matchesFilters matches on text query + facets', () => {
-  const item = { title: 'Login screen', repo: 'pentacle', machine: 'bart', tags: ['auth', 'mobile'] };
+  const item = { title: 'Login screen', repo: 'pentacle', machine: 'desk', tags: ['auth', 'mobile'] };
   assert.equal(ui._test._matchesFilters(item, { query: 'login' }), true);
   assert.equal(ui._test._matchesFilters(item, { query: 'logout' }), false);
   assert.equal(ui._test._matchesFilters(item, { repo: 'pentacle' }), true);
