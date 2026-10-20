@@ -132,8 +132,7 @@ Success response:
 ### Addressing the assistant by alias
 
 `tell` and `send` (only these two verbs) also accept one literal, case-sensitive
-alias: the name of the primary assistant composite (`PENTACLE_ASSISTANT_PRIMARY_NAME`, default `assistant`;
-resolved by `agent_orch.cli.assistant_alias()`). It means "that
+alias: the name of the primary assistant composite (set by `PENTACLE_ASSISTANT_PRIMARY_NAME`, default `assistant`). It means "that
 composite's current binding" and is for agent peers: a verified seat stream token and an explicit
 sender claim (`from_stream_id`, always sent by the CLI) naming the same seat are required. Operator-only
 callers receive `assistant_tell_unauthorized` / `assistant_send_unauthorized`, Dot and scoped clients keep their scope errors, and
