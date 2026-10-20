@@ -1353,8 +1353,18 @@ class WindowSchedule:
         ``fields`` is the complete template (create: the request; update: the
         stored template overlaid with the request). Returns the columns to store.
         """
+        if kind not in {"seat", "service"}:
+            raise VerbError("not_authorized", "recurring owner must be a seat or service actor")
         if msg.get("agent_orch_attestation") is not None or fields.get("initial_prompt_blob_sha"):
             raise VerbError("unsupported_configuration", "use an inline prompt")
+        if any(msg.get(key) for key in ("handoff", "handoff_from_stream_id")):
+            raise VerbError("unsupported_configuration", "recurring rules cannot hand off")
+        if msg.get("resume_session_id") is not None or msg.get("resume") is not None:
+            raise VerbError("resume_not_schedulable", "resume cannot be scheduled")
+        if msg.get("confirm_model_change"):
+            raise VerbError("handoff_only_flag", "confirm_model_change applies only to handoff")
+        if "idempotency_key" in msg:
+            raise VerbError("idempotency_key_not_schedulable", "recurring dispatch identity is rule-owned")
         prompt_text = fields.get("initial_prompt")
         if not isinstance(prompt_text, str) or not prompt_text.strip():
             raise VerbError("invalid_request", "initial_prompt is required")
@@ -1817,7 +1827,7 @@ class WindowSchedule:
         await self._broadcast_recurring("recurring_materialised", str(outcome["recurring_id"]))
 
     async def materialise_due_recurring(self, now: datetime | None = None) -> int:
-        """One pass over due active rules; returns how many were evaluated."""
+        """One pass over due active rules; returns how many were evaluated without raising."""
         if self.schema_health != "ok":
             return 0
         moment = now or datetime.now(timezone.utc)
@@ -1832,6 +1842,7 @@ class WindowSchedule:
 
         rules = await self.store.submit(due)
         parent = await self._assistant_parent() if any(mode == "assistant" for _, mode in rules) else None
+        failed = 0
         for recurring_id, _mode in rules:
             try:
                 outcome = await self.store.submit(lambda conn, rid=recurring_id: self._materialise_tx(
@@ -1842,8 +1853,9 @@ class WindowSchedule:
                 elif outcome["outcome"] == "missed":
                     await self._broadcast_recurring("recurring_missed", recurring_id)
             except Exception:
+                failed += 1
                 log.exception("recurring materialise failed recurring_id=%s", recurring_id)
-        return len(rules)
+        return len(rules) - failed
 
     async def run_forever(self) -> None:
         await self.recover()

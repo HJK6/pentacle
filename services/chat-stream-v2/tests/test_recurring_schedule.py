@@ -489,3 +489,36 @@ def test_create_replays_by_request_id_and_refuses_blob_prompts(tmp_path) -> None
         assert exc.value.code == "unsupported_configuration"
     finally:
         store.stop()
+
+
+@pytest.mark.parametrize("extra, code", [
+    ({"handoff": True}, "unsupported_configuration"),
+    ({"resume_session_id": "abc"}, "resume_not_schedulable"),
+    ({"confirm_model_change": True}, "handoff_only_flag"),
+    ({"idempotency_key": "k"}, "idempotency_key_not_schedulable"),
+])
+def test_create_refuses_the_one_shot_only_spawn_flags(tmp_path, extra, code) -> None:
+    store, _s, _c, spawn, surface = harness(tmp_path)
+    try:
+        with pytest.raises(VerbError) as exc:
+            create_rule(surface, **extra)
+        assert exc.value.code == code
+        assert spawn.admissions == []
+    finally:
+        store.stop()
+
+
+def test_failing_rules_do_not_count_as_evaluated_so_recover_terminates(tmp_path, monkeypatch) -> None:
+    store, _s, _c, _spawn, surface = harness(tmp_path)
+    try:
+        rid = create_rule(surface)["recurring_id"]
+        force_next(store, rid, iso(datetime.now(UTC) - timedelta(minutes=1)))
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("tz data gone")
+
+        monkeypatch.setattr(surface, "_materialise_tx", boom)
+        assert run(surface.materialise_due_recurring()) == 0
+        run(surface.recover())  # returns instead of re-running the failing pass forever
+    finally:
+        store.stop()
