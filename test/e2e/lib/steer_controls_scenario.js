@@ -71,8 +71,8 @@ async function agentChatSteerControls(ctx) {
   await waitFor(ctx, `!!document.querySelector(${json('#' + cell + ' .slot-chat-compose-send')})`, 'composite composer');
   await session.eval(`window.PentacleChatStore.sendTurn(${json(composite)}, 'working probe'), true`);
   await cdp.sleep(500);
-  const bart = await session.eval(probe(cell));
-  report.ok('the composite chat shows neither the mode control nor Stop', bart.compose && !bart.mode && !bart.stop, bart);
+  const compositeProbe = await session.eval(probe(cell));
+  report.ok('the composite chat shows neither the mode control nor Stop', compositeProbe.compose && !compositeProbe.mode && !compositeProbe.stop, compositeProbe);
 
   await controlsJourney(ctx, agent);
 
