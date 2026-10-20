@@ -75,7 +75,7 @@ def test_pinned_literal_and_printf_shape_preserved():
 def test_no_hardcoded_personal_paths():
     text = SHIM.read_text()
     # Host/personal values must be configured, not defaulted into source.
-    assert "/barti" "maeus/" not in text  # assembled so the private path is not a literal here
+    assert "/Users/" not in text and "/home/" not in text
     assert "PENTACLE_AUTH_SSM_PARAMETER" in text  # SSM param is configuration
 
 

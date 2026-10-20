@@ -28,7 +28,8 @@ printf '%s' 'The task is finished. The details are in chat.' |
 `--text` also accepts literal text; callers must quote it as shell data. The
 helper reads the loaded limits from localhost `GET /status` and sends JSON directly to `POST /speak`; it never invokes a shell
 with the text. `PENTACLE_SPEAK_URL` can select another loopback HTTP port for a test
-service. Remote destinations, proxies and redirects are refused. The helper
+service. The mic server names the helper to agents as `assistant-say`; set
+`PENTACLE_SPEAK_HELPER` in its environment if the helper is installed under another name. Remote destinations, proxies and redirects are refused. The helper
 prints JSON with `outcome` (`spoken`, `suppressed`, `refused`) and a reason for
 non-spoken results. Refusal is nonfatal. The synchronous receipt allows the
 speaker's thirty-second operation deadline plus five seconds for transport;

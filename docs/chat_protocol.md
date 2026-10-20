@@ -89,7 +89,8 @@ household store. The daemon keeps no household state, cache or broadcast.
   are private to the operator.
 - **Neutral vocabulary.** No household member's name or assistant identity crosses the wire. Rows are
   translated viewer-relatively: `who` `self` / `partner` / `both`; `scope` `private` / `shared`;
-  `created_by` `assistant` (the operator's assistant), `app`, or `partner_assistant`. The operator's
+  `created_by` `assistant` (the operator's assistant), `app`, or `partner_assistant`. Cosmo rows whose
+  `created_by` equals `PENTACLE_COSMO_ASSISTANT_AUTHOR` (default `assistant`) map to `assistant`. The operator's
   Cosmo person value comes from `PENTACLE_COSMO_SELF` (required) and the snapshot's
   `people.partner` display name from `PENTACLE_HOUSEHOLD_PARTNER_NAME` (default `Partner`, max 40).
 - **Verbs** (each accepts exactly the listed fields; anything else is `invalid_request`):
