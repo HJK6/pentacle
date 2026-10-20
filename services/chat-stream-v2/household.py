@@ -63,7 +63,7 @@ PARTNER_NAME_ENV = "PENTACLE_HOUSEHOLD_PARTNER_NAME"
 COSMO_PARTNER_WHO = "me"
 COSMO_BOTH_WHO = "both"
 #: Cosmo `created_by` of the operator's assistant and of a person's own app.
-COSMO_ASSISTANT = "bart"
+COSMO_ASSISTANT = os.environ.get("PENTACLE_COSMO_ASSISTANT_AUTHOR", "").strip() or "assistant"
 COSMO_APP = "app"
 WHO = ("self", "partner", "both")
 CHICAGO = ZoneInfo("America/Chicago")

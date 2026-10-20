@@ -33,6 +33,7 @@ from pathlib import Path
 from alerts import Alerts
 from loop_watchdog import LoopWatchdog
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+from v2_runtime import primary_assistant_name
 from assistant_router import AssistantRouterAdapter
 import launch
 from assets import DEFAULT_ASSETS_DB, DEFAULT_DASHBOARD_CATALOG_SPEC_ID, Assets
@@ -88,8 +89,8 @@ log = logging.getLogger("chat_streamd_v2")
 def _wire_cosmo_reply_push(assistant_composites: dict, push_reply) -> None:
     """Wire the Cosmo reply-push hook to the Daff composite ONLY.
 
-    Bart must never push to the Cosmo audience (a bart-scoped token would
-    otherwise receive Bart reply text), so Bart's composite gets NO hook and its
+    The primary assistant must never push to the Cosmo audience (a primary-scoped token would
+    otherwise receive primary reply text), so the primary composite gets NO hook and its
     publish never invokes push.  Deny-by-default: any non-Daff composite is left
     without a reply-push hook.
     """
@@ -324,7 +325,7 @@ async def run(args: argparse.Namespace) -> int:
         spawnctl=spawnctl, comms=comms, local_host=args.local_host, binds=binds,
         hosts=hosts,
     )
-    # Fixed two-assistant map (bart, daff).  bart reads the existing unprefixed
+    # Fixed two-assistant map.  The primary reads the existing unprefixed
     # env keys byte-identically; daff reads PENTACLE_ASSISTANT_DAFF_* and stays
     # inert until configured.
     assistant_configs = AssistantCompositeConfig.all_from_env()
@@ -476,11 +477,11 @@ async def run(args: argparse.Namespace) -> int:
             voice_answers_validate=_validate_voice_answers,
         )
     server.assistant_composites = assistant_composites
-    # Primary (bart) alias: existing single-composite call sites (notify binding,
+    # Primary alias: existing single-composite call sites (notify binding,
     # backend routing-integrity, watch-wake root, handler resolution fallbacks)
-    # keep referring to bart byte-identically.
-    assistant_composite = assistant_composites["bart"]
-    assistant_config = assistant_configs["bart"]
+    # keep referring to the primary byte-identically.
+    assistant_composite = assistant_composites[primary_assistant_name()]
+    assistant_config = assistant_configs[primary_assistant_name()]
     server.assistant_composite = assistant_composite
 
     async def _assistant_ingress_policy(*, target_stream_id, body, msg, verb):
@@ -505,9 +506,9 @@ async def run(args: argparse.Namespace) -> int:
     comms.front_desk_digest = assistant_composite.front_desk_digest
     outbound.front_desk_digest = assistant_composite.front_desk_digest
     # Cosmo reply push: one Expo push to the scoped CosmoPushTokens audience when
-    # a DAFF reply commits.  Wired to the Daff composite ONLY — Bart must never
-    # push to the Cosmo audience (a bart-scoped token would otherwise receive
-    # Bart reply text), so Bart's publish never invokes the hook at all.
+    # a DAFF reply commits.  Wired to the Daff composite ONLY — the primary must never
+    # push to the Cosmo audience (a primary-scoped token would otherwise receive
+    # primary reply text), so the primary's publish never invokes the hook at all.
     from cosmo_push import CosmoPush
     import uiverbs as _uiverbs_mod
 
@@ -748,24 +749,24 @@ async def run(args: argparse.Namespace) -> int:
     )
     server.reconciler = reconciler
 
-    # Daff seat recovery: daemon-owned respawn of the Daff assistant only.  Bart
+    # Daff seat recovery: daemon-owned respawn of the Daff assistant only.  The primary
     # is never recovered (the hook declines non-Daff rows).  Enabled only when
     # the daff composite is configured.
     if assistant_composites.get("daff") is not None and assistant_composites["daff"].config.enabled:
         import uuid as _uuid
         from recovery import DaffRecovery
 
-        async def _tell_bart_degraded(text: str) -> None:
-            bart = assistant_composites.get("bart")
-            if bart is None:
+        async def _tell_primary_degraded(text: str) -> None:
+            primary = assistant_composites.get(primary_assistant_name())
+            if primary is None:
                 return
             tell_id = f"daff-degraded-{_uuid.uuid4().hex}"
             delivered = await server._deliver_composite_tell(
-                bart, bart.config.stream_id, "daemon:recovery", text, tell_id, "",
+                primary, primary.config.stream_id, "daemon:recovery", text, tell_id, "",
             )
             if delivered is None:
                 await store.enqueue_composite_tell(
-                    name=bart.config.name, tell_id=tell_id,
+                    name=primary.config.name, tell_id=tell_id,
                     from_stream_id="daemon:recovery", body=text, request_id="",
                 )
 
@@ -773,7 +774,7 @@ async def run(args: argparse.Namespace) -> int:
             sessions=sessions, spawnctl=spawnctl, store=store, local_host=args.local_host,
             composites=lambda: assistant_composites,
             flush_composite_tells=server._flush_composite_tells,
-            tell_bart=_tell_bart_degraded,
+            tell_primary=_tell_primary_degraded,
             startup_prompt=os.environ.get("PENTACLE_ASSISTANT_DAFF_STARTUP_PROMPT", "")
             or "You are Daff, the operator's always-on assistant. Read your startup context and resume.",
         )

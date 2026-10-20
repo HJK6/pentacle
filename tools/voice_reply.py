@@ -22,7 +22,7 @@ def submit_line(conversation_id, kind, text, action=None, final=False, endpoint=
         return {"outcome": "refused", "reason": "invalid_kind"}
     if final and expects_answer:
         return {"outcome": "refused", "reason": "final_and_expects_answer"}
-    base = endpoint or os.environ.get("BART_SPEAK_URL", "http://127.0.0.1:7780")
+    base = endpoint or os.environ.get("PENTACLE_SPEAK_URL", "http://127.0.0.1:7780")
     try:
         url = urllib.parse.urlsplit(base)
         if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1", "localhost"} or url.username or url.password or url.query or url.fragment or url.path not in {"", "/"}:

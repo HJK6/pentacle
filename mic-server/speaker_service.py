@@ -143,7 +143,7 @@ class SpeakerService:
 
     def _other_window_open(self, cid):
         # True when a conversation OTHER than cid already holds a live answer window
-        # (one Bart answer window service-wide at a time).
+        # (one assistant answer window service-wide at a time).
         for other_cid, item in self.conversations.items():
             if other_cid == cid:
                 continue
@@ -214,7 +214,8 @@ class SpeakerService:
 
     def contract(self, cid=None):
         limits = self.rules.snapshot()['replies']
-        return dict(helper=f"bart-say --conversation-id {cid or '<conversation_id>'} --kind reply --text <literal-line>",
+        helper = os.environ.get("PENTACLE_SPEAK_HELPER", "").strip() or "assistant-say"
+        return dict(helper=f"{helper} --conversation-id {cid or '<conversation_id>'} --kind reply --text <literal-line>",
                     **{key:limits[key] for key in ('sentences_per_line','words_per_line','characters_per_line')})
 
     def _suppressed(self, output, meeting, rules):
@@ -335,7 +336,7 @@ class SpeakerService:
                     item['closed'] = 'closed_conversation'
                 elif expects_answer and result['outcome'] == 'spoken':
                     if self._other_window_open(item['cid']):
-                        # One Bart answer window service-wide at a time; the second is refused.
+                        # One assistant answer window service-wide at a time; the second is refused.
                         window_refused = 'answer_window_busy'
                         if reached:
                             item['closed'] = 'exhausted_conversation'
@@ -427,7 +428,7 @@ class SpeakerService:
         return None
 
     def answer_captured(self, meeting=False):
-        """The operator answered an open Bart question without the wake word.
+        """The operator answered an open assistant question without the wake word.
 
         Returns delivery metadata (conversation_id + answer_to=line_id) for the wake
         claim, acknowledges on the same conversation as any routed request, resets the
@@ -472,7 +473,7 @@ class SpeakerService:
             return True
 
     def has_open_window(self):
-        # One Bart answer window at a time, and never overlapping a local-action window.
+        # One assistant answer window at a time, and never overlapping a local-action window.
         with self.lock:
             for item in self.conversations.values():
                 self._maybe_expire_window(item)
@@ -481,7 +482,7 @@ class SpeakerService:
             return False
 
     def answer_window_status(self):
-        # Surfaced to /status and the mic panel: whether the microphone is waiting for an answer to Bart.
+        # Surfaced to /status and the mic panel: whether the microphone is waiting for an answer to the assistant.
         with self.lock:
             for cid in reversed(self.conversations):
                 item = self.conversations[cid]

@@ -5,7 +5,7 @@
 //   1. Requests microphone permission via AVCaptureDevice (triggers macOS
 //      prompt on first launch; cached afterwards in TCC.db).
 //   2. Execs the Python mic_server.py via posix_spawn so the python child
-//      inherits this binary's TCC responsibility (com.bartimaeus.mic-server).
+//      inherits this binary's TCC responsibility (its bundle identifier).
 //
 // Build:
 //   swiftc -O -target arm64-apple-macos11 -o mic-server-launcher MicServerLauncher.swift

@@ -19,7 +19,7 @@ class AssistantPolicy:
         self.role = os.environ.get("PENTACLE_ASSISTANT_ROLE", "").strip()
         if self.role and (len(self.role) > 40 or not re.fullmatch(r"[a-z0-9_-]+", self.role)):
             raise ValueError("PENTACLE_ASSISTANT_ROLE must be a short role slug")
-        # A second protected assistant (daff) may run beside the primary (bart).
+        # A second protected assistant may run beside the primary.
         # Its role slug is a separate opt-in key; it is preserved-on-death and
         # close-guarded exactly like the primary, but confers no fleet lifecycle
         # authority (that is governed solely by store_lifecycle_authority).  The
@@ -56,7 +56,7 @@ class AssistantPolicy:
         return bool(auth.get("operator_authenticated") or auth.get("service_authenticated"))
 
     async def available(self, host, role=None, *, excluding="", predecessor=""):
-        # Singleton is enforced per protected role, so bart and daff are each
+        # Singleton is enforced per protected role, so the two assistants are each
         # their own singleton and never block the other.
         role = role or self.role
         if host != self.local_host:

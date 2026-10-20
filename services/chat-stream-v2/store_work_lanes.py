@@ -236,7 +236,7 @@ def _session_conn(conn: sqlite3.Connection, stream_id: str) -> dict[str, Any] | 
 
 
 def _protected(row: dict[str, Any] | None) -> bool:
-    """``AssistantPolicy.protects(row)`` for every configured assistant (bart and daff)."""
+    """``AssistantPolicy.protects(row)`` for every configured assistant."""
     return AssistantPolicy(None, "").protects(row)
 
 

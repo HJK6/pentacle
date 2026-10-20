@@ -3565,7 +3565,7 @@
         container, header, traderSelect, ageEl, botEl, hostEl, banner,
         totalPnlVal, unrealizedVal, realizedVal, filledVal, tpVal, slVal, circuitVal,
         scanTitle, scanList, posTableWrap, footer,
-        selectedTrader: (_ls() && _ls().getItem(_LS_KEY)) || 'bart',
+        selectedTrader: (_ls() && _ls().getItem(_LS_KEY)) || '',
         knownTraders: [],
         lastSnapshotTs: 0,
       };

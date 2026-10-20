@@ -14,7 +14,7 @@ import time
 
 from message_envelopes import build_message_envelope
 from store_routing import _insert_outbound_notice_conn
-from v2_runtime import env_number, iso_now
+from v2_runtime import env_number, iso_now, primary_assistant_name
 
 log = logging.getLogger('chat_streamd_v2.front_desk_digest')
 HELD_KIND = 'front_desk_held'
@@ -46,7 +46,7 @@ class FrontDeskDigest:
 
     def binding(self):
         cfg = self.config()
-        if cfg.enabled and cfg.name == 'bart' and cfg.direct_primary:
+        if cfg.enabled and cfg.name == primary_assistant_name() and cfg.direct_primary:
             return cfg.direct_primary_stream_id, cfg.direct_primary_generation
         return None
 

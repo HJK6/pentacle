@@ -10,11 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_COMPOSITE = "bart:assistant"
+DEFAULT_COMPOSITE = os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", "").strip()
 CONFIRM_ACTIONS = ("set_state:done", "set_owner:fd", "lane.close", "lane.decision:cancel")
 
 
@@ -330,7 +331,8 @@ def add_parser(subparsers: Any) -> None:
     p.set_defaults(func=cmd_estimate_preview)
 
     def common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--composite-stream-id", default=DEFAULT_COMPOSITE)
+        p.add_argument("--composite-stream-id", default=DEFAULT_COMPOSITE or None, required=not DEFAULT_COMPOSITE,
+                       help="assistant composite stream id (default: PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID)")
         p.add_argument("--timeout", type=float, default=30.0)
 
     def mutator(name: str, help_text: str) -> argparse.ArgumentParser:

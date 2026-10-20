@@ -1,7 +1,7 @@
 """Daff seat recovery (E): a single daemon-owned owner that respawns the Daff
 assistant when its bound pane dies, rebinds, and replays queued input.
 
-Bart is never recovered here — the hook declines any non-Daff row, and Bart's
+The primary assistant is never recovered here — the hook declines any non-Daff row, and its
 preserve-and-do-not-spawn path in the reconciler/sessions is untouched.
 
 Continuity note: recovery uses a handoff spawn, which supersedes a plain Claude
@@ -33,7 +33,7 @@ class DaffRecovery:
         local_host: str,
         composites: Callable[[], dict[str, Any]],
         flush_composite_tells: Callable[[Any], Awaitable[int]],
-        tell_bart: Callable[[str], Awaitable[None]],
+        tell_primary: Callable[[str], Awaitable[None]],
         startup_prompt: str,
         model: str = "claude-opus-5-5",
         effort: str = "high",
@@ -45,7 +45,7 @@ class DaffRecovery:
         self.local_host = local_host
         self._composites = composites
         self._flush = flush_composite_tells
-        self._tell_bart = tell_bart
+        self._tell_primary = tell_primary
         self.startup_prompt = startup_prompt
         self.model = model
         self.effort = effort
@@ -152,7 +152,7 @@ class DaffRecovery:
                     log.info("daff recovery succeeded predecessor=%s new=%s", predecessor, new_sid)
                     return True
                 log.warning("daff recovery attempt %d failed code=%s", index, resp.get("error_code"))
-        # Exhausted: degrade and notify Bart exactly once.
+        # Exhausted: degrade and notify the primary assistant exactly once.
         try:
             await self.sessions.set_status_card(
                 row["host"], row["session_name"],
@@ -160,7 +160,7 @@ class DaffRecovery:
             )
         except Exception:  # noqa: BLE001 - the degraded tell still goes out
             log.exception("daff degraded status card failed")
-        await self._tell_bart(
+        await self._tell_primary(
             "daff:assistant is degraded: automatic recovery failed after 3 retries; "
             "manual attention needed.",
         )
