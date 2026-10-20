@@ -15,6 +15,9 @@ const {
   projectScheduleRow,
   projectScheduleInventory,
   scheduleLifecycleEventType,
+  RECURRING_EDIT_FIELDS,
+  projectRecurringRow,
+  projectRecurringInventory,
 } = require('./schedule_projection');
 
 const OPERATOR_AUTH_V2_PREFIX = 'pentacle-auth-v2:';
@@ -153,6 +156,7 @@ class ChatStreamClient {
     this._capabilities = {};
     this._hostedDashboardPolicy = null;
     this._schedules = [];
+    this._recurring = [];
     this._limits = nullLimits();
     this._limitsHealth = null;
     this._hostsStats = {};
@@ -219,6 +223,7 @@ class ChatStreamClient {
         && !Object.hasOwn(session, 'status') ? { ...session, status: 'open' } : session),
       capabilities: { ...this._capabilities },
       schedules: this._schedules.slice(),
+      recurring: this._recurring.slice(),
       limits: validatedLimits(this._limits),
       limits_health: this._limitsHealth,
       hosts_stats: { ...this._hostsStats },
@@ -796,6 +801,29 @@ try {
     return this._projectScheduleReply(reply);
   }
 
+  // Recurring rules: the app may pause, resume and edit (create, run and delete stay CLI-only).
+  async _recurringCommand(verb, recurringId, fields = {}) {
+    const reply = await this.sendCommand({
+      type: `schedule.recurring.${verb}`, recurring_id: String(recurringId || ''), ...fields,
+    }, 'schedule', { requestId: crypto.randomUUID() });
+    const recurring = projectRecurringRow(reply?.recurring);
+    return recurring ? { ...reply, recurring } : reply;
+  }
+
+  recurringGet(recurringId) { return this._recurringCommand('get', recurringId); }
+
+  recurringPause(recurringId) { return this._recurringCommand('pause', recurringId); }
+
+  recurringResume(recurringId) { return this._recurringCommand('resume', recurringId); }
+
+  recurringUpdate(recurringId, fields) {
+    const allowed = {};
+    for (const key of RECURRING_EDIT_FIELDS) {
+      if (fields && fields[key] !== undefined && fields[key] !== null) allowed[key] = fields[key];
+    }
+    return this._recurringCommand('update', recurringId, allowed);
+  }
+
   closeSession({ host, sessionName, operatorConfirm, operator_confirm, force }) {
     const payload = { type: 'close', host, session_name: sessionName };
     // operator_confirm must be opt-in from the caller, not defaulted here —
@@ -1166,6 +1194,17 @@ try {
     this._forwardFrame(event);
   }
 
+  _applyRecurringLifecycle(msg) {
+    const rule = projectRecurringRow(msg.recurring);
+    if (!rule) return;
+    this._recurring = msg.event === 'recurring_deleted'
+      ? this._recurring.filter((row) => row.recurring_id !== rule.recurring_id)
+      : projectRecurringInventory([
+        ...this._recurring.filter((row) => row.recurring_id !== rule.recurring_id), rule,
+      ]);
+    this._forwardFrame({ type: 'recurring.inventory', recurring: this._recurring.slice() });
+  }
+
   _applyScheduleLifecycle(msg) {
     const raw = msg?.schedule && typeof msg.schedule === 'object'
       ? msg.schedule
@@ -1426,6 +1465,7 @@ try {
         this._hostedDashboardPolicy = msg.hostedDashboardPolicy || null;
         this._workLanes = msg.work_lanes && typeof msg.work_lanes === 'object' ? msg.work_lanes : null;
         this._replaceSchedules(msg.schedules);
+        this._recurring = projectRecurringInventory(msg.recurring);
         if (Object.prototype.hasOwnProperty.call(msg, 'limits')) {
           const limits = validatedLimits(msg.limits);
           if (limits) {
@@ -1441,6 +1481,7 @@ try {
           connected: true,
           events: this._events,
           schedules: this._schedules,
+          recurring: this._recurring,
         });
         this._flushHandshakeLimitsUpdate();
       } else if (msg.type === 'limits.update') {
@@ -1460,6 +1501,8 @@ try {
       } else if (msg.type === 'schedule.inventory' && Array.isArray(msg.schedules)) {
         this._replaceSchedules(msg.schedules);
         this._forwardFrame({ type: 'schedule.inventory', schedules: this._schedules.slice() });
+      } else if (msg.type === 'schedule.lifecycle' && msg.recurring && typeof msg.recurring === 'object') {
+        this._applyRecurringLifecycle(msg);
       } else if (msg.type === 'schedule.lifecycle') {
         this._applyScheduleLifecycle(msg);
       } else if (typeof msg.type === 'string' && msg.type.startsWith('schedule_')) {

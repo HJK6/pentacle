@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+from datetime import datetime, timedelta, timezone
 import json
 import hashlib
 import os
@@ -34,12 +36,74 @@ sys.path.insert(0, os.path.dirname(_SERVICE_DIR))
 
 from store import Store  # noqa: E402
 from ingest import _identity_key  # noqa: E402
+import recurrence  # noqa: E402
 
 # A fixed, human-readable transcript so assertions can match exact strings.
 TRANSCRIPT = [
     ("USER", "hello from the web gate fixture"),
     ("ASSIST_TEXT", "fixture assistant reply for the web gate"),
 ]
+
+
+SCHEDULE_FIXTURE = {
+    "recurring_id": "5ced0000-0000-4000-8000-000000000001",
+    "name": "Gate nightly retro",
+    "oneshot_id": "sched-web-gate-oneshot",
+    "oneshot_prompt": "web gate one-shot reminder",
+}
+_SPEC = "spec_gate__scheduled_section"
+_PROVENANCE = json.dumps([{"spec_id": _SPEC, "provenance": "spawn_explicit",
+                           "granting_principal": "operator", "granted_at": "2026-10-20T00:00:00Z"}])
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+async def seed_schedules(store: Store) -> None:
+    """One active weekly rule and one pending one-shot, both days from firing.
+
+    The weekly day is today + 3 in the rule's zone, so the scenario's pause,
+    resume and time edit can never put an occurrence inside the run.
+    """
+    now = datetime.now(timezone.utc)
+    zone = recurrence.zone("America/Chicago")
+    day = recurrence.DAYS[(now.astimezone(zone).weekday() + 3) % 7]
+    rule = {"every": "weekly", "at_time": "02:00", "days": [day], "tz": "America/Chicago"}
+    timestamp = _iso(now)
+    prompt = b"web gate seeded rule"
+    template = dict(
+        target_host="local", requested_provider="claude", requested_model="", requested_effort="",
+        resolved_provider="claude", resolved_model="claude-sonnet-5-5", resolved_effort="high",
+        prompt_sha256=hashlib.sha256(prompt).hexdigest(), prompt_b64=base64.b64encode(prompt).decode(),
+        owner_spec_ids_json=json.dumps([_SPEC]), owner_spec_provenance_json=_PROVENANCE,
+        objective="web gate fixture", objective_source="explicit", created_at=timestamp, updated_at=timestamp,
+    )
+
+    def write(conn) -> None:
+        rule_row = dict(
+            recurring_id=SCHEDULE_FIXTURE["recurring_id"], name=SCHEDULE_FIXTURE["name"], state="active",
+            recurrence_json=json.dumps(rule), next_fire_at_utc=_iso(recurrence.next_occurrence(rule, now)),
+            parent_mode="none", generation=1, **template,
+        )
+        conn.execute(
+            f"INSERT INTO v2_recurring_schedules ({','.join(rule_row)}) VALUES ({','.join('?' for _ in rule_row)})",
+            tuple(rule_row.values()),
+        )
+        shot = dict(
+            schedule_id=SCHEDULE_FIXTURE["oneshot_id"], request_id="5ced0000-0000-4000-8000-0000000000a1",
+            owner_service_actor="recurring", fires_at_utc=_iso(now + timedelta(days=30)),
+            state="pending", generation=1, **template,
+        )
+        shot["prompt_b64"] = base64.b64encode(SCHEDULE_FIXTURE["oneshot_prompt"].encode()).decode()
+        shot["prompt_sha256"] = hashlib.sha256(SCHEDULE_FIXTURE["oneshot_prompt"].encode()).hexdigest()
+        conn.execute(
+            f"INSERT INTO v2_schedules ({','.join(shot)}) VALUES ({','.join('?' for _ in shot)})",
+            tuple(shot.values()),
+        )
+        conn.commit()
+
+    await store.submit(write)
 
 
 def _event(stream_id: str, kind: str, text: str, index: int) -> dict:
@@ -103,6 +167,8 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
             )
             if result:
                 appended += 1
+        if session == 'web-gate-1':
+            await seed_schedules(store)
         if blob_root and session == 'web-gate-1':
             fixtures = [
                 ('web-gate-file.pdf', 'application/pdf', b'%PDF synthetic web download', True),

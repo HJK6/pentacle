@@ -41,6 +41,35 @@ function registerScheduleIpcHandlers(ipcMain, chatStreamClient, normalizeError =
       return { ok: false, error: normalizeError(error) };
     }
   });
+  ipcMain.handle('chat-stream:recurring-get', async (_, recurringId) => {
+    try {
+      return { ok: true, ...(await chatStreamClient.recurringGet(recurringId)) };
+    } catch (error) {
+      return { ok: false, error: normalizeError(error) };
+    }
+  });
+  ipcMain.handle('chat-stream:recurring-pause', async (_, recurringId) => {
+    try {
+      return { ok: true, ...(await chatStreamClient.recurringPause(recurringId)) };
+    } catch (error) {
+      return { ok: false, error: normalizeError(error) };
+    }
+  });
+  ipcMain.handle('chat-stream:recurring-resume', async (_, recurringId) => {
+    try {
+      return { ok: true, ...(await chatStreamClient.recurringResume(recurringId)) };
+    } catch (error) {
+      return { ok: false, error: normalizeError(error) };
+    }
+  });
+  ipcMain.handle('chat-stream:recurring-update', async (_, args) => {
+    const { recurringId, fields } = args || {};
+    try {
+      return { ok: true, ...(await chatStreamClient.recurringUpdate(recurringId, fields)) };
+    } catch (error) {
+      return { ok: false, error: normalizeError(error) };
+    }
+  });
 }
 
 module.exports = {

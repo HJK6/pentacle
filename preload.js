@@ -166,6 +166,10 @@ window.cc = {
     scheduleId,
     firesAtUtc: options && typeof options === 'object' ? options.at : options,
   }),
+  recurringGet: (recurringId) => ipcRenderer.invoke('chat-stream:recurring-get', recurringId),
+  recurringPause: (recurringId) => ipcRenderer.invoke('chat-stream:recurring-pause', recurringId),
+  recurringResume: (recurringId) => ipcRenderer.invoke('chat-stream:recurring-resume', recurringId),
+  recurringUpdate: (recurringId, fields) => ipcRenderer.invoke('chat-stream:recurring-update', { recurringId, fields }),
   // Notifications subsystem (Notifications dashboard talks to chat_streamd via these)
   promptList: (args) => ipcRenderer.invoke('chat-stream:prompt-list', args || null),
   notificationList: (args) => ipcRenderer.invoke('chat-stream:notification-list', args || null),

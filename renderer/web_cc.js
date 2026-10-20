@@ -406,6 +406,10 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
       scheduleId,
       firesAtUtc: options && typeof options === 'object' ? options.at : options,
     }),
+    recurringGet: (recurringId) => call('chat-stream:recurring-get', recurringId),
+    recurringPause: (recurringId) => call('chat-stream:recurring-pause', recurringId),
+    recurringResume: (recurringId) => call('chat-stream:recurring-resume', recurringId),
+    recurringUpdate: (recurringId, fields) => call('chat-stream:recurring-update', { recurringId, fields }),
 
     promptList: (args) => call('chat-stream:prompt-list', args || null),
     notificationList: (args) => call('chat-stream:notification-list', args || null),

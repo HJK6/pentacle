@@ -109,6 +109,11 @@ reconnect and answered-state reload. Free-text questions send `text` with the
 shows its labeled textarea immediately. Actual asking-seat delivery still needs
 a live fixture journey; this provider-free gate asserts durable resolution.
 
+The **scheduled-section** scenario reads the seeded recurring rule (weekly, days from
+firing, in America/Chicago) and one pending one-shot from the sidebar Scheduled section,
+then clicks Pause, Resume and Edit (a new `at_time`) and reads each result back from the
+daemon with `schedule.recurring.get`, including the re-armed `next_fire_at_utc`.
+
 The **slot-column-split** scenario drives both row dividers and checks independent
 30/70 and 65/35 widths, true reload persistence, legacy preference migration,
 row-specific mouse/touch/keyboard reset, cancellation and measured width limits.

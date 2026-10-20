@@ -80,6 +80,11 @@ const {
   replaceSchedulesFromInventory,
   applyScheduleEvent,
 } = require('./schedule_ui_state');
+const {
+  hasScheduledContent,
+  scheduledSectionHtml,
+  editFieldsFromForm,
+} = require('./scheduled_section');
 const loadedConfig = require('../config-loader').loadConfig(path.join(__dirname, '..'));
 const CONFIG = loadedConfig.config;
 const hostPresentation = require('./host_presentation');
@@ -541,6 +546,7 @@ const state = {
     sessions: [],
     spawnFailureNotifications: new Set(),
     schedules: [],
+    recurring: [],
     assets: {},
     hostsStats: {},
     // Streams whose recent events have been backfilled via
@@ -553,6 +559,7 @@ const state = {
     usage: true,
     machineStats: true,
     mic: true,
+    scheduled: true,
   },
   appearance: loadAppearanceSettings(),
   // Optimistic-close overlay: stream ids the operator just closed, hidden from
@@ -1993,6 +2000,8 @@ function applyChatStreamState(data) {
     // schedule window plane was retired so there is nothing to re-render here.
     state.chatStream.schedules = replaceSchedulesFromInventory(state.chatStream.schedules, data.schedules);
   }
+  if (Array.isArray(data.recurring)) state.chatStream.recurring = data.recurring;
+  if (Array.isArray(data.schedules) || Array.isArray(data.recurring)) renderScheduledSection();
   // A healthy daemon snapshot replaces the managed inventory.
   if (state.chatStream.connected) {
     _perfRecord('renderer:sidebar-seeded-from-snapshot', { count: state.sessions.length });
@@ -2100,6 +2109,7 @@ function applyChatStreamPayload(payload) {
       drafts: payload.drafts || {},
       sessions: payload.sessions,
       schedules: payload.schedules || [],
+      recurring: payload.recurring || [],
       notifications: payload.notifications || [],
       hosts_stats: payload.hosts_stats || state.chatStream.hostsStats,
       ...(payload.work_lanes ? { work_lanes: payload.work_lanes } : {}),
@@ -2154,13 +2164,20 @@ function applyChatStreamPayload(payload) {
     refetchAssetSnapshotsForActiveSlots();
     return;
   }
+  if (payload.type === 'recurring.inventory' && Array.isArray(payload.recurring)) {
+    state.chatStream.recurring = payload.recurring;
+    renderScheduledSection();
+    return;
+  }
   if (payload.type === 'schedule.inventory' && Array.isArray(payload.schedules)) {
     // Protocol ingestion only — the desktop schedule window plane was retired.
     state.chatStream.schedules = replaceSchedulesFromInventory(state.chatStream.schedules, payload.schedules);
+    renderScheduledSection();
     return;
   }
   if (SCHEDULE_EVENT_TYPES.includes(String(payload.type || ''))) {
     state.chatStream.schedules = applyScheduleEvent(state.chatStream.schedules, payload);
+    renderScheduledSection();
     return;
   }
   if (payload.type) return;
@@ -7630,6 +7647,67 @@ function setSidebarSectionExpanded(sectionId, expanded, persist = false) {
   if (body) body.hidden = !expanded;
 }
 
+// ── Scheduled section ─────────────────────────────────────────
+// Recurring rules (pause / resume / edit) then pending one-shot rows, read-only.
+
+let editingRecurringId = null;
+
+function renderScheduledSection(force = false) {
+  const section = document.getElementById('scheduled-section');
+  const body = document.getElementById('scheduled-section-body');
+  if (!section || !body) return;
+  // An open Edit form is not clobbered by a daemon frame or the age timer.
+  if (!force && editingRecurringId && body.querySelector('form.scheduled-edit')) return;
+  const view = { recurring: state.chatStream.recurring, schedules: state.chatStream.schedules };
+  section.style.display = hasScheduledContent(view) ? '' : 'none';
+  body.innerHTML = scheduledSectionHtml({ ...view, editingId: editingRecurringId });
+}
+
+async function runScheduledAction(action, row) {
+  const recurringId = row.dataset.recurringId;
+  const form = row.querySelector('form.scheduled-edit');
+  const showError = (message) => {
+    const slot = form && form.querySelector('.scheduled-edit-error');
+    if (slot) { slot.textContent = message; slot.hidden = false; }
+    showToast(message, { type: 'error' });
+  };
+  if (action === 'edit' || action === 'cancel-edit') {
+    editingRecurringId = action === 'edit' ? recurringId : null;
+    renderScheduledSection(true);
+    return;
+  }
+  const reply = action === 'save'
+    ? await window.cc.recurringUpdate(recurringId, editFieldsFromForm(form))
+    : await (action === 'pause' ? window.cc.recurringPause : window.cc.recurringResume)(recurringId);
+  if (!reply || reply.ok === false) {
+    showError(String(reply?.error || `Could not ${action} schedule`));
+    return;
+  }
+  if (action === 'save') editingRecurringId = null;
+  if (reply.recurring) {
+    state.chatStream.recurring = [
+      ...state.chatStream.recurring.filter((rule) => rule.recurring_id !== recurringId), reply.recurring,
+    ];
+  }
+  renderScheduledSection(true);
+}
+
+function setupScheduledSection() {
+  const body = document.getElementById('scheduled-section-body');
+  if (!body) return;
+  body.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-scheduled-action]');
+    const row = button && button.closest('[data-recurring-id]');
+    if (!button || !row) return;
+    runScheduledAction(button.dataset.scheduledAction, row).catch((error) => {
+      showToast(String(error?.error || error?.message || error), { type: 'error' });
+    });
+  });
+  renderScheduledSection();
+  // Relative times ("in 3h 20m") age between daemon frames.
+  setInterval(renderScheduledSection, 30000);
+}
+
 function setupSidebarCollapsibles(root = document) {
   root.querySelectorAll('[data-sidebar-section-toggle]').forEach((toggle) => {
     const sectionId = toggle.dataset.sidebarSectionToggle;
@@ -8655,6 +8733,7 @@ document.getElementById('mic-btn-silent')?.addEventListener('click', async () =>
     if (viewSwitcher) viewSwitcher.style.display = 'none';
   }
   setupSidebarCollapsibles();
+  setupScheduledSection();
 })();
 
 // ── Settings Panel ─────────────────────────────────────────────

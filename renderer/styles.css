@@ -606,12 +606,26 @@ body.chat-stream-degraded button[data-cleanup-action] {
   overflow: hidden;
 }
 
+#scheduled-section .sidebar-section-body,
 #usage-section .sidebar-section-body,
 #machine-stats-section .sidebar-section-body,
 #mic-section .sidebar-section-body {
   max-height: 220px;
   overflow-y: auto;
 }
+
+.scheduled-row { padding: 7px 12px; border-top: 1px solid var(--pc-line-soft); font-size: 11px; color: var(--pc-dim); }
+.scheduled-title { display: flex; align-items: center; gap: 6px; }
+.scheduled-name { flex: 1; color: var(--pc-text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scheduled-badge { font-size: 9px; letter-spacing: .4px; text-transform: uppercase; padding: 1px 5px; border: 1px solid var(--pc-line); border-radius: 8px; color: var(--pc-soft); }
+.scheduled-badge-active { color: var(--pc-accent); border-color: var(--pc-accent); }
+.scheduled-actions, .scheduled-edit-actions { display: flex; gap: 6px; margin-top: 4px; }
+.scheduled-actions button, .scheduled-edit-actions button { font: inherit; color: var(--pc-text); background: transparent; border: 1px solid var(--pc-line); border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.scheduled-edit { display: grid; gap: 4px; margin-top: 6px; }
+.scheduled-edit label { display: flex; align-items: center; gap: 6px; }
+.scheduled-edit input[type="text"], .scheduled-edit input[type="time"], .scheduled-edit select { flex: 1; min-width: 0; font: inherit; color: var(--pc-text); background: var(--pc-pane); border: 1px solid var(--pc-line); border-radius: 4px; padding: 1px 4px; }
+.scheduled-days { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.scheduled-edit-error { color: #ff8a80; }
 
 /* :not(.is-collapsed) keeps this ID rule from outranking the collapse rule below
    (the Limits section could never collapse otherwise). */

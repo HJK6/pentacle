@@ -30,6 +30,7 @@ the standard `unsupported_in_v2` response.
 | `agent-orch schedule cancel <schedule_id>` | Cancel a pending schedule; terminal states return `schedule_terminal_state`. |
 | `agent-orch schedule reschedule <schedule_id> (--at ISO \| --delay DURATION) [--allow-past-time] [--allow-far-future]` | Re-arm a schedule for a new UTC fire time. Valid on every state; terminal-state re-arm resets retry bookkeeping and preserves the prior `fire_result_stream_id` until the next successful fire overwrites it. |
 | `agent-orch schedule run <schedule_id>` | Move a `pending` or `pending_retry` row to fire immediately. Terminal states and `fired_in_progress` return `schedule_terminal_state`; use `reschedule` to re-arm terminal rows. |
+| `agent-orch schedule recurring add\|list\|get\|set\|pause\|resume\|run\|rm` | Durable recurring spawn rules (nightly, weekdays, weekly) in an IANA time zone. See [Recurring](#recurring). |
 | `agent-orch send [--retry] <stream_id> <msg_id> <prompt>` | Issue `send` RPC. The target may also be the assistant alias; see [Addressing the assistant by alias](#addressing-the-assistant-by-alias). `msg_id` is unique per target stream. `--retry` is accepted when the latest entry for `(msg_id, stream_id)` is `send.result` with `delivery:"not_landed"`, `send.error`, `transmit_failed`, `transmit_delivered_awaiting_result`, or `send_error`. The CLI builds and validates a minimal Inbox v1 envelope from the prompt, carries it inline to the daemon, and the daemon re-validates it. |
 | `agent-orch tell <peer_stream_id> <text> [--from STREAM_ID] [--ttl SECONDS] [--tell-id UUID] [--urgent]` | Direct one-way peer message. The target may also be the assistant alias; see [Addressing the assistant by alias](#addressing-the-assistant-by-alias). The daemon pastes immediately through the always-submit path and returns a durable completed-delivery receipt; `submission_confirmed` is post-hoc evidence, not a readiness gate. |
 | `agent-orch park <stream_id> --reason TEXT [--from STREAM_ID]` / `agent-orch unpark <stream_id> [--event-id ID --reason TEXT] [--from STREAM_ID]` | Declare or clear a session's parked state. The CLI is authorized for the target stream or its direct parent; the Pentacle desktop operator surface has the separate operator-confirmed path. A routing-integrity park requires its exact event id and a non-empty acknowledgement reason. Parked sessions receive no system nudges. |
@@ -686,6 +687,38 @@ Schedule rows use the native v2 states:
 | `expired` | A pending row exceeded its admitted lifetime. | Terminal. |
 
 Dispatch checkpoints are `prepared`, `dispatch_claimed`, `dispatch_transmitted`, then `spawn_delivered` or a terminal classification. Restart recovery retries only a generation stopped at `prepared`. Once dispatch was claimed, the daemon reconciles durable spawn evidence and writes the original operation's terminal measured receipt; absence or contradictory evidence becomes `indeterminate`, never an inferred failure. A successful scheduled handoff sends both `handoff=true` and the persisted `handoff_from_stream_id` through SpawnCtl's existing handoff lifecycle.
+
+### Recurring
+
+A recurring rule is a durable daemon row, not a launchd job: it survives daemon restarts, has an explicit IANA time zone (default `America/Chicago`), and is listed in the **Scheduled** section of the web and mobile apps, where it can be paused, resumed and edited. Each occurrence becomes one ordinary one-shot schedule row, so dispatch, receipts, recovery and inventory are the existing scheduled-spawn paths.
+
+```bash
+agent-orch schedule recurring add --name "Nightly retro" --every daily --at-time 02:00 \
+  --provider claude --model claude-sonnet-5-5 --effort high --visibility hidden \
+  --spec-id <repo>__<topic> --objective "Nightly retro" \
+  --initial-prompt "Run the retro and report with --terminate."
+agent-orch schedule recurring add --name "Weekday brief" --every weekdays --at-time 08:00 --tz America/New_York ...
+agent-orch schedule recurring add --name "Mon/Wed sweep" --every weekly --days mon,wed --at-time 09:30 ...
+```
+
+| Command | Behavior |
+|---|---|
+| `recurring add` | Creates the rule and prints its `recurring_id`, `tz` and `next_fire_at_utc`. `--every` is `daily`, `weekdays` or `weekly` (weekly requires `--days`); `--at-time` is 24-hour `HH:MM` in `--tz`. An unknown zone is refused (`invalid_timezone`). Spawn admission (provider, model, spec binding and the work-link check) runs here, once. `--parent` is `assistant` (default, resolved to the bound assistant seat at fire time), `none`, or a stream id that must exist now; a parented rule requires `--objective`. |
+| `recurring list [--json]` | Name, recurrence in the rule's zone, `active`/`paused`, next fire (rule zone and UTC), last result and missed count. A seat sees only the rules it created; the operator sees all. |
+| `recurring get <id>` | The rule plus its decoded prompt. |
+| `recurring set <id> [--name --every --at-time --days --tz ...]` | Edits the schedule fields (re-armed from now) or the spawn template (`--provider/--model/--effort/--host/--role/--phase/--visibility/--parent/--spec-id/--objective/--initial-prompt[-file]`, which re-runs admission as the creator). |
+| `recurring pause <id>` / `resume <id>` | A paused rule accrues no misses; `resume` re-arms from now without recording a miss. |
+| `recurring run <id>` | Materialises one occurrence now. Refused with `previous_run_open` under the overlap rule. The schedule is not moved. |
+| `recurring rm <id>` | Deletes the rule; already-materialised one-shot rows are unaffected. |
+
+Policies are fixed, not knobs:
+
+- **Occurrence identity.** The daemon inserts the one-shot row directly from the admitted template with `request_id = uuid5(recurring_id, occurrence_utc)` and `owner_service_actor='recurring'`, plus a `row_committed` receipt (`schedule.recurring.materialise`). It does not re-run admission, and it never refuses on the spec link: a rule whose spec has since left its lane keeps firing until it is paused or repointed with `set --spec-id`. Restarting around an occurrence never yields two rows.
+- **Missed occurrences.** If `next_fire_at_utc` is more than 900 s in the past when evaluated (restart, sleep, clock jump) the occurrence is missed: `missed_count` grows by exactly one however many occurrences elapsed, nothing fires, `last_missed_reason` is `late`, and the next fire is recomputed from now. Within 900 s it fires late.
+- **Overlap.** If the rule's previous row is still `pending`/`retry_pending`/`firing`, or its child seat is still open, the occurrence is skipped (`previous_run_open`); `run` is refused with the same code. `--parent assistant` with no bound open assistant seat skips with `parent_unbound`.
+- **DST.** Occurrences are wall times in the rule's zone. A time inside a spring-forward gap fires at the transition instant; an ambiguous fall-back time fires on its first occurrence.
+
+The creating seat's `schedule list` also shows the one-shot rows its rules materialised.
 
 ## Cross-host leader binding
 

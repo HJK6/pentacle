@@ -178,6 +178,16 @@ compaction. Chat events and all non-coalescible frames (including
 full queue still disconnects with 1011/`slow_consumer`, signaling the client to
 reconnect and refetch.
 
+### Recurring schedules
+
+`v2_recurring_schedules` holds durable recurring rules (additive `CREATE TABLE IF NOT EXISTS`; a rollback to older code leaves it inert). `recurrence.py` is the pure next-occurrence math (`daily`, `weekdays`, `weekly`, an IANA zone, DST per the agent-orch README). `WindowSchedule` serves `schedule.recurring.create|list|get|update|pause|resume|run|delete`; admission mirrors `schedule.insert` and runs at create/update only. The `materialise_due_recurring()` pass runs inside `run_forever` before the one-shot due scan, and `recover()` applies the same evaluation to every due active rule. Missed (`late`, grace `RECURRING_LATE_FIRE_GRACE_S = 900`), overlap and unbound-parent policies are described under "Recurring" in the agent-orch README.
+
+Frames reach authenticated operator clients only, like every `schedule.*` frame:
+
+- The hello snapshot carries `recurring: [rule, ...]` beside `schedules`.
+- `{"type": "schedule.lifecycle", "event": <event>, "recurring": <rule>}` with `event` one of `recurring_created`, `recurring_updated`, `recurring_paused`, `recurring_resumed`, `recurring_run_requested`, `recurring_materialised`, `recurring_missed`, `recurring_deleted`. A materialised occurrence also pushes the ordinary one-shot `created` lifecycle frame.
+- A projected rule carries `recurrence` (`every`, `at_time`, `days`, `tz`), `recurrence_text`, `state` (`active`|`paused`), `next_fire_at_utc`, `next_fire_local`, `last_result` (`fired`|`missed`), `last_result_reason`, `missed_count`, `last_schedule_state` and `last_child_stream_id`; never the prompt body (`get` returns `initial_prompt_b64`).
+
 ### Scheduled spawn fleet smoke
 
 Synthetic warning and failure cards are published only in a harness-owned

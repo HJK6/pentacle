@@ -193,7 +193,30 @@ function scheduleLifecycleEventType(frame, sourceState) {
   }[sourceState] || '';
 }
 
+// Recurring rules arrive projected by the daemon (recurrence in the rule's zone, no prompt body).
+const RECURRING_STATES = new Set(['active', 'paused']);
+const RECURRING_EDIT_FIELDS = Object.freeze(['name', 'every', 'at_time', 'days', 'tz']);
+
+function projectRecurringRow(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.recurring_id !== 'string' || !raw.recurring_id) return null;
+  if (!RECURRING_STATES.has(String(raw.state || ''))) return null;
+  const rule = { ...raw };
+  delete rule.initial_prompt_b64;
+  return rule;
+}
+
+function projectRecurringInventory(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map(projectRecurringRow)
+    .filter(Boolean)
+    .sort((a, b) => String(a.next_fire_at_utc || '').localeCompare(String(b.next_fire_at_utc || ''))
+      || String(a.name || '').localeCompare(String(b.name || '')));
+}
+
 module.exports = {
+  RECURRING_EDIT_FIELDS,
+  projectRecurringRow,
+  projectRecurringInventory,
   SOURCE_STATE_TO_UI,
   TERMINAL_SOURCE_STATES,
   TERMINAL_DISPLAY_GRACE_MS,
