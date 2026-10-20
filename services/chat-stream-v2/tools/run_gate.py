@@ -330,6 +330,9 @@ def main() -> int:
         if ready:
             mark_owner_stopping(manifest)
             reap_manifest(manifest, _ACTIVE_RUN_ID)
+            # pytest never cleans an explicit --basetemp; evidence lives in the evidence dir.
+            for tier in tiers:
+                shutil.rmtree(basetemp / tier, ignore_errors=True)
         for signum, previous in old_handlers.items():
             signal.signal(signum, previous)
         _ACTIVE_MANIFEST_PATH = _ACTIVE_RUN_ID = None
