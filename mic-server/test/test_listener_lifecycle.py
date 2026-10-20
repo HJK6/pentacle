@@ -179,7 +179,8 @@ def test_recovery_does_not_restart_a_responding_off_service(monkeypatch, tmp_pat
     import plistlib
     recovery = load_recovery()
     plist = tmp_path/'mic.plist'; plist.write_bytes(plistlib.dumps({'Label': 'fixture.mic'}))
-    monkeypatch.setattr(recovery, 'status', lambda: {'mode': 'off'})
+    monkeypatch.setattr(recovery, 'status', lambda timeout=3: {'mode': 'off'})
+    monkeypatch.setattr(recovery, 'LOCK_PATH', tmp_path/'mic-recover.lock')
     monkeypatch.setattr(recovery.subprocess, 'run', lambda *a, **kw: pytest.fail('Off must not launch or restart'))
     recovery.recover(plist)
 

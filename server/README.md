@@ -256,8 +256,11 @@ answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety ne
   existing web authentication still applies. `provider-relogin:*` uses the same gate. `mic.useStreamHost` disables local recovery.
   Concurrent starts share one execution with a 75-second timeout. The helper
   must emit JSON `{"ok":true,"ready":true}` only after verifying service readiness;
-  exit success alone is insufficient. An already-running service must not be
-  restarted. The button stays disabled while starting and shows a retryable error
+  exit success alone is insufficient. A service that answers `/status` must not be
+  restarted. The macOS helper (`mic-server/recover-local-service.py --plist <path>`)
+  bootstraps an unloaded job, and restarts a loaded job once (`launchctl kickstart -k`)
+  only when `/status` stays unanswered and its process is at least 30 seconds old;
+  it serializes runs with a lock file and finishes within 70 seconds. The button stays disabled while starting and shows a retryable error
   on failure. No automatic start occurs on page load; `autoSpawn:false` is preserved.
 - **`pty:save-image`** → the pasted image is handed to the viewer as a browser
   download rather than written into the *host's* tmpdir.
