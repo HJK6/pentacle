@@ -13,7 +13,7 @@ A spoken line may declare that it is a question Zephyr needs answered to proceed
 
 ```sh
 printf '%s' 'Should I deploy the release now?' |
-  bart-say --conversation-id <id> --kind reply --expects-answer
+  assistant-say --conversation-id <id> --kind reply --expects-answer
 ```
 
 - `/speak` and the helper accept `expects_answer` (boolean, default false). A line

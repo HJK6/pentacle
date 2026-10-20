@@ -10,7 +10,7 @@
   "test/assistant_composite_reply.test.ts",
   "test/assistant_direct_entry.test.js",
   "test/assistant_role.test.js",
-  "test/bart_chat_declutter.test.ts",
+  "test/assistant_chat_declutter.test.ts",
   "test/browser_popouts.test.js",
   "test/business_envelope.test.js",
   "test/cc_handlers_parity.test.js",

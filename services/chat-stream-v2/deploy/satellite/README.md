@@ -95,7 +95,7 @@ the live row's `working` / `working_label` overlay through the existing
 ## Knobs / kill switches (env, `PENTACLE_SATELLITE_*`)
 
 - `PENTACLE_SATELLITE_HOST` — fleet name; MUST match the registry host (`linux-workstation`/`workstation`).
-- `PENTACLE_SATELLITE_WS` — reachable coordinator WebSocket endpoint. The legacy `PENTACLE_SATELLITE_BART_WS` is a fallback when WS is unset; otherwise the default is `ws://127.0.0.1:7791`.
+- `PENTACLE_SATELLITE_WS` — reachable coordinator WebSocket endpoint. When unset, the default is `ws://127.0.0.1:7791`.
 - `PENTACLE_SATELLITE_SESSION_GLOB` — tmux session-name filter, default `v2-*`.
 - `PENTACLE_SATELLITE_HISTORY_BYTES` — first-bind history horizon (default 1 MiB): on initial bind
   the tail starts within the last this-many bytes of a transcript so live turns

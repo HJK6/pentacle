@@ -48,19 +48,19 @@ def test_step_a_uploads_managed_and_prints_server_receipt(tmp_path, wire, capsys
 
 
 def test_step_b_reuses_explicit_correlation(wire):
-    assert cli.send_file(args('--upload-id','synthetic-upload','--to','bart:assistant',
+    assert cli.send_file(args('--upload-id','synthetic-upload','--to','home:assistant',
         '--dispatch-id','real-dispatch','--reply-to-message-id','real-input',
         '--publish-kind','result','--request-id','existing-request')) == 0
     assert len(wire) == 1
     payload = wire[0][1]
     assert payload == dict(type='assistant.publish', request_id='existing-request',
-        composite_stream_id='bart:assistant', dispatch_id='real-dispatch',
+        composite_stream_id='home:assistant', dispatch_id='real-dispatch',
         reply_to_message_id='real-input', publish_kind='result', message='',
         attachment_ids=['synthetic-upload'])
 
 
 def publish_args(*source, **kw):
-    argv = [*source, '--to','bart:assistant','--dispatch-id','real-dispatch',
+    argv = [*source, '--to','home:assistant','--dispatch-id','real-dispatch',
         '--reply-to-message-id','real-input','--publish-kind',kw.get('kind','result')]
     if kw.get('request', True):
         argv += ['--request-id','existing-request']
@@ -176,8 +176,8 @@ def test_transport_exception_does_not_leak(tmp_path, monkeypatch, wire, capsys):
 
 @pytest.mark.parametrize('argv', [
     ['--upload-id','synthetic-upload'],
-    ['--upload-id','synthetic-upload','--to','bart:assistant'],
-    ['--upload-id','synthetic-upload','--to','bart:assistant','--dispatch-id','real',
+    ['--upload-id','synthetic-upload','--to','home:assistant'],
+    ['--upload-id','synthetic-upload','--to','home:assistant','--dispatch-id','real',
      '--reply-to-message-id','input','--publish-kind','result'],
 ])
 def test_missing_correlation_fails_before_network(wire, argv):
@@ -255,7 +255,7 @@ def test_path_swap_to_secret_symlink_is_refused(tmp_path, monkeypatch, capsys, w
 
 
 @pytest.mark.parametrize('kind,principal,credential,scope',[
-    ('scoped','credential:scope-1','scope-1','bart:assistant'),
+    ('scoped','credential:scope-1','scope-1','home:assistant'),
     ('operator','operator:operator-1','operator-1',None),
 ])
 def test_nonseat_receipt_preserves_explicit_null_generation(tmp_path,monkeypatch,wire,capsys,kind,principal,credential,scope):

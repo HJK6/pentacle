@@ -15,12 +15,12 @@ test('shared host handler and client pass voice metadata to ordinary and composi
   const collector = createCollector(); let input;
   createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: { sendMessage: async p => { input = p; return { delivery: 'landed' }; } } }).register(collector);
   const meta = { voice: { duration_s: 2 } };
-  await collector.table['chat-stream:send'].handler({}, 'bart', 'assistant', 'voice', 'request', 'message', [], { stream_id: 'bart:assistant', meta });
+  await collector.table['chat-stream:send'].handler({}, 'home', 'assistant', 'voice', 'request', 'message', [], { stream_id: 'home:assistant', meta });
   assert.deepEqual(input.meta, meta);
   const fake = Object.create(client); fake.sendCommand = async p => p; fake.noteInteraction = () => {};
   for (const composite of [false, true]) {
-    fake._sessions = [{ stream_id: 'bart:assistant', session_kind: composite ? 'assistant_composite' : 'agent' }];
-    const frame = await fake.sendMessage({ host: 'bart', sessionName: 'assistant', text: 'voice', optimisticId: 'message', meta });
+    fake._sessions = [{ stream_id: 'home:assistant', session_kind: composite ? 'assistant_composite' : 'agent' }];
+    const frame = await fake.sendMessage({ host: 'home', sessionName: 'assistant', text: 'voice', optimisticId: 'message', meta });
     assert.deepEqual(frame.meta, meta);
   }
 });

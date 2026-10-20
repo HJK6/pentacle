@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { renderTranscriptItemHtml } from '../renderer/src/shared_transcript_view';
 import { formatAssistantActivity } from '../pentacle-chat-core/src/services/pentacleChatModel';
 
-// Canonical Bart chat shows only actionable status under a user message:
+// Canonical assistant chat shows only actionable status under a user message:
 // progress and latency chrome is redundant with the slot working indicator.
 const REMOVED = ['queued', 'routing', 'awaiting_reply', 'acknowledged', 'answered', 'reply_received'];
 const RETAINED: Record<string, string> = {
@@ -26,12 +26,12 @@ function userItem(responseState: string) {
   } as any;
 }
 
-test('progress and latency labels are not rendered under Bart user messages', () => {
+test('progress and latency labels are not rendered under assistant-chat user messages', () => {
   for (const responseState of REMOVED) {
     const html = renderTranscriptItemHtml(userItem(responseState), undefined, { allowReplies: false });
     assert.match(html, /Hello Zephyr/, responseState);
     assert.doesNotMatch(html, /slot-chat-assistant-activity|data-assistant-waiting-at/, responseState);
-    assert.doesNotMatch(html, /Waiting for Bart|First reply|Answer complete|Follow-up pending|Reply received/, responseState);
+    assert.doesNotMatch(html, /Waiting for the assistant|First reply|Answer complete|Follow-up pending|Reply received/, responseState);
   }
 });
 
@@ -44,7 +44,7 @@ test('pending operator action and failure labels remain', () => {
   }
 });
 
-test('Bart assistant messages have no Reply control; user messages keep theirs', () => {
+test('Assistant messages have no Reply control; user messages keep theirs', () => {
   const assistant = { id: 'a1', messageId: 'assistant-1', displayRule: 'bubble:assistant', text: 'Done.', replyToQuestionId: 'q1' } as any;
   const user = { id: 'u1', messageId: 'user-1', isUser: true, displayRule: 'bubble:user', text: 'Thanks' } as any;
   assert.doesNotMatch(renderTranscriptItemHtml(assistant, undefined, { allowReplies: true }), /slot-chat-reply-btn|>Reply</);

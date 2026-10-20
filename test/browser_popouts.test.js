@@ -100,7 +100,7 @@ test('direct assistant context includes source and generation in dock identity',
   const parent = fakeWindow();
   const child = fakeWindow({ opener: parent });
   parent.nextChild = child;
-  const direct = { ...chat, assistant_source_stream_id: 'bart:assistant', assistant_generation: 'generation-1' };
+  const direct = { ...chat, assistant_source_stream_id: 'home:assistant', assistant_generation: 'generation-1' };
   const owner = createBrowserPopouts({ win: parent, location: { origin, href: `${origin}/` } });
   await owner.openChat(direct);
   const detached = createBrowserPopouts({ win: child, location: { origin, href: `${origin}/` }, chatPopoutContext: direct });

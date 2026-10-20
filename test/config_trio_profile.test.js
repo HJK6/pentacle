@@ -1,7 +1,7 @@
 'use strict';
 // Config-trio mechanism regression (public-safe, generic hosts):
 //   spec_pentacle__web_thoth_host_color_yellow_2026_09
-//   spec_pentacle__web_remove_retired_bart_machine_2026_09
+//   the retired-machine removal spec
 //   spec_pentacle__web_usage_limits_enabled_2026_09
 // These three ship as gitignored web-profile changes. This test locks the
 // config->behavior MECHANISM they depend on so a future profile edit cannot
@@ -25,7 +25,7 @@ const { executionHosts } = require(path.join(ROOT, 'main', 'execution_host'));
 
 // A generic overlay mirroring the config-trio target SHAPE with no fleet names:
 // local host is yellow/ibis; two peers keep distinct colors; `legacy` is a
-// retired machine that is NOT in the roster (the Bart-removal end state).
+// retired machine that is NOT in the roster (the removal end state).
 function writeGenericProfile(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-config-trio-'));
   // Placeholder-cleanup baseline: remove the stand-in after the test so it does

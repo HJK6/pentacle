@@ -234,7 +234,7 @@ test('the chat popout context comes from the query string', () => {
     assistant_source_stream_id: '',
     assistant_generation: '',
   });
-  const direct = { ...ctx, assistant_source_stream_id: 'bart:assistant', assistant_generation: 'generation-1' };
+  const direct = { ...ctx, assistant_source_stream_id: 'home:assistant', assistant_generation: 'generation-1' };
   assert.equal(chatPopoutContextFromSearch(`?pentacle-chat-popout=${encodeURIComponent(JSON.stringify(direct))}`).assistant_generation,
     'generation-1');
   // Regression: URLSearchParams already decodes, so a second decodeURIComponent

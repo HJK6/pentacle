@@ -1,4 +1,4 @@
-// lane_update cards in Bart's chat (spec_pentacle__first_class_work_lanes_2026_10 D6/D8, V12 client side):
+// lane_update cards in the primary assistant's chat (spec_pentacle__first_class_work_lanes_2026_10 D6/D8, V12 client side):
 // publish_kind 'lane_update' renders a typed card from raw.lane_update; every other
 // event, and old clients, keep the summary prose.
 import test from 'node:test';
@@ -8,13 +8,13 @@ import fixture from '../pentacle-chat-core/tests/fixtures/work-lanes-inventory.j
 import { ChatStoreController } from '../renderer/src/chat_store_controller';
 import { renderTranscriptTimelineHtml, renderTranscriptItemHtml } from '../renderer/src/shared_transcript_view';
 
-const CHROME = { header: '#102a4a', accent: '#4da3ff', surface: '#0c1827', border: '#2f6ca5', title: 'bart' };
-const STREAM = 'bart:assistant';
+const CHROME = { header: '#102a4a', accent: '#4da3ff', surface: '#0c1827', border: '#2f6ca5', title: 'assistant' };
+const STREAM = 'home:assistant';
 
 function load(extra: unknown[] = []) {
   const store = new ChatStoreController();
   store.applyFrame({ type: 'snapshot', connected: true, events: [], sessions: [{
-    stream_id: STREAM, host: 'bart', provider: 'composite', session_name: 'assistant', session_kind: 'assistant_composite',
+    stream_id: STREAM, host: 'home', provider: 'composite', session_name: 'assistant', session_kind: 'assistant_composite',
     visibility: 'visible', last_event_at: '2026-10-07T19:00:00.000Z',
   }] } as never);
   for (const wire of [...fixture.lane_update_events, ...extra] as any[]) store.applyFrame(wire);

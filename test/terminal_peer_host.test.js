@@ -28,7 +28,7 @@ test('pty:create resolves a peers[] host to an SSH target', async () => {
   };
   const config = {
     chatStream: { localHost: 'local' },
-    remote: { host: 'bart.example', user: 'bartimaeus', port: 22, tmux: '/opt/homebrew/bin/tmux' },
+    remote: { host: 'host.example', user: 'operator', port: 22, tmux: '/opt/homebrew/bin/tmux' },
     peers: [{ id: 'merlin', host: '198.51.100.35', user: 'vgujju', port: 2222, tmux: '/opt/homebrew/bin/tmux' }],
   };
   const c = collector();
@@ -50,7 +50,7 @@ test('local and remote still resolve, and an unknown host is refused', async () 
   const execute = async (file, args) => { calls.push({ file }); return { stdout: Array.isArray(args) && args.some((a) => String(a).includes('display-message')) ? '%1\n' : '' }; };
   const config = {
     chatStream: { localHost: 'local' },
-    remote: { host: 'bart.example', user: 'bartimaeus', port: 22, tmux: 'tmux' },
+    remote: { host: 'host.example', user: 'operator', port: 22, tmux: 'tmux' },
     peers: [{ id: 'merlin', host: '198.51.100.35', user: 'vgujju' }],
   };
   const c = collector();

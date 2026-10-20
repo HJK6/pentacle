@@ -70,7 +70,7 @@ test('tap target per visible_chat.available matches the fixture', () => {
   }
 });
 
-test('tap target never falls back to Bart, a hidden worker or a new generation', () => {
+test('tap target never falls back to the primary assistant, a hidden worker or a new generation', () => {
   const inv = applyWorkLanesFrame(emptyWorkLanesInventory(), fixture.inventory_frame);
   const unavailable = selectWorkLanes(inv).find((l) => l.visible_chat.available === 'unavailable')!;
   const target = workLaneTapTarget(unavailable);
@@ -99,7 +99,7 @@ test('lane with no lead and no eta has an empty eta label', () => {
 });
 
 function event(wire: any): PentacleEvent {
-  return { host: 'bart', session_name: 'assistant', ...wire.event } as PentacleEvent;
+  return { host: 'home', session_name: 'assistant', ...wire.event } as PentacleEvent;
 }
 
 test('lane_update events parse raw.lane_update for every kind; plain events do not', () => {
@@ -117,12 +117,12 @@ test('lane_update events parse raw.lane_update for every kind; plain events do n
 
 test('transcript rows for lane_update carry laneUpdate; legacy text stays the summary; dedupe by message_id', () => {
   let state = { ...initialPentacleStreamState };
-  state = { ...state, sessions: [{ stream_id: 'bart:assistant', host: 'bart', provider: 'composite', session_name: 'assistant',
+  state = { ...state, sessions: [{ stream_id: 'home:assistant', host: 'home', provider: 'composite', session_name: 'assistant',
     last_event_at: '2026-10-07T19:00:00.000Z' } as never] };
   for (const wire of fixture.lane_update_events) state = applyPentacleEvent(state, event(wire));
   // Live broadcast + history replay of the same publication must not double up.
   state = applyPentacleEvent(state, { ...event(fixture.lane_update_events[1]), daemon_seq: 1043 });
-  const detail = selectSessionDetail(state, 'bart:assistant', { visibleCount: 50 })!;
+  const detail = selectSessionDetail(state, 'home:assistant', { visibleCount: 50 })!;
   const rows = detail.transcriptItems.filter((item) => item.publishKind === 'lane_update');
   assert.equal(new Set(rows.map((r) => r.messageId)).size, rows.length);
   assert.equal(rows.length, 6);

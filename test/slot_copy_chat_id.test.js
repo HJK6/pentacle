@@ -130,7 +130,7 @@ test('slotCopyIdStreamId returns the CURRENT session id, never a stale bound-str
 });
 
 test('slotCopyIdStreamId copies the canonical assistant stream, not its local pane fallback', () => {
-  const canonical = { session_kind: 'assistant_composite', stream_id: 'bart:assistant' };
+  const canonical = { session_kind: 'assistant_composite', stream_id: 'home:assistant' };
   const ctx = {
     state: { slots: [{ name: 'assistant', hostId: 'local', session_kind: 'assistant_composite' }], slotChatBoundStream: ['local:STALE'] },
     findSession: () => ({ name: 'assistant', hostId: 'local' }),
@@ -140,12 +140,12 @@ test('slotCopyIdStreamId copies the canonical assistant stream, not its local pa
     sessionSummaryStreamId: (session) => session.stream_id,
   };
   const slotCopyIdStreamId = loadSlotStreamIdFn(ctx);
-  assert.equal(slotCopyIdStreamId(0), 'bart:assistant');
+  assert.equal(slotCopyIdStreamId(0), 'home:assistant');
 });
 
 test('slotCopyIdStreamId fails closed when a composite slot loses its canonical daemon row', () => {
   const ctx = {
-    state: { slots: [{ name: 'assistant', hostId: 'local', session_kind: 'assistant_composite' }], slotChatBoundStream: ['bart:assistant'] },
+    state: { slots: [{ name: 'assistant', hostId: 'local', session_kind: 'assistant_composite' }], slotChatBoundStream: ['home:assistant'] },
     findSession: () => ({ name: 'assistant', hostId: 'local' }),
     sidebarStreamIdForSession: () => 'local:assistant',
     canonicalChatSessionStateForNameHost: () => null,

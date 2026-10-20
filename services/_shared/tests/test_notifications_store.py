@@ -918,7 +918,7 @@ def test_restricted_dedup_refresh_atomically_refuses_authority_bearing_row(
     if authority_kind == "actions":
         kwargs["actions"] = [{"kind": "ack"}]
     elif authority_kind == "answer_target":
-        kwargs["answer_to_stream_id"] = "bart:v2-owner"
+        kwargs["answer_to_stream_id"] = "home:v2-owner"
     original = store.create_notification(
         producer="altum-bot-cd",
         title="original",

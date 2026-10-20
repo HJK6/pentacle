@@ -5154,7 +5154,7 @@ function renderSidebar() {
 // ── Work lane taps ──────────────────────────────────────────────
 // A lane tap opens the lane's daemon-resolved visible chat: `open_chat` an open
 // session or the composite, `history` a read-only slot for the closed chat at the
-// lane's generation, `unavailable` an explicit card. Never Bart, a hidden worker
+// lane's generation, `unavailable` an explicit card. Never the primary assistant, a hidden worker
 // or a newer generation as a fallback.
 function openWorkLane(el) {
   openWorkLaneById(el.dataset.laneId);

@@ -15,7 +15,7 @@ function fixture() {
     f.requests.push(body); return { claim: f.claims.shift() || null };
   };
   f.make = (overrides = {}) => createWakeDelivery({
-    config: { features: { mic: true, assistantRole: 'assistant' }, mic: { wakeTargetHost: 'bart' }, chatStream: {} },
+    config: { features: { mic: true, assistantRole: 'assistant' }, mic: { wakeTargetHost: 'home' }, chatStream: {} },
     getState: async () => structuredClone(f.state), api: (...args) => f.api(...args),
     sendTurn: (...args) => f.sends.push(args), getSpawnCatalog: async () => catalog,
     spawnAgent: async request => { f.spawns.push(request); return { ok: true, state: 'ready', streamId: 'amaterasu:new' }; }, ...overrides,
@@ -35,7 +35,7 @@ test('unknown tuple/action fails without fallback', () => {
   const c = capture(); c.action.model = 'unknown'; assert.throws(() => prepareVoiceSpawn(c, catalog));
   c.action.version = 3; assert.throws(() => prepareVoiceSpawn(c, catalog));
 });
-test('one local spawn without Bart session; no chat injection', async () => {
+test('one local spawn without assistant session; no chat injection', async () => {
   const f = fixture();
   await Promise.all([f.helper.tick(f.status), f.helper.tick(f.status)]);
   await f.helper.tick(f.status);
@@ -48,7 +48,7 @@ test('Off while catalog resolves prevents action', async () => {
   f.helper = f.make({ getSpawnCatalog: async () => { f.status.mode = 'off'; return catalog; } });
   await f.helper.tick(f.status); assert.equal(f.spawns.length, 0);
 });
-test('uncertain spawn is not retried or sent to Bart', async () => {
+test('uncertain spawn is not retried or sent to the assistant', async () => {
   const f = fixture(); let calls = 0;
   f.helper = f.make({ spawnAgent: async () => { calls++; throw Error('lost response'); } });
   await f.helper.tick(f.status); f.claims.push(capture()); await f.helper.tick(f.status);

@@ -1,42 +1,43 @@
 # Two named assistants, scoped client, Cosmo push, Daff recovery
 
 This is the chat-daemon foundation for a second always-on assistant (**Daff**,
-the operator's) living beside **Bart** on the same host, plus a restricted phone client
+the operator's) living beside the **primary assistant** on the same host, plus a restricted phone client
 (**Cosmo**) that can use only Daff's chat. It is deliberately a *fixed two-assistant*
-design — not a multi-user platform. Bart's behaviour is unchanged throughout.
+design — not a multi-user platform. The primary assistant's behaviour is unchanged throughout.
 
-## A. Named assistants (`bart`, `daff`)
+## A. Named assistants
 
 An assistant "name" is just the prefix of its configured composite stream id;
 nothing derives it in code. `AssistantCompositeConfig.all_from_env()` builds the
-fixed map `{"bart": …, "daff": …}`:
+fixed map keyed by the primary name (`PENTACLE_ASSISTANT_PRIMARY_NAME`, default
+`assistant`) and the second assistant's name:
 
-- `bart` reads the existing **unprefixed** `PENTACLE_ASSISTANT_*` keys, so its
+- the primary assistant reads the existing **unprefixed** `PENTACLE_ASSISTANT_*` keys, so its
   config is byte-identical to the single-assistant daemon.
 - `daff` reads `PENTACLE_ASSISTANT_DAFF_*` and stays inert (`enabled=False`) until
   those keys are configured; `PENTACLE_ASSISTANT_DAFF_ROLE` is its protected role.
 
 `main.py` builds one `AssistantComposite` per name; `server.assistant_composite`
-remains the `bart` alias so existing call sites are unchanged, and
+remains the primary-assistant alias so existing call sites are unchanged, and
 `Server._composite_for(stream_id)` resolves the owning composite for any stream.
 
 **Binding** is keyed by name: `v2_assistant_direct_binding(name TEXT PRIMARY KEY, …)`.
 A one-time migration (`migrate_binding_to_named`, run in `Store._run`) converts the
-legacy single `id=1` row to `name='bart'` verbatim; `rollback_binding_to_single`
+legacy single `id=1` row to the primary name verbatim; `rollback_binding_to_single`
 restores the one-row form (used by the deploy rollback path). The mirror binding
-is a per-composite dict; Bart keeps the legacy kv key `assistant.mirror.enabled`
+is a per-composite dict; the primary assistant keeps the legacy kv key `assistant.mirror.enabled`
 while others use `assistant.mirror.<name>.enabled`.
 
 **Policy** (`AssistantPolicy`) protects a *set* of roles (`roles` = primary +
 `extra_roles`). `protects()` is membership, the singleton check in `available()`
-is per-role (Bart and Daff never block each other), and `self.role` stays the
+is per-role (the two assistants never block each other), and `self.role` stays the
 primary slug that still backs operator-credential and consent protection.
 **Daff gets no fleet/lane authority** — that is governed solely by
 `store_lifecycle_authority`, independent of role.
 
 ## B. Composite tell routing
 
-`tell bart:assistant "…"` / `tell daff:assistant "…"` deliver to the composite's
+`tell <name>:assistant "…"` delivers to the composite's
 *current* bound pane. `Server._composite_tell` authorises operator credentials or
 agent stream tokens only (Dot/scoped clients get `dot_scope_denied`), resolves the
 binding at send time, and checks the generation: a replaced pane (open at a
@@ -81,7 +82,7 @@ A scoped connection is **deny-by-default**:
 Scoped `register_push` writes to a **separate** DynamoDB table `CosmoPushTokens`
 (env `COSMO_PUSH_TOKENS_TABLE`), carrying `credential_id` + `scope_stream`, so the
 legacy `PushTokens` readers never see the device. The table is declared in
-`bartimaeus-triforce/infra/bartimaeus-infrastructure.yaml` (DynamoDB is managed by
+the private infrastructure template (DynamoDB is managed by
 CloudFormation per `aws_standards.md`).
 
 When an assistant reply commits on a composite (`AssistantComposite.publish`,
@@ -90,14 +91,14 @@ prose/final), the `reply_push` hook (`cosmo_push.CosmoPush`) sends one Expo push
 `publish` fires the hook only on the first (non-duplicate) commit, so replays and
 reconnects never re-push. Revocation is re-checked per send, `DeviceNotRegistered`
 tokens are deleted, and the Expo transport is injectable (tests stub it). The hook
-is wired to all composites but self-filters by stream, so Bart never pushes to the
+is wired to all composites but self-filters by stream, so the primary assistant never pushes to the
 Cosmo audience.
 
 ## E. Daff seat recovery
 
 The reconciler preserves a dead protected seat ("do not spawn here"); it now also
 fires `on_protected_dead`. `recovery.DaffRecovery` handles **only** Daff (it
-declines any non-Daff row, so Bart's preserve path is untouched and Bart still has
+declines any other row, so the primary assistant's preserve path is untouched and it still has
 no auto-respawn). Under a single-owner in-flight guard it:
 
 1. spawns a fresh Daff seat via a daemon handoff spawn
@@ -108,7 +109,7 @@ no auto-respawn). Under a single-owner in-flight guard it:
 3. flushes queued composite tells, in order, and wakes the composite worker.
 
 It retries 3× with backoff (30 s / 2 m / 10 m); on exhaustion it marks the seat
-degraded (status-card `update`) and tells `bart:assistant` exactly once. The Daff
+degraded (status-card `update`) and tells the primary composite exactly once. The seat's
 chat history lives in the daemon store and survives the seat change, so a fresh
 handoff seat is continuous; a plain Claude `--resume` is intentionally not used
 (the resume path refuses a role/handoff spawn).

@@ -242,8 +242,8 @@ async function run() {
     steps.push({ name: 'multi-chunk PNG event ingested and exact media restored after browser reload', ok: true,
       size: largeImage.size, sha: largeImage.sha, reload: largeReload });
     assert.equal(await page.eval("!!document.querySelector('#cell-0 .slot-chat-reply-btn[data-reply-message-id=\"direct-event-1\"]')"), false);
-    assert.equal(await page.eval("/Waiting for Bart|First reply|Answer complete/.test(document.querySelector('#cell-0 .slot-chat-list')?.textContent || '')"), false);
-    steps.push({ name: 'Bart assistant rows render no Reply button or progress/latency labels', ok: true });
+    assert.equal(await page.eval("/Waiting for the assistant|First reply|Answer complete/.test(document.querySelector('#cell-0 .slot-chat-list')?.textContent || '')"), false);
+    steps.push({ name: 'Assistant rows render no Reply button or progress/latency labels', ok: true });
     daemon.setPaneQuestion({ question_key: 'pane-direct', header: 'Disposable', prompt: 'Confirm route',
       options: [{ index: 1, label: 'Yes' }] });
     await page.waitFor("window.PentacleChatStore?.getQuestion('mock-host:live')?.question_key === 'pane-direct'", { timeoutMs: 5000 });

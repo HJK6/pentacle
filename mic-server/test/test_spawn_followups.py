@@ -200,9 +200,9 @@ def test_unrelated_is_silent_counts_and_never_refreshes_timer(dialogue):
     listener, actions, clock, start, answer, hear = dialogue
     start(); deadline = actions.pending['deadline']
     actions.speaker = lambda *args: pytest.fail('Unrelated room speech must stay silent')
-    answer('The pizza is here.', route='bart')
+    answer('The pizza is here.', route='assistant')
     assert actions.pending['deadline'] == deadline and actions.pending['answers'] == 1
-    answer('The pizza is still here.', route='bart')
+    answer('The pizza is still here.', route='assistant')
     assert actions.pending is None and not listener.wake.pending
 
 
@@ -319,7 +319,7 @@ def test_missing_model_reply_alone_opens_idle_agent(dialogue):
 
 def test_fresh_wake_preserves_earlier_independent_request(dialogue):
     listener, actions, clock, start, answer, hear = dialogue
-    actions.classifier = lambda text: {'route':'bart','text':text}
+    actions.classifier = lambda text: {'route':'assistant','text':text}
     hear(listener, 'Hey Zephyr first message'); hear(listener, 'over')
     first = actions.queue.get_nowait()
     hear(listener, 'Hey Zephyr second message'); hear(listener, 'over')

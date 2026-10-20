@@ -5,7 +5,7 @@ delivering client carries it through binding handoff and prepends this machine
 header to the assistant input:
 
 ```text
-[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id","voice_reply":{"helper":"bart-say --conversation-id opaque-service-id --kind reply --text <literal-line>","sentences_per_line":2,"words_per_line":40,"characters_per_line":300}}]
+[pentacle-input {"origin":"room_mic","conversation_id":"opaque-service-id","voice_reply":{"helper":"assistant-say --conversation-id opaque-service-id --kind reply --text <literal-line>","sentences_per_line":2,"words_per_line":40,"characters_per_line":300}}]
 
 The recognized request.
 ```
@@ -17,17 +17,17 @@ expired and closed ids, including ids copied into a hand-written header.
 
 ## Spoken lines
 
-Install the executable `bin/bart-say` on the assistant's PATH, for example with a
+Install the executable `bin/assistant-say` on the assistant's PATH, for example with a
 symlink to the accepted checkout. It takes literal text from stdin by default:
 
 ```sh
 printf '%s' 'The task is finished. The details are in chat.' |
-  bart-say --conversation-id opaque-service-id --kind reply --action chat --final
+  assistant-say --conversation-id opaque-service-id --kind reply --action chat --final
 ```
 
 `--text` also accepts literal text; callers must quote it as shell data. The
 helper reads the loaded limits from localhost `GET /status` and sends JSON directly to `POST /speak`; it never invokes a shell
-with the text. `BART_SPEAK_URL` can select another loopback HTTP port for a test
+with the text. `PENTACLE_SPEAK_URL` can select another loopback HTTP port for a test
 service. Remote destinations, proxies and redirects are refused. The helper
 prints JSON with `outcome` (`spoken`, `suppressed`, `refused`) and a reason for
 non-spoken results. Refusal is nonfatal. The synchronous receipt allows the

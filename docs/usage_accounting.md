@@ -524,7 +524,7 @@ whose `hosts` could own it, which is every host unless the config narrows it.
 - **Retired hosts.** The private config may list `retired_hosts`. A listed host
   is honoured only if, at run time, it has no open seat in `sessions` and no
   `v2_usage_state` row updated in the last 7 days. Open composite assistant rows
-  (`provider: composite`, routing aliases such as `bart:assistant`) carry no usage
+  (`provider: composite`, routing aliases such as `home:assistant`) carry no usage
   and are not counted; the honoured entry reports them as
   `open_composite_rows_not_counted`. Otherwise the entry is
   ignored with a printed warning. `retired_hosts` in the output gives each
