@@ -240,7 +240,7 @@ def test_usage_codex_ac3_unreconciled_and_unverifiable_never_priced(cx: Cx) -> N
 # --- AC4 rollup rows --------------------------------------------------------------------------------
 
 def test_usage_codex_ac4_mobile_spec_rows_and_no_deferred(cx: Cx) -> None:
-    S = 'spec_pentacle_mobile__bart_first_home_2026_10'
+    S = 'spec_pentacle_mobile__assistant_first_home_2026_10'
     cx.seat('thoth:m1', created=at(0), specs=(S,), provider='codex')
     cx.seat('amaterasu:m2', created=at(0), specs=(S,), provider='codex')
     cx.session('m1', [(at(60), SOL, 1_000_000, 0, 0), (at(300), LUNA, 0, 0, 1_000_000)], stream='thoth:m1')

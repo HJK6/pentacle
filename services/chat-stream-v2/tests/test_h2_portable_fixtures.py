@@ -197,8 +197,8 @@ def test_in_process_ceremony_uses_synthetic_signatures_without_children(tmp_path
     monkeypatch.setattr(aio, "create_subprocess_exec", forbidden_async)
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open("bart", role="lead")
-        await refused(env.lifecycle(c.auth, "designate", target="bart"), "consent_no_active_key")
+        await env.open("assistant", role="lead")
+        await refused(env.lifecycle(c.auth, "designate", target="assistant"), "consent_no_active_key")
         await c.enroll()
         challenge = await c.request()
         signature = c.sign(consent.decode(challenge["challenge_bytes"]))

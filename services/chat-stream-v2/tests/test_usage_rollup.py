@@ -453,9 +453,9 @@ def test_usage_rollup_ac5_unplaceable_mass_gate(fx: Fx, untimed: int, passes: bo
     fx.ident('n-fleet', FLEET)
     fx.seat('thoth:w', created='2026-09-01T00:00:00Z')
     if with_seat:
-        fx.seat('thoth:old', created='2026-08-01T00:00:00Z', closed='2026-08-02T00:00:00Z')
+        fx.seat('node-a:old', created='2026-08-01T00:00:00Z', closed='2026-08-02T00:00:00Z')
     fx.rec('thoth:w', out(1_000_000 - untimed), observed='2026-09-19T00:00:00Z')
-    fx.rec('thoth:old', out(untimed), host='bart', native='n-bart', row=False)
+    fx.rec('node-a:old', out(untimed), host='assistant', native='n-assistant', row=False)
     fx.config()
     result = fx.run('--calibrate')
     u = result['calibration']['unplaceable']
@@ -642,13 +642,13 @@ def test_usage_calibration_amend_ac1_coverage_judged_on_merged_interval(fx: Fx) 
 
 # --- amendments AC2: retired hosts ---------------------------------------------------------------
 
-def _retired_ledger(fx: Fx, *, bart_open: bool = False) -> None:
+def _retired_ledger(fx: Fx, *, assistant_open: bool = False) -> None:
     fx.ident('n-fleet', FLEET)
     fx.seat('thoth:w', created='2026-09-01T00:00:00Z', specs=('spec_demo__w',))
-    fx.seat('bart:old', created='2026-08-01T00:00:00Z', specs=('spec_demo__old',),
-            closed=None if bart_open else '2026-08-02T00:00:00Z')
+    fx.seat('assistant:old', created='2026-08-01T00:00:00Z', specs=('spec_demo__old',),
+            closed=None if assistant_open else '2026-08-02T00:00:00Z')
     fx.rec('thoth:w', out(990_000), observed='2026-09-19T00:00:00Z')
-    fx.rec('bart:old', out(30_000), host='bart', native='n-bart', row=False)  # untimed forever
+    fx.rec('assistant:old', out(30_000), host='assistant', native='n-assistant', row=False)  # untimed forever
 
 
 def _spec_totals(result: dict) -> list:
@@ -659,38 +659,38 @@ def _spec_totals(result: dict) -> list:
 
 def test_usage_calibration_amend_ac2_retired_host_honoured(fx: Fx) -> None:
     _retired_ledger(fx)
-    fx.usage_state('bart:old', '2026-10-02T23:59:00Z')  # last push 7 days + 1 min before NOW
-    fx.seat('bart:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias
+    fx.usage_state('assistant:old', '2026-10-02T23:59:00Z')  # last push 7 days + 1 min before NOW
+    fx.seat('home:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias
     fx.config()
     before = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
     assert before['calibration']['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6)
     assert before['calibration']['unplaceable']['passes'] is False
-    fx.config(retired=('bart',))
+    fx.config(retired=('assistant',))
     after = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
     u = after['calibration']['unplaceable']
-    assert after['calibration']['retired_hosts'] == [{'host': 'bart', 'status': 'honoured',
+    assert after['calibration']['retired_hosts'] == [{'host': 'assistant', 'status': 'honoured',
                                                       'open_composite_rows_not_counted': 1}]
     assert u['ratio'] == 0.0 and u['provider_total_tokens'] == 990_000 and u['passes'] is True
-    assert u['retired_mass'] == [{'provider': 'claude', 'host': 'bart', 'tokens': 30_000}]
+    assert u['retired_mass'] == [{'provider': 'claude', 'host': 'assistant', 'tokens': 30_000}]
     assert u['by_host_account'] == []
     assert _spec_totals(after) == _spec_totals(before)  # per-spec rollups unchanged
 
 
 def test_usage_calibration_amend_ac2_ignored_with_open_seat(fx: Fx, capsys) -> None:
-    _retired_ledger(fx, bart_open=True)
-    fx.config(retired=('bart',))
+    _retired_ledger(fx, assistant_open=True)
+    fx.config(retired=('assistant',))
     cal = fx.run('--calibrate')['calibration']
-    assert cal['retired_hosts'] == [{'host': 'bart', 'status': 'ignored', 'reason': 'open seat in sessions (1)'}]
+    assert cal['retired_hosts'] == [{'host': 'assistant', 'status': 'ignored', 'reason': 'open seat in sessions (1)'}]
     assert cal['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6) and cal['unplaceable']['retired_mass'] == []
-    assert "retired_hosts entry 'bart' ignored: open seat" in capsys.readouterr().err
+    assert "retired_hosts entry 'assistant' ignored: open seat" in capsys.readouterr().err
 
 
 def test_usage_calibration_amend_ac2_ignored_with_recent_push(fx: Fx, capsys) -> None:
     _retired_ledger(fx)
-    fx.usage_state('bart:old', '2026-10-03T00:01:00Z')  # 7 days - 1 min before NOW
-    fx.config(retired=('bart',))
+    fx.usage_state('assistant:old', '2026-10-03T00:01:00Z')  # 7 days - 1 min before NOW
+    fx.config(retired=('assistant',))
     cal = fx.run('--calibrate')['calibration']
-    assert cal['retired_hosts'] == [{'host': 'bart', 'status': 'ignored',
+    assert cal['retired_hosts'] == [{'host': 'assistant', 'status': 'ignored',
                                      'reason': 'v2_usage_state row updated within 7 days'}]
     assert cal['unplaceable']['passes'] is False and cal['unplaceable']['retired_mass'] == []
     assert 'within 7 days' in capsys.readouterr().err
@@ -704,7 +704,7 @@ def test_usage_calibration_amend_ac3_identity_mass_partition(fx: Fx) -> None:
     fx.ident('n-unknown', None)
     fx.ident('n-m-fleet', FLEET, host='merlin')
     fx.ident('n-m-conflict', None, host='merlin', conflict=1)
-    fx.ident('n-bart', FLEET, host='bart')
+    fx.ident('n-assistant', FLEET, host='assistant')
     fx.seat('thoth:w', created='2026-09-01T00:00:00Z')
     fx.rec('thoth:w', out(1000), observed=w % 1)                                   # measured
     fx.rec('merlin:m', out(200), observed=w % 2, model='claude-mystery-1', host='merlin', native='n-m-fleet')  # unpriced
@@ -712,15 +712,15 @@ def test_usage_calibration_amend_ac3_identity_mass_partition(fx: Fx) -> None:
     fx.rec('merlin:m', out(400), observed=w % 4, host='merlin', native='n-m-conflict')  # unknown_account.conflict
     fx.rec('thoth:w', out(50), observed=None)                                      # untimed
     fx.rec('merlin:m', out(60), host='merlin', native='n-m-fleet', row=False)      # untimed
-    fx.rec('bart:old', out(700), observed=w % 5, host='bart', native='n-bart')     # retired, timed in window
-    fx.rec('bart:old', out(800), host='bart', native='n-bart', row=False)          # retired, untimed
-    fx.config(retired=('bart',))
+    fx.rec('assistant:old', out(700), observed=w % 5, host='assistant', native='n-assistant')     # retired, timed in window
+    fx.rec('assistant:old', out(800), host='assistant', native='n-assistant', row=False)          # retired, untimed
+    fx.config(retired=('assistant',))
     cal = fx.run('--calibrate')['calibration']
     e = entry({'calibration': cal}, FLEET)
     w2 = next(p for p in e['methods']['full_week_100']['points'] if p['window_start'] == '2026-09-16T16:00:00Z')
     assert w2['tokens'] == {'measured': 1000, 'unpriced': 200, 'unknown_account': 700}
     expected = [
-        {'provider': 'claude', 'host': 'bart',
+        {'provider': 'claude', 'host': 'assistant',
          'window': {'measured': 0, 'unpriced': 0, 'unknown_account': 0, 'conflict': 0},
          'outside_window_sum': {'untimed': 0, 'retired': 1500}},
         {'provider': 'claude', 'host': 'merlin',

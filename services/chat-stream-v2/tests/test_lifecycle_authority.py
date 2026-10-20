@@ -153,21 +153,21 @@ def test_only_authenticated_operator_designates_and_attribution_is_verified(monk
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("lead2", role="lead")
         forged = {"actor_kind": "operator", "operator_principal": "operator:forged", "role": "assistant"}
         # Unauthenticated, forged wire claims, and an ordinary lead's own seat token.
-        await _refused(env.mutate({}, "designate", target="bart", **forged), "authority_operator_required")
-        await _refused(env.mutate(await env.seat("lead2"), "designate", target="bart", request_id="r2",
+        await _refused(env.mutate({}, "designate", target="assistant", **forged), "authority_operator_required")
+        await _refused(env.mutate(await env.seat("lead2"), "designate", target="assistant", request_id="r2",
                                      **forged), "authority_operator_required")
         # A connection that carries a seat token never acts as operator.
         both = {**OPERATOR, **await env.seat("lead2")}
         await _refused(env.mutate(both, "designate", target="lead2", request_id="r3"), "authority_operator_required")
         assert (await env.grant())["stream_id"] is None
-        reply = await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
+        reply = await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
         receipt = reply["receipt"]
-        assert receipt["holder_stream_id"] == "node-a:bart"
-        assert receipt["holder_generation"] == await env.gen("bart")
+        assert receipt["holder_stream_id"] == "node-a:assistant"
+        assert receipt["holder_generation"] == await env.gen("assistant")
         assert receipt["actor_kind"] == "operator"
         assert receipt["actor_identity"] == OPERATOR["operator_principal"]
         assert receipt["actor_generation"] is None
@@ -201,13 +201,13 @@ def test_recipient_matrix_refuses_ineligible(monkeypatch, role, fields, code, ac
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("cand", role=role, **fields)
         if action != "designate":
-            await env.mutate(OPERATOR, "designate", target="bart", request_id="d0")
+            await env.mutate(OPERATOR, "designate", target="assistant", request_id="d0")
         before = await env.grant()
         # A caller-supplied role/title never establishes eligibility.
-        forged = {"role": "lead", "target_role": "lead", "title": "Bart right hand"}
+        forged = {"role": "lead", "target_role": "lead", "title": "Assistant right hand"}
         coro = env.mutate(OPERATOR, "designate", target="cand", request_id="d1", **forged)
         await _refused(coro, code)
         assert await env.grant() == before
@@ -220,16 +220,16 @@ def test_recipient_generation_closed_and_unknown_refused(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
-        stale = await env.gen("bart")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", target_generation="nope"),
+        await env.open("assistant", role="lead")
+        stale = await env.gen("assistant")
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", target_generation="nope"),
                        "authority_target_generation_mismatch")
-        await env.store.mark_closed(HOST, "bart", closed_at="2026-09-26T00:00:00Z", pane_status="pane_dead")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", request_id="r2",
+        await env.store.mark_closed(HOST, "assistant", closed_at="2026-09-26T00:00:00Z", pane_status="pane_dead")
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", request_id="r2",
                                      target_generation=stale), "authority_target_unavailable")
-        await env.open("bart", role="lead")  # same name, new generation
-        assert await env.gen("bart") != stale
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", request_id="r3",
+        await env.open("assistant", role="lead")  # same name, new generation
+        assert await env.gen("assistant") != stale
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", request_id="r3",
                                      target_generation=stale), "authority_target_generation_mismatch")
         await _refused(env.mutate(OPERATOR, "designate", request_id="r4",
                                      target_stream_id="node-a:ghost", target_generation="g"),
@@ -257,14 +257,14 @@ def test_eligibility_change_between_read_and_commit_refuses(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
-        generation = await env.gen("bart")
-        readback = (await env.mutate(OPERATOR, "inspect", target="bart"))["target"]
-        assert readback == {"stream_id": "node-a:bart", "session_generation": generation, "role": "lead",
+        await env.open("assistant", role="lead")
+        generation = await env.gen("assistant")
+        readback = (await env.mutate(OPERATOR, "inspect", target="assistant"))["target"]
+        assert readback == {"stream_id": "node-a:assistant", "session_generation": generation, "role": "lead",
                             "eligible": True, "refusal_code": None}
         # Role changes after the operator's read but before the mutation commits.
-        await env.store.update_session(HOST, "bart", role="worker")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", target_generation=generation),
+        await env.store.update_session(HOST, "assistant", role="worker")
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", target_generation=generation),
                        "authority_target_ineligible")
         assert (await env.grant())["stream_id"] is None
 
@@ -275,11 +275,11 @@ def test_revision_conflict_and_idempotent_operator_retry(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("lead2", role="lead")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", expected=5), "authority_revision_conflict")
-        first = await env.mutate(OPERATOR, "designate", target="bart", request_id="d1", expected=0)
-        again = await env.mutate(OPERATOR, "designate", target="bart", request_id="d1", expected=0)
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", expected=5), "authority_revision_conflict")
+        first = await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1", expected=0)
+        again = await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1", expected=0)
         assert again["receipt"]["replayed"] is True
         assert {k: v for k, v in again["receipt"].items() if k != "replayed"} == first["receipt"]
         assert (await env.grant())["revision"] == 1
@@ -290,7 +290,7 @@ def test_revision_conflict_and_idempotent_operator_retry(monkeypatch):
         await _refused(env.mutate(OTHER_OPERATOR, "designate", target="lead2", request_id="d1", expected=0),
                        "authority_revision_conflict")
         replaced = await env.mutate(OTHER_OPERATOR, "designate", target="lead2", request_id="d1", expected=1)
-        assert replaced["receipt"]["prior_stream_id"] == "node-a:bart"
+        assert replaced["receipt"]["prior_stream_id"] == "node-a:assistant"
         assert replaced["receipt"]["actor_identity"] == OTHER_OPERATOR["operator_principal"]
         assert (await env.grant())["stream_id"] == "node-a:lead2"
 
@@ -301,9 +301,9 @@ def test_missing_reason_or_request_id_refuses(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", reason="  "), "authority_reason_required")
-        await _refused(env.mutate(OPERATOR, "designate", target="bart", request_id=""),
+        await env.open("assistant", role="lead")
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", reason="  "), "authority_reason_required")
+        await _refused(env.mutate(OPERATOR, "designate", target="assistant", request_id=""),
                        "authority_request_id_required")
         await _refused(env.mutate(OPERATOR, "revoke", request_id="x"), "authority_not_held")
         with pytest.raises(VerbError) as exc:
@@ -318,11 +318,11 @@ def test_missing_reason_or_request_id_refuses(monkeypatch):
 def test_transfer_disabled_for_operator_holder_and_other_seat(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("lead2", role="lead")
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
         before = await env.grant()
-        for auth in (OPERATOR, await env.seat("bart"), await env.seat("lead2")):
+        for auth in (OPERATOR, await env.seat("assistant"), await env.seat("lead2")):
             await _refused(env.mutate(auth, "transfer", target="lead2"), "authority_transfer_disabled")
             await _refused(env.lifecycle(auth, "transfer", target="lead2"), "authority_transfer_disabled")
         assert await env.grant() == before
@@ -333,13 +333,13 @@ def test_reopened_holder_generation_does_not_inherit(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("lead2", role="lead")
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
-        old = await env.seat("bart")
-        await env.store.mark_closed(HOST, "bart", closed_at="2026-09-26T00:00:00Z", pane_status="pane_dead")
-        await env.open("bart", role="lead")
-        new = await env.seat("bart")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
+        old = await env.seat("assistant")
+        await env.store.mark_closed(HOST, "assistant", closed_at="2026-09-26T00:00:00Z", pane_status="pane_dead")
+        await env.open("assistant", role="lead")
+        new = await env.seat("assistant")
         assert new["session_generation"] != old["session_generation"]
         for auth in (old, new):
             assert not await env.sessions.assistant.manager_holds(auth)
@@ -352,9 +352,9 @@ def test_reopened_holder_generation_does_not_inherit(monkeypatch):
 def test_concurrent_replace_and_revoke_leave_one_outcome(monkeypatch):
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
     async def check(env: Env):
-        for name in ("bart", "lead2"):
+        for name in ("assistant", "lead2"):
             await env.open(name, role="lead")
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
         results = await asyncio.gather(
             env.mutate(OPERATOR, "designate", target="lead2", request_id="d2", expected=1),
             env.mutate(OPERATOR, "revoke", request_id="v1", expected=1), return_exceptions=True)
@@ -378,10 +378,10 @@ def test_audit_failure_prevents_authority_mutation(monkeypatch):
         return real(conn, **fields)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         monkeypatch.setattr(lifecycle_authority, "audit", failing)
         with pytest.raises(sqlite3.OperationalError):
-            await env.mutate(OPERATOR, "designate", target="bart")
+            await env.mutate(OPERATOR, "designate", target="assistant")
         monkeypatch.setattr(lifecycle_authority, "audit", real)
         assert await env.grant() == {"stream_id": None, "session_generation": None, "revision": 0}
         assert [r["result"] for r in await env.audit()] == []
@@ -395,17 +395,17 @@ def test_revocation_and_grant_survive_restart_without_revival(monkeypatch, tmp_p
     state: dict = {}
 
     async def first(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("lead2", role="lead")
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
-        state["bart"] = await env.seat("bart")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
+        state["assistant"] = await env.seat("assistant")
         await env.mutate(OPERATOR, "designate", target="lead2", request_id="d2")
         state["lead2"] = await env.seat("lead2")
 
     async def second(env: Env):
         assert (await env.grant())["stream_id"] == "node-a:lead2"
         assert await env.sessions.assistant.manager_holds(state["lead2"])
-        assert not await env.sessions.assistant.manager_holds(state["bart"])
+        assert not await env.sessions.assistant.manager_holds(state["assistant"])
         replay = await env.mutate(OPERATOR, "designate", target="lead2", request_id="d2", expected=1)
         assert replay["receipt"]["replayed"] is True
         await env.mutate(OPERATOR, "revoke", request_id="v1", reason="rollback drill")
@@ -427,9 +427,9 @@ def test_revocation_and_grant_survive_restart_without_revival(monkeypatch, tmp_p
 # -- manager close / reparent ----------------------------------------------
 
 async def _manager(env: Env) -> dict:
-    await env.open("bart", role="lead")
-    await env.mutate(OPERATOR, "designate", target="bart", request_id="d-manager")
-    return await env.seat("bart")
+    await env.open("assistant", role="lead")
+    await env.mutate(OPERATOR, "designate", target="assistant", request_id="d-manager")
+    return await env.seat("assistant")
 
 
 def _close(auth: dict, target: str, reason: str = "reported childless cleanup", **extra) -> dict:
@@ -441,25 +441,25 @@ def test_ordinary_lead_denied_until_designated_then_closes_reported_non_child(mo
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
+        await env.open("assistant", role="lead")
         await env.open("other", role="lead")
         await env.open("fixture", role="worker", parent_stream_id="node-a:other")
         await env.report("fixture")
-        bart = await env.seat("bart")
-        await _refused(env.server._on_close(_close(bart, "fixture")), "close_unauthorized")
+        assistant = await env.seat("assistant")
+        await _refused(env.server._on_close(_close(assistant, "fixture")), "close_unauthorized")
         assert (await env.store.fetch_session(HOST, "fixture"))["status"] == "open"
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1")
         generation = await env.gen("fixture")
-        reply = await env.server._on_close(_close(bart, "fixture"))
+        reply = await env.server._on_close(_close(assistant, "fixture"))
         assert reply["type"] == "close.ok"
         assert env.tmux.killed == ["fixture"]
         assert (await env.store.fetch_session(HOST, "fixture"))["status"] == "closed"
         rows = [r for r in await env.audit() if r["action"] == "manager_close"]
         assert [(r["actor_kind"], r["result"], r["refusal_code"], r["actor_identity"], r["actor_generation"],
                  r["target_generation"], r["old_revision"], r["new_revision"]) for r in rows] == [
-            ("seat", "refused", "close_unauthorized", "node-a:bart", bart["session_generation"], generation, 0, 0),
-            ("manager", "admitted", None, "node-a:bart", bart["session_generation"], generation, 1, 1),
-            ("manager", "applied", None, "node-a:bart", bart["session_generation"], generation, 1, 1),
+            ("seat", "refused", "close_unauthorized", "node-a:assistant", assistant["session_generation"], generation, 0, 0),
+            ("manager", "admitted", None, "node-a:assistant", assistant["session_generation"], generation, 1, 1),
+            ("manager", "applied", None, "node-a:assistant", assistant["session_generation"], generation, 1, 1),
         ]
         # Normal parent close is unchanged.
         await env.open("kid", role="worker", parent_stream_id="node-a:other")
@@ -625,7 +625,7 @@ def test_manager_reparent_stale_generation_with_closed_cross_host_parent(monkeyp
             assert (row["actor_identity"], row["actor_generation"], row["target_stream_id"],
                     row["target_generation"], row["new_parent_stream_id"], row["reason"],
                     row["request_id"], row["old_revision"], row["new_revision"]) == (
-                        f"{HOST}:bart", manager["session_generation"], f"{HOST}:child",
+                        f"{HOST}:assistant", manager["session_generation"], f"{HOST}:child",
                         await env.gen("child"), "node-b:successor", "adopt orphan", "adopt-orphan", 1, 1)
 
     scenario(check)
@@ -643,13 +643,13 @@ def test_manager_reparent_live_parent_and_owned_cycle(monkeypatch):
                "expected_generation": await env.gen("child"), "reason": "move active lane",
                "request_id": "move-live", "_auth_context": manager}
         assert (await env.server._on_reparent(msg))["type"] == "reparent.ok"
-        await env.open("owned", role="worker", parent_stream_id=f"{HOST}:bart")
+        await env.open("owned", role="worker", parent_stream_id=f"{HOST}:assistant")
         await env.open("descendant", role="worker", parent_stream_id=f"{HOST}:owned")
         await _refused(env.server._on_reparent({**msg, "stream_id": f"{HOST}:owned",
                                                  "new_parent_stream_id": f"{HOST}:descendant",
                                                  "expected_generation": await env.gen("owned"),
                                                  "request_id": "cycle"}), "reparent_cycle")
-        assert (await env.store.fetch_session(HOST, "owned"))["parent_stream_id"] == f"{HOST}:bart"
+        assert (await env.store.fetch_session(HOST, "owned"))["parent_stream_id"] == f"{HOST}:assistant"
 
     scenario(check)
 
@@ -899,10 +899,10 @@ def test_caller_text_is_scrubbed_and_inspect_requires_auth(monkeypatch):
     canary = "Zq7" + "xK9mPw2LrT8vNc4Hs6Jd1YbQ"
 
     async def check(env: Env):
-        await env.open("bart", role="lead")
-        await _refused(env.mutate({}, "designate", target="bart", reason=f"leak {canary}", request_id=canary),
+        await env.open("assistant", role="lead")
+        await _refused(env.mutate({}, "designate", target="assistant", reason=f"leak {canary}", request_id=canary),
                        "authority_operator_required")
-        await env.mutate(OPERATOR, "designate", target="bart", request_id="d1", reason=f"ok {canary}\x00")
+        await env.mutate(OPERATOR, "designate", target="assistant", request_id="d1", reason=f"ok {canary}\x00")
         rows = await env.audit()
         assert rows[0]["reason"] is None and rows[0]["request_id"] is None  # unverified caller text dropped
         assert rows[1]["reason"] == "ok [redacted]"
@@ -910,7 +910,7 @@ def test_caller_text_is_scrubbed_and_inspect_requires_auth(monkeypatch):
         with pytest.raises(VerbError) as exc:
             await env.server._on_assistant_lifecycle({"action": "inspect", "_auth_context": {}})
         assert exc.value.code == "authentication_required"
-        assert (await env.mutate(await env.seat("bart"), "inspect"))["grant"]["stream_id"] == "node-a:bart"
+        assert (await env.mutate(await env.seat("assistant"), "inspect"))["grant"]["stream_id"] == "node-a:assistant"
 
     scenario(check)
 

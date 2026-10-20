@@ -557,7 +557,7 @@ def test_ordinary_ask_cannot_forge_composite_lifetime_exemption(tmp_path):
 def test_bound_assistant_questions_surface_in_composite_chat(tmp_path):
     """A hidden direct-primary assistant's cards belong to the composite chat."""
     async def go():
-        composite, bound, other = "bart:assistant", "hosta:v2-lead", "hosta:v2-other"
+        composite, bound, other = "home:assistant", "node-a:v2-lead", "node-a:v2-other"
         sessions = _FakeSessions({
             bound: {"visibility": "hidden", "status": "open", "session_generation": "g1"},
             other: {"visibility": "visible", "status": "open", "session_generation": "g2"},

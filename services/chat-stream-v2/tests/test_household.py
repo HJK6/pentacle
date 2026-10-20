@@ -284,7 +284,7 @@ def test_event_add_and_remove(adapter, cosmo):
     ("household.item.add", {"list": "grocery", "label": "x", "scope": "shared"}),
     ("household.item.add", {"list": "tasks", "label": "x", "priority": "hi"}),
     ("household.item.add", {"list": "tasks", "label": "x", "due_date": "2026-10-09"}),
-    ("household.item.add", {"list": "tasks", "label": "x", "created_by": "bart"}),
+    ("household.item.add", {"list": "tasks", "label": "x", "created_by": "assistant"}),
     ("household.item.add", {"list": "wishlist", "label": "x"}),
     ("household.item.add", {"list": "tasks", "label": "   "}),
     ("household.item.add", {"list": "tasks", "label": "x" * 1001}),
@@ -489,12 +489,12 @@ def test_fake_cosmo_accepts_a_whole_snapshot_burst(cosmo):
 
 def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo):
     cosmo.routes[("GET", "/lists/tasks/items")] = (200, {"items": [
-        item(1, created_by="bart"), item(2, scope="shared", created_by="helper"), item(3, created_by="app"),
+        item(1, created_by="assistant"), item(2, scope="shared", created_by="helper"), item(3, created_by="app"),
         item(4, scope="someone-else"),  # never sent by Cosmo to this credential; dropped defensively
     ]})
     cosmo.routes[("GET", "/events")] = (200, {"items": [
         event(5, "2026-10-06", who="owner"), event(6, "2026-10-06", who="me", scope="shared"),
-        event(7, "2026-10-06", who="both", created_by="bart"),
+        event(7, "2026-10-06", who="both", created_by="assistant"),
     ]})
     result = call(adapter, "household.snapshot")
     assert result["people"] == {"partner": "Sam"}
@@ -502,7 +502,7 @@ def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo):
         (1, "private", "assistant"), (2, "shared", "partner_assistant"), (3, "private", "app")]
     assert [(e["id"], e["who"], e["scope"], e["created_by"]) for e in result["events"]] == [
         (5, "self", "private", "app"), (6, "partner", "shared", "app"), (7, "both", "private", "assistant")]
-    assert SELF not in json.dumps(result) and "bart" not in json.dumps(result) and "helper" not in json.dumps(result)
+    assert SELF not in json.dumps(result) and "assistant" not in json.dumps(result) and "helper" not in json.dumps(result)
 
 
 def test_partner_name_defaults_and_is_bounded(cosmo, token_file, monkeypatch):

@@ -314,7 +314,7 @@ def test_prompt_auth_eligibility_and_replay_use_only_disposable_stores(tmp_path)
 
 # --- Regression: distinct terminal reports from one child-generation ----------
 # A single child seat can legitimately file more than one terminal report to its
-# parent (e.g. bart:v2-8a5bf6ee filed done for msg 2026091362 then done for msg
+# parent (e.g. assistant:v2-8a5bf6ee filed done for msg 2026091362 then done for msg
 # 2026091348 on 2026-09-13). Each distinct report_id must produce its own
 # child_report_ready notice; the generation "end"-fact short-circuit in
 # store_watch_wake.coalesce_notice_conn used to swallow the second one so the

@@ -52,7 +52,7 @@ async def _harness(tmp_path):
                                     parent_stream_id=DESK if alias == "child" else None)
             await store.grant_stream_token(HOST, name, hashlib.sha256(token.encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
         composite = AssistantComposite(store, config=AssistantCompositeConfig(
-            enabled=True, name="bart", stream_id=ASSISTANT,
+            enabled=True, name="assistant", stream_id=ASSISTANT,
             direct_primary_stream_id=DESK, direct_primary_generation=generation,
             astra_stream_id=DESK, authority_stream_id=HOST + ":advisor"),
             dispatch=_production_dispatcher(comms))

@@ -156,7 +156,7 @@ def test_proactive_idempotent_and_conflict(kind):
                 await composite.publish({**msg, 'message': 'changed'}, actor_stream_id=ROOT)
             assert len(await _answer_rows(store)) == 1
             # Rebinding revokes even a retry from the old seat.
-            await sql(store, "INSERT OR REPLACE INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES('bart','other:seat','other-generation',1,'now')")
+            await sql(store, "INSERT OR REPLACE INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES('assistant','other:seat','other-generation',1,'now')")
             with pytest.raises(ValueError, match='assistant_publish_provenance_unverified'):
                 await composite.publish(msg, actor_stream_id=ROOT)
         finally:
@@ -215,7 +215,7 @@ def test_proactive_rechecks_binding_in_commit_transaction(monkeypatch):
         try:
             original = store.record_assistant_composite_publication
             async def rebind_before_commit(**kwargs):
-                await sql(store, "INSERT OR REPLACE INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES('bart','other:seat','other-generation',1,'now')")
+                await sql(store, "INSERT OR REPLACE INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) VALUES('assistant','other:seat','other-generation',1,'now')")
                 return await original(**kwargs)
             monkeypatch.setattr(store, 'record_assistant_composite_publication', rebind_before_commit)
             with pytest.raises(ValueError, match='assistant_publish_provenance_unverified'):

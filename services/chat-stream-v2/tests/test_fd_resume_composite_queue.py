@@ -2,7 +2,7 @@
 spec_pentacle__daemon_restart_continuity_2026_10). In-process pins for the two
 RED cells found on the disposable daemon (`tests/soak/test_fd_resume_recovery.py`):
 
-  A7: a peer tell to bart is delivered into the front-desk digest hold
+  A7: a peer tell to assistant is delivered into the front-desk digest hold
       (`persisted`, action committed, no paste). The post-rebind flush must count
       that durable hold as delivered, or every queued tell after the first is
       stranded behind it.
@@ -22,7 +22,7 @@ from sessions import Sessions
 from store import Store
 
 LOCAL = "fixture-host"
-BART_CHAT = "bart:assistant"
+ASSISTANT_CHAT = "home:assistant"
 FD = "fixture-fd:front"
 OPERATOR = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
 
@@ -65,7 +65,7 @@ async def _seat(store, stream_id):
 def _config(generation):
     return AssistantCompositeConfig.from_env({
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
-        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": BART_CHAT,
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT_CHAT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": FD,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,
     })
@@ -84,30 +84,30 @@ def test_flush_dequeues_digest_held_tells_in_order():
         store.start()
         try:
             seat = await _seat(store, FD)
-            bart = AssistantComposite(store, config=_config(seat["session_generation"]))
-            await bart.load_binding()
-            await bart.ensure_projection()
+            assistant = AssistantComposite(store, config=_config(seat["session_generation"]))
+            await assistant.load_binding()
+            await assistant.ensure_projection()
             sessions = Sessions(store, tmux=None, local_host=LOCAL)
             server = Server(store=store, sessions=sessions, comms=_HeldComms(store), local_host=LOCAL)
-            server.assistant_composites = {"bart": bart}
-            server.assistant_composite = bart
+            server.assistant_composites = {"assistant": assistant}
+            server.assistant_composite = assistant
             await _close_dead(store, seat)
             for i, text in enumerate(["first", "second"]):
-                reply = await server._on_tell({"to_stream_id": BART_CHAT, "text": text, "tell_id": f"t{i}",
+                reply = await server._on_tell({"to_stream_id": ASSISTANT_CHAT, "text": text, "tell_id": f"t{i}",
                                                "_auth_context": OPERATOR})
                 assert reply["delivery_status"] == "queued_unbound"
 
             resumed = await _seat(store, FD)  # resume: same stream, new generation
-            bart2 = AssistantComposite(store, config=_config(resumed["session_generation"]))
-            await bart2.load_binding()
-            server.assistant_composites["bart"] = bart2
+            assistant2 = AssistantComposite(store, config=_config(resumed["session_generation"]))
+            await assistant2.load_binding()
+            server.assistant_composites["assistant"] = assistant2
 
-            delivered = await server._flush_composite_tells(bart2)
+            delivered = await server._flush_composite_tells(assistant2)
             assert delivered == 2
             assert [m["message"] for m in server.comms.told] == ["first", "second"]
-            assert await store.claim_composite_tells(name="bart") == []
+            assert await store.claim_composite_tells(name="assistant") == []
             # A replayed flush cannot double-deliver: nothing is left to deliver.
-            assert await server._flush_composite_tells(bart2) == 0
+            assert await server._flush_composite_tells(assistant2) == 0
         finally:
             store.stop()
 
@@ -122,24 +122,24 @@ def test_flush_keeps_tell_without_durable_hold():
         store.start()
         try:
             seat = await _seat(store, FD)
-            bart = AssistantComposite(store, config=_config(seat["session_generation"]))
-            await bart.load_binding()
-            await bart.ensure_projection()
+            assistant = AssistantComposite(store, config=_config(seat["session_generation"]))
+            await assistant.load_binding()
+            await assistant.ensure_projection()
             sessions = Sessions(store, tmux=None, local_host=LOCAL)
             server = Server(store=store, sessions=sessions, comms=_HeldComms(store, drop={"first"}),
                             local_host=LOCAL)
-            server.assistant_composites = {"bart": bart}
-            server.assistant_composite = bart
+            server.assistant_composites = {"assistant": assistant}
+            server.assistant_composite = assistant
             await _close_dead(store, seat)
             for i, text in enumerate(["first", "second"]):
-                await server._on_tell({"to_stream_id": BART_CHAT, "text": text, "tell_id": f"t{i}",
+                await server._on_tell({"to_stream_id": ASSISTANT_CHAT, "text": text, "tell_id": f"t{i}",
                                        "_auth_context": OPERATOR})
             resumed = await _seat(store, FD)
-            bart2 = AssistantComposite(store, config=_config(resumed["session_generation"]))
-            await bart2.load_binding()
-            server.assistant_composites["bart"] = bart2
-            assert await server._flush_composite_tells(bart2) == 0
-            assert [r["body"] for r in await store.claim_composite_tells(name="bart")] == ["first", "second"]
+            assistant2 = AssistantComposite(store, config=_config(resumed["session_generation"]))
+            await assistant2.load_binding()
+            server.assistant_composites["assistant"] = assistant2
+            assert await server._flush_composite_tells(assistant2) == 0
+            assert [r["body"] for r in await store.claim_composite_tells(name="assistant")] == ["first", "second"]
         finally:
             store.stop()
 
@@ -159,17 +159,17 @@ def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed(with_l
                 dispatched.append(route)
                 return {"delivery": "landed"}
 
-            bart = AssistantComposite(store, config=_config(seat["session_generation"]), dispatch=dispatch)
-            await bart.load_binding()
-            await bart.ensure_projection()
+            assistant = AssistantComposite(store, config=_config(seat["session_generation"]), dispatch=dispatch)
+            await assistant.load_binding()
+            await assistant.ensure_projection()
             await _close_dead(store, seat)
 
-            receipt = await bart.accept_input(
+            receipt = await assistant.accept_input(
                 {"text": "while closed", "request_id": "r1", "optimistic_id": "in-closed"},
                 operator_principal="operator:fixture")
             assert receipt["type"] == "assistant.send.accepted"
             for _ in range(100):
-                route = await store.get_assistant_composite_route(stream_id=BART_CHAT, input_identity="in-closed")
+                route = await store.get_assistant_composite_route(stream_id=ASSISTANT_CHAT, input_identity="in-closed")
                 if route and route.get("error_code") == "assistant_direct_target_unbound":
                     break
                 await asyncio.sleep(0.01)
@@ -185,12 +185,12 @@ def test_input_after_unprotected_bound_seat_closes_is_queued_and_replayed(with_l
                          seat["session_generation"], "synthetic-proof"))
                     conn.commit()
                 await store.submit(record)
-            await store.recover_assistant_binding(name="bart", target_stream_id=FD,
+            await store.recover_assistant_binding(name="assistant", target_stream_id=FD,
                                                   target_generation=resumed["session_generation"])
-            await bart.load_binding()
-            await bart.recover()
+            await assistant.load_binding()
+            await assistant.recover()
             for _ in range(200):
-                route = await store.get_assistant_composite_route(stream_id=BART_CHAT, input_identity="in-closed")
+                route = await store.get_assistant_composite_route(stream_id=ASSISTANT_CHAT, input_identity="in-closed")
                 if route["routing_state"] == "resolved" and dispatched:
                     break
                 await asyncio.sleep(0.01)
@@ -215,13 +215,13 @@ def test_input_to_resumed_but_unbound_generation_is_still_refused():
         store.start()
         try:
             seat = await _seat(store, FD)
-            bart = AssistantComposite(store, config=_config(seat["session_generation"]))
-            await bart.load_binding()
-            await bart.ensure_projection()
+            assistant = AssistantComposite(store, config=_config(seat["session_generation"]))
+            await assistant.load_binding()
+            await assistant.ensure_projection()
             await _close_dead(store, seat)
             await _seat(store, FD)
             try:
-                await bart.accept_input({"text": "x", "request_id": "r2", "optimistic_id": "in-live"},
+                await assistant.accept_input({"text": "x", "request_id": "r2", "optimistic_id": "in-live"},
                                         operator_principal="operator:fixture")
             except ValueError as exc:
                 assert str(exc) == "assistant_direct_generation_conflict"

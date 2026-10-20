@@ -1470,7 +1470,7 @@ def test_authenticated_usage_push_projects_snapshot_into_live_inventory() -> Non
             source_host_proof = hmac.new(
                 host_secret.encode(), proof_message.encode(), hashlib.sha256,
             ).hexdigest()
-            await_sessions = Sessions(store, local_host="bart")
+            await_sessions = Sessions(store, local_host="assistant")
             await_sessions_row = await await_sessions.open(
                 "amaterasu", session_name, provider="codex", pane_pid="8123",
                 session_generation=generation,

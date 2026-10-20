@@ -127,7 +127,7 @@ def test_bound_system_connection_cannot_switch_claim_or_verb(monkeypatch):
         peer = Peer()
         hello = _system_frame("hello", subscribe={"mode": "rpc", "snapshot": False})
         assert (await daemon._dispatch(json.dumps(hello), websocket=peer))[0]["type"] == "ready"
-        changed = _system_frame("tell", from_stream_id="bart:v2-stolen")
+        changed = _system_frame("tell", from_stream_id="assistant:v2-stolen")
         assert (await daemon._dispatch(json.dumps(changed), websocket=peer))[0]["error_code"] == "system_producer_auth_required"
         assert (await daemon._dispatch('{"type":"tell","request_id":"tokenless"}', websocket=peer))[0]["error_code"] == "system_producer_forbidden"
         assert calls == []
@@ -282,15 +282,15 @@ def test_loopback_system_hello_never_activates_broadcast_subscription(monkeypatc
     ("field", "value"),
     [
         ("actor", "operator"),
-        ("actor_stream_id", "bart:v2-owner"),
+        ("actor_stream_id", "assistant:v2-owner"),
         ("owner", "operator"),
-        ("answer_to_stream_id", "bart:v2-owner"),
+        ("answer_to_stream_id", "assistant:v2-owner"),
         ("ttl_seconds", 60),
         ("prompt", {"text": "approve"}),
         ("grant", {"role": "admin"}),
         ("spawn", {"model": "anything"}),
         ("schedule", {"at": "now"}),
-        ("binding", {"answer_to_stream_id": "bart:v2-owner"}),
+        ("binding", {"answer_to_stream_id": "assistant:v2-owner"}),
         ("_auth_context", {"operator_authenticated": True}),
     ],
 )

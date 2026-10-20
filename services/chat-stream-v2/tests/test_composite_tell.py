@@ -13,9 +13,9 @@ from store import Store
 
 
 LOCAL = "fixture-host"
-BART_CHAT = "bart:assistant"
+ASSISTANT_CHAT = "home:assistant"
 DAFF_CHAT = "daff:assistant"
-BART_SEAT = "fixture-barts:visible"
+ASSISTANT_SEAT = "fixture-assistants:visible"
 DAFF_SEAT = "fixture-daffs:visible"
 
 
@@ -66,7 +66,7 @@ async def _server_with(store, composites):
     await sessions.refresh()
     server = Server(store=store, sessions=sessions, comms=comms, local_host=LOCAL)
     server.assistant_composites = composites
-    server.assistant_composite = composites.get("bart")
+    server.assistant_composite = composites.get("assistant")
     return server, comms, sessions
 
 
@@ -75,13 +75,13 @@ def test_composite_tell_delivers_both_directions_to_bound_pane():
         store = Store(":memory:")
         store.start()
         try:
-            bart_seat = await _seat(store, BART_SEAT)
+            assistant_seat = await _seat(store, ASSISTANT_SEAT)
             daff_seat = await _seat(store, DAFF_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, bart_seat["session_generation"]))
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, assistant_seat["session_generation"]))
             daff = AssistantComposite(store, config=_config(
                 "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, daff_seat["session_generation"]))
-            server, comms, sessions = await _server_with(store, {"bart": bart, "daff": daff})
+            server, comms, sessions = await _server_with(store, {"assistant": assistant, "daff": daff})
             await sessions.refresh()
 
             # operator -> daff:assistant
@@ -93,19 +93,19 @@ def test_composite_tell_delivers_both_directions_to_bound_pane():
             assert comms.told[-1]["to_stream_id"] == DAFF_SEAT
             assert comms.told[-1]["message"] == "hi daff"
 
-            # daff -> bart:assistant (agent stream token)
+            # daff -> home:assistant (agent stream token)
             await server._on_tell({
-                "to_stream_id": BART_CHAT, "text": "hi bart",
+                "to_stream_id": ASSISTANT_CHAT, "text": "hi assistant",
                 "from_stream_id": DAFF_CHAT,
                 "_auth_context": {"token_verified": True, "stream_id": DAFF_SEAT},
             })
-            assert comms.told[-1]["to_stream_id"] == BART_SEAT
+            assert comms.told[-1]["to_stream_id"] == ASSISTANT_SEAT
             assert comms.told[-1]["from_stream_id"] == DAFF_CHAT
 
-            # bart -> daff:assistant
+            # assistant -> daff:assistant
             await server._on_tell({
-                "to_stream_id": DAFF_CHAT, "text": "ack", "from_stream_id": BART_CHAT,
-                "_auth_context": {"token_verified": True, "stream_id": BART_SEAT},
+                "to_stream_id": DAFF_CHAT, "text": "ack", "from_stream_id": ASSISTANT_CHAT,
+                "_auth_context": {"token_verified": True, "stream_id": ASSISTANT_SEAT},
             })
             assert comms.told[-1]["to_stream_id"] == DAFF_SEAT
         finally:
@@ -119,13 +119,13 @@ def test_scoped_and_dot_clients_may_not_tell_composite():
         store = Store(":memory:")
         store.start()
         try:
-            seat = await _seat(store, BART_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, seat["session_generation"]))
-            server, comms, _ = await _server_with(store, {"bart": bart})
+            seat = await _seat(store, ASSISTANT_SEAT)
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, seat["session_generation"]))
+            server, comms, _ = await _server_with(store, {"assistant": assistant})
             for auth in ({"dot_principal": True}, {"scoped_principal": True, "token_verified": True}):
                 try:
-                    await server._on_tell({"to_stream_id": BART_CHAT, "text": "x", "_auth_context": auth})
+                    await server._on_tell({"to_stream_id": ASSISTANT_CHAT, "text": "x", "_auth_context": auth})
                 except VerbError as exc:
                     assert exc.code == "dot_scope_denied"
                 else:
@@ -142,12 +142,12 @@ def test_unauthenticated_composite_tell_refused():
         store = Store(":memory:")
         store.start()
         try:
-            seat = await _seat(store, BART_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, seat["session_generation"]))
-            server, comms, _ = await _server_with(store, {"bart": bart})
+            seat = await _seat(store, ASSISTANT_SEAT)
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, seat["session_generation"]))
+            server, comms, _ = await _server_with(store, {"assistant": assistant})
             try:
-                await server._on_tell({"to_stream_id": BART_CHAT, "text": "x", "_auth_context": {}})
+                await server._on_tell({"to_stream_id": ASSISTANT_CHAT, "text": "x", "_auth_context": {}})
             except VerbError as exc:
                 assert exc.code == "assistant_tell_unauthorized"
             else:
@@ -164,14 +164,14 @@ def test_stale_generation_refused():
         store = Store(":memory:")
         store.start()
         try:
-            seat = await _seat(store, BART_SEAT)
+            seat = await _seat(store, ASSISTANT_SEAT)
             # Bind to a generation that does not match the live seat.
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, "stalegen0000"))
-            server, comms, _ = await _server_with(store, {"bart": bart})
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, "stalegen0000"))
+            server, comms, _ = await _server_with(store, {"assistant": assistant})
             try:
                 await server._on_tell({
-                    "to_stream_id": BART_CHAT, "text": "x",
+                    "to_stream_id": ASSISTANT_CHAT, "text": "x",
                     "_auth_context": {"operator_authenticated": True, "operator_principal": "operator:fixture"},
                 })
             except VerbError as exc:
@@ -230,12 +230,12 @@ def test_flush_retains_tell_when_delivery_unconfirmed():
         store = Store(":memory:")
         store.start()
         try:
-            bart_seat = await _seat(store, BART_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, bart_seat["session_generation"]))
+            assistant_seat = await _seat(store, ASSISTANT_SEAT)
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, assistant_seat["session_generation"]))
             daff = AssistantComposite(store, config=_config(
                 "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, "g-daff-pending"))
-            server, comms, sessions = await _server_with(store, {"bart": bart, "daff": daff})
+            server, comms, sessions = await _server_with(store, {"assistant": assistant, "daff": daff})
             server.comms = _UnconfirmedComms()
 
             reply = await server._on_tell({
@@ -358,12 +358,12 @@ def test_tell_queued_while_unbound_then_flushed_in_order():
         store.start()
         try:
             # daff bound to a seat that is not open -> unbound for delivery.
-            bart_seat = await _seat(store, BART_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, bart_seat["session_generation"]))
+            assistant_seat = await _seat(store, ASSISTANT_SEAT)
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, assistant_seat["session_generation"]))
             daff = AssistantComposite(store, config=_config(
                 "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, "g-daff-pending"))
-            server, comms, sessions = await _server_with(store, {"bart": bart, "daff": daff})
+            server, comms, sessions = await _server_with(store, {"assistant": assistant, "daff": daff})
 
             # Two tells arrive while daff's pane is absent -> both queue, in order.
             for i, text in enumerate(["first", "second"]):

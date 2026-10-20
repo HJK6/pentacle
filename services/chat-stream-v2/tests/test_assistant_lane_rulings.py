@@ -1,4 +1,4 @@
-"""Bart lane admission requires an independent authority request."""
+"""Assistant lane admission requires an independent authority request."""
 
 import asyncio
 import json
@@ -51,7 +51,7 @@ class PaneTmux:
         self.live.discard(name)
 
 
-def test_bart_lead_spawn_waits_for_independent_ruling_before_spawning():
+def test_assistant_lead_spawn_waits_for_independent_ruling_before_spawning():
     async def go():
         store = Store(":memory:")
         store.start()

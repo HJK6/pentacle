@@ -1019,8 +1019,8 @@ def _retro(cell: Cell, cfg: Path, *args: str, env: dict[str, str] | None = None)
                             stderr=subprocess.PIPE, text=True)
 
 
-def _bart_texts(cell: Cell, marker: str) -> int:
-    return sum(1 for item in cell.inputs("bart") if marker in item["text"])
+def _assistant_texts(cell: Cell, marker: str) -> int:
+    return sum(1 for item in cell.inputs("assistant") if marker in item["text"])
 
 
 def run_c4(root: Path, evidence: Path, *, stay_down: bool = False) -> dict[str, Any]:
@@ -1040,15 +1040,15 @@ def run_c4(root: Path, evidence: Path, *, stay_down: bool = False) -> dict[str, 
             token_path = cell.root / "operator-token"
             token_path.write_text(envelope)
             cell.daemon.start()
-            bart = seed_seats(cell, "bart")["bart"]
-            bart_generation = (bart.get("session") or {}).get("session_generation")
+            assistant = seed_seats(cell, "assistant")["assistant"]
+            assistant_generation = (assistant.get("session") or {}).get("session_generation")
             cell.daemon.stop(signal.SIGTERM)
             seats = _seed_codex_rows(cell, ("sol", "astra"))
             cell.daemon.extra_env.update({
                 "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
                 "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": "soakchat:assistant",
-                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": f"{LOCAL_HOST}:bart",
-                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": str(bart_generation),
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": f"{LOCAL_HOST}:assistant",
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": str(assistant_generation),
             })
             cell.daemon.start()
             # Shared memory + retained run state shaped like the 2026-10-07 incident:
@@ -1120,20 +1120,20 @@ def run_c4(root: Path, evidence: Path, *, stay_down: bool = False) -> dict[str, 
             first = finish(pass1, 600)
             state_after_1 = {n: retro.read(run_root / n, None) for n in (
                 "failure.json", "failure-delivery.json", "failure-notice-error.json", "delivery.json")}
-            report_after_1 = _bart_texts(cell, "REPORT daily-retro ready")
-            notice_after_1 = _bart_texts(cell, "REPORT daily-retro failure")
+            report_after_1 = _assistant_texts(cell, "REPORT daily-retro ready")
+            notice_after_1 = _assistant_texts(cell, "REPORT daily-retro failure")
             second = finish(_retro(cell, cfg, "run", "--on-demand"), 600)
             state_after_2 = {n: retro.read(run_root / n, None) for n in (
                 "failure.json", "failure-delivery.json", "failure-notice-error.json", "delivery.json")}
-            report_total = _bart_texts(cell, "REPORT daily-retro ready")
-            notice_total = _bart_texts(cell, "REPORT daily-retro failure")
+            report_total = _assistant_texts(cell, "REPORT daily-retro ready")
+            notice_total = _assistant_texts(cell, "REPORT daily-retro failure")
             spawns = cell.sql("SELECT session_name, idempotency_key FROM v2_stream_reservations "
                               "UNION ALL SELECT session_name, idempotency_key FROM v2_spawn_outcomes")
             retro_spawns = [r for r in spawns if str(r.get("idempotency_key") or "").startswith("daily-retro-")]
             record.update(stop=stop, pass1=first, pass2=second, astra_report=astra_report,
                           state_after_pass1=state_after_1, state_after_pass2=state_after_2,
-                          bart_report_after_pass1=report_after_1, bart_notice_after_pass1=notice_after_1,
-                          bart_report_total=report_total, bart_notice_total=notice_total,
+                          assistant_report_after_pass1=report_after_1, assistant_notice_after_pass1=notice_after_1,
+                          assistant_report_total=report_total, assistant_notice_total=notice_total,
                           retro_spawns=retro_spawns, run_id=run_id)
             failure = state_after_1["failure.json"] or {}
             primary_masked = bool(first["rc"] not in (0,) and "ConnectionRefused" in first["stderr"].strip().splitlines()[-1:][0]
