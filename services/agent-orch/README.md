@@ -2,7 +2,7 @@
 
 Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one agent spawn, drive, and observe other agents without the leader's LLM context having to read raw tmux scrollback.
 
-→ See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for system context. Setup guide: see [../../docs/agent_orchestration_setup.md](../../docs/agent_orchestration_setup.md) for installing `chat_streamd`, `agent-orch`, per-machine config, autostart, and smoke tests. The canonical CLI install is `bash services/agent-orch/install.sh` from the Pentacle checkout.
+→ See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for system context. Setup guide: see [../../docs/agent_orchestration_setup.md](../../docs/agent_orchestration_setup.md) for installing `chat_streamd`, `agent-orch`, per-machine config, autostart, and smoke tests. That guide installs the CLI into the checkout-local virtual environment; `bash services/agent-orch/install.sh` is an alternative user-level install that needs Python 3.12 or later (3.13 on macOS).
 
 ## Architecture in one breath
 
