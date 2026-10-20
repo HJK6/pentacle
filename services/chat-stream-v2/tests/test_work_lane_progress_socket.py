@@ -21,7 +21,8 @@ async def cli_call(port, tmp_path, *args, expected_status=0):
            "AGENT_ORCH_WS_URL": f"ws://127.0.0.1:{port}", "AGENT_ORCH_TOKEN": "",
            "AGENT_ORCH_HOST_ID": "fixture-root", "AGENT_ORCH_STREAM_ID": FD,
            "AGENT_ORCH_STREAM_TOKEN": "fixture-lane-token",
-           "AGENT_ORCH_RUNTIME_DIR": str(tmp_path / "cli"), "AGENT_ORCH_MEMORY_REPO": str(tmp_path / "memory")}
+           "AGENT_ORCH_RUNTIME_DIR": str(tmp_path / "cli"), "AGENT_ORCH_MEMORY_REPO": str(tmp_path / "memory"),
+           "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT}
     proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", "work-lane", *args,
                                                 env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:

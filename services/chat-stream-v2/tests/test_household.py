@@ -487,14 +487,16 @@ def test_fake_cosmo_accepts_a_whole_snapshot_burst(cosmo):
     assert cosmo.httpd.request_queue_size >= len(household.LISTS) + 2
 
 
-def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo):
+def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo, monkeypatch):
+    import household
+    monkeypatch.setattr(household, "COSMO_ASSISTANT", "desk-author")  # a configured Cosmo author
     cosmo.routes[("GET", "/lists/tasks/items")] = (200, {"items": [
-        item(1, created_by="assistant"), item(2, scope="shared", created_by="helper"), item(3, created_by="app"),
+        item(1, created_by="desk-author"), item(2, scope="shared", created_by="helper"), item(3, created_by="app"),
         item(4, scope="someone-else"),  # never sent by Cosmo to this credential; dropped defensively
     ]})
     cosmo.routes[("GET", "/events")] = (200, {"items": [
         event(5, "2026-10-06", who="owner"), event(6, "2026-10-06", who="me", scope="shared"),
-        event(7, "2026-10-06", who="both", created_by="assistant"),
+        event(7, "2026-10-06", who="both", created_by="desk-author"),
     ]})
     result = call(adapter, "household.snapshot")
     assert result["people"] == {"partner": "Sam"}
@@ -502,7 +504,7 @@ def test_snapshot_translates_cosmo_vocabulary(adapter, cosmo):
         (1, "private", "assistant"), (2, "shared", "partner_assistant"), (3, "private", "app")]
     assert [(e["id"], e["who"], e["scope"], e["created_by"]) for e in result["events"]] == [
         (5, "self", "private", "app"), (6, "partner", "shared", "app"), (7, "both", "private", "assistant")]
-    assert SELF not in json.dumps(result) and "assistant" not in json.dumps(result) and "helper" not in json.dumps(result)
+    assert SELF not in json.dumps(result) and "desk-author" not in json.dumps(result) and "helper" not in json.dumps(result)
 
 
 def test_partner_name_defaults_and_is_bounded(cosmo, token_file, monkeypatch):

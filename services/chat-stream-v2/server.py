@@ -3052,8 +3052,7 @@ class Server:
         composites = self.assistant_composites
         if composites:
             return composites
-        return ({self.assistant_composite.config.name: self.assistant_composite}
-                if self.assistant_composite is not None else {})
+        return {ASSISTANT_ALIAS: self.assistant_composite} if self.assistant_composite is not None else {}
 
     def _composite_for(self, stream_id: object) -> Any:
         """Return the named assistant composite that owns ``stream_id``, or None."""

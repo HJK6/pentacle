@@ -411,7 +411,7 @@ def primary_fixture(config):
     with sqlite3.connect(archive) as conn:
         conn.execute(SESSIONS_DDL)
         conn.execute("INSERT INTO sessions(host,session_name,visibility,created_at,status,closed_at) VALUES ('fixture','reviewer','hidden','2026-09-26T00:00:00Z','closed','2026-09-27T06:00:00Z')")
-    return replace(config, primary_store=path, primary_archive=archive)
+    return replace(config, primary_store=path, primary_archive=archive, primary_composite="home:assistant")
 
 
 def test_primary_receipts_cutoff_safe_projection_readonly_and_first_digest(config):
@@ -3899,6 +3899,7 @@ def shared_memory(config, tmp_path, monkeypatch):
     (memory / "scripts").mkdir(parents=True)
     (memory / "scripts" / "memory_client.py").write_text(FAKE_MEMORY_CLIENT)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENT_ORCH_MEMORY_REPO", str(memory))
     monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
     settings = replace(config, memory_root=memory.resolve())
     folders = []
@@ -4011,6 +4012,7 @@ def test_unconfigured_tree_keeps_direct_write_even_with_a_client(config, tmp_pat
     (config.memory_root / "scripts").mkdir()
     (config.memory_root / "scripts" / "memory_client.py").write_text("raise SystemExit('must not run')\n")
     monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
     monkeypatch.setenv("PENTACLE_STREAM_ID", "fixture:reviewer")
     record = asyncio.run(retro.Pipeline(config, Transport()).decision("spec_one", proposal2()))
     assert retro.proposals(path.read_text())[record["id"]]["version"] == record["version"]

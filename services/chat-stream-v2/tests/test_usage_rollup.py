@@ -660,7 +660,7 @@ def _spec_totals(result: dict) -> list:
 def test_usage_calibration_amend_ac2_retired_host_honoured(fx: Fx) -> None:
     _retired_ledger(fx)
     fx.usage_state('assistant:old', '2026-10-02T23:59:00Z')  # last push 7 days + 1 min before NOW
-    fx.seat('home:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias
+    fx.seat('assistant:assistant', created='2026-09-19T00:00:00Z', provider='composite')  # open routing alias on the retired host
     fx.config()
     before = fx.run('--calibrate', '--spec', 'spec_demo__w', 'spec_demo__old')
     assert before['calibration']['unplaceable']['ratio'] == round(30_000 / 1_020_000, 6)
