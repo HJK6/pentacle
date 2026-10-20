@@ -11,7 +11,7 @@
 // blocks `import` over file:// (origin null). See
 // Consumers inject this optional dependency explicitly.
 //
-// 43060d270344 is replaced by build.js with the source git short-sha.
+// dddddd530f03 is replaced by build.js with the source git short-sha.
 
 (function (root, factory) {
   const api = factory();
@@ -21,7 +21,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  const VERSION = '43060d270344';
+  const VERSION = 'dddddd530f03';
 
   // ── Status set ────────────────────────────────────────────────
   // Canonical JS mirror of triforce-shared/specs_parser DEFAULT_STATUSES and
