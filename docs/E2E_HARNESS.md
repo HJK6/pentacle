@@ -264,7 +264,7 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 #### Full aggregate and evidence boundaries
 
 The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**28 named scenarios**:
+**29 named scenarios**:
 
 1. `default-pane-assistant`
 2. `transport-and-config`
@@ -289,11 +289,12 @@ The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
 21. `web-dashboards-revamp`
 22. `dashboard_catalog`
 23. `web-work-lanes`
-24. `pane-count-selector`
-25. `chat-first-style`
-26. `agent-chat-steer-controls`
-27. `closed-chat-slot`
-28. `host-restart-restores-input`
+24. `scheduled-section`
+25. `pane-count-selector`
+26. `chat-first-style`
+27. `agent-chat-steer-controls`
+28. `closed-chat-slot`
+29. `host-restart-restores-input`
 
 `cross-origin-boundary` is hermetic-only. A page on a second loopback origin
 must get the host's own 403 for a `fetch` (read from Chrome's network log, not
