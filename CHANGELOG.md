@@ -13,6 +13,13 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-20 (2)
+
+### Added
+
+- Steer now, Queue and a Stop control that stays visible on agent chats while the agent works (web and desktop). Steer now interrupts the current turn and sends your message at once; Queue runs it after the turn. The Bart chat is unchanged.
+- Recurring schedules: durable agent-orch rules with an explicit time zone (`agent-orch schedule recurring ...`), listed in a Scheduled section in the web and desktop sidebar, where a rule can be paused, resumed and edited.
+
 ## 2026-10-20
 
 ### Added
