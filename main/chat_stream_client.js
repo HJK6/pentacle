@@ -637,7 +637,7 @@ try {
     return this.sendCommand({ type: 'spawn_catalog_get' }, 'spawn_catalog_get', { timeoutMs: this._spawnCatalogRpcTimeoutMs });
   }
 
-  sendMessage({ host, sessionName, streamId, text, requestId, optimisticId, attachments, meta, replyToMessageId, replyToQuestionId } = {}) {
+  sendMessage({ host, sessionName, streamId, text, requestId, optimisticId, attachments, meta, replyToMessageId, replyToQuestionId, urgent } = {}) {
     // requestId (optional) flows through to sendCommand so a renderer-owned
     // optimistic send_id is used on the wire. Absent → legacy main-generated id.
     const targetId = streamId || `${host}:${sessionName}`;
@@ -650,6 +650,9 @@ try {
       ? { type: 'send', stream_id: targetId, message: text, msg_id: optimisticId }
       : { type: 'send', host, session_name: sessionName, text };
     if (!composite && typeof optimisticId === 'string' && optimisticId) payload.optimistic_id = optimisticId;
+    // Steer now: one guarded Escape before the message. Agent chats only; the
+    // composite branch above never carries it.
+    if (!composite && urgent === true) payload.urgent = true;
     if (Array.isArray(attachments) && attachments.length > 0) payload.attachments = attachments;
     if (typeof replyToMessageId === 'string' && replyToMessageId) payload.reply_to_message_id = replyToMessageId;
     if (typeof replyToQuestionId === 'string' && replyToQuestionId) payload.reply_to_question_id = replyToQuestionId;

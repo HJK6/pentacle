@@ -18,6 +18,7 @@ const { webWorkLanes } = require('./work_lanes_scenario');
 const { crossOriginBoundary } = require('./cross_origin_scenario');
 const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
 const { branding } = require('./branding_scenario');
+const { agentChatSteerControls } = require('./steer_controls_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -524,6 +525,7 @@ const SCENARIOS = [
   ['web-work-lanes', webWorkLanes],
   ['pane-count-selector', paneCountSelector],
   ['chat-first-style', chatFirstStyle],
+  ['agent-chat-steer-controls', agentChatSteerControls],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.

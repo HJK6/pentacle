@@ -341,4 +341,4 @@ async function chatFirstStyle(ctx) {
   }
 }
 
-module.exports = { defaultPaneAssistant, paneCountSelector, chatFirstStyle };
+module.exports = { defaultPaneAssistant, paneCountSelector, chatFirstStyle, WORKSPACE_KEY, waitFor, reloadWith, layoutProbe };

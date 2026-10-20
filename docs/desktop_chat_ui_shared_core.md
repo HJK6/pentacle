@@ -31,6 +31,12 @@ Runtime text is treated as untrusted input. HTML helpers escape text, links acce
 
 An optimistic send starts as `queued`, becomes `dispatched` after the transport accepts it, and ends as `acked`, `echoed`, or `failed`. A reconnect may replay only explicitly retry-safe survivors with the original request id. A daemon restart marks ambiguous sends indeterminate so the user can choose whether to retry. An explicit retry creates a new request id.
 
+## Composer modes on agent chats
+
+While an agent chat is working (turn phase not idle), the composer shows `Queue` | `Steer now`, default `Queue`, and a Stop control beside Send that is visible whether or not a draft exists. `Enter` sends in the selected mode and `Alt+Enter` sends as Steer now; the choice returns to `Queue` after each send. `Queue` sends exactly as an ordinary send and the provider holds it in its native queue. `Steer now` calls `sendTurn(streamId, text, attachments, { urgent: true })`, which reaches the daemon as `send.urgent` (see [chat protocol](chat_protocol.md#session-interrupt)). The Bart composite chat shows neither control, never reports a working phase for them and never sends `urgent`.
+
+Stop and Steer now draw on one Escape budget per working turn. The first of either sends the Escape; a later Steer now in the same turn is sent without `urgent` and the composer shows "Steer did not take; queued instead", and a later Stop is a no-op. The budget resets when the turn phase leaves working, and a failed interrupt request re-arms it. `urgent` is first-dispatch only: it is not stored on the optimistic row, so a retry or a reconnect replay sends an ordinary message. Row state follows the receipt: a steer whose receipt is still `provider_queued` renders as queued and shows the same notice. Stop never clears the provider's queue; while queued rows remain the composer says "Stopped. Queued messages run next".
+
 ## Transcript rendering
 
 The view receives a bounded window of rows and renders content-bearing DOM elements. A paint proof should assert the row kind and a bounded text prefix, not merely that a transport event arrived. Question controls are generated from the parsed payload, use accessible labels, and submit one deterministic answer object.

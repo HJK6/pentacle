@@ -197,7 +197,11 @@ html.chat-first-style .cosmic .slot-chat-attach, html.chat-first-style .cosmic .
 html.chat-first-style .cosmic .slot-chat-attach { font: 400 25px/1 var(--workspace-font); }
 html.chat-first-style .cosmic .slot-chat-attach:hover, html.chat-first-style .cosmic .slot-chat-compose-mic:hover { background: var(--pc-chip-bg); color: var(--pc-dim); }
 html.chat-first-style .cosmic .slot-chat-compose-send { background: var(--pc-chip-bg); color: var(--pc-dim); font: 700 22px/1 var(--workspace-font); }
-html.chat-first-style .cosmic .slot-chat-compose-send[data-action="stop"] { background: var(--pc-chip-bg); color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-compose-stop { background: var(--pc-chip-bg); color: var(--pc-dim); }
+html.chat-first-style .cosmic .slot-chat-send-mode { border-color: var(--pc-line); background: var(--pc-pane); }
+html.chat-first-style .cosmic .slot-chat-send-mode button { color: var(--pc-dim); font-family: var(--workspace-font); }
+html.chat-first-style .cosmic .slot-chat-send-mode button[aria-pressed="true"] { background: var(--pc-chip-bg); color: var(--pc-text); }
+html.chat-first-style .cosmic .slot-chat-compose-notice { color: var(--pc-dim); font-family: var(--workspace-font); }
 html.chat-first-style .cosmic .slot-chat-compose-send:disabled { background: var(--pc-chip-bg); color: var(--pc-dim); }
 html.chat-first-style .cosmic .slot-chat-plus-menu { border: 1px solid var(--pc-line); background: var(--pc-pane); box-shadow: 0 4px 20px rgba(0,0,0,.055); }
 html.chat-first-style .cosmic .slot-chat-plus-menu button { color: var(--pc-dim); font: 400 12px/1.3 var(--workspace-font); }

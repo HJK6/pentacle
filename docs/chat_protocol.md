@@ -114,6 +114,8 @@ household store. The daemon keeps no household state, cache or broadcast.
 
 ## Session interrupt
 
+Operator clients can also steer: a `send` to an agent chat may carry `urgent: true`, and the daemon sends one Escape before the message. Updated clients set it only for an explicit Steer now, on the first dispatch only (a retry or reconnect replay sends without it), and at most once per working turn together with Stop. The composite chat's `send` path ignores the field and the clients never set it there.
+
 `send.interrupt` names a session with `host` and `session_name`. For a configured
 remote host, updated web and desktop clients also send the selected open row's
 `expected_session_generation`. They capture it when the user requests Stop and

@@ -259,34 +259,36 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 #### Full aggregate and evidence boundaries
 
 The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**26 named scenarios**:
+**28 named scenarios**:
 
 1. `default-pane-assistant`
 2. `transport-and-config`
-3. `cross-origin-boundary`
-4. `settings-version-line`
-5. `sidebar-from-inventory`
-6. `coloured-host-glyphs`
-7. `slot-attach-type-resize-kill`
-8. `chat-transcript-paint`
-9. `chat-file-delivery`
-10. `web-chat-voice`
-11. `public-chat-renderer-contracts`
-12. `mic-panel-answer-window`
-13. `mic-source-selector`
-14. `slot-survives-cc-reconnect`
-15. `slot-column-split`
-16. `question-free-text`
-17. `question-partial-send`
-18. `question-skip`
-19. `web-voice-answers`
-20. `web-dashboards-revamp`
-21. `dashboard_catalog`
-22. `web-work-lanes`
-23. `pane-count-selector`
-24. `chat-first-style`
-25. `closed-chat-slot`
-26. `host-restart-restores-input`
+3. `branding`
+4. `cross-origin-boundary`
+5. `settings-version-line`
+6. `sidebar-from-inventory`
+7. `coloured-host-glyphs`
+8. `slot-attach-type-resize-kill`
+9. `chat-transcript-paint`
+10. `chat-file-delivery`
+11. `web-chat-voice`
+12. `public-chat-renderer-contracts`
+13. `mic-panel-answer-window`
+14. `mic-source-selector`
+15. `slot-survives-cc-reconnect`
+16. `slot-column-split`
+17. `question-free-text`
+18. `question-partial-send`
+19. `question-skip`
+20. `web-voice-answers`
+21. `web-dashboards-revamp`
+22. `dashboard_catalog`
+23. `web-work-lanes`
+24. `pane-count-selector`
+25. `chat-first-style`
+26. `agent-chat-steer-controls`
+27. `closed-chat-slot`
+28. `host-restart-restores-input`
 
 `cross-origin-boundary` is hermetic-only. A page on a second loopback origin
 must get the host's own 403 for a `fetch` (read from Chrome's network log, not
@@ -317,6 +319,17 @@ requires the probe to equal main's and every changed pixel to lie in a named
 region: the titlebar (sidebar toggle and pane selector) or live data (working
 spinners, machine stats). Gate page reloads (`reloadDashboardPage`) start the next document
 with an empty four-pane workspace so scenarios see a fresh renderer.
+
+`agent-chat-steer-controls` checks the composer of a working agent chat: the
+`Queue` | `Steer now` choice (default Queue), Stop beside Send while a draft
+exists, and the absence of both on the Bart composite chat. A send whose bridge
+never answers keeps a turn in flight (the daemon cannot make a seeded seat
+work); the real Send, Steer now, `Alt+Enter` and Stop controls then drive fake
+send and cancel bridges. It asserts `urgent` only on the first Steer now of a
+turn, the reset to Queue after each send, the "Steer did not take" and
+"Stopped. Queued messages run next" notices, that a second Stop is a no-op, and
+that Stop keeps the draft and the queued row. The Escape reaching a pane is a
+live-seat journey, not part of this hermetic gate.
 
 After a successful no-profile main run, the command also runs the
 [history retention](../test/e2e/web_chat_history_retention_gate.cjs),

@@ -491,6 +491,7 @@ const state = {
   chatBlobObjectUrls: {}, // blob sha -> object URL for fetched transcript attachments
   slotSendPending: [false, false, false, false],
   slotSendErrors: ['', '', '', ''],
+  slotSendMode: ['queue', 'queue', 'queue', 'queue'],
   slotChatRenderTimers: [null, null, null, null],
   slotChatLastListHtml: [null, null, null, null],
   slotChatPendingListRender: [null, null, null, null],
@@ -2823,6 +2824,33 @@ function ensureSlotChatSurface(slot) {
 	  micEl.title = 'Microphone controls';
 	  micEl.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/></svg>';
 
+	  // Agent chats only: Stop beside Send, and a Queue | Steer now choice while the agent works.
+	  const stopEl = document.createElement('button');
+	  stopEl.type = 'button';
+	  stopEl.className = 'slot-chat-compose-stop';
+	  stopEl.dataset.slot = String(slot);
+	  stopEl.hidden = true;
+	  stopEl.title = 'Stop current turn (Esc)';
+	  stopEl.setAttribute('aria-label', 'Stop current turn');
+	  stopEl.innerHTML = '<span aria-hidden="true">■</span>';
+	  stopEl.addEventListener('click', () => cancelChatComposer(slot));
+	  const modeEl = document.createElement('div');
+	  modeEl.className = 'slot-chat-send-mode';
+	  modeEl.hidden = true;
+	  modeEl.setAttribute('role', 'group');
+	  modeEl.setAttribute('aria-label', 'Send mode');
+	  modeEl.innerHTML = '<button type="button" data-send-mode="queue" title="Run after this turn">Queue</button><button type="button" data-send-mode="steer" title="Interrupt and send now (Alt+Enter)">Steer now</button>';
+	  modeEl.addEventListener('click', (event) => {
+	    const mode = event.target?.closest?.('[data-send-mode]')?.dataset.sendMode;
+	    if (mode !== 'queue' && mode !== 'steer') return;
+	    state.slotSendMode[slot] = mode;
+	    updateSendControls(slot);
+	  });
+	  const noticeEl = document.createElement('div');
+	  noticeEl.className = 'slot-chat-compose-notice';
+	  noticeEl.setAttribute('role', 'status');
+	  noticeEl.hidden = true;
+
 	  const sendEl = document.createElement('button');
   sendEl.className = 'slot-chat-compose-send';
   sendEl.dataset.slot = String(slot);
@@ -2835,6 +2863,7 @@ function ensureSlotChatSurface(slot) {
 	  composeEl.appendChild(inputEl);
 	  composeEl.appendChild(plusWrapEl);
 	  composeEl.appendChild(micEl);
+	  composeEl.appendChild(stopEl);
 	  composeEl.appendChild(sendEl);
 	  chatShell.appendChild(scrollEl);
 
@@ -2857,6 +2886,8 @@ function ensureSlotChatSurface(slot) {
 	  dockEl.appendChild(statusEl);
 	  dockEl.appendChild(draftPreviewEl);
 	  dockEl.appendChild(errorEl);
+	  dockEl.appendChild(noticeEl);
+	  dockEl.appendChild(modeEl);
 	  dockEl.appendChild(replyEl);
 	  dockEl.appendChild(composeEl);
 	  chatShell.appendChild(dockEl);
@@ -2919,7 +2950,7 @@ function ensureSlotChatSurface(slot) {
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendChatComposer(slot);
+      sendChatComposer(slot, e.altKey ? { steer: true } : undefined);
     } else if (e.key === 'Escape') {
       // B3 (chat_send_turn_lifecycle_batch2): ESC cancels the latest in-flight
       // turn (interrupts the running agent — the ESC-in-terminal equivalent).
@@ -2984,7 +3015,7 @@ function ensureSlotChatSurface(slot) {
 	    event.preventDefault(); dragDepth = 0; chatShell.classList.remove('is-drag-over');
 	    addSlotAttachmentFiles(slot, event.dataTransfer.files).catch((error) => setSlotSendError(slot, error?.message || 'Attachment failed.'));
 	  });
-	  sendEl.addEventListener('click', () => sendEl.dataset.action === 'stop' ? cancelChatComposer(slot) : sendChatComposer(slot));
+	  sendEl.addEventListener('click', () => sendChatComposer(slot));
 	  if (typeof ResizeObserver === 'function') {
 	    new ResizeObserver(() => {
 	      chatShell.style.setProperty('--slot-chat-dock-height', `${Math.ceil(dockEl.getBoundingClientRect().height)}px`);
@@ -3004,7 +3035,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, voiceController, syncComposerLayout: autoSize };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, stopEl, modeEl, noticeEl, voiceController, syncComposerLayout: autoSize };
   return state.slotChatRefs[slot];
 }
 
@@ -3030,14 +3061,25 @@ function updateSendControls(slot) {
     const hasDraft = !!String(refs.inputEl?.value || state.slotDrafts[slot] || '').trim() || slotAttachmentDrafts(slot).length > 0;
     const streamId = state.slotChatBoundStream[slot];
     const phase = streamId && window.PentacleChatStore?.getTurnPhase?.(streamId);
-    const stop = !hasDraft && !isCompositeSlot(slot) && phase && phase !== 'idle';
-    refs.sendEl.dataset.action = stop ? 'stop' : 'send';
-    refs.sendEl.classList.toggle('is-stop', !!stop);
-    refs.sendEl.classList.toggle('is-idle', !stop && !hasDraft);
-    refs.sendEl.innerHTML = stop ? '<span aria-hidden="true">■</span>' : '<span aria-hidden="true">↑</span>';
-    refs.sendEl.title = stop ? 'Stop current turn' : 'Send';
-    refs.sendEl.setAttribute('aria-label', stop ? 'Stop current turn' : 'Send message');
-    refs.sendEl.disabled = pending || !target || !!target.error || (!hasDraft && !stop);
+    const working = !isCompositeSlot(slot) && !!phase && phase !== 'idle';
+    refs.sendEl.dataset.action = 'send';
+    refs.sendEl.classList.toggle('is-idle', !hasDraft);
+    refs.sendEl.disabled = pending || !target || !!target.error || !hasDraft;
+    // Agent chats only (never the composite): Stop whenever the agent works,
+    // and the Queue | Steer now choice, which resets to Queue once idle.
+    if (!working) state.slotSendMode[slot] = 'queue';
+    if (refs.stopEl) refs.stopEl.hidden = !working;
+    if (refs.modeEl) {
+      refs.modeEl.hidden = !working;
+      for (const button of refs.modeEl.querySelectorAll('[data-send-mode]')) {
+        button.setAttribute('aria-pressed', String(button.dataset.sendMode === state.slotSendMode[slot]));
+      }
+    }
+    if (refs.noticeEl) {
+      const notice = (!isCompositeSlot(slot) && streamId && window.PentacleChatStore?.getComposerNotice?.(streamId)) || '';
+      refs.noticeEl.textContent = notice;
+      refs.noticeEl.hidden = !notice;
+    }
   }
   if (refs?.inputEl) refs.inputEl.disabled = pending;
   if (refs?.attachEl) refs.attachEl.disabled = pending;
@@ -4327,7 +4369,7 @@ function cancelChatComposer(slot) {
   return cancelled;
 }
 
-async function sendChatComposer(slot) {
+async function sendChatComposer(slot, options = {}) {
   if (!chatUiEnabled() || state.slots[slot]?.laneHistory) return;
   const refs = state.slotChatRefs[slot];
   const inputEl = refs?.inputEl;
@@ -4359,8 +4401,12 @@ async function sendChatComposer(slot) {
       try {
         const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot) : [];
         if (!assertAssistantDirectSlot(slot)) return;
+        // Steer now only on a working agent chat; the composite never carries it.
+        const steer = !isCompositeSlot(slot) && (options.steer === true || state.slotSendMode[slot] === 'steer')
+          && window.PentacleChatStore.getTurnPhase?.(streamId) !== 'idle';
         const optimisticId = window.PentacleChatStore.sendTurn(streamId, text, attachments,
-          reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : undefined);
+          { ...(reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {}), ...(steer ? { urgent: true } : {}) });
+        state.slotSendMode[slot] = 'queue';
         if (optimisticId && state.slotGen[slot] === sendGeneration) {
           state.slotReplies[slot] = null;
           state.slotDrafts[slot] = '';
