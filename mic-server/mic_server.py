@@ -247,7 +247,7 @@ def always_on_enabled():
 def auto_start_caller():
     """Identity recorded as `caller` for modes started by MIC_SERVER_START_MODE.
     Defaults to None (legacy/anonymous). Operators set MIC_SERVER_HOST_ID so
-    other clients see e.g. "bart using mic" instead of "unknown using mic"."""
+    other clients see e.g. "desk using mic" instead of "unknown using mic"."""
     value = os.environ.get("MIC_SERVER_HOST_ID", "").strip()
     return value or None
 
@@ -624,7 +624,7 @@ def start_always_on(stop_existing=True):
     listener.mode_phrases = lambda: get_service().rules.snapshot()["modes"]
     listener.on_silent = lambda on: get_service().set_silent(
         on, "voice", listener=listener, meeting=state["meeting_active"] or state["mode"] == "meeting")
-    # Bart answer window: capture an answer without the wake word and deliver it tagged.
+    # Assistant answer window: capture an answer without the wake word and deliver it tagged.
     listener.answer_window = lambda: get_service().answer_window_status().get("ready", False)
     listener.on_answer = lambda: get_service().answer_captured(
         meeting=state["meeting_active"] or state["mode"] == "meeting")

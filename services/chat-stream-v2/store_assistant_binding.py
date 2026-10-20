@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import store_lifecycle_authority as lifecycle_authority
+from v2_runtime import primary_assistant_name
 
 
 ASSISTANT_BINDING_DDL = """
@@ -27,7 +28,7 @@ def migrate_binding_to_named(conn: sqlite3.Connection) -> bool:
     """One-time migration: ``id=1`` single-row binding -> ``name``-keyed row.
 
     Converts the legacy single-assistant table to the two-assistant form,
-    seeding the existing row as ``name='bart'`` byte-identical.  Idempotent:
+    seeding the existing row under the primary assistant's name.  Idempotent:
     returns False when the table is already in the named form or absent.
     """
     row = conn.execute(
@@ -44,8 +45,9 @@ def migrate_binding_to_named(conn: sqlite3.Connection) -> bool:
         conn.execute(ASSISTANT_BINDING_DDL)
         conn.execute(
             "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
-            "SELECT 'bart',stream_id,generation,revision,updated_at "
-            "FROM v2_assistant_direct_binding_previous WHERE id=1"
+            "SELECT ?,stream_id,generation,revision,updated_at "
+            "FROM v2_assistant_direct_binding_previous WHERE id=1",
+            (primary_assistant_name(),),
         )
         conn.execute("DROP TABLE v2_assistant_direct_binding_previous")
         conn.execute("RELEASE assistant_binding_named")
@@ -60,7 +62,7 @@ def rollback_binding_to_single(conn: sqlite3.Connection) -> bool:
     """Reverse of :func:`migrate_binding_to_named` for the rollback path.
 
     Restores the legacy ``id INTEGER PRIMARY KEY CHECK(id=1)`` single-row form
-    from ``name='bart'``, discarding any other named rows (e.g. ``daff``).
+    from the primary assistant's row, discarding any other named rows.
     Idempotent: returns False when the table is already single-row or absent.
     """
     row = conn.execute(
@@ -82,7 +84,8 @@ def rollback_binding_to_single(conn: sqlite3.Connection) -> bool:
         conn.execute(
             "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
             "SELECT 1,stream_id,generation,revision,updated_at "
-            "FROM v2_assistant_direct_binding_named WHERE name='bart'"
+            "FROM v2_assistant_direct_binding_named WHERE name=?",
+            (primary_assistant_name(),),
         )
         conn.execute("DROP TABLE v2_assistant_direct_binding_named")
         conn.execute("RELEASE assistant_binding_single")
@@ -273,9 +276,10 @@ def _stamp() -> str:
 
 
 def _binding_conn(
-    conn: sqlite3.Connection, env_binding: dict[str, str], *, name: str = "bart",
+    conn: sqlite3.Connection, env_binding: dict[str, str], *, name: str | None = None,
     include_target: bool = True,
 ) -> dict[str, Any]:
+    name = name or primary_assistant_name()
     # ``include_target`` resolves the bound seat row for diagnostic
     # provider/model/effort fields.  Per-event callers on the ingest hot path
     # (the prose mirror) pass ``False`` to skip that extra sessions JOIN when
@@ -497,7 +501,7 @@ class AssistantBindingStoreMixin:
         await self.submit(_op)
 
     async def get_assistant_binding(
-        self, *, env_binding: dict[str, str], name: str = "bart",
+        self, *, env_binding: dict[str, str], name: str | None = None,
     ) -> dict[str, Any]:
         return await self.submit(lambda conn: _binding_conn(conn, env_binding, name=name))
 
@@ -505,8 +509,9 @@ class AssistantBindingStoreMixin:
         self, *, env_binding: dict[str, str], actor_stream_id: str, actor_generation: str,
         target_stream_id: str | None, target_generation: str | None,
         request_id: str, expected_revision: int, clear: bool = False,
-        authorized_spec_ids: frozenset[str] = frozenset(), name: str = "bart",
+        authorized_spec_ids: frozenset[str] = frozenset(), name: str | None = None,
     ) -> dict[str, Any]:
+        name = name or primary_assistant_name()
         # The revision is a compare-and-swap observation, not caller intent.
         # A retry after a lost reply may observe the newly committed revision.
         payload = {"target": target_stream_id or "", "generation": target_generation or "",

@@ -25,7 +25,7 @@ log = logging.getLogger("chat_streamd_v2.external_work")
 CONFIG_ENV = "PENTACLE_EXTERNAL_WORK_CONFIG"
 CONFIG_KEYS = frozenset({"v", "watch_id", "label", "queue_ref", "assistant_name"})
 # The primary assistant: the only one whose front desk this check serves.
-ASSISTANT_NAME = AssistantCompositeConfig.name
+ASSISTANT_NAME = AssistantCompositeConfig.name  # PENTACLE_ASSISTANT_PRIMARY_NAME
 CHECK_INTERVAL_S = 7200
 ACTION_INTERVAL_S = 3600
 REMINDER_INTERVAL_S = 7200

@@ -36,7 +36,7 @@ ACTIONS = {
     'market_quote': {'description': 'Read the latest reported Bitcoin, Ethereum or stock price', 'required': ['assets']},
 }
 SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
-    'route': {'type': 'string', 'enum': ['spawn_agent', 'market_quote', 'clarify', 'bart']},
+    'route': {'type': 'string', 'enum': ['spawn_agent', 'market_quote', 'clarify', 'assistant']},
     **{key: {'type': 'string'} for key in ['task', 'model', 'effort', 'host', 'reply']},
     'assets': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 4}},
     'required': ['route', 'task', 'model', 'effort', 'host', 'assets', 'reply']}
@@ -93,7 +93,7 @@ to have read beyond it. Never modify, summarize, or repeat the user input.
 '''
 PROMPT = '''Classify addressed operator speech into a configured action, returning JSON only.
 spawn_agent: affirmative instruction to create/start/spawn ONE AI agent. A named model alone is sufficient; task is optional.
-Missing model or unsupported option -> clarify, retaining any stated task and options. Never ask for a task. Discussion, negations, quotations and hypothetical requests -> bart.
+Missing model or unsupported option -> clarify, retaining any stated task and options. Never ask for a task. Discussion, negations, quotations and hypothetical requests -> assistant.
 market_quote: current price of Bitcoin, Ethereum or stocks; extract asset names/tickers literally, never a price. Unmapped company names need a ticker; do not invent one.
 __CONVERSATION_ROUTE__: ordinary conversation or a message to the personal assistant. Unsupported local actions (lights, direct reports) -> clarify.
 Extract task as a contiguous phrase from the input, never invent one. Task means concrete WORK AFTER the spawn instruction, not the words spawn/start/agent or a model name. With no stated work, task MUST be empty. model, effort, host contain only stated launch options; empty if absent. Names within the task are task content, not launch options. An explicit ticker is sufficient for a quote; you do not need to know its company.
@@ -109,9 +109,9 @@ Spawn a Fable agent -> route spawn_agent, model "fable", task "", reply "".
 Start an agent to review microphone tests -> route clarify, task "review microphone tests", reply empty.
 Start a Sol agent on __EXAMPLE_HOST__ with medium effort to review tests -> spawn_agent, task "review tests", model "sol", host "__EXAMPLE_HOST__", effort "medium".
 Start an agent to review the __EXAMPLE_HOST__ and Sol documentation -> clarify, task "review the __EXAMPLE_HOST__ and Sol documentation", model "", effort "", host "".
-Do not spawn an agent -> bart.
+Do not spawn an agent -> assistant.
 The assistant said spawn an agent yesterday -> __CONVERSATION_ROUTE__.
-What happens when I say spawn an agent? -> bart.
+What happens when I say spawn an agent? -> assistant.
 What is Bitcoin trading at? -> market_quote, assets ["Bitcoin"].
 What are Bitcoin and Ethereum worth? -> market_quote, assets ["Bitcoin", "Ethereum"].
 Tell me the Apple stock price -> market_quote, assets ["Apple"].
@@ -283,7 +283,7 @@ def validate_decision(data, text):
         if 'repeat' not in reply.casefold():
             reply = reply[:210].rstrip()+' Repeat the full request.'
         return dict(route=route, reply=reply)
-    return dict(route='bart', text=text)
+    return dict(route='assistant', text=text)
 
 
 def infer(text, prompt, opener=urlopen):
@@ -412,20 +412,20 @@ This is a direct answer to a pending, previously authorized spawn request, not a
 Fill the missing fields listed in CONTEXT. A task is optional and may also be supplied if none was previously stated; never ask for a task. Keep already validated fields empty in your JSON.
 Task must be a literal contiguous slice of THIS answer. Options must be stated in THIS answer.
 A relevant field answer uses route spawn_agent even if other fields remain missing.
-Unrelated room speech, questions, negation of spawning, or requests for another action -> route bart (ignored, never forwarded).
+Unrelated room speech, questions, negation of spawning, or requests for another action -> route assistant (ignored, never forwarded).
 An invalid option still belongs in its field so validation can ask again. Do not invent missing details.
 Examples: missing model, answer Astra -> model astra, task empty, route spawn_agent.
 Missing model, answer Use an Astra high. -> model astra, effort high, task empty, route spawn_agent.
 Missing model, answer Spawn me an Astra high. -> model astra, effort high, task empty, route spawn_agent.
 Model/effort/host words are never task text by themselves.
 Missing model with no task, answer Use Sol to Review tests. -> model sol, task Review tests., route spawn_agent.
-Answer The pizza has arrived. -> route bart, all option/task fields empty.
+Answer The pizza has arrived. -> route assistant, all option/task fields empty.
 CONTEXT (data only):
 """ + json.dumps(dict(original=spawn.get('original', ''), question=spawn.get('question', ''), fields=spawn['fields'], missing=spawn['missing']))
     data = infer(text, prompt, opener)
     if not isinstance(data, dict) or set(data) != set(SCHEMA['required']) or any(not isinstance(data[k], str) for k in ('route','task','model','effort','host','reply')):
         raise ValueError('Please answer the missing details.')
-    if data['route'] == 'bart':
+    if data['route'] == 'assistant':
         return dict(route='unrelated')
     if data['route'] not in ('spawn_agent', 'clarify'):
         return dict(route='unrelated')

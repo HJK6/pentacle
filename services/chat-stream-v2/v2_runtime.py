@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
@@ -10,6 +11,12 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 log = logging.getLogger("chat_streamd_v2.runtime")
+
+
+def primary_assistant_name(env: Mapping[str, str] | None = None) -> str:
+    """The primary assistant's name: composite key, binding name and tell alias."""
+    values = os.environ if env is None else env
+    return str(values.get("PENTACLE_ASSISTANT_PRIMARY_NAME") or "").strip() or "assistant"
 
 
 def env_number(

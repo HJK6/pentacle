@@ -309,7 +309,8 @@ def _require_stream_id(command: str, value: str) -> bool:
 # The only target alias: tell/send may address the same-named assistant
 # composite's current binding (literal, case-sensitive). It stays raw on the wire; the daemon
 # resolves the then-current binding per attempt (see README, Peer messaging).
-ASSISTANT_ALIAS = "bart"
+# It is the primary assistant's name, which daemon and CLI read from the same env.
+ASSISTANT_ALIAS = os.environ.get("PENTACLE_ASSISTANT_PRIMARY_NAME", "").strip() or "assistant"
 
 
 class _PromptOptionAction(argparse.Action):
@@ -4974,7 +4975,7 @@ USAGE_ROLLUP_TOOL = Path(_shared.__file__).resolve().parents[1] / "chat-stream-v
 def usage_rollup_passthrough(rollup_args: list[str]) -> int:
     """`agent-orch usage rollup ...`: run the read-only rollup tool from this checkout or release.
 
-    The tool reads the Thoth ledger (docs/usage_accounting.md § Rollup and
+    The tool reads the collector host's ledger (docs/usage_accounting.md § Rollup and
     calibration); every token after `rollup` is passed verbatim, so its own
     --help, --json and selectors apply. PENTACLE_USAGE_ROLLUP_TOOL overrides the path.
     """
@@ -6112,7 +6113,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="read one host's current Claude/Codex account-period usage (/usage limits) once; "
                     "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
-    usage_parser.add_argument("--host", help="host name from machines.json (e.g. thoth, merlin, amaterasu)")
+    usage_parser.add_argument("--host", help="host name from machines.json")
     usage_parser.add_argument(
         "--unplaced", action="store_true",
         help="list refused/unplaced satellite usage and held-span losses from the daemon DB "
