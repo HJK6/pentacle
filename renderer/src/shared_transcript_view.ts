@@ -481,7 +481,7 @@ const LANE_UPDATE_KIND_LABEL: Record<string, string> = {
 };
 
 // Typed lane-update card (spec_pentacle__first_class_work_lanes_2026_10 D6/D8). The daemon
-// publishes it into Bart's timeline; `summary` is also the event text, so clients that
+// publishes it into the primary assistant's timeline; `summary` is also the event text, so clients that
 // do not branch on publish_kind 'lane_update' still show the prose.
 function renderLaneUpdateCard(update: NonNullable<PentacleTranscriptItem['laneUpdate']>): string {
   const label = LANE_UPDATE_KIND_LABEL[update.kind] || update.kind;

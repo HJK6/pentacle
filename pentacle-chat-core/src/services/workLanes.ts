@@ -335,7 +335,7 @@ export function selectOpenLaneCount(inventory: WorkLanesInventory): number {
   return inventory.counts.open;
 }
 
-/** Where a lane tap goes. Never Bart, a hidden worker or a new generation as a fallback. */
+/** Where a lane tap goes. Never the primary assistant, a hidden worker or a new generation as a fallback. */
 export function workLaneTapTarget(lane: WorkLane): WorkLaneTapTarget {
   const chat = lane.visible_chat;
   if (!chat.stream_id) return { action: 'unavailable' };

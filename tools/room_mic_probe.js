@@ -1,6 +1,6 @@
 'use strict';
 // A capture counterpart plus the real wake-delivery subject. The caller supplies
-// a disposable seat explicitly; this harness never reads or writes Bart binding.
+// a disposable seat explicitly; this harness never reads or writes the primary assistant binding.
 const {execFileSync}=require('node:child_process');
 const fs=require('node:fs');
 const {createWakeDelivery}=require('../renderer/wake_delivery');

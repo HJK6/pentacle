@@ -356,7 +356,7 @@ async function slotSurvivesCcReconnect(ctx) {
     const sendBefore = await sendEnabled();
     report.ok('the slot chat transcript paints and the composer is usable before the drop', sendBefore === true, { sendBefore });
 
-    // Model Bart's PRODUCTION summary daemon on the reconnect re-pull: the hello
+    // Model the primary assistant's PRODUCTION summary daemon on the reconnect re-pull: the hello
     // snapshot carries no events (events_mode:'summary') AND the open stream is
     // momentarily ABSENT from the resync session inventory (a filtered/nested/remote
     // session, or a post-daemon-reconnect inventory gap). That is the exact shape

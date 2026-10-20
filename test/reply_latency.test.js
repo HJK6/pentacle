@@ -22,7 +22,7 @@ test('provider root records actual delivery once without turning receipts into d
  const {createRoomMicTurns,roomMicHeader}=require('../renderer/room_mic_turns');
  const calls=[];
  const tracker=createRoomMicTurns({api:async(...args)=>calls.push(args)});
- const text=roomMicHeader('c','Hello',{sentences_per_line:3,words_per_line:50,characters_per_line:400,helper:'bart-say'});
+ const text=roomMicHeader('c','Hello',{sentences_per_line:3,words_per_line:50,characters_per_line:400,helper:'assistant-say'});
  assert.ok(text.includes('"sentences_per_line":3'));
  tracker.register({streamId:'workstation:seat',conversationId:'c',optimisticId:'o',requestId:'r',text});
  const root={stream_id:'workstation:seat',daemon_seq:1,kind:'USER',text,request_id:'r',timestamp:'2026-09-29T07:00:00Z',raw:{transport:'send-receipt'}};

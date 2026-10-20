@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from agent_orch import cli
+from agent_orch import cli, work_lane_cli
+
+
+@pytest.fixture(autouse=True)
+def _composite_stream_id(monkeypatch):
+    monkeypatch.setattr(work_lane_cli, "DEFAULT_COMPOSITE", "home:assistant")
 
 
 def _wire(monkeypatch, reply):
@@ -30,7 +35,7 @@ def _run(argv):
 def test_list_and_show_are_read_verbs(monkeypatch, capsys):
     lane = {"lane_id": "wl-1", "version": 2, "state": "paused", "state_reason": "lead_lost",
             "owner_kind": "fd", "title": "T", "lead": None,
-            "visible_chat": {"stream_id": "bart:assistant", "available": "open"}}
+            "visible_chat": {"stream_id": "home:assistant", "available": "open"}}
     sent = _wire(monkeypatch, {"type": "work_lanes.list.ok", "lanes": [lane]})
     assert _run(["work-lane", "list", "--include-done"]) == 0
     assert sent[-1] == {"type": "work_lanes.list", "include_done": True, "limit": 200}
@@ -46,7 +51,7 @@ def test_mutators_wrap_assistant_operation(monkeypatch):
     assert _run(["work-lane", "set-state", "wl-1", "--to", "done", "--outcome", "Shipped",
                  "--expected-version", "3", "--request-id", "r1", "--confirmation-question-id", "q1"]) == 0
     assert sent[-1] == {
-        "type": "assistant.operation", "request_id": "r1", "composite_stream_id": "bart:assistant",
+        "type": "assistant.operation", "request_id": "r1", "composite_stream_id": "home:assistant",
         "dispatch_id": "none", "operation": "work_lane.set_state", "lane_id": "wl-1",
         "expected_lane_version": 3,
         "payload": {"to": "done", "outcome": "Shipped", "operator_confirmation": {"question_id": "q1"}}}
@@ -74,7 +79,7 @@ def test_adopt_apply_uses_stable_request_ids(monkeypatch, tmp_path, capsys):
     assert [m["request_id"] for m in sent] == ["adopt:stream:h:a", "adopt:stream:h:a"]
     assert "evidence" not in sent[0]["payload"] and sent[0]["operation"] == "work_lane.adopt"
     assert _run(["work-lane", "adopt", "--preview"]) == 0
-    assert sent[-1] == {"type": "work_lanes.adopt_preview", "composite_stream_id": "bart:assistant"}
+    assert sent[-1] == {"type": "work_lanes.adopt_preview", "composite_stream_id": "home:assistant"}
     assert _run(["work-lane", "adopt"]) == 2
 
 

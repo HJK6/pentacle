@@ -49,7 +49,7 @@ function computeSilentState({ status } = {}) {
   };
 }
 
-// Whether the microphone is waiting for the operator's answer to a Bart question.
+// Whether the microphone is waiting for the operator's answer to an assistant question.
 function computeAnswerWindowState({ status } = {}) {
   const speaker = (status && status.speaker) || {};
   const window = (speaker.answer_window && typeof speaker.answer_window === 'object') ? speaker.answer_window : {};

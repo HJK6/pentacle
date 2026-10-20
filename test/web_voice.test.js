@@ -12,10 +12,10 @@ function io(overrides = {}) {
     send: p => { calls.push(['send', p]); return 'optimistic-1'; }, ...overrides };
 }
 test('one take uploads, transcribes and dispatches transcript with voice metadata to captured stream', async () => {
-  const deps = io(); const take = createVoiceTake({ streamId: 'bart:assistant', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 2, id: 'take-1' }, deps);
+  const deps = io(); const take = createVoiceTake({ streamId: 'home:assistant', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 2, id: 'take-1' }, deps);
   await take.run(); await take.run();
   assert.deepEqual(deps.calls.map(c => c[0]), ['upload', 'transcribe', 'send']);
-  assert.deepEqual(deps.calls[2][1], { streamId: 'bart:assistant', text: 'hello', meta: { voice: { duration_s: 2 } } });
+  assert.deepEqual(deps.calls[2][1], { streamId: 'home:assistant', text: 'hello', meta: { voice: { duration_s: 2 } } });
   assert.equal(deps.states.at(-1).status, 'sent');
 });
 for (const failure of ['upload', 'backend_unavailable']) test(`${failure} is visible and Retry retains take and transcription identity`, async () => {

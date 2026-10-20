@@ -132,7 +132,7 @@ Success response:
 ### Addressing the assistant by alias
 
 `tell` and `send` (only these two verbs) also accept one literal, case-sensitive
-alias: `bart`, the name of the primary assistant composite. It means "that
+alias: the name of the primary assistant composite (set by `PENTACLE_ASSISTANT_PRIMARY_NAME`, default `assistant`). It means "that
 composite's current binding" and is for agent peers: a verified seat stream token and an explicit
 sender claim (`from_stream_id`, always sent by the CLI) naming the same seat are required. Operator-only
 callers receive `assistant_tell_unauthorized` / `assistant_send_unauthorized`, Dot and scoped clients keep their scope errors, and
@@ -142,8 +142,8 @@ usual. The alias grants no authority. `report`, `inspect`, `await` and
 `send-receipt` do not accept it.
 
 ```sh
-agent-orch tell bart 'status: parser landed' --tell-id 6f1027b2-66f7-4422-a5fc-7b693cccb256
-agent-orch send bart 101 'review the parser change'
+agent-orch tell assistant 'status: parser landed' --tell-id 6f1027b2-66f7-4422-a5fc-7b693cccb256
+agent-orch send assistant 101 'review the parser change'
 ```
 
 The CLI keeps the alias raw on the wire. `tell` sets `to_stream_id` to the
@@ -206,7 +206,7 @@ The CLI reads the file, checks it is a PNG/JPEG no larger than 25 MiB, uploads i
 On success the CLI prints a JSON receipt:
 
 ```json
-{ "ok": true, "stream_id": "bart:v2-…", "event_id": 4821, "blob_sha": "…", "content_kind": "image_and_text", "duplicate": false, "source_path": "./chart.png", "source_sha256": "…", "bytes": 20518 }
+{ "ok": true, "stream_id": "home:v2-…", "event_id": 4821, "blob_sha": "…", "content_kind": "image_and_text", "duplicate": false, "source_path": "./chart.png", "source_sha256": "…", "bytes": 20518 }
 ```
 
 `event_id` is the durable transcript row (it survives reconnect/history replay as one row). The send is idempotent by `request_id`: a retry with the same request id returns `"duplicate": true` and adds no second row. Genuine error receipts (non-zero exit, `send_image.error` with an `error_code`) cover an unsupported type or oversize file (rejected client-side before upload, exit `2`), a blob that was never uploaded (`attachment_missing`), an invalid attachment (`attachment_invalid`), and calling from an unverified or foreign stream (`stream_ownership_unverified`, exit `66`). Exit codes: `0` delivered, `1` send error, `2` bad input, `66` not authorized. This is agent → operator only; the operator's own image sends use the existing desktop/mobile attachment composer, not this verb.

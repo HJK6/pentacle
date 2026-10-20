@@ -43,7 +43,7 @@ def test_meeting_start_and_end_phrases_handled_in_service(monkeypatch):
 
 
 @pytest.mark.parametrize('line', ['silent movie night', 'take meeting notes', 'what does silent mean', 'the meeting went well'])
-def test_near_misses_do_not_switch_modes_and_reach_bart(monkeypatch, line):
+def test_near_misses_do_not_switch_modes_and_reach_assistant(monkeypatch, line):
     _, listener, silent, meeting = wired(monkeypatch)
     say(listener, line)
     assert silent == [] and meeting == {'start': 0, 'stop': 0}
@@ -51,7 +51,7 @@ def test_near_misses_do_not_switch_modes_and_reach_bart(monkeypatch, line):
     assert listener.wake.claim()['text'] == line
 
 
-def test_without_wiring_meeting_phrase_is_sent_to_bart(monkeypatch):
+def test_without_wiring_meeting_phrase_is_sent_to_assistant(monkeypatch):
     # Step-2 classification: with the wake-capture path and no in-service mode matching,
     # a meeting phrase is NOT executed locally -- it is delivered to Zephyr as text (the defect
     # this spec fixes by sourcing mode phrases from the rules Modes section).

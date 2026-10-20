@@ -13,7 +13,7 @@ def test_request_uses_fresh_target_and_revision(monkeypatch):
         return {'type': verb + '.ok', 'code': 'consent_pending'}
     monkeypatch.setattr(cli, 'assistant_lifecycle_once', inspect)
     monkeypatch.setattr(cli, 'consent_once', call)
-    args = cli.build_parser().parse_args(['consent', 'request', 'designate', '--target', 'fixture:bart', '--reason', 'Exact manager'])
+    args = cli.build_parser().parse_args(['consent', 'request', 'designate', '--target', 'fixture:assistant', '--reason', 'Exact manager'])
     assert args.func(args) == 0
     assert captured['verb'] == 'consent.request'
     assert captured['fields']['expected_revision'] == 7

@@ -87,7 +87,7 @@
           "eta_stale": false
         },
         "visible_chat": {
-          "stream_id": "bart:assistant",
+          "stream_id": "home:assistant",
           "generation": null,
           "kind": "composite",
           "available": "open"
@@ -284,7 +284,7 @@
             "eta_stale": false
           },
           "visible_chat": {
-            "stream_id": "bart:assistant",
+            "stream_id": "home:assistant",
             "generation": null,
             "kind": "composite",
             "available": "open"
@@ -482,7 +482,7 @@
           "eta_stale": false
         },
         "visible_chat": {
-          "stream_id": "bart:assistant",
+          "stream_id": "home:assistant",
           "generation": null,
           "kind": "composite",
           "available": "open"
@@ -597,7 +597,7 @@
         "done_at": "2026-10-07T17:30:00.000Z",
         "lead": null,
         "visible_chat": {
-          "stream_id": "bart:assistant",
+          "stream_id": "home:assistant",
           "generation": null,
           "kind": "composite",
           "available": "open"
@@ -617,7 +617,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
@@ -659,7 +659,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Waiting for operator deploy window",
@@ -701,7 +701,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Blocker cleared: design review",
@@ -743,7 +743,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Rollup shipped on main 355f12ab",
@@ -785,7 +785,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Deploy daemon before web activation",
@@ -827,7 +827,7 @@
     {
       "type": "chat.event",
       "event": {
-        "stream_id": "bart:assistant",
+        "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
         "text": "Store and operations merged",
@@ -893,7 +893,7 @@
       },
       "wl-active-0002": {
         "action": "open_chat",
-        "stream_id": "bart:assistant"
+        "stream_id": "home:assistant"
       },
       "wl-paused-0004": {
         "action": "unavailable"

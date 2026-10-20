@@ -2,7 +2,7 @@
 
 Dot is an outside agent (the operator's cloud agent on another host). In **v1**
 (operator b3e1c657, parent ruling f4e6c3cf) it may do exactly one useful thing:
-message **only** the current assistant ("Bart") binding as an attributed handoff.
+message **only** the current primary assistant binding as an attributed handoff.
 Every fleet **read** path — the `list_sessions` RPC, the hello snapshot, and
 broadcast/subscription frames — is **denied by default**; the server, not a
 cooperating client, enforces this. The read view is retained behind a config
@@ -67,23 +67,23 @@ Three read channels are all closed by default:
   which blocks waiting for a `snapshot` frame, from hanging.
 - **broadcasts/subscriptions:** with read off, `_frame_for_client` returns `None`
   for **every** frame type to a Dot connection (including `session.inventory`), so
-  no push read path exists and Bart's reply frames never reach Dot over wss. When
+  no push read path exists and the primary assistant's reply frames never reach Dot over wss. When
   read is on, only the projected `session.inventory` is delivered; never
   `chat.event`/`working.state`/`report`/`notification`/`schedule`, and nothing
   over plain ws.
 
-## Write scope (Bart-only, attributed)
+## Write scope (primary-assistant-only, attributed)
 
 A Dot `send` may target only the assistant composite stream. The daemon resolves
 the composite's **current** backing seat at send time (never a hardcoded seat) and
 delivers the message as an ordinary attributed peer `send` carrying the Dot's own
 `from_stream_id`, so the existing `[from <dot>]` envelope and token-verified
-provenance apply. It is **not** operator intake: Bart receives an attributed
+provenance apply. It is **not** operator intake: the primary assistant receives an attributed
 external handoff and applies its normal grant rules (and gates production actions
 as usual). Any other send target is `dot_scope_denied`.
 
 The **ack** returned to Dot discloses no fleet data: it echoes only the stable
-composite id (e.g. `bart:assistant`) plus safe delivery-status fields — never the
+composite id (e.g. `home:assistant`) plus safe delivery-status fields — never the
 resolved backend seat id, host, or session name (that is live fleet binding
 state). The message is still delivered internally to the resolved backend.
 

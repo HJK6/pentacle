@@ -32,7 +32,7 @@ Local JSON configuration (absolute paths; keep credentials outside source):
   "host": "configured-host",
   "primary_store": "/absolute/private/sessions.db",
   "primary_archive": "/absolute/private/sessions_archive.db",
-  "primary_composite": "bart:assistant"
+  "primary_composite": "home:assistant"
 }
 ```
 

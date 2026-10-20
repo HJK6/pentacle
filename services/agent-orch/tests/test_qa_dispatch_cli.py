@@ -67,7 +67,7 @@ def test_qa_send_fields_reach_wire(monkeypatch):
     captured = {}
     _install_send_fakes(monkeypatch, captured)
     args = cli.build_parser().parse_args(
-        ["send", "bart:qa", "7", "Review surface", *QA]
+        ["send", "home:qa", "7", "Review surface", *QA]
     )
     assert args.func(args) == 0
     assert {

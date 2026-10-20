@@ -152,21 +152,21 @@ async function webWorkLanes(ctx) {
     report.ok('a completed lane leaves the header count and panel',
       /^3 lanes/.test(after) && await session.eval(`!document.querySelector('#session-list .lane-row[data-lane-id="wl-active-0002"]')`), { after });
 
-    // lane_update cards in Bart's timeline (composite stream), rendered by the real view.
+    // lane_update cards in the primary assistant's timeline (composite stream), rendered by the real view.
     const cards = await session.eval(`(() => {
       const store = window.PentacleChatStore;
-      store.applyFrame({ type: 'snapshot', connected: true, events: [], sessions: [{ stream_id: 'bart:assistant', host: 'bart',
+      store.applyFrame({ type: 'snapshot', connected: true, events: [], sessions: [{ stream_id: 'home:assistant', host: 'home',
         provider: 'composite', session_name: 'assistant', session_kind: 'assistant_composite', visibility: 'visible',
         last_event_at: '2026-10-07T19:00:00.000Z' }] });
       for (const wire of ${JSON.stringify(fixtureContract.lane_update_events)}) store.applyFrame(wire);
       const container = document.createElement('div'); document.body.appendChild(container);
       try {
-        window.PentacleChatView.renderStreamTranscript('bart:assistant', container);
+        window.PentacleChatView.renderStreamTranscript('home:assistant', container);
         return { kinds: [...container.querySelectorAll('.slot-chat-lane-update')].map((el) => el.dataset.updateKind).sort(),
           prose: container.querySelectorAll('.slot-chat-assistant-card').length };
       } finally { container.remove(); }
     })()`);
-    report.ok('all six lane_update kinds render as typed cards in Bart\'s timeline, none as prose',
+    report.ok('all six lane_update kinds render as typed cards in the primary assistant\'s timeline, none as prose',
       JSON.stringify(cards.kinds) === JSON.stringify(['lane_blocked', 'lane_completed', 'lane_started', 'lane_unblocked', 'major_decision', 'milestone']) && cards.prose === 0, cards);
   } finally {
     await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: hook.identifier }).catch(() => {});
