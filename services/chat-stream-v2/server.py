@@ -3604,6 +3604,9 @@ class Server:
             and self.window_schedule is not None
         ):
             snapshot["schedules"] = await self.window_schedule.schedule_inventory()
+            recurring_inventory = getattr(self.window_schedule, "recurring_inventory", None)
+            if recurring_inventory is not None:
+                snapshot["recurring"] = await recurring_inventory()
         if "limits.update" not in exclude_event_types:
             snapshot["limits"] = self.limits.snapshot() if self.limits else [
                 {"id": "claude", "label": "Claude", "pct": None, "resets_at_iso": None, "resets_text": None, "upstream_reported_at": None, "probed_at": None},

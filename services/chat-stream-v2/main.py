@@ -527,6 +527,11 @@ async def run(args: argparse.Namespace) -> int:
         local_host=args.local_host, broadcast=server.broadcast,
     )
     spawnctl.window_schedule = window_schedule
+
+    async def _assistant_bound_stream() -> str | None:
+        return str((await assistant_composite.binding()).get("stream_id") or "") or None
+
+    window_schedule.assistant_binding = _assistant_bound_stream
     server.window_schedule = window_schedule
     server.handlers.update(window_schedule.wire_handlers())
     # Every inventory-changing observer shares this one bounded emitter. The

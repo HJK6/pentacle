@@ -14,6 +14,7 @@ import time
 import uuid
 
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from .config import load_config
 from . import external_work_cli, prompt_protocol, triage, work_lane_cli
@@ -560,6 +561,7 @@ _RECEIPT_PHASES_BY_VERB: dict[str, tuple[str, tuple[str, ...]]] = {
     "schedule.cancel": ("schedule", ("terminal",)),
     "schedule.reschedule": ("schedule", ("row_committed",)),
     "schedule.run": ("schedule", ("spawn_delivered", "terminal")),
+    "schedule.recurring.create": ("schedule", ("row_committed",)),
 }
 
 
@@ -786,6 +788,170 @@ def schedule_receipt(args: argparse.Namespace) -> int:
         print(f"agent-orch schedule receipt: {transport_message}", file=sys.stderr)
         return transport_exit
     return 0 if _schedule_ok(response) else 1
+
+
+def _recurring_call(
+    args: argparse.Namespace, payload: dict[str, object], label: str, *, mutation: bool,
+    render: Callable[[dict[str, object]], None] = _print_response,
+) -> int:
+    """One recurring RPC; ``render`` prints a successful response (errors print as JSON)."""
+    payload = _schedule_actor_payload(args, payload, mutation=mutation)
+    response, transport_exit, transport_message = _run_schedule_once(
+        payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+    )
+    ok = transport_exit is None and _schedule_ok(response)
+    (render if ok else _print_response)(response)
+    if transport_exit is not None:
+        print(f"agent-orch schedule recurring {label}: {transport_message}", file=sys.stderr)
+        return transport_exit
+    return 0 if ok else 1
+
+
+def _print_recurring_table(rows: list[dict[str, object]]) -> None:
+    print("recurring_id                          name                  recurrence                                state   next_fire_local            next_fire_utc               last_result          missed")
+    for row in rows:
+        last = str(row.get("last_result") or "-")
+        if row.get("last_result_reason"):
+            last += f":{row['last_result_reason']}"
+        print(
+            f"{str(row.get('recurring_id') or ''):<37} "
+            f"{str(row.get('name') or '')[:21]:<21} "
+            f"{str(row.get('recurrence_text') or ''):<41} "
+            f"{str(row.get('state') or ''):<7} "
+            f"{str(row.get('next_fire_local') or ''):<26} "
+            f"{str(row.get('next_fire_at_utc') or ''):<27} "
+            f"{last:<20} "
+            f"{row.get('missed_count', 0)}"
+        )
+
+
+def _recurring_schedule_fields(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        key: getattr(args, key) for key in ("name", "every", "at_time", "tz", "days")
+        if getattr(args, key, None) is not None
+    }
+
+
+def schedule_recurring_add(args: argparse.Namespace) -> int:
+    from _shared.spawn_objective import resolve_objective
+    config = load_config()
+    host = args.host or config.host_id
+    parent = args.parent or "assistant"
+    lineage = None if parent == "none" else parent
+    _, _, objective_error_code = resolve_objective(
+        args.objective, objective_supported=True, parent_stream_id=lineage,
+    )
+    if objective_error_code:
+        print(f"agent-orch schedule recurring add: {objective_error_code}", file=sys.stderr)
+        return 2
+    if args.every == "weekly" and not args.days:
+        print("agent-orch schedule recurring add: validation failed: weekly requires --days", file=sys.stderr)
+        return 2
+    try:
+        resolved_spawn = resolve_spawn(provider=args.provider, model=args.model, effort=args.effort, host=host)
+    except SpawnProfileError as exc:
+        print(f"agent-orch schedule recurring add: validation failed: {exc.code}: {exc}", file=sys.stderr)
+        return 2
+    if args.model is None:
+        print(
+            "agent-orch schedule recurring add: WARNING: no --model given; using the "
+            f"{resolved_spawn['provider']} default {resolved_spawn['model']}/{resolved_spawn['effort']}.",
+            file=sys.stderr,
+        )
+    prompt_payload, prompt_exit = _capture_initial_prompt(args, config)
+    if prompt_payload is None:
+        return prompt_exit
+    if "initial_prompt" not in prompt_payload:
+        print("agent-orch schedule recurring add: validation failed: --initial-prompt or --initial-prompt-file is required (inline, within the prompt cap)", file=sys.stderr)
+        return 2
+    visibility = args.visibility
+    payload: dict[str, object] = {
+        "type": "schedule.recurring.create",
+        "objective": args.objective, "objective_supported": True,
+        "provider": resolved_spawn["provider"], "target_host": host,
+        "role": args.role, "phase": args.phase, "visibility": visibility, "parent": parent,
+        **resolved_spawn,
+        "requested_provider": args.provider, "requested_model": args.model, "requested_effort": args.effort,
+        **_recurring_schedule_fields(args),
+        **prompt_payload,
+    }
+    self_close = _resolve_self_close_on_completion(args, visibility=visibility, parent=lineage, handoff=False)
+    if self_close is not None:
+        payload["self_close_on_completion"] = self_close
+    spec_ids = list(args.spec_id or [])
+    payload["spec_id"] = spec_ids[0]
+    if len(spec_ids) > 1:
+        payload["spec_ids"] = spec_ids
+    return _recurring_call(args, payload, "add", mutation=True)
+
+
+def schedule_recurring_list(args: argparse.Namespace) -> int:
+    def render(response: dict[str, object]) -> None:
+        if getattr(args, "json", False):
+            _print_response(response)
+            return
+        rows = response.get("recurring") if isinstance(response.get("recurring"), list) else []
+        _print_recurring_table([row for row in rows if isinstance(row, dict)])
+
+    return _recurring_call(args, {"type": "schedule.recurring.list"}, "list", mutation=False, render=render)
+
+
+def schedule_recurring_get(args: argparse.Namespace) -> int:
+    def render(response: dict[str, object]) -> None:
+        row = response.get("recurring") if isinstance(response.get("recurring"), dict) else {}
+        prompt_b64 = row.pop("initial_prompt_b64", None)
+        _print_response(response)
+        if isinstance(prompt_b64, str) and prompt_b64 and not getattr(args, "json", False):
+            try:
+                prompt = base64.b64decode(prompt_b64).decode("utf-8")
+            except Exception:
+                prompt = "<prompt decode failed>"
+            print()
+            print(prompt)
+
+    return _recurring_call(
+        args, {"type": "schedule.recurring.get", "recurring_id": args.recurring_id}, "get",
+        mutation=False, render=render,
+    )
+
+
+def schedule_recurring_set(args: argparse.Namespace) -> int:
+    payload: dict[str, object] = {
+        "type": "schedule.recurring.update", "recurring_id": args.recurring_id,
+        **_recurring_schedule_fields(args),
+    }
+    for attr, key in (
+        ("provider", "provider"), ("model", "model"), ("effort", "effort"), ("host", "target_host"),
+        ("role", "role"), ("phase", "phase"), ("visibility", "visibility"), ("parent", "parent"),
+        ("objective", "objective"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            payload[key] = value
+    spec_ids = list(args.spec_id or [])
+    if spec_ids:
+        payload["spec_ids"] = spec_ids
+    if args.initial_prompt is not None or args.initial_prompt_file is not None:
+        prompt_payload, prompt_exit = _capture_initial_prompt(args, load_config())
+        if prompt_payload is None:
+            return prompt_exit
+        payload.update(prompt_payload)
+    return _recurring_call(args, payload, "set", mutation=True)
+
+
+def _schedule_recurring_simple(verb: str, label: str):
+    def command(args: argparse.Namespace) -> int:
+        return _recurring_call(
+            args, {"type": f"schedule.recurring.{verb}", "recurring_id": args.recurring_id}, label,
+            mutation=True,
+        )
+    return command
+
+
+schedule_recurring_pause = _schedule_recurring_simple("pause", "pause")
+schedule_recurring_resume = _schedule_recurring_simple("resume", "resume")
+schedule_recurring_run = _schedule_recurring_simple("run", "run")
+schedule_recurring_rm = _schedule_recurring_simple("delete", "rm")
 
 
 def _handoff_request_path(config, source_stream_id: str) -> Path:
@@ -5212,6 +5378,64 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_receipt_parser.add_argument("--from", dest="from_stream_id")
     schedule_receipt_parser.add_argument("--timeout", type=float, default=30.0)
     schedule_receipt_parser.set_defaults(func=schedule_receipt)
+
+    schedule_recurring_parser = schedule_sub.add_parser(
+        "recurring", help="Durable recurring spawn rules (nightly, weekdays, weekly) in an IANA time zone",
+    )
+    recurring_sub = schedule_recurring_parser.add_subparsers(dest="recurring_command", required=True)
+
+    def _recurring_common(parser: argparse.ArgumentParser, *, creating: bool) -> None:
+        parser.add_argument("--name", required=creating)
+        parser.add_argument("--every", choices=["daily", "weekdays", "weekly"], required=creating)
+        parser.add_argument("--at-time", dest="at_time", metavar="HH:MM", required=creating,
+                            help="24-hour wall time in the rule's zone")
+        parser.add_argument("--tz", help="IANA zone (default America/Chicago)")
+        parser.add_argument("--days", help="weekly only: comma list, e.g. mon,wed")
+        parser.add_argument("--provider", required=creating)
+        parser.add_argument("--model")
+        parser.add_argument("--effort")
+        parser.add_argument("--host")
+        parser.add_argument("--role")
+        parser.add_argument("--phase")
+        parser.add_argument("--visibility", choices=["default", "nested", "hidden"])
+        parser.add_argument("--parent", help="assistant (default, resolved at fire time), none, or a stream id")
+        parser.add_argument("--spec-id", type=_spec_id_arg, action="append", required=creating)
+        parser.add_argument("--objective")
+        prompt_group = parser.add_mutually_exclusive_group(required=creating)
+        prompt_group.add_argument("--initial-prompt")
+        prompt_group.add_argument("--initial-prompt-file")
+        parser.add_argument("--request-id")
+        parser.add_argument("--from", dest="from_stream_id")
+        parser.add_argument("--timeout", type=float, default=30.0)
+
+    recurring_add = recurring_sub.add_parser("add")
+    _recurring_common(recurring_add, creating=True)
+    recurring_add.set_defaults(func=schedule_recurring_add)
+    recurring_set = recurring_sub.add_parser("set")
+    recurring_set.add_argument("recurring_id")
+    _recurring_common(recurring_set, creating=False)
+    recurring_set.set_defaults(func=schedule_recurring_set)
+    recurring_list = recurring_sub.add_parser("list")
+    recurring_list.add_argument("--json", action="store_true")
+    recurring_list.add_argument("--from", dest="from_stream_id")
+    recurring_list.add_argument("--timeout", type=float, default=30.0)
+    recurring_list.set_defaults(func=schedule_recurring_list)
+    recurring_get = recurring_sub.add_parser("get")
+    recurring_get.add_argument("recurring_id")
+    recurring_get.add_argument("--json", action="store_true")
+    recurring_get.add_argument("--from", dest="from_stream_id")
+    recurring_get.add_argument("--timeout", type=float, default=30.0)
+    recurring_get.set_defaults(func=schedule_recurring_get)
+    for name, func in (
+        ("pause", schedule_recurring_pause), ("resume", schedule_recurring_resume),
+        ("run", schedule_recurring_run), ("rm", schedule_recurring_rm),
+    ):
+        simple = recurring_sub.add_parser(name)
+        simple.add_argument("recurring_id")
+        simple.add_argument("--request-id")
+        simple.add_argument("--from", dest="from_stream_id")
+        simple.add_argument("--timeout", type=float, default=30.0)
+        simple.set_defaults(func=func)
 
     send_parser = subparsers.add_parser(
         "send",

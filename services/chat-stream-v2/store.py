@@ -1111,6 +1111,44 @@ SCHEDULE_DDL = (
     """,
     """CREATE INDEX IF NOT EXISTS ix_v2_dispatch_phase
        ON v2_schedule_dispatches(phase)""",
+    """
+    CREATE TABLE IF NOT EXISTS v2_recurring_schedules (
+      recurring_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active','paused')),
+      recurrence_json TEXT NOT NULL CHECK(json_valid(recurrence_json)),
+      next_fire_at_utc TEXT NOT NULL,
+      last_fired_at_utc TEXT,
+      last_schedule_id TEXT,
+      missed_count INTEGER NOT NULL DEFAULT 0 CHECK(missed_count >= 0),
+      last_missed_at TEXT,
+      last_missed_reason TEXT,
+      parent_mode TEXT NOT NULL,
+      target_host TEXT NOT NULL,
+      requested_provider TEXT NOT NULL,
+      requested_model TEXT NOT NULL,
+      requested_effort TEXT NOT NULL,
+      resolved_provider TEXT NOT NULL,
+      resolved_model TEXT NOT NULL,
+      resolved_effort TEXT NOT NULL,
+      role TEXT,
+      phase TEXT,
+      visibility TEXT,
+      objective TEXT,
+      objective_source TEXT,
+      prompt_sha256 TEXT NOT NULL,
+      prompt_b64 TEXT NOT NULL,
+      owner_spec_ids_json TEXT NOT NULL CHECK(json_valid(owner_spec_ids_json)),
+      owner_spec_provenance_json TEXT NOT NULL CHECK(json_valid(owner_spec_provenance_json)),
+      created_by_stream_id TEXT,
+      self_close_on_completion INTEGER CHECK(self_close_on_completion IS NULL OR self_close_on_completion IN (0,1)),
+      generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS ix_v2_recurring_due
+       ON v2_recurring_schedules(state,next_fire_at_utc)""",
 )
 
 #: v1 `STREAM_TOKEN_HASH_VERSION`. grant_token persists only the hash.

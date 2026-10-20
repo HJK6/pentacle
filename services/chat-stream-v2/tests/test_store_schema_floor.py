@@ -137,7 +137,9 @@ def test_fresh_store_reaches_schema_floor_and_schedule_readiness(tmp_path: Path)
         store.stop()
 
     assert _version(path) == SCHEMA_VERSION
-    assert {"sessions", "v2_session_generations", "v2_schedules"} <= set(_table_counts(path))
+    assert {
+        "sessions", "v2_session_generations", "v2_schedules", "v2_recurring_schedules",
+    } <= set(_table_counts(path))
 
 
 def test_floor_copy_stamps_version_without_mutating_rows(tmp_path: Path) -> None:
