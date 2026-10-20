@@ -328,7 +328,7 @@ with an empty four-pane workspace so scenarios see a fresh renderer.
 
 `agent-chat-steer-controls` checks the composer of a working agent chat: the
 `Queue` | `Steer now` choice (default Queue), Stop beside Send while a draft
-exists, and the absence of both on the Bart composite chat. A send whose bridge
+exists, and the absence of both on the assistant composite chat. A send whose bridge
 never answers keeps a turn in flight (the daemon cannot make a seeded seat
 work); the real Send, Steer now, `Alt+Enter` and Stop controls then drive fake
 send and cancel bridges. It asserts `urgent` only on the first Steer now of a

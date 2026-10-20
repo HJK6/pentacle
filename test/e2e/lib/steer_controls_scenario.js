@@ -1,7 +1,7 @@
 'use strict';
 
 // agent-chat-steer-controls: an agent chat that is working offers `Queue` |
-// `Steer now` (default Queue) and a persistent Stop beside Send; the Bart
+// `Steer now` (default Queue) and a persistent Stop beside Send; the assistant
 // composite chat offers neither. The hermetic daemon cannot make a seeded seat
 // work, so a turn is entered through the page's own store: a send whose bridge
 // never answers leaves the turn in flight, the state the controls key on. The
@@ -64,7 +64,7 @@ async function agentChatSteerControls(ctx) {
   const queue = await session.eval(probe('cell-0'));
   report.ok('choosing Queue selects it again', queue.pressed.join() === 'queue', queue);
 
-  // The Bart composite never offers either control, even while a send is in flight.
+  // The assistant composite never offers either control, even while a send is in flight.
   await session.eval(`window.focusStreamId(${json(composite)}), true`);
   const cell = await session.eval(`(() => { const c = [...document.querySelectorAll('.grid-cell')].find(c => c.querySelector('.cell-label')?.textContent.trim() === 'Assistant Fixture'); return c ? c.id : ''; })()`);
   report.ok('the composite chat opens in a pane', /^cell-\d$/.test(cell), { cell });
