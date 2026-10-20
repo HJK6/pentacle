@@ -146,6 +146,7 @@ class _StandinComposite:
     enabled = True
     def __init__(self, backend):
         self._backend = backend
+        self.config = type("Config", (), {"name": "assistant"})()
     def is_stream(self, sid):
         return str(sid or "") == "home:assistant"
     async def binding(self):
