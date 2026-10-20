@@ -31,6 +31,9 @@ EXPECTED_PUBLIC_STEPS = {
     "Portable microphone contracts", "Bounded dashboard dependency",
     "Web mode E2E gate", "Daemon and CLI checks", "Source integrity at gate end",
 }
+CHANGELOG_PREAMBLE = "# Changelog\n\nEach dated section is one promoted release.\n\n"
+CHANGELOG_OLD = CHANGELOG_PREAMBLE + "## Unreleased\n\n## 2026-10-19\n\n- Earlier change.\n"
+CHANGELOG_CUT = CHANGELOG_PREAMBLE + "## Unreleased\n\n## 2026-10-20\n\n### Added\n\n- A changelog.\n- A second change.\n\n## 2026-10-19\n\n- Earlier change.\n"
 EXISTING_ANNOTATION = "\n".join((
     "workflow_id: 7", "run_id: 123",
     "run_url: https://github.com/HJK6/pentacle/actions/runs/123",
@@ -39,8 +42,8 @@ EXISTING_ANNOTATION = "\n".join((
 ))
 
 
-def _result(args: list[str], stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args, returncode, stdout, "")
+def _result(args: list[str], stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args, returncode, stdout, stderr)
 
 
 def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/pentacle") -> tuple[dict, dict, dict, list[list[str]]]:
@@ -77,6 +80,10 @@ def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/p
             return _result(args, f"{CANDIDATE}\trefs/heads/codex/candidate\n")
         if args == ["git", "show", f"{CANDIDATE}:{path}"]:
             return _result(args, WORKFLOW_TEXT)
+        if args == ["git", "show", f"{OLD}:CHANGELOG.md"]:
+            return _result(args, CHANGELOG_OLD)
+        if args == ["git", "show", f"{CANDIDATE}:CHANGELOG.md"]:
+            return _result(args, CHANGELOG_CUT)
         if args[:2] == ["git", "rev-parse"]:
             return _result(args, OLD if args[-1] == "origin/main" else CANDIDATE)
         if args == ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"]:
@@ -141,6 +148,7 @@ def test_promote_tags_before_cas_fast_forward(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(merge_gate, "_command", command)
     result = merge_gate.promote(CANDIDATE, 123)
     assert result["tag"] == f"v2-gate/{CANDIDATE}"
+    assert result.get("changelog") == {"heading": "2026-10-20", "bullets": 2}
     tag_push = ["git", "push", "origin", f"refs/tags/v2-gate/{CANDIDATE}"]
     main_push = ["git", "push", f"--force-with-lease=refs/heads/main:{OLD}", "origin", f"{CANDIDATE}:refs/heads/main"]
     assert calls.index(tag_push) < calls.index(main_push)
@@ -436,3 +444,66 @@ def test_portable_candidate_coverage_cannot_be_omitted(monkeypatch, required, ch
     with pytest.raises(merge_gate.GateError, match=required):
         merge_gate.promote(CANDIDATE, 123)
     assert not any(call[:2] == ["git", "push"] for call in calls)
+
+
+MISSING_PATH = "fatal: path 'CHANGELOG.md' does not exist in 'bbbb'"
+NOT_IN_TREE = "fatal: path 'CHANGELOG.md' exists on disk, but not in 'aaaa'"
+
+
+def _changelog_case(monkeypatch: pytest.MonkeyPatch, *, old: str | None, candidate: str | None) -> list[list[str]]:
+    """Serve CHANGELOG.md at old_main/candidate; None means the path is absent at that commit."""
+    _, _, _, calls = _fake_evidence(monkeypatch)
+    original = merge_gate._command
+
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        for sha, text, stderr in ((OLD, old, NOT_IN_TREE), (CANDIDATE, candidate, MISSING_PATH)):
+            if args == ["git", "show", f"{sha}:CHANGELOG.md"]:
+                calls.append(args)
+                return _result(args, text, 0) if text is not None else _result(args, "", 128, stderr)
+        return original(args, input_text=input_text, timeout=timeout)
+
+    monkeypatch.setattr(merge_gate, "_command", command)
+    return calls
+
+
+@pytest.mark.parametrize("code, old, candidate", [
+    ("changelog_missing", CHANGELOG_OLD, None),
+    ("changelog_unchanged", CHANGELOG_OLD, CHANGELOG_OLD),
+    ("changelog_not_cut", CHANGELOG_OLD, CHANGELOG_CUT.replace("## Unreleased\n", "## Unreleased\n\n- Not cut yet.\n", 1)),
+    ("changelog_malformed", CHANGELOG_OLD, CHANGELOG_CUT.replace("## 2026-10-19", "## v1.0", 1)),
+    ("changelog_malformed", CHANGELOG_OLD, CHANGELOG_PREAMBLE + "## Unreleased\n"),
+    ("changelog_malformed", CHANGELOG_OLD, CHANGELOG_PREAMBLE + "## Unreleased\n\n## 2026-10-20\n\n## 2026-10-19\n\n- Earlier change.\n"),
+], ids=["missing", "unchanged", "not_cut", "bad_heading", "no_dated_section", "empty_first_section"])
+def test_uncut_or_malformed_changelog_refuses_before_evidence_tag_or_push(
+    monkeypatch: pytest.MonkeyPatch, code: str, old: str | None, candidate: str | None,
+) -> None:
+    calls = _changelog_case(monkeypatch, old=old, candidate=candidate)
+    with pytest.raises(merge_gate.GateError, match=code):
+        merge_gate.promote(CANDIDATE, 123)
+    assert not any(call[:2] in (["git", "push"], ["git", "tag"], ["gh", "api"]) for call in calls)
+
+
+def test_changelog_absent_at_old_main_counts_as_changed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _changelog_case(monkeypatch, old=None, candidate=CHANGELOG_CUT)
+    assert merge_gate._check_changelog(OLD, CANDIDATE) == {"heading": "2026-10-20", "bullets": 2}
+
+
+def test_same_day_cut_heading_and_internal_only_bullet_are_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = CHANGELOG_PREAMBLE + "## Unreleased\n\n## 2026-10-20 (2)\n\n- Internal changes only.\n\n## 2026-10-20\n\n- A changelog.\n"
+    _changelog_case(monkeypatch, old=CHANGELOG_OLD, candidate=candidate)
+    assert merge_gate._check_changelog(OLD, CANDIDATE) == {"heading": "2026-10-20 (2)", "bullets": 1}
+
+
+def test_unreadable_changelog_is_an_error_not_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, _, _, calls = _fake_evidence(monkeypatch)
+    original = merge_gate._command
+
+    def command(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "show", f"{OLD}:CHANGELOG.md"]:
+            return _result(args, "", 128, "fatal: bad object " + OLD)
+        return original(args, input_text=input_text, timeout=timeout)
+
+    monkeypatch.setattr(merge_gate, "_command", command)
+    with pytest.raises(merge_gate.GateError, match="bad object"):
+        merge_gate.promote(CANDIDATE, 123)
+    assert not any(call[:2] in (["git", "push"], ["git", "tag"]) for call in calls)

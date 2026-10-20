@@ -19,6 +19,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CHANGELOG_PATH = "CHANGELOG.md"
+CHANGELOG_HEADING_RE = re.compile(r"^## (Unreleased|\d{4}-\d{2}-\d{2}( \(\d+\))?)$")
+CHANGELOG_ABSENT_RE = re.compile(r"does not exist in|exists on disk, but not in")
 ORIGIN_RE = re.compile(
     r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
     r"(HJK6/(?:pentacle|pentacle-private))(?:\.git)?$"
@@ -478,6 +481,38 @@ def wait_for_promotion_checks(candidate: str, tag: str, repository: str, workflo
         sleep(min(poll_s, remaining()))
 
 
+def _changelog_at(sha: str) -> str | None:
+    """CHANGELOG.md as committed at sha; None when the path is absent there."""
+    result = _command(["git", "show", f"{sha}:{CHANGELOG_PATH}"])
+    if result.returncode and CHANGELOG_ABSENT_RE.search(result.stderr):
+        return None
+    _require(result, f"git show {sha}:{CHANGELOG_PATH}")
+    return result.stdout
+
+
+def _check_changelog(old_main: str, candidate: str) -> dict[str, object]:
+    """Refuse a candidate whose changelog was not cut for it; return the first dated section."""
+    text = _changelog_at(candidate)
+    if text is None:
+        raise GateError(f"changelog_missing: {CHANGELOG_PATH} is missing in the candidate")
+    if text == _changelog_at(old_main):
+        raise GateError(f"changelog_unchanged: {CHANGELOG_PATH} is identical to origin/main; cut a dated section on the candidate branch")
+    sections: list[tuple[str, int]] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            sections.append((line[3:].rstrip(), 0))
+        elif line.startswith("- ") and sections:
+            sections[-1] = (sections[-1][0], sections[-1][1] + 1)
+    if any(heading == "Unreleased" and bullets for heading, bullets in sections):
+        raise GateError("changelog_not_cut: '## Unreleased' has bullets; rename it to the dated '## YYYY-MM-DD' heading and add a fresh empty '## Unreleased' above it")
+    if any(not CHANGELOG_HEADING_RE.fullmatch(f"## {heading}") for heading, _ in sections):
+        raise GateError("changelog_malformed: every '## ' heading must be 'Unreleased' or '## YYYY-MM-DD' (later same-day cuts append ' (2)', ' (3)')")
+    dated = [(heading, bullets) for heading, bullets in sections if heading != "Unreleased"]
+    if not dated or not dated[0][1]:
+        raise GateError("changelog_malformed: the first dated section must exist and hold at least one '- ' bullet")
+    return {"heading": dated[0][0], "bullets": dated[0][1]}
+
+
 def promote(candidate: str, run_id: int, *, checks_timeout_s: float = DEFAULT_CHECKS_TIMEOUT_S,
             poll_s: float = 2, clock=time.monotonic, sleep=time.sleep) -> dict[str, object]:
     """Tag verified exact-head smoke evidence, then CAS fast-forward main."""
@@ -490,6 +525,7 @@ def promote(candidate: str, run_id: int, *, checks_timeout_s: float = DEFAULT_CH
     old_main = _git("rev-parse", "origin/main")
     if _command(["git", "merge-base", "--is-ancestor", old_main, candidate]).returncode:
         raise GateError("candidate is below the merged-lane floor or would not fast-forward origin/main")
+    changelog = _check_changelog(old_main, candidate)
     workflow_id, run = _run_evidence(run_id, candidate)
     annotation = _tag_annotation(candidate, old_main, workflow_id, run)
     fields = _verify_annotation(annotation)
@@ -536,7 +572,7 @@ def promote(candidate: str, run_id: int, *, checks_timeout_s: float = DEFAULT_CH
     _git("push", f"--force-with-lease=refs/heads/main:{old_main}", "origin", f"{candidate}:refs/heads/main")
     if _remote_main() != candidate:
         raise GateError("origin/main did not resolve to the promoted candidate")
-    result = {"candidate": candidate, "old_main": old_main, "run_id": run_id, "tag": tag}
+    result = {"candidate": candidate, "changelog": changelog, "old_main": old_main, "run_id": run_id, "tag": tag}
     if check_receipt is not None:
         result["promotion_checks"] = {key: value for key, value in check_receipt.items() if key != "deadline"}
     return result

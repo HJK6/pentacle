@@ -63,6 +63,10 @@ still skips a redundant tag push only when remote and local tag objects match.
 Keep the pre-push guard enabled and preserve refusal receipts. This source
 change does not authorize dot to execute a promotion or mutate main.
 
+### Release notes
+
+A PR with a user-visible change adds a bullet under `## Unreleased` in `CHANGELOG.md`. Before the candidate's `Public checks` run, the release owner cuts the section on the candidate branch (rename `## Unreleased` to `## YYYY-MM-DD`, add a fresh empty `## Unreleased`; `Internal changes only.` when nothing is user-visible). `promote` refuses a candidate whose changelog is missing, unchanged from `origin/main`, still has bullets under `Unreleased`, or is malformed, before it checks the run or creates a tag, and its result reports `changelog` (the first dated heading and bullet count). Run `promote` from a checkout of the candidate SHA so the check is present, and record that SHA with the output. The FD relay carries the PR like any public write.
+
 ## Push guard
 
 Before every public push, run `python3 scripts/check_public_residue.py`, review
