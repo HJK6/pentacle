@@ -48,7 +48,7 @@ Before changing a lane's scope, priority or prerequisites, establish its operato
 
 ## Work lanes
 
-Leads propose lane changes through `GATE`; the front desk submits them. Each accepted transition or substantive milestone produces one typed lane update (`work-lane set-state`, or `work-lane update --kind major_decision|milestone`); never repost it as prose, and send no updates for heartbeats, unchanged state or routine logs. A lane showing `lead_lost` is an action item, not a pause: re-lead it, restart it after verifying the prior execution is gone, or set it `paused` or `blocked` with a real reason. Acknowledging the alert never clears it. A new commission resolves to one lane-linked spec (`--spec-id`, or the caller's own `agent-orch spec assign`); follow a refusal's printed `set-members` repair before dispatching. See [work lanes](../../services/chat-stream-v2/docs/work-lanes.md).
+Leads propose lane changes through `GATE`; the front desk submits them. Each accepted transition, major decision or substantive milestone produces one typed lane update (`work-lane set-state`, or `work-lane update --kind major_decision|milestone`); never repost it as prose, and send no updates for heartbeats, unchanged state or routine logs. A lane showing `lead_lost` is an action item, not a pause: re-lead it, restart it under existing authority after verifying the prior execution is gone, or set it `paused` or `blocked` with a real reason. Acknowledging the alert never clears it. A new commission resolves to one lane-linked spec (`--spec-id`, or the caller's own `agent-orch spec assign`); follow a refusal's printed `set-members` repair before dispatching. See [work lanes](../../services/chat-stream-v2/docs/work-lanes.md).
 
 ## Delegate before depth
 
