@@ -322,7 +322,7 @@ def proposal():
             "owner": "fixture:owner", "checkpoint": "2026-09-29", "success_measure": "output matches fixture"}
 
 
-def continuous_source(config, name="bart", body="Observed delivery refusal.", window=True):
+def continuous_source(config, name="assistant", body="Observed delivery refusal.", window=True):
     path = source(config.memory_root, name, body=body, status="in_progress")
     text = path.read_text().replace("completed_at:", "tags: [continuous-retro]\ncompleted_at:")
     if window:
@@ -335,12 +335,12 @@ def test_continuous_intake_changed_unchanged_status_move_and_unrelated_edit(conf
     path = continuous_source(config)
     source(config.memory_root, "unselected", status="in_progress")
     first = retro.collect(config, at())
-    assert [s["id"] for s in first["sources"]] == ["spec_bart"]
+    assert [s["id"] for s in first["sources"]] == ["spec_assistant"]
     path.write_text(path.read_text().replace("Observed delivery refusal.", "Observed refusal corrected."))
     second = retro.collect(config, at("2026-09-29T05:00:00-05:00"))
-    assert [s["id"] for s in second["sources"]] == ["spec_bart"]
+    assert [s["id"] for s in second["sources"]] == ["spec_assistant"]
     path.write_text(path.read_text().replace("status: in_progress", "status: completed") + "\n## Outside\nUnrelated note.")
-    moved = config.memory_root / "work/completed/bart/spec.md"
+    moved = config.memory_root / "work/completed/assistant/spec.md"
     moved.parent.mkdir(parents=True)
     path.rename(moved)
     third = retro.collect(config, at("2026-09-30T05:00:00-05:00"))
@@ -363,7 +363,7 @@ def test_continuous_intake_limits_are_explicit(config, damage):
         text = text.replace("status: in_progress", "status: blocked")
     elif damage == "duplicate":
         other = source(config.memory_root, "duplicate")
-        other.write_text(other.read_text().replace("spec_duplicate", "spec_bart"))
+        other.write_text(other.read_text().replace("spec_duplicate", "spec_assistant"))
     path.write_text(text)
     manifest = retro.collect(config, at())
     assert not manifest["sources"]
@@ -376,12 +376,12 @@ def test_continuous_intake_limits_are_explicit(config, damage):
 
 def test_continuous_overflow_never_enrolls_and_multiline_tag(config):
     path = continuous_source(config)
-    path.write_text(path.read_text().replace("tags: [continuous-retro]", "tags:\n- continuous-retro\n- bart"))
+    path.write_text(path.read_text().replace("tags: [continuous-retro]", "tags:\n- continuous-retro\n- assistant"))
     first = retro.collect(config, at(), max_bytes=1)
     assert first["coverage"]["deferred"] == 1 and not first["sources"]
-    assert "spec_bart" not in retro.rebuild_index(config)["entries"]
+    assert "spec_assistant" not in retro.rebuild_index(config)["entries"]
     second = retro.collect(config, at("2026-09-29T05:00:00-05:00"))
-    assert [s["id"] for s in second["sources"]] == ["spec_bart"]
+    assert [s["id"] for s in second["sources"]] == ["spec_assistant"]
 
 
 def primary_fixture(config):
@@ -394,13 +394,13 @@ def primary_fixture(config):
         for ddl in (SESSIONS_DDL, REPORTS_DDL, SEND_RECEIPT_DDL, OUTBOUND_NOTICE_DDL,
                     ASSISTANT_COMPOSITE_PUBLICATIONS_DDL, ASSISTANT_COMPOSITE_LANES_DDL, ASSISTANT_BINDING_DDL, ASSISTANT_REBIND_AUDIT_DDL):
             conn.execute(ddl)
-        conn.execute("INSERT INTO v2_assistant_direct_binding VALUES ('bart','fixture:fd','g1',1,'2026-09-27T00:00:00Z')")
+        conn.execute("INSERT INTO v2_assistant_direct_binding VALUES ('assistant','fixture:fd','g1',1,'2026-09-27T00:00:00Z')")
         for name, parent in (("fd", None), ("lead", "fixture:fd")):
             card = json.dumps({"updated_at": "2026-09-27T00:00:00Z", "plan": [{"status": "active", "text": "PRIVATE_SENTINEL"}]})
             conn.execute("INSERT INTO sessions(host,session_name,parent_stream_id,visibility,created_at,status,status_card) VALUES ('fixture',?,?, 'hidden','2026-09-27T00:00:00Z','open',?)", (name, parent, card))
         for identity, stamp in (("visible", "2026-09-27T12:00:00Z"), ("unknown", "2026-09-27T13:00:00Z"), ("future", "2026-09-29T12:00:00Z")):
             conn.execute("INSERT INTO v2_reports(report_id,from_stream_id,to_stream_id,status,summary,ingested_at,created_at) VALUES (?,'fixture:lead','fixture:fd','done','PRIVATE_SENTINEL',?,?)", (identity, stamp, retro.aware(stamp).timestamp()))
-        conn.execute("INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,publish_kind,evidence_refs_json,event_id,created_at) VALUES ('pub-visible','bart:assistant','h','{\"text\":\"PRIVATE_SENTINEL\"}','','result','[\"visible\"]',1,'2026-09-27T12:00:30Z')")
+        conn.execute("INSERT INTO v2_assistant_composite_publications(publication_key,stream_id,payload_digest,canonical_payload_json,dispatch_id,publish_kind,evidence_refs_json,event_id,created_at) VALUES ('pub-visible','home:assistant','h','{\"text\":\"PRIVATE_SENTINEL\"}','','result','[\"visible\"]',1,'2026-09-27T12:00:30Z')")
         conn.execute("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,display_text,content_kind,delivery,created_at,from_stream_id) VALUES ('fixture:reviewer','request','receipt','not_landed','PRIVATE_SENTINEL','send','not_landed','2026-09-27T07:00:00Z','fixture:lead')")
         for n, stamp, age in ((1, "2026-09-27T07:40:00Z", 7000), (2, "2026-09-27T08:01:00Z", 7300), (3, "2026-09-27T08:31:00Z", 9100)):
             key = "d2:" + str(n) * 64
@@ -440,7 +440,7 @@ def test_primary_missing_archive_stores_overflow_and_wait_provenance(config):
     assert limited["coverage"]["reports"]["overflow"] == 1
     assert any(o["kind"] == "delivery_failure" for o in limited["observations"])
     with sqlite3.connect(settings.primary_store) as conn:
-        conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','bart:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
+        conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','home:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
     held = retro.primary_evidence(settings, at("2026-09-27T00:00:00-05:00"), at())
     assert any(o.get("classification") == "intentional_hold" and o["next_action"] is None for o in held["observations"])
     with sqlite3.connect(settings.primary_store) as conn:
@@ -634,7 +634,7 @@ def test_primary_expiry_crossing_emits_once_with_unchanged_lane_identity(config,
     with sqlite3.connect(settings.primary_store) as conn:
         conn.execute("DELETE FROM v2_outbound_notices")
         if mode == "waiting":
-            conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','bart:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
+            conn.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,bound_stream_id,bound_generation,version,created_at,updated_at) VALUES ('hold','home:assistant','waiting','fixture:lead','g2',1,'2026-09-27T06:00:00Z','2026-09-27T06:00:00Z')")
         for n, stamp in enumerate(("2026-09-27T08:00:00Z", "2026-09-27T09:01:00Z", "2026-09-27T09:31:00Z")):
             key = "d2:" + str(n) * 64
             body = build_message_envelope("lane_digest", notice_id=key, evaluated_at=stamp,
@@ -664,7 +664,7 @@ def test_continuous_fenced_retro_example_is_not_a_section(config, fence):
     example = "\n## Example\n" + fence + "\n## Retro\nExample only.\n" + fence[:3] + "\n"
     path.write_text(text.replace("\n## Retro\n", example + "\n## Retro\n", 1))
     manifest = retro.collect(config, at())
-    assert [s["id"] for s in manifest["sources"]] == ["spec_bart"]
+    assert [s["id"] for s in manifest["sources"]] == ["spec_assistant"]
     assert not manifest["gaps"] and "Example only" not in manifest["sources"][0]["original"]
 
 
@@ -699,10 +699,10 @@ def test_primary_wait_requires_configured_composite_and_retains_exact_provenance
     wrong = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
     assert any(o.get("classification") == "unexplained_idle" for o in wrong["observations"])
     with sqlite3.connect(settings.primary_store) as conn:
-        conn.execute("UPDATE v2_assistant_composite_lanes SET stream_id='bart:assistant'")
+        conn.execute("UPDATE v2_assistant_composite_lanes SET stream_id='home:assistant'")
     held = retro.primary_evidence(settings, at("2026-09-27T00:00:00Z"), at())
     observation = next(o for o in held["observations"] if o.get("classification") == "intentional_hold")
-    assert observation["waiting_provenance"] == [{"lane_id": "hold", "stream_id": "bart:assistant", "bound_stream_id": "fixture:lead", "bound_generation": "g2", "phase": "waiting", "version": 7, "updated_at": "2026-09-27T06:00:00Z"}]
+    assert observation["waiting_provenance"] == [{"lane_id": "hold", "stream_id": "home:assistant", "bound_stream_id": "fixture:lead", "bound_generation": "g2", "phase": "waiting", "version": 7, "updated_at": "2026-09-27T06:00:00Z"}]
 
 
 @pytest.mark.parametrize("side", ["recipient", "source"])

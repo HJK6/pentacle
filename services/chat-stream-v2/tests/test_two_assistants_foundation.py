@@ -1,5 +1,5 @@
-"""Foundation for two named assistants (bart, daff): config, migration, binding,
-mirror and policy isolation.  Bart's behaviour must stay byte-identical."""
+"""Foundation for two named assistants (assistant, daff): config, migration, binding,
+mirror and policy isolation.  The primary assistant's behaviour must stay byte-identical."""
 from __future__ import annotations
 
 import asyncio
@@ -13,34 +13,34 @@ from store import Store
 from store_assistant_binding import migrate_binding_to_named, rollback_binding_to_single
 
 
-BART_CHAT = "bart:assistant"
+ASSISTANT_CHAT = "home:assistant"
 DAFF_CHAT = "daff:assistant"
-BART_SEAT = "fixture-bart:visible"
+ASSISTANT_SEAT = "fixture-assistant:visible"
 DAFF_SEAT = "fixture-daff:visible"
 OTHER_SEAT = "fixture-other:visible"
 
 
-# --- config: bart byte-identical, daff isolated namespace --------------------
+# --- config: assistant byte-identical, daff isolated namespace --------------------
 
-def test_all_from_env_bart_byte_identical_and_daff_prefixed():
+def test_all_from_env_assistant_byte_identical_and_daff_prefixed():
     env = {
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
-        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": BART_CHAT,
-        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": BART_SEAT,
-        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": "g-bart",
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT_CHAT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": ASSISTANT_SEAT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": "g-assistant",
         "PENTACLE_ASSISTANT_DAFF_COMPOSITE_ENABLED": "1",
         "PENTACLE_ASSISTANT_DAFF_COMPOSITE_STREAM_ID": DAFF_CHAT,
         "PENTACLE_ASSISTANT_DAFF_DIRECT_PRIMARY_STREAM_ID": DAFF_SEAT,
         "PENTACLE_ASSISTANT_DAFF_DIRECT_PRIMARY_GENERATION": "g-daff",
     }
     configs = AssistantCompositeConfig.all_from_env(env)
-    assert set(configs) == {"bart", "daff"}
-    # bart reads the existing unprefixed keys, identical to the legacy single call
-    # (the legacy call defaults name to "bart").
+    assert set(configs) == {"assistant", "daff"}
+    # assistant reads the existing unprefixed keys, identical to the legacy single call
+    # (the legacy call defaults name to "assistant").
     legacy = AssistantCompositeConfig.from_env(env)
-    assert configs["bart"] == legacy
-    assert configs["bart"].name == "bart"
-    assert configs["bart"].stream_id == BART_CHAT
+    assert configs["assistant"] == legacy
+    assert configs["assistant"].name == "assistant"
+    assert configs["assistant"].stream_id == ASSISTANT_CHAT
     assert configs["daff"].name == "daff"
     assert configs["daff"].stream_id == DAFF_CHAT
     assert configs["daff"].direct_primary_stream_id == DAFF_SEAT
@@ -49,12 +49,12 @@ def test_all_from_env_bart_byte_identical_and_daff_prefixed():
 def test_daff_inert_when_unconfigured():
     env = {
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
-        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": BART_CHAT,
-        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": BART_SEAT,
-        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": "g-bart",
+        "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT_CHAT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": ASSISTANT_SEAT,
+        "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": "g-assistant",
     }
     configs = AssistantCompositeConfig.all_from_env(env)
-    assert configs["bart"].enabled is True
+    assert configs["assistant"].enabled is True
     assert configs["daff"].enabled is False
     assert configs["daff"].stream_id == ""
 
@@ -69,11 +69,11 @@ def _legacy_binding_table(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "INSERT INTO v2_assistant_direct_binding(id,stream_id,generation,revision,updated_at) "
-        "VALUES(1,?,?,?,?)", (BART_SEAT, "g-bart", 7, "2026-10-03T00:00:00Z"),
+        "VALUES(1,?,?,?,?)", (ASSISTANT_SEAT, "g-assistant", 7, "2026-10-03T00:00:00Z"),
     )
 
 
-def test_migration_seeds_bart_and_rollback_restores_single():
+def test_migration_seeds_assistant_and_rollback_restores_single():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     _legacy_binding_table(conn)
@@ -90,7 +90,7 @@ def test_migration_seeds_bart_and_rollback_restores_single():
     ).fetchall()
     assert len(row) == 1
     assert dict(row[0]) == {
-        "name": "bart", "stream_id": BART_SEAT, "generation": "g-bart",
+        "name": "assistant", "stream_id": ASSISTANT_SEAT, "generation": "g-assistant",
         "revision": 7, "updated_at": "2026-10-03T00:00:00Z",
     }
 
@@ -109,7 +109,7 @@ def test_migration_seeds_bart_and_rollback_restores_single():
         "SELECT id,stream_id,generation,revision FROM v2_assistant_direct_binding"
     ).fetchall()
     assert len(restored) == 1
-    assert dict(restored[0]) == {"id": 1, "stream_id": BART_SEAT, "generation": "g-bart", "revision": 7}
+    assert dict(restored[0]) == {"id": 1, "stream_id": ASSISTANT_SEAT, "generation": "g-assistant", "revision": 7}
 
 
 def test_store_startup_migrates_legacy_db(tmp_path):
@@ -125,11 +125,11 @@ def test_store_startup_migrates_legacy_db(tmp_path):
         store.start()
         try:
             binding = await store.get_assistant_binding(
-                env_binding={"stream_id": "", "generation": ""}, name="bart",
+                env_binding={"stream_id": "", "generation": ""}, name="assistant",
             )
-            assert binding["stream_id"] == BART_SEAT
-            assert binding["generation"] == "g-bart"
-            # daff has no row yet -> unconfigured, independent of bart
+            assert binding["stream_id"] == ASSISTANT_SEAT
+            assert binding["generation"] == "g-assistant"
+            # daff has no row yet -> unconfigured, independent of assistant
             daff = await store.get_assistant_binding(
                 env_binding={"stream_id": "", "generation": ""}, name="daff",
             )
@@ -169,32 +169,32 @@ def test_independent_bindings_do_not_cross(tmp_path):
         store = Store(str(tmp_path / "sessions.db"))
         store.start()
         try:
-            bart_seat = await _seat(store, BART_SEAT)
+            assistant_seat = await _seat(store, ASSISTANT_SEAT)
             daff_seat = await _seat(store, DAFF_SEAT)
             other = await _seat(store, OTHER_SEAT)
-            bart = AssistantComposite(store, config=_config(
-                "bart", "", BART_CHAT, BART_SEAT, bart_seat["session_generation"]))
+            assistant = AssistantComposite(store, config=_config(
+                "assistant", "", ASSISTANT_CHAT, ASSISTANT_SEAT, assistant_seat["session_generation"]))
             daff = AssistantComposite(store, config=_config(
                 "daff", "DAFF_", DAFF_CHAT, DAFF_SEAT, daff_seat["session_generation"]))
-            for c in (bart, daff):
+            for c in (assistant, daff):
                 await c.load_binding()
                 await c.ensure_projection()
 
-            # Rebind daff to OTHER; bart's binding and generation are untouched.
+            # Rebind daff to OTHER; assistant's binding and generation are untouched.
             await daff.rebind(_rebind("daff-move", 0, OTHER_SEAT), actor_stream_id=DAFF_SEAT)
-            bart_binding = await bart.binding()
+            assistant_binding = await assistant.binding()
             daff_binding = await daff.binding()
-            assert bart_binding["stream_id"] == BART_SEAT
-            assert bart_binding["generation"] == bart_seat["session_generation"]
+            assert assistant_binding["stream_id"] == ASSISTANT_SEAT
+            assert assistant_binding["generation"] == assistant_seat["session_generation"]
             assert daff_binding["stream_id"] == OTHER_SEAT
             assert daff_binding["generation"] == other["session_generation"]
 
-            # Rebind bart; daff unaffected.
-            await bart.rebind(_rebind("bart-move", 0, OTHER_SEAT), actor_stream_id=BART_SEAT)
-            assert (await bart.binding())["stream_id"] == OTHER_SEAT
+            # Rebind assistant; daff unaffected.
+            await assistant.rebind(_rebind("assistant-move", 0, OTHER_SEAT), actor_stream_id=ASSISTANT_SEAT)
+            assert (await assistant.binding())["stream_id"] == OTHER_SEAT
             assert (await daff.binding())["stream_id"] == OTHER_SEAT  # daff still where we left it
             assert (await daff.binding())["revision"] == 1  # one rebind only
-            assert (await bart.binding())["revision"] == 1
+            assert (await assistant.binding())["revision"] == 1
         finally:
             store.stop()
 
@@ -206,20 +206,20 @@ def test_per_name_mirror_kv_keys_isolated(tmp_path):
         store = Store(str(tmp_path / "sessions.db"))
         store.start()
         try:
-            await _seat(store, BART_SEAT)
+            await _seat(store, ASSISTANT_SEAT)
             await _seat(store, DAFF_SEAT)
             await store.configure_assistant_mirror(
-                composite_stream_id=BART_CHAT, source_stream_id=BART_SEAT,
-                source_generation="g", enabled_default=True, name="bart")
+                composite_stream_id=ASSISTANT_CHAT, source_stream_id=ASSISTANT_SEAT,
+                source_generation="g", enabled_default=True, name="assistant")
             await store.configure_assistant_mirror(
                 composite_stream_id=DAFF_CHAT, source_stream_id=DAFF_SEAT,
                 source_generation="g", enabled_default=True, name="daff")
-            # bart uses the legacy key; daff uses a per-name key.
+            # assistant uses the legacy key; daff uses a per-name key.
             await store.put("assistant.mirror.enabled", "off")
             await store.put("assistant.mirror.daff.enabled", "on")
-            bart_state = await store.assistant_mirror_state(BART_CHAT)
+            assistant_state = await store.assistant_mirror_state(ASSISTANT_CHAT)
             daff_state = await store.assistant_mirror_state(DAFF_CHAT)
-            assert bart_state["enabled"] is False
+            assert assistant_state["enabled"] is False
             assert daff_state["enabled"] is True
         finally:
             store.stop()
@@ -237,22 +237,22 @@ def test_policy_protects_both_roles_but_singleton_is_per_role(monkeypatch, tmp_p
         store = Store(str(tmp_path / "sessions.db"))
         store.start()
         try:
-            policy = AssistantPolicy(store, "fixture-bart")
+            policy = AssistantPolicy(store, "fixture-assistant")
             assert policy.roles == {"assistant", "daff-assistant"}
             assert policy.protects({"role": "assistant"}) is True
             assert policy.protects({"role": "daff-assistant"}) is True
             assert policy.protects({"role": "lead"}) is False
 
-            # Open a bart-role seat; daff singleton check must still pass.
+            # Open an assistant-role seat; daff singleton check must still pass.
             await store.open_session(
-                "fixture-bart", "visible", provider="claude", role="assistant",
+                "fixture-assistant", "visible", provider="claude", role="assistant",
                 visibility="default", pane_status="pane_alive",
                 effective_model="x", effective_effort="high")
-            # bart singleton now occupied -> another bart is refused
+            # assistant singleton now occupied -> another assistant is refused
             with pytest.raises(Exception, match="already open"):
-                await policy.available("fixture-bart", "assistant")
+                await policy.available("fixture-assistant", "assistant")
             # daff is a different singleton -> available
-            await policy.available("fixture-bart", "daff-assistant")
+            await policy.available("fixture-assistant", "daff-assistant")
         finally:
             store.stop()
 

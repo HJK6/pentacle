@@ -1,5 +1,5 @@
 """Daff seat recovery (E): single-owner respawn + rebind + queued-input replay,
-degrade-after-retries, and Bart's preserve path untouched."""
+degrade-after-retries, and the primary assistant's preserve path untouched."""
 from __future__ import annotations
 
 import asyncio
@@ -76,24 +76,24 @@ async def _build(monkeypatch, *, fail_times=0):
         flushed.append(composite.config.name)
         return 0
 
-    async def _tell_bart(text):
+    async def _tell_primary(text):
         tells.append(text)
 
     spawnctl = _FakeSpawnctl(store, fail_times=fail_times)
     recovery = DaffRecovery(
         sessions=sessions, spawnctl=spawnctl, store=store, local_host=LOCAL,
         composites=lambda: {"daff": daff}, flush_composite_tells=_flush,
-        tell_bart=_tell_bart, startup_prompt="daff startup", sleep=_noop_sleep,
+        tell_primary=_tell_primary, startup_prompt="daff startup", sleep=_noop_sleep,
     )
     return store, daff, sessions, spawnctl, recovery, flushed, tells
 
 
-def test_bart_row_is_not_recovered(monkeypatch):
+def test_assistant_row_is_not_recovered(monkeypatch):
     async def run():
         store, daff, sessions, spawnctl, recovery, flushed, tells = await _build(monkeypatch)
         try:
-            # A Bart-role protected row must be declined (Bart has no auto-respawn).
-            await recovery.on_dead({"host": LOCAL, "session_name": "bart-dead",
+            # A primary-role protected row must be declined (no auto-respawn).
+            await recovery.on_dead({"host": LOCAL, "session_name": "assistant-dead",
                                     "role": "assistant", "session_generation": "g"})
             assert spawnctl.calls == 0
             assert flushed == [] and tells == []
@@ -117,7 +117,7 @@ def test_recovers_daff_rebinds_and_flushes(monkeypatch):
             assert bound["generation"] == seat["session_generation"]
             # Queued input was flushed in order for daff.
             assert flushed == ["daff"]
-            assert tells == []  # healthy recovery does not tell Bart
+            assert tells == []  # healthy recovery does not tell the primary assistant
         finally:
             store.stop()
     asyncio.run(run())
@@ -137,9 +137,9 @@ def test_concurrent_triggers_produce_one_seat(monkeypatch):
     asyncio.run(run())
 
 
-def test_three_failures_degrade_and_tell_bart_once(monkeypatch):
+def test_three_failures_degrade_and_tell_assistant_once(monkeypatch):
     async def run():
-        # 4 attempts all fail (initial + 3 retries) -> degrade + one Bart tell.
+        # 4 attempts all fail (initial + 3 retries) -> degrade + one primary-assistant tell.
         store, daff, sessions, spawnctl, recovery, flushed, tells = await _build(
             monkeypatch, fail_times=99)
         try:
@@ -161,7 +161,7 @@ def test_three_failures_degrade_and_tell_bart_once(monkeypatch):
 def test_exhausted_episode_not_retried_on_next_reconcile(monkeypatch):
     """Finding 6: the preserved-dead row stays open, so the reconciler re-fires
     on_dead every pass.  An exhausted dead generation must NOT respawn or tell
-    Bart again."""
+    the primary assistant again."""
     async def run():
         store, daff, sessions, spawnctl, recovery, flushed, tells = await _build(
             monkeypatch, fail_times=99)

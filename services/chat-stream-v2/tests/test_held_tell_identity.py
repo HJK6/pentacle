@@ -41,7 +41,7 @@ async def _backend(tmp_path, *, name="backend.db"):
     await h.observe()
     target = f"{HOST}:astra"
     composite = AssistantComposite(store, config=AssistantCompositeConfig(
-        enabled=True, name="bart", stream_id=f"{HOST}:assistant", astra_stream_id=target))
+        enabled=True, name="assistant", stream_id=f"{HOST}:assistant", astra_stream_id=target))
     h.comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
     return store, h, composite, target
 

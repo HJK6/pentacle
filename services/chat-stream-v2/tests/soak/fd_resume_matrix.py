@@ -2,7 +2,7 @@
 spec_pentacle__daemon_restart_continuity_2026_10).
 
 A real `main.py` (restart_matrix's disposable daemon and stub Claude) with a
-direct-primary `bart` composite bound to a front-desk (FD) seat. Each journey
+direct-primary `assistant` composite bound to a front-desk (FD) seat. Each journey
 kills the FD pane and restarts the daemon (a host logout), resumes the seat
 through the real `agent-orch spawn --resume`, and drives the rebind through the
 real CLI with the resumed generation's own stream token. Handoffs use the real
@@ -25,8 +25,8 @@ from typing import Any
 from tests.soak import restart_matrix as rm
 from tests.soak.harness import LOCAL_HOST
 
-RECOVERY_SPEC = "spec_pentacle__bart_fd_routing_recovery_2026_10"
-RECOVERY_TOPIC = "pentacle__bart_fd_routing_recovery_2026_10"
+RECOVERY_SPEC = "spec_pentacle__assistant_fd_routing_recovery_2026_10"
+RECOVERY_TOPIC = "pentacle__assistant_fd_routing_recovery_2026_10"
 COMPOSITE = "soakchat:assistant"
 DAFF_COMPOSITE = "soakchat:daff"
 FD_ROLE = "lead"
@@ -132,7 +132,7 @@ class FdCell:
         return self.cell.sql("SELECT * FROM v2_assistant_composite_tell_queue")
 
     def held(self, text: str) -> list[dict[str, Any]]:
-        """Front-desk digest holds (the live delivery of a peer tell to bart)."""
+        """Front-desk digest holds (the live delivery of a peer tell to assistant)."""
         return self.cell.sql("SELECT notice_id, kind, recipient_stream_id, created_at, delivered_at, terminal_at "
                              "FROM v2_outbound_notices WHERE body LIKE ?", (f"%{text}%",))
 
@@ -180,7 +180,7 @@ class FdCell:
         return path if csid and path.exists() else None
 
     def configure_composites(self, fd: str, daff: str) -> None:
-        """Bind bart to the FD and daff to its seat (env pairs), then restart."""
+        """Bind assistant to the FD and daff to its seat (env pairs), then restart."""
         self.cell.daemon.stop(signal.SIGTERM)
         if self.assistant_role:
             self.cell.daemon.extra_env["PENTACLE_ASSISTANT_ROLE"] = self.assistant_role
@@ -378,7 +378,7 @@ def run_self_resume(root: Path, evidence: Path, *, assistant_role: str | None) -
 
         # A3: the resumed FD has no recovery spec: self-rebind is refused.
         revision = int(fd.binding().get("revision") or 0)
-        a3_try = fd.rebind("fd", "fd", new_gen, revision, f"bart-fd-recovery-fd-{new_gen}")
+        a3_try = fd.rebind("fd", "fd", new_gen, revision, f"assistant-fd-recovery-fd-{new_gen}")
         a3 = {"cell": "A3", "assistant_role": assistant_role or "<unset>",
               "rebind": {k: a3_try[k] for k in ("rc", "json")}, "stderr": a3_try["stderr"][-400:],
               "binding_after": fd.binding()}
@@ -439,7 +439,7 @@ def run_actual_fd_shape(root: Path, evidence: Path, *, assistant_role: str | Non
         else:
             new_gen = fd.generation("fd")
             revision = int(fd.binding().get("revision") or 0)
-            attempt = fd.rebind("fd", "fd", new_gen, revision, f"bart-fd-recovery-fd-{new_gen}")
+            attempt = fd.rebind("fd", "fd", new_gen, revision, f"assistant-fd-recovery-fd-{new_gen}")
             rec["rebind"] = {k: attempt[k] for k in ("rc", "json")}
             rec["checks"] = {
                 "outcome_recorded": True,
@@ -525,7 +525,7 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         if ok_handoff:
             rev0 = int(fd.binding().get("revision") or 0)
             gen1 = fd.generation(succ)
-            proof = fd.rebind(succ, succ, gen1, rev0, f"bart-fd-handoff-{succ_sid}-{gen1}")
+            proof = fd.rebind(succ, succ, gen1, rev0, f"assistant-fd-handoff-{succ_sid}-{gen1}")
             handoff_rec["proof_rebind"] = {k: proof[k] for k in ("rc", "json")}
             handoff_rec["checks"]["binding_moved_by_handoff_proof"] = proof["rc"] == 0 and \
                 (fd.binding().get("stream_id") == succ_sid)
@@ -571,7 +571,7 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         # A4: runbook step 3 (read binding, CAS rebind to own stream+generation).
         before = fd.binding()
         rev = int(before.get("revision") or 0)
-        rid = f"bart-fd-recovery-{succ_sid}-{gen2}"
+        rid = f"assistant-fd-recovery-{succ_sid}-{gen2}"
         first = fd.rebind(succ, succ, gen2, rev, rid)
         after = fd.binding()
         audit = [a for a in fd.audit() if a["request_id"] == rid]
@@ -605,7 +605,7 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         records.append(classify(a6))
 
         # A7: every tell the dead window accepted delivers once after the rebind.
-        # A live peer tell to bart is delivered into the front-desk digest hold
+        # A live peer tell to assistant is delivered into the front-desk digest hold
         # (persisted, no paste; see the live control), so a tell counts as
         # delivered once when exactly one hold for the successor carries it.
         # A composite input queued for the dead generation is released only to

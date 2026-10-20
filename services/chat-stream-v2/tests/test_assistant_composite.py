@@ -807,10 +807,10 @@ def _daff_inventory_fixture():
     server = Server()
     server.assistant_composites = {
         name: AssistantComposite(store, config=AssistantCompositeConfig(stream_id=f"{name}:assistant"))
-        for name in ("bart", "daff")
+        for name in ("assistant", "daff")
     }
     rows = [
-        {"stream_id": "bart:assistant", "provider": "composite", "visibility": "default"},
+        {"stream_id": "home:assistant", "provider": "composite", "visibility": "default"},
         {"stream_id": "daff:assistant", "provider": "composite", "visibility": "default"},
         {"stream_id": "fixture:ordinary", "provider": "codex", "visibility": "default"},
         {"stream_id": "fixture:hidden", "provider": "codex", "visibility": "hidden"},
@@ -818,21 +818,21 @@ def _daff_inventory_fixture():
     return server, rows
 
 
-def test_operator_inventory_hides_daff_and_keeps_bart_and_other_rows() -> None:
+def test_operator_inventory_hides_daff_and_keeps_assistant_and_other_rows() -> None:
     server, rows = _daff_inventory_fixture()
     projected = server._filter_sessions_for_client(rows, False, None, include_assistant_composite=True)
-    assert [row["stream_id"] for row in projected] == ["bart:assistant", "fixture:ordinary"]
+    assert [row["stream_id"] for row in projected] == ["home:assistant", "fixture:ordinary"]
     # This policy belongs only to inventories; direct-access visibility stays intact.
     assert server._session_is_visible_to_client(rows[1], False, None, True)
 
 
 def test_inventory_daff_exception_requires_its_own_scope() -> None:
     server, rows = _daff_inventory_fixture()
-    for scope in (None, "bart:assistant", "other:assistant", "daff:assistant"):
+    for scope in (None, "home:assistant", "other:assistant", "daff:assistant"):
         projected = server._filter_sessions_for_client(
             rows, True, None, include_assistant_composite=True, scoped_stream_id=scope,
         )
-        expected = ["bart:assistant"]
+        expected = ["home:assistant"]
         if scope == "daff:assistant":
             expected.append("daff:assistant")
         expected.extend(["fixture:ordinary", "fixture:hidden"])

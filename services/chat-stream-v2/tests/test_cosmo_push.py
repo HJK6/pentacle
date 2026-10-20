@@ -17,7 +17,7 @@ from store import Store
 
 
 DAFF_CHAT = "daff:assistant"
-BART_CHAT = "bart:assistant"
+ASSISTANT_CHAT = "home:assistant"
 
 
 class _FakeTable:
@@ -49,7 +49,7 @@ def test_push_only_matching_active_nonrevoked_tokens():
     sent = []
     table = _FakeTable([
         {"push_token": "t-daff", "scope_stream": DAFF_CHAT, "credential_id": "c1", "active": True},
-        {"push_token": "t-wrong-stream", "scope_stream": BART_CHAT, "credential_id": "c2", "active": True},
+        {"push_token": "t-wrong-stream", "scope_stream": ASSISTANT_CHAT, "credential_id": "c2", "active": True},
         {"push_token": "t-inactive", "scope_stream": DAFF_CHAT, "credential_id": "c3", "active": False},
         {"push_token": "t-revoked", "scope_stream": DAFF_CHAT, "credential_id": "revoked", "active": True},
     ])
@@ -123,21 +123,21 @@ def test_register_push_operator_stays_on_legacy_table(monkeypatch):
 # --- wiring: only Daff pushes to Cosmo ---------------------------------------
 
 def test_cosmo_reply_push_wired_to_daff_only():
-    """The reply-push hook is wired to the Daff composite ONLY.  Bart's composite
-    must have no hook, so a committed Bart reply never pushes to the Cosmo
-    audience even if a bart-scoped token exists in CosmoPushTokens."""
+    """The reply-push hook is wired to the second assistant composite ONLY.  The primary
+    composite must have no hook, so a committed primary reply never pushes to the Cosmo
+    audience even if an assistant-scoped token exists in CosmoPushTokens."""
     import main
-    bart = SimpleNamespace(reply_push="should-be-cleared")
+    assistant = SimpleNamespace(reply_push="should-be-cleared")
     daff = SimpleNamespace(reply_push=None)
     hook = object()
-    main._wire_cosmo_reply_push({"bart": bart, "daff": daff}, hook)
+    main._wire_cosmo_reply_push({"assistant": assistant, "daff": daff}, hook)
     assert daff.reply_push is hook
-    assert bart.reply_push is None
+    assert assistant.reply_push is None
 
 
 # --- publish fires exactly one reply push -------------------------------------
 
-def test_committed_daff_reply_pushes_once_and_bart_never(monkeypatch):
+def test_committed_daff_reply_pushes_once_and_assistant_never(monkeypatch):
     async def run():
         store = Store(":memory:")
         store.start()

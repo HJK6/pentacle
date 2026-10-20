@@ -68,7 +68,7 @@ class Ceremony:
 
     async def request(self, auth=None):
         reply = await self.call('consent.request', auth, action='lifecycle.designate',
-            target_stream_id='node-a:bart', target_generation=await self.env.gen('bart'),
+            target_stream_id='node-a:assistant', target_generation=await self.env.gen('assistant'),
             expected_revision=(await self.env.grant())['revision'], reason='Approve this exact manager')
         if reply.get('code') == 'consent_pending_exists':
             prior = await self.env.store.submit(lambda conn: conn.execute(
@@ -91,8 +91,8 @@ async def refused(coro, code):
 def test_designation_cannot_activate_without_phone_consent(tmp_path):
     async def check(env: Env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
-        await refused(env.lifecycle(c.auth, 'designate', target='bart'), 'consent_no_active_key')
+        await env.open('assistant', role='lead')
+        await refused(env.lifecycle(c.auth, 'designate', target='assistant'), 'consent_no_active_key')
         assert (await env.grant())['revision'] == 0
     scenario(check)
 
@@ -100,9 +100,9 @@ def test_designation_cannot_activate_without_phone_consent(tmp_path):
 def test_transfer_disabled_even_for_authenticated_seat(tmp_path):
     async def check(env: Env):
         Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await env.open('other', role='lead')
-        await refused(env.lifecycle(await env.seat('bart'), 'transfer', target='other'), 'authority_transfer_disabled')
+        await refused(env.lifecycle(await env.seat('assistant'), 'transfer', target='other'), 'authority_transfer_disabled')
         assert (await env.grant())['revision'] == 0
     scenario(check)
 
@@ -110,7 +110,7 @@ def test_transfer_disabled_even_for_authenticated_seat(tmp_path):
 def test_host_offer_then_signed_designation_and_exact_replay(tmp_path):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         offer, key = await c.enroll()
         await refused(c.call('consent_key.confirm', c.local, fingerprint='00'*32), 'unsupported_verb')
         challenge = await c.request()
@@ -122,7 +122,7 @@ def test_host_offer_then_signed_designation_and_exact_replay(tmp_path):
         signature = c.sign(consent.decode(challenge['challenge_bytes']))
         approved = await c.call('consent.approve', challenge_id=challenge['challenge_id'], key_id=c.key_id, signature=signature)
         assert approved['receipt']['consent_id'] == challenge['challenge_id']
-        assert (await env.grant())['stream_id'] == 'node-a:bart'
+        assert (await env.grant())['stream_id'] == 'node-a:assistant'
         replay = await c.call('consent.approve', challenge_id=challenge['challenge_id'], key_id=c.key_id, signature=signature)
         assert replay['replayed'] is True
         assert (await env.grant())['revision'] == 1
@@ -135,7 +135,7 @@ def test_host_offer_then_signed_designation_and_exact_replay(tmp_path):
 def test_revoked_live_operator_leaves_pending_unchanged(tmp_path, verb):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         challenge = await c.request()
         c.registry.revoke(c.cid)
@@ -151,7 +151,7 @@ def test_revoked_live_operator_leaves_pending_unchanged(tmp_path, verb):
 def test_cross_requester_supersede_and_cancel_are_refused(tmp_path):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await env.open('requester', role='lead')
         await env.open('stranger', role='lead')
         await c.enroll()
@@ -174,7 +174,7 @@ def test_cross_requester_supersede_and_cancel_are_refused(tmp_path):
 def test_substitution_of_each_bound_field_fails_signature(tmp_path, field):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         challenge = await c.request()
         def get(conn):
@@ -195,14 +195,14 @@ def test_substitution_of_each_bound_field_fails_signature(tmp_path, field):
 def test_mutation_refusal_rolls_back_and_keeps_pending(tmp_path, cause):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         challenge = await c.request()
         def intervene(conn):
             if cause == 'revision':
                 conn.execute('INSERT INTO v2_lifecycle_manager VALUES (1,NULL,NULL,1,?)', (time.time(),))
             else:
-                conn.execute("UPDATE sessions SET role='worker' WHERE host='node-a' AND session_name='bart'")
+                conn.execute("UPDATE sessions SET role='worker' WHERE host='node-a' AND session_name='assistant'")
             conn.commit()
         await env.store.submit(intervene)
         before = await env.grant()
@@ -216,7 +216,7 @@ def test_mutation_refusal_rolls_back_and_keeps_pending(tmp_path, cause):
 def test_deny_cancel_expiry_and_revoke_key(tmp_path):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         _, key = await c.enroll()
         ch = await c.request()
         assert (await c.call('consent.deny', challenge_id=ch['challenge_id']))['intent']['state'] == 'denied'
@@ -245,7 +245,7 @@ def test_deny_cancel_expiry_and_revoke_key(tmp_path):
 def test_non_audience_approval_and_deny_refused(tmp_path, bad_actor):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await env.open('seat', role='lead')
         await c.enroll()
         ch = await c.request()
@@ -265,13 +265,13 @@ def test_non_audience_approval_and_deny_refused(tmp_path, bad_actor):
 def test_emergency_revoke_is_reduce_only_and_audits_claims(tmp_path):
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         await c.approve(ch)
         for auth in ({'peer_loopback': False, 'local_admin_verified': True}, {'peer_loopback': True}):
             await refused(env.lifecycle(auth, 'revoke', request_id='emergency', emergency=True), 'emergency_local_only')
-        await refused(env.lifecycle(c.local, 'designate', target='bart', emergency=True), 'emergency_local_only')
+        await refused(env.lifecycle(c.local, 'designate', target='assistant', emergency=True), 'emergency_local_only')
         receipt = await env.lifecycle(c.local, 'revoke', request_id='emergency', emergency=True,
             caller_claims={'os_user': 'claimed', 'pid': 123, 'executable': 'agent-orch'}, reason='Lost phone')
         assert receipt['receipt']['holder_stream_id'] is None
@@ -297,7 +297,7 @@ def test_file_backed_local_admin_verifies_real_socket_emergency_revoke(tmp_path,
 
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         await c.approve(await c.request())
         env.server.port = 0
@@ -349,7 +349,7 @@ def test_concurrent_approvals_and_cancel_linearize_under_authority_lock(tmp_path
     import asyncio
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         results = await asyncio.gather(c.approve(ch), c.call('consent.cancel', challenge_id=ch['challenge_id']), return_exceptions=True)
@@ -365,7 +365,7 @@ def test_credential_revocation_linearization_intervals(tmp_path, monkeypatch, in
     import threading
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         if interval == 'before_snapshot':
@@ -403,7 +403,7 @@ def test_cancelled_approval_holds_authority_lock_until_worker_commit(tmp_path, m
     import threading
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         entered, release = threading.Event(), threading.Event()
@@ -445,7 +445,7 @@ def test_retired_bootstrap_is_unsupported(tmp_path, verb):
 
 def test_rotation_keeps_prior_active_until_offer_acceptance(tmp_path):
     async def check(env):
-        c=Ceremony(env,tmp_path);await env.open('bart',role='lead')
+        c=Ceremony(env,tmp_path);await env.open('assistant',role='lead')
         _,old=await c.enroll();old_private,old_id=c.private,c.key_id
         c.private=ec.generate_private_key(ec.SECP256R1())
         c.spki=consent.encode(c.private.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
@@ -465,11 +465,11 @@ def test_handoff_after_revocation_or_replacement_carries_nothing(tmp_path, monke
     monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
     async def check(env):
         c = Ceremony(env, tmp_path)
-        for name in ('bart','successor','replacement'):
+        for name in ('assistant','successor','replacement'):
             await env.open(name, role='assistant')
         await c.enroll()
         await c.approve(await c.request())
-        source_generation = await env.gen('bart')
+        source_generation = await env.gen('assistant')
         action = 'lifecycle.revoke' if changed == 'revoke' else 'lifecycle.designate'
         ch = (await c.call('consent.request', action=action, target_stream_id='node-a:replacement',
             target_generation=await env.gen('replacement'), expected_revision=1, reason='Change manager'))['intent']
@@ -478,7 +478,7 @@ def test_handoff_after_revocation_or_replacement_carries_nothing(tmp_path, monke
         before = await env.grant()
         # All three admitted journeys converge at the same commit-time carry.
         async with env.sessions.assistant.authority_lock:
-            result = await env.store.lifecycle_authority_carry_on_handoff('node-a:bart', source_generation,
+            result = await env.store.lifecycle_authority_carry_on_handoff('node-a:assistant', source_generation,
                 'node-a:successor', await env.gen('successor'), 'assistant')
         assert result is None
         assert await env.grant() == before
@@ -491,7 +491,7 @@ def test_real_handoff_finish_emits_informational_continuity_card(tmp_path, monke
     monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='assistant')
+        await env.open('assistant', role='assistant')
         await env.open('successor', role='assistant')
         await c.enroll()
         await c.approve(await c.request())
@@ -503,9 +503,9 @@ def test_real_handoff_finish_emits_informational_continuity_card(tmp_path, monke
             async def notification(self, msg):
                 records.append(msg)
         ctl.consent_notify = Notify()
-        auth = (await env.seat('bart')) if mode == 'live' else c.auth if mode == 'operator' else {
-            **(await env.seat('bart')), 'service_authenticated': True, 'service_actor': 'daemon:scheduler'}
-        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart', 'reparent_children': False,
+        auth = (await env.seat('assistant')) if mode == 'live' else c.auth if mode == 'operator' else {
+            **(await env.seat('assistant')), 'service_authenticated': True, 'service_actor': 'daemon:scheduler'}
+        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:assistant', 'reparent_children': False,
             '_auth_context': auth}, 'node-a:successor')
         assert (await env.grant())['stream_id'] == 'node-a:successor'
         assert len(records) == 1 and records[0]['actions'] == []
@@ -518,7 +518,7 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
     from websockets.asyncio.client import connect
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         env.server.port = 0
         await env.server.bind()
@@ -540,8 +540,8 @@ def test_real_socket_signed_designation_and_revoked_live_deny(tmp_path):
                         reply = json.loads(await asyncio.wait_for(ws.recv(), 3))
                         if reply.get('request_id') == rid:
                             return reply
-                pending = await rpc('assistant.lifecycle', action='designate', target_stream_id='node-a:bart',
-                    target_generation=await env.gen('bart'), expected_revision=0, reason='Real wire rehearsal')
+                pending = await rpc('assistant.lifecycle', action='designate', target_stream_id='node-a:assistant',
+                    target_generation=await env.gen('assistant'), expected_revision=0, reason='Real wire rehearsal')
                 assert pending['type'] == 'assistant.lifecycle.ok' and pending['code'] == 'consent_pending'
                 assert (await env.grant())['revision'] == 0
                 ch = (await rpc('consent.open',intent_id=pending['intent']['request_id'],key_id=c.key_id))['challenge']
@@ -571,28 +571,28 @@ def test_scheduled_handoff_never_carries_unbound_or_prior_generation(tmp_path, m
     monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='assistant')
-        admitted_generation = await env.gen('bart')
-        await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
-        await env.open('bart', role='assistant')
-        assert await env.gen('bart') != admitted_generation
+        await env.open('assistant', role='assistant')
+        admitted_generation = await env.gen('assistant')
+        await env.sessions.close('node-a', 'assistant', close_kind='handed_off', reason='End G1')
+        await env.open('assistant', role='assistant')
+        assert await env.gen('assistant') != admitted_generation
         await env.open('successor', role='assistant')
         await c.enroll()
         await c.approve(await c.request())
         before = await env.grant()
         auth = {'service_authenticated': True, 'service_actor': 'daemon:scheduler',
-                'token_verified': True, 'stream_id': 'node-a:bart'}
+                'token_verified': True, 'stream_id': 'node-a:assistant'}
         if binding == 'stale':
             auth['session_generation'] = admitted_generation
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
-        await env.open('child', parent_stream_id='node-a:bart')
+        await env.open('child', parent_stream_id='node-a:assistant')
         killed = list(env.tmux.killed)
-        await refused(ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
+        await refused(ctl._finish_handoff({'handoff_from_stream_id': 'node-a:assistant',
             'reparent_children': True, '_auth_context': auth}, 'node-a:successor'),
             'stale_owner_generation')
         assert await env.grant() == before
-        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
-        assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+        assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:assistant'
         assert env.tmux.killed == killed
     scenario(check)
 
@@ -609,8 +609,8 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
         fields = {'role': 'assistant', 'spec_ids': [SPEC], 'spec_binding_provenance': [{
             'spec_id': SPEC, 'provenance': 'spawn_explicit', 'granting_principal': 'operator:fixture',
             'granted_at': '2026-09-28T00:00:00Z'}]}
-        await env.open('bart', **fields)
-        admitted_generation = await env.gen('bart')
+        await env.open('assistant', **fields)
+        admitted_generation = await env.gen('assistant')
         await c.enroll()
         await c.approve(await c.request())
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
@@ -624,19 +624,19 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
         surface = WindowSchedule(env.store, env.sessions, None, native, local_host='node-a')
         surface.mark_store_ready()
         inserted = await surface.schedule_insert({'type': 'schedule.insert', 'request_id': str(uuid.uuid4()),
-            'from_stream_id': 'node-a:bart', '_auth_context': await env.seat('bart'),
-            'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
+            'from_stream_id': 'node-a:assistant', '_auth_context': await env.seat('assistant'),
+            'handoff': True, 'handoff_from_stream_id': 'node-a:assistant', 'role': 'assistant',
             'spec_ids': [SPEC], 'objective': 'Continue the approved manager',
             'fires_at_utc': future_time(), 'reparent_children': True})
         if binding == 'stale':
-            await env.sessions.close('node-a', 'bart', close_kind='handed_off', reason='End G1')
-            await env.open('bart', **fields)
+            await env.sessions.close('node-a', 'assistant', close_kind='handed_off', reason='End G1')
+            await env.open('assistant', **fields)
             await c.approve(await c.request())  # independent phone grant for G2
         if binding == 'missing':
             await env.store.submit(lambda conn: (conn.execute(
                 "UPDATE v2_operation_receipts SET measured_state_json='{}' WHERE request_id=? AND phase='row_committed'",
                 (inserted['schedule']['request_id'],)), conn.commit()))
-        await env.open('child', parent_stream_id='node-a:bart')
+        await env.open('child', parent_stream_id='node-a:assistant')
         before = await env.grant()
         killed = list(env.tmux.killed)
         sid = inserted['schedule']['schedule_id']
@@ -648,8 +648,8 @@ def test_real_schedule_admission_dispatch_and_carry_generation_boundary(tmp_path
         if binding != 'current':
             assert native.calls == []
             assert await env.store.fetch_session('node-a', 'successor') is None
-            assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
-            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'open'
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:assistant'
             assert env.tmux.killed == killed
             assert after == before
             row = await env.store.submit(lambda conn: dict(conn.execute(
@@ -666,7 +666,7 @@ def test_two_audience_keys_can_only_commit_one_approval(tmp_path):
     import asyncio
     async def check(env):
         a = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await a.enroll()
         b = Ceremony(env, tmp_path)
         await b.enroll()
@@ -687,7 +687,7 @@ def test_key_revoke_waits_for_approved_commit_and_never_clears_grant(tmp_path, m
     import threading
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         _, key = await c.enroll()
         ch = await c.request()
         entered, release = threading.Event(), threading.Event()
@@ -719,7 +719,7 @@ def test_approve_vs_authorized_supersede_barrier(tmp_path, monkeypatch, first):
     import threading
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
@@ -768,7 +768,7 @@ def test_approve_vs_expiry_barrier(tmp_path, monkeypatch, first):
     import threading
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         await c.enroll()
         ch = await c.request()
         entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
@@ -894,14 +894,14 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
     monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='assistant')
-        await env.open('child', parent_stream_id='node-a:bart')
+        await env.open('assistant', role='assistant')
+        await env.open('child', parent_stream_id='node-a:assistant')
         await c.enroll()
         await c.approve(await c.request())
         before = await env.grant()
-        auth = {**await env.seat('bart'), 'service_authenticated': True,
+        auth = {**await env.seat('assistant'), 'service_authenticated': True,
                 'service_actor': 'daemon:scheduler'}
-        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:bart',
+        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:assistant',
                'role': 'assistant', '_auth_context': auth, 'reparent_children': True}
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -923,9 +923,9 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
                 await env.sessions.mark_closed(source_host, source_name, reason='fixture process death',
                                                expected_generation=auth['session_generation'])
             else:
-                await env.sessions.close('node-a', 'bart', close_kind='handed_off',
+                await env.sessions.close('node-a', 'assistant', close_kind='handed_off',
                                          expected_generation=auth['session_generation'])
-            return await env.sessions.open('node-a', 'bart', role='assistant')
+            return await env.sessions.open('node-a', 'assistant', role='assistant')
         if change_point == 'before_spawn':
             # FIRE's earlier read can race with a new generation. Guarded spawn
             # must re-read under the lifecycle lock before any boot effect.
@@ -935,8 +935,8 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
             await refused(ctl._spawn_guarded(msg, 'node-a'), 'stale_owner_generation')
             assert boots == []
             assert await env.store.fetch_session('node-a', 'successor') is None
-            assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
-            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'open'
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:assistant'
             assert env.tmux.killed == killed
             assert await env.grant() == before
             return
@@ -950,8 +950,8 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
             except asyncio.TimeoutError:
                 pass
             assert not writer.done(), 'generation writer crossed the handoff fence'
-            assert await env.gen('bart') == auth['session_generation']
-            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert await env.gen('assistant') == auth['session_generation']
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:assistant'
             assert await env.grant() == before
             assert boots == []
         finally:
@@ -959,9 +959,9 @@ def test_scheduled_handoff_generation_fence_barrier(tmp_path, monkeypatch, chang
             await asyncio.gather(handoff, *([writer] if writer else []), return_exceptions=True)
         assert handoff.result()['type'] == 'spawn.ok'
         assert writer.result()['session_generation'] != auth['session_generation']
-        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'open'
         assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:successor'
-        assert env.tmux.killed == ['bart']  # only admitted G1 was retired
+        assert env.tmux.killed == ['assistant']  # only admitted G1 was retired
         assert (await env.grant())['stream_id'] == 'node-a:successor'
         assert (await env.grant())['revision'] == before['revision'] + 1
     scenario(check)
@@ -973,7 +973,7 @@ def test_same_generation_scheduled_handoff_never_revives_old_authority(tmp_path,
     monkeypatch.setenv('PENTACLE_ASSISTANT_ROLE', 'assistant')
     async def check(env):
         c = Ceremony(env, tmp_path)
-        await env.open('bart', role='assistant')
+        await env.open('assistant', role='assistant')
         await env.open('successor', role='assistant')
         if grant_state != 'none':
             await c.enroll()
@@ -988,12 +988,12 @@ def test_same_generation_scheduled_handoff_never_revives_old_authority(tmp_path,
                     expected_revision=(await env.grant())['revision'], reason='Replace before handoff')
             await c.approve((await c.call('consent.open',intent_id=pending['intent']['request_id'],key_id=c.key_id))['challenge'])
         before = await env.grant()
-        auth = {**await env.seat('bart'), 'service_authenticated': True,
+        auth = {**await env.seat('assistant'), 'service_authenticated': True,
                 'service_actor': 'daemon:scheduler'}
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
-        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:bart',
+        await ctl._finish_handoff({'handoff_from_stream_id': 'node-a:assistant',
             '_auth_context': auth, 'reparent_children': False}, 'node-a:successor')
-        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'closed'
+        assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'closed'
         assert await env.grant() == before
     scenario(check)
 
@@ -1014,13 +1014,13 @@ def test_scheduled_handoff_real_spawn_serializes_generation_through_finish(tmp_p
             return 'alive' if name in self.live else 'gone'
     async def check(env):
         env.tmux = env.sessions.tmux = BootTmux()
-        await env.open('bart', role='assistant', provider='claude',
+        await env.open('assistant', role='assistant', provider='claude',
             effective_model='claude-opus-4-8', effective_effort='high')
-        await env.open('child', parent_stream_id='node-a:bart')
+        await env.open('child', parent_stream_id='node-a:assistant')
         c = Ceremony(env, tmp_path)
         await c.enroll()
         await c.approve(await c.request())
-        auth = {**await env.seat('bart'), 'service_authenticated': True,
+        auth = {**await env.seat('assistant'), 'service_authenticated': True,
                 'service_actor': 'daemon:scheduler'}
         ctl = SpawnCtl(env.store, env.sessions, tmux=env.tmux)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -1030,14 +1030,14 @@ def test_scheduled_handoff_real_spawn_serializes_generation_through_finish(tmp_p
             await release.wait()
             return await original(*args, **kwargs)
         monkeypatch.setattr(ctl, '_spawn_fenced', barrier)
-        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:bart', 'role': 'assistant',
+        msg = {'handoff': True, 'handoff_from_stream_id': 'node-a:assistant', 'role': 'assistant',
             'command': 'stub', 'ready_marker': 'READY', 'request_id': 'scheduled-native-boundary',
             'objective': 'Exercise generation-bound scheduled boot', '_auth_context': auth}
         handoff = asyncio.create_task(ctl._spawn_guarded(msg, 'node-a'))
         async def reopen():
-            await env.sessions.close('node-a', 'bart', close_kind='handed_off',
+            await env.sessions.close('node-a', 'assistant', close_kind='handed_off',
                 expected_generation=auth['session_generation'])
-            return await env.sessions.open('node-a', 'bart', role='assistant')
+            return await env.sessions.open('node-a', 'assistant', role='assistant')
         writer = None
         try:
             await asyncio.wait_for(entered.wait(), 3)
@@ -1048,7 +1048,7 @@ def test_scheduled_handoff_real_spawn_serializes_generation_through_finish(tmp_p
                 pass
             assert not writer.done(), 'generation changed between admission and native boot'
             assert env.tmux.created == 0
-            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:bart'
+            assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == 'node-a:assistant'
         finally:
             release.set()
             await asyncio.wait_for(asyncio.gather(handoff, *([writer] if writer else []),
@@ -1056,9 +1056,9 @@ def test_scheduled_handoff_real_spawn_serializes_generation_through_finish(tmp_p
         reply = handoff.result()
         assert reply['type'] == 'spawn.ok'
         assert env.tmux.created == 1
-        assert env.tmux.killed == ['bart']
+        assert env.tmux.killed == ['assistant']
         assert writer.result()['session_generation'] != auth['session_generation']
-        assert (await env.store.fetch_session('node-a', 'bart'))['status'] == 'open'
+        assert (await env.store.fetch_session('node-a', 'assistant'))['status'] == 'open'
         assert (await env.store.fetch_session('node-a', 'child'))['parent_stream_id'] == reply['stream_id']
         assert (await env.grant())['stream_id'] == reply['stream_id']
         assert not ctl._handoff_fences

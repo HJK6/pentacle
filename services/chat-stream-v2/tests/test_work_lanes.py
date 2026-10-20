@@ -190,15 +190,15 @@ def test_lead_eligibility_v5():
 
 
 def test_protected_assistant_seat_is_ineligible(monkeypatch):
-    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "bart")
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
     async def body(env):
         lid = (await env.adopt(state="paused", lead=False, owner="operator"))["lane"]["lane_id"]
-        bart = await env.seat("bart-seat", role="bart")
+        assistant = await env.seat("assistant-seat", role="assistant")
         with pytest.raises(ValueError) as e:
-            await env.op("set_lead", {"lead": {"stream_id": bart[0], "generation": bart[1]}}, lane=lid, version=1)
+            await env.op("set_lead", {"lead": {"stream_id": assistant[0], "generation": assistant[1]}}, lane=lid, version=1)
         assert code(e) == "work_lane_lead_ineligible"
         with pytest.raises(ValueError) as e:
-            await env.op("set_chat", {"visible_chat": {"stream_id": bart[0], "generation": bart[1]}},
+            await env.op("set_chat", {"visible_chat": {"stream_id": assistant[0], "generation": assistant[1]}},
                          lane=lid, version=1)
         assert code(e) == "work_lane_visible_chat_invalid"
     run(body)

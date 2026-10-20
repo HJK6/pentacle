@@ -10,7 +10,7 @@ def test_direct_front_desk_holds_start_but_other_parents_keep_delivery():
         store=Store(':memory:'); store.start()
         try:
             composite=AssistantComposite(store, config=AssistantCompositeConfig(enabled=True,
-                name='bart', stream_id='h:assistant', direct_primary_stream_id='h:desk',
+                name='assistant', stream_id='h:assistant', direct_primary_stream_id='h:desk',
                 direct_primary_generation='g', astra_stream_id='h:desk'))
             held=await composite.suppress_routine_backend_ingress(target_stream_id='h:desk',
                 body='START: working', msg={'tell_id':'start-1'}, verb='tell')
@@ -34,7 +34,7 @@ from test_nudges import HOST, _iso, _new_store
 
 def _desk(store, target, generation):
     composite=AssistantComposite(store, config=AssistantCompositeConfig(enabled=True,
-        name='bart',stream_id=f'{HOST}:assistant',direct_primary_stream_id=target,
+        name='assistant',stream_id=f'{HOST}:assistant',direct_primary_stream_id=target,
         direct_primary_generation=generation,astra_stream_id=target))
     return composite
 
@@ -285,7 +285,7 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
             generation = sessions.get(target)['session_generation']
             await store.update_session('fixture-host', 'v2-test', pane_pid='4242')
             composite = AssistantComposite(store, config=AssistantCompositeConfig(
-                enabled=True, name='bart', stream_id='fixture-host:assistant',
+                enabled=True, name='assistant', stream_id='fixture-host:assistant',
                 direct_primary_stream_id=target, direct_primary_generation=generation),
                 dispatch=_production_dispatcher(comms))
             comms.front_desk_digest = composite.front_desk_digest

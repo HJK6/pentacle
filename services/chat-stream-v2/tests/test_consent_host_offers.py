@@ -21,9 +21,9 @@ def test_maintenance_audit_failure_rolls_back_before_unrelated_commit(tmp_path, 
             table, idcol, rid, verb = 'v2_consent_offers', 'offer_id', request['offer_id'], 'consent_key.expire'
         else:
             await a.enroll()
-            await env.open('bart', role='lead')
-            request = (await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:bart',
-                target_generation=await env.gen('bart'), expected_revision=0, reason='Maintenance atomicity'))['intent']
+            await env.open('assistant', role='lead')
+            request = (await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:assistant',
+                target_generation=await env.gen('assistant'), expected_revision=0, reason='Maintenance atomicity'))['intent']
             table, idcol, rid, verb = 'v2_consent_intents', 'request_id', request['request_id'], 'consent.expire'
             await a.call('consent.open', intent_id=rid, key_id=a.key_id)
         def expire(conn):
@@ -175,10 +175,10 @@ def test_durable_intent_has_no_challenge_until_explicit_open_and_one_atomic_effe
     async def check(env):
         a, b = await setup(env, tmp_path)
         await a.enroll(); await b.enroll()
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         now = time.time()
-        result = await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:bart',
-            target_generation=await env.gen('bart'), expected_revision=0, reason='Synthetic manager')
+        result = await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:assistant',
+            target_generation=await env.gen('assistant'), expected_revision=0, reason='Synthetic manager')
         intent = result['intent']
         assert not intent.get('challenge_bytes') and not intent.get('nonce')
         assert intent['expires_at'] >= now + 86399
@@ -203,9 +203,9 @@ def test_durable_intent_has_no_challenge_until_explicit_open_and_one_atomic_effe
 def test_reopen_replaces_challenge_without_refreshing_parent(tmp_path, monkeypatch):
     async def check(env):
         a, _ = await setup(env, tmp_path)
-        await a.enroll(); await env.open('bart', role='lead')
-        intent = (await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:bart',
-            target_generation=await env.gen('bart'), expected_revision=0, reason='Synthetic manager'))['intent']
+        await a.enroll(); await env.open('assistant', role='lead')
+        intent = (await a.call('consent.request', action='lifecycle.designate', target_stream_id='node-a:assistant',
+            target_generation=await env.gen('assistant'), expected_revision=0, reason='Synthetic manager'))['intent']
         first = (await a.call('consent.open', intent_id=intent['request_id'], key_id=a.key_id))['challenge']
         monkeypatch.setattr(consent.time, 'time', lambda: first['expires_at'] + 1)
         second = (await a.call('consent.open', intent_id=intent['request_id'], key_id=a.key_id))['challenge']
@@ -219,9 +219,9 @@ def test_reopen_replaces_challenge_without_refreshing_parent(tmp_path, monkeypat
 def test_repeated_request_creation_is_idempotent_and_cannot_rebind(tmp_path, monkeypatch):
     async def check(env):
         a, _ = await setup(env, tmp_path)
-        await a.enroll(); await env.open('bart', role='lead')
-        fields = dict(request_id='same-wire-request', action='lifecycle.designate', target_stream_id='node-a:bart',
-            target_generation=await env.gen('bart'), expected_revision=0, reason='Synthetic manager')
+        await a.enroll(); await env.open('assistant', role='lead')
+        fields = dict(request_id='same-wire-request', action='lifecycle.designate', target_stream_id='node-a:assistant',
+            target_generation=await env.gen('assistant'), expected_revision=0, reason='Synthetic manager')
         first = await a.call('consent.request', **fields)
         monkeypatch.setattr(consent.time, 'time', lambda: first['intent']['created_at'] + 180)
         second = await a.call('consent.request', **fields)
@@ -382,8 +382,8 @@ def test_final_audit_failure_rolls_back_the_entire_effect(tmp_path,monkeypatch,e
             fields=dict(offer_id=offer['offer_id'],challenge_id=opened['challenge_id'],spki=other.spki,signature=other.sign(consent.offer_bytes(opened,other.spki)))
             verb='consent_key.accept'
         else:
-            await env.open('bart',role='lead')
-            intent=(await a.call('consent.request',action='lifecycle.designate',target_stream_id='node-a:bart',target_generation=await env.gen('bart'),expected_revision=0,reason='Atomic fixture'))['intent']
+            await env.open('assistant',role='lead')
+            intent=(await a.call('consent.request',action='lifecycle.designate',target_stream_id='node-a:assistant',target_generation=await env.gen('assistant'),expected_revision=0,reason='Atomic fixture'))['intent']
             ch=(await a.call('consent.open',intent_id=intent['request_id'],key_id=a.key_id))['challenge']
             fields=dict(challenge_id=ch['challenge_id'],key_id=a.key_id,signature=a.sign(consent.decode(ch['challenge_bytes'])))
             verb='consent.approve'
@@ -436,8 +436,8 @@ def test_cutover_retains_active_keys_and_disables_legacy_pending_bootstrap(tmp_p
             assert consent.rowdict(conn,'v2_consent_keys','key_id',b.key_id)['state']=='expired'
             assert conn.execute('SELECT purpose FROM v2_consent_enrollment_codes').fetchone()[0]=='retired'
         await env.store.submit(cutover)
-        await env.open('bart',role='lead')
-        intent=(await a.call('consent.request',action='lifecycle.designate',target_stream_id='node-a:bart',target_generation=await env.gen('bart'),expected_revision=0,reason='Existing-key continuity'))['intent']
+        await env.open('assistant',role='lead')
+        intent=(await a.call('consent.request',action='lifecycle.designate',target_stream_id='node-a:assistant',target_generation=await env.gen('assistant'),expected_revision=0,reason='Existing-key continuity'))['intent']
         assert intent['audience_key_ids']==[a.key_id]
         child=(await a.call('consent.open',intent_id=intent['request_id'],key_id=a.key_id))['challenge']
         approved=await a.call('consent.approve',challenge_id=child['challenge_id'],key_id=a.key_id,signature=a.sign(consent.decode(child['challenge_bytes'])))

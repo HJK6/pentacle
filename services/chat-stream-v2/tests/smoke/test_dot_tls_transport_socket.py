@@ -138,16 +138,17 @@ def test_dot_token_works_over_wss_and_is_refused_over_plain_ws(tmp_path):
     asyncio.run(run())
 
 
-BACKEND = "thoth:v2-bartbackend-disposable"
+BACKEND = "node-a:v2-assistantbackend-disposable"
 
 
 class _StandinComposite:
-    """A disposable stand-in Bart binding for the round-trip proof."""
+    """A disposable stand-in assistant binding for the round-trip proof."""
     enabled = True
     def __init__(self, backend):
         self._backend = backend
+        self.config = type("Config", (), {"name": "assistant"})()
     def is_stream(self, sid):
-        return str(sid or "") == "bart:assistant"
+        return str(sid or "") == "home:assistant"
     async def binding(self):
         return {"type": "assistant.binding.ok", "stream_id": self._backend, "generation": "g"}
 
@@ -160,14 +161,14 @@ class _RecordingComms:
     async def send(self, msg):
         self.sent.append(msg)
         return {"type": "send.result", "delivery": "landed", "to_stream_id": msg.get("to_stream_id"),
-                "host": "thoth", "session_name": "v2-bartbackend-disposable"}
+                "host": "node-a", "session_name": "v2-assistantbackend-disposable"}
 
 
 def test_dot_wss_send_ack_sanitized_and_live_revocation(tmp_path):
     """Real-TLS WSS round trip (disposable binding): Dot connects over wss, sends
-    to the current Bart composite, gets a sanitized ack (no backend seat/host),
+    to the current assistant composite, gets a sanitized ack (no backend seat/host),
     the delivery preserves [from dot] attribution, and revoking the token drops
-    the live connection on the next RPC. Never touches live Bart."""
+    the live connection on the next RPC. Never touches the live assistant."""
     async def run():
         store = Store(str(tmp_path / "sessions.db"))
         store.start()
@@ -207,24 +208,24 @@ def test_dot_wss_send_ack_sanitized_and_live_revocation(tmp_path):
                 while not any(f.get("type") == "snapshot" for f in seq):
                     seq.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
 
-                # Send to the current Bart binding over wss.
+                # Send to the current assistant binding over wss.
                 await ws.send(json.dumps({
                     "type": "send", "request_id": "snd-tls",
                     "from_stream_id": DOT_ID, "stream_token": TOKEN,
-                    "to_stream_id": "bart:assistant", "text": "handoff from dot",
+                    "to_stream_id": "home:assistant", "text": "handoff from dot",
                 }))
                 acks = []
                 while not any(f.get("request_id") == "snd-tls" for f in acks):
                     acks.append(json.loads(await asyncio.wait_for(ws.recv(), 3)))
                 ack = acks[-1]
                 assert ack["type"] == "send.result"
-                assert ack["to_stream_id"] == "bart:assistant"
+                assert ack["to_stream_id"] == "home:assistant"
                 # The whitelisted delivery status DOES survive the real TLS RPC
                 # path (not merely that backend detail was dropped).
                 assert ack["delivery"] == "landed"
                 # The ack discloses NO backend seat/host/session_name.
                 assert BACKEND not in json.dumps(ack)
-                assert "v2-bartbackend-disposable" not in json.dumps(ack)
+                assert "v2-assistantbackend-disposable" not in json.dumps(ack)
                 for leaked in ("delivered_to_binding", "host", "session_name"):
                     assert leaked not in ack, leaked
                 # ...but the message WAS delivered to the resolved backend as an
@@ -243,7 +244,7 @@ def test_dot_wss_send_ack_sanitized_and_live_revocation(tmp_path):
                 await ws.send(json.dumps({
                     "type": "send", "request_id": "snd-revoked",
                     "from_stream_id": DOT_ID, "stream_token": TOKEN,
-                    "to_stream_id": "bart:assistant", "text": "after revoke",
+                    "to_stream_id": "home:assistant", "text": "after revoke",
                 }))
                 post = []
                 while not any(f.get("request_id") == "snd-revoked" for f in post):

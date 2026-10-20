@@ -590,7 +590,7 @@ async def _set_durable_binding(store: Store, stream_id: str, generation: str):
     def _op(conn):
         conn.execute(
             "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
-            "VALUES('bart',?,?,1,?) ON CONFLICT(name) DO UPDATE SET "
+            "VALUES('assistant',?,?,1,?) ON CONFLICT(name) DO UPDATE SET "
             "stream_id=excluded.stream_id,generation=excluded.generation,"
             "revision=excluded.revision,updated_at=excluded.updated_at",
             (stream_id, generation, "2026-09-27T12:45:33.000Z"),
@@ -715,7 +715,7 @@ def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
             def _corrupt(conn):
                 conn.execute(
                     "INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
-                    "VALUES('bart',?,?,1,?)", ("fixture-root:visible", "", "2026-09-27T12:45:33.000Z"),
+                    "VALUES('assistant',?,?,1,?)", ("fixture-root:visible", "", "2026-09-27T12:45:33.000Z"),
                 )
                 conn.commit()
             await store.submit(_corrupt)

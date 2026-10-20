@@ -1,5 +1,5 @@
 """The external scoped ("Dot") principal: TLS-only, read-metadata-only,
-Bart-only-messaging, default-deny, revocable.
+Assistant-only-messaging, default-deny, revocable.
 
 Dot is the operator's external cloud agent. The daemon — not the
 client — enforces that its token works only over daemon-terminated TLS, that it
@@ -31,7 +31,7 @@ from store import STREAM_TOKEN_HASH_VERSION
 
 DOT_ID = "amaterasu:dot"
 TOKEN = "dot-seat-token"
-BACKEND = "thoth:v2-bartbackend"
+BACKEND = "node-a:v2-assistantbackend"
 
 
 class Peer:
@@ -267,7 +267,7 @@ def test_dot_list_projection_is_metadata_only():
 
 class _FakeComposite:
     def __init__(self, backend): self._backend = backend
-    def is_stream(self, sid): return str(sid or "") == "bart:assistant"
+    def is_stream(self, sid): return str(sid or "") == "home:assistant"
     async def binding(self):
         return {"type": "assistant.binding.ok", "stream_id": self._backend, "generation": "g"}
 
@@ -300,7 +300,7 @@ def test_dot_send_reaches_current_binding_attributed_not_operator():
         daemon, comms = _dot_server_for_send()
         auth = {"dot_principal": True, "token_verified": True, "stream_id": DOT_ID}
         res = await daemon._on_send({
-            "to_stream_id": "bart:assistant", "text": "please orchestrate X",
+            "to_stream_id": "home:assistant", "text": "please orchestrate X",
             "_auth_context": auth,
         })
         # The message is delivered to the resolved live backend...
@@ -311,7 +311,7 @@ def test_dot_send_reaches_current_binding_attributed_not_operator():
         # ...but the ACK to Dot discloses NO fleet data: only the stable composite
         # id + safe delivery status; never the resolved backend seat/host/name.
         assert res["delivery"] == "landed"
-        assert res["to_stream_id"] == "bart:assistant"
+        assert res["to_stream_id"] == "home:assistant"
         assert BACKEND not in json.dumps(res)
         for leaked in ("delivered_to_binding", "host", "session_name"):
             assert leaked not in res, leaked
@@ -332,7 +332,7 @@ def test_dot_send_ack_preserves_provider_queued_and_still_drops_fleet_fields():
         comms.send = queued_send
         auth = {"dot_principal": True, "token_verified": True, "stream_id": DOT_ID}
         res = await daemon._on_send({
-            "to_stream_id": "bart:assistant", "text": "queued please",
+            "to_stream_id": "home:assistant", "text": "queued please",
             "request_id": "req-q", "_auth_context": auth,
         })
         assert res["provider_queued"] is True
@@ -345,14 +345,14 @@ def test_dot_send_ack_preserves_provider_queued_and_still_drops_fleet_fields():
         # An ordinary idle ack carries no provider_queued key at all.
         plain, plain_comms = _dot_server_for_send()
         idle = await plain._on_send({
-            "to_stream_id": "bart:assistant", "text": "idle", "_auth_context": auth,
+            "to_stream_id": "home:assistant", "text": "idle", "_auth_context": auth,
         })
         assert "provider_queued" not in idle
 
     asyncio.run(run())
 
 
-def test_dot_send_to_non_bart_target_denied():
+def test_dot_send_to_non_assistant_target_denied():
     async def run():
         daemon, comms = _dot_server_for_send()
         auth = {"dot_principal": True, "token_verified": True, "stream_id": DOT_ID}
@@ -373,7 +373,7 @@ def test_non_dot_non_operator_still_refused_at_composite():
         auth = {"token_verified": True, "stream_id": "thoth:v2-random"}  # not dot, not operator
         with pytest.raises(VerbError) as excinfo:
             await daemon._on_send({
-                "to_stream_id": "bart:assistant", "text": "x", "_auth_context": auth,
+                "to_stream_id": "home:assistant", "text": "x", "_auth_context": auth,
             })
         assert excinfo.value.code == "assistant_send_unauthorized"
 
@@ -457,7 +457,7 @@ def test_dot_revocation_on_loopback_does_not_fall_through_to_local_access():
 def test_dot_broadcasts_none_when_read_disabled():
     """v1 default (read OFF): a Dot connection receives NO broadcast frame at
     all — not even the projected inventory. This closes the subscription/push
-    read path and means Bart's reply frames never reach Dot over wss."""
+    read path and means the assistant's reply frames never reach Dot over wss."""
     daemon = Server(dot_principal_stream_ids=[DOT_ID])  # read OFF by default
     assert daemon.dot_read_enabled is False
     tls_peer = Peer()
@@ -610,7 +610,7 @@ def test_dot_send_error_frame_is_code_only():
         peer = Peer()
         daemon._tls_connections.add(peer)
         frames = await daemon._dispatch(_dot_frame(
-            "send", to_stream_id="bart:assistant", text="handoff"), websocket=peer)
+            "send", to_stream_id="home:assistant", text="handoff"), websocket=peer)
         err = frames[0]
         assert err["type"] == "send.error"
         assert err["error_code"] == "internal_error"
@@ -630,7 +630,7 @@ def test_dot_scrub_outbound_unit():
     err = scrub({"type": "send.error", "error_code": "boom",
                  "error": "SECRET thoth:v2-x", "extra_field": "SECRET", "request_id": "r1"})
     assert err == {"type": "send.error", "error_code": "boom", "request_id": "r1"}
-    ok = {"type": "send.result", "to_stream_id": "bart:assistant", "delivery": "landed"}
+    ok = {"type": "send.result", "to_stream_id": "home:assistant", "delivery": "landed"}
     assert scrub(ok) == ok   # non-error passes through unchanged
 
 

@@ -233,7 +233,7 @@ def test_usage_lifecycle_and_source_fences(tmp_path):
             row = await store.open_session(HOST, 'fenced', provider='codex', jsonl_path='/bound/native.jsonl')
             for changed in ({'session_generation': 'old'}, {'jsonl_path': '/foreign.jsonl'}, {'provider': 'claude'}):
                 assert await store.record_usage({**row, **changed}, [codex()], native_session_id='native', collection_host=HOST) is None
-            assert await store.record_usage(row, [codex()], native_session_id='native', collection_host='bart') is None
+            assert await store.record_usage(row, [codex()], native_session_id='native', collection_host='assistant') is None
             counted = await store.record_usage(row, [codex()], native_session_id='native', collection_host=HOST)
             assert counted['tokens']['input_total'] == 100
             other = await store.open_session(HOST, 'other', provider='codex')
@@ -282,10 +282,10 @@ def test_usage_local_host_scope(tmp_path):
         try:
             path = tmp_path / 'remote.jsonl'
             path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': 'remote'}}) + '\n' + json.dumps(codex()) + '\n')
-            await sessions.open('bart', 'remote', provider='codex', jsonl_path=str(path))
+            await sessions.open('assistant', 'remote', provider='codex', jsonl_path=str(path))
             await ingest.run_pass()
             assert not ingest._streams, 'local collector attempted a foreign provider path'
-            usage = (await store.fetch_session('bart', 'remote'))['usage']
+            usage = (await store.fetch_session('assistant', 'remote'))['usage']
             assert usage['collection_host'] is None and usage['scope'] == 'stream'
             assert usage['tokens']['input_total'] is None
             assert not {'fleet_total', 'total_tokens', 'aggregate', 'cost', 'quota'} & usage.keys()

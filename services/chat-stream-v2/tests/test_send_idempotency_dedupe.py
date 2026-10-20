@@ -44,7 +44,7 @@ def test_rotated_request_id_retry_collapses_to_one_delivery(tmp_path: Path) -> N
         try:
             await _open_claude(sessions)
             base = {"stream_id": STREAM, "text": BODY,
-                    "optimistic_id": "optimistic_bart_v2-d33b331d_1", "_auth_context": AUTH}
+                    "optimistic_id": "optimistic_assistant_v2-d33b331d_1", "_auth_context": AUTH}
             rids = ["retry-1789356725441-i1zgeh", "retry-1789356725967-sh2xt0",
                     "retry-1789356726159-p9dsil", "retry-1789356726334-1r8b8s"]
             results = [await comms.send({**base, "request_id": rid}) for rid in rids]
@@ -120,12 +120,12 @@ def test_post_restart_same_text_after_window_is_delivered(tmp_path: Path) -> Non
             await _open_claude(sessions)
             # A landed receipt from the pre-restart session, long outside the window.
             await _preinsert_receipt(
-                store, optimistic_id="optimistic_bart_v2-d33b331d_1",
+                store, optimistic_id="optimistic_assistant_v2-d33b331d_1",
                 request_id="retry-old", state="landed", delivery="landed",
                 created_at="2000-01-01T00:00:00Z", confirmed=True)
             result = await comms.send({
                 "stream_id": STREAM, "text": BODY, "_auth_context": AUTH,
-                "optimistic_id": "optimistic_bart_v2-d33b331d_1", "request_id": "send-new"})
+                "optimistic_id": "optimistic_assistant_v2-d33b331d_1", "request_id": "send-new"})
             assert len(tmux.pastes) == 1, "post-restart identical send must be delivered"
             assert not result.get("coalesced")
             assert result["submission_confirmed"] is True
@@ -250,9 +250,9 @@ def test_mobile_launch_id_scheme_unaffected(tmp_path: Path) -> None:
         try:
             await _open_claude(sessions)
             await comms.send({"stream_id": STREAM, "text": "launch one", "_auth_context": AUTH,
-                              "optimistic_id": "optimistic_bart_launch-abc_1", "request_id": "send-l1"})
+                              "optimistic_id": "optimistic_assistant_launch-abc_1", "request_id": "send-l1"})
             await comms.send({"stream_id": STREAM, "text": "launch two", "_auth_context": AUTH,
-                              "optimistic_id": "optimistic_bart_launch-abc_2", "request_id": "send-l2"})
+                              "optimistic_id": "optimistic_assistant_launch-abc_2", "request_id": "send-l2"})
             assert len(tmux.pastes) == 2, f"distinct launch sends must each deliver, got {len(tmux.pastes)}"
         finally:
             store.stop()

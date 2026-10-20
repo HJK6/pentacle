@@ -151,7 +151,7 @@ async def _ceremony(root: Path):
         web_cid, _ = registry.issue('pentacle', label='Synthetic web')
         env = Env(store, sessions, server, tmux)
         await env.open('requester', role='lead')
-        await env.open('bart', role='lead')
+        await env.open('assistant', role='lead')
         seat_token = 'synthetic-seat-token-for-this-ceremony'
         seat_path = root / 'runtime/seat.token'
         seat_path.parent.mkdir()
@@ -257,7 +257,7 @@ async def _ceremony(root: Path):
         assert replacement_offer['expected_prior_key_id']==key['key_id']
         states={k['key_id']:k['state'] for k in (await cli('consent-key','list'))['keys']}
         assert states[key['key_id']]=='active'
-        intent=(await cli('consent','request','designate','--target','node-a:bart','--reason','Exact disposable target',seat_auth=True))['intent']
+        intent=(await cli('consent','request','designate','--target','node-a:assistant','--reason','Exact disposable target',seat_auth=True))['intent']
         assert not intent.get('challenge_bytes') and not intent.get('audience_key_ids')
         async def open_request(intent,key):
             return (await rpc(phone,'consent.open',intent_id=intent['request_id'],key_id=key['key_id']))['challenge']
@@ -276,7 +276,7 @@ async def _ceremony(root: Path):
         revoke=(await cli('consent','request','revoke','--reason','Consent reduction',seat_auth=True))['intent']
         assert (await approve(await open_request(revoke,replacement),new_private,replacement))['receipt']['revision']==2
         assert (await env.grant())['stream_id'] is None
-        cancelled=(await cli('consent','request','designate','--target','node-a:bart','--reason','Cancel rehearsal',seat_auth=True))['intent']
+        cancelled=(await cli('consent','request','designate','--target','node-a:assistant','--reason','Cancel rehearsal',seat_auth=True))['intent']
         error(await cli('consent','deny',cancelled['request_id'],seat_auth=True,expected=1),'consent_mobile_required')
         assert (await cli('consent','cancel',cancelled['request_id'],seat_auth=True))['intent']['state']=='cancelled'
         cells.append('real CLI status/cancel; seat deny refusal; synthetic-signature normal designate/revoke')
@@ -294,7 +294,7 @@ async def _ceremony(root: Path):
         assert snapshot['capabilities']['consent_enrollment_offer_v1'] is True
         cells.append('disconnect/reconnect/host switch fresh snapshots')
 
-        designation = (await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason',
+        designation = (await cli('consent', 'request', 'designate', '--target', 'node-a:assistant', '--reason',
                                   'Emergency reducing proof', seat_auth=True))['intent']
         await approve(await open_request(designation,replacement), new_private, replacement)
         emergency = dict(action='revoke', emergency=True, expected_revision=3, reason='Disposable lost phone')
@@ -310,7 +310,7 @@ async def _ceremony(root: Path):
         assert reduced['receipt']['revision'] == 4 and (await env.grant())['stream_id'] is None
         assert (await env.audit())[-1]['action'] == 'emergency_revoke'
         await cli('consent-key', 'revoke', replacement['fingerprint'])
-        error(await cli('consent', 'request', 'designate', '--target', 'node-a:bart', '--reason',
+        error(await cli('consent', 'request', 'designate', '--target', 'node-a:assistant', '--reason',
                         'Revoked key refuses', seat_auth=True, expected=1), 'consent_no_active_key')
         cells.append('0600 loopback-admin emergency reduce-only/key revoke')
     finally:
@@ -330,7 +330,7 @@ async def _ceremony(root: Path):
                 cleanup_errors.append(type(exc).__name__)
         try:
             if sessions:
-                for name in ('requester', 'bart'):
+                for name in ('requester', 'assistant'):
                     await store.mark_closed('node-a', name, closed_at=iso_now(), pane_status='pane_dead')
                     closed += int((await store.fetch_session('node-a', name) or {}).get('status') == 'closed')
         finally:
