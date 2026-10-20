@@ -11,11 +11,16 @@ when a supported tuple is launched. The observer accepts a provider root only
 when those launch-time values still match. Missing birth proof, an unexpected
 executable, or a changed process identity fails closed.
 
-The first fallback bind requires one unique writable provider transcript. The
-opened descriptor's device and inode identity are retained with the session.
-An unrelated transcript, a read-only descriptor, or a changed file identity
-cannot replace that binding. The same proof is used after a restart or a
-temporary writer gap.
+The first fallback bind requires one unique writable provider conversation.
+For Claude this remains exactly one writable transcript. Current Codex releases
+may also keep provider-owned subagent rollouts writable in the proven pane
+process; the observer reads each descriptor's identity-checked `session_meta`,
+excludes only explicit `source.subagent` rollouts, and requires exactly one
+`source: "cli"` rollout. Unknown source metadata or two interactive rollouts is
+ambiguous and fails closed. The selected descriptor's device and inode identity
+are retained with the session. An unrelated transcript, a read-only descriptor,
+or a changed file identity cannot replace that binding. The same proof is used
+after a restart or a temporary writer gap.
 
 ## Generations and events
 
