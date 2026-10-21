@@ -1332,6 +1332,19 @@ class SpawnCtl:
             return await waiter(stream_id, **kwargs)
         return await self.submission_proof.watermark(stream_id)
 
+    @staticmethod
+    def _spawn_fenced_watermark(watermark: EventWatermark) -> EventWatermark:
+        """Boundary for proving a spawn's own brief when the pre-paste read failed.
+
+        A spawn's seat is a brand-new, generation-fenced stream, so the only USER
+        event that can carry its brief is the spawn's own paste. When the Store
+        was unreadable before the paste (restart or load), boundary 0 inside that
+        fence loses nothing; the receipt keeps the original unreachable record.
+        """
+        if watermark.state == "reachable":
+            return watermark
+        return EventWatermark(watermark.stream_id, 0, "reachable")
+
     async def _confirm_submission(
         self, name: str, brief: str, before: str, provider: str, tmux: tmux_transport.Tmux,
         *, host: str | None = None, watermark: EventWatermark | None = None,
@@ -3164,16 +3177,21 @@ class SpawnCtl:
             finally:
                 self._delivery_critical.discard(delivery_task)
             self._submission_attempts[stream_id] = 1
+            confirm_watermark = (
+                self._spawn_fenced_watermark(watermark) if watermark is not None else None
+            )
             try:
                 if host == self.sessions.local_host:
                     observed = await self._confirm_brief_delivery(
-                        name, brief, before, provider, tmux, watermark=watermark,
+                        name, brief, before, provider, tmux,
+                        watermark=confirm_watermark,
                         absolute_deadline=submission_deadline,
                         proof_timeout_s=initial_proof_timeout_s,
                     )
                 else:
                     observed = await self._confirm_brief_delivery(
-                        name, brief, before, provider, tmux, host=host, watermark=watermark,
+                        name, brief, before, provider, tmux, host=host,
+                        watermark=confirm_watermark,
                         absolute_deadline=submission_deadline,
                         proof_timeout_s=initial_proof_timeout_s,
                     )
@@ -4349,7 +4367,8 @@ class SpawnCtl:
         """Use the pre-admission coordinator Store watermark as adoption authority.
 
         A delivery receipt with a reachable pre-action watermark is the only
-        safe boundary for post-restart proof.  Do not take a fresh watermark
+        safe boundary for post-restart proof (an unreadable pre-paste watermark
+        falls back to the spawn's own generation fence).  Do not take a fresh watermark
         here: doing so could turn a USER event from this spawn into the
         boundary and erase the very evidence adoption is meant to recover.
         Old test doubles may expose only ``watermark()``; those remain
@@ -4357,17 +4376,20 @@ class SpawnCtl:
         """
         if not isinstance(delivery_receipt, dict):
             return None
-        if str(delivery_receipt.get("proof_watermark_state") or "") != "reachable":
+        watermark_state = str(delivery_receipt.get("proof_watermark_state") or "")
+        if watermark_state not in {"reachable", "unreachable"}:
             return None
         try:
             watermark = EventWatermark(
                 stream_id,
                 int(delivery_receipt.get("proof_watermark")),
-                "reachable",
+                watermark_state,
                 str(delivery_receipt.get("proof_watermark_reason") or ""),
             )
         except (TypeError, ValueError):
             return None
+        # A pre-paste read that failed leaves the spawn's own fence as boundary.
+        watermark = self._spawn_fenced_watermark(watermark)
         lookup = getattr(self.submission_proof, "lookup", None)
         if not callable(lookup):
             return EventProof(
