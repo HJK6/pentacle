@@ -3479,7 +3479,7 @@ class SpawnCtl:
             "effective_effort": effort,
         }
         if not explicit:
-            configured = machine.claude_bin if provider == "claude" else machine.codex_bin
+            configured = machine.claude_bin if provider == "claude" else (machine.gemini_bin if provider == "gemini" else machine.codex_bin)
             parts = launch._command_parts(configured)
             overrides["observer_binding"] = {
                 "executable": launch._resolve_local_executable(parts[0]) if parts else "",

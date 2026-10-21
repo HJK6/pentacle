@@ -821,7 +821,11 @@ class Ingest:
             return 0
         if isinstance(binding, dict) and await self._provider_root(row, name) is None:
             return 0
-        events = normalize_claude_jsonl_records(records, host=host, session_name=name)
+        if provider == "gemini":
+            from gemini_jsonl_norm import normalize_gemini_jsonl_records
+            events = normalize_gemini_jsonl_records(records, host=host, session_name=name)
+        else:
+            events = normalize_claude_jsonl_records(records, host=host, session_name=name)
         appended = 0
         capped = False
         for payload in events:

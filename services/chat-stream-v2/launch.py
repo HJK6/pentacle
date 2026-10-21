@@ -102,6 +102,7 @@ class LocalMachine:
     codex_cwd: str
     claude_bin: str
     codex_bin: str
+    gemini_bin: str
     projects_root: str
     agent_orch_bin_dir: str | None = None
 
@@ -112,6 +113,7 @@ def local_machine(
     cwd: str | None = None,
     claude_bin: str | None = None,
     codex_bin: str | None = None,
+    gemini_bin: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -127,6 +129,7 @@ def local_machine(
         codex_cwd=resolved_cwd,
         claude_bin=resolved_claude,
         codex_bin=codex_bin or "codex",
+        gemini_bin=gemini_bin or "gemini",
         projects_root=projects_root or os.path.join(home, ".claude/projects"),
         # Keep an explicit profile/CLI value here. When it is absent, the
         # provider-specific command builder derives the fallback after the
@@ -144,7 +147,7 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
     (the cutover-day remote-canary failure mode). The active provider is
     validated independently so a Codex-only legacy profile does not need a
     Claude path merely to launch Codex."""
-    if provider not in ("claude", "codex"):
+    if provider not in ("claude", "codex", "gemini"):
         raise ValueError(f"provider_unknown: {provider}")
     provider_bin = getattr(cfg, f"{provider}_bin", "") or ""
     if not (provider_bin and cfg.cwd and cfg.projects_root):
@@ -294,6 +297,7 @@ def local_machine_from_config(
     cwd: str | None = None,
     claude_bin: str | None = None,
     codex_bin: str | None = None,
+    gemini_bin: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -435,6 +439,31 @@ def _claude_command(
         f"--permission-mode bypassPermissions "
         f"--disallowed-tools {CLAUDE_DISALLOWED_TOOLS} "
         f"{model_flag}{effort_flag}{metadata_flag}{identity_flag} {shlex.quote(session_id)}"
+    )
+
+
+def _gemini_command(
+    machine: LocalMachine, tmux_session: str, session_id: str,
+    stream_token_file: str,
+    *, launch_model: str | None, launch_effort: str | None,
+    operator_facing: bool = False,
+    resume: bool = False,
+    resume_cwd: str | None = None,
+) -> str:
+    gemini_bin = _resolve_local_executable(_shell_executable(machine.gemini_bin))
+    model_flag = f"--model {shlex.quote(launch_model)} " if launch_model else ""
+    identity_flag = f"--resume {shlex.quote(session_id)}" if resume else f"--session-id {shlex.quote(session_id)}"
+    
+    transcript_dir = os.path.join(machine.cwd, ".gemini/sessions")
+    transcript_file = os.path.join(transcript_dir, f"{session_id}.jsonl")
+    
+    return (
+        f"mkdir -p {shlex.quote(transcript_dir)} && "
+        f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
+        f"{agent_orch_path_export(machine, provider_bin=gemini_bin)}"
+        f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
+        f"exec {shlex.quote(gemini_bin)} "
+        f"{model_flag}{identity_flag} -o stream-json | tee {shlex.quote(transcript_file)}"
     )
 
 
@@ -635,6 +664,27 @@ def build_launch(
             command=command,
             session_id="",
             jsonl_path="",
+            stream_token=stream_token,
+            stream_token_file=stream_token_file,
+        )
+    if provider == "gemini":
+        session_id = resume_session_id or str(uuid.uuid4())
+        command = _gemini_command(
+            machine, tmux_session, session_id, stream_token_file,
+            launch_model=launch_model, launch_effort=launch_effort,
+            operator_facing=operator_facing,
+            resume=resume_session_id is not None,
+            resume_cwd=resume_cwd,
+        )
+        jsonl_path = (
+            resume_jsonl_path
+            if resume_session_id is not None and resume_jsonl_path
+            else os.path.join(machine.cwd, ".gemini/sessions", f"{session_id}.jsonl")
+        )
+        return LaunchPlan(
+            command=command,
+            session_id=session_id,
+            jsonl_path=jsonl_path,
             stream_token=stream_token,
             stream_token_file=stream_token_file,
         )

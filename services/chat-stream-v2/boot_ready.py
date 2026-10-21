@@ -317,6 +317,7 @@ def codex_tui_session_visible(pane_text: str) -> bool:
 READY_PREDICATES = {
     "claude": claude_prompt_ready,
     "codex": codex_tui_ready,
+    "gemini": lambda text: True,
 }
 
 
@@ -412,6 +413,8 @@ def claude_prompt_in_native_queue(pane_text: str, prompt: str) -> bool:
 
 def prompt_in_native_queue(pane_text: str, prompt: str, provider: str) -> bool:
     """Provider dispatch for native-queue detection after a delivered paste."""
+    if provider == "gemini":
+        return tuple()
     if provider == "claude":
         return claude_prompt_in_native_queue(pane_text, prompt)
     if provider == "codex":
@@ -716,6 +719,7 @@ def codex_prompt_exactly_in_active_draft(pane_text: str, prompt: str) -> bool:
 SUBMIT_PREDICATES = {
     "claude": claude_prompt_submitted,
     "codex": codex_prompt_submitted,
+    "gemini": lambda text: True,
 }
 
 _CLAUDE_SUBMISSION_MARKERS = ("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")
@@ -728,6 +732,8 @@ def submission_marker_count(pane_text: str, provider: str) -> int:
 
 def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...]:
     lines = pane_text.splitlines()
+    if provider == "gemini":
+        return tuple()
     if provider == "claude":
         input_start = _last_claude_input_start(lines)
         history = lines if input_start is None else lines[:input_start]
@@ -756,6 +762,8 @@ def submission_proven_after(pane_text: str, baseline: str, prompt: str, provider
         return False
     after_markers = _submission_marker_snapshot(pane_text, provider)
     baseline_markers = _submission_marker_snapshot(baseline, provider)
+    if provider == "gemini":
+        return tuple()
     if provider == "claude":
         return after_markers != baseline_markers
     return len(after_markers) > len(baseline_markers)

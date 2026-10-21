@@ -196,7 +196,9 @@ def transcript_allowed(path: str, provider: str, binding: Mapping | None = None)
     if not isinstance(path, str) or not path.endswith(".jsonl"):
         return False
     if binding is None:
-        fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
+        fragment = ("/.codex/sessions/" if provider == "codex"
+                    else "/.gemini/" if provider == "gemini"
+                    else "/.claude/")
         return fragment in path
     if binding.get("provider") != provider:
         return False
