@@ -220,3 +220,242 @@ for (const [supplied, name] of [[undefined, 'Zephyr'], ['   ', 'Zephyr'], [' Ast
     assert.equal(f.helper.message(f.status), `Silent mode is on — ${name} answers in chat. Say “Hey ${name}” to speak.`);
   });
 }
+
+// Binding lookup cache and last-good grace (idle note path only).
+const durable = (stream_id, generation, revision = 1) => ({ ok: true, source: 'durable', stream_id, generation, revision });
+function bindingFixture() {
+  const f = pinnedFixture();
+  f.status.wake.pending_count = 0;
+  f.state.sessions = [
+    row('home:direct', { role: 'lead', session_generation: 'gen-a' }),
+    row('home:unrelated', { role: 'lead', session_generation: 'gen-b' }),
+  ];
+  f.clock = 1000;
+  f.calls = 0;
+  f.result = durable('home:direct', 'gen-a');
+  f.getBinding = async () => {
+    f.calls += 1;
+    if (f.result instanceof Error) throw f.result;
+    return f.result;
+  };
+  f.helper = createWakeDelivery({ config: f.config, getState: async () => structuredClone(f.state),
+    getBinding: (...args) => f.getBinding(...args), now: () => f.clock,
+    api: (...args) => f.api(...args), sendTurn: (...args) => f.sends.push(args), onStatus: text => f.notes.push(text) });
+  f.normal = 'Say “Hey Zephyr” to speak; “over” to send.';
+  f.noTarget = 'No wake target: connect a unique current assistant.';
+  f.shown = () => f.helper.message(f.status);
+  return f;
+}
+const overloaded = { ok: false, error_code: 'server_overloaded' };
+const lookupFailed = { ok: false, error_code: 'assistant_binding_lookup_failed' };
+
+test('one overloaded lookup after a success leaves the idle wake note on the normal prompt', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.normal);
+  f.clock += 3000;
+  f.result = overloaded;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+  assert.equal(f.shown(), f.normal);
+});
+
+test('idle lookups reuse a successful binding for under 2 s', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.clock += 1999;
+  await f.helper.tick(f.status);
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 1);
+  f.clock += 2;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+});
+
+test('the grace ends 15 s after the last success and the note then appears', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.result = overloaded;
+  f.clock += 14000;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.normal);
+  f.clock += 2000;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.noTarget);
+});
+
+for (const [name, failure] of [['server_overloaded', overloaded], ['assistant_binding_lookup_failed', lookupFailed],
+  ['thrown error', new Error('timed_out')], ['thrown error with another code', Object.assign(new Error('x'), { error_code: 'other' })]]) {
+  test(`transient ${name} within the grace keeps the last good binding`, async () => {
+    const f = bindingFixture();
+    await f.helper.tick(f.status);
+    f.result = failure;
+    f.clock += 5000;
+    await f.helper.tick(f.status);
+    assert.equal(f.calls, 2);
+    assert.equal(f.shown(), f.normal);
+  });
+}
+
+for (const [name, failure] of [['non-transient ok:false code', { ok: false, error_code: 'assistant_binding_unauthorized' }],
+  ['ok:false without a code', { ok: false }], ['malformed success', { ok: true, source: 'other' }]]) {
+  test(`${name} gets no grace`, async () => {
+    const f = bindingFixture();
+    await f.helper.tick(f.status);
+    f.result = failure;
+    f.clock += 5000;
+    await f.helper.tick(f.status);
+    assert.equal(f.shown(), f.noTarget);
+  });
+}
+
+test('unsupported_in_v2 gets no grace and falls back to the local pin', async () => {
+  const f = bindingFixture();
+  f.state.sessions = [row('home:other', { role: 'lead', session_generation: 'gen-a' })];
+  f.result = durable('home:other', 'gen-a');
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.normal);
+  f.result = { ok: false, error_code: 'unsupported_in_v2' };
+  f.clock += 5000;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.noTarget);
+  f.result = Object.assign(new Error('old daemon'), { error_code: 'unsupported_in_v2' });
+  f.clock += 5000;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.noTarget);
+});
+
+test('a real loss of the target still shows the note despite the cache', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.state.sessions[0].status = 'closed';
+  f.clock += 500;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.noTarget);
+});
+
+test('invalidateBinding drops the cache and the grace', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.helper.invalidateBinding();
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+  f.helper.invalidateBinding();
+  f.result = overloaded;
+  f.clock += 1000;
+  await f.helper.tick(f.status);
+  assert.equal(f.shown(), f.noTarget);
+});
+
+test('cancel and a new wake generation drop the cache and the grace', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.helper.cancel();
+  f.status.wake.generation = 'two';
+  f.result = overloaded;
+  f.clock += 1000;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+  assert.equal(f.shown(), f.noTarget);
+});
+
+test('a new wake generation alone drops the cache', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.status.wake.generation = 'two';
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+});
+
+test('the mic leaving on drops the cache', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  await f.helper.tick({ mode: 'off', wake: { enabled: true, generation: 'one' } });
+  f.status.wake.generation = 'two';
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+});
+
+for (const drop of ['invalidateBinding', 'cancel']) {
+  test(`a lookup in flight across ${drop} does not write the cache`, async () => {
+    const f = bindingFixture();
+    let release;
+    f.getBinding = () => new Promise(resolve => { f.calls += 1; release = () => resolve(durable('home:direct', 'gen-a')); });
+    const first = f.helper.tick(f.status);
+    await new Promise(resolve => setImmediate(resolve));
+    f.helper[drop]();
+    if (drop === 'cancel') f.status.wake.generation = 'two';
+    release();
+    await first;
+    f.getBinding = async () => { f.calls += 1; return overloaded; };
+    f.clock += 500;
+    await f.helper.tick(f.status);
+    assert.equal(f.calls, 2);
+    assert.equal(f.shown(), f.noTarget);
+  });
+}
+
+test('a rebind with the old seat still open never sends to the cached binding', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.result = durable('home:unrelated', 'gen-b', 2);
+  f.status.wake.pending_count = 1;
+  f.clock += 100;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 3);
+  assert.deepEqual(f.sends, [['home:unrelated', tagged('hello')]]);
+});
+
+test('a rebind followed by a failing fresh lookup holds the message instead of sending to the cached binding', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  f.result = overloaded;
+  f.status.wake.pending_count = 1;
+  f.clock += 100;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 2);
+  assert.deepEqual(f.sends, []);
+  assert.equal(f.apiCalls.includes('/wake/claim'), false);
+});
+
+test('a lookup that fails after the claim holds the message and never sends to the cached binding', async () => {
+  const f = bindingFixture();
+  await f.helper.tick(f.status);
+  const original = f.api;
+  f.api = async (...args) => { const r = await original(...args); if (args[1] === '/wake/claim') f.result = overloaded; return r; };
+  f.status.wake.pending_count = 1;
+  f.clock += 100;
+  await f.helper.tick(f.status);
+  assert.deepEqual(f.sends, []);
+  assert.equal(f.shown(), 'Wake message waiting for the current assistant.');
+});
+
+test('a held claim reads the binding fresh on both lookups', async () => {
+  const f = bindingFixture();
+  f.status.wake.pending_count = 1;
+  const original = f.api;
+  f.api = async (...args) => {
+    const r = await original(...args);
+    if (args[1] === '/wake/claim') f.result = durable('home:unrelated', 'gen-b', 2);
+    return r;
+  };
+  await f.helper.tick(f.status);
+  assert.deepEqual(f.sends, []);
+  assert.equal(f.calls, 2);
+  f.status.wake.pending_count = 0;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, 4);
+  assert.deepEqual(f.sends, [['home:unrelated', tagged('hello')]]);
+});
+
+test('a fresh delivery lookup refreshes the idle cache', async () => {
+  const f = bindingFixture();
+  f.status.wake.pending_count = 1;
+  await f.helper.tick(f.status);
+  assert.equal(f.sends.length, 1);
+  const calls = f.calls;
+  f.status.wake.pending_count = 0;
+  f.clock += 1000;
+  await f.helper.tick(f.status);
+  assert.equal(f.calls, calls);
+});
