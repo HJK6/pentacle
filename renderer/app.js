@@ -996,6 +996,7 @@ function providerLabelForHero(provider) {
   const normalized = String(provider || '').trim().toLowerCase();
   if (normalized === 'codex') return 'Codex';
   if (normalized === 'claude') return 'Claude';
+  if (normalized === 'gemini') return 'Gemini';
   return provider ? String(provider).trim() : 'Agent';
 }
 
