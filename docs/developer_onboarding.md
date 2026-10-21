@@ -109,7 +109,11 @@ WSL, microphone, dashboard and remote-daemon integrations opt-in; see the
 ```bash
 npm test
 python3 services/chat-stream-v2/tools/run_gate.py unit
+python3 -m pytest services/_shared/tests -q
 ```
+
+The shared service suite (`services/_shared/tests`) is not part of the v2 gate
+tiers; public CI and the opt-in pre-push hook run it next to the agent-orch suite.
 
 Use the activated environment from step 4, or its explicit `.venv-dev/bin/python`.
 For the standard Web gate, run `npm run build:web` then

@@ -111,6 +111,8 @@ if [ "$agent_orch" -eq 1 ]; then
   echo "pre-push: agent-orch paths changed — running services/agent-orch/tests..." >&2
   "$PY" -m pytest services/agent-orch/tests -q
 fi
+echo "pre-push: running the shared service suite (services/_shared/tests)..." >&2
+"$PY" -m pytest services/_shared/tests -q
 
 echo "pre-push: local gate PASSED — proceeding with push." >&2
 exit 0
