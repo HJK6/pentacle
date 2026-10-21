@@ -4,9 +4,13 @@ const { configuredAssistantRole } = require('./assistant_role');
 const { prepareVoiceSpawn, spawnOutcome } = require('./voice_action_delivery');
 const { roomMicHeader } = require('./room_mic_turns');
 
+const BINDING_REUSE_MS = 2000;
+const BINDING_GRACE_MS = 15000;
+const TRANSIENT_BINDING_CODES = new Set(['server_overloaded', 'assistant_binding_lookup_failed']);
+
 // Reuse the main client's full-snapshot handshake and existing correlated chat
 // lifecycle. A claim owns one utterance; sendTurn must only create one request.
-function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onRoomMicTurn = () => {}, onStatus = () => {} }) {
+function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawnAgent, getSpawnCatalog, onRoomMicTurn = () => {}, onStatus = () => {}, now = Date.now }) {
   let busy = false;
   let held = null;
   let epoch = 0;
@@ -19,19 +23,37 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
   const enabled = () => config.features?.mic === true && (!!role() || !!pinnedIdentity() || typeof getBinding === 'function')
     && (!!config.mic?.wakeTargetHost || typeof getBinding === 'function')
     && config.chatStream?.snapshot !== false;
-  const binding = async () => {
-    if (typeof getBinding !== 'function') return { source: 'unsupported' };
+  // The idle note may reuse a recent binding and ride out a transient lookup
+  // failure. Delivery always reads fresh: assistant.rebind leaves the old seat
+  // open, so only a fresh read can tell a replaced binding from the current one.
+  let cached = null;
+  let cacheEpoch = 0;
+  const lookup = async () => {
+    if (typeof getBinding !== 'function') return { value: { source: 'unsupported' } };
     try {
       const result = await getBinding();
-      if (result?.ok === false && result.error_code === 'unsupported_in_v2') return { source: 'unsupported' };
+      if (result?.ok === false && result.error_code === 'unsupported_in_v2') return { value: { source: 'unsupported' } };
       if (result?.ok === false || !['durable', 'env', 'unconfigured'].includes(result?.source)) {
-        return { source: 'error' };
+        return { value: { source: 'error' }, transient: result?.ok === false && TRANSIENT_BINDING_CODES.has(result.error_code) };
       }
-      return result;
+      return { value: result, success: true };
     } catch (error) {
-      return error?.error_code === 'unsupported_in_v2' ? { source: 'unsupported' } : { source: 'error' };
+      return error?.error_code === 'unsupported_in_v2'
+        ? { value: { source: 'unsupported' } } : { value: { source: 'error' }, transient: true };
     }
   };
+  const binding = async ({ idle = false } = {}) => {
+    if (idle && cached && now() - cached.at < BINDING_REUSE_MS) return cached.value;
+    const started = cacheEpoch;
+    const { value, success, transient } = await lookup();
+    if (success && started === cacheEpoch) cached = { at: now(), value };
+    if (idle && transient && cached && now() - cached.at <= BINDING_GRACE_MS) return cached.value;
+    return value;
+  };
+  function invalidateBinding() {
+    cacheEpoch += 1;
+    cached = null;
+  }
   const target = (state, effectiveBinding) => {
     if (!state?.connected || !Array.isArray(state.sessions)) return null;
     if (effectiveBinding?.source === 'error') return null;
@@ -82,6 +104,7 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
     return matches.length === 1 ? matches[0].stream_id : null;
   };
   function cancel() {
+    invalidateBinding();
     epoch += 1;
     held = null;
     muted = true;
@@ -120,13 +143,14 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
     if (!enabled() || !status?.wake?.enabled || status.mode !== 'on' || muted || busy) return;
     if (!held && !status.wake.pending_count && !pinnedIdentity()) return;
     busy = true;
+    const idle = !held && !status.wake.pending_count;
     const current = epoch;
     const valid = () => epoch === current && !muted;
     try {
-      const [initialState, initialBinding] = await Promise.all([getState(), binding()]);
+      const [initialState, initialBinding] = await Promise.all([getState(), binding({ idle })]);
       const initialTarget = target(initialState, initialBinding);
       if (!valid()) return;
-      if (!held && !status.wake.pending_count) {
+      if (idle) {
         note = initialTarget ? '' : 'No wake target: connect a unique current assistant.';
         return;
       }
@@ -208,6 +232,6 @@ function createWakeDelivery({ config, getState, getBinding, api, sendTurn, spawn
       onStatus(message(status));
     }
   }
-  return { tick, cancel, message };
+  return { tick, cancel, message, invalidateBinding };
 }
 module.exports = { createWakeDelivery };

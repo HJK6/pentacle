@@ -2078,6 +2078,7 @@ function applyChatStreamPayload(payload) {
     return;
   }
   if (payload.type === 'assistant.binding.changed') {
+    wakeDelivery?.invalidateBinding();
     // A binding change does not emit session.inventory. Hide the old scope
     // immediately; the newer request generation refuses any late old list.
     for (let slot = 0; slot < 4; slot++) {
