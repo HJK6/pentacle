@@ -295,7 +295,32 @@ button{margin-top:12px;width:100%;padding:10px;border:0;border-radius:8px;backgr
 <button type="submit">Sign in</button></form></body></html>`;
 }
 
-function handleLogin(req, res, auth) {
+// Per-peer /login failure backoff: three free failures, then 1 s doubling to a
+// 5 min cap. State is in memory and capped, so a restart clears it.
+const LOGIN_FREE_FAILURES = 3;
+const LOGIN_MAX_DELAY_MS = 300000;
+const LOGIN_MAX_PEERS = 1000;
+
+function createLoginLimiter({ now = Date.now } = {}) {
+  const peers = new Map();  // peer -> { fails, until }
+  return {
+    retryAfterMs(peer) {
+      const entry = peers.get(peer);
+      return entry ? Math.max(0, entry.until - now()) : 0;
+    },
+    failed(peer) {
+      const fails = (peers.get(peer)?.fails || 0) + 1;
+      const delay = fails <= LOGIN_FREE_FAILURES ? 0
+        : Math.min(1000 * 2 ** (fails - LOGIN_FREE_FAILURES - 1), LOGIN_MAX_DELAY_MS);
+      peers.delete(peer);
+      if (peers.size >= LOGIN_MAX_PEERS) peers.delete(peers.keys().next().value);
+      peers.set(peer, { fails, until: now() + delay });
+    },
+    succeeded(peer) { peers.delete(peer); },
+  };
+}
+
+function handleLogin(req, res, auth, limiter) {
   if (req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage());
     return;
@@ -307,10 +332,19 @@ function handleLogin(req, res, auth) {
     if (body.length > 4096) { req.destroy(); }  // a token is short; cap the body
   });
   req.on('end', () => {
+    const peer = String(req.socket && req.socket.remoteAddress);
+    const wait = limiter.retryAfterMs(peer);
+    if (wait > 0) {
+      res.writeHead(429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(Math.ceil(wait / 1000)) })
+        .end(loginPage('Too many attempts. Try again shortly.'));
+      return;
+    }
     const token = new URLSearchParams(body).get('token') || '';
     if (auth.checkToken(token)) {
+      limiter.succeeded(peer);
       res.writeHead(302, { 'set-cookie': auth.setCookieHeader(), location: '/', 'cache-control': 'no-store' }).end();
     } else {
+      limiter.failed(peer);
       res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(loginPage('Incorrect token.'));
     }
   });
@@ -442,6 +476,7 @@ async function main(argv = process.argv.slice(2)) {
     catalogRoot: CONFIG.dashboards?.catalogRoot || null,
     log: (line) => console.warn(line),
   });
+  const loginLimiter = createLoginLimiter();
   const server = http.createServer((req, res) => {
     if (!auth && !loopbackRequestAllowed(req)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end('origin_refused');
@@ -459,7 +494,7 @@ async function main(argv = process.argv.slice(2)) {
       }
       if (urlPath === '/login') { res.writeHead(404).end('not found'); return; }
     } else if (auth) {
-      if (urlPath === '/login') { handleLogin(req, res, auth); return; }
+      if (urlPath === '/login') { handleLogin(req, res, auth, loginLimiter); return; }
       if (!auth.isAuthed(req)) {
         if (req.method === 'GET' && !urlPath.startsWith('/api/')) {
           res.writeHead(302, { location: '/login', 'cache-control': 'no-store' }).end();
@@ -544,7 +579,7 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 module.exports = { main, parseArgs, resolveProfilePath, serveStatic, WEB_DIST, isLoopbackBind, createAuth, COOKIE_NAME,
-  createTailscaleAuth, isTailnetAddress, hostedDashboardAuthMode };
+  createTailscaleAuth, isTailnetAddress, hostedDashboardAuthMode, createLoginLimiter };
 
 if (require.main === module) {
   main().catch((e) => {

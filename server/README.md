@@ -289,6 +289,7 @@ unauthenticated. With a token:
 - every page, `/api/*` call and `/cc` websocket upgrade is gated on that cookie
   with a constant-time compare; an upgrade's `Origin` must also be this host's own
   (`http(s)://<Host>`), or absent from a loopback peer such as a CLI client;
+- repeated wrong tokens from one peer back off (three free failures, then 1 s doubling to 5 min, in memory); use a generated token such as `openssl rand -hex 32`, not a chosen phrase;
 - passing `--token-file` on a loopback bind opts that instance into auth too.
 
 The cookie has **no `Secure` attribute**: the host speaks plain HTTP and relies

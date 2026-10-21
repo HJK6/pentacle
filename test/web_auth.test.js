@@ -15,7 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 
-const { main, isLoopbackBind, parseArgs } = require('../server/index.js');
+const { main, isLoopbackBind, parseArgs, createLoginLimiter } = require('../server/index.js');
 
 function scratch() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-auth-'));
@@ -189,6 +189,45 @@ test('with a token, an authenticated upgrade must come from the host\'s own orig
   assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: `http://app.${authority}` }), 'rejected', 'a subdomain is refused');
   assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: 'https://example.com' }), 'rejected', 'a foreign site is refused');
   assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: 'null' }), 'rejected', 'an opaque origin is refused');
+});
+
+test('login failures back off per peer and a success clears the peer', () => {
+  let now = 1000;
+  const limiter = createLoginLimiter({ now: () => now });
+  const peer = '203.0.113.7';
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(limiter.retryAfterMs(peer), 0, `attempt ${i + 1} is allowed`);
+    limiter.failed(peer);
+  }
+  assert.equal(limiter.retryAfterMs(peer), 0, 'the first three failures cost nothing');
+  limiter.failed(peer);
+  assert.equal(limiter.retryAfterMs(peer), 1000, 'the fourth failure waits one second');
+  assert.equal(limiter.retryAfterMs('203.0.113.8'), 0, 'another peer is unaffected');
+  now += 1000;
+  assert.equal(limiter.retryAfterMs(peer), 0, 'the wait elapses');
+  limiter.failed(peer);
+  assert.equal(limiter.retryAfterMs(peer), 2000, 'each further failure doubles the wait');
+  for (let i = 0; i < 30; i += 1) { now += 600000; limiter.failed(peer); }
+  assert.ok(limiter.retryAfterMs(peer) <= 300000, 'the wait is capped at five minutes');
+  limiter.succeeded(peer);
+  assert.equal(limiter.retryAfterMs(peer), 0, 'a success clears the peer');
+});
+
+test('a locked peer gets 429 with Retry-After even for the right token', async (t) => {
+  const { dir, profile, home } = scratch();
+  const tokenPath = path.join(dir, 'web.token');
+  fs.writeFileSync(tokenPath, 'super-secret-token\n');
+  const host = await startHost(t, ['--profile', profile, '--bind', '127.0.0.1', '--port', '0', '--token-file', tokenPath], home);
+  const login = token => fetch(`http://127.0.0.1:${host.port}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }).toString(),
+  });
+  for (let i = 0; i < 4; i += 1) assert.equal((await login('wrong')).status, 401, `failure ${i + 1}`);
+  const locked = await login('super-secret-token');
+  assert.equal(locked.status, 429, 'the right token is refused while the peer is locked');
+  assert.ok(Number(locked.headers.get('retry-after')) >= 1, 'Retry-After tells the client when to retry');
+  assert.equal(locked.headers.get('set-cookie'), null, 'no cookie while locked');
 });
 
 test('hosted auth mode is derived from the effective server auth object only', () => {
