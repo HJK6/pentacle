@@ -3957,9 +3957,13 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             if isinstance(delivery, dict):
                 store_exchange.append(conn, delivery.get("exchange"))
                 conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
+            # Keep every tell an unsettled notice (any kind) can still read back, so
+            # a retry never finds its proof row pruned; answer/alert rows stay
+            # protected after delivery as before.
             conn.execute(
                 "DELETE FROM v2_tell_deliveries WHERE NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
-                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.kind IN ('notification_answer','error_alert') AND n.tell_id=v2_tell_deliveries.tell_id) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id "
+                "AND (n.kind IN ('notification_answer','error_alert') OR (n.terminal_at IS NULL AND n.delivered_at IS NULL))) "
                 "AND tell_id NOT IN"
                 " (SELECT tell_id FROM v2_tell_deliveries ORDER BY created_at DESC LIMIT ?)",
                 (TELL_RETENTION,),

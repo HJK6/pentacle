@@ -776,12 +776,15 @@ class Comms:
                         return reply
                 # The durable outbound row is expected to have a tell row after
                 # the initial attempt.  If a crash fell into that pre-persist
-                # window, keep this recovery pass evidence-only and retryable.
-                return self._tell_reply(
+                # window, keep this recovery pass evidence-only; the queue
+                # settles it from the explicit row_missing state.
+                reply = self._tell_reply(
                     tell_id, route, submission_confirmed=False,
                     delivery_status="proof_unavailable", submission_attempts=0,
-                    reason="submission_proof_pending",
+                    reason="tell_row_missing",
                 )
+                reply["proof_state"] = "row_missing"
+                return reply
         return await self.tell({
             **msg,
             "message": marked_body,
