@@ -99,6 +99,20 @@ An SSH tunnel can retain a loopback daemon listener; forwarded connections
 inherit the tunnel endpoint's trust boundary. Restrict tunnel access to the
 operator.
 
+## Desk credential labels
+
+`PENTACLE_DESK_STAMP_CONFIG` names a private (mode 600, daemon-user) JSON file
+mapping operator-registry credential ids to desk labels, for example
+`{"<credential uuid>": "sms-desk"}`. Labels are lowercase words ending in `-desk`;
+the file holds at most eight entries and an invalid file or entry stamps nothing.
+A `send` authenticated with a mapped credential has its `text` (and `message`)
+prefixed `[from <label>]` on its own line after sanitising, before any target
+handling. The prefix is deliberately not an anchored tell, so the row stays an
+ordinary user row and its receipt reaches `landed`. The file is re-read on each
+send: deleting it or an entry stops the label at once. This is attribution and
+per-credential revocation, not a reduction in privilege; a desk credential can
+still do whatever an operator credential can, and only `send` text is labelled.
+
 ## Remote session interrupt
 
 `send.interrupt` targets a session by `host` and `session_name`. For a configured

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import store_host_transfer as host_transfer
 import qa_dispatch
+import desk_stamp
 import wmi_brief_producer
 
 import asyncio
@@ -4223,6 +4224,7 @@ class Server:
         return await self._on_send(physical)
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        msg = desk_stamp.stamp_message(msg)
         if msg.get("to_stream_id") == ASSISTANT_ALIAS:
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)

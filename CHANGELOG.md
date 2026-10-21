@@ -13,6 +13,20 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-21
+
+### Added
+
+- Chat daemon: sends from configured desk credentials are labelled `[from <desk>]`, so desk traffic is attributable and each desk can be revoked on its own.
+
+### Changed
+
+- Web host in token mode: WebSocket upgrades must come from the host's own origin (or carry none from a local client). Repeated failed logins from one peer back off, and the README recommends a generated token.
+
+### Fixed
+
+- Chat daemon: a new seat whose first prompt was delivered while the event store was briefly unreadable is no longer left in `starting` or marked as never started.
+
 ## 2026-10-20 (2)
 
 ### Added
