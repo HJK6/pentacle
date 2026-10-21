@@ -423,6 +423,13 @@ def test_queued_spawn_timeout_is_terminal_and_releases_its_reservation(
     async def run() -> None:
         store = Store(":memory:")
         store.start()
+        # Declared before `try` so the failure-safe teardown below can always
+        # unblock the fake spawn and drain, whichever assertion raised first.
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        first: asyncio.Task | None = None
+        ctl: SpawnCtl | None = None
+        leaked: set[asyncio.Task] = set()
         try:
             tmux = IdleTmux()
             sessions = Sessions(store, tmux=tmux, local_host="hosta")
@@ -433,8 +440,6 @@ def test_queued_spawn_timeout_is_terminal_and_releases_its_reservation(
 
             sessions.set_inventory_emitter(InventoryEmitter(sessions, broadcast, min_interval_s=0))
             ctl = SpawnCtl(store, sessions, tmux=tmux)
-            first_started = asyncio.Event()
-            release_first = asyncio.Event()
 
             async def resolve(*_args: object, **_kwargs: object):
                 return "provider", {"resolved_launch_tuple": {"provider": "codex"}}, {
@@ -460,17 +465,30 @@ def test_queued_spawn_timeout_is_terminal_and_releases_its_reservation(
                 {"objective": "Exercise the existing spawn contract", "provider": "codex", "session_name": "first", "request_id": "first-r"}, "hosta",
             ))
             await first_started.wait()
+            obligations_before = set(ctl._background_spawns)
             queued = await ctl.spawn(
                 {"objective": "Exercise the existing spawn contract", "provider": "codex", "session_name": "expired", "request_id": "expired-r"}, "hosta",
             )
             assert queued["type"] == "spawn.ok"
             assert queued["state"] == "queued"
 
-            for _ in range(20):
-                outcome = await ctl.await_spawn({"spawn_request_id": "expired-r"})
-                if outcome["type"] == "await_spawn.error":
-                    break
-                await asyncio.sleep(0.01)
+            # The queued reply returns early; the spawn obligation keeps running
+            # as a background task that, on queue timeout, writes the `failed`
+            # outcome, THEN publishes `failed` to inventory, THEN closes the row,
+            # THEN (in its `finally`) releases the reservation. `await_spawn`
+            # reports the terminal error as soon as the outcome row exists, i.e.
+            # BEFORE those later cleanup steps, so it is not a cleanup barrier.
+            # Wait for the obligation itself to finish before asserting on
+            # reservation / inventory / closed state. If the obligation already
+            # finished (its done-callback dropped it from the set) there is
+            # nothing to wait for and the cleanup below is already complete.
+            expired_obligation = ctl._background_spawns - obligations_before
+            assert len(expired_obligation) <= 1, expired_obligation
+            if expired_obligation:
+                finished, _ = await asyncio.wait(expired_obligation, timeout=10)
+                assert finished == expired_obligation, "queued spawn obligation did not finish within 10s"
+            outcome = await ctl.await_spawn({"spawn_request_id": "expired-r"})
+            assert outcome["type"] == "await_spawn.error", outcome
             assert outcome["error_code"] == "spawn_queue_timeout"
             assert all(row["session_name"] != "expired" for row in await store.reservations())
             states = [
@@ -483,20 +501,31 @@ def test_queued_spawn_timeout_is_terminal_and_releases_its_reservation(
             release_first.set()
             await first
         finally:
-            # `ctl.spawn` returns its admitted/queued reply early while
-            # `_spawn_impl` (incl. the request-id-fenced reservation release)
-            # keeps running as a background task in `ctl._background_spawns`.
-            # Awaiting only the `ctl.spawn` coroutines above does NOT await those
-            # finishers, so under load a late `release_stream_id_fenced` could run
-            # after `store.stop()` -> `RuntimeError: store is not running` (the CI
-            # boot-throttle flake). Drain the background spawns against a LIVE
-            # store before teardown so the release completes deterministically.
-            ctl_obj = locals().get("ctl")
-            if ctl_obj is not None and ctl_obj._background_spawns:
-                await asyncio.gather(
-                    *list(ctl_obj._background_spawns), return_exceptions=True
-                )
+            # Failure-safe teardown. `ctl.spawn` returns its admitted/queued
+            # reply early while `_spawn_impl` (incl. the request-id-fenced
+            # reservation release) keeps running as a background task in
+            # `ctl._background_spawns`; a late `release_stream_id_fenced` after
+            # `store.stop()` raises `RuntimeError: store is not running` (the CI
+            # boot-throttle flake), so drain against a LIVE store. The drain
+            # must not depend on the body having reached `release_first.set()`:
+            # an earlier assertion would otherwise leave `first` parked in the
+            # fake spawn forever and turn the real AssertionError into a
+            # pytest-timeout (the queued-spawn cleanup race). Always unblock the
+            # fake first, bound the drain, and cancel whatever still remains so
+            # the original exception (if any) propagates as itself.
+            release_first.set()
+            pending = {
+                task for task in (first, *(ctl._background_spawns if ctl is not None else ()))
+                if task is not None and not task.done()
+            }
+            if pending:
+                _finished, leaked = await asyncio.wait(pending, timeout=5)
+                for task in leaked:
+                    task.cancel()
+                if leaked:
+                    await asyncio.wait(leaked, timeout=5)
             store.stop()
+        assert not leaked, f"spawn tasks still pending at teardown: {leaked}"
 
     async def _true() -> bool:
         return True
