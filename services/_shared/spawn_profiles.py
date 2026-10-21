@@ -22,10 +22,12 @@ PROFILES = {
     "agent_orch": {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
+        "gemini": ("gemini-3.8-flash", "high"),
     },
     "desktop_manual": {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
+        "gemini": ("gemini-3.8-flash", "high"),
     },
 }
 DEFAULT_MAX_CONCURRENT_BOOTS = 3
@@ -49,6 +51,11 @@ MODELS = {
         "gpt-6.1-sol": {"aliases": ("gpt-6.1-sol", "sol-6.1", "sol"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-luna": {"aliases": ("gpt-6-luna", "luna"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+    },
+    "gemini": {
+        "gemini-3.5-flash-lite": {"aliases": ("gemini-3.5-flash-lite", "flash-lite"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gemini-3.8-flash": {"aliases": ("gemini-3.8-flash", "flash"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gemini-3.8-pro": {"aliases": ("gemini-3.8-pro", "pro"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
 }
 # Which MODELS ids are advertised to interactive New Chat clients is an

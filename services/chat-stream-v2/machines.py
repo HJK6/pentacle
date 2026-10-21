@@ -104,7 +104,7 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
     # peer session with local paths.
     claude_default = "" if is_remote else defaults.claude_bin
     codex_default = "" if is_remote else defaults.codex_bin
-    gemini_default = "" if is_remote else defaults.gemini_bin
+    gemini_default = "" if is_remote else (defaults.gemini_bin or "")
     projects_default = "" if is_remote else defaults.projects_root
     cwd_default = "" if is_remote else defaults.cwd
     return MachineConfig(

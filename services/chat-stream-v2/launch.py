@@ -198,7 +198,7 @@ def raw_command_machine_from_config(cfg: Any) -> LocalMachine:
     paths. Never fall back to the daemon's ambient PATH for a remote target.
     """
     explicit_agent_orch = getattr(cfg, "agent_orch_bin_dir", None)
-    provider_bin = getattr(cfg, "claude_bin", "") or getattr(cfg, "codex_bin", "") or ""
+    provider_bin = getattr(cfg, "claude_bin", "") or getattr(cfg, "codex_bin", "") or getattr(cfg, "gemini_bin", "") or ""
     provider_executable = _shell_executable(provider_bin) if provider_bin else ""
     is_remote = getattr(cfg, "ssh_target", None) is not None
     if is_remote and not explicit_agent_orch and not os.path.isabs(provider_executable):
@@ -311,6 +311,7 @@ def local_machine_from_config(
         cwd=cwd or cfg.cwd or None,
         claude_bin=claude_bin or cfg.claude_bin or None,
         codex_bin=codex_bin or cfg.codex_bin or None,
+        gemini_bin=gemini_bin or getattr(cfg, "gemini_bin", None) or None,
         projects_root=projects_root or cfg.projects_root or None,
         agent_orch_bin_dir=(
             agent_orch_bin_dir or cfg.agent_orch_bin_dir or None
@@ -383,7 +384,7 @@ def agent_orch_path_export(
             provider_bin=provider_bin, tmux_bin="tmux",
         )
     if not bin_dir and machine:
-        machine_provider_bin = machine.claude_bin or machine.codex_bin
+        machine_provider_bin = machine.claude_bin or machine.codex_bin or machine.gemini_bin
         if machine_provider_bin:
             bin_dir = _agent_orch_bin_dir_default(
                 provider_bin=machine_provider_bin, tmux_bin="tmux",
