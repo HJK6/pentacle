@@ -51,8 +51,8 @@ def test_tell_retention_does_not_strand_unsettled_report_notice() -> None:
         store = Store(":memory:")
         store.start()
         try:
-            sessions = Sessions(store, tmux=tmux, local_host="hosta")
-            await sessions.open("hosta", "parent", provider="codex")
+            sessions = Sessions(store, tmux=tmux, local_host="fixture-chat")
+            await sessions.open("fixture-chat", "parent", provider="codex")
             comms = Comms(
                 store, sessions, _CodexNoticeSpawn(tmux), submission_proof=_DelayedUserProof(),
             )
@@ -60,10 +60,10 @@ def test_tell_retention_does_not_strand_unsettled_report_notice() -> None:
             await queue.enqueue(
                 kind=NOTICE_KIND_REPORT,
                 dedupe_key="report:report-retention-red",
-                recipient_stream_id="hosta:parent",
+                recipient_stream_id="fixture-chat:parent",
                 tell_id=notice_id,
                 body="child report ready",
-                source_stream_id="hosta:child",
+                source_stream_id="fixture-chat:child",
                 metadata={"report_id": "report-retention-red"},
             )
             # First attempt pastes and records a proof-pending tell row.
@@ -114,10 +114,10 @@ async def _enqueue_kind(queue: OutboundNoticeQueue, tell_id: str, kind: str, **e
     await queue.enqueue(
         kind=kind,
         dedupe_key=f"{kind}:{tell_id}",
-        recipient_stream_id="hosta:parent",
+        recipient_stream_id="fixture-chat:parent",
         tell_id=tell_id,
         body="body",
-        source_stream_id="hosta:child",
+        source_stream_id="fixture-chat:child",
         **extra,
     )
 
@@ -172,14 +172,14 @@ def _comms_without_row(provider: str, *, pane: str = "") -> tuple[Store, Comms, 
     tmux.capture_text = pane
     store = Store(":memory:")
     store.start()
-    sessions = Sessions(store, tmux=tmux, local_host="hosta")
+    sessions = Sessions(store, tmux=tmux, local_host="fixture-chat")
     return store, Comms(store, sessions, _CrashAfterPasteSpawn(tmux), submission_proof=_DelayedUserProof()), tmux, sessions
 
 
 def _notice_message(tell_id: str) -> dict:
     return {
         "_outbound_notice_kind": NOTICE_KIND_REPORT,
-        "tell_id": tell_id, "stream_id": "hosta:parent", "to_stream_id": "hosta:parent",
+        "tell_id": tell_id, "stream_id": "fixture-chat:parent", "to_stream_id": "fixture-chat:parent",
         "message": "child report ready", "urgent": False,
     }
 
@@ -188,7 +188,7 @@ def test_missing_row_reply_carries_row_missing_state_without_input() -> None:
     async def run() -> tuple[dict, int]:
         store, comms, tmux, sessions = _comms_without_row("codex")
         try:
-            await sessions.open("hosta", "parent", provider="codex", pane_status="pane_alive")
+            await sessions.open("fixture-chat", "parent", provider="codex", pane_status="pane_alive")
             reply = await comms.deliver_outbound_notice(_notice_message("gone-tell"), check_existing=True)
             return reply, len(tmux.pastes)
         finally:
@@ -209,7 +209,7 @@ def test_missing_row_with_pane_marker_is_recorded_delivered_not_row_missing() ->
         assert notice_needle(tell_id) in pane
         store, comms, tmux, sessions = _comms_without_row("shell", pane=pane)
         try:
-            await sessions.open("hosta", "parent", provider="shell", pane_status="pane_alive")
+            await sessions.open("fixture-chat", "parent", provider="shell", pane_status="pane_alive")
             reply = await comms.deliver_outbound_notice(_notice_message(tell_id), check_existing=True)
             return reply, await store.get_tell_delivery(tell_id)
         finally:
@@ -225,7 +225,7 @@ def test_missing_row_without_pane_marker_on_scanned_provider_is_row_missing() ->
     async def run() -> dict:
         store, comms, tmux, sessions = _comms_without_row("shell", pane="unrelated pane text")
         try:
-            await sessions.open("hosta", "parent", provider="shell", pane_status="pane_alive")
+            await sessions.open("fixture-chat", "parent", provider="shell", pane_status="pane_alive")
             return await comms.deliver_outbound_notice(_notice_message("absent-tell"), check_existing=True)
         finally:
             store.stop()
@@ -246,18 +246,18 @@ def test_row_missing_terminalizes_for_open_recipient_only_after_age_floor(
         store = Store(":memory:")
         store.start()
         try:
-            sessions = Sessions(store, local_host="hosta")
-            await sessions.open("hosta", "parent", provider="codex")
+            sessions = Sessions(store, local_host="fixture-chat")
+            await sessions.open("fixture-chat", "parent", provider="codex")
             now = 2_000_000_000.0
             monkeypatch.setattr(notices_module.time, "time", lambda: now)
             queue = OutboundNoticeQueue(store, _PendingComms("row_missing"), config=_config())
             await queue.enqueue(
                 kind=NOTICE_KIND_REPORT,
                 dedupe_key="report:row-missing",
-                recipient_stream_id="hosta:parent",
+                recipient_stream_id="fixture-chat:parent",
                 tell_id="row-missing",
                 body="body",
-                source_stream_id="hosta:child",
+                source_stream_id="fixture-chat:child",
                 created_at=notices_module._iso_from_epoch(now - age_s),
             )
             assert await queue.deliver_now("row-missing") is False
@@ -286,8 +286,8 @@ def test_never_persisted_attempt_goes_terminal_on_row_missing_without_paste(
         store = Store(":memory:")
         store.start()
         try:
-            sessions = Sessions(store, tmux=tmux, local_host="hosta")
-            await sessions.open("hosta", "parent", provider="codex")
+            sessions = Sessions(store, tmux=tmux, local_host="fixture-chat")
+            await sessions.open("fixture-chat", "parent", provider="codex")
             comms = Comms(
                 store, sessions, _CodexNoticeSpawn(tmux), submission_proof=_DelayedUserProof(),
             )
@@ -307,10 +307,10 @@ def test_never_persisted_attempt_goes_terminal_on_row_missing_without_paste(
             await queue.enqueue(
                 kind=NOTICE_KIND_REPORT,
                 dedupe_key="report:never-persisted",
-                recipient_stream_id="hosta:parent",
+                recipient_stream_id="fixture-chat:parent",
                 tell_id="never-persisted",
                 body="body",
-                source_stream_id="hosta:child",
+                source_stream_id="fixture-chat:child",
                 created_at=notices_module._iso_from_epoch(now - PROOF_TERMINAL_BOUND_S - 5.0),
             )
             assert await queue.deliver_now("never-persisted") is False
