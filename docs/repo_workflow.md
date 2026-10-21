@@ -97,6 +97,14 @@ activation window: fast-forward its checkout, run
 and PID of what is actually running; a checkout at the right commit is not a
 deployment. Documentation and guard-only changes do not require a runtime restart.
 
+A release that adds daemon frames or snapshot fields moves the web host and the
+daemon as a pair. An older web host can throw on a newer daemon's frames and exit,
+and a restart loop follows; a newer web host tolerates an older daemon. So
+upgrade the web host first, then the daemon, and roll back in the opposite order:
+daemon first, then web host. Never leave the older web host running against the
+newer daemon; if one side must be rolled back alone, stop the web host until the
+pair matches.
+
 Historical private exclusions are reviewed by content; ordinary source and portable tests move through the same public gates. See [Public source boundary](public_boundary.md) for the shipped batch and retained private inputs.
 
 ### TH-H5 promotion evidence details
