@@ -522,3 +522,18 @@ def test_failing_rules_do_not_count_as_evaluated_so_recover_terminates(tmp_path,
         run(surface.recover())  # returns instead of re-running the failing pass forever
     finally:
         store.stop()
+
+
+def test_service_created_rule_template_update_is_not_refused_by_the_create_owner_check(tmp_path) -> None:
+    store, _s, _c, _spawn, surface = harness(tmp_path)
+    try:
+        rid = create_rule(surface)["recurring_id"]
+        run(store.submit(lambda conn: (
+            conn.execute("UPDATE v2_recurring_schedules SET created_by_stream_id=NULL WHERE recurring_id=?", (rid,)),
+            conn.commit(),
+        )))
+        updated = run(surface.recurring_update(operator_message(
+            "schedule.recurring.update", recurring_id=rid, initial_prompt="p2")))
+        assert updated["recurring"]["recurring_id"] == rid
+    finally:
+        store.stop()

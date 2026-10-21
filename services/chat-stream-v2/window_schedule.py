@@ -1353,8 +1353,6 @@ class WindowSchedule:
         ``fields`` is the complete template (create: the request; update: the
         stored template overlaid with the request). Returns the columns to store.
         """
-        if kind not in {"seat", "service"}:
-            raise VerbError("not_authorized", "recurring owner must be a seat or service actor")
         if msg.get("agent_orch_attestation") is not None or fields.get("initial_prompt_blob_sha"):
             raise VerbError("unsupported_configuration", "use an inline prompt")
         if any(msg.get(key) for key in ("handoff", "handoff_from_stream_id")):
@@ -1492,6 +1490,8 @@ class WindowSchedule:
     async def recurring_create(self, msg: dict[str, Any]) -> dict[str, Any]:
         request_id = _valid_uuid(msg.get("request_id"))
         kind, actor, seat = await self._actor(msg)
+        if kind not in {"seat", "service"}:
+            raise VerbError("not_authorized", "recurring owner must be a seat or service actor")
         replay = await self._mutation_replay(
             msg, phase="row_committed", surface="schedule", actor_kind=kind, actor_id=actor,
         )
@@ -1827,7 +1827,7 @@ class WindowSchedule:
         await self._broadcast_recurring("recurring_materialised", str(outcome["recurring_id"]))
 
     async def materialise_due_recurring(self, now: datetime | None = None) -> int:
-        """One pass over due active rules; returns how many were evaluated without raising."""
+        """One pass over due active rules; returns how many were due, or 0 when every one raised."""
         if self.schema_health != "ok":
             return 0
         moment = now or datetime.now(timezone.utc)
@@ -1855,7 +1855,7 @@ class WindowSchedule:
             except Exception:
                 failed += 1
                 log.exception("recurring materialise failed recurring_id=%s", recurring_id)
-        return len(rules) - failed
+        return len(rules) if failed < len(rules) else 0
 
     async def run_forever(self) -> None:
         await self.recover()
