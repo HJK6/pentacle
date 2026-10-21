@@ -412,6 +412,17 @@ class OutboundNoticeQueue:
                 isinstance(reply, dict)
                 and reply.get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES
             )
+            if (
+                proof_pending
+                and reply.get("proof_state") == "row_missing"
+                and self._past_proof_floor(row)
+            ):
+                await self._terminal(
+                    row,
+                    "tell_row_missing: no delivery proof row (never persisted or pruned)",
+                    "inspect the recipient transcript for the notice marker; resend deliberately only if absent",
+                )
+                return "terminal"
             authoritative_negative = proof_pending and reply.get("proof_state") == "pending"
             return await self._retry(
                 row,
@@ -475,10 +486,14 @@ class OutboundNoticeQueue:
         )
         return "retry"
 
+    @staticmethod
+    def _past_proof_floor(row: dict[str, Any]) -> bool:
+        created = _epoch_from_iso(row.get("created_at"))
+        return created is not None and time.time() - created >= PROOF_TERMINAL_BOUND_S
+
     async def _terminal_proof_negative(self, row: dict[str, Any]) -> bool:
         """A missing event is terminal only after time and lifecycle evidence."""
-        created = _epoch_from_iso(row.get("created_at"))
-        if created is None or time.time() - created < PROOF_TERMINAL_BOUND_S:
+        if not self._past_proof_floor(row):
             return False
         stream_id = str(row.get("recipient_stream_id") or "")
         host, sep, name = stream_id.partition(":")
