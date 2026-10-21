@@ -484,6 +484,16 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     }
     if (!session) throw cdpErr || new Error('could not attach Chrome over CDP');
 
+    // Test-only: web_gate_interrupt.test.js parks the gate here so it can signal a
+    // fully started run. Inert unless the env var is set; the wait is bounded.
+    if (process.env.PENTACLE_WEB_GATE_TEST_HOLD_AFTER_ATTACH === '1') {
+      console.log(`WEB_GATE_TEST_HOLD ${JSON.stringify({
+        chromePid: chrome.pid, daemonPid: runtime.daemonProc && runtime.daemonProc.pid,
+        userDataDir, scratch, runtimeDir,
+      })}`);
+      await new Promise((resolve) => setTimeout(resolve, args.timeoutMs));
+    }
+
     const ctx = { session, report, cdp, cdpPort, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
@@ -557,4 +567,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, allocateReportDir };
+module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, allocateReportDir, resolveChrome };
