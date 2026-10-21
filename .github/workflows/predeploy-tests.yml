@@ -59,6 +59,7 @@ jobs:
         run: |
           npm run build:web
           node test/e2e/web_gate.js
+          node --test test/e2e/web_gate_interrupt.test.js
       - name: Daemon and CLI checks
         env:
           V2_UNIT_TIMEOUT_S: '1200'

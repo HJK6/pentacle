@@ -68,7 +68,7 @@ for (const [label, profile, closeFails] of [
   const observations = { starts: 0, closes: 0, runtimeCleanup: 0 };
   const context = {
     module: { exports: {} }, __dirname: path.join(root, 'e2e'),
-    process: { env: {}, execPath: process.execPath },
+    process: { env: {}, execPath: process.execPath, on() {}, removeListener() {}, listeners: () => [] },
     console: { log() {}, error() {} }, Buffer, Date, setTimeout, clearTimeout,
     require(name) {
       if (name === 'os') return { ...os, tmpdir: () => root };

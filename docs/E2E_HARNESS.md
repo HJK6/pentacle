@@ -122,6 +122,14 @@ Run locally: `npm run build:web && node test/e2e/web_gate.js` (needs a system
 Chrome, `tmux`, and a Python with the daemon's `websockets`). `--profile <config.js>`
 runs the scenarios against an external daemon for a by-hand check.
 
+SIGINT, SIGTERM and SIGHUP tear the gate down the same way a finished run does:
+Chrome runs in its own process group and the whole group is stopped, then the daemon,
+scratch, user-data and runtime directories are removed (unless `--keep`). The gate
+records a FAIL verdict with `interrupted` set and exits 130, 143 or 129; a second
+signal during teardown is ignored. SIGKILL cannot be handled. Check it with
+`node --test test/e2e/web_gate_interrupt.test.js` (needs Chrome and the web build;
+it boots the gate three times, so it is not part of `npm test`).
+
 For the external loopback profile, choose a free port for each run and use that
 same value for the daemon and gate. For example, start the daemon in one shell:
 
