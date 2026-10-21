@@ -13,6 +13,7 @@ from server import Server
 # deadline so a synchronous stall is observable before it becomes a timeout.
 KEEPALIVE_PING_PONG_BUDGET_SECONDS = 0.05
 STREAM_ID = "testhost:v2-loop"
+BACKFILL_REQUEST_ID = "loop-probe"
 EVENT_COUNT = 500
 EVENT_TEXT_BYTES = 36 * 1024
 
@@ -132,12 +133,37 @@ def test_history_page_wait_does_not_block_inventory_or_pong() -> None:
     asyncio.run(run())
 
 
-def _server(events: list[dict]) -> Server:
-    server = Server.__new__(Server)
+def _server(store: _Store) -> Server:
+    # The normal constructor. A bare ``Server.__new__`` skipped the composite
+    # map, so the real handler raised inside its stream and the latency probe
+    # timed one ``request_stream_events.error`` frame instead of the history.
+    server = Server()
     server.sessions = _Sessions()
-    server.store = _Store(events)
-    server.handlers = {"request_stream_events": server._on_request_stream_events}
+    server.store = store
     return server
+
+
+def _decode(frame: object) -> dict:
+    payload = getattr(frame, "payload", None)
+    return json.loads(payload) if isinstance(payload, str) else frame
+
+
+def _assert_complete_backfill(frames: list[dict], expected: list[dict], *, request_id: str) -> None:
+    """Every requested event exactly once, in chunks closed by one ok; never an error."""
+    types = [frame.get("type") for frame in frames]
+    errors = [frame for frame in frames if frame.get("type") == "request_stream_events.error"]
+    assert not errors, f"backfill emitted error frames: {errors}"
+    assert types and types[-1] == "request_stream_events.ok", types
+    assert types[:-1] and set(types[:-1]) == {"request_stream_events.chunk"}, types
+    assert all(
+        frame.get("request_id") == request_id and frame.get("stream_id") == STREAM_ID
+        for frame in frames
+    ), frames
+    delivered = [event["daemon_seq"] for frame in frames for event in frame.get("events", [])]
+    assert len(delivered) == len(set(delivered)), "an event was delivered more than once"
+    assert sorted(delivered) == [event["daemon_seq"] for event in expected], (
+        f"delivered {len(delivered)} of {len(expected)} events"
+    )
 
 
 class _RecordingSocket:
@@ -303,10 +329,10 @@ def test_disconnected_history_stops_and_closes_producer(monkeypatch, disconnect)
     asyncio.run(run())
 
 
-def test_large_backfill_keeps_ping_pong_inside_deadline() -> None:
-    """A known ~18 MiB pane leaves an application ping/pong runnable promptly."""
-    async def _go() -> float:
-        daemon = _server(_events())
+def _run_backfill(store: _Store) -> tuple[list[dict], float]:
+    """Serve one whole-history request while probing ping/pong; return frames and worst latency."""
+    async def _go() -> tuple[list[dict], float]:
+        daemon = _server(store)
         loop = asyncio.get_running_loop()
         stop = False
         latencies: list[float] = []
@@ -324,25 +350,57 @@ def test_large_backfill_keeps_ping_pong_inside_deadline() -> None:
         # fail against the known-bad implementation.
         await asyncio.sleep(0)
         result = await daemon._dispatch(json.dumps({
-            "request_id": "loop-probe",
+            "request_id": BACKFILL_REQUEST_ID,
             "stream_id": STREAM_ID,
             "limit": EVENT_COUNT,
             "type": "request_stream_events",
         }))
+        raw_frames: list[object] = []
         if hasattr(result, "__aiter__"):
-            async for _frame in result:
-                pass
+            async for frame in result:
+                raw_frames.append(frame)
         else:
-            # The pre-fix handler returned one dict; emulate _serve's synchronous
-            # websocket json encoding so the RED run covers the shipped path.
-            for frame in result:
-                json.dumps(frame)
+            # A handler that refuses before streaming returns correlated dicts.
+            raw_frames.extend(result)
         stop = True
         await probe
-        return max(latencies, default=0.0)
+        # Decode only after the probe stops so the harness's own JSON parsing
+        # never counts against the daemon's loop budget.
+        return [_decode(frame) for frame in raw_frames], max(latencies, default=0.0)
 
-    max_latency = asyncio.run(_go())
+    return asyncio.run(_go())
+
+
+def test_large_backfill_keeps_ping_pong_inside_deadline() -> None:
+    """A known ~18 MiB pane is delivered completely and leaves ping/pong runnable."""
+    events = _events()
+    frames, max_latency = _run_backfill(_Store(events))
+    # Payload first: a stream that failed early is fast for the wrong reason.
+    _assert_complete_backfill(frames, events, request_id=BACKFILL_REQUEST_ID)
     assert max_latency < KEEPALIVE_PING_PONG_BUDGET_SECONDS, (
         f"backfill blocked ping/pong for {max_latency:.3f}s "
         f"(budget {KEEPALIVE_PING_PONG_BUDGET_SECONDS:.3f}s)"
     )
+
+
+def test_backfill_oracle_fails_on_handler_error() -> None:
+    """A forced page failure yields the daemon's error frame, which the oracle rejects."""
+    class BrokenStore(_Store):
+        async def fetch_session_event_page(self, _stream_id, **_kwargs):
+            raise RuntimeError("forced page failure")
+
+    events = _events()
+    frames, _ = _run_backfill(BrokenStore(events))
+    assert [frame["type"] for frame in frames] == ["request_stream_events.error"], frames
+    with pytest.raises(AssertionError, match="error frames"):
+        _assert_complete_backfill(frames, events, request_id=BACKFILL_REQUEST_ID)
+
+
+def test_backfill_oracle_fails_on_missing_event() -> None:
+    """A history short by one event is otherwise well-formed, and still fails."""
+    events = _events()
+    short = [event for event in events if event["daemon_seq"] != EVENT_COUNT // 2]
+    frames, _ = _run_backfill(_Store(short))
+    assert frames[-1]["type"] == "request_stream_events.ok", frames[-1]
+    with pytest.raises(AssertionError, match=f"delivered {EVENT_COUNT - 1} of {EVENT_COUNT} events"):
+        _assert_complete_backfill(frames, events, request_id=BACKFILL_REQUEST_ID)
