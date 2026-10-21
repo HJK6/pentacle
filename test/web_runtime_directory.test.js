@@ -29,7 +29,7 @@ for (const keep of [false, true]) {
         p.kill = signal => { p.signalCode = signal; p.emit('exit', null, signal); };
         children.push(p);
         if (args[0].endsWith('/server')) observations.push(options.env.PENTACLE_RUNTIME_DIR);
-        else assert.equal(command, 'synthetic-chrome');
+        else { assert.equal(command, 'synthetic-chrome'); assert.equal(options.detached, true); }
         return p;
       }
       const fakeFs = Object.create(fs);
@@ -39,7 +39,10 @@ for (const keep of [false, true]) {
       };
       fakeFs.openSync = (...args) => { const fd = fs.openSync(...args); openFds.push(fd); return fd; };
       const quiet = { log() {}, error() {} };
-      const context = { module: { exports: {} }, __dirname: path.join(root, 'e2e'), process: { env, execPath: process.execPath },
+      // The gate registers signal handlers and signals its Chrome group; the synthetic group is always empty.
+      const syntheticProcess = { env, execPath: process.execPath, on() {}, removeListener() {}, listeners: () => [],
+        kill() { throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); } };
+      const context = { module: { exports: {} }, __dirname: path.join(root, 'e2e'), process: syntheticProcess,
         console: quiet, Buffer, Date, setTimeout, clearTimeout,
         require(name) {
           if (name === 'fs') return fakeFs;
