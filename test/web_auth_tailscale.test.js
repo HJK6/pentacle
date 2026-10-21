@@ -261,14 +261,6 @@ for (const mode of ['tailscale', 'token']) test(`mic:start-server and provider-r
   ok.ws.close();
   assert.deepEqual(invoked, methods);
   const hostile = await tryWs(host.port, { ...proxied, Origin: 'https://evil.example' });
-  if (mode === 'tailscale') {
-    assert.deepEqual(hostile, { outcome: 'rejected', status: 403 }, 'hostile Origin refused at the upgrade');
-  } else {
-    // Token mode keeps its existing upgrade rule; the per-method gate refuses.
-    assert.equal(hostile.outcome, 'open');
-    const reply = await request(hostile.ws, 'mic:start-server');
-    assert.equal(reply.error.code, 'mic_origin_refused');
-    hostile.ws.close();
-  }
+  assert.deepEqual(hostile, { outcome: 'rejected', status: 403 }, 'hostile Origin refused at the upgrade');
   assert.deepEqual(invoked, methods, 'no handler ran for the hostile Origin');
 });

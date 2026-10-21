@@ -170,6 +170,27 @@ test('with a token, unauthenticated access is rejected and /login mints a workin
   assert.equal(await tryWs(host.port, { Cookie: 'pentacle_web=deadbeef' }), 'rejected', 'a bogus cookie is rejected');
 });
 
+test('with a token, an authenticated upgrade must come from the host\'s own origin or carry none', async (t) => {
+  const { dir, profile, home } = scratch();
+  const tokenPath = path.join(dir, 'web.token');
+  fs.writeFileSync(tokenPath, 'super-secret-token\n');
+  const host = await startHost(t, ['--profile', profile, '--bind', '127.0.0.1', '--port', '0', '--token-file', tokenPath], home);
+  const login = await fetch(`http://127.0.0.1:${host.port}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token: 'super-secret-token' }).toString(),
+  });
+  const cookie = cookieFrom(login.headers.get('set-cookie'));
+  const authority = `127.0.0.1:${host.port}`;
+
+  assert.equal(await tryWs(host.port, { Cookie: cookie }), 'open', 'a CLI client with the cookie and no Origin connects');
+  assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: `http://${authority}` }), 'open', 'the page served by this host connects');
+  assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: `http://127.0.0.1:${host.port + 1}` }), 'rejected', 'another port on the same host is refused');
+  assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: `http://app.${authority}` }), 'rejected', 'a subdomain is refused');
+  assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: 'https://example.com' }), 'rejected', 'a foreign site is refused');
+  assert.equal(await tryWs(host.port, { Cookie: cookie, Origin: 'null' }), 'rejected', 'an opaque origin is refused');
+});
+
 test('hosted auth mode is derived from the effective server auth object only', () => {
   const { createAuth, hostedDashboardAuthMode } = require('../server/index.js');
   assert.equal(createAuth('synthetic-token').mode, 'token');

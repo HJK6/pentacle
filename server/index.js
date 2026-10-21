@@ -144,6 +144,13 @@ function createAuth(token) {
       const cookie = parseCookies(req.headers && req.headers.cookie)[COOKIE_NAME];
       return !!cookie && safeEqual(cookie, cookieValue);
     },
+    originAllowed(req) {
+      const values = headerValues(req, 'origin');
+      if (values.length === 0) return isLoopbackPeer(req.socket && req.socket.remoteAddress);
+      const authority = singleHeader(req, 'host');
+      return values.length === 1 && !!authority
+        && (values[0] === `http://${authority}` || values[0] === `https://${authority}`);
+    },
     checkToken(candidate) { return safeEqual(candidate, token); },
     setCookieHeader() {
       return `${COOKIE_NAME}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800`;
@@ -482,12 +489,13 @@ async function main(argv = process.argv.slice(2)) {
     // The upgrade carries the browser's cookies; reject an unauthenticated one
     // before it becomes a socket. Unauthenticated loopback also verifies the
     // local Host and browser Origin before exposing the operator bridge.
-    // Identity mode also pins the upgrade to the proxy's canonical Origin, so a
-    // page on any other origin cannot ride the operator's tailnet identity.
+    // Both auth modes also pin the upgrade's Origin (identity mode: the proxy's
+    // canonical Origin; token mode: this host's own authority), so a page on any
+    // other origin cannot ride the operator's cookie or tailnet identity.
     verifyClient: auth
       ? (info, done) => {
         if (!auth.isAuthed(info.req)) return done(false, 401, 'authentication required');
-        if (auth.mode === 'tailscale' && !auth.originAllowed(info.req)) return done(false, 403, 'origin_refused');
+        if (!auth.originAllowed(info.req)) return done(false, 403, 'origin_refused');
         return done(true);
       }
       : (info, done) => loopbackRequestAllowed(info.req)

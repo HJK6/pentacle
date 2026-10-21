@@ -287,7 +287,8 @@ unauthenticated. With a token:
 - the browser posts the token once at `/login`; the reply sets an `HttpOnly`,
   `SameSite=Strict` cookie carrying `sha256(token)` (never the token itself);
 - every page, `/api/*` call and `/cc` websocket upgrade is gated on that cookie
-  with a constant-time compare;
+  with a constant-time compare; an upgrade's `Origin` must also be this host's own
+  (`http(s)://<Host>`), or absent from a loopback peer such as a CLI client;
 - passing `--token-file` on a loopback bind opts that instance into auth too.
 
 The cookie has **no `Secure` attribute**: the host speaks plain HTTP and relies
