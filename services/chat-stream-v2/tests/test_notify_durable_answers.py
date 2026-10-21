@@ -20,6 +20,12 @@ async def answer(notify, question, **changes):
 async def state(notify, question):
     return await notify._db.call('get_notification',question['notification_id'])
 
+def _expire_abandoned_leases(conn):
+    """Expire an abandoned claim directly: sleeping past the .1s lease depends on the wall clock
+    (a WSL time-sync step under gate load leaves the lease unexpired and the answer 'pending')."""
+    conn.execute("UPDATE v2_outbound_notices SET lease_until=0 WHERE lease_owner IS NOT NULL AND delivered_at IS NULL AND terminal_at IS NULL")
+    conn.commit()
+
 def test_saved_ack_precedes_provider_and_same_retry_does_not_dispatch_twice(tmp_path):
     async def run():
         async with fixture(tmp_path) as (notify,queue,comms,provider,sessions,store):
@@ -59,8 +65,9 @@ def test_restart_bridges_saved_owned_answer_without_queue_row(tmp_path):
             finally: await restarted.stop()
     asyncio.run(run())
 
+@pytest.mark.parametrize('clock_step', [0.0, -0.5])
 @pytest.mark.parametrize('before', [False,True])
-def test_cancelled_paste_boundary_reconciles_never_repeats_and_late_proof_promotes(tmp_path,before):
+def test_cancelled_paste_boundary_reconciles_never_repeats_and_late_proof_promotes(tmp_path,monkeypatch,before,clock_step):
     async def run():
         async with fixture(tmp_path) as (notify,queue,comms,provider,sessions,store):
             q=await _seed_live_shaped_question(notify);await answer(notify,q)
@@ -73,7 +80,9 @@ def test_cancelled_paste_boundary_reconciles_never_repeats_and_late_proof_promot
             assert intent['reply']['submission_attempts']==0
             assert intent['delivery']['submission_attempts']==0
             assert intent['reply']['delivery_status']=='proof_unavailable'
-            await asyncio.sleep(.12)
+            # A wall-clock step between the abandoned claim and the re-drain must not matter.
+            real_time=time.time;monkeypatch.setattr(time,'time',lambda:real_time()+clock_step)
+            await store.submit(_expire_abandoned_leases)
             await queue.drain_once(force=True)
             if before:
                 assert provider.pastes==[]
@@ -150,10 +159,6 @@ def test_prompt_answer_uses_same_owned_queue_and_pending_ack(tmp_path,mode):
             assert (await state(notify,q))['resolution']['delivery_status']=='delivered'
     asyncio.run(run())
 
-def _expire_abandoned_leases(conn):
-    conn.execute("UPDATE v2_outbound_notices SET lease_until=0 WHERE lease_owner IS NOT NULL AND delivered_at IS NULL AND terminal_at IS NULL")
-    conn.commit()
-
 @pytest.mark.parametrize('clock_step', [0.0, -0.5])
 def test_tell_retention_cannot_erase_possible_answer_input(tmp_path,monkeypatch,clock_step):
     async def run():
@@ -219,7 +224,8 @@ def test_answer_stamp_keeps_asking_generation_across_selection_lookup(tmp_path,e
     asyncio.run(run())
 
 
-def test_late_proof_holds_original_generation_until_lookup_finishes(tmp_path):
+@pytest.mark.parametrize('clock_step', [0.0, -0.5])
+def test_late_proof_holds_original_generation_until_lookup_finishes(tmp_path,monkeypatch,clock_step):
     async def run():
         async with fixture(tmp_path) as (notify,queue,comms,provider,sessions,store):
             q=await _seed_live_shaped_question(notify)
@@ -229,7 +235,8 @@ def test_late_proof_holds_original_generation_until_lookup_finishes(tmp_path):
             await provider.entered.wait()
             task.cancel()
             with pytest.raises(asyncio.CancelledError): await task
-            await asyncio.sleep(.12)
+            real_time=time.time;monkeypatch.setattr(time,'time',lambda:real_time()+clock_step)
+            await store.submit(_expire_abandoned_leases)
             await queue.drain_once(force=True)
             assert (await state(notify,q))['resolution']['delivery_status']=='unconfirmed'
             original_tail=store.fetch_session_event_tail
