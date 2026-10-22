@@ -480,7 +480,7 @@ class Ingest:
         # normalizer (`codex_rollout_norm`) — the claude normalizer is never
         # pointed at them. Any third provider still short-circuits rather than
         # being parsed by a normalizer that was not written for it.
-        if provider not in ("claude", "codex"):
+        if provider not in ("claude", "codex", "gemini"):
             return 0
 
         if not st.path:
@@ -823,7 +823,10 @@ class Ingest:
             return 0
         if provider == "gemini":
             from gemini_jsonl_norm import normalize_gemini_jsonl_records
-            events = normalize_gemini_jsonl_records(records, host=host, session_name=name)
+            events = normalize_gemini_jsonl_records(
+                records, host=host, session_name=name,
+                default_session_id=st.session_id,
+            )
         else:
             events = normalize_claude_jsonl_records(records, host=host, session_name=name)
         appended = 0
@@ -866,7 +869,7 @@ class Ingest:
             if path and not transcript_allowed(path, row.get("provider"), account): return None
         if (not isinstance(binding, dict) or not row.get("session_generation")
                 or binding.get("generation") != row.get("session_generation")
-                or row.get("provider") not in {"codex", "claude"}):
+                or row.get("provider") not in {"codex", "claude", "gemini"}):
             return None
         pid = codex_source_pane_pid(row.get("pane_pid"))
         started = canonical_start(binding.get("pane_started_at"))
@@ -936,7 +939,7 @@ class Ingest:
             observation["reason"] = "start_mismatch" if started != prior_start else "proof_unavailable"
             return row  # recorded/first-bind paths cannot seed recovery authority
         provider = row.get("provider")
-        if provider not in {"codex", "claude"} or transcript.get("provider") != provider:
+        if provider not in {"codex", "claude", "gemini"} or transcript.get("provider") != provider:
             observation["reason"] = "foreign_identity"
             return row
         if provider == "claude" and row.get("jsonl_path"):
@@ -1105,6 +1108,8 @@ def _provider_from_session_name(name: str) -> str | None:
         return "codex"
     if "claude" in lowered:
         return "claude"
+    if "gemini" in lowered:
+        return "gemini"
     return None
 
 

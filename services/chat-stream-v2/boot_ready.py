@@ -314,10 +314,91 @@ def codex_tui_session_visible(pane_text: str) -> bool:
     )
 
 
+# -- Gemini -------------------------------------------------------------------
+#
+# Evidence shapes captured from a live detached pane (gemini-cli v0.65):
+#   idle:      the composer renders `> ` + the placeholder and sits directly
+#              above the footer (`workspace (/directory) ... /model`);
+#   draft:     the typed prompt IS the composer line, nothing follows it;
+#   submitted: the prompt is echoed as an earlier `> ` line in the transcript
+#              while the composer returns to the placeholder (optionally with a
+#              `Thinking... (esc to cancel` activity line between them).
+# The bottom-most `> ` line is always the active composer, which makes the
+# draft/submitted discrimination structural rather than positional guessing.
+_GEMINI_COMPOSER_PLACEHOLDER = "Type your message or @path/to/file"
+
+
+def _gemini_composer_index(lines: list[str]) -> int | None:
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].lstrip().startswith("> "):
+            return index
+    return None
+
+
+def _gemini_composer_block(lines: list[str], composer_index: int) -> str:
+    """The composer's text: its `> ` line plus wrapped continuation lines up to
+    the next divider, which closes the composer box above the footer."""
+    parts = [lines[composer_index].lstrip().removeprefix(">").strip()]
+    for line in lines[composer_index + 1:]:
+        stripped = line.strip()
+        if not stripped or set(stripped) <= set("▀▄─"):
+            break
+        if stripped.startswith(("workspace (", "Shift+Tab", "? for shortcuts", "> ")):
+            break
+        parts.append(stripped)
+    return " ".join(part for part in parts if part)
+
+
+def gemini_prompt_ready(pane_text: str) -> bool:
+    """The Gemini TUI is up and can accept input: its status footer and an
+    active composer line are both on screen."""
+    lines = pane_text.splitlines()
+    return (
+        any(line.lstrip().startswith("workspace (") for line in lines)
+        and _gemini_composer_index(lines) is not None
+    )
+
+
+def gemini_prompt_in_active_draft(pane_text: str, prompt: str) -> bool:
+    """True when `prompt` sits UNSUBMITTED in gemini's active composer."""
+    lines = pane_text.splitlines()
+    composer_index = _gemini_composer_index(lines)
+    if composer_index is None:
+        return False
+    needle = _normalize_for_claude_pane_match(prompt)
+    if not needle:
+        return False
+    composer = _normalize_for_claude_pane_match(_gemini_composer_block(lines, composer_index))
+    return needle in composer
+
+
+def gemini_prompt_submitted(pane_text: str, prompt: str) -> bool:
+    """True once `prompt` has been SUBMITTED to a gemini TUI: it is echoed as
+    an earlier `> ` transcript line while the composer holds newer content
+    (the placeholder), or the pane shows a turn-error marker."""
+    if "API Error:" in pane_text:
+        return True
+    lines = pane_text.splitlines()
+    composer_index = _gemini_composer_index(lines)
+    if composer_index is None:
+        return False
+    needle = _normalize_for_claude_pane_match(prompt)
+    if not needle:
+        return False
+    for line in lines[:composer_index]:
+        if not line.lstrip().startswith("> "):
+            continue
+        echo = _normalize_for_claude_pane_match(
+            line.lstrip().removeprefix(">").strip())
+        if echo and needle in echo:
+            return True
+    return False
+
+
 READY_PREDICATES = {
     "claude": claude_prompt_ready,
     "codex": codex_tui_ready,
-    "gemini": lambda text: True,
+    "gemini": gemini_prompt_ready,
 }
 
 
@@ -719,7 +800,7 @@ def codex_prompt_exactly_in_active_draft(pane_text: str, prompt: str) -> bool:
 SUBMIT_PREDICATES = {
     "claude": claude_prompt_submitted,
     "codex": codex_prompt_submitted,
-    "gemini": lambda text: True,
+    "gemini": gemini_prompt_submitted,
 }
 
 _CLAUDE_SUBMISSION_MARKERS = ("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")
@@ -733,7 +814,13 @@ def submission_marker_count(pane_text: str, provider: str) -> int:
 def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...]:
     lines = pane_text.splitlines()
     if provider == "gemini":
-        return tuple()
+        composer_index = _gemini_composer_index(lines)
+        if composer_index is None:
+            return tuple()
+        return tuple(
+            line.strip() for line in lines[:composer_index]
+            if line.lstrip().startswith("> ")
+        )
     if provider == "claude":
         input_start = _last_claude_input_start(lines)
         history = lines if input_start is None else lines[:input_start]
@@ -762,14 +849,13 @@ def submission_proven_after(pane_text: str, baseline: str, prompt: str, provider
         return False
     after_markers = _submission_marker_snapshot(pane_text, provider)
     baseline_markers = _submission_marker_snapshot(baseline, provider)
-    if provider == "gemini":
-        return tuple()
     if provider == "claude":
         return after_markers != baseline_markers
     return len(after_markers) > len(baseline_markers)
 DRAFT_PREDICATES = {
     "claude": claude_prompt_in_active_draft,
     "codex": codex_prompt_in_active_draft,
+    "gemini": gemini_prompt_in_active_draft,
 }
 
 # NOTE: there are deliberately NO pre-paste delivery-readiness predicates here.

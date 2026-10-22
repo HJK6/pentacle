@@ -593,13 +593,105 @@ def test_unknown_provider_still_short_circuits() -> None:
         try:
             await store.open_session("h", "v2-other", visibility="visible")
             ingest = _codex_ingest(store)
-            row = {"stream_id": "h:v2-other", "provider": "gemini",
+            row = {"stream_id": "h:v2-other", "provider": "mystery-agent",
                    "jsonl_path": str(FIXTURES / "codex_rollout_first_turn.jsonl")}
             assert await ingest._ingest_stream(row, _StreamIngest(), 500) == 0
         finally:
             store.stop()
 
     asyncio.run(_go())
+
+
+async def _gemini_row(store: Store, path: Path, stream_id: str = "h:v2-gemini", *, pane_pid: str = "8123") -> dict:
+    host, name = stream_id.split(":", 1)
+    row = await store.update_session(host, name, provider="gemini", jsonl_path=str(path))
+    return {**row, "pane_pid": pane_pid}
+
+
+def test_gemini_native_recording_ingests_turns() -> None:
+    """The always-on native chat recording is the gemini transcript source (the
+    interactive pane cannot stream `-o stream-json`), so the pump must ingest
+    its schema: metadata header, `$set` bumps, user/gemini turns with inline
+    toolCalls, and error/info notices."""
+    async def _go() -> None:
+        store = _open_store()
+        try:
+            await store.open_session("h", "v2-gemini", visibility="visible", pane_pid="8123")
+            ingest = _codex_ingest(store)
+            st = _StreamIngest()
+            path = FIXTURES / "gemini_native_recording.jsonl"
+            appended = await ingest._ingest_stream(await _gemini_row(store, path), st, 500)
+            # session_context SYSTEM + USER turn + (TOOL_USE + TOOL_RESULT +
+            # ASSIST_TEXT from the tool turn) + closing ASSIST_TEXT + error
+            # SYSTEM + info SYSTEM.
+            assert appended == 8, appended
+            rows = await store.fetch_session_event_tail("h:v2-gemini", limit=500)
+            kinds = [r.get("kind") for r in rows]
+            assert kinds.count("USER") == 1, kinds
+            assert "Gemini session context established" in [r.get("text") for r in rows]
+            assert "Two files: launch.py and ingest.py." in [r.get("text") for r in rows]
+            tool_results = [r.get("text") for r in rows if r.get("kind") == "TOOL_RESULT"]
+            assert tool_results == ["launch.py\ningest.py"], tool_results
+            # Every durable event carries the recording's session identity.
+            assert all(r.get("session_id") == "a1b2c3d4-1111-2222-3333-444455556666"
+                       for r in rows), [r.get("session_id") for r in rows]
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
+
+def test_gemini_replay_is_exactly_once() -> None:
+    async def _go() -> None:
+        store = _open_store()
+        try:
+            await store.open_session("h", "v2-gemini", visibility="visible", pane_pid="8123")
+            ingest = _codex_ingest(store)
+            st = _StreamIngest()
+            path = FIXTURES / "gemini_native_recording.jsonl"
+            row = await _gemini_row(store, path)
+            assert await ingest._ingest_stream(row, st, 500) > 0
+            assert await ingest._ingest_stream(row, st, 500) == 0
+            rows = await store.fetch_session_event_tail("h:v2-gemini", limit=500)
+            assert len(rows) == 8, len(rows)
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
+
+def test_gemini_foreign_session_recording_is_never_ingested(tmp_path: Path) -> None:
+    """The identity guard must reject a recording whose sessionId does not
+    match the stream's bound identity."""
+    async def _go() -> None:
+        store = _open_store()
+        try:
+            await store.open_session("h", "v2-gemini", visibility="visible", pane_pid="8123")
+            ingest = _codex_ingest(store)
+            st = _StreamIngest()
+            path = FIXTURES / "gemini_native_recording.jsonl"
+            row = await _gemini_row(store, path)
+            assert await ingest._ingest_stream(row, st, 500) > 0
+
+            foreign = tmp_path / "foreign.jsonl"
+            foreign.write_text(
+                '{"sessionId":"ffff0000-1111-2222-3333-444455556666",'
+                '"projectHash":"x","startTime":"2026-10-22T13:00:00.000Z",'
+                '"lastUpdated":"2026-10-22T13:00:00.000Z","kind":"main"}\n'
+                '"id":"fu1","timestamp":"2026-10-22T13:00:01.000Z",'
+                '"type":"user","content":[{"text":"another synthetic session"}]}\n'
+            )
+            rebound = await store.update_session("h", "v2-gemini", jsonl_path=str(foreign))
+            row = {**rebound, "pane_pid": "8123"}
+            appended = await ingest._ingest_stream(row, _StreamIngest(), 500)
+            assert appended == 0, "a foreign recording must not append"
+            rows = await store.fetch_session_event_tail("h:v2-gemini", limit=500)
+            assert not any("another synthetic session" in str(r.get("text")) for r in rows)
+        finally:
+            store.stop()
+
+    asyncio.run(_go())
+
 
 
 def test_larger_replacement_file_does_not_ingest_a_foreign_session(tmp_path: Path) -> None:
