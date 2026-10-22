@@ -458,13 +458,34 @@ def _gemini_command(
     transcript_dir = os.path.join(machine.cwd, ".gemini/sessions")
     transcript_file = os.path.join(transcript_dir, f"{session_id}.jsonl")
     
+    # The interactive UI and the headless `-o stream-json` stdout feed are
+    # mutually exclusive: the CLI classifies any non-TTY stdout (including this
+    # command's old `| tee` capture) as headless mode and exits with "No input
+    # provided via stdin". So the transcript is NOT taken from stdout. An
+    # interactive session instead writes the always-on native chat recording —
+    # `$HOME/.gemini/tmp/<project>/chats/session-<UTC-minute>-<shortId>.jsonl`
+    # where shortId is the first 8 characters of the `--session-id` value — so
+    # pass the session id and let the CLI record. The recording's filename
+    # carries a minute timestamp chosen by the CLI at boot, which a static
+    # lifecycle path cannot predict, so a bounded background watcher links the
+    # recording to the stable per-session path the lifecycle row records
+    # (`LaunchPlan.jsonl_path`); path stat/open follow the symlink.
+    short_id = session_id[:8]
+    recording_link_watcher = (
+        "{ ( i=0; while [ $i -lt 240 ]; do "
+        "f=$(ls \"$HOME\"/.gemini/tmp/*/chats/session-*-"
+        f"{short_id}.jsonl 2>/dev/null | head -n 1); "
+        f"[ -n \"$f\" ] && {{ ln -sfn \"$f\" {shlex.quote(transcript_file)}; exit 0; }}; "
+        "i=$((i+1)); sleep 0.5; done ) >/dev/null 2>&1 & }"
+    )
     return (
         f"mkdir -p {shlex.quote(transcript_dir)} && "
         f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=gemini_bin)}"
+        f"{recording_link_watcher} && "
         f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
         f"exec {shlex.quote(gemini_bin)} "
-        f"{model_flag}{identity_flag} -o stream-json | tee {shlex.quote(transcript_file)}"
+        f"{model_flag}{identity_flag}"
     )
 
 
