@@ -520,7 +520,27 @@ def _load_gate_evidence(path: Path, sha: str) -> dict[str, object]:
     if not isinstance(tiers, list):
         raise DeployError("gate evidence tiers must be a list")
     required_tiers = {"unit", "smoke"}
-    passed_tiers = {item.get("tier") for item in tiers if isinstance(item, dict) and item.get("passed") is True}
+    passed_tiers = set()
+    for item in tiers:
+        if not isinstance(item, dict) or not isinstance(item.get("tier"), str) or not item["tier"]:
+            raise DeployError("gate evidence tier row is malformed")
+        tier = item["tier"]
+        if tier in passed_tiers:
+            raise DeployError(f"gate evidence repeats tier {tier}")
+        if item.get("passed") is not True:
+            raise DeployError(f"gate evidence top-level pass contradicts failing tier {tier}")
+        counts = item.get("counts")
+        if (
+            ("returncode" in item and (type(item["returncode"]) is not int or item["returncode"] != 0))
+            or ("timed_out" in item and item["timed_out"] is not False)
+            or (counts is not None and (
+                not isinstance(counts, dict)
+                or type(counts.get("failures")) is not int or counts["failures"] != 0
+                or type(counts.get("errors")) is not int or counts["errors"] != 0
+            ))
+        ):
+            raise DeployError(f"gate evidence tier {tier} contradicts passed")
+        passed_tiers.add(tier)
     if not required_tiers.issubset(passed_tiers):
         raise DeployError("gate evidence is missing a passing v2 unit or smoke tier")
     return raw
