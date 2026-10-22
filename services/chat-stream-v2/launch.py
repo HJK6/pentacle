@@ -102,9 +102,11 @@ class LocalMachine:
     codex_cwd: str
     claude_bin: str
     codex_bin: str
-    gemini_bin: str
     projects_root: str
     agent_orch_bin_dir: str | None = None
+    # Defaulted and last so pre-gemini positional/keyword constructors keep
+    # working; the bare value resolves through the daemon PATH.
+    gemini_bin: str = "gemini"
 
 
 def local_machine(
