@@ -65,6 +65,33 @@ def _print_members(members):
             print(f"      next: {member['next_action_text']}")
 
 
+def cmd_unattended(args: argparse.Namespace) -> int:
+    try:
+        response = _call(args, {"type": "work.unattended"})
+    except Exception as exc:  # noqa: BLE001
+        print(f"agent-orch work unattended: {exc}", file=sys.stderr)
+        return 1
+    if args.json or not str(response.get("type") or "").endswith(".ok"):
+        return _finish(response)
+    work = response["unattended_work"]
+    print(f"{work['count']} {work['label']} [{work['quality']}]; omitted {work['omitted_count']}")
+    if work.get("error"):
+        print(f"    {work['error']}")
+    for item in work["items"]:
+        age = f"{item['age_s']}s" if item.get("age_s") is not None else "unknown"
+        print(f"    {item['spec_id']}  {item['repo']}  age {age}")
+    return 0
+
+
+def add_work_parser(subparsers) -> None:
+    parser = subparsers.add_parser("work", help="read whole-board work attendance")
+    sub = parser.add_subparsers(dest="work_command", required=True)
+    unattended = sub.add_parser("unattended", help="in_progress without an assigned implementation lead")
+    unattended.add_argument("--json", action="store_true")
+    unattended.add_argument("--timeout", type=float, default=30.0)
+    unattended.set_defaults(func=cmd_unattended)
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work_lanes.list", "include_done": bool(args.include_done),

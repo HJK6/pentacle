@@ -921,6 +921,7 @@ class Server:
             "transcribe_blob": self._on_transcribe_blob,
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
+            "work.unattended": self._on_work_unattended,
             "work_lanes.list": self._on_work_lanes_list,
             "work_lanes.show": self._on_work_lanes_show,
             "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
@@ -4639,16 +4640,20 @@ class Server:
         except ValueError as exc:
             raise VerbError(str(exc), str(exc)) from exc
 
-    def _work_lanes_reader(self, msg: dict[str, Any]) -> None:
+    def _work_lanes_reader(self, msg: dict[str, Any], *, require_inventory: bool = True) -> None:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         websocket = msg.get("_client_websocket")
-        if self.work_lanes is None or self.store is None:
+        if (require_inventory and self.work_lanes is None) or self.store is None:
             raise VerbError("work_lanes_unavailable", "work lanes are not enabled on this daemon")
         if (auth.get("dot_principal") or auth.get("scoped_principal")
                 or self._scoped_stream_for(websocket) is not None
                 or not (auth.get("operator_authenticated") or auth.get("token_verified")
                         or (websocket is not None and self._is_loopback_client(websocket)))):
             raise VerbError("work_lanes_unauthorized", "work lanes require an operator or verified seat")
+
+    async def _on_work_unattended(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg, require_inventory=False)
+        return {"type": "work.unattended.ok", "unattended_work": await self.store.work_unattended(now=time.time())}
 
     async def _on_work_lanes_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)

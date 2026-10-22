@@ -1821,7 +1821,7 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
                     "assistant.authority", "assistant.ruling", "assistant.transfer",
                     # Work-lanes v1 read verbs (`agent-orch work-lane list|show|adopt --preview`);
                     # the mutators stay `assistant.operation` with `operation: work_lane.*`.
-                    "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"}:
+                    "work.unattended", "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"}:
         raise ValueError("assistant_verb_invalid")
     if verb == 'assistant.transfer' and from_stream_id and _stream_token_from_env():
         payload.update(from_stream_id=from_stream_id,stream_token=_stream_token_from_env())
