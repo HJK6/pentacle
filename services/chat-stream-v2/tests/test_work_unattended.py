@@ -23,10 +23,10 @@ async def cached(store, *, count=1, status="in_progress", now=100):
 
 
 async def root(store):
-    sessions = Sessions(store, local_host="hosta")
-    row = await sessions.open("hosta", "root", provider="shell", no_watch=True)
-    await store.update_session("hosta", "root", pane_status="pane_alive")
-    return sessions, ("hosta:root", row["session_generation"]), {"hosta:root": {
+    sessions = Sessions(store, local_host="host-a")
+    row = await sessions.open("host-a", "root", provider="shell", no_watch=True)
+    await store.update_session("host-a", "root", pane_status="pane_alive")
+    return sessions, ("host-a:root", row["session_generation"]), {"host-a:root": {
         "session_generation": row["session_generation"], "online": True, "pane_status": "pane_alive"}}
 
 
@@ -136,7 +136,7 @@ def test_read_only_rpc_whole_board_without_lanes(tmp_path):
     ({"role": None, "spec_ids": ["demo__item_00"]}, "spec_demo__item_00", False),
     ({"role": "lead", "status": "closed", "spec_ids": ["demo__item_00"]}, "spec_demo__item_00", False),
     ({"role": "lead", "presumed_dead_at": "2026-10-22T20:00:00Z", "spec_ids": ["demo__item_00"]}, "spec_demo__item_00", False),
-    ({"role": "lead", "visibility": "hidden", "handoff_from_stream_id": "hosta:old", "spec_ids": ["demo__item_00"]}, "spec_demo__item_00", True),
+    ({"role": "lead", "visibility": "hidden", "handoff_from_stream_id": "host-a:old", "spec_ids": ["demo__item_00"]}, "spec_demo__item_00", True),
     ({"role": "lead", "spec_id": "demo__item_00"}, None, True),
 ])
 def test_assignment_matrix(fields, assigned, attended):
@@ -146,10 +146,10 @@ def test_assignment_matrix(fields, assigned, attended):
             await cached(store)
             owner_fields = dict(fields)
             status = owner_fields.pop("status", "open")
-            await store.open_session("hosta", "owner", **owner_fields)
+            await store.open_session("host-a", "owner", **owner_fields)
             # Exercise persisted NULL versus explicit empty independently of
             # current creation defaults, including normalized legacy tags.
-            await store.update_session("hosta", "owner", assigned_spec_id=assigned, status=status)
+            await store.update_session("host-a", "owner", assigned_spec_id=assigned, status=status)
             work = await store.work_unattended(now=105)
             assert work["count"] == (0 if attended else 1)
             assert work["quality"] == "fresh"
@@ -185,7 +185,7 @@ def test_whole_population_hash_quality_order_recovery_and_clear(monkeypatch):
             assert unattended_signature(work) == unattended_signature(await store.work_unattended(now=110))
             # The unknown-age row is outside the eight stems, but its removal
             # must still change the digest's full population hash.
-            await store.open_session("hosta", "successor", role="lead", visibility="hidden",
+            await store.open_session("host-a", "successor", role="lead", visibility="hidden",
                 assigned_spec_id="spec_demo__item_00", spec_ids=["demo__item_00", "demo__item_09"])
             await store.evaluate_watch_wake(obs, now=115, root_binding=binding)
             assert len(await notices(store)) == 2
@@ -202,7 +202,7 @@ def test_whole_population_hash_quality_order_recovery_and_clear(monkeypatch):
             await store.evaluate_watch_wake(obs, now=125, root_binding=binding)
             assert len(await notices(store)) == 4
             for i in range(1, 9):
-                await store.open_session("hosta", f"owner-{i}", role="nexus", assigned_spec_id=f"spec_demo__item_{i:02}")
+                await store.open_session("host-a", f"owner-{i}", role="nexus", assigned_spec_id=f"spec_demo__item_{i:02}")
             await store.evaluate_watch_wake(obs, now=130, root_binding=binding)
             assert match_message_envelope((await notices(store))[-1]["body"])["unattended_work"]["count"] == 0
             await store.evaluate_watch_wake(obs, now=135, root_binding=binding)
