@@ -66,7 +66,7 @@ def _default_local_machine() -> MachineConfig:
         tmux_bin="tmux",
         claude_bin=str(home / ".local/bin/claude"),
         codex_bin="codex",
-        gemini_bin=str(home / ".nvm/versions/node/v24.22.0/bin/gemini"),
+        gemini_bin="gemini",
         projects_root=str(home / ".claude/projects"),
         cwd=str(home / "agent-workspace"),
         label="Local",

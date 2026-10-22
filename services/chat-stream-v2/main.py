@@ -239,7 +239,7 @@ def _local_machine_for_spawn(args: argparse.Namespace, configured_machines: tupl
         cwd=args.spawn_cwd or None,
         claude_bin=args.claude_bin or None,
         codex_bin=args.codex_bin or None,
-            gemini_bin=args.gemini_bin or None,
+        gemini_bin=args.gemini_bin or None,
         projects_root=args.projects_root or None,
         agent_orch_bin_dir=args.agent_orch_bin_dir or None,
     )
