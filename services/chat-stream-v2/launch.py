@@ -509,14 +509,15 @@ def _codex_command(
     if initial_prompt_file:
         # Keep the prompt out of tmux's command line. The sentinel preserves
         # trailing newlines through command substitution, then Codex receives
-        # the staged bytes as its one positional initial-prompt argument.
+        # the staged bytes as its one positional initial-prompt argument after
+        # an option terminator so a leading `-` stays data.
         launcher = "\n".join((
             "prompt_file=$1",
             "shift",
             "prompt=$(cat \"$prompt_file\"; printf '\\001')",
             "prompt=${prompt%?}",
             "unset CODEX_SESSION_ID CODEX_THREAD_ID CODEX_CI PENTACLE_SPAWN_NONCE",
-            "exec \"$@\" \"$prompt\"",
+            "exec \"$@\" -- \"$prompt\"",
         ))
         return (
             f"cd {shlex.quote(effective_cwd)} && "
