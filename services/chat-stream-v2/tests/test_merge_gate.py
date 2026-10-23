@@ -23,7 +23,7 @@ OLD = "a" * 40
 CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
-EXPECTED_PUBLIC_SHA256 = "af736d00b10211ad44fa6e795e3da17567b2093a4cad31303cf812ba6ba36567"
+EXPECTED_PUBLIC_SHA256 = "6858e37862c0290c307c7b10714a74e0bec686de15db01513ee8fb763fb7e2b4"
 CHECKOUT_LOG = (Path(__file__).parent / "fixtures/th_h5/tag_checkout.txt").read_text()
 EXPECTED_PUBLIC_STEPS = {
     "Run npm test", "Run python3 scripts/test_check_public_residue.py",
@@ -115,6 +115,63 @@ def _fake_evidence(monkeypatch: pytest.MonkeyPatch, *, repository: str = "HJK6/p
 def test_public_contract_is_bound_to_audited_commands_and_steps() -> None:
     assert merge_gate.PUBLIC_WORKFLOW_SHA256 == EXPECTED_PUBLIC_SHA256
     assert merge_gate.PUBLIC_REQUIRED_STEPS == EXPECTED_PUBLIC_STEPS
+
+
+def _tracked_public_workflow() -> bytes:
+    path, _ = merge_gate.WORKFLOWS["HJK6/pentacle"]
+    return subprocess.check_output(["git", "show", f"HEAD:{path}"], cwd=REPO_ROOT)
+
+
+def test_tracked_public_workflow_matches_audited_digest() -> None:
+    assert hashlib.sha256(_tracked_public_workflow()).hexdigest() == merge_gate.PUBLIC_WORKFLOW_SHA256
+
+
+def _workflow_git_candidate(root: Path, workflow: bytes | None) -> str:
+    """Build real disposable Git objects without remotes, refs or hooks."""
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+
+    def git(*args: str, data: bytes | None = None) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, input=data).decode().strip()
+
+    if workflow is not None:
+        blob = git("hash-object", "-w", "--stdin", data=workflow)
+        path, _ = merge_gate.WORKFLOWS["HJK6/pentacle"]
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    tree = git("write-tree")
+    return git("-c", "user.name=Workflow Test", "-c", "user.email=workflow@example.com",
+               "commit-tree", tree, data=b"Workflow guard fixture\n")
+
+
+def test_public_workflow_real_git_accepts_audited_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = _workflow_git_candidate(tmp_path, _tracked_public_workflow())
+    monkeypatch.setattr(merge_gate, "REPO_ROOT", tmp_path)
+    path, _ = merge_gate.WORKFLOWS["HJK6/pentacle"]
+    merge_gate._public_workflow(candidate, path)
+
+
+@pytest.mark.parametrize("change", ["missing", "remove_interrupt", "remove_shared", "arbitrary_byte"])
+def test_public_workflow_real_git_refuses_changed_or_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    workflow = _tracked_public_workflow()
+    if change == "missing":
+        workflow = None
+    elif change == "arbitrary_byte":
+        workflow += b"\n"
+    else:
+        command = {
+            "remove_interrupt": b"          node --test test/e2e/web_gate_interrupt.test.js\n",
+            "remove_shared": b"          python -m pytest services/_shared/tests\n",
+        }[change]
+        assert workflow.count(command) == 1
+        workflow = workflow.replace(command, b"", 1)
+    candidate = _workflow_git_candidate(tmp_path, workflow)
+    monkeypatch.setattr(merge_gate, "REPO_ROOT", tmp_path)
+    path, _ = merge_gate.WORKFLOWS["HJK6/pentacle"]
+    message = ("public candidate is missing the mapped workflow" if change == "missing"
+               else "public candidate workflow commands differ from the audited contract")
+    with pytest.raises(merge_gate.GateError, match=f"^{message}$"):
+        merge_gate._public_workflow(candidate, path)
 
 
 @pytest.mark.parametrize("repository", ["HJK6/pentacle", "HJK6/pentacle-private"])
