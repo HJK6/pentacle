@@ -69,9 +69,13 @@ class AccountRuntime:
     async def choose_launch(self,*,host,provider,model,effort,message):
         await self.authorize_choice(message)
         if not self.manages(host):
+            if "account" in message or message.get("_account_resume_binding"):
+                raise AccountError("account_feature_off")
+            # OFF restores legacy admissions; retained rows remain for draining.
+            if self.policy.get("enabled") is not True: return None
             managed=await self.run(lambda accounts:accounts.conn.execute(
                 "SELECT 1 FROM v2_account_bindings WHERE host=? AND provider=? LIMIT 1",(host,provider)).fetchone() is not None)
-            if managed or "account" in message: raise AccountError("account_feature_off")
+            if managed: raise AccountError("account_feature_off")
             return None
         if message.get("command"): raise AccountError("managed_command_forbidden")
         if message.get("resume_session_id") and message.get("_account_resume_binding"):

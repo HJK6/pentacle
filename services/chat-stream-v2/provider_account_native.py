@@ -211,7 +211,9 @@ def claude_observation(binding: Binding, *, collect_usage, run=subprocess.run, n
     windows = {}
     from datetime import datetime
     for key, window in usage.items():
-        if not isinstance(window, dict): continue
+        # Billing/breakdown metadata shares this cache with timed quotas.
+        if not isinstance(window, dict) or "resets_at" not in window: continue
+        if not isinstance(window["resets_at"], str): raise AccountError("provider_windows_invalid")
         try:
             reset = datetime.fromisoformat(window["resets_at"].replace("Z", "+00:00")).timestamp()
         except (KeyError, ValueError, TypeError): raise AccountError("provider_windows_invalid") from None

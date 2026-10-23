@@ -73,8 +73,11 @@ JSON file. With no file, the feature is off. A minimal disabled policy is:
 ```
 
 `managed_hosts` allows a staged rollout. An untouched host keeps its existing
-launch path. A host with previously registered managed bindings cannot silently
-fall back to legacy homes when disabled. Missing entries in `cells` are not
+launch path. While policy is enabled, removing a previously managed host from
+that list refuses new launches there. Disabling the whole policy restores the
+legacy path for ordinary new launches even when account rows remain; explicit
+account choices and resumes of bound named-home conversations still refuse.
+Missing entries in `cells` are not
 invented accounts; configured but unenrolled entries appear as unconfigured.
 Defaults live in the daemon's transactional store, survive restart and carry a
 revision. Selection reads a complete account/default revision once before launch.
@@ -194,8 +197,14 @@ Enable only compatible launch, local/satellite ingest, usage and recovery consum
 at their accepted artifacts. Bind real evidence to source/config/binary hashes,
 login generation and live process identity. Preserve healthy legacy homes.
 
-Rollback disables new controls/new managed launches first, while existing bound
-agents can drain. Use the existing handoff before reverting to a binary that
+Enable policy and configure each managed host/provider's saved default in the
+same activation window; verify an ordinary spawn with no account override.
+An enabled host without a saved default refuses ordinary spawns.
+
+Rollback disables new controls/new managed launches first and restores ordinary
+legacy admission, while existing bound agents can drain. Retain binding and
+default rows; no database restore or account-row deletion is needed. Use the
+existing handoff before reverting to a binary that
 cannot understand named transcript roots. Keep saved defaults and immutable
 bindings coherent. Never restore stale token bytes, wipe homes or log out another
 account as rollback. Missing host/provider/account enrollment is incomplete and

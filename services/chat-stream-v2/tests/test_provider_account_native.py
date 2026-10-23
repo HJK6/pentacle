@@ -45,7 +45,8 @@ def test_codex_unverified_or_changed_identity_never_returns_quota(tmp_path, case
     with pytest.raises(AccountError): codex_observation(binding(tmp_path), rpc_factory=RPC)
 
 
-def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path):
+@pytest.mark.parametrize("case", ["plain", "metadata", "null_reset", "numeric_reset", "invalid_reset"])
+def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path, case):
     account = binding(tmp_path, "claude")
     def run(argv, **kwargs):
         assert kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path)
@@ -53,17 +54,36 @@ def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path):
             "apiProvider": "firstParty", "configDirectory": str(tmp_path), "orgId": "pool-a", "email": "person@example.test", "subscriptionType": "max"}))
     def collect(selected, env):
         assert selected == account and env["CLAUDE_CONFIG_DIR"] == str(tmp_path)
+        usage = {key: {"utilization": 12, "resets_at": "2027-01-01T00:00:00Z"}
+                 for key in ["five_hour", "seven_day", "seven_day_model"]}
+        if case == "metadata":
+            # Native /usage also caches billing and breakdown metadata. These
+            # are fake values, not timed quota windows or live account data.
+            usage.update({
+                "seven_day_opus": None,
+                "extra_usage": {"is_enabled": False, "utilization": None, "monthly_limit": None},
+                "spend": {"used": 0, "limit": None, "enabled": False},
+                "seven_day_breakdown": {"as_of": "2026-01-01T00:00:00Z", "rows": []},
+                "limits": [], "member_dashboard_available": False,
+            })
+        elif case != "plain":
+            usage["five_hour"]["resets_at"] = {
+                "null_reset": None, "numeric_reset": 1234, "invalid_reset": "not-a-timestamp",
+            }[case]
         (tmp_path / ".claude.json").write_text(json.dumps({
             "oauthAccount": {"accountUuid": "login-user", "organizationUuid": "pool-a", "emailAddress": "person@example.test"},
             "cachedUsageUtilization": {"accountUuid": "login-user", "fetchedAtMs": 1000500,
-                "utilization": {key: {"utilization": 12, "resets_at": "2027-01-01T00:00:00Z"}
-                                for key in ["five_hour", "seven_day", "seven_day_model"]}}}))
+                "utilization": usage}}))
     # Native login account cache exists before quota collection.
     collect(account, {"CLAUDE_CONFIG_DIR": str(tmp_path)})
     ticks = iter([1000, 1001])
+    if case not in {"plain", "metadata"}:
+        with pytest.raises(AccountError, match="provider_windows_invalid"):
+            claude_observation(account, collect_usage=collect, run=run, now=lambda: next(ticks))
+        return
     row = claude_observation(account, collect_usage=collect, run=run, now=lambda: next(ticks))
     assert row["provider_id"] == "login-user" and row["pool_id"] == "pool-a" and row["observed_at"] == 1000.5
-    assert len(row["windows"]) == 3
+    assert set(row["windows"]) == {"five_hour", "seven_day", "seven_day_model"}
 
 
 @pytest.mark.parametrize("outcome", ["cancelled", "locked_keychain", "human_reseed_required", "wrong_account", "ok"])
