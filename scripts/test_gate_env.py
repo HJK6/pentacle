@@ -459,10 +459,10 @@ class DeadlineEnvelope(Tmp):
     def test_deadline_covers_tiers_preflight_and_reserve(self):
         command, results = self.command("merge", "parser.add_argument('--deadline-seconds')")
         self.assertEqual(command[command.index("--timeout-seconds") + 1], "900")
-        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60))
-        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30)
+        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60 + 30))
+        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
         unit, results = self.command("unit", "--deadline-seconds")
-        self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60))  # unit has no smoke preflight
+        self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")

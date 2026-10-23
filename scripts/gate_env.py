@@ -846,7 +846,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
             budget = config["deadline"]
             preflights = 1 if target["gate"] in ("smoke", "merge") else 0
-            deadline_s = tier_s * tiers + budget["preflight_s"] * preflights + budget["reserve_s"]
+            # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
+            deadline_s = tier_s * tiers + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
