@@ -2,7 +2,7 @@
 
 The v2 daemon tracks coordinator-adjudicated QA rejects by canonical spec, stable
 acceptance surface, and cycle. Two valid rejects from different commissions stop
-new QA commissions on that surface until a lead or Nexus records a diagnosis and
+new QA commissions on that surface until an authorized coordinator records a diagnosis and
 pivot. Candidate SHA changes do not reset the count. The adjudication requirement
 and valid-reject limit apply to every commission carrying all three QA fields in
 both modes. `PENTACLE_QA_DISPATCH_MODE=enforce` additionally makes those fields
@@ -125,10 +125,22 @@ agent-orch spec-issue diagnose --spec-id spec_pentacle__example \
   --pivot 'Repair the generation oracle and review the corrected scope'
 ```
 
-Mutations require an open verified lead/Nexus with the canonical spec binding and
-commission ownership: the original coordinator generation, its current ancestor,
-or an explicit handoff successor chain. Shared spec tags alone grant no authority.
-The reviewer cannot adjudicate its own report.
+Lead/Nexus mutations require an open verified caller with the canonical spec
+binding and commission ownership: the original coordinator generation, its current
+ancestor, or an explicit handoff successor chain. A planner additionally needs that
+spec as its current assignment and may commission only `--phase spec` QA. Use
+`--role qa --phase spec` at spawn; sends use the reviewer's current persisted phase,
+not a phase override in the send request. Surface slugs remain descriptive.
+
+The normalized phase is saved on each commission. Planner adjudication requires a
+saved `spec` phase; diagnosis requires every counted reject to be `spec` phase and
+owned under the same lineage rules. Changing the reviewer's phase cannot upgrade
+an existing commission. Existing database rows retain a NULL phase and remain
+available to lead/Nexus callers; planners cannot mutate those legacy commissions.
+Mixed-phase rejects share the same counter and require lead/Nexus diagnosis.
+Shared spec tags alone grant no planner assignment or commission ownership. The
+reviewer cannot adjudicate its own report. These permissions grant no product
+implementation authority.
 
 The first adjudication permanently selects one representative report per
 commission. Repeated adjudication is idempotent; a new report id for the same

@@ -11,7 +11,7 @@ import time
 import threading
 from typing import Any
 
-from store_specs import _session_row, normalize_spec_ids
+from store_specs import _session_row, effective_assignment, normalize_spec_ids
 
 
 class QaError(ValueError):
@@ -23,6 +23,7 @@ class QaError(ValueError):
 SPEC_SOURCE_FIELDS = (
     "created_at", "session_generation", "status", "role", "parent_stream_id",
     "handoff_from_stream_id", "spec_id", "spec_ids", "qualified_spec_ids",
+    "assigned_spec_id", "phase",
     "spec_binding_provenance", "requested_model", "requested_effort",
     "effective_model", "effective_effort", "provider",
 )
@@ -93,6 +94,8 @@ def initialize(conn):
         payload_hash TEXT NOT NULL, report_id TEXT UNIQUE, adjudicated_valid INTEGER NOT NULL DEFAULT 0,
         reason TEXT, actor TEXT, created_at REAL NOT NULL,
         PRIMARY KEY(reviewer,generation,msg_id))""")
+    if "phase" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_qa_commissions)")}:
+        conn.execute("ALTER TABLE v2_qa_commissions ADD COLUMN phase TEXT")
     conn.execute("""CREATE INDEX IF NOT EXISTS v2_qa_active
         ON v2_qa_commissions(spec_id,surface,cycle,adjudicated_valid)""")
     conn.execute(
@@ -446,6 +449,8 @@ class QaStoreMixin:
         ids = [spec, *normalize_spec_ids(
             caller.get("qualified_spec_ids") or caller.get("spec_ids"), caller.get("spec_id"))]
         ids += normalize_spec_ids(target.get("spec_ids"), target.get("spec_id")) if reviewer else list(target_specs or ())
+        if str(caller.get("role") or "").lower() == "planner" and effective_assignment(caller):
+            ids.append(effective_assignment(caller))
         lookup = await self._resolve_spec_inputs(ids)
         def check(conn):
             if capture(conn) != source:
@@ -463,9 +468,9 @@ class QaStoreMixin:
             raise QaError(
                 "qa_unauthorized", "caller lifecycle is not open and verified"
             )
-        if str(row.get("role") or "").lower() not in {"lead", "nexus"}:
+        if str(row.get("role") or "").lower() not in {"lead", "nexus", "planner"}:
             raise QaError(
-                "qa_unauthorized", "a lead or Nexus must commission/adjudicate QA"
+                "qa_unauthorized", "a lead, Nexus or assigned SPEC-QA planner is required"
             )
         if not callable(resolver) or resolver(spec) != spec:
             raise QaError(
@@ -476,7 +481,16 @@ class QaStoreMixin:
         )
         if spec not in {resolver(s) for s in specs}:
             raise QaError("qa_spec_mismatch", "caller does not carry this spec")
+        if str(row.get("role") or "").lower() == "planner":
+            assigned = effective_assignment(row)
+            if not assigned or resolver(assigned) != spec:
+                raise QaError("qa_unauthorized", "planner must be assigned this spec")
         return row
+
+    @staticmethod
+    def _qa_planner_phase(owner, phase):
+        if str(owner.get("role") or "").lower() == "planner" and phase != "spec":
+            raise QaError("qa_unauthorized", "planner authority is limited to commissioned SPEC-phase QA")
 
     async def qa_admit(
         self,
@@ -493,6 +507,7 @@ class QaStoreMixin:
         check_only=False,
         existing_reviewer=False,
         prepare_only=False,
+        phase=None,
     ):
         scope, target_specs = copy.deepcopy(scope), copy.deepcopy(target_specs)
         spec, surface, cycle = _scope(scope)
@@ -514,6 +529,7 @@ class QaStoreMixin:
                 owner = self._qa_actor(conn, actor, actor_generation, spec, resolve)
                 reviewer_generation = generation
                 reviewer_specs = target_specs
+                reviewer_phase = phase
                 if existing_reviewer:
                     target = _session(conn, reviewer)
                     if not target or target.get("status") != "open":
@@ -522,10 +538,13 @@ class QaStoreMixin:
                         )
                     if target.get("session_generation") != generation:
                         raise QaError("qa_reviewer_unavailable", "QA reviewer generation changed")
+                    reviewer_phase = target.get("phase")
                     reviewer_generation = target.get("session_generation")
                     reviewer_specs = normalize_spec_ids(
                         target.get("spec_ids"), target.get("spec_id")
                     )
+                reviewer_phase = str(reviewer_phase or "").strip().lower() or None
+                self._qa_planner_phase(owner, reviewer_phase)
                 canonical_targets = {
                     resolve(value) for value in reviewer_specs
                 }
@@ -540,6 +559,7 @@ class QaStoreMixin:
                         (reviewer, reviewer_generation, msg_id),
                     ).fetchone()
                     if prior:
+                        self._qa_planner_phase(owner, prior["phase"])
                         expected = (
                             actor,
                             actor_generation,
@@ -576,8 +596,8 @@ class QaStoreMixin:
                     )
                     conn.execute(
                         "INSERT INTO v2_qa_commissions "
-                        "(reviewer,generation,msg_id,coordinator,coordinator_generation,spec_id,surface,cycle,payload_hash,created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "(reviewer,generation,msg_id,coordinator,coordinator_generation,spec_id,surface,cycle,payload_hash,created_at,phase) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             reviewer,
                             reviewer_generation,
@@ -589,6 +609,7 @@ class QaStoreMixin:
                             cycle,
                             payload_hash,
                             time.time(),
+                            reviewer_phase,
                         ),
                     )
                 if transaction:
@@ -687,6 +708,7 @@ class QaStoreMixin:
                                 "report generation/commission does not match scope",
                                 candidate_msg_ids=candidate_msg_ids,
                             )
+                        self._qa_planner_phase(caller, commission["phase"])
                         if report["from_stream_id"] == actor or not _authorized_lineage(
                             conn, caller, commission
                         ):
@@ -740,6 +762,8 @@ class QaStoreMixin:
                         ident = _text(msg.get("diagnosis_id"), "diagnosis_id", 128)
                         diagnosis = _text(msg.get("diagnosis"), "diagnosis")
                         pivot = _text(msg.get("pivot"), "pivot")
+                        for counted in _rejects(conn, spec, surface, cycle):
+                            self._qa_planner_phase(caller, counted["phase"])
                         prior = conn.execute(
                             "SELECT * FROM v2_qa_diagnoses WHERE diagnosis_id=?",
                             (ident,),

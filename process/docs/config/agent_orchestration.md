@@ -28,7 +28,7 @@ Public role instructions are in [planner](../../agents/planner_baseline.md), [le
 
 Role label, model and effort, task and authority are four separate facts; none implies another.
 
-- A **planner** writes the spec and commissions its independent spec review. It does not implement, and it does not acquire execution authority by relabeling itself.
+- A **planner** writes the spec and may commission, adjudicate and diagnose independent SPEC-phase QA for its assigned canonical spec, using `--role qa --phase spec`. It does not implement, and it does not acquire execution authority by relabeling itself.
 - An **execution lead** implements only under an explicit commission: a brief or spawn that names provider, model and effort, role and spec, issued after the spec is accepted. An authored spec or a self-chosen label is not that commission.
 - **QA** is independent of the author and the implementer, reviews once, reports a verdict and stops.
 - Hand accepted scope to the named execution owner once, at the stage boundary. Routine edits inside an owner's existing scope need no further transfer or approval.
@@ -56,9 +56,9 @@ As of 2026-10-08. This profile assigns by task class and risk, without requiring
 - If a chosen tuple is unavailable, record the constraint and the authorized substitute. Do not silently lower the tier.
 - The coordinator tuple is for coordination; it is not the default implementer. A planning model is not a substitute hard-problem solver.
 
-For new planned work the order is planner, independent spec QA, then one execution lead or an optional multi-lane coordinator. Drivers consume the accepted packet, implement directly and own closure. The planner closes after its spec is accepted unless it is doing named, bounded work; the continuing execution owner takes custody of its child reports and pending decisions first. Advice on a named blocker, a materially changed scope or a two-rejection reassessment is commissioned fresh, reports once and closes. Bounded repairs preserve accepted evidence for unchanged scope; two valid rejections require diagnosis reassessment.
+For new planned work the order is planner, independent spec QA, then one execution lead or an optional multi-lane coordinator. Drivers consume the accepted packet, implement directly and own closure. After spec acceptance, the planner returns the packet to the front desk, which commissions the execution lead or optional coordinator and takes custody of child reports and pending decisions. For complex stories the front desk may retain the planner as an advisor; otherwise the planner closes after handback. Retention adds no execution authority. Advice on a named blocker, a materially changed scope or a two-rejection reassessment is commissioned fresh, reports once and closes. Bounded repairs preserve accepted evidence for unchanged scope; two valid rejections require diagnosis reassessment.
 
-A lead keeps at most two live children. Run no standing evaluator, shadow or polling seats. Read each durable child report once when it is ready, then close the completed child.
+A lead keeps at most two live children. Run no shadow or polling seats; optional retained planner advice does not replace a fresh independent evaluator or QA. Read each durable child report once when it is ready, then close the completed child.
 
 ### Overrun evaluation
 

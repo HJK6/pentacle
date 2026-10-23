@@ -39,6 +39,8 @@ def message(verb, **extra):
         "worker",
         "off_legacy",
         "restart",
+        "planner",
+        "planner_unassigned_at_fire",
     ],
 )
 def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case):
@@ -91,6 +93,10 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
         await link_specs(store, SPEC)  # item (1): a scheduled commission names a lane-linked spec
         try:
             fields = dict(META)
+            if case.startswith("planner"):
+                await store.update_session("localhost", "lead", role="planner")
+                await sessions.refresh()
+                fields["phase"] = "spec"
             if case in ("worker", "off_legacy"):
                 fields = {}
             if case == "off_legacy":
@@ -186,8 +192,10 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                     )
                 )["schedule"]
                 assert row["generation"] == 2
+            if case == "planner_unassigned_at_fire":
+                await store.update_session("localhost", "lead", assigned_spec_id="")
             run_msg = message("schedule.run", schedule_id=sid)
-            if case in ("rejects", "stale", "rearm", "owner_generation", "scheduled_fire_refuses_pending"):
+            if case in ("rejects", "stale", "rearm", "owner_generation", "scheduled_fire_refuses_pending", "planner_unassigned_at_fire"):
                 with pytest.raises(VerbError) as exc:
                     await schedule._fire_schedule(sid)
                 result = exc.value.extra.get("spawn", {})
@@ -196,7 +204,7 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                     if case == "stale"
                     else (
                         "qa_unauthorized"
-                        if case == "owner_generation"
+                        if case in ("owner_generation", "planner_unassigned_at_fire")
                         else "qa_dispatch_reject_limit"
                     )
                 )
@@ -224,6 +232,8 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                 replay = await schedule.schedule_run(run_msg)
                 assert replay == fired
                 assert len(tmux.live) == count == 1
+                if case == "planner":
+                    assert (await issue(server, "show"))["commissions"][0]["phase"] == "spec"
                 if case == "replay":
                     assert len((await issue(server, "show"))["commissions"]) == 1
         finally:
