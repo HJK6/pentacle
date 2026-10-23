@@ -2,9 +2,20 @@
 
 The public harness is provider-free and uses a disposable local daemon. It validates the shipped websocket and renderer contracts with synthetic sessions; it does not connect to a production service or collect live user content.
 
+## Supported entry: `scripts/gate_env.py`
+
+QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
+
+```bash
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target v2-unit --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+```
+
+Targets are the closed list in `scripts/gate-env.json` (`v2-unit`, `v2-smoke`, `v2-merge`, `v2-pytest --select tests/test_x.py`, `npm-test --select test/x.test.js`); `prepare` runs the same setup without a subject. Every invocation writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before any setup, so failures, cancellation and crashes stay visible; `EVIDENCE/test-attempts.v1.json` is a derived index. A changed requirement, lockfile or profile selects a new prepared cache; a drifted cache is refused until `--rebuild` (which removes only that owned directory). Exit codes: 0 pass, 1 subject failure, 3 setup failure, 130 cancelled. Running `run_gate.py` or `pytest` directly remains possible but is not the supported route. Self-test: `python3 scripts/test_gate_env.py`.
+
 ## Unit and protocol checks
 
-Run the repository's normal unit gate first:
+Run the repository's normal unit gate first, through the supported entry above (`--target v2-unit`). The underlying tier runner is:
 
 ```bash
 python3 services/chat-stream-v2/tools/run_gate.py unit

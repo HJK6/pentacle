@@ -1,5 +1,9 @@
 # TH-H2 portable daemon gate
 
+## Supported entry
+
+The prepared environment, dependency check and capability probes below are run for you by `scripts/gate_env.py` (see [E2E harness](E2E_HARNESS.md#supported-entry-scriptsgate_envpy)); a missing required capability refuses before the subject starts. The manual recipe that follows is the reference for what it prepares.
+
 ## Exact interpreter and bounded execution
 
 From services/chat-stream-v2, create a disposable venv and install the existing requirements:
