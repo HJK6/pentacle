@@ -31,7 +31,7 @@ async function run(surface,output) {
     if(surface==='web') {
       host=await startHost(['--profile',profile,'--port','0']);
       const chrome=process.env.PENTACLE_CHROME || (process.platform==='darwin'?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':'google-chrome');
-      proc=spawn(chrome,['--headless=new','--no-first-run','--no-default-browser-check','--disable-gpu','--window-size=1280,800',...args,`http://127.0.0.1:${host.port}`],{stdio:['ignore',log,log]});
+      proc=spawn(chrome,['--headless=new', '--use-mock-keychain','--no-first-run','--no-default-browser-check','--disable-gpu','--window-size=1280,800',...args,`http://127.0.0.1:${host.port}`],{stdio:['ignore',log,log]});
     } else {
       proc=spawn(require('electron'),[ROOT,...args],{env:{...process.env,PENTACLE_CONFIG:profile,PENTACLE_HARNESS:'1'},stdio:['ignore',log,log]});
     }

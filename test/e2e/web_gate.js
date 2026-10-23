@@ -571,7 +571,9 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       chrome = spawn(chromeBin, [
         '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
         '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-        '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
+        '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000',
+        // A HOME without a login keychain (isolated gate runs) otherwise leaves the page target at about:blank on macOS.
+        '--use-mock-keychain', url,
         ...withResolverRule(runtime.modelerFixture?.chromeArgs || [], `MAP ${REBIND_HOST} 127.0.0.1`),
       ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
