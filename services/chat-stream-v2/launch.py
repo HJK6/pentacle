@@ -104,8 +104,6 @@ class LocalMachine:
     codex_bin: str
     projects_root: str
     agent_orch_bin_dir: str | None = None
-    # Defaulted and last so pre-gemini positional/keyword constructors keep
-    # working; the bare value resolves through the daemon PATH.
     gemini_bin: str = "gemini"
 
 
@@ -460,18 +458,13 @@ def _gemini_command(
     transcript_dir = os.path.join(machine.cwd, ".gemini/sessions")
     transcript_file = os.path.join(transcript_dir, f"{session_id}.jsonl")
     
-    # The interactive UI and the headless `-o stream-json` stdout feed are
-    # mutually exclusive: the CLI classifies any non-TTY stdout (including this
-    # command's old `| tee` capture) as headless mode and exits with "No input
-    # provided via stdin". So the transcript is NOT taken from stdout. An
-    # interactive session instead writes the always-on native chat recording —
-    # `$HOME/.gemini/tmp/<project>/chats/session-<UTC-minute>-<shortId>.jsonl`
-    # where shortId is the first 8 characters of the `--session-id` value — so
-    # pass the session id and let the CLI record. The recording's filename
-    # carries a minute timestamp chosen by the CLI at boot, which a static
-    # lifecycle path cannot predict, so a bounded background watcher links the
-    # recording to the stable per-session path the lifecycle row records
-    # (`LaunchPlan.jsonl_path`); path stat/open follow the symlink.
+    # Non-TTY stdout makes the CLI think it's headless and exit ("No input
+    # provided via stdin"), so no stdout capture. The interactive pane uses the
+    # CLI's native chat recording instead:
+    # ~/.gemini/tmp/<project>/chats/session-<UTC-minute>-<shortId>.jsonl,
+    # shortId = first 8 chars of --session-id. The CLI picks the minute
+    # timestamp at boot, so a bounded watcher symlinks the recording to the
+    # stable per-session path the lifecycle row records (LaunchPlan.jsonl_path).
     short_id = session_id[:8]
     recording_link_watcher = (
         "{ ( i=0; while [ $i -lt 240 ]; do "

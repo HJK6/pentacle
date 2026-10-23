@@ -315,16 +315,10 @@ def codex_tui_session_visible(pane_text: str) -> bool:
 
 
 # -- Gemini -------------------------------------------------------------------
-#
-# Evidence shapes captured from a live detached pane (gemini-cli v0.65):
-#   idle:      the composer renders `> ` + the placeholder and sits directly
-#              above the footer (`workspace (/directory) ... /model`);
-#   draft:     the typed prompt IS the composer line, nothing follows it;
-#   submitted: the prompt is echoed as an earlier `> ` line in the transcript
-#              while the composer returns to the placeholder (optionally with a
-#              `Thinking... (esc to cancel` activity line between them).
-# The bottom-most `> ` line is always the active composer, which makes the
-# draft/submitted discrimination structural rather than positional guessing.
+# gemini-cli v0.65 pane shapes: the bottom-most `> ` line is always the live
+# composer. idle: composer + placeholder over the footer; draft: the prompt IS
+# the composer; submitted: the prompt is echoed above while the composer
+# returns to the placeholder (maybe with a `Thinking...` line between).
 _GEMINI_COMPOSER_PLACEHOLDER = "Type your message or @path/to/file"
 
 
@@ -495,7 +489,7 @@ def claude_prompt_in_native_queue(pane_text: str, prompt: str) -> bool:
 def prompt_in_native_queue(pane_text: str, prompt: str, provider: str) -> bool:
     """Provider dispatch for native-queue detection after a delivered paste."""
     if provider == "gemini":
-        return tuple()
+        return False
     if provider == "claude":
         return claude_prompt_in_native_queue(pane_text, prompt)
     if provider == "codex":

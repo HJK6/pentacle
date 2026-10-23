@@ -37,8 +37,7 @@ def _record_session_id(record: dict) -> str:
     return ""
 
 
-#: `error`/`info` records carry no sessionId; the stream's bound identity fills
-#: them in so every emitted event keeps its session attribution.
+#: error/info records carry no sessionId — inherit the stream's identity.
 def _event_session_id(record: dict, default: str) -> str:
     return _record_session_id(record) or default
 
@@ -84,7 +83,7 @@ def normalize_gemini_jsonl_record(
             "raw": raw,
         }
 
-    # File header and `$set` metadata bumps carry no conversational content.
+    # file header and $set metadata bumps: no conversation content.
     if record_type is None:
         return []
 
@@ -92,8 +91,7 @@ def normalize_gemini_jsonl_record(
         content = _to_text(record.get("content"))
         if not content.strip():
             return []
-        # The CLI injects its own setup envelope into the USER role before the
-        # first typed turn; it must not open turn 1.
+        # CLI-injected setup envelope must not open turn 1.
         if content.lstrip().startswith("<session_context>"):
             return _stamp_jsonl_event_identity(
                 [make("SYSTEM", "Gemini session context established")], record_uuid)
@@ -109,8 +107,8 @@ def normalize_gemini_jsonl_record(
 
     if record_type == "gemini":
         events: list[dict] = []
-        # Tool activity is recorded inline on the assistant record; the final
-        # text is the turn's answer, so tool use/results come first.
+        # tool activity is inline on the assistant record; the final text is
+        # the answer, so tool use/results come first.
         for tool_call in record.get("toolCalls") or []:
             if not isinstance(tool_call, dict):
                 continue
@@ -149,7 +147,7 @@ def normalize_gemini_jsonl_record(
             "subtype": "cli-info",
         })], record_uuid)
 
-    # Unknown record types (future schema additions) are skipped, never guessed.
+    # unknown record types: skip, never guess.
     return []
 
 
@@ -187,8 +185,7 @@ def normalize_gemini_jsonl_records(
     session_name: str,
     default_session_id: str = "",
 ) -> list[dict]:
-    # Flat map: the native recording is append-only and self-contained per
-    # record, so no cross-record grouping is needed.
+    # flat map: the recording is append-only and self-contained per record.
     payloads = []
     for r in records:
         payloads.extend(normalize_gemini_jsonl_record(
