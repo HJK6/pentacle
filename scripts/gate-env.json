@@ -1,0 +1,60 @@
+{
+  "schema": "pentacle.gate-env.v1",
+  "toolchain": {"python": "3.13", "node": "22"},
+  "reserve_s": 60,
+  "max_tmpdir_bytes": 48,
+  "min_free_mb": 1024,
+  "locales": ["en_US.UTF-8", "C.UTF-8"],
+  "system_path": ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
+  "search_path": {
+    "darwin": ["/opt/homebrew/opt/python@3.13/bin", "/opt/homebrew/opt/node@22/bin", "/opt/homebrew/bin", "/usr/local/bin"],
+    "linux": ["/usr/local/bin", "/usr/bin", "/bin"]
+  },
+  "capability_sets": {
+    "v2_host": [
+      "ps argv readable",
+      "ps birth readable",
+      "process start identity readable",
+      "lsof descriptor readable",
+      "tmux usable",
+      "short-path unix-socket directory writable",
+      "environment: isolated Python dependencies"
+    ]
+  },
+  "profiles": {
+    "pentacle": {
+      "service_dir": "services/chat-stream-v2",
+      "python_requirements": ["services/chat-stream-v2/requirements.txt"],
+      "python_editable": ["services/agent-orch"],
+      "pythonpath": ["services", "services/agent-orch"],
+      "package_lock": "package-lock.json",
+      "targets": {
+        "v2-unit": {
+          "kind": "run_gate", "gate": "unit", "needs": ["python", "tmux"],
+          "capabilities": "v2_host", "timeout_s": 900, "max_timeout_s": 7200
+        },
+        "v2-smoke": {
+          "kind": "run_gate", "gate": "smoke", "needs": ["python", "tmux"],
+          "capabilities": "v2_host", "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "timeout_s": 900, "max_timeout_s": 7200
+        },
+        "v2-merge": {
+          "kind": "run_gate", "gate": "merge", "needs": ["python", "tmux"],
+          "capabilities": "v2_host", "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "timeout_s": 1800, "max_timeout_s": 14400
+        },
+        "v2-pytest": {
+          "kind": "pytest_files", "needs": ["python", "tmux"], "capabilities": "v2_host",
+          "select": {"root": "services/chat-stream-v2", "pattern": "^tests/test_[A-Za-z0-9_]+\\.py(::[A-Za-z0-9_]+)*$"},
+          "timeout_s": 900, "max_timeout_s": 7200
+        },
+        "npm-test": {
+          "kind": "npm_test", "needs": ["node", "npm"], "npm_ci": true, "process_listing": true,
+          "select": {"pattern": "^test/[A-Za-z0-9_./*-]+$"},
+          "default_patterns": ["test/*.test.js", "test/*.test.ts", "test/e2e/terminal_interaction_runtime/*.test.js"],
+          "timeout_s": 900, "max_timeout_s": 7200
+        }
+      }
+    }
+  }
+}
