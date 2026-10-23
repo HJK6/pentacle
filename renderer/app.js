@@ -6633,23 +6633,14 @@ function catalogProviders(catalog) {
 }
 
 function modelLabel(model) {
-  const labels = {
-    'claude-opus-4-8': 'Opus 4.8',
-    'claude-opus-5': 'Opus 5',
-    'claude-opus-5-5': 'Opus 5.5',
-    'claude-sonnet-5-5': 'Sonnet 5.5',
-    'claude-sonnet-5': 'Sonnet 5',
-    'claude-fable-5': 'Fable 5',
-    'claude-fable-5-1': 'Fable 5.1',
-    'gpt-5.6-sol': '5.6 Sol',
-    'gpt-6-astra': '6 Astra',
-    'gpt-6-sol': '6 Sol',
-    'gpt-6.1-sol': '6.1 Sol',
-    'gpt-6-luna': '6 Luna',
-    'gpt-5.6-luna': '5.6 Luna',
-    'gpt-5.6-terra': '5.6 Terra',
-  };
-  return labels[model] ?? model;
+  // Catalog ids carry their display name (claude-<family>-<major>[-<minor>],
+  // gpt-<version>-<tier>); anything else renders raw.
+  const id = String(model ?? '');
+  const title = (word) => word[0].toUpperCase() + word.slice(1);
+  const claude = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
+  if (claude) return `${title(claude[1])} ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}`;
+  const gpt = id.match(/^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/);
+  return gpt ? `${gpt[1]} ${title(gpt[2])}` : model;
 }
 
 function updateNewSessionStatus(message = '', isError = false) {
