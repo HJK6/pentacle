@@ -122,6 +122,7 @@ async def admit(
             enforce=enabled,
             check_only=check_only,
             existing_reviewer=existing_reviewer,
+            phase=row.get("phase"),
         )
     except QaError as exc:
         log.info(
