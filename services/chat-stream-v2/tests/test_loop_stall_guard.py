@@ -179,8 +179,14 @@ async def test_publisher_lifecycle_and_bounded_healthy_repetitions(tmp_path):
     w.start(asyncio.get_running_loop())
     samples = []
     try:
-        await asyncio.sleep(.05)
-        p = await asyncio.to_thread(read_json, path)
+        # The watchdog publishes from its own thread; wait for the first snapshot, bounded.
+        async with asyncio.timeout(2):
+            while True:
+                try:
+                    p = await asyncio.to_thread(read_json, path)
+                    break
+                except FileNotFoundError:
+                    await asyncio.sleep(.02)
         assert validate_snapshot(p, time.monotonic())['store']['pending_count'] == 0
         for _ in range(20):
             started = time.monotonic()

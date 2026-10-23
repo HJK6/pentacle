@@ -20,16 +20,24 @@ jobs:
       - name: System packages
         timeout-minutes: 10
         run: |
+          # Stalls have been slow package-pool downloads from one mirror while its index stays fast,
+          # so attempt 2 switches mirror. Worst case fits the step: 2 x (60+10 update, 180+10 install)
+          # + (60+10 dpkg repair) + 5 sleep = 595 s < 600 s.
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          for attempt in 1 2 3; do
-            # Acquire timeouts do not catch every mirror stall; cap each call so a hang is retried.
-            if sudo timeout -k 10 120 apt-get "${apt_opts[@]}" update \
-              && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y tmux lsof zsh ffmpeg; then
+          for attempt in 1 2; do
+            if [ "$attempt" = 2 ]; then
+              echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            echo "apt attempt $attempt mirror: $(head -n 1 /etc/apt/apt-mirrors.txt 2>/dev/null || echo image-default)"
+            if sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update \
+              && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends tmux lsof zsh ffmpeg; then
               exit 0
             fi
-            echo "apt attempt $attempt failed or timed out; retrying in 15 s"
-            sudo dpkg --configure -a || true
-            sleep 15
+            echo "apt attempt $attempt failed or timed out"
+            if [ "$attempt" = 1 ]; then
+              sudo timeout -k 10 60 dpkg --configure -a || true
+              sleep 5
+            fi
           done
           exit 1
       - run: npm ci
