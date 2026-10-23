@@ -278,7 +278,7 @@ test('B1: failed and cancelled rows render their affordances', () => {
 test('B4: a queued row renders a "queued" affordance + is-queued class', () => {
   const html = renderTranscriptItemHtml(userItem({ sendState: 'queued' }), CHROME);
   assert.ok(/is-user is-queued/.test(html), 'row carries is-queued');
-  assert.ok(/slot-chat-send-status is-queued/.test(html) && />Queued</.test(html), 'queued label');
+  assert.ok(/slot-chat-send-status is-sending/.test(html) && />sending…</.test(html), 'local queue metadata is not provider proof');
 });
 
 test('C4: a provider-queued row renders Queued (is-queued), not sending…, via receiptCaption or providerQueued', () => {
@@ -311,7 +311,8 @@ test('C4/C12: send.result provider_queued shows Queued through the controller, e
   await new Promise((r) => setTimeout(r, 0));
   const queued = a.container.querySelector('.slot-chat-send-status.is-queued');
   assert.ok(queued, a.container.innerHTML);
-  assert.equal(queued!.textContent, 'Queued');
+  assert.equal(queued!.firstChild?.textContent, 'Queued');
+  assert.equal(queued!.querySelector('.slot-chat-send-now')?.textContent, 'Send now');
   assert.equal(a.container.querySelector('.slot-chat-send-status.is-sending'), null);
   assert.equal(controller.getState().optimisticSends?.[optimisticId]?.status, 'acked');
 
@@ -331,7 +332,7 @@ test('C4: provider_queued arriving only on the send bridge result also shows Que
   await new Promise((r) => setTimeout(r, 0));
   controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed', submission_confirmed: true });
   assert.equal(controller.getState().optimisticSends?.[optimisticId]?.provider_queued, true, 'bridge result provider_queued retained across the later plain ack');
-  assert.equal(a.container.querySelector('.slot-chat-send-status.is-queued')?.textContent, 'Queued');
+  assert.equal(a.container.querySelector('.slot-chat-send-status.is-queued')?.firstChild?.textContent, 'Queued');
 });
 
 test('C12: an idle landed send.result (no provider_queued) shows Sent before the echo', async () => {

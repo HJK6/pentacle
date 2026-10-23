@@ -19,6 +19,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 - Optional named provider accounts add explicit spawn selection, per-host defaults, account usage and targeted re-login; disabled by default.
 
+### Changed
+
+- Agent chats send normally from the composer. Queued messages show their delivery state with a Send now action that interrupts the current turn without sending the message twice; the Queue/Steer chooser is removed.
+
 ## 2026-10-21
 
 ### Added

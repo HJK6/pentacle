@@ -56,6 +56,7 @@ export type TranscriptRenderOptions = {
   showTurnDuration?: boolean;
   streamId?: string;
   allowReplies?: boolean;
+  allowQueuedSendNow?: boolean;
   resolvedQuestions?: readonly ResolvedQuestionRecord[];
 };
 
@@ -381,7 +382,7 @@ function renderChatBody(text: string, options: TranscriptRenderOptions = {}): st
 // operator's ask). Confirmed rows pass sendState undefined and render nothing.
 const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_for_dependency', 'uncertain', 'failed', 'cancelled']);
 
-function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string): string {
+function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false): string {
   const label = sendState === 'sent' ? 'Sent' : sendState === 'queued'
     ? 'Queued'
     : sendState === 'sending'
@@ -392,7 +393,9 @@ function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticI
   const retry = (sendState === 'failed' || sendState === 'indeterminate') && optimisticId
     ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
     : '';
-  return `<div class="slot-chat-send-status is-${sendState}">${label}${retry}</div>`;
+  const sendNow = sendState === 'queued' && allowSendNow && optimisticId && streamId
+    ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}" title="Interrupt the current turn and run the queued messages">Send now</button>` : '';
+  return `<div class="slot-chat-send-status is-${sendState}">${label}${retry}${sendNow}</div>`;
 }
 
 type RenderAttachment = ChatAttachment & {
@@ -518,10 +521,10 @@ function renderTranscriptItemBodyHtml(
     const sendState = item.sendState;
     const rowClass = sendState ? ` is-${sendState}` : '';
     const receipt = sendState === 'cancelled' || sendState === 'failed' || sendState === 'indeterminate'
-      ? sendState : item.receiptCaption || (item.providerQueued ? 'queued' : item.queuedWhileWorking && (sendState === 'queued' || sendState === 'sending') ? 'queued' : sendState);
+      ? sendState : item.providerQueued ? 'queued' : item.receiptCaption || (sendState === 'queued' ? 'sending' : sendState);
     const invalidVoiceAnswers = item.voiceAnswersInvalid === true && sendState === 'failed';
     const droppedVoiceAnswers = item.voiceAnswersStatus?.state === 'dropped';
-    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId) : '';
+    const status = receipt && !invalidVoiceAnswers ? renderUserSendStatus(receipt, item.optimisticId, options.streamId, item.providerQueued === true && options.allowQueuedSendNow === true) : '';
     const plainVoice = invalidVoiceAnswers && item.optimisticId
       ? `<button type="button" data-question-voice-plain data-optimistic-id="${escapeHtml(item.optimisticId)}">Send as plain voice note</button>` : '';
     const voiceAnswersStatus = invalidVoiceAnswers || droppedVoiceAnswers
@@ -679,7 +682,8 @@ export function renderTranscriptTimelineHtml(
   chrome: ViewChrome = DEFAULT_CHROME,
   options: TranscriptRenderOptions = {},
 ): string {
-  options = { ...options, streamId: detail?.streamId || options.streamId };
+  options = { ...options, streamId: detail?.streamId || options.streamId,
+    allowQueuedSendNow: detail?.sessionKind !== 'assistant_composite' && options.allowQueuedSendNow !== false };
   const items = withResolvedQuestionAnswers(detail?.transcriptItems || [], options.resolvedQuestions);
   if (!items.length) return '';
   const output: string[] = [];
