@@ -2,13 +2,26 @@
 
 The public harness is provider-free and uses a disposable local daemon. It validates the shipped websocket and renderer contracts with synthetic sessions; it does not connect to a production service or collect live user content.
 
+## Supported entry: `scripts/gate_env.py`
+
+QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
+
+```bash
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target v2-unit --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+```
+
+Targets are the closed list in `scripts/gate-env.json` (`v2-unit`, `v2-smoke`, `v2-merge`, `v2-pytest --select tests/test_x.py`, `npm-test --select test/x.test.js`); `prepare` runs the same setup without a subject. Every invocation writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before any setup, so failures, cancellation and crashes stay visible; `EVIDENCE/test-attempts.v1.json` is a derived index. A changed requirement, lockfile or profile selects a new prepared cache; a drifted cache is refused until `--rebuild` (which removes only that owned directory). Exit codes: 0 pass, 1 subject failure, 3 setup failure, 130 cancelled. Running `run_gate.py` or `pytest` directly remains possible but is not the supported route. Self-test: `python3 scripts/test_gate_env.py`.
+
 ## Unit and protocol checks
 
-Run the repository's normal unit gate first:
+Run the repository's normal unit gate first, through the supported entry above (`--target v2-unit`). The underlying tier runner is:
 
 ```bash
 python3 services/chat-stream-v2/tools/run_gate.py unit
 ```
+
+Each tier's evidence keeps the original subject outcome (`reason`, also `primary_outcome`) apart from reporting and cleanup facts (`secondary_outcomes`), plus the raw `subprocess_returncode` and a `termination` record that tells an internal tier timeout from an external signal. A progress journal (`<tier>.progress.jsonl`, written by `tools/gate_progress.py` outside basetemp) names the last started and completed nodes even after a per-test timeout hard exit; it holds node identities, phases, outcomes and monotonic times only. Missing JUnit, an incomplete journal, a truncated log or an unwritable log always fail the tier. The evidence file is written as `finished: false` before launch, so a runner killed without cleanup stays visibly incomplete. `--deadline-seconds N` refuses with `deadline_envelope_exceeded`, before launch or between tiers, when the remaining time cannot cover the remaining tier bounds, smoke/soak preflight (30s), usage validation (30s) and `--deadline-reserve-seconds` (default 60s); every check's components are recorded under `deadline`.
 
 For a websocket smoke check, start a daemon on an ephemeral loopback port with temporary session and notification stores, then exercise `welcome`, `hello`, `list_sessions`, `spawn`, `send`, and `close`. The test should use a fake provider executable that writes deterministic output to a disposable tmux session.
 

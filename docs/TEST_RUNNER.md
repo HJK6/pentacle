@@ -71,7 +71,11 @@ Top-level fields include version, discovered source list, budgets, measured
 Each file has `file`, status (`pass`, `fail`, `timeout`, `not_run`, `build_failed`),
 `duration_ms`, reason when applicable, cleanup status and survivor PIDs. Build
 and execution records include exit/signal, timeout/abort, output-tail/truncation
-and cleanup details. A stderr table lists every row. A run succeeds only if all
+and cleanup details. Each cleanup record also carries `scans`: one row per group
+inspection with `elapsed_ms`, member count and error (at most 16 rows, the first
+and latest kept, `scans_dropped` counting the rest); `CLEANUP INCOMPLETE` stderr
+lines repeat them so a run without a summary path keeps the evidence. This is a
+diagnostic receipt only: it changes no deadline or verdict. A stderr table lists every row. A run succeeds only if all
 files pass and all runner/directory cleanup obligations succeed.
 
 ## Synthetic regression corpus
