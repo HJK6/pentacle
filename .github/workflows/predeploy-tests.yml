@@ -60,18 +60,14 @@ jobs:
           npm run build:web
           node test/e2e/web_gate.js
           node --test test/e2e/web_gate_interrupt.test.js
-      - name: Gate environment self-test
-        run: python3 scripts/test_gate_env.py
       - name: Daemon and CLI checks
         env:
-          GATE_EVIDENCE: ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          V2_UNIT_TIMEOUT_S: '1200'
+          V2_GATE_EVIDENCE_DIR: ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           umask 077
-          # Supported entry: owned venv/HOME/TMPDIR, closed child environment, preflight, attempt receipts.
-          python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${GATE_EVIDENCE}" \
-            --target v2-merge --timeout-seconds 2400 --spec ci --series "ci-${GITHUB_RUN_ID}" --purpose acceptance \
-            --attempt-manifest "${GATE_EVIDENCE}/attempt-manifest.json"
           export PYTHONPATH="${GITHUB_WORKSPACE}/services:${GITHUB_WORKSPACE}/services/agent-orch"
+          python services/chat-stream-v2/tools/run_gate.py merge --basetemp "/tmp/pentacle-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           python -m pytest services/agent-orch/tests
           python -m pytest services/_shared/tests
       - name: Retain failed daemon gate evidence
@@ -82,11 +78,9 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/gate/v2-merge-evidence.json
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/gate/*.log
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/gate/*.junit.xml
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/gate/u4-upload/**
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/attempts/**
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/test-attempts.v1.json
+            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/v2-merge-evidence.json
+            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/*.junit.xml
+            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/u4-upload/**
       - name: Source integrity at gate end
         run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"

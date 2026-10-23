@@ -112,7 +112,7 @@ python3 services/chat-stream-v2/tools/run_gate.py unit
 python3 -m pytest services/_shared/tests -q
 ```
 
-Fleet gates, QA recipes and CI use the supported entry `scripts/gate_env.py` (owned environment, closed child env, preflight and attempt receipts); see the [E2E harness](E2E_HARNESS.md#supported-entry-scriptsgate_envpy).
+Fleet gates and QA recipes use the supported entry `scripts/gate_env.py` (owned environment, closed child env, preflight and attempt receipts); see the [E2E harness](E2E_HARNESS.md#supported-entry-scriptsgate_envpy).
 
 The shared service suite (`services/_shared/tests`) is not part of the v2 gate
 tiers; public CI and the opt-in pre-push hook run it next to the agent-orch suite.
