@@ -13,7 +13,7 @@
  > PREDICATE_TEST_ONE
 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
  workspace (/directory)         branch                sandbox            /model
- ~/My Drive/pentacle            gemini-support        no sandbox           Auto
+ ~/workspace                   feature               no sandbox           Auto
 
 
 

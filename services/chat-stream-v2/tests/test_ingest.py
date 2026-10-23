@@ -604,7 +604,9 @@ def test_unknown_provider_still_short_circuits() -> None:
 
 async def _gemini_row(store: Store, path: Path, stream_id: str = "h:v2-gemini", *, pane_pid: str = "8123") -> dict:
     host, name = stream_id.split(":", 1)
-    row = await store.update_session(host, name, provider="gemini", jsonl_path=str(path))
+    current = await store.fetch_session(host, name)
+    row = await store.update_session(host, name, provider="gemini", jsonl_path=str(path),
+        claude_session_id=current.get("claude_session_id") or "a1b2c3d4-1111-2222-3333-444455556666")
     return {**row, "pane_pid": pane_pid}
 
 
@@ -678,7 +680,7 @@ def test_gemini_foreign_session_recording_is_never_ingested(tmp_path: Path) -> N
                 '{"sessionId":"ffff0000-1111-2222-3333-444455556666",'
                 '"projectHash":"x","startTime":"2026-10-22T13:00:00.000Z",'
                 '"lastUpdated":"2026-10-22T13:00:00.000Z","kind":"main"}\n'
-                '"id":"fu1","timestamp":"2026-10-22T13:00:01.000Z",'
+                '{"id":"fu1","timestamp":"2026-10-22T13:00:01.000Z",'
                 '"type":"user","content":[{"text":"another synthetic session"}]}\n'
             )
             rebound = await store.update_session("h", "v2-gemini", jsonl_path=str(foreign))
@@ -789,3 +791,36 @@ def test_replacement_between_bind_and_read_is_rejected(tmp_path: Path, monkeypat
             store.stop()
 
     asyncio.run(_go())
+
+
+def test_gemini_first_recording_must_match_launch_identity(tmp_path):
+    """A first-read foreign header must not become authority after restart."""
+    async def run():
+        store = _open_store()
+        try:
+            await store.open_session("h", "v2-gemini", visibility="visible", pane_pid="8123",
+                                     claude_session_id="expected-native-id")
+            row = await _gemini_row(store, FIXTURES / "gemini_native_recording.jsonl")
+            assert await _codex_ingest(store)._ingest_stream(row, _StreamIngest(), 500) == 0
+            assert await store.fetch_session_event_tail("h:v2-gemini", limit=50) == []
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_gemini_native_updates_replay_exactly_once_in_durable_store():
+    """Shapes derived from Gemini CLI v0.65.0 chatRecordingService/Types."""
+    async def run():
+        store = _open_store()
+        try:
+            await store.open_session("h", "v2-gemini", visibility="visible", pane_pid="8123")
+            row = await _gemini_row(store, FIXTURES / "gemini_native_updates.jsonl")
+            ingest = _codex_ingest(store)
+            assert await ingest._ingest_stream(row, _StreamIngest(), 500) == 3
+            assert await ingest._ingest_stream(row, _StreamIngest(), 500) == 0
+            rows = await store.fetch_session_event_tail("h:v2-gemini", limit=50)
+            assert [e["kind"] for e in rows] == ["TOOL_USE", "ASSIST_TEXT", "TOOL_RESULT"]
+            assert rows[-1]["text"] == "ok"
+        finally:
+            store.stop()
+    asyncio.run(run())

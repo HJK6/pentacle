@@ -44,7 +44,9 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel('gpt-5.6-luna'), '5.6 Luna');
   assert.equal(modelLabel('claude-opus-6'), 'Opus 6');
   assert.equal(modelLabel('claude-haiku-5-5'), 'Haiku 5.5');
-  assert.equal(modelLabel('gemini-2-pro'), 'gemini-2-pro');
+  assert.equal(modelLabel('gemini-2-pro'), 'Gemini 2 Pro');
+  assert.equal(modelLabel('gemini-3.1-pro-preview'), 'Gemini 3.1 Pro Preview');
+  assert.equal(modelLabel('gemini-3.5-flash-lite'), 'Gemini 3.5 Flash Lite');
   assert.equal(modelLabel('claude-opus'), 'claude-opus');
   assert.equal(modelLabel('gpt-'), 'gpt-');
   assert.equal(modelLabel(''), '');
@@ -362,4 +364,19 @@ test('modal traps focus and restores an inert accessibility background', () => {
   assert.match(app, /child\.inert = true/);
   assert.match(app, /event\.key !== 'Tab'/);
   assert.match(app, /spawnAck: \{ requested:/);
+});
+
+test('explicit Gemini picker selection uses its model and the CLI default effort', () => {
+  const emissions = [];
+  const { dom, container } = renderProfileForTest(
+    { provider: 'gemini', model: 'gemini-3.1-pro-preview', effort: 'default' },
+    { 'gemini-3.1-pro-preview': { efforts: ['default'] }, 'gemini-3.8-flash': { efforts: ['default'] } },
+    emissions,
+  );
+  const model = container.querySelector('#spawn-model');
+  assert.equal(model.value, 'gemini-3.1-pro-preview');
+  assert.deepEqual([...container.querySelectorAll('#spawn-effort option')].map(o => o.value), ['default']);
+  model.value = 'gemini-3.8-flash';
+  model.dispatchEvent(new dom.window.Event('change'));
+  assert.deepEqual(emissions, [{ provider: 'gemini', model: 'gemini-3.8-flash' }]);
 });

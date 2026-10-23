@@ -38,13 +38,13 @@ class MachineConfig:
     ssh_target: str | None
     tmux_bin: str = "tmux"
     claude_bin: str = ""
-    gemini_bin: str = "gemini"
     codex_bin: str = "codex"
     projects_root: str = ""
     cwd: str = ""
     agent_orch_bin_dir: str | None = None
     label: str | None = None
     smoke_optional: bool = False
+    gemini_bin: str = "gemini"
 
     @property
     def is_local(self) -> bool:

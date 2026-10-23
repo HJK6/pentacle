@@ -6,7 +6,7 @@ For a persistent named assistant, continue with [the executable bootstrap recipe
 
 ## 1. Install prerequisites
 
-Install Node.js, Python 3, tmux, and a provider CLI that can be replaced by a fixture command in tests. Install dependencies from the repository's documented lockfiles.
+Install Node.js, Python 3, tmux, and a provider CLI that can be replaced by a fixture command in tests. Install dependencies from the repository's documented lockfiles. Optional local Gemini support and its offline validation limits are documented in [Gemini provider](gemini_provider.md).
 
 ```bash
 npm ci

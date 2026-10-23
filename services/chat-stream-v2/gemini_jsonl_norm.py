@@ -83,7 +83,29 @@ def normalize_gemini_jsonl_record(
             "raw": raw,
         }
 
-    # file header and $set metadata bumps: no conversation content.
+    # Late tool results are emitted as $patch updates in CLI v0.65.0. Their
+    # identity agrees with the same tool result in a repeated full snapshot.
+    patch = record.get("$patch")
+    if isinstance(patch, dict):
+        updates = patch.get("updates", [patch])
+        events = []
+        for update in updates if isinstance(updates, list) else []:
+            if not isinstance(update, dict):
+                continue
+            calls = update.get("toolCalls")
+            for call in calls if isinstance(calls, list) else []:
+                if not isinstance(call, dict) or not call.get("id"):
+                    continue
+                output = _gemini_tool_output(call.get("result"))
+                if output is not None:
+                    event = make("TOOL_RESULT", output, {
+                        "tool_use_id": call["id"], "tool_content": output,
+                    })
+                    events.extend(_stamp_jsonl_event_identity(
+                        [event], f"gemini-tool:{call['id']}:result"))
+        return events
+
+    # Headers, metadata, edits and rewinds do not change immutable event history.
     if record_type is None:
         return []
 
@@ -109,22 +131,27 @@ def normalize_gemini_jsonl_record(
         events: list[dict] = []
         # tool activity is inline on the assistant record; the final text is
         # the answer, so tool use/results come first.
-        for tool_call in record.get("toolCalls") or []:
+        calls = record.get("toolCalls")
+        for tool_call in calls if isinstance(calls, list) else []:
             if not isinstance(tool_call, dict):
                 continue
             name = str(tool_call.get("name") or "Tool")
             args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
-            events.append(make("TOOL_USE", f"{name}({json.dumps(args, separators=(',', ':'))})", {
+            event = make("TOOL_USE", f"{name}({json.dumps(args, separators=(',', ':'))})", {
                 "tool_use_id": tool_call.get("id"),
                 "tool_name": name,
                 "tool_input": args,
-            }))
+            })
+            events.extend(_stamp_jsonl_event_identity(
+                [event], f"gemini-tool:{tool_call['id']}:use" if tool_call.get("id") else None))
             output = _gemini_tool_output(tool_call.get("result"))
             if output is not None:
-                events.append(make("TOOL_RESULT", output, {
+                event = make("TOOL_RESULT", output, {
                     "tool_use_id": tool_call.get("id"),
                     "tool_content": output,
-                }))
+                })
+                events.extend(_stamp_jsonl_event_identity(
+                    [event], f"gemini-tool:{tool_call['id']}:result" if tool_call.get("id") else None))
         text = _to_text(record.get("content"))
         if text.strip():
             events.append(_stamp_jsonl_event_identity(
@@ -166,7 +193,8 @@ def _gemini_tool_output(result: Any) -> str | None:
     for item in result:
         if not isinstance(item, dict):
             continue
-        response = (item.get("functionResponse") or {}).get("response")
+        function_response = item.get("functionResponse")
+        response = function_response.get("response") if isinstance(function_response, dict) else None
         if isinstance(response, dict):
             output = response.get("output")
             if output is None:

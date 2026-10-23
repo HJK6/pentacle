@@ -155,6 +155,8 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
             f"machines.json entry for {cfg.name} lacks {provider}_bin/cwd/projects_root"
         )
     ssh_target = getattr(cfg, "ssh_target", None)
+    if provider == "gemini" and ssh_target is not None:
+        raise ValueError("gemini_remote_unsupported: native recording ingest is local only")
     if ssh_target is not None and not str(ssh_target).strip():
         raise ValueError(f"machines.json entry for {cfg.name} has a blank ssh_target")
     explicit_agent_orch = getattr(cfg, "agent_orch_bin_dir", None)
@@ -178,6 +180,7 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
         codex_cwd=getattr(cfg, "codex_cwd", None) or cfg.cwd,
         claude_bin=cfg.claude_bin or "",
         codex_bin=cfg.codex_bin or "",
+        gemini_bin=getattr(cfg, "gemini_bin", "") or "",
         projects_root=cfg.projects_root,
         agent_orch_bin_dir=(
             explicit_agent_orch
@@ -451,36 +454,38 @@ def _gemini_command(
     resume: bool = False,
     resume_cwd: str | None = None,
 ) -> str:
+    """Keep the provider TTY attached; discover its native recording separately."""
     gemini_bin = _resolve_local_executable(_shell_executable(machine.gemini_bin))
     model_flag = f"--model {shlex.quote(launch_model)} " if launch_model else ""
     identity_flag = f"--resume {shlex.quote(session_id)}" if resume else f"--session-id {shlex.quote(session_id)}"
-    
     transcript_dir = os.path.join(machine.cwd, ".gemini/sessions")
     transcript_file = os.path.join(transcript_dir, f"{session_id}.jsonl")
-    
-    # Non-TTY stdout makes the CLI think it's headless and exit ("No input
-    # provided via stdin"), so no stdout capture. The interactive pane uses the
-    # CLI's native chat recording instead:
-    # ~/.gemini/tmp/<project>/chats/session-<UTC-minute>-<shortId>.jsonl,
-    # shortId = first 8 chars of --session-id. The CLI picks the minute
-    # timestamp at boot, so a bounded watcher symlinks the recording to the
-    # stable per-session path the lifecycle row records (LaunchPlan.jsonl_path).
-    short_id = session_id[:8]
-    recording_link_watcher = (
-        "{ ( i=0; while [ $i -lt 240 ]; do "
-        "f=$(ls \"$HOME\"/.gemini/tmp/*/chats/session-*-"
-        f"{short_id}.jsonl 2>/dev/null | head -n 1); "
-        f"[ -n \"$f\" ] && {{ ln -sfn \"$f\" {shlex.quote(transcript_file)}; exit 0; }}; "
-        "i=$((i+1)); sleep 0.5; done ) >/dev/null 2>&1 & }"
-    )
+    # Match the FULL native header identity, not only the filename's 8-char
+    # prefix. Quote glob prefixes so spaces in HOME/project names are preserved.
+    # A helper runs at most 240 polls and stops after provider exit.
+    # Resume already has an exact, identity-checked native path; no watcher.
+    header_pattern = shlex.quote(r'"sessionId"[[:space:]]*:[[:space:]]*"' + session_id + '"')
+    watcher = ""
+    if not resume:
+        watcher = (
+            "owner=$$; { ( i=0; while [ $i -lt 240 ] && kill -0 \"$owner\" 2>/dev/null; do "
+            "match=; count=0; for f in \"$HOME\"/.gemini/tmp/*/chats/session-*-"
+            f"{session_id[:8]}.jsonl; do "
+            "[ -f \"$f\" ] || continue; "
+            f"head -c 4096 \"$f\" | head -n 1 | grep -Eq {header_pattern} || continue; "
+            "match=$f; count=$((count+1)); done; "
+            "[ $count -gt 1 ] && exit 1; "
+            f"[ $count -eq 1 ] && {{ ln -sfn \"$match\" {shlex.quote(transcript_file)}; exit; }}; "
+            "i=$((i+1)); sleep 0.5; done ) >/dev/null 2>&1 & }; "
+        )
     return (
+        f"command -v {shlex.quote(gemini_bin)} >/dev/null 2>&1 && "
         f"mkdir -p {shlex.quote(transcript_dir)} && "
         f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=gemini_bin)}"
-        f"{recording_link_watcher} && "
+        f"{{ {watcher}"
         f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
-        f"exec {shlex.quote(gemini_bin)} "
-        f"{model_flag}{identity_flag}"
+        f"exec {shlex.quote(gemini_bin)} {model_flag}{identity_flag}; }}"
     )
 
 
@@ -614,6 +619,8 @@ def build_launch(
     (no flag passed, CLI default used) and the canonical value for an explicit
     request — matching v1's `launch_model = model if requested_model is not None`.
     """
+    if account_binding is not None and provider == "gemini":
+        raise ValueError("gemini_named_accounts_unsupported")
     if account_binding is not None:
         from provider_accounts import ENV_ALLOWLIST, transcript_allowed
         if (account_binding.provider != provider or account_binding.host != machine.name
@@ -685,13 +692,32 @@ def build_launch(
             stream_token_file=stream_token_file,
         )
     if provider == "gemini":
+        if launch_effort not in (None, "default"):
+            raise ValueError("gemini_effort_unsupported: use default")
         session_id = resume_session_id or str(uuid.uuid4())
+        try:
+            if str(uuid.UUID(session_id)) != session_id:
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise ValueError("gemini_session_id_invalid") from None
+        if resume_session_id is not None:
+            from provider_accounts import transcript_allowed
+            if not resume_jsonl_path or not transcript_allowed(resume_jsonl_path, "gemini"):
+                raise ValueError("gemini_resume_recording_required")
+            try:
+                import json
+                with open(resume_jsonl_path, encoding="utf-8") as recording:
+                    native = json.loads(recording.readline(4096))
+                if not isinstance(native, dict) or native.get("sessionId") != session_id:
+                    raise ValueError()
+            except (OSError, ValueError):
+                raise ValueError("gemini_resume_identity_mismatch") from None
         command = _gemini_command(
             machine, tmux_session, session_id, stream_token_file,
             launch_model=launch_model, launch_effort=launch_effort,
             operator_facing=operator_facing,
             resume=resume_session_id is not None,
-            resume_cwd=resume_cwd,
+            resume_cwd=resume_cwd or cwd,
         )
         jsonl_path = (
             resume_jsonl_path

@@ -22,12 +22,12 @@ PROFILES = {
     "agent_orch": {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
-        "gemini": ("gemini-3.1-pro-preview", "low"),
+        "gemini": ("gemini-3.1-pro-preview", "default"),
     },
     "desktop_manual": {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
-        "gemini": ("gemini-3.1-pro-preview", "low"),
+        "gemini": ("gemini-3.1-pro-preview", "default"),
     },
 }
 DEFAULT_MAX_CONCURRENT_BOOTS = 3
@@ -53,9 +53,9 @@ MODELS = {
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
     "gemini": {
-        "gemini-3.5-flash-lite": {"aliases": ("gemini-3.5-flash-lite", "flash-lite"), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "gemini-3.8-flash": {"aliases": ("gemini-3.8-flash", "flash"), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "gemini-3.1-pro-preview": {"aliases": ("gemini-3.1-pro-preview", "pro"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gemini-3.5-flash-lite": {"aliases": ("gemini-3.5-flash-lite", "flash-lite"), "efforts": ("default",)},
+        "gemini-3.8-flash": {"aliases": ("gemini-3.8-flash", "flash"), "efforts": ("default",)},
+        "gemini-3.1-pro-preview": {"aliases": ("gemini-3.1-pro-preview", "pro"), "efforts": ("default",)},
     },
 }
 # Which MODELS ids are advertised to interactive New Chat clients is an
@@ -195,6 +195,8 @@ def load_spawn_config() -> dict[str, Any]:
     if not isinstance(providers, dict):
         raise _config_error("spawn defaults providers must be an object")
     for provider in MODELS:
+        if provider == "gemini" and provider not in providers:
+            continue  # Older deployment policies remain two-provider policies.
         _config_tuple(provider, providers.get(provider))
     _positive_int(raw.get("max_concurrent_boots"), "max_concurrent_boots")
     _positive_int(raw.get("spawn_queue_timeout_seconds"), "spawn_queue_timeout_seconds")
@@ -234,6 +236,8 @@ def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
     configured = config.get("available_models")
     result: dict[str, tuple[str, ...]] = {}
     for provider in MODELS:
+        if provider not in config["providers"]:
+            continue
         ids = configured.get(provider) if isinstance(configured, dict) else None
         result[provider] = tuple(ids) if ids else tuple(MODELS[provider])
     return result
@@ -257,7 +261,10 @@ def _validate_available_models(available: object) -> None:
 def _default_tuple(provider: str, host: str | None) -> tuple[str, str]:
     config = load_spawn_config()
     providers = config["providers"]
-    values = dict(providers[provider])
+    values = dict(providers.get(provider) or (
+        {"model": PROFILES["agent_orch"][provider][0], "effort": PROFILES["agent_orch"][provider][1]}
+        if provider == "gemini" else {}
+    ))
     if host:
         host_overrides = config.get("host_overrides", {})
         override = host_overrides.get(host, {}).get(provider, {})
@@ -442,7 +449,7 @@ def catalog() -> dict:
         "schema_version": "CatalogV1",
         "catalog_version": CATALOG_VERSION,
         "profiles": {
-            profile: {provider: _default_tuple(provider, None) for provider in MODELS}
+            profile: {provider: _default_tuple(provider, None) for provider in config["providers"] if provider in MODELS}
             for profile in PROFILES
         },
         "spawn_defaults": {

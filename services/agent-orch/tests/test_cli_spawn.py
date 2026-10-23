@@ -376,7 +376,7 @@ def test_spawn_rejects_model_for_unsupported_provider(tmp_path: Path, capsys) ->
 
     assert cli.spawn(args) == 2
     captured = capsys.readouterr()
-    assert "--model requires --provider claude or codex" in captured.err
+    assert "--model requires --provider claude, codex or gemini" in captured.err
 
 
 def test_spawn_payload_includes_generated_idempotency_key(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1779,3 +1779,19 @@ def test_dead_seat_replay_error_tells_the_caller_to_pass_a_new_key(monkeypatch, 
     captured = capsys.readouterr()
     assert json.loads(captured.out)["error_code"] == "replayed_stream_dead"
     assert "hostc:old-seat" in captured.err and "--idempotency-key" in captured.err
+
+
+def test_gemini_explicit_model_reaches_spawn_rpc(monkeypatch, tmp_path, capsys):
+    captured = {}
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
+    async def fake_send(_config, payload, timeout):
+        captured.update(payload)
+        return {"type": "spawn.ok", "session": {"stream_id": "hostc:gemini-child"}}
+    monkeypatch.setattr(cli, "spawn_once", fake_send)
+    args = _spawn_args(tmp_path)
+    args.provider = "gemini"
+    args.model = "gemini-3.1-pro-preview"
+    args.effort = "default"
+    assert cli.spawn(args) == 0
+    _printed_json(capsys)
+    assert (captured["provider"], captured["model"], captured["effort"]) == (args.provider, args.model, "default")

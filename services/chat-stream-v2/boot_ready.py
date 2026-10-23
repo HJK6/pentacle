@@ -370,23 +370,26 @@ def gemini_prompt_submitted(pane_text: str, prompt: str) -> bool:
     """True once `prompt` has been SUBMITTED to a gemini TUI: it is echoed as
     an earlier `> ` transcript line while the composer holds newer content
     (the placeholder), or the pane shows a turn-error marker."""
-    if "API Error:" in pane_text:
-        return True
+    return bool(_gemini_matching_echoes(pane_text, prompt))
+
+
+def _gemini_matching_echoes(pane_text: str, prompt: str) -> tuple[str, ...]:
+    """Match complete wrapped prompt echoes, never an unrelated history delta."""
     lines = pane_text.splitlines()
     composer_index = _gemini_composer_index(lines)
     if composer_index is None:
-        return False
+        return ()
     needle = _normalize_for_claude_pane_match(prompt)
     if not needle:
-        return False
-    for line in lines[:composer_index]:
+        return ()
+    matches = []
+    for index, line in enumerate(lines[:composer_index]):
         if not line.lstrip().startswith("> "):
             continue
-        echo = _normalize_for_claude_pane_match(
-            line.lstrip().removeprefix(">").strip())
-        if echo and needle in echo:
-            return True
-    return False
+        echo = _normalize_for_claude_pane_match(_gemini_composer_block(lines, index))
+        if echo == needle:
+            matches.append(echo)
+    return tuple(matches)
 
 
 READY_PREDICATES = {
@@ -829,6 +832,10 @@ def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...
 
 def submission_proven_after(pane_text: str, baseline: str, prompt: str, provider: str) -> bool:
     """Require new provider evidence after the exact pre-paste baseline."""
+    if provider == "gemini":
+        if gemini_prompt_in_active_draft(pane_text, prompt):
+            return False
+        return len(_gemini_matching_echoes(pane_text, prompt)) > len(_gemini_matching_echoes(baseline, prompt))
     if "API Error:" in pane_text and "API Error:" not in baseline:
         return True
     # A stale history/body marker must not win over the current editable

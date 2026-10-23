@@ -583,6 +583,17 @@ class Ingest:
             st.session_id = native
         elif not st.session_id and provider == "claude":
             st.session_id = str(row.get("claude_session_id") or "")
+        if provider == "gemini":
+            native = await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
+            expected = str(row.get("claude_session_id") or st.session_id or "")
+            if not native or (expected and native != expected):
+                _close_stream(st)
+                st.path, st.offset, st.file_id = "", 0, None
+                log.warning("Gemini recording identity refused", extra={
+                    "subsystem": "ingest", "bug_ref": "gemini_provider_identity",
+                })
+                return 0
+            st.session_id = native
         if size < st.offset:
             # Rotation/truncation in place: replay from the start; dedup keeps
             # it exact.
