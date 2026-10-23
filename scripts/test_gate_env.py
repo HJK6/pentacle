@@ -515,6 +515,97 @@ class EntrypointReceipts(Tmp):
         self.assertEqual(a["primary_outcome"], "cancelled")
         self.assertFalse((self.tmp / "ws" / "runs").exists() and any((self.tmp / "ws" / "runs").iterdir()))
 
+    def test_prepare_with_a_target_never_launches_a_subject(self):
+        (self.tmp / "co" / "services" / "chat-stream-v2").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "co" / "services" / "chat-stream-v2" / "requirements.txt").write_text("websockets==17.0.1\n")
+        tool = {"path": "/x/t", "realpath": "/x/t", "version": "3.13.1", "sha256": "aa"}
+        short = tempfile.mkdtemp(prefix="gt", dir="/tmp")  # TMPDIR must stay under the socket-path bound
+        self.addCleanup(lambda: __import__("shutil").rmtree(short, ignore_errors=True))
+
+        def boom(*a, **k):
+            raise AssertionError("prepare launched a subject")
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
+                                 ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
+                                 build_command=boom, source_identity=lambda *a, **k: {"sha": "x", "dirty": False}), mock.patch.object(ge.subprocess, "Popen", boom):
+            code = ge.main(["prepare", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
+                            "--tmp-root", short, "--target", "v2-pytest", "--spec", "s", "--series", "x", "--purpose", "diagnostic"])
+        self.assertEqual(code, 0)
+        (a,) = self.attempts()
+        self.assertEqual((a["primary_outcome"], a["last_state"]), ("pass", "terminal"))
+        states = sorted(p.name.split("-", 1)[1] for p in (self.tmp / "ev" / "attempts" / a["attempt_id"]).glob("0*"))
+        self.assertEqual(states, ["prepared.json", "started.json", "terminal.json"])  # no subject_started
+
+    def test_cancellation_reaps_the_recorded_subject_tree(self):
+        """Regression: a cancelled pytest subject left its detached daemon behind (it is not in the subject's process group)."""
+        pidfile = self.tmp / "orphan.pid"
+        short = tempfile.mkdtemp(prefix="gt", dir="/tmp")
+        self.addCleanup(lambda: __import__("shutil").rmtree(short, ignore_errors=True))
+        (self.tmp / "co" / "services" / "chat-stream-v2").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "co" / "services" / "chat-stream-v2" / "requirements.txt").write_text("websockets==17.0.1\n")
+        tools = self.tmp / "co" / "services" / "chat-stream-v2" / "tools"
+        tools.mkdir(parents=True, exist_ok=True)
+        (self.tmp / "co" / "services" / "chat-stream-v2" / "tests").mkdir(exist_ok=True)
+        (self.tmp / "co" / "services" / "chat-stream-v2" / "tests" / "test_x.py").write_text("")
+        (tools / "gate_owner_manifest.py").write_bytes((HERE.parent / "services" / "chat-stream-v2" / "tools" / "gate_owner_manifest.py").read_bytes())
+        tool = {"path": "/x/t", "realpath": "/x/t", "version": "3.13.1", "sha256": "aa"}
+        # A subject that records a detached child into the owner manifest, like the daemon fixtures do, then waits.
+        script = ("import os,subprocess,sys,time,importlib.util as u;"
+                  "m=u.spec_from_file_location('g',sys.argv[1]);g=u.module_from_spec(m);m.loader.exec_module(g);"
+                  "c=subprocess.Popen(['sleep','300'],start_new_session=True);"
+                  "g.record(os.environ['V2_GATE_OWNER_MANIFEST'],c.pid,None,c.pid);"
+                  "open(sys.argv[2],'w').write(str(c.pid));time.sleep(300)")
+        argv = [sys.executable, "-c", script, str(tools / "gate_owner_manifest.py"), str(pidfile)]
+
+        def fire():  # cancel once the subject has recorded its orphan-to-be
+            deadline = __import__("time").time() + 20
+            while not pidfile.exists() and __import__("time").time() < deadline:
+                __import__("time").sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+        import threading
+        threading.Thread(target=fire, daemon=True).start()
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
+                                 ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
+                                 check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
+                                 build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to: ("pass", None, {})}),
+                                 source_identity=lambda *a, **k: {"sha": "x", "dirty": False}):
+            code = ge.main(["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
+                            "--tmp-root", short, "--target", "v2-pytest", "--select", "tests/test_x.py", "--spec", "s", "--series", "x", "--purpose", "diagnostic"])
+        self.assertEqual(code, 130)
+        orphan = int(pidfile.read_text())
+        deadline = __import__("time").time() + 10
+        alive = True
+        while alive and __import__("time").time() < deadline:
+            try:
+                os.kill(orphan, 0)
+                __import__("time").sleep(0.1)
+            except ProcessLookupError:
+                alive = False
+        if alive:
+            os.kill(orphan, signal.SIGKILL)
+        self.assertFalse(alive, "the detached orphan survived cancellation")
+        (a,) = self.attempts()
+        self.assertEqual(a["primary_outcome"], "cancelled")
+        self.assertNotEqual(a.get("secondary", {}).get("cleanup"), "failed")
+
+    def test_prepare_refuses_select_and_pytest_run_needs_one(self):
+        # run with no --select on the focused pytest target: refused before any setup, never the full suite
+        code = self.run_main("--target", "v2-pytest", "--spec", "s", "--series", "x", "--purpose", "diagnostic")
+        self.assertEqual(code, 3)
+        (a,) = self.attempts()
+        self.assertEqual((a["primary_outcome"], a["first_failure"]["code"], a["last_state"]), ("setup_failure", "selection", "terminal"))
+        argv = ["prepare", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev2"), "--checkout", str(self.tmp / "co"),
+                "--target", "v2-pytest", "--select", "tests/test_x.py"]
+        with mock.patch.object(ge, "source_identity", return_value={"sha": "x", "dirty": False}):
+            self.assertEqual(ge.main(argv), 3)
+
+    def test_validate_selection_requires_a_select_for_pytest_targets_only(self):
+        pytest_target = REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-pytest"]
+        with self.assertRaises(ge.SetupFailure):
+            ge.validate_selection(pytest_target, [], self.tmp)
+        npm = REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]
+        self.assertEqual(ge.validate_selection(npm, [], self.tmp), npm["default_patterns"])
+
     def test_retry_after_setup_failure_keeps_original_attempt(self):
         self.run_main("--target", "nope", "--spec", "s", "--series", "x", "--purpose", "acceptance")
         first = self.attempts()[0]["attempt_id"]

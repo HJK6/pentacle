@@ -449,6 +449,9 @@ def run_preflight_script(run, script: Path, env: Dict[str, str]) -> List[Dict[st
 def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path) -> List[str]:
     spec = target.get("select")
     if not select:
+        if spec and "default_patterns" not in target:
+            # A bare pytest target would collect its whole rootdir; a focused target never defaults to the full suite.
+            raise SetupFailure([fail("selection", "this target requires at least one --select", "name the test files (and optional ::nodes) to run; use a v2-unit/v2-merge target for the full suite")])
         return list(target.get("default_patterns", []))
     if not spec:
         raise SetupFailure([fail("selection", "this target takes no --select", "")])
@@ -594,7 +597,7 @@ def evidence_refs(folder: Path) -> List[Dict[str, Any]]:
     return refs
 
 
-def stop_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
+def stop_group(proc: subprocess.Popen, grace: float = 20.0) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError):
@@ -610,6 +613,34 @@ def stop_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
             break
         except subprocess.TimeoutExpired:
             continue
+
+
+class OwnedProcesses:
+    """The gate owner manifest (tools/gate_owner_manifest.py) for a subject the entrypoint launches directly.
+
+    Test fixtures record the daemons/tmux servers they start into it (V2_GATE_OWNER_MANIFEST); `stop` reaps
+    exactly those after the subject ends, is cancelled or times out, so teardown never depends on one process group."""
+
+    ENV = "V2_GATE_OWNER_MANIFEST"
+
+    def __init__(self, service_dir: Path, path: Path) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gate_owner_manifest_for_gate_env", service_dir / "tools" / "gate_owner_manifest.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)  # type: ignore[union-attr]
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.module.reap_manifest(path)  # a stale manifest from a dead owner is reaped, a live one raises
+        self.run_id = self.module.initialize_manifest(path)
+
+    def stop(self) -> bool:
+        """True when every recorded entry of this run was reaped and the manifest is gone."""
+        try:
+            self.module.mark_owner_stopping(self.path)
+            self.module.reap_manifest(self.path, self.run_id)
+        except Exception:  # a manifest that cannot be read is an unproven teardown, not a crash
+            return False
+        return not self.path.exists()
 
 
 def group_alive(pgid: int) -> bool:
@@ -633,7 +664,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--target")
-    parser.add_argument("--select", action="append", default=[])
+    parser.add_argument("--select", action="append", default=[], help="run only: test files/nodes; required for pytest targets (never defaults to the full suite)")
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
     parser.add_argument("--spec")
     parser.add_argument("--series")
@@ -681,11 +712,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     proc = None
+    owner: Optional[OwnedProcesses] = None
     try:
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
         config = load_config(CONFIG_PATH)
-        profile =config["profiles"].get(args.profile)
+        profile = config["profiles"].get(args.profile)
         if profile is None:
             raise SetupFailure([fail("config", "unknown profile %r" % args.profile, "choose one of %s" % sorted(config["profiles"]))])
         target = None
@@ -693,7 +725,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             target = profile["targets"].get(args.target)
             if target is None:
                 raise SetupFailure([fail("config", "unknown target %r" % args.target, "choose one of %s" % sorted(profile["targets"]))])
-        else:  # prepare: the union of every target's needs, no subject
+        if args.command == "prepare":
+            # prepare never launches a subject: it provisions and preflights --target's needs (or every target's when none is named).
+            if args.select:
+                raise SetupFailure([fail("selection", "prepare takes no --select (it launches nothing)", "use `run` to execute a selection")])
+            if target is not None:
+                target = dict(target, kind="prepare")
+        if target is None:  # prepare without a target: the union of every target's needs
             target = {"kind": "prepare", "needs": sorted({n for t in profile["targets"].values() for n in t.get("needs", [])}),
                       "npm_ci": any(t.get("npm_ci") for t in profile["targets"].values()), "timeout_s": 600, "max_timeout_s": 600}
         identity["identities"]["config"] = ga.digest_of(config)
@@ -764,6 +802,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
+            if target["kind"] == "pytest_files":  # run_gate and the npm runner own their own teardown; a bare pytest subject needs one
+                owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
+                env[OwnedProcesses.ENV] = str(owner.path)
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
             timed_out = False
             try:
@@ -798,6 +839,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         for s, h in old.items():
             signal.signal(s, h)
+        if owner is not None and not owner.stop():
+            state["secondary"]["cleanup"] = "failed"
+            state["secondary"]["owned_processes"] = "unreaped"
         # Owned scratch only: HOME, basetemp, TMPDIR. Evidence and the prepared cache stay.
         for d in (run_dir, tmp):
             try:
