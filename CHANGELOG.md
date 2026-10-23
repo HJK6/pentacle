@@ -13,6 +13,12 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-23 (2)
+
+### Added
+
+- Work ownership reports flag unattended implementation and include cached disposition context when a commissioned agent finishes.
+
 ## 2026-10-23
 
 ### Added
