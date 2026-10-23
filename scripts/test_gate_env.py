@@ -197,7 +197,7 @@ class ToolchainResolution(Tmp):
         self.assertNotIn("npm-cli.js", failures[0]["detail"] + failures[0]["remediation"])
 
     def test_env_node_shebang_npm_is_resolved_with_its_own_directory_on_path(self):
-        # Real npm is `#!/usr/bin/env node`; the version probe must find node next to it (regression: first Thoth npm cold run).
+        # Real npm is `#!/usr/bin/env node`; the version probe must find node next to it (regression: first npm cold run).
         d = self.tmp / "n"
         d.mkdir()
         fake_exe(d, "node", "v22.4.1")
