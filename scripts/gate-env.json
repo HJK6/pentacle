@@ -2,6 +2,7 @@
   "schema": "pentacle.gate-env.v1",
   "toolchain": {"python": "3.13", "node": "22"},
   "reserve_s": 60,
+  "deadline": {"preflight_s": 30, "reserve_s": 60, "slack_s": 30},
   "max_tmpdir_bytes": 48,
   "min_free_mb": 1024,
   "locales": ["en_US.UTF-8", "C.UTF-8"],
