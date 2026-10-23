@@ -28,7 +28,7 @@ async function main() {
     process.env.PENTACLE_CONFIG = config;
     web = await require(path.join(ROOT, 'server')).main(['--profile', config, '--bind', '127.0.0.1', '--port', '0']);
     const debugPort = await getFreePort();
-    browser = spawn(chrome(), ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(chrome(), ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--disable-gpu', `--user-data-dir=${path.join(out, 'browser-profile')}`, `--remote-debugging-port=${debugPort}`, web.url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });
     await page.waitFor('window.PentacleChatStore?.getState().connected === true', { timeoutMs: 15000 });

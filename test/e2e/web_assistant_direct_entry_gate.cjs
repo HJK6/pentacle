@@ -27,7 +27,7 @@ async function runInstalled() {
   const cells = [];
   try {
     const debugPort = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--ignore-certificate-errors', '--disable-gpu', '--window-size=1600,900',
       `--user-data-dir=${path.join(OUT, 'browser-profile')}`, `--remote-debugging-port=${debugPort}`, url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });
@@ -86,7 +86,7 @@ async function run() {
     process.env.PENTACLE_CONFIG = daemon.configFile;
     web = await require('../../server').main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const debugPort = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--disable-gpu', '--window-size=1600,900', `--user-data-dir=${path.join(OUT, 'browser-profile')}`,
       `--remote-debugging-port=${debugPort}`, web.url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });

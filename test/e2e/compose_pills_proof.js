@@ -141,7 +141,7 @@ async function run(args) {
 
     const cdpPort = await gate.freePort();
     chrome = spawn(CHROME, [
-      '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+      '--headless=new', '--use-mock-keychain', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
       '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     session = await cdp.connect(cdpPort, { match: new RegExp(`127\\.0\\.0\\.1:${host.port}`) });

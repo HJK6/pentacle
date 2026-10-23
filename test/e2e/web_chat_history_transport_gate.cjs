@@ -92,7 +92,7 @@ async function run() {
     let browserConnections = 0;
     web.wss.on('connection', () => { browserConnections++; });
     const debugPort = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--disable-gpu', '--window-size=1600,900', `--user-data-dir=${path.join(out, 'browser-profile')}`,
       `--remote-debugging-port=${debugPort}`, web.url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });

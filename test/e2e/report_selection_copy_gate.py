@@ -245,7 +245,7 @@ def main():
         verdict["bundle_sha256"] = sha256(bundle)
         with tempfile.TemporaryDirectory(prefix="pentacle-report-chrome-") as profile:
             options = webdriver.ChromeOptions()
-            for flag in ("--headless=new", "--no-sandbox", "--disable-gpu", "--window-size=1600,1000",
+            for flag in ("--headless=new", "--use-mock-keychain", "--no-sandbox", "--disable-gpu", "--window-size=1600,1000",
                          f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check"):
                 options.add_argument(flag)
             driver = webdriver.Chrome(options=options)
