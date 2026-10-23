@@ -212,3 +212,19 @@ def test_lead_lost_fault_names_repair(monkeypatch, capsys):
     assert _run(["work-lane", "list"]) == 0
     out = capsys.readouterr().out
     assert "active/lead_lost — LEAD LOST — repair: set-lead wl-9" in out
+
+
+def test_unattended_is_read_only_and_reports_quality(monkeypatch, capsys):
+    work = {"label": "in_progress with no assigned implementation lead", "count": 1,
+            "quality": "partial", "omitted_count": 2, "error": None,
+            "items": [{"spec_id": "spec_demo__one", "repo": "demo", "age_s": None}]}
+    sent = _wire(monkeypatch, {"type": "work.unattended.ok", "unattended_work": work})
+    assert _run(["work", "unattended", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["unattended_work"] == work
+    assert sent == [{"type": "work.unattended"}]
+    assert _run(["work", "unattended"]) == 0
+    text = capsys.readouterr().out
+    assert "partial" in text and "omitted 2" in text and "age unknown" in text
+    work.update(quality="unavailable", count=0, error="work_index_unavailable", items=[])
+    assert _run(["work", "unattended"]) == 0
+    assert "unavailable" in capsys.readouterr().out

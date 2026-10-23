@@ -776,7 +776,7 @@ The CLI rejects malformed values before any websocket traffic. Rejected values i
 
 Ownership-level sessions require at least one spec tag: any handoff, any `lead`/`nexus` role, and any parentless session. Parented bounded workers inherit their parent's ordered tag set when no explicit tag is supplied. The daemon stores ordered `spec_ids` and keeps legacy `spec_id` as the first tag for existing consumers. `agent-orch spec attach|detach <stream_id> <spec_id>` updates tags on a live session; detaching the final tag from an ownership-level session is refused.
 
-For `spawn --handoff`, the daemon inherits the source leader's full `spec_ids` set when the handoff request does not include tags. Explicit `--spec-id` values on the handoff override the inherited set. Retagging away from a source `in_progress` spec is refused unless the successor still carries that spec or the caller supplies `--disposition-waived <reason>`.
+For `spawn --handoff`, the daemon inherits the source leader's full `spec_ids` set when the handoff request does not include tags. Explicit `--spec-id` values on the handoff override the inherited set.
 
 Every agent-orch websocket hello advertises agent-orch capabilities:
 
@@ -806,7 +806,7 @@ agent-orch report --msg-id 3 --status done --result '{"summary":"done","findings
 
 `report.ok` is committed to the `(stream, msg_id)` → report index **before** the close attempt, so `agent-orch inspect <stream> --msg-id N` and `agent-orch await --from <stream> --msg-id N` resolve on the report even when the follow-up close is refused or fails. See chat-stream README "Report ingestion decoupling" for the daemon-side contract.
 
-The follow-up close also runs the spec disposition gate. If the reporting session owns an `in_progress` spec and no successor/parking/terminal disposition exists, `report --terminate` ingests the report and then returns a close refusal; use `--disposition-waived <reason>` only for an audited override.
+Spec disposition is a process responsibility; report termination and session closure do not read spec acceptance Markdown or impose a disposition gate. `--disposition-waived <reason>` remains accepted and transmitted for compatibility, with no enforcement effect.
 
 ### Self-terminate classification (six paths)
 
@@ -1522,12 +1522,12 @@ All paths below are repo-relative to the `pentacle` repo root.
 state. A hold release accepts either its exclusive resource or the `hold-*` id
 returned by `hold list`; expiry is evaluated as an RFC 3339 instant, not string
 order. `report --discharges <obligation_id>` discharges open obligations owned
-by the reporting stream. Close refuses open obligations unless
-`--disposition-waived` is supplied, which waives and records them.
+by the reporting stream. Open obligations do not gate session closure;
+`--disposition-waived` is a compatibility no-op.
 
 ### Obligation expiry and the spec-issue flag
 
-`oblige <stream> <text> [--spec-id <id>] [--expires-in <seconds>]` attaches an optional deadline. The daemon's 30s coordination sweep stamps an open obligation once when the deadline passes: it sets a persisted **spec-issue flag** on the target session (`session_spec_issues` row, surfaced as the `spec_issues` list on session summaries; card rendering ships with the session status card lane) and tells the target with urgency. The obligation itself stays `open` — still dischargeable via `report --discharges`, still waivable, still gating close. Waiving an obligation auto-clears the flag its expiry set; a discharge does **not** clear it — the flag asserts "finding not yet re-validated clean", so it clears only via `spec-issue clear --stream <id> --spec-id <id>` (restricted to server-derived internal service actors and the operator surface) or a waive.
+`oblige <stream> <text> [--spec-id <id>] [--expires-in <seconds>]` attaches an optional deadline. The daemon's 30s coordination sweep stamps an open obligation once when the deadline passes: it sets a persisted **spec-issue flag** on the target session (`session_spec_issues` row, surfaced as the `spec_issues` list on session summaries; card rendering ships with the session status card lane) and tells the target with urgency. The obligation itself stays `open` — still dischargeable via `report --discharges`, still waivable; it does not gate close. Waiving an obligation auto-clears the flag its expiry set; a discharge does **not** clear it — the flag asserts "finding not yet re-validated clean", so it clears only via `spec-issue clear --stream <id> --spec-id <id>` (restricted to server-derived internal service actors and the operator surface) or a waive.
 
 ### Service actors
 
@@ -1549,25 +1549,17 @@ The production daemon retains explicit `agent-orch nexus list|context|inspect` a
 
 The `repo` command family is absent from ordinary CLI help and direct repo RPCs return `disabled`; stored registration/activity rows remain untouched for audit.
 
-### Lane completion and parked specs
+### Lane completion and work disposition
 
-Closing a lead checks the custom criteria in every member of its open lanes.
-Each criterion must be checked, waived with a reason, tracked to an owned
-nonterminal follow-up with a matching receipt, or parked. A member in
-`work/blocked/` grants parking only through an unfenced Tracking declaration
-`- parked: YYYY-MM-DD <authority-ref> — <reason>` with a real calendar date,
-a nonempty authority token and reason; the last declaration governs.
-Parking disposes only unmarked unchecked criteria: existing waiver and tracked
-markers retain their validation. Missing or malformed park declarations refuse
-those criteria with `park_line_missing` or `park_line_malformed` and the line to
-add. Moving the member out of `blocked` ends the park; its declaration may stay
-as history. Single-criterion deferrals still use `tracked:`.
+Session closure and lane completion retain their authority, generation and revision checks; they do not parse spec acceptance criteria, parked declarations or follow-up receipts. They do not automatically move work items. The memory publisher retains its ordinary lifecycle/closure checks. The canonical [work Lifecycle](https://github.com/HJK6/triforce-memory/blob/main/work/README.md#lifecycle) owns attendance and the outgoing lead/report recipient's disposition duties.
 
-A successful close appends one clause per parked member to the existing audit
-reason: `parked: <spec_id> criteria=<n> date=<YYYY-MM-DD> authority=<token> reason=<reason>`.
-Read it with `agent-orch inspect`. Changes to the park line or folder retain the
-existing preparation/admission source fences and post-termination warning;
-parking adds no atomic-snapshot promise or new audit field.
+### Unattended work and report context
+
+`agent-orch work unattended [--json]` reads the entire cached work index through `work.unattended`. It returns every fresh `in_progress` item without an open, non-presumed-dead lead/nexus whose current `effective_assignment` matches that item. Explicit assignment wins; explicit empty is unassigned; legacy NULL falls back only to one normalized spec tag. Authority tags alone do not establish attendance. Hidden seats and handoff successors use the same rule. Source age orders items and never grants a grace period.
+
+The existing FD `lane_digest` includes `unattended_work`, with per-repository counts and the eight oldest items, including when there are no lanes. The CLI returns the full list. Unknown source age sorts last. Unavailable index and omitted stale/unknown observations are explicit; fresh matches remain visible. Stable full membership and quality drive deduplication; rendered age and observation/evaluation time do not. Flags are advisory, including for legitimate operator hands-on work.
+
+The first durable `child_report_ready` notice and ledger fallback can include optional `disposition_context`: report evidence id, cached item status/observation time or unknown, and other current qualifying owners excluding the reporter. Its neutral review hint does not select a lifecycle move. Enrichment uses the insertion connection and cached data only; errors preserve the durable report, ordinary notice and dedupe. Original envelopes remain valid, and parentless reports do not gain a child notice.
 
 ### Input provenance
 

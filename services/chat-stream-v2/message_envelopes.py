@@ -229,12 +229,28 @@ def _report_notice_id(report_id: object) -> str:
     return f"child-report-ready-v2-{digest}"
 
 
+def _valid_disposition_context(value: object, report_id: object) -> bool:
+    if (not isinstance(value, dict) or value.get("report_id") != report_id
+            or not isinstance(value.get("review"), str)
+            or value.get("bindings_quality") not in ("known", "unknown")
+            or not isinstance(value.get("items"), list)):
+        return False
+    return all(isinstance(item, dict) and isinstance(item.get("spec_id"), str)
+               and isinstance(item.get("status"), str) and item.get("quality") in ("fresh", "unknown")
+               and (item.get("observed_at") is None or
+                    isinstance(item["observed_at"], str) and _valid_utc_timestamp(item["observed_at"]))
+               and isinstance(item.get("other_owners"), list)
+               and all(isinstance(owner, str) for owner in item["other_owners"])
+               for item in value["items"])
+
+
 def _build_child_report_ready(
     *, report_id: object, ledger_row_id: object, child_stream_id: object,
     msg_id: object, status: object, summary: object, notice_id: object | None = None,
     qa_attestation_state: object | None = None,
     qa_attestation_reasons: object | None = None,
     effective_model: object | None = None, effective_effort: object | None = None,
+    disposition_context: object | None = None,
     **_: Any,
 ) -> str:
     resolved_notice_id = str(notice_id or _report_notice_id(report_id))
@@ -259,6 +275,8 @@ def _build_child_report_ready(
         lines.append(f"effective_model={effective_model}")
     if effective_effort is not None:
         lines.append(f"effective_effort={effective_effort}")
+    if _valid_disposition_context(disposition_context, report_id):
+        lines.append("disposition_context=" + json.dumps(disposition_context, sort_keys=True, separators=(",", ":")))
     return f"{_notice_marker(resolved_notice_id)}\n" + "\n".join(lines)
 
 
@@ -273,7 +291,8 @@ _CHILD_REPORT = re.compile(
     rf"status=(?P<status>done|error|aborted)\n"
     rf"(?:(?:qa_attestation_state=unverified)\nqa_attestation_reasons=(?P<qa_reasons>[A-Za-z0-9_.:-]+(?:,[A-Za-z0-9_.:-]+)*)\n)?"
     rf"summary=(?P<summary>[^\r\n]+)"
-    rf"(?:\neffective_model=(?P<effective_model>[^\s=]+)\neffective_effort=(?P<effective_effort>[^\s=]+))?$"
+    rf"(?:\neffective_model=(?P<effective_model>[^\s=]+)\neffective_effort=(?P<effective_effort>[^\s=]+))?"
+    rf"(?:\ndisposition_context=(?P<disposition_context>[^\r\n]*))?$"
 )
 
 
@@ -281,7 +300,7 @@ def _match_child_report_ready(text: str, **_: Any) -> dict[str, Any] | None:
     match = _CHILD_REPORT.fullmatch(str(text or ""))
     if not match or _report_notice_id(match["report_id"]) != match["id"]:
         return None
-    return {
+    result = {
         "kind": "child_report_ready",
         "id": match["id"],
         "report_id": match["report_id"],
@@ -290,6 +309,14 @@ def _match_child_report_ready(text: str, **_: Any) -> dict[str, Any] | None:
         "msg_id": match["msg_id"],
         "status": match["status"],
     }
+
+    try:
+        context = json.loads(match["disposition_context"] or "null")
+        if _valid_disposition_context(context, match["report_id"]):
+            result["disposition_context"] = context
+    except (TypeError, ValueError):
+        pass  # Optional malformed enrichment cannot erase the ordinary notice.
+    return result
 
 
 def _build_claude_pasted_content(*, id: object, body: object, **_: Any) -> str:
