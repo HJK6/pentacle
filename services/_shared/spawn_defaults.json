@@ -12,7 +12,7 @@
       "effort": "max"
     },
     "gemini": {
-      "model": "gemini-3.1-pro",
+      "model": "gemini-3.1-pro-preview",
       "effort": "low"
     }
   },
