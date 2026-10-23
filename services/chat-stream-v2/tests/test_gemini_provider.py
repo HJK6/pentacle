@@ -310,6 +310,7 @@ def test_parallel_tool_results_do_not_include_sibling_outputs():
     parts = [
         {"functionResponse":{"id":"tool-a", "response":{"output":"output A"}}},
         {"functionResponse":{"id":"tool-b", "response":{"output":"output B"}}},
+        {"text":"shared turn context"},
     ]
     calls = [{"id":tid, "name":"read_file", "result":parts} for tid in ("tool-a", "tool-b")]
     records = [{"type":"gemini", "id":"g1", "toolCalls":calls},
@@ -320,3 +321,11 @@ def test_parallel_tool_results_do_not_include_sibling_outputs():
     for event in results:
         expected = "output A" if event["raw"]["tool_use_id"] == "tool-a" else "output B"
         assert event["text"] == expected
+
+
+def test_text_only_tool_result_fallback_is_preserved():
+    record = {"type":"gemini", "id":"g1", "toolCalls":[
+        {"id":"t1", "name":"read_file", "result":[{"text":"plain tool output"}]},
+    ]}
+    events = normalize_gemini_jsonl_records([record], host="local", session_name="fixture", default_session_id=SID)
+    assert [e["text"] for e in events if e["kind"] == "TOOL_RESULT"] == ["plain tool output"]

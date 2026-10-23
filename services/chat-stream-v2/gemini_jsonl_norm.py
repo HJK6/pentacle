@@ -209,7 +209,7 @@ def _gemini_tool_output(result: Any, *, tool_use_id: str | None = None) -> str |
                 output = response.get("error")
             if output is not None:
                 parts.append(_to_text(output))
-        elif item.get("text"):
+        elif item.get("text") and response_count == 0:
             parts.append(_to_text(item.get("text")))
     return "\n".join(parts) if parts else None
 
