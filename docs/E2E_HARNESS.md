@@ -10,6 +10,8 @@ Run the repository's normal unit gate first:
 python3 services/chat-stream-v2/tools/run_gate.py unit
 ```
 
+Each tier's evidence keeps the original subject outcome (`reason`, also `primary_outcome`) apart from reporting and cleanup facts (`secondary_outcomes`), plus the raw `subprocess_returncode` and a `termination` record that tells an internal tier timeout from an external signal. A progress journal (`<tier>.progress.jsonl`, written by `tools/gate_progress.py` outside basetemp) names the last started and completed nodes even after a per-test timeout hard exit; it holds node identities, phases, outcomes and monotonic times only. Missing JUnit, an incomplete journal, a truncated log or an unwritable log always fail the tier. The evidence file is written as `finished: false` before launch, so a runner killed without cleanup stays visibly incomplete. `--deadline-seconds N` refuses with `deadline_envelope_exceeded`, before launch or between tiers, when the remaining time cannot cover the remaining tier bounds, smoke/soak preflight (30s), usage validation (30s) and `--deadline-reserve-seconds` (default 60s); every check's components are recorded under `deadline`.
+
 For a websocket smoke check, start a daemon on an ephemeral loopback port with temporary session and notification stores, then exercise `welcome`, `hello`, `list_sessions`, `spawn`, `send`, and `close`. The test should use a fake provider executable that writes deterministic output to a disposable tmux session.
 
 ## Recorded ingress probe rehearsal
