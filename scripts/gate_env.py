@@ -70,6 +70,9 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
     for key in ("toolchain", "profiles", "capability_sets", "search_path", "locales", "system_path"):
         if not isinstance(config.get(key), (dict, list)):
             problems.append(key)
+    deadline = config.get("deadline")
+    if not isinstance(deadline, dict) or any(not isinstance(deadline.get(k), int) or isinstance(deadline.get(k), bool) or deadline[k] < 0 for k in ("preflight_s", "reserve_s", "slack_s")):
+        problems.append("deadline")
     for key in ("reserve_s", "max_tmpdir_bytes", "min_free_mb"):
         if not isinstance(config.get(key), int) or isinstance(config.get(key), bool) or config[key] < 0:
             problems.append(key)
@@ -474,6 +477,8 @@ def junit_counts(path: Path) -> Optional[Dict[str, int]]:
 
 
 def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, cancelled: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
+    """Fold run_gate evidence. Reads the runner's own `primary_outcome` (falling back to `reason` for
+    older runners) and keeps its reporting/cleanup facts as secondaries instead of erasing them."""
     if cancelled:
         return "cancelled", {"stage": "subject", "code": "cancelled"}, {}
     if timed_out:
@@ -482,24 +487,37 @@ def classify_run_gate(evidence_json: Path, returncode: int, timed_out: bool, can
         data = json.loads(evidence_json.read_text("utf-8"))
     except (OSError, ValueError):
         return "harness_failure", {"stage": "subject", "code": "no_gate_evidence"}, {}
-    first = next((t for t in data.get("tiers", []) if not t.get("passed")), None)
+    tiers = data.get("tiers", [])
+    secondary: Dict[str, Any] = {}
+    reporting = sorted({r for t in tiers for r in (t.get("secondary_outcomes") or [])})
+    if reporting:
+        secondary["reporting"] = reporting
+    if data.get("finished") is False:
+        return "incomplete", {"stage": "subject", "code": "evidence_not_finished"}, secondary
+    first = next((t for t in tiers if not t.get("passed")), None)
     if first is None and returncode == 0:
-        return "pass", None, {"tiers": [t.get("tier") for t in data.get("tiers", [])]}
+        return "pass", None, dict(secondary, tiers=[t.get("tier") for t in tiers])
     if first is None:
-        return "harness_failure", {"stage": "subject", "code": "rc_%d_without_failed_tier" % returncode}, {}
-    reason, counts = first.get("reason") or "unknown", first.get("counts") or {}
+        return "harness_failure", {"stage": "subject", "code": "rc_%d_without_failed_tier" % returncode}, secondary
+    reason = first.get("primary_outcome") or first.get("reason") or "unknown"
+    counts = first.get("counts") or {}
     ff = {"stage": first.get("tier", "subject"), "code": reason}
+    kind = (first.get("termination") or {}).get("kind")
+    if kind == "external_signal" or reason == "terminated":
+        return "cancelled", ff, secondary
+    if reason == "deadline_envelope_exceeded":
+        return "setup_failure", ff, secondary
     if reason in ("ambient_tmux", "tmux_missing", "preflight_failed", "dirty_worktree", "invalid_soak_tier") or reason.startswith("manifest_error"):
-        return "setup_failure", ff, {}
+        return "setup_failure", ff, secondary
     if reason == "timeout":
-        return "timeout_unclassified", ff, {}
-    if reason == "terminated":
-        return "cancelled", ff, {}
+        return "timeout_unclassified", ff, secondary
+    if kind == "subject_signal":
+        return "harness_failure", ff, secondary  # killed by a signal the runner did not send
     if reason == "test_failures":
-        return ("product_failure" if counts.get("failures") else "unknown"), ff, {}
-    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "soak_skipped"):
-        return "harness_failure", ff, {}
-    return "unknown", ff, {}
+        return ("product_failure" if counts.get("failures") else "unknown"), ff, secondary
+    if reason in ("missing_junit", "invalid_junit", "no_tests_collected", "source_changed_during_gate", "soak_skipped", "evidence_incomplete", "usage_manifest_invalid", "usage_manifest_timeout"):
+        return "harness_failure", ff, secondary
+    return "unknown", ff, secondary
 
 
 def classify_pytest(junit: Path, returncode: int, timed_out: bool, cancelled: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
@@ -743,13 +761,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if target["kind"] == "prepare":
             state.update(outcome="pass", first_failure=None)
         else:
-            command, results = build_command(target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
+            command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
             timed_out = False
             try:
-                proc.wait(timeout=timeout_s + config["reserve_s"])
+                proc.wait(timeout=results.get("wall_s", timeout_s + config["reserve_s"]))
             except subprocess.TimeoutExpired:
                 timed_out = True
                 stop_group(proc)
@@ -813,17 +831,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT.get(state["outcome"], 1)
 
 
-def build_command(target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
+def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
                   selection: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[List[str], Dict[str, Any]]:
     gate_dir = evidence / "gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
     kind = target["kind"]
     if kind == "run_gate":
         tiers = 2 if target["gate"] == "merge" else 1
-        command = [str(venv / "bin" / "python"), str(service_dir / "tools" / "run_gate.py"), target["gate"], "--evidence-dir", str(gate_dir),
-                   "--basetemp", str(basetemp), "--timeout-seconds", str(max(1, timeout_s // tiers))]
+        tier_s = max(1, timeout_s // tiers)
+        runner = service_dir / "tools" / "run_gate.py"
+        command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
+                   "--basetemp", str(basetemp), "--timeout-seconds", str(tier_s)]
+        wall_s = timeout_s + config["reserve_s"]
+        if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
+            budget = config["deadline"]
+            preflights = 1 if target["gate"] in ("smoke", "merge") else 0
+            # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
+            deadline_s = tier_s * tiers + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
+            command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
+            wall_s = deadline_s + budget["slack_s"]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
-        return command, {"cwd": checkout, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
+        return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":
         junit = gate_dir / "pytest.junit.xml"
         command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs", "--strict-capabilities", "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]

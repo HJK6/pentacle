@@ -157,6 +157,7 @@ class ConfigFailsClosed(Tmp):
             "timeout over max": lambda c: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(timeout_s=99999),
             "unknown capability set": lambda c: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(capabilities="nope"),
             "no targets": lambda c: c["profiles"]["pentacle"].update(targets={}),
+            "deadline budget": lambda c: c["deadline"].update(slack_s=-1),
         }
         for label, mutate in bad.items():
             with self.subTest(label), self.assertRaises(ge.SetupFailure):
@@ -406,6 +407,27 @@ class Classification(Tmp):
         self.assertEqual(ge.classify_run_gate(self.tmp / "none.json", 1, False, False)[0], "harness_failure")
         self.assertEqual(ge.classify_run_gate(self.tmp / "none.json", 1, True, False)[0], "timeout_unclassified")
 
+    def test_run_gate_deadline_runner_fields_are_read(self):
+        def tier(**kw):
+            return dict({"tier": "unit", "passed": False, "reason": "x", "primary_outcome": "x"}, **kw)
+
+        def fold(data, rc=1):
+            path = self.tmp / "e.json"
+            path.write_text(json.dumps(data))
+            return ge.classify_run_gate(path, rc, False, False)
+        out, ff, sec = fold({"finished": True, "tiers": [tier(primary_outcome="deadline_envelope_exceeded", reason="deadline_envelope_exceeded")]})
+        self.assertEqual((out, ff["code"]), ("setup_failure", "deadline_envelope_exceeded"))
+        self.assertEqual(fold({"finished": False, "tiers": []})[0], "incomplete")
+        self.assertEqual(fold({"finished": True, "tiers": [tier(primary_outcome="evidence_incomplete", secondary_outcomes=["journal_incomplete"])]})[::2],
+                         ("harness_failure", {"reporting": ["journal_incomplete"]}))
+        self.assertEqual(fold({"finished": True, "tiers": [tier(primary_outcome="pytest_failed", termination={"kind": "external_signal"})]})[0], "cancelled")
+        self.assertEqual(fold({"finished": True, "tiers": [tier(primary_outcome="pytest_failed", termination={"kind": "subject_signal", "signal": "SIGKILL"})]})[0], "harness_failure")
+        # primary_outcome wins over the legacy reason; failures still split product from unknown
+        self.assertEqual(fold({"finished": True, "tiers": [tier(reason="old", primary_outcome="test_failures", counts={"failures": 1})]})[0], "product_failure")
+        # a green primary keeps reporting facts as secondaries and is still a pass
+        self.assertEqual(fold({"finished": True, "tiers": [{"tier": "unit", "passed": True, "primary_outcome": None, "secondary_outcomes": ["output_truncated"]}]}, rc=0)[::2],
+                         ("pass", {"reporting": ["output_truncated"], "tiers": ["unit"]}))
+
     def test_pytest_and_npm_outcomes(self):
         junit = self.tmp / "j.xml"
         junit.write_text('<testsuite tests="3" failures="1" errors="0" skipped="0"/>')
@@ -421,6 +443,31 @@ class Classification(Tmp):
         self.assertEqual(ge.classify_npm(summary, 1, False, False)[0], "product_failure")
         summary.write_text(json.dumps({"exit_code": 1, "files": [{"file": "a", "status": "timeout", "cleanup": {"status": "clean"}}]}))
         self.assertEqual(ge.classify_npm(summary, 1, False, False)[0], "timeout_unclassified")
+
+
+class DeadlineEnvelope(Tmp):
+    """gate_env hands run_gate a finite --deadline-seconds only when that runner supports it."""
+
+    def command(self, gate, runner_text):
+        service = self.tmp / "svc"
+        (service / "tools").mkdir(parents=True, exist_ok=True)
+        (service / "tools" / "run_gate.py").write_text(runner_text)
+        target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
+        command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
+        return command, results
+
+    def test_deadline_covers_tiers_preflight_and_reserve(self):
+        command, results = self.command("merge", "parser.add_argument('--deadline-seconds')")
+        self.assertEqual(command[command.index("--timeout-seconds") + 1], "900")
+        self.assertEqual(command[command.index("--deadline-seconds") + 1], str(900 * 2 + 30 + 60 + 30))
+        self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
+        unit, results = self.command("unit", "--deadline-seconds")
+        self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+
+    def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
+        command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
+        self.assertNotIn("--deadline-seconds", command)
+        self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
 class EntrypointReceipts(Tmp):
