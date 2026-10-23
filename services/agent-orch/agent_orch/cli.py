@@ -1124,7 +1124,7 @@ def spawn(args: argparse.Namespace) -> int:
                 "idempotency_key_not_schedulable",
                 "--idempotency-key cannot override the schedule generation key",
             )
-        if top_level and getattr(args, "self_close_on_completion", None) is not None:
+        if top_level and getattr(args, "self_close_on_completion", None) is True:
             return _fresh_schedule_validation_error(
                 "self_close_requires_parent",
                 "--self-close-on-completion requires parent lineage",
@@ -1298,6 +1298,8 @@ def spawn(args: argparse.Namespace) -> int:
         resolved_self_close = _resolve_self_close_on_completion(
             args, visibility=visibility, parent=parent, handoff=handoff
         )
+        if top_level and getattr(args, "self_close_on_completion", None) is False:
+            payload["self_close_on_completion"] = False
         if resolved_self_close is not None:
             payload["self_close_on_completion"] = resolved_self_close
         if spec_ids:
