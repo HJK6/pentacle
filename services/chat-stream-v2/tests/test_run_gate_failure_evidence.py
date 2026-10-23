@@ -34,8 +34,14 @@ run_gate.SERVICE_DIR = suite
 run_gate._tier_command = lambda tier, junit, basetemp: [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
                                                          f"--junitxml={junit}", "--basetemp", str(basetemp / tier)]
 run_gate._sha = lambda: "c" * 40
+os.environ.update(config.get("env", {}))
 statuses = iter(config.get("statuses", ["", ""]))
-run_gate._git_status = lambda: next(statuses)
+def git_status():
+    value = next(statuses)
+    if value == "RAISE":
+        raise OSError("injected readback failure")
+    return value
+run_gate._git_status = git_status
 if config.get("log_max_bytes"):
     run_gate.LOG_MAX_BYTES = config["log_max_bytes"]
 if config.get("reap_fails"):
@@ -159,7 +165,7 @@ def test_runner_sigkill_leaves_visibly_unfinished_evidence(tmp_path: Path) -> No
     except ProcessLookupError:
         pass
     data = json.loads((evidence / "v2-unit-evidence.json").read_text(encoding="utf-8"))
-    assert data["finished"] is False and data["passed"] is False and data["tiers"] == []
+    assert data["finished"] is False and data["passed"] is False and data["tiers"] == [] and data["source"]["clean_after"] is None
     from tools import gate_progress
     assert gate_progress.summarize(journal)["active_nodes"] == ["test_synthetic.py::test_slow"]
 
@@ -241,3 +247,22 @@ def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     assert seen == ["unit"] and [tier["reason"] for tier in data["tiers"]] == [None, "deadline_envelope_exceeded"]
     assert [check["ok"] for check in data["deadline"]["checks"]] == [True, False]
     assert data["deadline"]["checks"][1]["tier_bounds_s"] == {"smoke": 10.0}
+
+
+def test_setup_exception_keeps_terminal_record(tmp_path: Path) -> None:
+    code, data, out = _gate(tmp_path, PASSING, env={"V2_UNIT_TIMEOUT_S": "abc"})
+    assert code == 1 and data["finished"] is True and data["passed"] is False, out
+    assert [tier["reason"] for tier in data["tiers"]] == ["runner_error"] and "ValueError" in data["tiers"][0]["error"]
+
+
+def test_source_readback_failure_is_recorded_beside_green_tier(tmp_path: Path) -> None:
+    code, data, _ = _gate(tmp_path, PASSING, statuses=["", "RAISE"])
+    assert code == 1 and data["tiers"][0]["passed"] is True
+    assert data["tiers"][-1]["reason"] == "source_readback_failed" and data["source"]["clean_after"] is None
+
+
+def test_subject_killed_by_foreign_signal_is_attributed(tmp_path: Path) -> None:
+    code, data, _ = _gate(tmp_path, "import os, signal\ndef test_a():\n    os.kill(os.getpid(), signal.SIGKILL)\n")
+    unit = data["tiers"][0]
+    assert code == 1 and unit["passed"] is False and unit["subprocess_returncode"] == -signal.SIGKILL
+    assert unit["termination"] == {"kind": "subject_signal", "signal": "SIGKILL"} and unit["timed_out"] is False

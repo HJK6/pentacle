@@ -1,9 +1,9 @@
 """Bounded per-run progress journal for one v2 gate tier (pytest plugin).
 
-run_gate.py loads this with ``-p gate_progress --gate-progress-journal=PATH``;
+run_gate.py loads this with ``-p tools.gate_progress --gate-progress-journal=PATH``;
 the option exists only on that subject's argv, so nested pytest processes never
-inherit it. Each record is one JSON line written with a single unbuffered
-``os.write`` to an O_APPEND descriptor, so a pytest-timeout thread hard exit
+inherit it. Each record is one JSON line written unbuffered (short writes
+completed) to an O_APPEND descriptor, so a pytest-timeout thread hard exit
 (``os._exit``) leaves every prior record plus the last started node on disk.
 
 Only identities, phases, outcomes and monotonic times are recorded: never test
@@ -24,6 +24,9 @@ SCHEMA = "pentacle.v2.gate-progress.v1"
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 NODEID_MAX = 300
 PARAM_MAX = 48
+# Bound before any test runs: suites monkeypatch os.write/os.open (short-write and
+# disk-full controls), and the journal must not share those patches.
+_OPEN, _WRITE, _CLOSE = os.open, os.write, os.close
 
 
 def bounded_nodeid(nodeid: str) -> str:
@@ -44,7 +47,7 @@ class ProgressJournal:
         self.started = time.monotonic()
         self.seq = self.written = 0
         self.exhausted = False
-        self.fd: int | None = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_TRUNC, 0o600)
+        self.fd: int | None = _OPEN(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_TRUNC, 0o600)
 
     def emit(self, kind: str, **fields: Any) -> None:
         if self.fd is None:
@@ -58,7 +61,9 @@ class ProgressJournal:
                                sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
             self.exhausted = True
         try:
-            os.write(self.fd, line)
+            view = memoryview(line)
+            while view:
+                view = view[_WRITE(self.fd, view):]
             self.written += len(line)
         except OSError:
             self.close()
@@ -69,7 +74,7 @@ class ProgressJournal:
     def close(self) -> None:
         if self.fd is not None:
             try:
-                os.close(self.fd)
+                _CLOSE(self.fd)
             except OSError:
                 pass
             self.fd = None

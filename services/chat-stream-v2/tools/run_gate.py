@@ -302,6 +302,10 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     _LAST_PROCESS.clear()
     code, timed_out = _run_process(command, env=env, log_path=log, timeout=timeout)
     facts = dict(_LAST_PROCESS)
+    raw = facts.get("subprocess_returncode")
+    if facts.get("termination") is None and isinstance(raw, int) and raw < 0:
+        # Killed by a signal this runner did not send (for example the OOM killer).
+        facts["termination"] = {"kind": "subject_signal", "signal": signal.Signals(-raw).name if -raw in signal.Signals._value2member_map_ else str(-raw)}
     counts, progress = _junit_counts(junit), summarize_progress(journal)
     terminated = not timed_out and (_TERMINATION_REQUESTED or (facts.get("termination") or {}).get("kind") == "external_signal")
     reason, secondary = _classify(code=code, timed_out=timed_out, terminated=terminated, counts=counts, tier=tier, progress=progress, output=facts.get("output") or {})
@@ -358,7 +362,7 @@ def _run_usage_manifest(manifest: Path, evidence: Path, deployment_contract: Pat
 
 def _write_evidence(gate: str, evidence: Path, output: Path | None, sha: str | None, before: str | None, after_sha: str | None, after: str | None, tiers: list[dict[str, Any]], *, finished: bool = True, deadline: dict[str, Any] | None = None) -> Path:
     passed = finished and bool(tiers) and all(bool(item["passed"]) for item in tiers)
-    data = {"schema": "pentacle.v2.gate-evidence.v1", "gate": gate, "sha": sha, "source": {"sha_before": sha, "sha_after": after_sha, "clean_before": not before, "clean_after": not after, "status_before": before, "status_after": after}, "generated_at": datetime.now(timezone.utc).isoformat(), "repo_root": str(REPO_ROOT), "service_dir": str(SERVICE_DIR), "tiers": tiers, "finished": finished, "deadline": deadline, "passed": passed}
+    data = {"schema": "pentacle.v2.gate-evidence.v1", "gate": gate, "sha": sha, "source": {"sha_before": sha, "sha_after": after_sha, "clean_before": None if before is None else not before, "clean_after": None if after is None else not after, "status_before": before, "status_after": after}, "generated_at": datetime.now(timezone.utc).isoformat(), "repo_root": str(REPO_ROOT), "service_dir": str(SERVICE_DIR), "tiers": tiers, "finished": finished, "deadline": deadline, "passed": passed}
     path = output or evidence / f"v2-{gate}-evidence.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replace: a crash mid-write leaves the previous (started, unfinished) record intact.
@@ -419,17 +423,20 @@ def main() -> int:
         parser.error("usage manifest validation requires the merge gate")
     evidence = args.evidence_dir or Path(os.environ.get("V2_GATE_EVIDENCE_DIR") or tempfile.mkdtemp(prefix="pentacle-v2-gate-"))
     evidence.mkdir(parents=True, exist_ok=True)
-    basetemp = args.basetemp or evidence / f"pytest-{args.gate}-{os.getpid()}-{uuid.uuid4().hex[:10]}"
-    basetemp.mkdir(parents=True, exist_ok=True)
-    manifest = basetemp / ".owned.json"
     tiers = ("unit", "smoke") if args.gate == "merge" else ("soak",) if args.gate == "soak" else (args.gate,)
-    limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", DEFAULT_TIMEOUTS[tier]))) for tier in tiers]
     deadline = None if args.deadline_seconds is None else {"deadline_s": args.deadline_seconds, "reserve_s": args.deadline_reserve_seconds, "checks": []}
-    sha, before, results = _sha(), _git_status(), []
-    _write_evidence(args.gate, evidence, args.evidence_out, sha, before, None, None, [], finished=False, deadline=deadline)
+    sha = before = None
+    results: list[dict[str, Any]] = []
     _TERMINATION_REQUESTED, _TERMINATION_SIGNAL = False, None
     old_handlers, ready = {}, False
     try:
+        # Setup faults below land in the runner_error record rather than a bare traceback.
+        sha, before = _sha(), _git_status()
+        _write_evidence(args.gate, evidence, args.evidence_out, sha, before, None, None, [], finished=False, deadline=deadline)
+        basetemp = args.basetemp or evidence / f"pytest-{args.gate}-{os.getpid()}-{uuid.uuid4().hex[:10]}"
+        basetemp.mkdir(parents=True, exist_ok=True)
+        manifest = basetemp / ".owned.json"
+        limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", DEFAULT_TIMEOUTS[tier]))) for tier in tiers]
         reap_manifest(manifest)
         _ACTIVE_RUN_ID = initialize_manifest(manifest)
         _ACTIVE_MANIFEST_PATH, ready = manifest, True
@@ -485,7 +492,7 @@ def main() -> int:
         after_sha = after = None
         results.append(_result("source_integrity", code=125, passed=False, reason="source_readback_failed", error=f"{type(exc).__name__}: {exc}"[:500]))
     else:
-        if after_sha != sha or (not before and after):
+        if sha is not None and (after_sha != sha or (not before and after)):
             results.append(_result("source_integrity", code=125, passed=False, reason="source_changed_during_gate", command=["git", "rev-parse", "HEAD"]))
     try:
         output = _write_evidence(args.gate, evidence, args.evidence_out, sha, before, after_sha, after, results, deadline=deadline)

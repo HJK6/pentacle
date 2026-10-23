@@ -113,3 +113,25 @@ def test_bounded_nodeid_hides_long_parameters() -> None:
     assert len(node) < 120 and node.startswith("t.py::test_x[ppp") and "#" in node
     assert gate_progress.bounded_nodeid("t.py::test_x[short]") == "t.py::test_x[short]"
     assert len(gate_progress.bounded_nodeid("t.py::" + "y" * 1000)) <= gate_progress.NODEID_MAX + 20
+
+
+PATCHES_OS_WRITE = '''
+import os
+
+def test_short_writes(monkeypatch):
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data[:7])))
+    def failing(fd, data):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(os, "write", failing)
+
+def test_after():
+    pass
+'''
+
+
+def test_journal_survives_tests_that_patch_os_write(tmp_path: Path) -> None:
+    proc, journal = _run_suite(tmp_path, PATCHES_OS_WRITE)
+    assert proc.returncode == 0, proc.stdout
+    summary = gate_progress.summarize(journal)
+    assert summary["complete"] is True and summary["completed_nodes"] == 2 and summary["malformed_lines"] == 0
