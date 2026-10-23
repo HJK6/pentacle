@@ -33,9 +33,12 @@ An optimistic send starts as `queued`, becomes `dispatched` after the transport 
 
 ## Composer modes on agent chats
 
-While an agent chat is working (turn phase not idle), the composer shows `Queue` | `Steer now`, default `Queue`, and a Stop control beside Send that is visible whether or not a draft exists. `Enter` sends in the selected mode and `Alt+Enter` sends as Steer now; the choice returns to `Queue` after each send. `Queue` sends exactly as an ordinary send and the provider holds it in its native queue. `Steer now` calls `sendTurn(streamId, text, attachments, { urgent: true })`, which reaches the daemon as `send.urgent` (see [chat protocol](chat_protocol.md#session-interrupt)). The assistant composite chat shows neither control, never reports a working phase for them and never sends `urgent`.
+The composer sends normally with Enter, Alt+Enter or Send, including while the agent works. The provider owns any native queue; there is no Queue/Steer chooser. Shift+Enter inserts a newline. Stop stays beside Send while a non-composite agent works, even with a draft.
 
-Stop and Steer now draw on one Escape budget per working turn. The first of either sends the Escape; a later Steer now in the same turn is sent without `urgent` and the composer shows "Steer did not take; queued instead", and a later Stop is a no-op. The budget resets when the turn phase leaves working, and a failed interrupt request re-arms it. `urgent` is first-dispatch only: it is not stored on the optimistic row, so a retry or a reconnect replay sends an ordinary message. Row state follows the receipt: a steer whose receipt is still `provider_queued` renders as queued and shows the same notice. Stop never clears the provider's queue; while queued rows remain the composer says "Stopped. Queued messages run next".
+Rows show sending until receipt proof arrives. `provider_queued` shows Queued with a Send now button; a local working hint or the optimistic lifecycle's initial queued state does not establish native queueing. A confirmed nonqueued receipt or correlated processing echo resolves the row to Sent. Historical receipt captions and ordinary failure/retry reconciliation retain their existing rules.
+
+Send now calls the generation-fenced interrupt bridge for that queued row's stream. It sends one Escape to end the current turn and release the provider-owned queue; it never resends text or attachments, rotates the request id, or creates another row. Multiple queued messages keep the provider's native order and may run together. The current composer draft is preserved. Stop and Send now coalesce against the same turn's Escape budget. An unconfirmed Send now acknowledgement keeps the row Queued with a waiting notice; an explicit failure allows an operator retry. Reconnect never replays an interrupt. Stop retains its existing explicit interrupt retry behavior. The assistant composite has no Stop, chooser or queued-row action.
+
 
 ## Transcript rendering
 

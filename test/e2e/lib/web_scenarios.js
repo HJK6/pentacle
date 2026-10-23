@@ -18,7 +18,7 @@ const { webWorkLanes } = require('./work_lanes_scenario');
 const { crossOriginBoundary } = require('./cross_origin_scenario');
 const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
 const { branding } = require('./branding_scenario');
-const { agentChatSteerControls } = require('./steer_controls_scenario');
+const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_scenario');
 const { scheduledSection } = require('./scheduled_section_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -528,7 +528,7 @@ const SCENARIOS = [
   ['scheduled-section', scheduledSection],
   ['pane-count-selector', paneCountSelector],
   ['chat-first-style', chatFirstStyle],
-  ['agent-chat-steer-controls', agentChatSteerControls],
+  ['agent-chat-send-default-queue-state', agentChatSendDefaultQueueState],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.
