@@ -202,3 +202,109 @@ test('a stale queued button cannot interrupt after the send becomes indeterminat
   assert.equal(interrupts.length, 0);
   controller.dispose();
 });
+
+for (const confirm of ['interrupt_unconfirmed', 'interrupted', 'coalesced']) {
+  test(`Send now retains its queue fence through render and local turn transitions (${confirm})`, async () => {
+    const { controller, interrupts, setInterrupt } = setup(false);
+    setInterrupt({ ok: true, confirm });
+    const id = controller.sendTurn(STREAM, 'queued behind an unobserved native turn');
+    await settle();
+    assert.equal(controller.getTurnPhase(STREAM), 'pending');
+    assert.equal(sendNow(controller, STREAM, id), true);
+    await settle();
+    controller.applyFrame({ type: 'chat.event', event: {
+      daemon_seq: 91, host: 'peer', provider: 'claude', stream_id: STREAM,
+      session_name: 'queue-seat', timestamp: new Date().toISOString(),
+      kind: 'ASSIST_TEXT', text: 'The earlier native turn is still producing output',
+    } });
+    assert.equal(typeof controller.getTurnState(STREAM)?.firstServerEventAt, 'number');
+    // This is the same read the transcript renderer performs on every paint.
+    const retainedAfterPaint = controller.getInterruptState(STREAM);
+    (controller as any).setState({ ...controller.getState(), workingByStream: {} });
+    const repeated = sendNow(controller, STREAM, id);
+    await settle();
+    assert.deepEqual({ interrupts: interrupts.length, retained: !!retainedAfterPaint, repeated },
+      { interrupts: 1, retained: true, repeated: false });
+    controller.dispose();
+  });
+}
+
+for (const confirm of ['interrupted', 'coalesced']) {
+  test(`a confirmed Stop shares its queue fence after the local turn clears (${confirm})`, async () => {
+    const { controller, interrupts, setInterrupt } = setup();
+    setInterrupt({ ok: true, confirm });
+    const id = controller.sendTurn(STREAM, 'queued behind the stopped native turn');
+    await settle();
+    assert.equal(controller.cancelTurn(STREAM), true);
+    await settle();
+    assert.equal(controller.getTurnPhase(STREAM), 'idle');
+    controller.getInterruptState(STREAM);
+    const repeated = sendNow(controller, STREAM, id);
+    await settle();
+    assert.deepEqual({ interrupts: interrupts.length, repeated }, { interrupts: 1, repeated: false });
+    controller.dispose();
+  });
+}
+
+test('queue processing releases the fence only after all originally queued rows resolve', async () => {
+  const { controller, interrupts } = setup();
+  const first = controller.sendTurn(STREAM, 'first reserved row');
+  const second = controller.sendTurn(STREAM, 'second reserved row');
+  await settle();
+  assert.equal(sendNow(controller, STREAM, second), true);
+  await settle();
+  const echo = (id: string, seq: number) => {
+    const send = controller.getState().optimisticSends?.[id]!;
+    controller.applyFrame({ type: 'chat.event', event: {
+      daemon_seq: seq, host: 'peer', provider: 'claude', stream_id: STREAM,
+      session_name: 'queue-seat', timestamp: new Date().toISOString(), kind: 'USER',
+      text: send.text, optimistic_id: id, request_id: send.request_id,
+      raw: { receipt_state: 'landed', receipt_delivery: 'landed' },
+    } });
+  };
+  echo(first, 101);
+  controller.getInterruptState(STREAM);
+  (controller as any).setState({ ...controller.getState(), workingByStream: {} });
+  assert.equal(sendNow(controller, STREAM, second), false);
+  echo(second, 102);
+  assert.equal(controller.getInterruptState(STREAM), null);
+  const next = controller.sendTurn(STREAM, 'new queue on the next turn');
+  await settle();
+  assert.equal(sendNow(controller, STREAM, next), true);
+  await settle();
+  assert.equal(interrupts.length, 2);
+  controller.dispose();
+});
+
+test('generation replacement releases the old fence without enabling its stale row', async () => {
+  const { controller, interrupts } = setup();
+  const old = controller.sendTurn(STREAM, 'old reserved row');
+  await settle();
+  assert.equal(sendNow(controller, STREAM, old), true);
+  await settle();
+  controller.applyFrame({ type: 'session.inventory', sessions: [session(STREAM, 'generation-2'), session(OTHER), session(COMPOSITE)] });
+  assert.equal(sendNow(controller, STREAM, old), false);
+  const next = controller.sendTurn(STREAM, 'new generation queue');
+  await settle();
+  assert.equal(sendNow(controller, STREAM, next), true);
+  await settle();
+  assert.deepEqual(interrupts.map(x => x.expectedSessionGeneration), ['generation-1', 'generation-2']);
+  controller.dispose();
+});
+
+test('a late queue receipt after delivery uncertainty cannot rearm an unresolved interrupt', async () => {
+  const { controller, interrupts } = setup(false);
+  const id = controller.sendTurn(STREAM, 'queue across a missing receipt');
+  await settle();
+  const requestId = controller.getState().optimisticSends?.[id]?.request_id;
+  assert.equal(sendNow(controller, STREAM, id), true);
+  await settle();
+  controller.applyFrame({ type: 'send.indeterminate', request_id: requestId, reason: 'disconnected' });
+  (controller as any).setState({ ...controller.getState(), workingByStream: {} });
+  controller.getInterruptState(STREAM);
+  controller.applyFrame({ type: 'send.result', request_id: requestId, delivery: 'landed', provider_queued: true });
+  const repeated = sendNow(controller, STREAM, id);
+  await settle();
+  assert.deepEqual({ interrupts: interrupts.length, repeated }, { interrupts: 1, repeated: false });
+  controller.dispose();
+});
