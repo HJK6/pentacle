@@ -53,7 +53,7 @@ def test_front_desk_defaults_and_concurrent_agents_bind_once(tmp_path):
             assert (await store.fetch_session("host-a","two"))["account_binding"]==second.public()
             runtime.policy["enabled"]=False
             await runtime.before_input(await store.fetch_session("host-a","two")) # drain on rollback
-            with pytest.raises(Exception,match="account_feature_off"): await choose({})
+            assert await choose({}) is None
         finally: store.stop()
     asyncio.run(run())
 
@@ -119,6 +119,73 @@ def test_rollout_scope_preserves_untouched_hosts_and_never_unbinds_managed_cells
             runtime.policy["managed_hosts"]=[]
             with pytest.raises(Exception,match="account_feature_off"):
                 await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message={})
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("launch_request",[
+    {"provider":"codex","model":"gpt-5.6-sol","effort":"high"},
+    {"command":"/bin/echo rollback-ready"},
+])
+def test_policy_off_restores_pre_activation_launch_on_registered_database_copy(tmp_path, launch_request):
+    import sqlite3
+    import launch
+    from spawnctl import SpawnCtl
+    async def run():
+        original=str(tmp_path/"before.db"); copied=str(tmp_path/"rollback.db")
+        store=Store(original); store.start(); sessions=Sessions(store,local_host="host-a")
+        runtime=AccountRuntime(store,sessions,policy={"enabled":False})
+        machine=launch.local_machine("host-a",cwd=str(tmp_path),codex_bin="/bin/echo")
+        def controller():
+            ctl=SpawnCtl(store,runtime.sessions,tmux=object(),machine=machine)
+            ctl.account_runtime=runtime
+            return ctl
+        message=dict(launch_request,_defer_launch_token_stage=True)
+        try:
+            before=await controller()._resolve_launch(message,"host-a","same-name")
+            runtime.policy["enabled"]=True
+            await runtime.run(lambda a:a.register(binding()))
+            await runtime.run(lambda a:a.set_default(host="host-a",provider="codex",alias="primary"))
+            existing=await store.open_session("host-a","bound-before-rollback",provider="codex",
+                session_generation="generation-one",account_binding=binding().public())
+            await runtime.bind_launch(existing)
+        finally: store.stop()
+        with sqlite3.connect(original) as source, sqlite3.connect(copied) as target:
+            source.backup(target)
+        store=Store(copied); store.start()
+        runtime.store=store; runtime.sessions=Sessions(store,local_host="host-a")
+        runtime.policy={"enabled":False}
+        try:
+            after=await controller()._resolve_launch(message,"host-a","same-name")
+            assert after[0]==before[0]
+            # Each fresh launch mints a new token/native ID; compare admission
+            # and the complete stable tuple/observer fields, not that entropy.
+            assert {k:v for k,v in after[1].items() if k!="_deferred_launch_plan"}=={
+                k:v for k,v in before[1].items() if k!="_deferred_launch_plan"}
+            volatile={"token_hash","claude_session_id","jsonl_path"}
+            assert {k:v for k,v in after[2].items() if k not in volatile}=={
+                k:v for k,v in before[2].items() if k not in volatile}
+            assert "account_binding" not in after[2]
+            assert (await store.fetch_session("host-a","bound-before-rollback"))["account_binding"]==binding().public()
+            assert (await runtime.run(lambda a:a.defaults()))[0]["alias"]=="primary"
+            assert await runtime.run(lambda a:a.bound(binding().key)) is not None
+            with pytest.raises(VerbError) as refused:
+                await controller()._resolve_launch(dict(message,command="/bin/echo refuse",account="primary"),
+                    "host-a","refused-override")
+            assert refused.value.code=="managed_command_forbidden"
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_policy_off_refuses_explicit_choice_and_bound_home_resume():
+    async def run():
+        store,runtime=await setup()
+        try:
+            runtime.policy["enabled"]=False
+            for message in ({"account":"primary","_auth_context":AUTH},
+                            {"resume_session_id":"native-id","_account_resume_binding":binding().public()}):
+                with pytest.raises(Exception,match="account_feature_off"):
+                    await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message=message)
         finally: store.stop()
     asyncio.run(run())
 

@@ -3333,7 +3333,7 @@ class SpawnCtl:
         provider = str(msg.get("provider") or "").strip()
         handoff = bool(msg.get("handoff"))
         account_runtime = getattr(self, "account_runtime", None)
-        if explicit and account_runtime is not None and account_runtime.manages(host):
+        if explicit and account_runtime is not None and (account_runtime.manages(host) or "account" in msg):
             raise VerbError("managed_command_forbidden", "managed launches require a native provider tuple")
 
         # Captured BEFORE resolution: v1 passes the model/effort FLAG to the CLI
@@ -3344,7 +3344,7 @@ class SpawnCtl:
         requested_effort = msg.get("effort")
 
         if not provider and not handoff:
-            if account_runtime is not None:
+            if account_runtime is not None and account_runtime.policy.get("enabled") is True:
                 managed = await account_runtime.run(lambda ledger: ledger.conn.execute(
                     "SELECT 1 FROM v2_account_bindings WHERE host=? LIMIT 1", (host,)).fetchone() is not None)
                 if managed or account_runtime.manages(host):
