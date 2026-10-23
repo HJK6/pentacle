@@ -303,3 +303,20 @@ def test_daemon_tuple_resolution_carries_native_identity_and_configured_binary(t
     assert overrides["jsonl_path"].endswith(f"/.gemini/sessions/{SID}.jsonl")
     assert overrides["observer_binding"]["executable"] == machine.gemini_bin
     assert "--session-id" in command
+
+
+def test_parallel_tool_results_do_not_include_sibling_outputs():
+    """Upstream patches can attach a whole multi-tool user turn to each call."""
+    parts = [
+        {"functionResponse":{"id":"tool-a", "response":{"output":"output A"}}},
+        {"functionResponse":{"id":"tool-b", "response":{"output":"output B"}}},
+    ]
+    calls = [{"id":tid, "name":"read_file", "result":parts} for tid in ("tool-a", "tool-b")]
+    records = [{"type":"gemini", "id":"g1", "toolCalls":calls},
+               {"$patch":{"updates":[{"id":"g1", "toolCalls":calls}]}}]
+    events = normalize_gemini_jsonl_records(records, host="local", session_name="fixture", default_session_id=SID)
+    results = [e for e in events if e["kind"] == "TOOL_RESULT"]
+    assert len(results) == 4
+    for event in results:
+        expected = "output A" if event["raw"]["tool_use_id"] == "tool-a" else "output B"
+        assert event["text"] == expected

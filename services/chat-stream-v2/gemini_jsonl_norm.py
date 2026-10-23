@@ -96,7 +96,7 @@ def normalize_gemini_jsonl_record(
             for call in calls if isinstance(calls, list) else []:
                 if not isinstance(call, dict) or not call.get("id"):
                     continue
-                output = _gemini_tool_output(call.get("result"))
+                output = _gemini_tool_output(call.get("result"), tool_use_id=call["id"])
                 if output is not None:
                     event = make("TOOL_RESULT", output, {
                         "tool_use_id": call["id"], "tool_content": output,
@@ -144,7 +144,7 @@ def normalize_gemini_jsonl_record(
             })
             events.extend(_stamp_jsonl_event_identity(
                 [event], f"gemini-tool:{tool_call['id']}:use" if tool_call.get("id") else None))
-            output = _gemini_tool_output(tool_call.get("result"))
+            output = _gemini_tool_output(tool_call.get("result"), tool_use_id=tool_call.get("id"))
             if output is not None:
                 event = make("TOOL_RESULT", output, {
                     "tool_use_id": tool_call.get("id"),
@@ -178,7 +178,7 @@ def normalize_gemini_jsonl_record(
     return []
 
 
-def _gemini_tool_output(result: Any) -> str | None:
+def _gemini_tool_output(result: Any, *, tool_use_id: str | None = None) -> str | None:
     """Extract display text from a recorded toolCall `result` part list.
 
     Ground truth: `[{"functionResponse": {"id", "name",
@@ -190,10 +190,18 @@ def _gemini_tool_output(result: Any) -> str | None:
     if not isinstance(result, list):
         return None
     parts: list[str] = []
+    response_count = sum(isinstance(item, dict) and isinstance(item.get("functionResponse"), dict)
+                         for item in result)
     for item in result:
         if not isinstance(item, dict):
             continue
         function_response = item.get("functionResponse")
+        if isinstance(function_response, dict) and tool_use_id:
+            result_id = function_response.get("id")
+            # Upstream may attach the entire multi-tool turn to each call.
+            # Keep only this call's response; id-less multi-call data is ambiguous.
+            if result_id != tool_use_id and (result_id or response_count > 1):
+                continue
         response = function_response.get("response") if isinstance(function_response, dict) else None
         if isinstance(response, dict):
             output = response.get("output")
