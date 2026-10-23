@@ -24,7 +24,7 @@ function loadModelLabel() {
   return new Function(`${extractFunction('modelLabel')}; return modelLabel;`)();
 }
 
-test('modelLabel uses the explicit desktop catalog map and raw fallback', () => {
+test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   const src = app.match(/function modelLabel\(model\) \{[\s\S]*?\n\}/);
   assert.ok(src, 'modelLabel function found in renderer/app.js');
   const modelLabel = loadModelLabel();
@@ -42,7 +42,10 @@ test('modelLabel uses the explicit desktop catalog map and raw fallback', () => 
   assert.equal(modelLabel('gpt-6.1-sol'), '6.1 Sol');
   assert.equal(modelLabel('gpt-6-luna'), '6 Luna');
   assert.equal(modelLabel('gpt-5.6-luna'), '5.6 Luna');
-  assert.equal(modelLabel('claude-opus-6'), 'claude-opus-6');
+  assert.equal(modelLabel('claude-opus-6'), 'Opus 6');
+  assert.equal(modelLabel('claude-haiku-5-5'), 'Haiku 5.5');
+  assert.equal(modelLabel('gemini-2-pro'), 'gemini-2-pro');
+  assert.equal(modelLabel('claude-opus'), 'claude-opus');
   assert.equal(modelLabel('gpt-'), 'gpt-');
   assert.equal(modelLabel(''), '');
 });
