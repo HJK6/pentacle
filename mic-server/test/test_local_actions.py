@@ -30,7 +30,9 @@ def test_default_and_explicit_tuple_are_grounded():
     assert (got['provider'], got['model'], got['effort'], got['host']) == ('codex', 'gpt-6-astra', 'high', 'samplehost')
     assert validate_decision(decision(), 'Spawn an agent to review tests')['spawn']['missing'] == ['model']
     got = validate_decision(decision(model='sol', effort='medium', host='otherhost'), 'Start a Sol agent with medium effort on Otherhost to review tests')
-    assert got['model'] == 'gpt-6-sol' and got['host'] == 'otherhost'
+    assert (got['provider'], got['model'], got['effort'], got['host']) == ('codex', 'gpt-6.1-sol', 'medium', 'otherhost')
+    got = validate_decision(decision(model='sol'), 'Spawn a Sol agent to review tests')
+    assert (got['provider'], got['model'], got['effort'], got['host']) == ('codex', 'gpt-6.1-sol', 'high', 'samplehost')
     for d, text in [(decision(task='delete files'), 'Spawn an agent to review tests')]:
         with pytest.raises(ValueError): validate_decision(d, text)
 
