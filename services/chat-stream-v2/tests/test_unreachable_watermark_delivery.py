@@ -18,7 +18,7 @@ import tmux_transport  # noqa: E402
 from sessions import Sessions  # noqa: E402
 from spawnctl import SpawnCtl  # noqa: E402
 from store import Store  # noqa: E402
-from submission_events import EventProof, EventWatermark  # noqa: E402
+from submission_events import DurableUserEventProof, EventProof, EventWatermark  # noqa: E402
 
 from test_adopt_reconcile import DEAD_PID, AdoptTmux  # noqa: E402
 from test_spawn_error_no_phantom_row import BootReadyTmux  # noqa: E402
@@ -126,3 +126,50 @@ def test_spawn_with_unreachable_watermark_confirms_from_fenced_event(
 
     outcome = asyncio.run(run())
     assert outcome["state"] == "delivered"
+
+
+def _settle_real(monkeypatch, events):
+    """Adoption against the REAL durable proof: events = [(kind, text, generation)]
+    where generation is "current" or "prior"."""
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.3)
+    stream = f"localhost:{NAME}"
+
+    async def run():
+        db = Store(":memory:")
+        db.start()
+        try:
+            await db.open_session("localhost", NAME, provider="claude")
+            prior = [e for e in events if e[2] == "prior"]
+            current = [e for e in events if e[2] == "current"]
+            for i, (kind, text, _g) in enumerate(prior):
+                await db.append_session_event(stream, {"stream_id": stream, "kind": kind, "text": text,
+                                                       "timestamp": "2026-10-01T00:00:00Z"}, identity=f"p{i}", limit=500)
+            if prior:
+                await db.submit(lambda conn: (conn.execute(
+                    "UPDATE sessions SET created_at=? WHERE host=? AND session_name=?",
+                    ("2099-01-01T00:00:00Z", "localhost", NAME)), conn.commit()))
+            for i, (kind, text, _g) in enumerate(current):
+                await db.append_session_event(stream, {"stream_id": stream, "kind": kind, "text": text,
+                                                       "timestamp": "2026-10-02T00:00:00Z"}, identity=f"c{i}", limit=500)
+            tmux = AdoptTmux(alive=True, pane_pid=DEAD_PID, screen="$ ")
+            sessions = Sessions(db, tmux=tmux, local_host="localhost")
+            ctl = SpawnCtl(db, sessions, tmux=tmux, submission_proof=DurableUserEventProof(db, local_host="localhost"))
+            return await ctl._settle_adoption("localhost", NAME, BRIEF, tmux, delivery_receipt=dict(UNREACHABLE))
+        finally:
+            db.stop()
+
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("events,delivered", [
+    ([("USER", BRIEF, "current")], True),
+    ([("USER", "unrelated operator text", "current")], False),
+    ([("USER", BRIEF, "prior")], False),
+], ids=["matching-current", "unrelated-body", "prior-generation"])
+def test_unreachable_watermark_settles_only_on_matching_current_generation_user(monkeypatch, events, delivered):
+    state, evidence, _reason = _settle_real(monkeypatch, events)
+    if delivered:
+        assert (state, evidence) == ("delivered", "event_store")
+    else:
+        # failed/agent_never_started, or indeterminate when the bounded store read expires; never delivered.
+        assert state != "delivered" and evidence != "event_store"
