@@ -597,7 +597,7 @@ def evidence_refs(folder: Path) -> List[Dict[str, Any]]:
     return refs
 
 
-def stop_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
+def stop_group(proc: subprocess.Popen, grace: float = 20.0) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError):
@@ -613,6 +613,34 @@ def stop_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
             break
         except subprocess.TimeoutExpired:
             continue
+
+
+class OwnedProcesses:
+    """The gate owner manifest (tools/gate_owner_manifest.py) for a subject the entrypoint launches directly.
+
+    Test fixtures record the daemons/tmux servers they start into it (V2_GATE_OWNER_MANIFEST); `stop` reaps
+    exactly those after the subject ends, is cancelled or times out, so teardown never depends on one process group."""
+
+    ENV = "V2_GATE_OWNER_MANIFEST"
+
+    def __init__(self, service_dir: Path, path: Path) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gate_owner_manifest_for_gate_env", service_dir / "tools" / "gate_owner_manifest.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)  # type: ignore[union-attr]
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.module.reap_manifest(path)  # a stale manifest from a dead owner is reaped, a live one raises
+        self.run_id = self.module.initialize_manifest(path)
+
+    def stop(self) -> bool:
+        """True when every recorded entry of this run was reaped and the manifest is gone."""
+        try:
+            self.module.mark_owner_stopping(self.path)
+            self.module.reap_manifest(self.path, self.run_id)
+        except Exception:  # a manifest that cannot be read is an unproven teardown, not a crash
+            return False
+        return not self.path.exists()
 
 
 def group_alive(pgid: int) -> bool:
@@ -684,6 +712,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     proc = None
+    owner: Optional[OwnedProcesses] = None
     try:
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
@@ -773,6 +802,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
             writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
             t_start = time.monotonic()
+            if target["kind"] == "pytest_files":  # run_gate and the npm runner own their own teardown; a bare pytest subject needs one
+                owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
+                env[OwnedProcesses.ENV] = str(owner.path)
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
             timed_out = False
             try:
@@ -807,6 +839,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         for s, h in old.items():
             signal.signal(s, h)
+        if owner is not None and not owner.stop():
+            state["secondary"]["cleanup"] = "failed"
+            state["secondary"]["owned_processes"] = "unreaped"
         # Owned scratch only: HOME, basetemp, TMPDIR. Evidence and the prepared cache stay.
         for d in (run_dir, tmp):
             try:
