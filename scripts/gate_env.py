@@ -449,6 +449,9 @@ def run_preflight_script(run, script: Path, env: Dict[str, str]) -> List[Dict[st
 def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path) -> List[str]:
     spec = target.get("select")
     if not select:
+        if spec and "default_patterns" not in target:
+            # A bare pytest target would collect its whole rootdir; a focused target never defaults to the full suite.
+            raise SetupFailure([fail("selection", "this target requires at least one --select", "name the test files (and optional ::nodes) to run; use a v2-unit/v2-merge target for the full suite")])
         return list(target.get("default_patterns", []))
     if not spec:
         raise SetupFailure([fail("selection", "this target takes no --select", "")])
@@ -633,7 +636,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--target")
-    parser.add_argument("--select", action="append", default=[])
+    parser.add_argument("--select", action="append", default=[], help="run only: test files/nodes; required for pytest targets (never defaults to the full suite)")
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
     parser.add_argument("--spec")
     parser.add_argument("--series")
@@ -685,7 +688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
         config = load_config(CONFIG_PATH)
-        profile =config["profiles"].get(args.profile)
+        profile = config["profiles"].get(args.profile)
         if profile is None:
             raise SetupFailure([fail("config", "unknown profile %r" % args.profile, "choose one of %s" % sorted(config["profiles"]))])
         target = None
@@ -693,7 +696,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             target = profile["targets"].get(args.target)
             if target is None:
                 raise SetupFailure([fail("config", "unknown target %r" % args.target, "choose one of %s" % sorted(profile["targets"]))])
-        else:  # prepare: the union of every target's needs, no subject
+        if args.command == "prepare":
+            # prepare never launches a subject: it provisions and preflights --target's needs (or every target's when none is named).
+            if args.select:
+                raise SetupFailure([fail("selection", "prepare takes no --select (it launches nothing)", "use `run` to execute a selection")])
+            if target is not None:
+                target = dict(target, kind="prepare")
+        if target is None:  # prepare without a target: the union of every target's needs
             target = {"kind": "prepare", "needs": sorted({n for t in profile["targets"].values() for n in t.get("needs", [])}),
                       "npm_ci": any(t.get("npm_ci") for t in profile["targets"].values()), "timeout_s": 600, "max_timeout_s": 600}
         identity["identities"]["config"] = ga.digest_of(config)
