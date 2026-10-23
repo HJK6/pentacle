@@ -17,7 +17,7 @@ function controls(initialTarget, pending = false) {
   const context = vm.createContext({ state, window: {}, chatControlTargetForSlot: () => target, slotAttachmentDrafts: () => [], isCompositeSlot: () => false });
   vm.runInContext(app.slice(start, end), context);
   const update = () => vm.runInContext('updateSendControls(0)', context);
-  return { refs, state, update, setTarget: value => { target = value; } };
+  return { refs, state, context, update, setTarget: value => { target = value; } };
 }
 
 for (const target of [null, { error: 'Waiting for websocket session detail.' }, { error: 'Chat stream offline.' }]) {
@@ -49,6 +49,29 @@ test('a resolved working stream still accepts native mid-turn input', () => {
   c.update();
   assert.equal(c.refs.sendEl.disabled, false);
   assert.equal(c.refs.inputEl.disabled, false);
+});
+
+test('queued-row readiness refreshes without replacing identical transcript HTML', () => {
+  const c = controls({ streamSession: { stream_id: 'hosta:test' } });
+  const button = { dataset: { streamId: 'hosta:test', optimisticId: 'row-1' } };
+  let eligible = true;
+  c.refs.listEl = { querySelectorAll: () => [button] };
+  c.context.window.PentacleChatStore = { canSendQueuedNow: (stream, row) => {
+    assert.equal(stream, 'hosta:test');
+    assert.equal(row, 'row-1');
+    return eligible;
+  } };
+  c.update();
+  assert.equal(button.disabled, false);
+  eligible = false; // reserved row or retired generation, same text/HTML
+  c.update();
+  assert.equal(button.disabled, true);
+  eligible = true;
+  c.update();
+  assert.equal(button.disabled, false);
+  c.setTarget({ streamSession: { stream_id: 'hosta:replacement' } });
+  c.update();
+  assert.equal(button.disabled, true);
 });
 
 test('existing pending operation still disables every control until it finishes', () => {

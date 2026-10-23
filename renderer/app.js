@@ -3078,6 +3078,13 @@ function updateSendControls(slot) {
   }
   if (refs?.inputEl) refs.inputEl.disabled = pending;
   if (refs?.attachEl) refs.attachEl.disabled = pending;
+  // Refresh even when the transcript HTML is byte-identical or its paint is deferred.
+  for (const button of refs?.listEl?.querySelectorAll?.('.slot-chat-send-now') || []) {
+    const streamId = button.dataset.streamId || '';
+    button.disabled = pending || isCompositeSlot(slot) || !target || !!target.error
+      || target.streamSession?.stream_id !== streamId
+      || !window.PentacleChatStore?.canSendQueuedNow?.(streamId, button.dataset.optimisticId || '');
+  }
 }
 
 function maybeRestoreReturnedToPromptDraft(slot, streamId) {

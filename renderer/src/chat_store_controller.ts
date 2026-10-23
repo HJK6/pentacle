@@ -180,7 +180,6 @@ export type ChatInterruptState = {
   turnId: string;
   expectedSessionGeneration?: string;
   optimisticId?: string;
-  queuedOptimisticIds?: string[];
   pending: boolean;
   retryable: boolean;
   confirm?: ChatInterruptConfirm;
@@ -195,6 +194,8 @@ export type ReturnedToPromptDraft = {
   text: string;
   returnedAt: number;
 };
+
+type QueueEscapeBudget = { generation: string; rows: Set<string> };
 
 export class ChatStoreController {
   private state: PentacleStreamState;
@@ -211,9 +212,9 @@ export class ChatStoreController {
   private sendBridge: ChatSendBridge | null = null;
   private cancelBridge: ChatCancelBridge | null = null;
   private interruptStates: Record<string, ChatInterruptState> = {};
-  // One Escape per working turn, shared by Stop and Send now. Cleared when the
-  // stream's turn phase leaves working; a failed interrupt RPC re-arms it.
-  private escapeSpent = new Set<string>();
+  // Queued-row keys own Escape independently of local turn/paint state.
+  // A replacement generation discards the previous generation's entire budget.
+  private queueEscapes = new Map<string, QueueEscapeBudget>();
   // Composer notice per stream (queue release / stopped with queued rows).
   private composerNotices: Record<string, string> = {};
   // A Stop notice outlives the turn it stopped (the turn clears at once); the next send or turn clears it.
@@ -419,19 +420,15 @@ export class ChatStoreController {
     for (const id of this.sendSessionGenerations.keys()) {
       if (!next.optimisticSends?.[id]) this.sendSessionGenerations.delete(id);
     }
-    this.releaseIdleEscapeState();
+    this.reconcileQueueEscapesAndNotices();
     this.notifyListeners();
   }
 
-  /** The Escape budget and composer notices belong to a working turn; drop them once it ends. */
-  private releaseIdleEscapeState(): void {
-    for (const streamId of [...this.escapeSpent]) {
-      if (this.getTurnPhase(streamId) === 'idle') this.escapeSpent.delete(streamId);
-    }
+  private reconcileQueueEscapesAndNotices(): void {
+    for (const streamId of this.queueEscapes.keys()) this.queueEscapeBudget(streamId);
     for (const [streamId, interrupt] of Object.entries(this.interruptStates)) {
-      if (interrupt.intent === 'send_now' && !this.queuedInterruptPending(interrupt)) {
+      if (interrupt.intent === 'send_now' && !this.queueEscapeBudget(streamId)) {
         delete this.interruptStates[streamId];
-        this.escapeSpent.delete(streamId);
         this.setComposerNotice(streamId, '');
       }
     }
@@ -474,22 +471,44 @@ export class ChatStoreController {
       && send.status !== 'failed' && send.status !== 'cancelled' && send.status !== 'echoed' && send.status !== 'reconciled');
   }
 
-  private providerQueuedIds(streamId: string): string[] {
-    return Object.keys(this.state.optimisticSends ?? {}).filter(id => this.providerQueueRowPending(streamId, id));
+  private providerQueuedIds(streamId: string, generation: string): string[] {
+    return Object.keys(this.state.optimisticSends ?? {}).filter(id => this.providerQueueRowPending(streamId, id, generation));
   }
 
-  private providerQueueRowPending(streamId: string, optimisticId: string): boolean {
+  private providerQueueRowPending(streamId: string, optimisticId: string, generation: string): boolean {
     const send = this.state.optimisticSends?.[optimisticId];
     // Uncertain delivery disables its button but does not prove the native queue drained.
-    return !!send && send.stream_id === streamId && send.provider_queued === true
+    return this.sendSessionGenerations.get(optimisticId) === generation
+      && !!send && send.stream_id === streamId && send.provider_queued === true
       && !['failed', 'cancelled', 'echoed', 'reconciled'].includes(send.status);
   }
 
-  // A local pending/working/idle transition is not proof that native queued work started.
-  private queuedInterruptPending(interrupt: ChatInterruptState | undefined): boolean {
-    return !!interrupt && !!interrupt.expectedSessionGeneration
-      && this.state.sessions.find(session => session.stream_id === interrupt.streamId)?.session_generation === interrupt.expectedSessionGeneration
-      && !!interrupt.queuedOptimisticIds?.some(id => this.providerQueueRowPending(interrupt.streamId, id));
+  private queueEscapeBudget(streamId: string): QueueEscapeBudget | undefined {
+    const budget = this.queueEscapes.get(streamId);
+    if (!budget) return undefined;
+    const session = this.state.sessions.find(item => item.stream_id === streamId);
+    if (!session || session.session_generation !== budget.generation || session.status === 'closed') {
+      this.queueEscapes.delete(streamId);
+      return undefined;
+    }
+    for (const id of budget.rows) {
+      if (!this.providerQueueRowPending(streamId, id, budget.generation)) budget.rows.delete(id);
+    }
+    if (!budget.rows.size) this.queueEscapes.delete(streamId);
+    return budget.rows.size ? budget : undefined;
+  }
+
+  private reserveQueueEscape(streamId: string, generation?: string): QueueEscapeBudget | undefined {
+    if (!generation || this.state.sessions.find(item => item.stream_id === streamId)?.session_generation !== generation) return undefined;
+    const rows = new Set(this.providerQueuedIds(streamId, generation));
+    if (!rows.size) return undefined;
+    const budget = { generation, rows };
+    this.queueEscapes.set(streamId, budget);
+    return budget;
+  }
+
+  private releaseQueueEscape(streamId: string, budget: QueueEscapeBudget | undefined): void {
+    if (budget && this.queueEscapes.get(streamId) === budget) this.queueEscapes.delete(streamId);
   }
 
   private setComposerNotice(streamId: string, notice: string, afterTurn = false): void {
@@ -592,6 +611,7 @@ export class ChatStoreController {
   /** Clear all pending settle timers (tests / teardown). */
   dispose(): void {
     this.sendSessionGenerations.clear();
+    this.queueEscapes.clear();
     for (const id of Object.keys(this.staleTurnTimers)) {
       clearTimeout(this.staleTurnTimers[id]);
       delete this.staleTurnTimers[id];
@@ -817,8 +837,8 @@ export class ChatStoreController {
       });
   }
 
-  /** Release a provider-owned queue without ever pasting the message again. */
-  sendQueuedNow(streamId: string, optimisticId: string): boolean {
+  /** Current row/generation ownership is also used to enable the rendered action. */
+  canSendQueuedNow(streamId: string, optimisticId: string): boolean {
     const send = this.state.optimisticSends?.[optimisticId];
     const session = this.state.sessions.find(item => item.stream_id === streamId);
     const generation = session?.session_generation;
@@ -828,24 +848,27 @@ export class ChatStoreController {
         || !send || send.stream_id !== streamId || send.provider_queued !== true
         || ['failed', 'cancelled', 'indeterminate', 'echoed', 'reconciled'].includes(send.status)) return false;
 
+    const existing = this.interruptStates[streamId];
+    return !this.queueEscapeBudget(streamId)
+      && !(existing?.expectedSessionGeneration === generation && existing.pending);
+  }
+
+  /** Release a provider-owned queue without ever pasting the message again. */
+  sendQueuedNow(streamId: string, optimisticId: string): boolean {
+    if (!this.canSendQueuedNow(streamId, optimisticId)) return false;
+    const generation = this.sendSessionGenerations.get(optimisticId)!;
     const turn = this.getTurnState(streamId);
     const turnId = turn ? ChatStoreController.turnIdentity(turn) : `queued:${generation}`;
-    const existing = this.interruptStates[streamId];
-    if (this.escapeSpent.has(streamId) || existing?.pending
-        || (this.queuedInterruptPending(existing) && !existing?.error
-          && (existing?.confirm === 'interrupt_unconfirmed' || !existing?.retryable))
-        || (existing?.turnId === turnId && (!existing.retryable || existing.confirm === 'interrupt_unconfirmed'))) return false;
-    this.escapeSpent.add(streamId);
+    const budget = this.reserveQueueEscape(streamId, generation);
     const request: ChatInterruptState = {
       intent: 'send_now', streamId, turnId, expectedSessionGeneration: generation, optimisticId,
-      queuedOptimisticIds: this.providerQueuedIds(streamId),
       pending: true, retryable: false, message: 'Sending queued message now…', requestedAt: Date.now(),
     };
     this.setInterruptState(streamId, request);
     this.setComposerNotice(streamId, request.message, !turn);
     const finish = (error?: string, confirm?: ChatInterruptConfirm) => {
       if (this.interruptStates[streamId] !== request) return;
-      if (error) this.escapeSpent.delete(streamId);
+      if (error) this.releaseQueueEscape(streamId, budget);
       const message = error ? 'Could not send now. Message remains queued.'
         : 'Send now requested. Waiting for the queued message to start.';
       this.setInterruptState(streamId, {
@@ -900,7 +923,8 @@ export class ChatStoreController {
   private reconcileInterruptStateForStream(streamId: string): void {
     const state = this.interruptStates[streamId];
     if (!state) return;
-    if (this.queuedInterruptPending(state)) return;
+    const budget = this.queueEscapeBudget(streamId);
+    if (budget && budget.generation === state.expectedSessionGeneration) return;
     const turn = this.getTurnState(streamId);
     if (!turn) return;
     const currentTurnId = ChatStoreController.turnIdentity(turn);
@@ -912,35 +936,38 @@ export class ChatStoreController {
   private requestInterrupt(streamId: string, turnId: string, optimisticId?: string, expectedSessionGeneration?: string): void {
     if (!this.cancelBridge) return;
     const requestedAt = Date.now();
-    const queuedOptimisticIds = this.providerQueuedIds(streamId);
-    const queued = queuedOptimisticIds.length ? { queuedOptimisticIds } : {};
-    this.setInterruptState(streamId, {
+    const budget = this.reserveQueueEscape(streamId, expectedSessionGeneration);
+    const request: ChatInterruptState = {
       streamId,
       turnId,
       expectedSessionGeneration,
       optimisticId,
-      ...queued,
       pending: true,
       retryable: false,
       message: 'Stopping...',
       requestedAt,
-    });
+    };
+    this.setInterruptState(streamId, request);
     Promise.resolve()
       .then(() => this.cancelBridge!({ streamId, expectedSessionGeneration }))
       .then((result) => {
+        if (this.interruptStates[streamId] !== request) return;
         const confirm = ChatStoreController.normalizeInterruptConfirm(result);
-        const retryable = confirm === 'interrupt_unconfirmed' || confirm === 'pane_unavailable';
+        const failed = result?.ok === false || confirm === 'pane_unavailable' || confirm === 'not_working';
+        if (failed) this.releaseQueueEscape(streamId, budget);
+        const retryable = (!budget || failed) && (confirm === 'interrupt_unconfirmed' || confirm === 'pane_unavailable');
         const error = result?.ok === false ? String(result.error || '') : undefined;
         this.setInterruptState(streamId, {
           streamId,
           turnId,
           expectedSessionGeneration,
           optimisticId,
-          ...queued,
           pending: false,
           retryable,
           confirm,
-          message: ChatStoreController.interruptMessageFor(confirm, error),
+          message: budget && !failed && confirm === 'interrupt_unconfirmed'
+            ? 'Stop requested. Waiting for queued messages to start.'
+            : ChatStoreController.interruptMessageFor(confirm, error),
           requestedAt,
           resolvedAt: Date.now(),
           ...(error ? { error } : {}),
@@ -952,13 +979,14 @@ export class ChatStoreController {
         }
       })
       .catch((error: unknown) => {
+        if (this.interruptStates[streamId] !== request) return;
+        this.releaseQueueEscape(streamId, budget);
         const message = error instanceof Error ? error.message : String(error || '');
         this.setInterruptState(streamId, {
           streamId,
           turnId,
           expectedSessionGeneration,
           optimisticId,
-          ...queued,
           pending: false,
           retryable: true,
           confirm: 'pane_unavailable',
@@ -989,22 +1017,23 @@ export class ChatStoreController {
    */
   cancelTurn(streamId: string): boolean {
     if (!streamId) return false;
+    if (this.queueEscapeBudget(streamId)) return true;
     const turn = this.getTurnState(streamId);
 
     if (turn) {
       const turnId = ChatStoreController.turnIdentity(turn);
       const existing = this.interruptStates[streamId];
-      if (this.queuedInterruptPending(existing) && (existing?.pending || !existing?.retryable)) return true;
-      if (existing && existing.turnId === turnId && (existing.pending || !existing.retryable)) {
+      const generation = this.state.sessions.find(session => session.stream_id === streamId)?.session_generation;
+      if (existing && existing.expectedSessionGeneration === generation
+          && existing.turnId === turnId && (existing.pending || !existing.retryable)) {
         return true;
       }
-      // Send now may already have spent this turn's Escape; a further Stop is a no-op
-      // unless a failed interrupt RPC re-armed it.
-      if (this.escapeSpent.has(streamId) && !existing?.retryable) return true;
-      this.escapeSpent.add(streamId);
-      const selectedGeneration = existing?.turnId === turnId
+      // Preserve the legacy Stop retry's target, without granting it ownership
+      // of rows sent to a replacement process.
+      const hasCurrentQueue = !!generation && this.providerQueuedIds(streamId, generation).length > 0;
+      const selectedGeneration = existing?.turnId === turnId && existing.retryable && !hasCurrentQueue
         ? existing.expectedSessionGeneration
-        : this.state.sessions.find(session => session.stream_id === streamId)?.session_generation;
+        : generation;
       const expectedSessionGeneration = typeof selectedGeneration === 'string' && selectedGeneration
         ? selectedGeneration : undefined;
       // Clear the indicator promptly: drop the elapsed anchor + any pending
