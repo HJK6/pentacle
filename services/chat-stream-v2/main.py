@@ -325,6 +325,12 @@ async def run(args: argparse.Namespace) -> int:
         spawnctl=spawnctl, comms=comms, local_host=args.local_host, binds=binds,
         hosts=hosts,
     )
+    from account_runtime import AccountRuntime, load_policy
+    account_runtime = AccountRuntime(store, sessions,
+        policy=load_policy(os.environ.get("PENTACLE_PROVIDER_ACCOUNT_POLICY")))
+    account_runtime.attach(server, spawnctl, comms)
+    from account_executor import AccountExecutor
+    account_runtime.executor = AccountExecutor(account_runtime, hosts)
     # Fixed two-assistant map.  The primary reads the existing unprefixed
     # env keys byte-identically; daff reads PENTACLE_ASSISTANT_DAFF_* and stays
     # inert until configured.
@@ -735,7 +741,7 @@ async def run(args: argparse.Namespace) -> int:
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.
         callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,
-                     watch_wake.tick, capacity_retry.tick]
+                     watch_wake.tick, capacity_retry.tick, account_runtime.tick]
         if server.assistant_restore is not None:
             callbacks.append(server.assistant_restore.tick)
         await run_reconcile_callbacks(*callbacks)
@@ -870,6 +876,7 @@ async def run(args: argparse.Namespace) -> int:
     store.start()
     log.info("startup phase=store_start duration_s=%.6f", time.monotonic() - startup_phase_started)
     await store.mark_work_index_pending()
+    await account_runtime.start()
     startup_phase_started = time.monotonic()
     for _composite in assistant_composites.values():
         if _composite.config.enabled:
@@ -1082,6 +1089,8 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     # Restart continuity: no new spawn admission once stopping, then hand every
     # in-flight admitted spawn to durable state while the store still runs.
     server.spawn_ready.clear()
+    if getattr(server, "account_runtime", None) is not None:
+        await budget.step("account-runtime", server.account_runtime.stop(), cap=3.0)
     await budget.step("spawn-drain", spawnctl.drain_background_spawns(
         timeout_s=budget.remaining(SHUTDOWN_SPAWN_DRAIN_S)), cap=SHUTDOWN_SPAWN_DRAIN_S)
     if getattr(server, "work_lanes", None) is not None:

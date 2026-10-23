@@ -1,0 +1,202 @@
+# Named provider accounts
+
+Named accounts are optional and **default OFF**. They let concurrent agents on
+one host use independent subscription logins. The front desk chooses an account
+for a launch or changes the saved host/provider default. A default change affects
+future launches; each running agent keeps its original home and login generation.
+
+## Controls
+
+Use the existing authenticated front-desk seat. A role name or claimed stream ID
+alone grants no account-control authority. Its authenticated successor inherits
+control through the existing assistant binding. Workers can spawn through their
+existing grants using the default, and read account status; they cannot choose
+an account override or change a default.
+
+```sh
+agent-orch account status --host host-a --provider codex
+agent-orch account default set --host host-a --provider codex --account primary
+agent-orch spawn --host host-a --provider codex --initial-prompt 'Continue the assigned work'
+agent-orch spawn --host host-a --provider codex --account spare --initial-prompt 'Continue the assigned work'
+agent-orch usage --account primary --json
+```
+
+An explicit account changes only that launch. Unknown, disabled, unavailable,
+wrong-provider and unprovisioned selections fail clearly, with no alternate
+account, default rewrite, model/provider change or hidden login attempt. Explicit
+account choices currently apply to immediate spawns. Ordinary scheduled spawns
+resolve the saved default when they execute.
+
+Priorities, exclusions, caps and ratios remain front-desk instructions. For
+example, the front desk can explicitly launch three agents on one permitted
+account and two on another. There is no ratio scheduler, fixed account priority,
+percentage reservation ledger or automatic quota/auth migration.
+
+## Move a conversation
+
+Prepare the source conversation's checkpoint, including its objective, current
+work, evidence and outstanding actions. The front desk supplies it through the
+existing handoff prompt interface; the operator need not repeat the conversation.
+
+```sh
+agent-orch spawn --handoff --handoff-from host-a:conversation --host host-b \
+  --account spare --initial-prompt-file /absolute/checkpoint.md
+```
+
+For the current seat, omit `--handoff-from`. This is the ordinary handoff path:
+it carries context through the initial prompt and transfers existing custody,
+using the existing successor-delivery, busy/uncertain-action and retirement
+protections. A managed handoff without a nonempty checkpoint/prompt refuses before
+launch. The predecessor's binding remains immutable; the successor gets a fresh
+native session in its selected home. No native cross-account resume, transcript
+copy or credential copy is performed. A pending or failed handoff is reported
+through the existing receipt; its source is preserved when delivery is unproved.
+
+## Private configuration and enrollment
+
+`PENTACLE_PROVIDER_ACCOUNT_POLICY` optionally names a mode-0600, owner-controlled
+JSON file. With no file, the feature is off. A minimal disabled policy is:
+
+```json
+{
+  "enabled": false,
+  "managed_hosts": ["host-a", "host-b"],
+  "cells": [
+    {"host": "host-a", "provider": "codex", "alias": "primary"},
+    {"host": "host-a", "provider": "codex", "alias": "spare"}
+  ],
+  "bindings": [],
+  "executors": {},
+  "watchers": {},
+  "account_caps": {}
+}
+```
+
+`managed_hosts` allows a staged rollout. An untouched host keeps its existing
+launch path. A host with previously registered managed bindings cannot silently
+fall back to legacy homes when disabled. Missing entries in `cells` are not
+invented accounts; configured but unenrolled entries appear as unconfigured.
+Defaults live in the daemon's transactional store, survive restart and carry a
+revision. Selection reads a complete account/default revision once before launch.
+
+Each enrolled host has a private mode-0700 directory containing its mode-0600
+`~/.config/pentacle/provider-account-host.json`. Its configuration contains:
+
+- `host`, absolute `registry` and managed `root` paths; both outside repositories,
+  shared memory and synchronization roots.
+- `cells`, keyed by `provider:alias`, with `enabled`, secure `profile_ref`, pinned
+  `executable`, exact `version`, `executable_sha256`, `platform` (`macos` or `wsl`),
+  `model`, `effort`, trusted absolute `cwd`, and an allowlisted non-secret
+  `bootstrap` mapping. A wrapper can also specify the native `observer_executable`
+  and its SHA256; launch keeps the wrapper while transcript proof uses the native
+  executable. The launch preserves the wrapper's non-secret secure-store/keychain
+  configuration and pins its native executable from the binding; credential
+  values and inherited native-executable overrides are excluded.
+- The intended `expected_provider_id`, or an `expected_email` from secure account
+  records for the first login. Native status must verify that identity before
+  the returned UUID is pinned and before the minimal subscription turn. Email is
+  checked in memory and omitted from readbacks. If both expectations are supplied,
+  both must match.
+- `browser_helper`, with the installed shared `account_browser.py` path and its
+  SHA256, and a configured `claude_usage_command` using the existing usage adapter.
+  Existing secure browser/profile and Keychain setup remains host-owned.
+
+The daemon's `executors` map selects each host's reviewed Python and host-helper
+script through the existing authenticated host transport. `bindings` imports
+verified non-secret host enrollment receipts. Profile references stay host-local.
+A stale startup receipt never reactivates an older generation.
+
+Enrollment is an explicit rollout step, not a startup side effect. Use the host
+helper on the selected host only under the deployment owner's live grant:
+
+```sh
+python /absolute/provider_account_host.py enroll --provider codex --account primary \
+  --login-generation unenrolled --operation-id enrollment-one --new-generation login-one
+```
+
+The helper resolves the home and browser profile from private configuration. It
+performs native login in the final absolute generation home, validates subscription
+identity/storage, makes a minimal turn with the configured model/effort and
+activates atomically. Codex uses explicit `CODEX_HOME` with file credentials;
+Claude uses explicit `CLAUDE_CONFIG_DIR`, directory-specific native Keychain on
+macOS and file storage on WSL. OS `HOME` remains unchanged. New homes are 0700;
+registry and credential files are 0600. Auth-environment overrides are scrubbed;
+paid API/Console authentication is rejected.
+
+Never copy refresh tokens or rename a Keychain-bound home. Only the allowlisted
+non-secret bootstrap is provisioned. A wrong, failed, cancelled or locked-store
+login leaves existing bindings and peer accounts intact. A busy browser profile
+is refused; the enrollment attempt closes only its own browser session. Missing
+profiles or human authentication needs return a safe code. The front desk drives
+the flow to that step and supplies the specific host/account browser instruction.
+Authorization URLs/codes and credential contents are not logs or evidence.
+
+## Usage, availability and re-login
+
+Usage reads the bound home, joins native identity coherently and reports every
+applicable window. Accounts on different hosts sharing the same verified pool
+produce one pool readback using the latest observation; percentages are not summed.
+The readback includes timestamps, freshness, reset, original identity, conflict
+and configured cap. Missing/stale/incomplete usage is visibly unknown, never zero.
+Freshness is informational; there is no new fixed-age launch admission gate.
+
+`account_caps[provider][verified_pool_id]` carries the existing operational cap
+value verbatim for that account across hosts. It does not introduce new units,
+percentages, margins or enforcement semantics. Do not infer an account allocation
+from an old host-named record or invent headroom; the front desk resolves the
+mapping through its existing policy source before relying on it.
+
+Transcript-derived usage retains the original per-stream generation binding and
+native identity separately. Reopening a stream or changing a default cannot
+rewrite historical attribution. Legacy unknown identity remains unknown, and a
+native identity disagreement remains visible.
+
+An authenticated bound probe or watcher auth failure marks only the affected
+host/provider/account generation unavailable and records a typed fact through
+the existing error-alert path. Alert delivery follows the existing configured
+alert policy. Other independently enrolled hosts and accounts remain usable.
+Quota, capacity and transport failures do not trigger login or an alternate spawn.
+A successful usage read alone cannot clear an unavailable login.
+
+The front desk can request targeted repair when ready:
+
+```sh
+agent-orch account probe --host host-a --provider codex --account primary --login-generation active
+agent-orch account relogin --host host-a --provider codex --account primary \
+  --login-generation active --operation-id repair-one --timeout 330
+```
+
+Repair verifies actual auth failure, uses same-cell/host serialization, the
+existing 900-second cooldown and three-attempt hourly limit, and a fresh final
+home. An uncertain reply is inspected using the same operation/generation instead
+of starting another login. Wrong-account, human-step and failed outcomes are safe
+metadata; no healthy peer account is logged out or moved.
+
+The shared `recover-codex`/`recover-claude --account ALIAS` wrappers submit bound
+requests to this same daemon path. They do not run another login loop. Managed
+`credwatch` uses an explicit provider/account/generation matrix and a fixed
+host-watcher principal with a private token file. Its mode is
+`CREDWATCH_MANAGED_ACCOUNTS=1`; `CREDWATCH_MANAGED_CELLS` supplies that matrix.
+The policy's `watchers` maps `host:account-watcher` to `host` and `token_file`.
+Only that authenticated host watcher can submit trusted observations/failures;
+ordinary workers may report only their own launch cell. Pending requests keep
+stable IDs through daemon outages. Provider-global legacy recovery refuses while
+managed mode is active.
+
+## Release and rollback
+
+Merge source with the feature off. Runtime repins, restarts and enrollment are
+separate deployment-owner grants; a source merge is not activation. Use the applicable repository gates and independent final-candidate QA, preserve
+non-secret config/code preimages, coordinate shared resources and prove the
+actual deployed journey under the deployment owner's grant.
+
+Enable only compatible launch, local/satellite ingest, usage and recovery consumers
+at their accepted artifacts. Bind real evidence to source/config/binary hashes,
+login generation and live process identity. Preserve healthy legacy homes.
+
+Rollback disables new controls/new managed launches first, while existing bound
+agents can drain. Use the existing handoff before reverting to a binary that
+cannot understand named transcript roots. Keep saved defaults and immutable
+bindings coherent. Never restore stale token bytes, wipe homes or log out another
+account as rollback. Missing host/provider/account enrollment is incomplete and
+must be reported explicitly.

@@ -695,7 +695,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     opened_by_host_id TEXT, jsonl_path TEXT, claude_session_id TEXT, claude_session_lineage TEXT,
     spec_ids TEXT, presumed_dead_at TEXT, status_card TEXT,
     context_tokens INTEGER, model_context_window INTEGER, context_updated_at TEXT,
-    context_level TEXT, pane_pid TEXT, observer_binding TEXT,
+    context_level TEXT, pane_pid TEXT, observer_binding TEXT, account_binding TEXT,
     pane_status TEXT NOT NULL DEFAULT 'pane_unknown',
     requested_model TEXT, requested_effort TEXT, effective_model TEXT,
     effective_effort TEXT, routing_integrity TEXT, routing_integrity_reason TEXT,
@@ -1852,6 +1852,10 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 conn.execute("ALTER TABLE v2_reports ADD COLUMN exchange_json TEXT")
             if "observer_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN observer_binding TEXT")
+            if "account_binding" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN account_binding TEXT")
+            import account_store
+            account_store.migrate(conn)
             if "assigned_spec_id" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
                 conn.execute("ALTER TABLE sessions ADD COLUMN assigned_spec_id TEXT")
             # The explicit work assignment of a single-spec seat is its only spec. Idempotent;
@@ -2643,6 +2647,10 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 if prior_objective and any(key in cols and prior_objective[index] != cols[key]
                                            for index, key in enumerate(("objective", "objective_source"))):
                     raise ValueError("objective and objective_source are immutable within a session generation")
+            if not generation_changed and "account_binding" in cols:
+                prior_account = conn.execute("SELECT account_binding FROM sessions WHERE host=? AND session_name=?", (host, session_name)).fetchone()
+                if prior_account and prior_account[0] != _enc("account_binding", cols["account_binding"]):
+                    raise ValueError("account_binding is immutable within a session generation")
             if generation_changed:
                 observer = cols.get("observer_binding")
                 if isinstance(observer, dict):
@@ -2702,6 +2710,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     "opened_by_host_id": None,
                     "jsonl_path": None,
                     "observer_binding": None,
+                    "account_binding": None,
                     "claude_session_id": None,
                     "claude_session_lineage": None,
                     "spec_ids": None,
@@ -2826,8 +2835,8 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
         **fields: Any,
     ) -> dict[str, Any] | None:
         """Patch named columns on one row. Returns the row, or None if absent."""
-        if {"objective", "objective_source"}.intersection(fields):
-            raise ValueError("objective and objective_source are immutable within a session generation")
+        if {"objective", "objective_source", "account_binding"}.intersection(fields):
+            raise ValueError("objective, objective_source and account_binding are immutable within a session generation")
         fields = _normalize_session_fields(fields)
         cols = self._known(fields)
         if not cols:

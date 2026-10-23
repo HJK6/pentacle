@@ -244,6 +244,32 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
     env.pop("CLAUDECODE", None)
     env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
 
+    command_args = [claude, "--disallowed-tools", "AskUserQuestion"]
+    if env.get("PENTACLE_USAGE_NAMED_ACCOUNT") == "1":
+        # The optional named-home adapter ships with the compatible account
+        # consumer; a standalone older installation fails closed here.
+        module_root = Path(__file__).resolve().parents[1] / "services/chat-stream-v2"
+        if not (module_root / "provider_accounts.py").is_file():
+            raise RuntimeError("named account adapter unavailable")
+        sys.path.insert(0, str(module_root))
+        try:
+            import provider_accounts
+            if Path(provider_accounts.__file__).resolve() != module_root / "provider_accounts.py":
+                raise RuntimeError("named account adapter mismatch")
+            allowed = provider_accounts.ENV_ALLOWLIST
+        finally: sys.path.pop(0)
+        home = env.get("CLAUDE_CONFIG_DIR", "")
+        if not os.path.isabs(home) or Path(home) != Path(home).resolve():
+            raise RuntimeError("named account home unavailable")
+        clean = {key:value for key,value in env.items() if key in allowed}
+        clean["CLAUDE_CONFIG_DIR"] = home
+        # Preserve this probe's owned socket location, never a provider token.
+        if env.get("TMUX_TMPDIR"): clean["TMUX_TMPDIR"] = env["TMUX_TMPDIR"]
+        env = clean
+        command_args = ["/usr/bin/env", "-i", *[f"{key}={value}" for key,value in sorted(clean.items())],
+                        claude, "--setting-sources", "user", "--settings",
+                        '{"forceLoginMethod":"claudeai","apiKeyHelper":""}', "--disallowed-tools", "AskUserQuestion"]
+
     def call(*args: str, check: bool = True):
         return run([tmux, "-L", socket, *args], env=env, capture_output=True,
                    text=True, check=check, timeout=5)
@@ -251,7 +277,7 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
     deadline = monotonic() + timeout
     captured = None
     try:
-        command = shlex.join([claude, "--disallowed-tools", "AskUserQuestion"])
+        command = shlex.join(command_args)
         call("new-session", "-d", "-s", "probe", "-x", "140", "-y", "60", "-c", cwd, command)
         captured = _capture_probe_socket(socket, call("display-message", "-p", "#{socket_path}").stdout)
         sent = False

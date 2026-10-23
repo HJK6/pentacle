@@ -842,6 +842,12 @@ class SpawnCtl:
             raise VerbError(
                 "spawn_launch_unavailable", "no target-host Claude launch profile",
             )
+        if prior and prior.get("account_binding"):
+            from dataclasses import replace
+            account = prior["account_binding"]
+            if account.get("host") != host or account.get("provider") != "claude":
+                raise VerbError("account_resume_cross_home_forbidden", "retained account binding conflicts")
+            machine = replace(machine, projects_root=account["transcript_root"])
         transcript_path, resume_cwd = await self._probe_resume_transcript(
             host, machine, session_id,
         )
@@ -1575,9 +1581,23 @@ class SpawnCtl:
 
     async def spawn(self, msg: dict[str, Any], local_host: str) -> dict[str, Any]:
         """Keep the durable spawn obligation running after request cancellation."""
+        from provider_accounts import AccountError, reject_overrides
+        try:
+            reject_overrides(msg, allow_account=True)
+        except AccountError as exc:
+            raise VerbError(str(exc), str(exc), **exc.context) from None
         retired = (msg.get("_auth_context") or {}).get("retired_handoff_owner")
         if retired:
+            # This existing path verifies the exact stored receipt and cannot
+            # launch, mutate a default or revive the retired caller's authority.
             return await self._replay_retired_handoff(msg, local_host, retired)
+        if "account" in msg:
+            try:
+                runtime = getattr(self, "account_runtime", None)
+                if runtime is None: raise AccountError("account_feature_off")
+                await runtime.authorize_choice(msg)
+            except AccountError as exc:
+                raise VerbError(str(exc), str(exc), **exc.context) from None
         # Objectives are required only for parented child spawns (roster projection);
         # a top-level/handoff spawn derives one, and the brief is read only then.
         supported, parent = msg.get("objective_supported"), msg.get("parent_stream_id")
@@ -2055,6 +2075,7 @@ class SpawnCtl:
             **({"_resume_jsonl_path": resume_jsonl_path} if resume_jsonl_path else {}),
             **({"_resume_cwd": resume_cwd} if resume_cwd else {}),
             "_defer_launch_token_stage": True,
+            **({"_account_resume_binding": resume_prior_row.get("account_binding")} if resume_prior_row else {}),
         }
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
         try:
@@ -2182,6 +2203,13 @@ class SpawnCtl:
             "state": "requested" if self._prompt_requested(msg) else "not_requested"
         }
         try:
+            account_runtime = getattr(self, "account_runtime", None)
+            if account_runtime is not None and open_flds.get("account_binding"):
+                from provider_accounts import AccountError
+                try:
+                    await account_runtime.bind_launch({**open_flds, "host": host, "stream_id": f"{host}:{name}"})
+                except AccountError as exc:
+                    raise VerbError(str(exc), str(exc), **exc.context) from None
             policy = getattr(self.sessions, "assistant", None)
             if policy is not None and policy.protects(open_flds):
                 await policy.available(
@@ -2402,6 +2430,9 @@ class SpawnCtl:
                         pane = ""
                 await self._notice_native_delivery_failure(host, name, request_id,
                     str(open_flds.get("parent_stream_id") or ""), reason, pane)
+            account = open_flds.get("account_binding")
+            if isinstance(exc, VerbError) and isinstance(account, dict):
+                exc.extra.update(host=host, provider=account["provider"], account=account["alias"])
             outcome_fields: dict[str, Any] = {}
             if reason == CODEX_RESET_BLOCKED:
                 # The provider pane is intentionally left OPEN and alive.  The
@@ -3301,6 +3332,9 @@ class SpawnCtl:
         explicit = str(msg.get("command") or "").strip()
         provider = str(msg.get("provider") or "").strip()
         handoff = bool(msg.get("handoff"))
+        account_runtime = getattr(self, "account_runtime", None)
+        if explicit and account_runtime is not None and account_runtime.manages(host):
+            raise VerbError("managed_command_forbidden", "managed launches require a native provider tuple")
 
         # Captured BEFORE resolution: v1 passes the model/effort FLAG to the CLI
         # only when the client explicitly sent it (else the CLI default, which the
@@ -3310,6 +3344,11 @@ class SpawnCtl:
         requested_effort = msg.get("effort")
 
         if not provider and not handoff:
+            if account_runtime is not None:
+                managed = await account_runtime.run(lambda ledger: ledger.conn.execute(
+                    "SELECT 1 FROM v2_account_bindings WHERE host=? LIMIT 1", (host,)).fetchone() is not None)
+                if managed or account_runtime.manages(host):
+                    raise VerbError("managed_command_forbidden", "managed admissions require an explicit native provider tuple")
             command = explicit or self.default_command
             if not command:
                 raise VerbError("bad_request", "provider (or command) is required")
@@ -3343,6 +3382,16 @@ class SpawnCtl:
         provider = resolved["provider"]
         model = resolved["model"]
         effort = resolved["effort"]
+        account_binding = None
+        if account_runtime is not None:
+            from provider_accounts import AccountError
+            try:
+                account_binding = await account_runtime.choose_launch(host=host, provider=provider, model=model,
+                    effort=effort, message=msg)
+            except AccountError as exc:
+                raise VerbError(str(exc), str(exc), **exc.context) from None
+        if account_binding is not None and handoff and not self._prompt_requested(msg):
+            raise VerbError("account_handoff_checkpoint_required", "Prepare the conversation checkpoint before the requested handoff")
         role = resolved.get("role", msg.get("role"))
         # Explicit-only flags (v1 `launch_model = model if requested_model is not
         # None`): a profile-default spawn passes no flag and the CLI uses its own
@@ -3350,6 +3399,8 @@ class SpawnCtl:
         # so its flags are always passed even when the client sent no --model.
         launch_model = model if (requested_model is not None or handoff) else None
         launch_effort = effort if (requested_effort is not None or handoff) else None
+        if account_binding is not None:
+            launch_model, launch_effort = model, effort
 
         session_id = jsonl_path = token_hash = ""
         deferred_launch_plan: launch.LaunchPlan | None = None
@@ -3390,6 +3441,7 @@ class SpawnCtl:
                     cwd=(
                         str(msg.get("cwd") or "") or None
                     ),
+                    account_binding=account_binding,
                 )
             except ValueError as exc:
                 raise VerbError("spawn_launch_unavailable", str(exc)) from exc
@@ -3432,6 +3484,10 @@ class SpawnCtl:
             overrides["observer_binding"] = {
                 "executable": launch._resolve_local_executable(parts[0]) if parts else "",
             }
+        if account_binding is not None:
+            overrides["account_binding"] = account_binding.public()
+            resolution["account_binding"] = account_binding.public()
+            overrides["observer_binding"]["executable"] = account_binding.observer
         if session_id:
             overrides["claude_session_id"] = session_id
         if jsonl_path:

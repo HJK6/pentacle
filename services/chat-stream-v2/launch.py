@@ -37,7 +37,7 @@ import shutil
 import uuid
 import hashlib
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 #: The one tool a spawned Claude seat must not expose (operator questions route
 #: through `agent-orch prompt ask`, not AskUserQuestion).
@@ -561,12 +561,43 @@ def build_launch(
     resume_jsonl_path: str | None = None,
     resume_cwd: str | None = None,
     cwd: str | None = None,
+    account_binding: Any = None,
 ) -> LaunchPlan:
     """Turn a RESOLVED (provider, model, effort) tuple into the exact launch v1
     emits. `launch_model`/`launch_effort` are None for a profile-default spawn
     (no flag passed, CLI default used) and the canonical value for an explicit
     request — matching v1's `launch_model = model if requested_model is not None`.
     """
+    if account_binding is not None:
+        from provider_accounts import ENV_ALLOWLIST, transcript_allowed
+        if (account_binding.provider != provider or account_binding.host != machine.name
+                or not os.path.isabs(account_binding.home) or not os.path.isabs(account_binding.executable)):
+            raise ValueError("account_launch_binding_mismatch")
+        if resume_session_id is not None and (not resume_jsonl_path or not transcript_allowed(
+                resume_jsonl_path, provider, {"provider": provider, "transcript_root": account_binding.transcript_root})):
+            raise ValueError("account_resume_cross_home_forbidden")
+        selected_machine = replace(machine, projects_root=account_binding.transcript_root,
+            **{f"{provider}_bin": (account_binding.executable if provider == "claude" else
+                shlex.join([account_binding.executable, "-c", 'cli_auth_credentials_store="file"',
+                            "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"']))})
+        plan = build_launch(selected_machine, provider=provider, tmux_session=tmux_session,
+            launch_model=launch_model, launch_effort=launch_effort, operator_facing=operator_facing,
+            initial_prompt_file=initial_prompt_file, resume_session_id=resume_session_id,
+            resume_jsonl_path=resume_jsonl_path, resume_cwd=resume_cwd, cwd=cwd)
+        if provider == "claude":
+            # Keep the curated common settings and instructions; project/local
+            # authentication helpers cannot override the selected subscription.
+            marker = f"exec {shlex.quote(_resolve_local_executable(account_binding.executable))} "
+            plan = replace(plan, command=plan.command.replace(marker, marker +
+                "--setting-sources user --settings " + shlex.quote('{"forceLoginMethod":"claudeai","apiKeyHelper":""}') + " ", 1))
+        # The target shell expands only allowlisted names, then execs a clean
+        # non-login shell. API/WIF/cloud/token/endpoint overrides cannot leak in.
+        passthrough = " ".join(f'{key}="${{{key}-}}"' for key in sorted(ENV_ALLOWLIST - {"PENTACLE_AUTH_CLAUDE_BIN"}))
+        home_key = "CODEX_HOME" if provider == "codex" else "CLAUDE_CONFIG_DIR"
+        wrapper = (" PENTACLE_AUTH_CLAUDE_BIN=" + shlex.quote(account_binding.observer_executable)
+                   if provider == "claude" and getattr(account_binding, "observer_executable", "") else "")
+        clean = f"env -i {passthrough} {home_key}={shlex.quote(account_binding.home)}{wrapper} /bin/sh -c {shlex.quote(plan.command)}"
+        return replace(plan, command=clean)
     stream_token = mint_stream_token()
     stream_token_file = stream_token_file_for(machine, tmux_session)
     if provider == "claude":

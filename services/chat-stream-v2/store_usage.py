@@ -126,6 +126,13 @@ def snapshot_conn(conn, row: dict[str, Any]) -> dict[str, Any]:
         'attribution': {'mode': 'exclusive_primary' if specs else 'unattributed', 'spec_id': specs[0] if specs else None},
         'handoff_from_stream_id': row.get('handoff_from_stream_id'),
     }
+    account = row.get('account_binding')
+    if account is None:
+        historical = conn.execute('SELECT r.data FROM v2_account_session_bindings r '
+            'WHERE r.stream_id=? AND r.generation=?', (stream_id, generation)).fetchone()
+        if historical:
+            account = json.loads(historical[0])
+    if account is not None: result['account_binding'] = account
     if derived_tokens:
         result['derived_tokens'] = derived_tokens
         result['derived_fields'] = derived_fields
@@ -616,11 +623,19 @@ def provenance_summary_conn(conn, stream_id: str, generation: str) -> dict[str, 
         account_source = 'transcript'
     else:
         account_source = 'unknown'
-    return {
+    result = {
         'account_id': account_id, 'account_source': account_source, 'conflict': conflict,
         'provenance_coverage': {'records': records, 'with_provenance': covered},
         'native_sessions': identities,
     }
+    binding_row = conn.execute('SELECT r.data FROM v2_account_session_bindings r '
+        'WHERE r.stream_id=? AND r.generation=?', (stream_id, generation)).fetchone()
+    if binding_row:
+        from provider_accounts import Binding
+        binding = Binding.from_public(json.loads(binding_row[0]))
+        result['account_binding'] = binding.public()
+        result['binding_conflict'] = bool(conflict or (account_id is not None and account_id != binding.provider_id))
+    return result
 
 
 # --- per-generation history (docs/usage_accounting.md § Unfenced spans) --------

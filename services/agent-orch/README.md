@@ -4,6 +4,13 @@ Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one age
 
 → See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for system context. Setup guide: see [../../docs/agent_orchestration_setup.md](../../docs/agent_orchestration_setup.md) for installing `chat_streamd`, `agent-orch`, per-machine config, autostart, and smoke tests. That guide installs the CLI into the checkout-local virtual environment; `bash services/agent-orch/install.sh` is an alternative user-level install that needs Python 3.12 or later (3.13 on macOS).
 
+Optional named subscription accounts are default OFF. The front desk can choose
+`spawn --account`, change a host/provider default with `account default set`, or
+carry a conversation through `spawn --handoff --handoff-from ... --account ...`.
+See [named provider accounts](../../docs/provider_accounts.md) for authority,
+setup, usage, targeted re-login and rollback.
+
+
 ## Architecture in one breath
 
 Agent-orch verbs connect directly to `chat_streamd` over websocket and return the daemon's typed RPC responses. There is no local background process or socket lifecycle to manage. Completion is out-of-band: a sub-agent calls `agent-orch report`, which opens a one-shot websocket to `chat_streamd`, submits a validated structured report, and exits. `agent-orch await` opens its own websocket and blocks on `await_report`; if a terminal report already exists, the daemon resolves from the durable ledger. Sends fence the validated inbox JSON inside the prompt as `<INBOX_V1 msg_id="N">...</INBOX_V1>` so remote sub-agents do not need the leader's filesystem. The removed inbox verb is not a delivery surface: use the git-channel/committed-artifact path as authority, and use the daemon's read-only delivered-record audit only to compare what was already pasted.

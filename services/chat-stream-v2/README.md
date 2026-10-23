@@ -2,6 +2,11 @@
 
 The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated desktop/mobile transport.
 
+[Named provider accounts](../../docs/provider_accounts.md) are optional and
+default OFF. Their launch, transcript, usage and recovery consumers must be
+compatible before enabling the host's named-account controls.
+
+
 Turn-budget observation, recovery and settings are retired. Existing history is
 retained; pending legacy turn notices become terminal without delivery. Spec and
 lane tracking remain available, but spawning does not require lane membership
