@@ -16,6 +16,8 @@ from server import Server
 from sessions import Sessions
 from store import Store
 
+from test_send_semantics import FakeTmux, _new_comms, HOST as S_HOST, NAME as S_NAME
+
 HOST = "fixture-host-chat"
 COMPOSITE = f"{HOST}:assistant"
 DESK_ID = str(uuid.uuid4())
@@ -164,3 +166,64 @@ def test_same_request_id_twice_under_unchanged_config_is_one_receipt_text(tmp_pa
     _config(tmp_path, monkeypatch, {DESK_ID: "sms-desk"})
     msg = {"text": "retry me", "request_id": "same", "_auth_context": _auth(DESK_ID)}
     assert desk_stamp.stamp_message(msg)["text"] == desk_stamp.stamp_message(dict(msg))["text"]
+
+
+S_STREAM = f"{S_HOST}:{S_NAME}"
+STAMPED = "[from sms-desk]\nhello there"
+
+
+def test_plain_seat_desk_send_receipt_landed_and_duplicate_request_id_one_delivery(tmp_path, monkeypatch):
+    _config(tmp_path, monkeypatch, {DESK_ID: "sms-desk"})
+
+    async def go():
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await sessions.open(S_HOST, S_NAME, provider="claude")
+            server = Server(store=store, sessions=sessions, comms=comms, local_host=S_HOST)
+            msg = {"host": S_HOST, "session_name": S_NAME, "text": "hello there",
+                   "request_id": "desk-r1", "optimistic_id": "desk-o1", "_auth_context": _auth(DESK_ID)}
+            first = await server._on_send(dict(msg))
+            second = await server._on_send(dict(msg))
+            receipt = await store.get_send_receipt(S_STREAM, "desk-r1")
+            rows = await store.submit(lambda conn: [dict(r) for r in conn.execute(
+                "SELECT state, display_text, reason FROM v2_send_receipts"
+                " WHERE to_stream_id=? AND request_id=? ORDER BY rowid", (S_STREAM, "desk-r1"))])
+            return tmux.pastes, first, second, receipt, rows
+        finally:
+            store.stop()
+
+    pastes, first, second, receipt, rows = asyncio.run(go())
+    assert len(pastes) == 1 and STAMPED in pastes[0]
+    assert first["delivery"] == "landed" and first["submission_confirmed"] is True
+    assert second["coalesced"] is True and second["do_not_resubmit"] is True and second["delivery"] == "landed"
+    # Append-only rows: every row for the request carries the exact stamped display text;
+    # exactly one is the physical landed delivery, later rows are coalesced replays of it.
+    assert {r["display_text"] for r in rows} == {STAMPED}
+    physical = [r for r in rows if r["state"] == "landed" and not str(r["reason"] or "").startswith("coalesced_replay:")]
+    assert len(physical) == 1
+    assert [r["reason"] for r in rows if str(r["reason"] or "").startswith("coalesced_replay:")] == ["coalesced_replay:desk-r1"]
+    assert receipt["state"] == "landed" and receipt["delivery"] == "landed"
+    assert _PEER_TELL_RE.search(STAMPED) is None
+
+
+def test_composite_desk_send_stores_one_exact_user_row(tmp_path, monkeypatch):
+    _config(tmp_path, monkeypatch, {DESK_ID: "sms-desk"})
+
+    async def go():
+        store, sessions, comms, composite, server = _harness()
+        try:
+            await _setup(store, sessions, composite)
+            msg = {"host": "fixture-host-chat", "session_name": "assistant", "text": "to composite",
+                   "request_id": "r2", "optimistic_id": "o2", "_auth_context": _auth(DESK_ID)}
+            first = await server._on_send(dict(msg))
+            second = await server._on_send(dict(msg))
+            events = await store.fetch_session_event_tail(COMPOSITE, limit=20)
+            return first, second, [e for e in events if e.get("kind") == "USER"]
+        finally:
+            store.stop()
+
+    first, second, users = asyncio.run(go())
+    assert [u["text"] for u in users] == ["[from sms-desk]\nto composite"]
+    assert _PEER_TELL_RE.search(users[0]["text"]) is None
+    assert first["assistant_composite"]["receipt_id"] == second["assistant_composite"]["receipt_id"]
