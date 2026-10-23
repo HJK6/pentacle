@@ -267,20 +267,24 @@ class Layout(Tmp):
         co, ws, ev = self.tmp / "co", self.tmp / "ws", self.tmp / "ev"
         for p in (co, ws, ev):
             p.mkdir()
-        run = ws / "runs" / "a"
-        self.assertEqual(ge.check_layout(co, ws, ev, run / "home", self.tmp / "t", run / "basetemp", 200), [])
+        home, tmp, base = ge.scratch_paths(ws, self.tmp / "t", "abcdef0123")
+        self.assertEqual(ge.check_layout(co, ws, ev, home, tmp, base, 200), [])
+        self.assertEqual(base.parent, tmp)
 
     def test_home_or_evidence_under_basetemp_and_checkout_are_refused(self):
         co, ws = self.tmp / "co", self.tmp / "ws"
         co.mkdir(), ws.mkdir()
-        base = ws / "base"
-        findings = ge.check_layout(co, ws, base / "ev", base / "home", self.tmp / "t", base, 200)
+        tmp = self.tmp / "t"
+        base = tmp / "b"
+        findings = ge.check_layout(co, ws, base / "ev", base / "home", tmp, base, 200)
         self.assertGreaterEqual(len([f for f in findings if "nested" in f["detail"]]), 2)
-        inside = ge.check_layout(co, ws, co / "ev", ws / "h", self.tmp / "t", ws / "b", 200)
+        inside = ge.check_layout(co, ws, co / "ev", ws / "h", tmp, base, 200)
         self.assertTrue(any("source checkout" in f["detail"] for f in inside))
+        outside = ge.check_layout(co, ws, self.tmp / "ev", ws / "h", tmp, ws / "elsewhere", 200)
+        self.assertTrue(any("not under TMPDIR" in f["detail"] for f in outside))
 
     def test_long_tmpdir_is_refused_with_socket_reason(self):
-        findings = ge.check_layout(self.tmp / "co", self.tmp / "ws", self.tmp / "ev", self.tmp / "h", self.tmp / ("x" * 60), self.tmp / "b", 48)
+        findings = ge.check_layout(self.tmp / "co", self.tmp / "ws", self.tmp / "ev", self.tmp / "h", self.tmp / ("x" * 60), self.tmp / ("x" * 60) / "b", 48)
         self.assertTrue(any("socket" in f["detail"] for f in findings))
 
 

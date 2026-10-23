@@ -186,6 +186,12 @@ def pick_locale(config: Dict[str, Any], *, run=subprocess.run) -> Tuple[Optional
 
 # -------------------------------------------------------------- layout
 
+def scratch_paths(workspace: Path, tmp_root: Path, attempt_id: str) -> Tuple[Path, Path, Path]:
+    """(HOME, TMPDIR, basetemp). HOME sits in the workspace; TMPDIR is short for socket paths and
+    holds the pytest basetemp, so harness isolation guards (roots under the OS temp base) accept it."""
+    tmp = tmp_root / attempt_id[:8]
+    return workspace / "runs" / attempt_id[:8] / "home", tmp, tmp / "b"
+
 def _inside(child: Path, parent: Path) -> bool:
     child, parent = Path(os.path.realpath(child)), Path(os.path.realpath(parent))
     return child == parent or parent in child.parents
@@ -197,9 +203,11 @@ def check_layout(checkout: Path, workspace: Path, evidence: Path, home: Path, tm
         if _inside(path, checkout):
             failures.append(fail("layout", "%s is inside the source checkout (it would dirty the gate's clean-tree check)" % label, "use a directory outside the checkout"))
     for a_label, a, b_label, b in (("evidence", evidence, "home", home), ("evidence", evidence, "tmp", tmp), ("evidence", evidence, "basetemp", basetemp),
-                                   ("home", home, "basetemp", basetemp), ("home", home, "tmp", tmp), ("tmp", tmp, "basetemp", basetemp)):
+                                   ("home", home, "basetemp", basetemp), ("home", home, "tmp", tmp)):
         if _inside(a, b) or _inside(b, a):
             failures.append(fail("layout", "%s and %s are nested; pytest may delete basetemp and HOME must never live under it" % (a_label, b_label), "keep them as siblings"))
+    if not _inside(basetemp, tmp):
+        failures.append(fail("layout", "basetemp is not under TMPDIR; the harness isolation guards only accept roots under the OS temp base", "keep basetemp inside the owned TMPDIR"))
     if len(str(tmp).encode()) > max_tmp:
         failures.append(fail("layout", "TMPDIR %r is %d bytes (>%d): unix and tmux socket paths would overflow" % (str(tmp), len(str(tmp).encode()), max_tmp), "pass a shorter --tmp-root"))
     return failures
@@ -645,9 +653,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state: Dict[str, Any] = {"outcome": "harness_failure", "first_failure": {"stage": "setup", "code": "crash"}, "secondary": {}, "evidence": [], "extra": {}}
     cancelled = {"hit": False}
-    run_dir = workspace / "runs" / attempt_id[:8]
     tmp_root = (args.tmp_root or Path("/tmp/ge-%d" % os.getuid())).resolve()
-    home, basetemp, tmp = run_dir / "home", run_dir / "basetemp", tmp_root / attempt_id[:8]
+    home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
+    run_dir = home.parent
 
     def on_signal(_n, _f):
         cancelled["hit"] = True
