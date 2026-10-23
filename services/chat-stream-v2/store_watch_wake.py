@@ -137,8 +137,19 @@ def _fact_notice(conn, owner, owner_generation, child, child_generation, kind, s
     return {**dict(row), "created": False} if row else None
 
 
-def coalesce_notice_conn(conn, notice, report=None):
+def coalesce_notice_conn(conn, notice, report=None, *, enrich_report=True):
     """Insert/find and consume in one caller-owned transaction, even on replay."""
+    if report and notice.get("kind") == "report":
+        prior = conn.execute("SELECT body FROM v2_outbound_notices WHERE notice_id=?", (notice["notice_id"],)).fetchone()
+        if prior is not None:
+            # Optional cached facts can advance after ingest. Replay retains the
+            # first durable body; ordinary content and all routing identities
+            # still pass the existing conflict check below.
+            base = lambda body: body.split("\ndisposition_context=", 1)[0]
+            if base(prior[0]) == base(notice["body"]):
+                notice = {**notice, "body": prior[0]}
+        elif enrich_report:
+            notice = {**notice, "body": report_notice_body_conn(conn, report)}
     owner = notice["recipient_stream_id"]
     child = notice.get("source_stream_id")
     bound = conn.execute("SELECT 1 FROM v2_watch_facts WHERE notice_id=?", (notice["notice_id"],)).fetchone()
@@ -198,6 +209,32 @@ def coalesce_notice_conn(conn, notice, report=None):
     return result
 
 
+def report_notice_body_conn(conn, report):
+    """Enrich before construction, without leaving the caller's transaction."""
+    from ledger import child_report_ready_tell_id
+    validation = report.get("qa_attestation_validation")
+    fields = dict(
+        notice_id=child_report_ready_tell_id(report["report_id"]),
+        report_id=report["report_id"],
+        ledger_row_id=report["ledger_row_id"],
+        child_stream_id=report["from_stream_id"],
+        msg_id=report["msg_id"],
+        status=report["status"],
+        summary=report.get("summary"),
+        qa_attestation_state=validation.get("state") if isinstance(validation, dict) else None,
+        qa_attestation_reasons=validation.get("reasons") if isinstance(validation, dict) else None,
+        effective_model=report.get("effective_model"),
+        effective_effort=report.get("effective_effort"),
+    )
+    try:
+        from work_unattended import report_disposition_context_conn
+        context = report_disposition_context_conn(conn, report)
+        return build_message_envelope("child_report_ready", **fields, disposition_context=context)
+    except Exception:  # Optional computation/rendering must never roll back the report.
+        logging.getLogger(__name__).exception("subsystem=report_context bug_ref=unattended_work action=degrade")
+    return build_message_envelope("child_report_ready", **fields)
+
+
 def report_watch_conn(conn, report):
     """Accepted-report hook; called after D1's append, before the shared commit."""
     owner, child = report.get("to_stream_id"), report["from_stream_id"]
@@ -218,26 +255,12 @@ def report_watch_conn(conn, report):
         return False
     from ledger import child_report_ready_tell_id
     nid = child_report_ready_tell_id(report["report_id"])
-    validation = report.get("qa_attestation_validation")
-    body = build_message_envelope(
-        "child_report_ready",
-        notice_id=nid,
-        report_id=report["report_id"],
-        ledger_row_id=report["ledger_row_id"],
-        child_stream_id=child,
-        msg_id=report["msg_id"],
-        status=report["status"],
-        summary=report.get("summary"),
-        qa_attestation_state=validation.get("state") if isinstance(validation, dict) else None,
-        qa_attestation_reasons=validation.get("reasons") if isinstance(validation, dict) else None,
-        effective_model=report.get("effective_model"),
-        effective_effort=report.get("effective_effort"),
-    )
+    body = report_notice_body_conn(conn, report)
     result = coalesce_notice_conn(conn, dict(notice_id=nid, tell_id=nid, kind="report",
         dedupe_key=f"report:{report['report_id']}", recipient_stream_id=owner, source_stream_id=child,
         body=body,
         metadata={"report_id": report["report_id"], "ledger_row_id": report["ledger_row_id"],
-                  "msg_id": report["msg_id"]}), report)
+                  "msg_id": report["msg_id"]}), report, enrich_report=False)
     return result.get("created", False)
 
 
@@ -744,16 +767,6 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
     for sid, row in members.items():
         children.setdefault(row.get("parent_stream_id"), []).append(sid)
     lanes = sorted(children.get(root_sid, ()))
-    if not lanes:
-        # Keep the monotonic notice sequence for this root generation. Clearing
-        # the material hash makes the next lane set a fresh digest episode.
-        if digest_s:
-            conn.execute(
-                """UPDATE v2_fleet_digest_state SET next_due=?,last_hash=NULL
-                   WHERE root=? AND root_generation=?""",
-                (now + digest_s, root_sid, root_gen),
-            )
-        return 0
     report_counts = _fleet_reports(conn, members)
     seat_states = {}
     for lane_sid in lanes:
@@ -838,7 +851,9 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         return count
     if now < state["next_due"]:
         return count
-    facts = _json(digest_lanes)
+    from work_unattended import unattended_work_conn, unattended_signature
+    unattended = unattended_work_conn(conn, now=now)
+    facts = _json({"lanes": digest_lanes, "unattended_work": unattended_signature(unattended)})
     digest = hashlib.sha256(facts.encode()).hexdigest()
     sequence = state["sequence"]
     # Equality refers to the last durable enqueue, not provider delivery. A
@@ -855,6 +870,8 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         nid = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
         body = build_message_envelope(
             "lane_digest", notice_id=nid, lanes=render_lanes,
+            unattended_work={**{key: value for key, value in unattended.items() if key != "omitted"},
+                             "items": unattended["items"][:8]},
             evaluated_at=_stamp(now),
         )
         _insert_outbound_notice_conn(

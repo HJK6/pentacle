@@ -5883,6 +5883,7 @@ def build_parser() -> argparse.ArgumentParser:
     nexus_route.set_defaults(func=nexus)
 
     work_lane_cli.add_parser(subparsers)
+    work_lane_cli.add_work_parser(subparsers)
     external_work_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)

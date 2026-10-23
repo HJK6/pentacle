@@ -966,6 +966,9 @@ class Ledger:
             effective_model=row.get("effective_model"),
             effective_effort=row.get("effective_effort"),
         )
+        # watch_fact routes the fallback through coalesce_notice_conn, where
+        # cache-only context is built on the insertion connection. Existing
+        # report-id notices retain their first durable body and dedupe identity.
         notice_row = await self.outbound.enqueue(
             kind=NOTICE_KIND_REPORT,
             dedupe_key=f"report:{row['report_id']}",

@@ -118,6 +118,10 @@ def _prepare_file(path: str, scan: dict, *, settle_s: float, sweep: bool):
 class WorkIndexStoreMixin:
     _work_index_fault = None
 
+    async def work_unattended(self, *, now: float | None = None) -> dict:
+        from work_unattended import unattended_work_conn
+        return await self.submit(lambda conn: unattended_work_conn(conn, now=now))
+
     async def work_index_status(self) -> dict[str, Any]:
         def read(conn):
             state = _state_conn(conn)
