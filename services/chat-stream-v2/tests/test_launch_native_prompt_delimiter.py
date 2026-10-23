@@ -41,7 +41,7 @@ def test_native_initial_prompt_is_exact_data_after_option_terminator(tmp_path: P
     workdir = tmp_path / "wt"
     workdir.mkdir()
     machine = launch.local_machine(
-        "hostc", cwd=str(tmp_path / "machine-default"), codex_bin=str(stub),
+        "test-native-host", cwd=str(tmp_path / "machine-default"), codex_bin=str(stub),
         projects_root=str(tmp_path / "projects"),
     )
     prompt_file = tmp_path / "prompt.txt"
@@ -62,7 +62,7 @@ def test_native_initial_prompt_is_exact_data_after_option_terminator(tmp_path: P
 def test_codex_command_without_initial_prompt_has_no_terminator(tmp_path: Path) -> None:
     stub, _out = _stub(tmp_path)
     machine = launch.local_machine(
-        "hostc", cwd=str(tmp_path / "machine-default"), codex_bin=str(stub),
+        "test-native-host", cwd=str(tmp_path / "machine-default"), codex_bin=str(stub),
         projects_root=str(tmp_path / "projects"),
     )
     cmd = launch._codex_command(machine, "sess", str(tmp_path / "tok"), launch_model=None, launch_effort=None)
