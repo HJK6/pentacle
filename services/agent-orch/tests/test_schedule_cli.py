@@ -373,11 +373,35 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
         "timing": {"--at", "--delay"},
         "client_only": {"--timeout", "--allow-past-time", "--allow-far-future"},
         "request_identity": {"--request-id"},
-        "rejected": {"--resume", "--confirm-model-change", "--idempotency-key", "--cwd"},
+        "rejected": {"--resume", "--confirm-model-change", "--idempotency-key", "--cwd",
+                     "--account", "--handoff-from"},
     }
     classified = [flag for values in groups.values() for flag in values]
     assert set(classified) == live_flags
     assert len(classified) == len(set(classified))
+
+
+@pytest.mark.parametrize("timing", [["--delay", "2m"], ["--at", "2026-05-20T20:05:00+00:00"]])
+@pytest.mark.parametrize("handoff", [False, True])
+@pytest.mark.parametrize("choice,detail", [
+    (["--account", "spare"], "explicit account choice requires an immediate front-desk spawn"),
+    (["--handoff-from", "hosta:conversation"], "--handoff-from requires --handoff --account and a stream id"),
+])
+def test_named_account_flags_refuse_scheduling_before_any_rpc(
+    monkeypatch, tmp_path, capsys, timing, handoff, choice, detail,
+):
+    captured: dict = {}
+    _install_spawn_fakes(monkeypatch, tmp_path, captured)
+    async def unexpected_rpc(*args, **kwargs):
+        pytest.fail("account schedule refusal must precede upload/spawn RPC")
+    monkeypatch.setattr(cli, "spawn_once", unexpected_rpc)
+    monkeypatch.setattr(cli, "upload_prompt_blob_once", unexpected_rpc)
+    argv = ["spawn", *timing, *choice]
+    if handoff: argv.append("--handoff")
+    args = cli.build_parser().parse_args(argv)
+    assert cli.spawn(args) == 2
+    assert detail in capsys.readouterr().err
+    assert "payload" not in captured
 
 
 def test_spawn_at_and_delay_rejected(monkeypatch, tmp_path, capsys):
