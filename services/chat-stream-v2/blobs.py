@@ -101,6 +101,7 @@ class BlobStore:
         self._tmp = self._root / ".tmp"
         self._uploads: dict[str, _Upload] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         #: Owning connection -> the request_ids of its in-flight uploads. An
         #: upload is owned by the connection that sent its `upload_blob_init`; a
         #: partial upload's lifetime is bounded by that connection's. When the
@@ -198,11 +199,7 @@ class BlobStore:
         # concurrent chunk is serialized against it instead of racing it (an
         # unlocked reset let a stale final chunk complete the wrong attempt and
         # left dangling ownership).
-        lock = self._locks.get(rid)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[rid] = lock
-        async with lock:
+        async with self._rid_lock(rid):
             # Idempotent reset: an init for a request_id that still has a live
             # upload (client resent init) discards the prior partial first so its
             # open fd + temp file cannot leak and a client retry is trivial.
@@ -218,12 +215,17 @@ class BlobStore:
             prior = self._uploads.pop(rid, None)
             if prior is not None:
                 self._drop_owner(rid, prior)
-                await self._run(self._discard, prior)
+                await self._run_joined(self._discard, prior)
+            opening = asyncio.get_running_loop().run_in_executor(None, self._open_tmp, ("attachment-" + uuid.uuid4().hex) if purpose == CHAT_ATTACHMENT_PURPOSE else rid)
             try:
-                fd, tmp_path = await self._run(self._open_tmp, ("attachment-" + uuid.uuid4().hex) if purpose == CHAT_ATTACHMENT_PURPOSE else rid)
+                fd, tmp_path = await self._join_task(opening)
             except OSError:
-                self._locks.pop(rid, None)  # no live upload owns this rid now
                 return flavor.error(rid, flavor.code_disk_full)
+            except asyncio.CancelledError:
+                # Install or clean: a cancelled init still owns what it opened.
+                if not opening.cancelled() and opening.exception() is None:
+                    await self._run_joined(self._discard, _Upload(*opening.result()))
+                raise
             self._uploads[rid] = _Upload(fd, tmp_path, owner, purpose=purpose, filename=filename, identity=identity, max_bytes=max_bytes)
             self._uploads[rid].voice_operation = voice_operation
             self._by_conn.setdefault(owner, set()).add(rid)
@@ -236,12 +238,9 @@ class BlobStore:
                 return flavor.error(str(msg.get("request_id") or ""), "invalid_request")
             return await self.voice_uploads.handle(msg, init=False)
         rid = str(msg.get("request_id") or "")
-        lock = self._locks.get(rid)
-        if lock is None:  # no init seen (or already finished/aborted)
-            return flavor.error(rid, flavor.code_unknown)
-        async with lock:  # acquired before any await => chunks stay in arrival order
+        async with self._rid_lock(rid):  # acquired before any await => chunks stay in arrival order
             up = self._uploads.get(rid)
-            if up is None:
+            if up is None:  # no init seen (or already finished/aborted)
                 return flavor.error(rid, flavor.code_unknown)
             if up.voice_operation is not None:
                 try:
@@ -257,6 +256,9 @@ class BlobStore:
                     return flavor.error(rid, exc.code)
                 if up.owner is not msg.get("_client_websocket") or up.identity != current_identity:
                     return flavor.error(rid, "upload_blob_forbidden")
+            sender = msg.get("_client_websocket")
+            if sender is not None and up.owner is not sender:  # a stale connection's chunk never touches a successor attempt
+                return flavor.error(rid, flavor.code_unknown)
             final = bool(msg.get("final"))
             data = _b64decode(msg.get("data_b64"))
             if len(data) > CHUNK_MAX_BYTES:
@@ -316,7 +318,6 @@ class BlobStore:
                 return flavor.error(rid, flavor.code_disk_full)
             size = up.size
             self._uploads.pop(rid, None)
-            self._locks.pop(rid, None)
             self._drop_owner(rid, up)
             return {"type": flavor.upload_ok, "request_id": rid,
                     flavor.sha_field: sha, "size_bytes": size,
@@ -464,24 +465,30 @@ class BlobStore:
         self.voice_uploads._sync_dir(source.parent)
         return sha
 
+    @contextlib.asynccontextmanager
+    async def _rid_lock(self, rid: str) -> AsyncIterator[None]:
+        """Hold the request_id's one lock. It stays registered while any task
+        holds or awaits it, or an upload is installed, so completion or abort
+        never lets a later same-rid task take a second lock."""
+        lock = self._locks.setdefault(rid, asyncio.Lock())
+        self._lock_users[rid] = self._lock_users.get(rid, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            users = self._lock_users.pop(rid) - 1
+            if users:
+                self._lock_users[rid] = users
+            elif rid not in self._uploads:
+                self._locks.pop(rid, None)
+
     async def _abort(self, rid: str) -> None:
-        """Discard an upload's state. The caller must already hold the per-upload
-        lock (chunk-error paths, `_on_init` reset, `_abort_locked`)."""
+        """Discard an upload's state. The caller must already hold `_rid_lock`
+        (chunk-error paths, `_on_init` reset, `abort_connection`)."""
         up = self._uploads.pop(rid, None)
-        self._locks.pop(rid, None)
         self._drop_owner(rid, up)
         if up is not None:
-            await self._run(self._discard, up)
-
-    async def _abort_locked(self, rid: str) -> None:
-        """Acquire the per-upload lock, then abort. For callers that do NOT hold
-        it, so teardown cannot race an in-flight chunk's `_append`/`_finish`."""
-        lock = self._locks.get(rid)
-        if lock is None:
-            await self._abort(rid)  # nothing live; clear any residue
-            return
-        async with lock:
-            await self._abort(rid)
+            await self._run_joined(self._discard, up)
 
     def _drop_owner(self, rid: str, up: "_Upload | None") -> None:
         """Forget this upload's connection ownership (completion or abort)."""
@@ -506,7 +513,12 @@ class BlobStore:
         teardown takes the per-upload lock so it serializes with any chunk task
         still unwinding on that upload."""
         for rid in tuple(self._by_conn.pop(owner, ())):
-            await self._abort_locked(rid)
+            async with self._rid_lock(rid):
+                # Revalidate under the lock: another connection may have
+                # re-initialized this rid since the snapshot.
+                up = self._uploads.get(rid)
+                if up is not None and up.owner is owner:
+                    await self._abort(rid)
 
     # -- fetch -------------------------------------------------------------
 
