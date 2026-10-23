@@ -260,6 +260,7 @@ def schedule_insert(surface: WindowSchedule, actor: str = "hosta:requester", **v
         ({}, "hosta:requester"),
         ({"parent": "hosta:participant"}, "hosta:participant"),
         ({"top_level": True}, None),
+        ({"top_level": True, "self_close_on_completion": False}, None),
     ],
 )
 def test_cli_to_daemon_fresh_schedule_creates_all_lineage_shapes(
@@ -305,9 +306,8 @@ def test_cli_to_daemon_fresh_schedule_creates_all_lineage_shapes(
         allow_past_time=False,
         allow_far_future=False,
         reparent_children=None,
-        # Exercise the negative lifecycle flag on every lineage shape that the
-        # fresh scheduled CLI path admits; top-level remains absent because the
-        # option has no meaning without parent lineage.
+        # Keep the unset top-level control; the explicit-negative row overrides
+        # this below so every lineage shape also exercises the opt-out.
         self_close_on_completion=None if lineage.get("top_level") else False,
         initial_prompt="captured at create",
         initial_prompt_file=None,
@@ -325,9 +325,13 @@ def test_cli_to_daemon_fresh_schedule_creates_all_lineage_shapes(
         assert captured[0]["from_stream_id"] == "hosta:requester"
         assert schedule["created_by_stream_id"] == "hosta:requester"
         assert schedule.get("parent_stream_id") == expected_parent
-        assert captured[0].get("self_close_on_completion") is (
-            False if expected_parent else None
-        )
+        assert captured[0].get("self_close_on_completion") is args.self_close_on_completion
+        assert schedule["self_close_on_completion"] is args.self_close_on_completion
+        stored = run(store.submit(lambda conn: conn.execute(
+            "SELECT self_close_on_completion FROM v2_schedules WHERE schedule_id=?",
+            (schedule["schedule_id"],),
+        ).fetchone()[0]))
+        assert stored == (0 if args.self_close_on_completion is False else None)
         assert schedule["phase"] == "implementation"
         assert schedule["prompt_sha256"]
     finally:
@@ -624,6 +628,58 @@ def test_scheduled_handoff_preserves_source_and_intent(tmp_path) -> None:
         assert spawn.calls[0]["handoff"] is True
         assert spawn.calls[0]["handoff_from_stream_id"] == "hosta:requester"
         assert spawn.calls[0]["self_close_on_completion"] is True
+    finally:
+        store.stop()
+
+
+def test_scheduled_top_level_negative_persists_zero_and_dispatches_false(tmp_path) -> None:
+    store, _sessions, _comms, spawn, surface = harness(tmp_path)
+    try:
+        inserted = schedule_insert(surface, self_close_on_completion=False)
+        schedule = inserted["schedule"]
+        assert schedule["parent_stream_id"] is None
+        assert schedule["self_close_on_completion"] is False
+        stored = run(store.submit(lambda conn: conn.execute(
+            "SELECT self_close_on_completion FROM v2_schedules WHERE schedule_id=?",
+            (schedule["schedule_id"],),
+        ).fetchone()[0]))
+        assert stored == 0
+        run(surface.schedule_run(message(
+            "schedule.run", schedule["created_by_stream_id"],
+            schedule_id=schedule["schedule_id"],
+        )))
+        assert len(spawn.calls) == 1
+        assert spawn.calls[0]["self_close_on_completion"] is False
+        assert not spawn.calls[0].get("parent_stream_id")
+        assert not spawn.calls[0].get("handoff")
+    finally:
+        store.stop()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, 1, "false", "", [], {}])
+def test_scheduled_leaderless_self_close_refuses_every_value_except_false(tmp_path, value) -> None:
+    store, _sessions, _comms, spawn, surface = harness(tmp_path)
+    try:
+        with pytest.raises(VerbError) as refused:
+            schedule_insert(surface, self_close_on_completion=value)
+        assert refused.value.code == "self_close_requires_parent"
+        assert spawn.admissions == []
+        assert run(surface.schedule_inventory()) == []
+    finally:
+        store.stop()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false", "", [], {}])
+def test_scheduled_parented_self_close_keeps_boolean_type_check(tmp_path, value) -> None:
+    store, sessions, _comms, spawn, surface = harness(tmp_path)
+    try:
+        with pytest.raises(VerbError) as refused:
+            schedule_insert(
+                surface, parent_stream_id=next(iter(sessions.rows)),
+                self_close_on_completion=value,
+            )
+        assert refused.value.code == "invalid_request"
+        assert spawn.admissions == []
     finally:
         store.stop()
 

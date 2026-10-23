@@ -230,10 +230,6 @@ def test_fresh_spawn_at_creates_all_lineage_shapes(
             {"top_level": True, "self_close_on_completion": True},
             "self_close_requires_parent",
         ),
-        (
-            {"top_level": True, "self_close_on_completion": False},
-            "self_close_requires_parent",
-        ),
     ],
 )
 def test_fresh_schedule_rejections_have_fixed_codes(
@@ -247,6 +243,64 @@ def test_fresh_schedule_rejections_have_fixed_codes(
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["error_code"] == error_code
     assert "payload" not in captured
+
+
+@pytest.mark.parametrize("flag", [False, True, None])
+def test_fresh_schedule_top_level_self_close_tri_state(
+    monkeypatch, tmp_path, capsys, flag,
+):
+    captured: dict = {}
+    _install_spawn_fakes(monkeypatch, tmp_path, captured)
+    rc = cli.spawn(_spawn_args(
+        handoff=False, delay="2m", initial_prompt=None, top_level=True,
+        self_close_on_completion=flag,
+    ))
+    response = json.loads(capsys.readouterr().out)
+    if flag is True:
+        assert rc == 2
+        assert response["error_code"] == "self_close_requires_parent"
+        assert "payload" not in captured
+    else:
+        assert rc == 0
+        assert "parent_stream_id" not in captured["payload"]
+        if flag is False:
+            assert captured["payload"]["self_close_on_completion"] is False
+        else:
+            assert "self_close_on_completion" not in captured["payload"]
+
+
+@pytest.mark.parametrize("scheduled", [False, True], ids=["immediate", "scheduled"])
+@pytest.mark.parametrize("flag", [False, True, None])
+def test_top_level_self_close_shared_predicate(
+    monkeypatch, tmp_path, capsys, scheduled, flag,
+):
+    captured: dict = {}
+    _install_spawn_fakes(monkeypatch, tmp_path, captured)
+
+    async def fake_spawn_once(_config, payload, timeout):
+        captured["payload"] = payload
+        return {"type": "spawn.ok", "session": {"stream_id": "host-a:worker"}}
+
+    monkeypatch.setattr(cli, "spawn_once", fake_spawn_once)
+    rc = cli.spawn(_spawn_args(
+        handoff=False, delay="2m" if scheduled else None,
+        initial_prompt=None, top_level=True, self_close_on_completion=flag,
+    ))
+    response = json.loads(capsys.readouterr().out)
+    # Shared safety predicate: top-level creates never send True. Explicit
+    # negatives are admitted; the scheduled positive alone is refused.
+    assert captured.get("payload", {}).get("self_close_on_completion") is not True
+    if scheduled and flag is True:
+        assert rc == 2
+        assert response["error_code"] == "self_close_requires_parent"
+        assert "payload" not in captured
+    else:
+        assert rc == 0
+        assert "parent_stream_id" not in captured["payload"]
+        if not scheduled or flag is None:
+            assert "self_close_on_completion" not in captured["payload"]
+        else:
+            assert captured["payload"]["self_close_on_completion"] is False
 
 
 @pytest.mark.parametrize(

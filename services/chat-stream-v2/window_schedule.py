@@ -507,7 +507,7 @@ class WindowSchedule:
                     "idempotency_key_not_schedulable",
                     "schedule dispatch identity is generation-owned",
                 )
-        if "self_close_on_completion" in msg and not (
+        if "self_close_on_completion" in msg and msg["self_close_on_completion"] is not False and not (
             handoff or msg.get("parent_stream_id")
         ):
             raise VerbError(
