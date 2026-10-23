@@ -3410,6 +3410,7 @@ function applySlotChatListRender(slot, refs, render) {
   }
   hydrateChatAttachmentMedia(refs.listEl);
   syncActivitySpinnerPhase(document);
+  updateSendControls(slot);
 }
 
 async function writeChatCopyText(text) {

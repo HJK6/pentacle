@@ -360,3 +360,54 @@ test('a late queue receipt after delivery uncertainty cannot rearm an unresolved
   assert.deepEqual({ interrupts: interrupts.length, repeated }, { interrupts: 1, repeated: false });
   controller.dispose();
 });
+
+for (const confirm of ['interrupt_unconfirmed', 'interrupted', 'coalesced']) {
+test(`Stop preserves its turn-owning native queue through delivery uncertainty (${confirm})`, async () => {
+  const { controller, interrupts, setInterrupt } = setup(false);
+  setInterrupt({ ok: true, confirm });
+  const id = controller.sendTurn(STREAM, 'native queue owns the locally pending turn');
+  await settle();
+  const request = controller.getState().optimisticSends?.[id]?.request_id;
+  assert.equal(controller.getTurnState(STREAM)?.optimisticId, id);
+  controller.applyFrame({ type: 'send.indeterminate', request_id: request, reason: 'disconnected' });
+  assert.equal(controller.getState().optimisticSends?.[id]?.provider_queued, true);
+  assert.equal(controller.cancelTurn(STREAM), true);
+  await settle();
+  const cancelled = controller.getState().optimisticSends?.[id]?.status === 'cancelled';
+  controller.getInterruptState(STREAM);
+  controller.cancelTurn(STREAM);
+  await settle();
+  controller.applyFrame({ type: 'send.result', request_id: request, delivery: 'landed', provider_queued: true });
+  const repeated = sendNow(controller, STREAM, id);
+  await settle();
+  assert.deepEqual({ cancelled, interrupts: interrupts.length, repeated },
+    { cancelled: false, interrupts: 1, repeated: false });
+  controller.dispose();
+});
+}
+
+test('Stop still cancels an undelivered local row without native queue proof', async () => {
+  const { controller, interrupts } = setup(false);
+  controller.setSendBridge(() => new Promise(() => {}));
+  const id = controller.sendTurn(STREAM, 'not delivered');
+  assert.equal(controller.cancelTurn(STREAM), true);
+  await settle();
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'cancelled');
+  assert.equal(interrupts.length, 1);
+  controller.dispose();
+});
+
+test('Stop does not announce a retired generation queue for a nonqueued current turn', async () => {
+  const { controller, setQueued } = setup();
+  const old = controller.sendTurn(STREAM, 'retired provider queue');
+  await settle();
+  controller.applyFrame({ type: 'session.inventory', sessions: [session(STREAM, 'generation-2'), session(OTHER), session(COMPOSITE)] });
+  setQueued(false);
+  controller.sendTurn(STREAM, 'current nonqueued work');
+  await settle();
+  controller.cancelTurn(STREAM);
+  await settle();
+  assert.equal(controller.getState().optimisticSends?.[old]?.provider_queued, true);
+  assert.equal(controller.getComposerNotice(STREAM), '');
+  controller.dispose();
+});

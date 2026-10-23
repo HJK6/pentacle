@@ -185,3 +185,34 @@ test('a composite cannot invoke a queued-row interrupt even from a stale button'
   assert.deepEqual(result.calls, []);
   assert.equal(result.renders, 0);
 });
+
+for (const eligibility of ['reserved', 'retired', 'ready']) {
+test(`selection-release deferred commit refreshes ${eligibility} queued-row readiness`, () => {
+  const { JSDOM } = require('jsdom');
+  const document = new JSDOM('<div id="list">old selected transcript</div>').window.document;
+  const c = controls({ streamSession: { stream_id: 'hosta:test' } });
+  c.refs.listEl = document.querySelector('#list');
+  c.state.slotChatPendingListRender = [{
+    html: '<button class="slot-chat-send-now" data-stream-id="hosta:test" data-optimistic-id="row-1">Send now</button>',
+    cacheKey: 'queued row', paintedStreamId: 'hosta:test', detailPresent: false,
+  }];
+  c.state.slotChatLastListHtml = [null];
+  c.state.slotChatPendingPrepend = [null];
+  c.context.window.PentacleChatStore = { canSendQueuedNow: () => eligibility === 'ready' };
+  let selected = true;
+  Object.assign(c.context, { document, activeSelectionInside: () => selected,
+    hydrateChatAttachmentMedia() {}, syncActivitySpinnerPhase() {} });
+  const applyStart = app.indexOf('function applySlotChatListRender(');
+  vm.runInContext(app.slice(applyStart, app.indexOf('\nasync function writeChatCopyText', applyStart)), c.context);
+  const deferStart = app.indexOf('function maybeApplyDeferredSlotChatRenders()');
+  vm.runInContext(app.slice(deferStart, app.indexOf('\nfunction scrollSlotChatToBottom', deferStart)), c.context);
+  vm.runInContext('maybeApplyDeferredSlotChatRenders()', c.context);
+  assert.equal(c.refs.listEl.querySelector('.slot-chat-send-now'), null);
+  selected = false;
+  vm.runInContext('maybeApplyDeferredSlotChatRenders()', c.context);
+  const button = c.refs.listEl.querySelector('.slot-chat-send-now');
+  assert.ok(button, 'deferred HTML actually committed');
+  assert.equal(c.state.slotChatPendingListRender[0], null);
+  assert.equal(button.disabled, eligibility !== 'ready');
+});
+}

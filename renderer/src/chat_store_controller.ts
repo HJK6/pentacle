@@ -466,9 +466,8 @@ export class ChatStoreController {
   }
 
   private hasProviderQueuedRows(streamId: string): boolean {
-    return Object.values(this.state.optimisticSends ?? {}).some(send => send.stream_id === streamId
-      && send.provider_queued === true
-      && send.status !== 'failed' && send.status !== 'cancelled' && send.status !== 'echoed' && send.status !== 'reconciled');
+    const generation = this.state.sessions.find(session => session.stream_id === streamId)?.session_generation;
+    return !!generation && this.providerQueuedIds(streamId, generation).length > 0;
   }
 
   private providerQueuedIds(streamId: string, generation: string): string[] {
@@ -1036,6 +1035,9 @@ export class ChatStoreController {
         : generation;
       const expectedSessionGeneration = typeof selectedGeneration === 'string' && selectedGeneration
         ? selectedGeneration : undefined;
+      const optimisticId = turn.optimisticId;
+      // Reserve native ownership before changing the local turn or its row.
+      this.requestInterrupt(streamId, turnId, optimisticId, expectedSessionGeneration);
       // Clear the indicator promptly: drop the elapsed anchor + any pending
       // stale-settle timer, then clear the turn.
       delete this.workingElapsedAnchors[streamId];
@@ -1045,16 +1047,15 @@ export class ChatStoreController {
         delete this.staleTurnTimers[streamId];
       }
       let next = clearPentacleTurn(this.state, streamId);
-      const optimisticId = turn.optimisticId;
       if (optimisticId) {
         const send = this.state.optimisticSends?.[optimisticId];
-        const confirmed = send && (send.status === 'acked' || send.status === 'echoed' || send.status === 'reconciled');
+        const confirmed = send && (send.provider_queued === true
+          || send.status === 'acked' || send.status === 'echoed' || send.status === 'reconciled');
         if (send && !confirmed) {
           next = markOptimisticCancelledByOptimisticId(next, optimisticId, Date.now());
         }
       }
       this.setState(next);
-      this.requestInterrupt(streamId, turnId, optimisticId, expectedSessionGeneration);
       // Stop never clears the provider queue: say so while queued rows remain.
       this.setComposerNotice(streamId, this.hasProviderQueuedRows(streamId) ? 'Stopped. Queued messages run next' : '', true);
       logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_FAILED, {
