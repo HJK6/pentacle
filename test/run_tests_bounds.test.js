@@ -115,6 +115,44 @@ test('denied inspection is an incomplete result, not clean success', async () =>
   assert.ok(result.errors.some(error => error.includes('EACCES')));
 });
 
+test('a timed-out scan leaves its elapsed time and error in the cleanup receipt and stays incomplete', async () => {
+  let now = 0, calls = 0;
+  const groupMembers = () => {
+    calls += 1;
+    if (calls === 1) { now += 300; throw new Error('owned process inspection unavailable (ETIMEDOUT)'); }
+    now += 10; return [];
+  };
+  const result = await runner.cleanupGroup(90001, { now: () => now, sleep: async ms => { now += ms; }, groupMembers, signalGroup() {} }, { termGraceMs: 10, killGraceMs: 10 });
+  assert.equal(result.status, 'incomplete');
+  assert.deepEqual(result.scans[0], { elapsed_ms: 300, members: null, error: 'owned process inspection unavailable (ETIMEDOUT)' });
+  assert.deepEqual(result.scans.at(-1), { elapsed_ms: 10, members: 0, error: null });
+  assert.equal(result.scans_dropped, 0);
+});
+
+test('scan receipts are bounded and keep the first and latest scans', async () => {
+  let now = 0, calls = 0;
+  const groupMembers = () => { calls += 1; now += calls; return [{ pid: 90002, state: 'S' }]; };
+  const stderr = { text: '', write(chunk) { this.text += chunk; } };
+  const result = await runner.cleanupGroup(90001, { now: () => now, sleep: async ms => { now += ms; }, groupMembers, signalGroup() {} }, { termGraceMs: 500, killGraceMs: 500 });
+  assert.equal(result.status, 'incomplete');
+  assert.equal(result.scans.length, 16);
+  assert.equal(result.scans_dropped, calls - 16);
+  assert.equal(result.scans[0].elapsed_ms, 1);
+  assert.equal(result.scans.at(-1).elapsed_ms, calls);
+  const fakeSpawn = () => {
+    const child = new EventEmitter(); child.pid = 90001;
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.stdout.destroy = child.stderr.destroy = child.unref = () => {};
+    process.nextTick(() => child.emit('exit', 0, null));
+    return child;
+  };
+  await runner.run(root, { patterns: [fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 10000, termGraceMs: 10, killGraceMs: 10 }, {
+    spawn: fakeSpawn, groupMembers: () => { throw new Error('owned process inspection unavailable (ETIMEDOUT)'); }, signalGroup() {},
+    now: () => now, sleep: async ms => { now += ms; }, stdout: quiet, stderr,
+  });
+  assert.match(stderr.text, /CLEANUP INCOMPLETE .* scans=\[\{"elapsed_ms":0,"members":null,"error":"owned process inspection unavailable \(ETIMEDOUT\)"\}/);
+});
+
 test('whole-run deadline also bounds bundling and preserves later not_run files', async () => {
   const child = new EventEmitter(); child.pid = 90001; child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdout.destroy = child.stderr.destroy = child.unref = () => {};
   const result = await runner.run(root, { patterns: [fixture('build_failed.ts'), fixture('pass.js')], fileTimeoutMs: 5000, runTimeoutMs: 40 }, { spawn: () => child, groupMembers: () => [], signalGroup() {}, stdout: quiet, stderr: quiet });

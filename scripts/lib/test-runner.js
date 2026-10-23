@@ -79,14 +79,29 @@ function groupMembers(pgid) {
   throw new Error('requires: POSIX owned process-group inspection');
 }
 
+const SCAN_RECORD_LIMIT = 16;
+
 async function cleanupGroup(pgid, deps, limits) {
-  const result = { status: 'clean', pgid, survivor_pids: [], zombie_pids: [], signals: [], errors: [] };
+  // scans: per-inspection elapsed/error receipt (diagnostic only; first and last rows kept when bounded).
+  const result = { status: 'clean', pgid, survivor_pids: [], zombie_pids: [], signals: [], errors: [], scans: [], scans_dropped: 0 };
   if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid === process.pid) {
     return { ...result, status: 'incomplete', errors: ['invalid owned process group'] };
   }
+  const record = row => {
+    if (result.scans.length >= SCAN_RECORD_LIMIT) { result.scans.splice(SCAN_RECORD_LIMIT / 2, 1); result.scans_dropped += 1; }
+    result.scans.push(row);
+  };
   const inspect = () => {
-    try { return deps.groupMembers(pgid); }
-    catch (error) { result.errors.push(`inspection: ${error.code || error.message}`); return null; }
+    const start = deps.now();
+    try {
+      const members = deps.groupMembers(pgid);
+      record({ elapsed_ms: Math.round((deps.now() - start) * 1000) / 1000, members: members.length, error: null });
+      return members;
+    } catch (error) {
+      record({ elapsed_ms: Math.round((deps.now() - start) * 1000) / 1000, members: null, error: error.code || error.message });
+      result.errors.push(`inspection: ${error.code || error.message}`);
+      return null;
+    }
   };
   const signal = name => {
     try { deps.signalGroup(pgid, name); result.signals.push(name); }
@@ -164,7 +179,7 @@ async function operation(command, args, { repoRoot, env, deadline, fileDeadline,
   child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref();
   const outputTail = (timeoutTail || tail).toString('utf8').split(/\r?\n/).slice(-20).join('\n');
   if (timedOut) deps.stderr.write(`\nTIMEOUT ${label}\n${outputTail}\n`);
-  if (cleanup.status === 'incomplete') deps.stderr.write(`\nCLEANUP INCOMPLETE ${label} survivors=${JSON.stringify(cleanup.survivor_pids)} errors=${JSON.stringify(cleanup.errors)}\n`);
+  if (cleanup.status === 'incomplete') deps.stderr.write(`\nCLEANUP INCOMPLETE ${label} survivors=${JSON.stringify(cleanup.survivor_pids)} errors=${JSON.stringify(cleanup.errors)} scans=${JSON.stringify(cleanup.scans)}\n`);
   return { ...outcome, timedOut, aborted, spawnError, duration_ms: Math.round(deps.now() - start), tail: outputTail, output_truncated: forwarded > FORWARD_BYTES, cleanup };
 }
 
