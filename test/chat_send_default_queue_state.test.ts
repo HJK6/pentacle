@@ -189,3 +189,16 @@ test('reconnect never replays a queued-row interrupt', async () => {
   assert.equal(interrupts.length, 1);
   controller.dispose();
 });
+
+test('a stale queued button cannot interrupt after the send becomes indeterminate', async () => {
+  const { controller, interrupts } = setup();
+  const id = controller.sendTurn(STREAM, 'queue before a lost connection');
+  await settle();
+  const requestId = controller.getState().optimisticSends?.[id]?.request_id;
+  controller.applyFrame({ type: 'send.indeterminate', request_id: requestId, reason: 'disconnected' });
+  assert.equal(controller.getState().optimisticSends?.[id]?.status, 'indeterminate');
+  assert.equal(sendNow(controller, STREAM, id), false);
+  await settle();
+  assert.equal(interrupts.length, 0);
+  controller.dispose();
+});

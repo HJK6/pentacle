@@ -164,7 +164,8 @@ async function publicChatRendererContracts(ctx) {
       const rows = [...document.querySelectorAll('#cell-0 .slot-chat-row.is-user')]
         .filter(row => (row.textContent || '').includes('Synthetic provider queued'));
       const node = rows.length ? rows[rows.length - 1].querySelector('.slot-chat-send-status') : null;
-      return { text: node ? node.textContent : null, cls: node ? node.className : '',
+      return { text: node ? node.firstChild?.textContent : null, cls: node ? node.className : '',
+        sendNow: !!node?.querySelector('.slot-chat-send-now'),
         sending: !!(node && node.classList.contains('is-sending')),
         queued: !!(node && node.classList.contains('is-queued')) };
     })()`;
@@ -193,7 +194,8 @@ async function publicChatRendererContracts(ctx) {
     await new Promise(resolve => setTimeout(resolve, 150));
     const stillQueued = await session.eval(probe);
     report.ok('provider-queued send.result shows Queued and survives the late send-bridge resolution',
-      queued.queued === true && queued.sending === false && stillQueued.text === 'Queued' && stillQueued.queued === true,
+      queued.queued === true && queued.sending === false && queued.sendNow === true
+        && stillQueued.text === 'Queued' && stillQueued.queued === true && stillQueued.sendNow === true,
       { queued, stillQueued });
     await session.eval(`(() => {
       const request = window.__publicRenderer.sends[2];
@@ -211,7 +213,7 @@ async function publicChatRendererContracts(ctx) {
     const sent = await waitForValue(session, cdp, probe, value => value?.text === 'Sent',
       { timeoutMs, label: 'correlated USER echo flips Queued to Sent' });
     report.ok('correlated USER echo flips the provider-queued row to Sent with no is-queued left',
-      sent.queued === false, sent);
+      sent.queued === false && sent.sendNow === false, sent);
   } finally {
     await reload();
   }

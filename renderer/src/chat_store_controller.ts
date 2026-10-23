@@ -807,7 +807,7 @@ export class ChatStoreController {
         || session.status === 'closed' || !generation
         || this.sendSessionGenerations.get(optimisticId) !== generation
         || !send || send.stream_id !== streamId || send.provider_queued !== true
-        || ['failed', 'cancelled', 'echoed', 'reconciled'].includes(send.status)) return false;
+        || ['failed', 'cancelled', 'indeterminate', 'echoed', 'reconciled'].includes(send.status)) return false;
 
     const turn = this.getTurnState(streamId);
     const turnId = turn ? ChatStoreController.turnIdentity(turn) : `queued:${generation}`;
