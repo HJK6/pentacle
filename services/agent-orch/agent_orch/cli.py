@@ -1110,6 +1110,9 @@ def spawn(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    if scheduled and getattr(args, "account", None) is not None:
+        print("agent-orch spawn: explicit account choice requires an immediate front-desk spawn", file=sys.stderr)
+        return 2
     if scheduled and not handoff:
         if getattr(args, "resume", None) is not None:
             return _fresh_schedule_validation_error(
@@ -1136,6 +1139,12 @@ def spawn(args: argparse.Namespace) -> int:
         scheduled or handoff or (args.parent is None and not top_level)
     ) else None
     handoff_from_stream_id = caller_stream_id if handoff else None
+    requested_source = getattr(args, "handoff_from", None)
+    if requested_source is not None:
+        if not handoff or not getattr(args, "account", None) or ":" not in requested_source:
+            print("agent-orch spawn: --handoff-from requires --handoff --account and a stream id", file=sys.stderr)
+            return 2
+        handoff_from_stream_id = requested_source
     parent = args.parent if args.parent is not None else (
         None if (handoff or top_level) else caller_stream_id
     )
@@ -1355,6 +1364,8 @@ def spawn(args: argparse.Namespace) -> int:
         "visibility": visibility,
         **resolved_spawn,
     }
+    if getattr(args, "account", None) is not None:
+        payload["account"] = args.account
     if spec_ids:
         payload["spec_id"] = spec_ids[0]
         if len(spec_ids) > 1:
@@ -5105,6 +5116,10 @@ def usage(args: argparse.Namespace) -> int:
     """Read one host's current Claude/Codex account-period usage (/usage limits)."""
     from agent_orch import usage_readback
 
+    if getattr(args, "account", None):
+        from . import account_cli
+        return account_cli.usage(args)
+
     if getattr(args, "unplaced", False):
         from agent_orch import usage_unplaced
 
@@ -5188,6 +5203,7 @@ def build_parser() -> argparse.ArgumentParser:
             timer_parser.add_argument("--repeat", action="store_true")
 
     spawn_parser = subparsers.add_parser("spawn")
+    spawn_parser.add_argument("--account", help="Named account for this launch (front desk only); omitted uses host/provider default.")
     spawn_parser.add_argument("--no-watch", action="store_true", help="Skip the default parent watch")
     spawn_parser.add_argument("--provider", help="Required except for --handoff, which inherits the retiring stream provider.")
     spawn_parser.add_argument(
@@ -5222,6 +5238,7 @@ def build_parser() -> argparse.ArgumentParser:
     spawn_parser.add_argument("--visibility", choices=["default", "nested", "hidden"])
     spawn_parser.add_argument("--parent")
     spawn_parser.add_argument("--handoff", action="store_true")
+    spawn_parser.add_argument("--handoff-from", help="Front desk: use this source stream with --handoff --account.")
     spawn_parser.add_argument(
         "--confirm-model-change",
         dest="confirm_model_change",
@@ -5672,6 +5689,8 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_ruling_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_ruling_parser.set_defaults(func=assistant_ruling)
 
+    from . import account_cli
+    account_cli.register(subparsers)
     capacity_parser = subparsers.add_parser("capacity-retry", help="hold, explicitly resume, or inspect Codex capacity retries")
     capacity_parser.add_argument("action", choices=("hold", "resume", "status"))
     capacity_target = capacity_parser.add_mutually_exclusive_group(required=True)
@@ -6340,6 +6359,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "`agent-orch usage rollup --help` for the per-spec/project rollup and calibration",
     )
     usage_parser.add_argument("--host", help="host name from machines.json")
+    usage_parser.add_argument("--account", help="read the immutable account registry and coherent pool observations")
     usage_parser.add_argument(
         "--unplaced", action="store_true",
         help="list refused/unplaced satellite usage and held-span losses from the daemon DB "

@@ -58,12 +58,13 @@ class Harness:
         monkeypatch.setattr(module,"process_record",record)
         monkeypatch.setattr(module,"_exec",execute)
     async def pane_pid(self,name):return self.pid
-    async def open(self):
+    async def open(self, account_binding=None):
         assert await self.store.reserve_stream_id("h","v2-root",ttl_s=60,request_id="spawn",nonce="nonce")
         assert await self.store.record_spawn_intent("h","v2-root",{"open_fields":{"session_generation":"gen-a"}},request_id="spawn",nonce="nonce")
         assert await self.store.commit_tmux_created_fenced("h","v2-root",request_id="spawn",nonce="nonce",pane_pid=PID,pane_started_at=BIRTH)
         await self.sessions.open("h","v2-root",fence="spawn",provider=self.provider,pane_pid=PID,
-            created_at="2026-09-09T16:19:32Z",session_generation="gen-a",observer_binding={"executable":EXE})
+            created_at="2026-09-09T16:19:32Z",session_generation="gen-a",observer_binding={"executable":EXE},
+            **({"account_binding": account_binding} if account_binding is not None else {}))
         assert await self.store.release_stream_id_fenced("h","v2-root","spawn")
     def ingest(self):
         return Ingest(self.store,self.sessions,self,lambda frame:asyncio.sleep(0),local_host="h",recent_limit=500)
@@ -91,6 +92,28 @@ def test_first_bind_rejects_unproven_sources(tmp_path,monkeypatch,case):
             assert await h.run(h.ingest(),state)==0
             assert await store.fetch_session_event_tail("h:v2-root",limit=500)==[]
         finally:_close_stream(state);store.stop()
+    asyncio.run(run())
+
+
+def test_named_account_root_retains_all_process_and_inode_fences(tmp_path, monkeypatch):
+    async def run():
+        store = Store(":memory:"); store.start(); state = _StreamIngest()
+        try:
+            home = tmp_path / "named" / "first"
+            path = home / "sessions" / "native.jsonl"; write_log(path)
+            account = {"provider": "codex", "host": "h", "alias": "ours", "generation": "first",
+                       "home": str(home), "transcript_root": str(home / "sessions")}
+            h = Harness(store, monkeypatch, path); await h.open(account)
+            assert await h.run(h.ingest(), state) == 1
+            _close_stream(state); state = _StreamIngest()
+            foreign = tmp_path / "other-home" / "sessions" / "native.jsonl"; write_log(foreign, "foreign")
+            h.descriptors = [(PID, "12", "w", foreign)]
+            # A stored native path is not re-bound to a different account's
+            # writer even when the PID and binary still match.
+            assert await h.run(h.ingest(), state) == 0  # original anchor is retained and deduplicated
+            assert (await store.fetch_session("h", "v2-root"))["account_binding"] == account
+            assert all(event.get("session_id") != "foreign" for event in await store.fetch_session_event_tail("h:v2-root", limit=500))
+        finally: _close_stream(state); store.stop()
     asyncio.run(run())
 
 

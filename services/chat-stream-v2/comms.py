@@ -1532,6 +1532,11 @@ class Comms:
 
     async def _prepare_send_plan(self, msg: dict[str, Any]) -> SendPlan:
         """Prepare the canonical text-or-attachments plan without pane I/O."""
+        from provider_accounts import AccountError, reject_overrides
+        try:
+            reject_overrides(msg)
+        except AccountError as exc:
+            raise VerbError(str(exc), str(exc), **exc.context) from None
         route = await self._resolve_route(msg, verb="send")
         await self._assert_claude_send_ready(route)
         raw_body = msg.get("message") if "message" in msg else msg.get("text")
@@ -1857,6 +1862,13 @@ class Comms:
                             phase="not_started",
                         )
                 await self._assert_claude_send_ready(plan.route)
+                account_runtime = getattr(self, "account_runtime", None)
+                if account_runtime is not None:
+                    from provider_accounts import AccountError
+                    try:
+                        await account_runtime.before_input(await self.store.fetch_session(host, name) or {})
+                    except AccountError as exc:
+                        raise VerbError(str(exc), str(exc), phase="not_started") from None
                 if self.capacity_retry is not None:
                     await self.capacity_retry.cancel_input(target)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)

@@ -13,6 +13,12 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-23
+
+### Added
+
+- Optional named provider accounts add explicit spawn selection, per-host defaults, account usage and targeted re-login; disabled by default.
+
 ## 2026-10-21
 
 ### Added

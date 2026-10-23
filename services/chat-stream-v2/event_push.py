@@ -298,6 +298,7 @@ class EventPush:
                 "session_generation": str(row.get("session_generation") or ""),
                 "provider": str(row.get("provider") or ""),
                 "source_pane_pid": str(row.get("pane_pid") or ""),
+                **({"account_binding": row["account_binding"]} if row.get("account_binding") else {}),
             })
         return [fence for fence in fences if all(fence.values())]
 

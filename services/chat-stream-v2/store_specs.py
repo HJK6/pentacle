@@ -11,7 +11,7 @@ import json
 import sqlite3
 from typing import Any
 
-JSON_COLUMNS = ("status_card", "observer_binding")
+JSON_COLUMNS = ("status_card", "observer_binding", "account_binding")
 SPEC_JSON_COLUMNS = ("spec_ids", "qualified_spec_ids", "spec_binding_provenance")
 SPEC_BINDING_PROVENANCE_KINDS = frozenset(
     {"spawn_explicit", "parent_inherited", "handoff_inherited", "operator_v2"}

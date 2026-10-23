@@ -526,3 +526,20 @@ def test_successful_usage_with_live_endpoint_reports_cleanup_failure(owned_probe
     with pytest.raises(RuntimeError, match="cleanup unconfirmed"):
         probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run, sleep=lambda _: None)
     assert path.exists()
+
+
+def test_named_probe_keeps_exact_home_and_rejects_inherited_auth_overrides(monkeypatch,socket_transport):
+    import shlex
+    monkeypatch.setenv('PENTACLE_USAGE_NAMED_ACCOUNT','1')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR','/absolute/named-home')
+    monkeypatch.setenv('ANTHROPIC_API_KEY','fake-only')
+    calls=[]; frames=iter(['❯','Current week (all models)\n12% used\nResets tomorrow'])
+    def run(command,**kwargs):
+        calls.append((command,kwargs))
+        return SimpleNamespace(returncode=0,stdout=next(frames) if command[3]=='capture-pane' else '')
+    assert probe.collect(claude='/absolute/claude',tmux='tmux',cwd='/absolute/trusted',run=socket_transport(run),sleep=lambda _:None)['week_all_pct']==12
+    command,kwargs=next(c for c in calls if c[0][3]=='new-session')
+    argv=shlex.split(command[-1])
+    assert 'CLAUDE_CONFIG_DIR=/absolute/named-home' in argv
+    assert '--setting-sources' in argv and '--settings' in argv
+    assert 'fake-only' not in command[-1] and 'ANTHROPIC_API_KEY' not in kwargs['env']

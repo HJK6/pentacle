@@ -2216,6 +2216,10 @@ class Server:
                         return [self._auth_error_frame(
                             verb, request_id, "system_producer_auth_required"
                         )]
+                elif (verb == "account" and getattr(self, "account_runtime", None) is not None
+                      and self.account_runtime.watcher_authorized(service_auth, msg.get("host"))
+                      and msg.get("action") in {"probe", "observe-failure", "observation"}):
+                    pass  # Typed payload and generation checks are in AccountRuntime.
                 elif wmi_brief_producer.is_actor(service_auth["service_actor"]):
                     if verb != "tell":
                         return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
@@ -2700,6 +2704,8 @@ class Server:
             WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV),
             BOT_MESSAGING_PRODUCER_STREAM_ID: os.environ.get(BOT_MESSAGING_STREAM_TOKEN_FILE_ENV),
         }
+        from provider_accounts import watcher_sources
+        sources.update(watcher_sources())
         producer = report_producer.load()
         if producer is not None:
             sources[producer.stream_id] = producer.token_file
@@ -3813,6 +3819,14 @@ class Server:
         return await qa_dispatch.issue(self.store, msg)
 
     async def _on_spawn(self, msg: dict[str, Any]) -> dict[str, Any]:
+        from provider_accounts import AccountError, reject_overrides
+        try:
+            reject_overrides(msg, allow_account=True)
+            runtime = getattr(self, "account_runtime", None)
+            if "account" in msg and not (msg.get("_auth_context") or {}).get("retired_handoff_owner"):
+                if runtime is None: raise AccountError("account_feature_off")
+                await runtime.authorize_choice(msg)
+        except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
         # Hold a spawn until boot reconciliation has settled the reservation
         # table (QA #18). Only spawn waits; the gate is open outside the boot
         # window, so this is a no-op for every steady-state spawn.
@@ -4224,6 +4238,9 @@ class Server:
         return await self._on_send(physical)
 
     async def _on_send(self, msg: dict[str, Any]) -> dict[str, Any]:
+        from provider_accounts import AccountError, reject_overrides
+        try: reject_overrides(msg)
+        except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
         msg = desk_stamp.stamp_message(msg)
         if msg.get("to_stream_id") == ASSISTANT_ALIAS:
             return await self._alias_send(msg)

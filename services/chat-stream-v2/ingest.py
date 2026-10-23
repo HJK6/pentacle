@@ -50,6 +50,7 @@ from prockill import canonical_start, process_tree, process_record
 from error_adapters import ErrorFact
 from store import ENTRY_DROPPED
 from tmux_transport import TRANSCRIPT_DIRS, _exec
+from provider_accounts import transcript_allowed
 from usage_accounting import native_provenance
 from usage_provenance import MAX_ITEMS as PROVENANCE_MAX_ITEMS, PAYLOAD_VERSION as PROVENANCE_VERSION
 from v2_runtime import env_number
@@ -851,6 +852,14 @@ class Ingest:
 
     async def _provider_root(self, row: dict[str, Any], name: str, *, observation: dict | None = None) -> tuple[str, str] | None:
         binding = row.get("observer_binding")
+        account = row.get("account_binding")
+        if account is not None:
+            if (not isinstance(account, dict) or account.get("host") != row.get("host")
+                    or account.get("provider") != row.get("provider") or not account.get("generation")):
+                return None
+            transcript = binding.get("transcript") if isinstance(binding, dict) else None
+            path = (transcript or {}).get("path") or row.get("jsonl_path")
+            if path and not transcript_allowed(path, row.get("provider"), account): return None
         if (not isinstance(binding, dict) or not row.get("session_generation")
                 or binding.get("generation") != row.get("session_generation")
                 or row.get("provider") not in {"codex", "claude"}):
@@ -943,8 +952,9 @@ class Ingest:
                 return row
             identity = (info.st_dev, info.st_ino)
         else:
-            fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
-            candidates = [c for c in await _open_writable_transcripts(pid) if fragment in c[0]]
+            account = row.get("account_binding")
+            candidates = await (_open_writable_transcripts(pid, account) if account else _open_writable_transcripts(pid))
+            candidates = [c for c in candidates if transcript_allowed(c[0], provider, account)]
             if len(candidates) != 1:
                 return row  # ambiguous (or no) writable transcript on the new pane
             path, identity = candidates[0]
@@ -1043,9 +1053,10 @@ class Ingest:
         root = await self._provider_root(row, name)
         if root is None:
             return ""
-        candidates = await _open_writable_transcripts(root[0])
-        fragment = "/.codex/sessions/" if row.get("provider") == "codex" else "/.claude/"
-        candidates = [candidate for candidate in candidates if fragment in candidate[0]]
+        account = row.get("account_binding")
+        from provider_accounts import transcript_allowed
+        candidates = await (_open_writable_transcripts(root[0], account) if account else _open_writable_transcripts(root[0]))
+        candidates = [candidate for candidate in candidates if transcript_allowed(candidate[0], row.get("provider"), account)]
         if len(candidates) != 1:
             return ""
         path, identity = candidates[0]
@@ -1175,7 +1186,7 @@ async def _open_transcripts(pids: list[str]) -> list[str]:
                    and any(fragment in line for fragment in TRANSCRIPT_DIRS)})
 
 
-async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int, int]]]:
+async def _open_writable_transcripts(root_pid: str, account: dict | None = None) -> list[tuple[str, tuple[int, int]]]:
     # The npm Codex launcher is a Node wrapper; current releases keep the
     # rollout descriptor open in their native Codex child. The pane-root proof
     # is still checked separately by ``_provider_root``. Restrict descriptor
@@ -1204,7 +1215,9 @@ async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int
         elif field == "i": inode = value
         elif (field == "n" and pid in allowed_pids and descriptor.isdecimal()
               and access in {"u", "w"} and kind == "REG"
-              and value.endswith(".jsonl") and any(fragment in value for fragment in TRANSCRIPT_DIRS)):
+              and value.endswith(".jsonl") and (
+                  transcript_allowed(value, account.get('provider'), account)
+                  if account else any(fragment in value for fragment in TRANSCRIPT_DIRS))):
             try:
                 identity = (int(device, 0), int(inode))
                 info = os.stat(value)
@@ -1212,7 +1225,7 @@ async def _open_writable_transcripts(root_pid: str) -> list[tuple[str, tuple[int
                 return []
             if not stat_module.S_ISREG(info.st_mode) or identity != (info.st_dev, info.st_ino):
                 return []
-            if "/.codex/sessions/" in value:
+            if "/.codex/sessions/" in value or (account and account.get("provider") == "codex"):
                 fd = _open_descriptor(value)
                 if fd is None:
                     return []

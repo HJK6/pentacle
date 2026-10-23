@@ -323,10 +323,11 @@ def _is_codex_cmdline(cmdline: str) -> bool:
     return bool(re.search(r"(?:^|[\s/])codex(?:$|[\s/])", cmdline, re.IGNORECASE))
 
 
-def _is_codex_rollout_path(path: str) -> bool:
+def _is_codex_rollout_path(path: str, account: dict | None = None) -> bool:
     """Recognize a Codex rollout without making the configured HOME global."""
     normalized = str(path or "").replace("\\", "/")
-    return "/.codex/sessions/" in normalized and normalized.endswith(".jsonl")
+    from provider_accounts import transcript_allowed
+    return transcript_allowed(normalized, "codex", account)
 
 
 def _descendant_pids(root_pid: int) -> list[int]:
@@ -364,7 +365,7 @@ def _descendant_pids(root_pid: int) -> list[int]:
     return found
 
 
-def _codex_transcript_for_pid(pane_pid: int) -> str:
+def _codex_transcript_for_pid(pane_pid: int, account: dict | None = None) -> str:
     """Find the active Codex rollout held by a pane or one of its children."""
     pids = _descendant_pids(pane_pid)
     try:
@@ -380,10 +381,10 @@ def _codex_transcript_for_pid(pane_pid: int) -> str:
     paths = {
         line[1:]
         for line in result.stdout.splitlines()
-        if line.startswith("n") and _is_codex_rollout_path(line[1:])
+        if line.startswith("n") and _is_codex_rollout_path(line[1:], account)
         and _codex_session_identity_from_bound_path(line[1:])
     }
-    return max(paths, key=_mtime, default="")
+    return next(iter(paths)) if len(paths) == 1 else ""
 
 
 def _claude_session_uuid_for_pid(pane_pid: int, direct_uuid: str, stream_id: str = "") -> str:
@@ -616,11 +617,15 @@ class Satellite:
                 or _infer_provider_from_pane(name, pane)
             )
             uuid = _session_uuid(cmdline)
+            fence = getattr(self, "_usage_fences", {}).get(f"{self.config.host}:{name}") or {}
+            account = fence.get("account_binding")
+            if account and (account.get("host") != self.config.host or account.get("provider") != provider):
+                continue
             if provider == "claude":
                 uuid = _claude_session_uuid_for_pid(pid, uuid, f"{self.config.host}:{name}")
-            path = self._transcript_for(uuid) if uuid else ""
+            path = (self._transcript_for(uuid, account) if account else self._transcript_for(uuid)) if uuid else ""
             if not path and _is_codex_cmdline(cmdline):
-                path = _codex_transcript_for_pid(pid)
+                path = _codex_transcript_for_pid(pid, account) if account else _codex_transcript_for_pid(pid)
             # A named Claude session with a transcript is the existing ingest
             # fallback when the pane is between rendered provider markers.
             if provider is None and path:
@@ -675,21 +680,26 @@ class Satellite:
             self._discover_fail_since = 0.0
             self._discover_fail_logged_at = 0.0
 
-    def _transcript_for(self, uuid: str) -> str:
+    def _transcript_for(self, uuid: str, account: dict | None = None) -> str:
         """Resolve `<uuid>.jsonl` under the claude projects root, cached. The
         cwd→dir encoding claude uses is not replicated — the uuid is unique, so a
         single rglob finds the exact file regardless of which project it is in."""
-        cached = self._uuid_path.get(uuid)
+        root = Path(account["transcript_root"]) if account else Path(self.config.claude_projects_root).expanduser()
+        cache_key = (str(root), uuid) if account else uuid
+        cached = self._uuid_path.get(cache_key)
         if cached and os.path.exists(cached):
             return cached
-        root = Path(self.config.claude_projects_root).expanduser()
         try:
-            hit = next(root.rglob(f"{uuid}.jsonl"), None)
+            hits = list(root.glob(f"*/{uuid}.jsonl"))
+            if account:
+                from provider_accounts import transcript_allowed
+                hits = [path for path in hits if transcript_allowed(str(path), "claude", account)]
+            hit = hits[0] if len(hits) == 1 else None
         except OSError:
             hit = None
         path = str(hit) if hit else ""
         if path:
-            self._uuid_path[uuid] = path
+            self._uuid_path[cache_key] = path
         return path
 
     # -- tail pass ------------------------------------------------------------
@@ -914,6 +924,10 @@ class Satellite:
             path = pane.transcript_path
             if not path:
                 continue
+            account = (getattr(self, "_usage_fences", {}).get(f"{self.config.host}:{name}") or {}).get("account_binding")
+            if account:
+                from provider_accounts import transcript_allowed
+                if not transcript_allowed(path, pane.provider, account): continue
             st = self._tails.setdefault(name, _StreamTail(session_name=name))
             provider = "codex" if pane.provider == "codex" or _is_codex_rollout_path(path) else pane.provider
             if st.path != path:

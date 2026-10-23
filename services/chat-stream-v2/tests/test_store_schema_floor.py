@@ -103,6 +103,10 @@ def test_below_floor_ladder_is_absent_and_readiness_stays_live() -> None:
     statement = "ALTER TABLE sessions ADD COLUMN observer_binding TEXT"
     assert store_source.count(statement) == 1
     store_source = store_source.replace(statement, "")
+    # Named accounts add exactly one nullable binding above the retained floor.
+    statement = "ALTER TABLE sessions ADD COLUMN account_binding TEXT"
+    assert store_source.count(statement) == 1
+    store_source = store_source.replace(statement, "")
     # Lane work assignment adds one nullable session field above the floor.
     statement = "ALTER TABLE sessions ADD COLUMN assigned_spec_id TEXT"
     assert store_source.count(statement) == 1
@@ -178,3 +182,63 @@ def test_floor_copy_stamps_version_without_mutating_rows(tmp_path: Path) -> None
     assert _version(target) == SCHEMA_VERSION
     assert _table_counts(target) == before_counts
     assert _generations(target) == before_generations
+
+
+def test_pre_account_database_opens_additively_and_reopens_idempotently(tmp_path: Path) -> None:
+    path = tmp_path / "pre-account.db"
+
+    async def seed() -> None:
+        store = Store(str(path))
+        store.start()
+        try:
+            await store.open_session("hosta", "existing", provider="codex",
+                                     created_at="2026-09-03T00:00:00Z", title="Keep this session")
+            await store.put("existing-key", "existing-value")
+        finally:
+            store.stop()
+
+    asyncio.run(seed())
+    # Synthetic retained-floor database with only this feature's schema absent.
+    # No production DB, credentials or historical repair ladder is involved.
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE sessions DROP COLUMN account_binding")
+        account_tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'v2_account_*'")]
+        assert len(account_tables) == 6
+        for table in account_tables:
+            conn.execute(f'DROP TABLE "{table}"')
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]
+        assert "account_binding" not in columns
+        original_row = conn.execute("SELECT * FROM sessions").fetchone()
+    original_counts = _table_counts(path)
+    original_generations = _generations(path)
+    original_version = _version(path)
+
+    async def reopen() -> None:
+        store = Store(str(path))
+        store.start()
+        try:
+            assert store.schedule_schema_health == "ok"
+            row = await store.fetch_session("hosta", "existing")
+            assert row["account_binding"] is None
+            assert row["title"] == "Keep this session"
+            assert await store.get("existing-key") == "existing-value"
+        finally:
+            store.stop()
+
+    for _ in range(2):
+        asyncio.run(reopen())
+        with sqlite3.connect(path) as conn:
+            fields = {row[1]: row for row in conn.execute("PRAGMA table_info(sessions)")}
+            assert set(fields) == set(columns) | {"account_binding"}
+            # TEXT, nullable, no default: legacy rows retain unknown binding.
+            assert fields["account_binding"][2:5] == ("TEXT", 0, None)
+            projection = ",".join(f'"{column}"' for column in columns)
+            assert conn.execute(f"SELECT {projection} FROM sessions").fetchone() == original_row
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        counts = _table_counts(path)
+        assert {table: counts[table] for table in original_counts} == original_counts
+        assert set(counts) - set(original_counts) == set(account_tables)
+        assert all(counts[table] == 0 for table in account_tables)
+        assert _generations(path) == original_generations
+        assert _version(path) == original_version == SCHEMA_VERSION
