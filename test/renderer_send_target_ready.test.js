@@ -13,7 +13,7 @@ assert.ok(start >= 0 && end > start);
 function controls(initialTarget, pending = false) {
   let target = initialTarget;
   const refs = { sendEl: { dataset: {}, classList: { toggle() {} }, setAttribute() {} }, inputEl: { value: 'draft survives' }, attachEl: {} };
-  const state = { slotSendPending: [pending], slotChatRefs: [refs], slotDrafts: ['draft survives'], slotAttachments: [[]], slotChatBoundStream: [null], slotSendMode: ['queue'] };
+  const state = { slotSendPending: [pending], slotChatRefs: [refs], slotDrafts: ['draft survives'], slotAttachments: [[]], slotChatBoundStream: [null] };
   const context = vm.createContext({ state, window: {}, chatControlTargetForSlot: () => target, slotAttachmentDrafts: () => [], isCompositeSlot: () => false });
   vm.runInContext(app.slice(start, end), context);
   const update = () => vm.runInContext('updateSendControls(0)', context);
@@ -60,44 +60,40 @@ test('existing pending operation still disables every control until it finishes'
   for (const ref of Object.values(c.refs)) assert.equal(ref.disabled, false);
 });
 
-// Steer / queue / Stop controls (agent chats only).
+// Ordinary Send / Stop controls (agent chats only).
 function agentControls({ phase, composite = false, draft = 'draft survives', notice = '' }) {
-  const modeButtons = ['queue', 'steer'].map(mode => ({ dataset: { sendMode: mode }, pressed: null, setAttribute(name, value) { if (name === 'aria-pressed') this.pressed = value; } }));
   const refs = {
     sendEl: { dataset: {}, classList: { toggle() {} }, setAttribute() {} }, inputEl: { value: draft }, attachEl: {},
   };
-  const extras = { stopEl: { hidden: true }, modeEl: { hidden: true, querySelectorAll: () => modeButtons }, noticeEl: { hidden: true, textContent: '' } };
+  const extras = { stopEl: { hidden: true }, noticeEl: { hidden: true, textContent: '' } };
   Object.assign(refs, extras);
   const store = { getTurnPhase: () => phase, getComposerNotice: () => notice };
-  const state = { slotSendPending: [false], slotChatRefs: [refs], slotDrafts: [draft], slotChatBoundStream: ['hosta:test'], slotSendMode: ['steer'] };
+  const state = { slotSendPending: [false], slotChatRefs: [refs], slotDrafts: [draft], slotChatBoundStream: ['hosta:test'] };
   const context = vm.createContext({ state, window: { PentacleChatStore: store }, chatControlTargetForSlot: () => ({ streamSession: { stream_id: 'hosta:test' } }), slotAttachmentDrafts: () => [], isCompositeSlot: () => composite });
   vm.runInContext(app.slice(start, end), context);
   vm.runInContext('updateSendControls(0)', context);
-  return { refs, extras, state, modeButtons };
+  return { refs, extras, state };
 }
 
-test('a working agent chat shows Stop beside Send (also with a draft) and the Queue | Steer now choice', () => {
+test('a working agent keeps Stop and ordinary Send available with a draft', () => {
   const c = agentControls({ phase: 'working' });
   assert.equal(c.extras.stopEl.hidden, false);
-  assert.equal(c.extras.modeEl.hidden, false);
   assert.equal(c.refs.sendEl.disabled, false);
   assert.equal(c.refs.sendEl.dataset.action, 'send');
-  assert.deepEqual(c.modeButtons.map(button => button.pressed), ['false', 'true']);
 });
 
-test('an idle agent chat hides Stop and the mode control and resets the mode to Queue', () => {
+test('an idle agent hides Stop and retains ordinary Send readiness', () => {
   const c = agentControls({ phase: 'idle' });
   assert.equal(c.extras.stopEl.hidden, true);
-  assert.equal(c.extras.modeEl.hidden, true);
-  assert.equal(c.state.slotSendMode[0], 'queue');
+  assert.equal(c.refs.sendEl.disabled, false);
+  assert.equal(c.refs.sendEl.dataset.action, 'send');
 });
 
-test('the composite chat never shows Stop, the mode control or a notice', () => {
-  const c = agentControls({ phase: 'working', composite: true, notice: 'Steer did not take; queued instead' });
+test('the composite chat shows ordinary Send without Stop or an agent queue notice', () => {
+  const c = agentControls({ phase: 'working', composite: true, notice: 'Send now requested. Waiting for the queued message to start.' });
   assert.equal(c.extras.stopEl.hidden, true);
-  assert.equal(c.extras.modeEl.hidden, true);
   assert.equal(c.extras.noticeEl.hidden, true);
-  assert.equal(c.state.slotSendMode[0], 'queue');
+  assert.equal(c.refs.sendEl.dataset.action, 'send');
 });
 
 test('a store notice shows in the composer', () => {
@@ -112,10 +108,57 @@ test('Send is still disabled without a draft even while the agent works', () => 
   assert.equal(c.extras.stopEl.hidden, false);
 });
 
-test('Alt+Enter sends as Steer now and plain Enter uses the selected mode', () => {
+test('Enter and Alt+Enter invoke the same ordinary send; Shift+Enter preserves the draft', () => {
   const keydown = app.slice(app.indexOf("inputEl.addEventListener('keydown'"), app.indexOf("attachmentTrayEl.addEventListener('click'"));
-  assert.match(keydown, /sendChatComposer\(slot, e\.altKey \? \{ steer: true \} : undefined\)/);
-  const send = app.slice(app.indexOf('async function sendChatComposer(slot, options = {})'), app.indexOf('function renderSlotReply'));
-  assert.match(send, /!isCompositeSlot\(slot\) && \(options\.steer === true \|\| state\.slotSendMode\[slot\] === 'steer'\)/);
-  assert.match(send, /state\.slotSendMode\[slot\] = 'queue'/);
+  let handler;
+  const sends = [];
+  const context = vm.createContext({ slot: 2, inputEl: { addEventListener: (_event, callback) => { handler = callback; } },
+    sendChatComposer: (...args) => sends.push(args), cancelChatComposer: () => false });
+  vm.runInContext(keydown, context);
+  for (const altKey of [false, true]) {
+    let prevented = false;
+    handler({ key: 'Enter', altKey, shiftKey: false, preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+  }
+  assert.deepEqual(sends, [[2], [2]], 'neither key carries an urgent or mode option');
+  let prevented = false;
+  handler({ key: 'Enter', shiftKey: true, preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, false);
+  assert.equal(sends.length, 2);
+});
+
+// Exercise the real row handler, including stale DOM after a slot changes.
+function queuedAction({ target, composite = false, streamId = 'hosta:test', optimisticId = 'row-1' }) {
+  const calls = [];
+  let click;
+  let renders = 0;
+  const button = { dataset: { streamId, optimisticId }, addEventListener: (_event, callback) => { click = callback; } };
+  const actionStart = app.indexOf("  refs.listEl.querySelectorAll('.slot-chat-send-now')");
+  const actionEnd = app.indexOf('  // Commit the binding ONLY', actionStart);
+  assert.ok(actionStart >= 0 && actionEnd > actionStart);
+  const context = vm.createContext({ slot: 0, refs: { listEl: { querySelectorAll: () => [button] } },
+    window: { PentacleChatStore: { sendQueuedNow: (...args) => { calls.push(args); return true; } } },
+    chatControlTargetForSlot: () => target, isCompositeSlot: () => composite,
+    renderSlotChat: () => { renders++; } });
+  vm.runInContext(app.slice(actionStart, actionEnd), context);
+  click();
+  return { calls, renders };
+}
+
+test('queued Send now requires a ready matching stream and row, including after a slot switch', () => {
+  for (const target of [null, { error: 'offline' }, {}, { streamSession: { stream_id: 'hosta:replacement' } }]) {
+    assert.equal(queuedAction({ target }).calls.length, 0);
+  }
+  const target = { streamSession: { stream_id: 'hosta:test' } };
+  assert.equal(queuedAction({ target, optimisticId: '' }).calls.length, 0);
+  assert.equal(queuedAction({ target, streamId: '' }).calls.length, 0);
+  const ready = queuedAction({ target });
+  assert.deepEqual(ready.calls, [['hosta:test', 'row-1']]);
+  assert.equal(ready.renders, 1);
+});
+
+test('a composite cannot invoke a queued-row interrupt even from a stale button', () => {
+  const result = queuedAction({ target: { streamSession: { stream_id: 'hosta:test' } }, composite: true });
+  assert.deepEqual(result.calls, []);
+  assert.equal(result.renders, 0);
 });
