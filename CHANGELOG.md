@@ -13,6 +13,12 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-23 (3)
+
+### Added
+
+- Optional local Gemini CLI sessions, native recording ingest and prompt-submission predicates, contributed by @Rohan-Juneja. Setup and compatibility limits are documented in `docs/gemini_provider.md`; validation uses fixtures and a fake provider, with live Gemini compatibility unverified.
+
 ## 2026-10-23 (2)
 
 ### Added
