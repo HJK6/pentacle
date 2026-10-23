@@ -30,3 +30,27 @@ def test_gate_env_scratch_is_accepted_by_real_isolation_guard(monkeypatch) -> No
     root = basetemp / "unit" / "owned-case"
     assert harness.assert_disposable_root(root) == root.resolve()
     assert home.resolve() != tmp.resolve() and tmp.resolve() not in home.resolve().parents
+
+
+def test_gate_env_deadline_is_accepted_by_the_real_runner_envelope(tmp_path) -> None:
+    """The first real smoke run was refused because gate_env's deadline equalled the runner's bare required sum."""
+    import json
+    import time
+
+    from tools import run_gate
+
+    spec = importlib.util.spec_from_file_location("gate_env_under_test2", ROOT / "scripts" / "gate_env.py")
+    gate_env = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate_env)
+    config = json.loads((ROOT / "scripts" / "gate-env.json").read_text())
+    service = ROOT / "services" / "chat-stream-v2"
+    for name in ("unit", "smoke", "merge"):
+        target = config["profiles"]["pentacle"]["targets"]["v2-" + name]
+        command, results = gate_env.build_command(config, target, tmp_path / "venv", ROOT, service, tmp_path / "ev", tmp_path / "t" / "b", [], target["timeout_s"], {})
+        deadline_s = float(command[command.index("--deadline-seconds") + 1])
+        tier_s = float(command[command.index("--timeout-seconds") + 1])
+        tiers = [("unit", tier_s), ("smoke", tier_s)] if name == "merge" else [(name, tier_s)]
+        for startup_s in (0.0, 5.0, 25.0):  # runner startup before its first check
+            deadline = {"deadline_s": deadline_s, "reserve_s": float(config["deadline"]["reserve_s"]), "checks": []}
+            assert run_gate._deadline_check(deadline, time.monotonic() - startup_s, "deadline", tiers, usage_pending=False) is None
+        assert results["wall_s"] > deadline_s
