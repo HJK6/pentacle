@@ -150,3 +150,29 @@ def test_intended_codex_email_is_verified_before_returning_any_identity(tmp_path
     with pytest.raises(AccountError,match='subscription_identity_unverified'):
         codex_observation(binding(tmp_path),rpc_factory=RPC,expected_email='intended@example.test')
     assert calls==['account/read']
+
+
+@pytest.mark.parametrize("permission",[True,False,None,"missing"])
+def test_codex_permission_retains_unknown_through_daemon_readback(tmp_path,permission):
+    import sqlite3
+    from account_store import AccountStore
+    class RPC:
+        def __init__(self,*args): pass
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def call(self,method,params=None):
+            if method=="account/read": return {"account":{"type":"chatgpt","planType":"pro"}}
+            result={"accountId":"native-a","rateLimits":{"primary":{
+                "usedPercent":20,"resetsAt":2000,"windowDurationMins":300}}}
+            if permission!="missing": result["ordinaryUsageAllowed"]=permission
+            return result
+    account=replace(binding(tmp_path),provider_id="native-a",pool_id="native-a",enabled=True,healthy=True)
+    observed=codex_observation(account,rpc_factory=RPC,now=lambda:1000)
+    expected=None if permission=="missing" else permission
+    assert observed["ordinary_usage_allowed"] is expected
+    conn=sqlite3.connect(":memory:"); conn.row_factory=sqlite3.Row
+    ledger=AccountStore(conn,{"enabled":True})
+    try:
+        ledger.register(account); ledger.observe(account.key,observed,now=1000)
+        assert ledger.readback(now=1000)["quota_pools"][0]["observation"]["ordinary_usage_allowed"] is expected
+    finally: conn.close()

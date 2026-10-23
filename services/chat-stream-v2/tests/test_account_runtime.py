@@ -160,3 +160,65 @@ def test_retired_source_can_only_read_existing_account_handoff_receipt():
             assert (await runtime.run(lambda a:a.defaults()))[0]["alias"]=="primary"
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_completed_relogin_replays_original_generation_after_restart(tmp_path):
+    from account_executor import AccountExecutor
+    calls=[]
+    async def execute(account,action,operation_id,generation=None):
+        calls.append(action)
+        if action=="observe": return {"outcome":"provider_auth_failed"}
+        return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
+            home="/private-fixture/"+generation).public()}
+    async def run():
+        path=str(tmp_path/"state.db")
+        store,runtime=await setup(path)
+        request={"action":"relogin","host":"host-a","provider":"codex","account":"primary",
+            "login_generation":"login-one","operation_id":"original","_auth_context":AUTH}
+        try:
+            runtime.executor=AccountExecutor(runtime,None,execute=execute)
+            result=await runtime.operation(request)
+        finally: store.stop()
+        # A new executor/store must find the durable receipt without another probe/login.
+        store=Store(path); store.start(); runtime.store=store; runtime.sessions.store=store
+        runtime.executor=AccountExecutor(runtime,None,execute=execute)
+        try:
+            assert await runtime.operation(request)==result
+            assert await runtime.operation(dict(request,login_generation="active"))==result
+            assert calls==["observe","enroll"]
+            with pytest.raises(VerbError,match="account_login_generation_stale"):
+                await runtime.operation(dict(request,operation_id="new-operation"))
+            with pytest.raises(VerbError,match="account_control_unauthorized"):
+                await runtime.operation(dict(request,_auth_context=dict(AUTH,session_generation="stale")))
+            assert calls==["observe","enroll"]
+        finally: store.stop()
+    asyncio.run(run())
+
+
+def test_interrupted_receipt_save_inspects_original_generation_after_activation(tmp_path):
+    from account_executor import AccountExecutor
+    calls=[]
+    async def run():
+        store,runtime=await setup(str(tmp_path/"state.db"))
+        async def execute(account,action,operation_id,generation=None):
+            calls.append((action,operation_id,generation))
+            if action=="observe": return {"outcome":"provider_auth_failed"}
+            return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
+                home="/private-fixture/"+generation).public()}
+        executor=AccountExecutor(runtime,None,execute=execute); runtime.executor=executor
+        request={"action":"relogin","host":"host-a","provider":"codex","account":"primary",
+            "login_generation":"login-one","operation_id":"original","_auth_context":AUTH}
+        def interrupted_save(*args): raise RuntimeError("interrupted after activation")
+        executor._save_recovery=interrupted_save
+        try:
+            with pytest.raises(RuntimeError,match="interrupted after activation"):
+                await runtime.operation(request)
+            assert (await runtime.run(lambda a:a._cell("host-a","codex","primary")))["generation"]!="login-one"
+            runtime.executor=AccountExecutor(runtime,None,execute=execute)
+            assert (await runtime.operation(dict(request,login_generation="active")))["result"]["outcome"]=="recovered"
+            assert [c[0] for c in calls]==["observe","enroll","status"]
+            assert calls[-1][1:]==calls[-2][1:]
+            await runtime.operation(request)
+            assert len(calls)==3
+        finally: store.stop()
+    asyncio.run(run())

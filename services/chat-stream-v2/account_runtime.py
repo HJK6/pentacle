@@ -170,7 +170,15 @@ class AccountRuntime:
         account=await self.run(lambda a:a._cell(host,provider,alias))
         if account is None: raise AccountError("account_generation_unknown")
         account=Binding(**json.loads(account["data"]))
-        if message.get("login_generation") not in {"active",account.generation}: raise AccountError("account_login_generation_stale")
+        if message.get("login_generation") not in {"active",account.generation}:
+            if action=="relogin" and self.executor:
+                generation=message.get("login_generation")
+                _component(generation)
+                prior=await self.run(lambda a:a.bound(":".join((host,provider,alias,generation))))
+                if prior is not None:
+                    result=await self.executor.replay(prior,str(message.get("operation_id") or message.get("request_id") or ""))
+                    if result is not None: return {"type":"account.ok","accepted":True,"result":result}
+            raise AccountError("account_login_generation_stale")
         if action=="report-failure":
             row=await self.store.fetch_session(*self.sessions.split(auth.get("stream_id")))
             if (not row or row.get("session_generation")!=auth.get("session_generation")

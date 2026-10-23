@@ -147,7 +147,8 @@ def codex_observation(binding: Binding, *, rpc_factory=CodexRPC, now=time.time, 
                                 "reset_id": str(window.get("resetsAt"))}
         return {"provider_id": identity, "pool_id": identity, "auth_mode": "subscription",
                 "observed_at": observed, "windows": windows, "collection": "ok",
-                "ordinary_usage_allowed": result.get("ordinaryUsageAllowed") is not False,
+                "ordinary_usage_allowed": (result.get("ordinaryUsageAllowed")
+                    if type(result.get("ordinaryUsageAllowed")) is bool else None),
                 "email_verified": expected_email is not None}
 
 

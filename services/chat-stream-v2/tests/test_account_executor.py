@@ -118,3 +118,40 @@ def test_recovery_cooldown_attempt_cap_and_human_stop(tmp_path):
             assert calls[count:] == ["observe"]
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_successful_generations_keep_cell_cooldown_and_hourly_cap(tmp_path):
+    async def run():
+        path=str(tmp_path/"state.db"); clock=[NOW]; calls=[]
+        store=Store(path); store.start()
+        runtime=AccountRuntime(store,Sessions(store),policy=policy(),clock=lambda:clock[0])
+        async def execute(account,action,operation_id,generation=None):
+            calls.append((account.alias,action))
+            if action=="observe": return {"outcome":"provider_auth_failed"}
+            return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
+                home="/private-fixture/"+generation).public()}
+        executor=AccountExecutor(runtime,None,execute=execute)
+        current=binding()
+        try:
+            await runtime.run(lambda ledger:ledger.register(current))
+            first=await executor.recover(current,relogin=True,operation_id="one")
+            current=Binding.from_public(first["binding"])
+            # Success and daemon restart must not reset the stable cell's budget.
+            store.stop(); store=Store(path); store.start(); runtime.store=store
+            executor=AccountExecutor(runtime,None,execute=execute)
+            assert (await executor.recover(current,relogin=True,operation_id="too-soon"))["outcome"]=="recovery_cooldown"
+            for name in ("two","three"):
+                clock[0]+=900
+                result=await executor.recover(current,relogin=True,operation_id=name)
+                assert result["outcome"]=="recovered"
+                current=Binding.from_public(result["binding"])
+            clock[0]+=900
+            assert (await executor.recover(current,relogin=True,operation_id="four"))["outcome"]=="recovery_capped"
+            assert calls.count(("primary","enroll"))==3
+            peer=binding("spare")
+            await runtime.run(lambda ledger:ledger.register(peer))
+            assert (await executor.recover(peer,relogin=True,operation_id="peer"))["outcome"]=="recovered"
+            clock[0]+=901
+            assert (await executor.recover(current,relogin=True,operation_id="later"))["outcome"]=="recovered"
+        finally: store.stop()
+    asyncio.run(run())

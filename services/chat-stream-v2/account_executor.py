@@ -77,8 +77,25 @@ class AccountExecutor:
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
             return await self._recover_locked(account, relogin=relogin, operation_id=operation_id)
 
+    async def replay(self, account, operation_id):
+        """Inspect a known operation on an inactive generation; never start a login."""
+        if not operation_id or len(operation_id) > 160: return None
+        async with self._host_locks.setdefault(account.host, asyncio.Lock()):
+            state = await self.runtime.run(lambda ledger: self._read_recovery(ledger, account.key))
+            if operation_id in state.get("receipts", {}): return state["receipts"][operation_id]
+            if state.get("inflight") == operation_id:
+                result = await self.execute(account, "status", operation_id, state["new_generation"])
+                return await self._finish_recovery(account, state, result, operation_id)
+            return None
+
     async def _recover_locked(self, account, *, relogin, operation_id):
         now = self.runtime.clock()
+        prior = await self.runtime.run(lambda ledger: self._prior_recovery(ledger, account, operation_id))
+        if prior:
+            owner, prior_state = prior
+            if operation_id in prior_state.get("receipts", {}): return prior_state["receipts"][operation_id]
+            result = await self.execute(owner, "status", prior_state["inflight"], prior_state["new_generation"])
+            return await self._finish_recovery(owner, prior_state, result, prior_state["inflight"])
         state = await self.runtime.run(lambda ledger: self._read_recovery(ledger, account.key))
         receipts = state.get("receipts", {})
         if operation_id in receipts: return receipts[operation_id]
@@ -91,13 +108,21 @@ class AccountExecutor:
         probe = await self._observe_locked(account)
         if probe["outcome"] == "ok": return {"outcome": "healthy"}
         if probe["outcome"] != "provider_auth_failed": return probe
-        attempts = [moment for moment in state.get("attempts", []) if 0 <= now - moment < 3600]
+        # Browser-attempt limits belong to the stable host/provider/account cell,
+        # while operation receipts remain bound to their original generation.
+        limits_key = "cell:" + ":".join((account.host, account.provider, account.alias))
+        limits = await self.runtime.run(lambda ledger: self._read_recovery(ledger, limits_key))
+        attempts = [moment for moment in limits.get("attempts", []) if 0 <= now - moment < 3600]
         if len(attempts) >= 3: return {"outcome": "recovery_capped"}
-        if state.get("last_attempt") is not None and now - state["last_attempt"] < 900:
+        if limits.get("last_attempt") is not None and now - limits["last_attempt"] < 900:
             return {"outcome": "recovery_cooldown"}
-        state.update(attempts=attempts + [now], last_attempt=now, inflight=operation_id,
-                     new_generation=uuid.uuid4().hex, human_stop=False)
-        await self.runtime.run(lambda ledger: self._save_recovery(ledger, account.key, state))
+        state.update(inflight=operation_id, new_generation=uuid.uuid4().hex, human_stop=False)
+        limits.update(attempts=attempts + [now], last_attempt=now)
+        def save_attempt(ledger):
+            with transaction(ledger.conn):
+                self._write_recovery(ledger, account.key, state)
+                self._write_recovery(ledger, limits_key, limits)
+        await self.runtime.run(save_attempt)
         try: result = await self.execute(account, "enroll", operation_id, state["new_generation"])
         except AccountError:
             # The host may still be authorizing. Persist the outstanding call;
@@ -125,6 +150,20 @@ class AccountExecutor:
         return result
 
     @staticmethod
+    def _prior_recovery(ledger, account, operation_id):
+        pending = None
+        for row in ledger.conn.execute(
+                "SELECT b.data AS binding, r.data AS recovery FROM v2_account_bindings b "
+                "JOIN v2_account_recovery r ON r.binding_key=b.binding_key "
+                "WHERE b.host=? AND b.provider=? AND b.alias=? AND b.binding_key<>?",
+                (account.host, account.provider, account.alias, account.key)):
+            state = json.loads(row["recovery"])
+            owner = Binding(**json.loads(row["binding"]))
+            if operation_id in state.get("receipts", {}): return owner, state
+            if state.get("inflight"): pending = owner, state
+        return pending
+
+    @staticmethod
     def _read_recovery(ledger, key):
         row = ledger.conn.execute("SELECT data FROM v2_account_recovery WHERE binding_key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else {}
@@ -132,8 +171,12 @@ class AccountExecutor:
     @staticmethod
     def _save_recovery(ledger, key, state):
         with transaction(ledger.conn):
-            ledger.conn.execute("INSERT OR REPLACE INTO v2_account_recovery VALUES (?,?,?)",
-                                (key, "pending" if state.get("inflight") else "idle", json.dumps(state)))
+            AccountExecutor._write_recovery(ledger, key, state)
+
+    @staticmethod
+    def _write_recovery(ledger, key, state):
+        ledger.conn.execute("INSERT OR REPLACE INTO v2_account_recovery VALUES (?,?,?)",
+                            (key, "pending" if state.get("inflight") else "idle", json.dumps(state)))
 
     async def collect_all(self):
         cells = await self.runtime.run(lambda accounts: [Binding(**json.loads(row[0])) for row in accounts.conn.execute(
