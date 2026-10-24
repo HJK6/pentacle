@@ -159,7 +159,7 @@ def resolve_toolchain(config: Dict[str, Any], needs: List[str], *, ambient_path:
                 hit, more = find_exe("python3", dirs, want_major=major, run=run)
                 rejected += more
             if hit is None:
-                failures.append(fail("toolchain", "no %s %s executable found (%s)" % (key, major, "; ".join(rejected) or "none on search path"),
+                failures.append(fail("missing_node" if key == "node" else "toolchain", "no %s %s executable found (%s)" % (key, major, "; ".join(rejected) or "none on search path"),
                                      "install %s %s or add its directory to PATH" % (key, major)))
             else:
                 found[key] = hit
@@ -423,7 +423,7 @@ def check_node_npm(run, toolchain: Dict[str, Any], env: Dict[str, str]) -> List[
     failures = []
     for tool in ("node", "npm"):
         if tool in toolchain and _version(run, tool, "--version", env=env) is None:
-            failures.append(fail("toolchain", "%s does not run from the child PATH" % tool, "fix the owned PATH resolution"))
+            failures.append(fail("missing_node" if tool == "node" else "toolchain", "%s does not run from the child PATH" % tool, "fix the owned PATH resolution"))
     return failures
 
 

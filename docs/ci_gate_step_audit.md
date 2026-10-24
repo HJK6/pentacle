@@ -10,7 +10,7 @@ step. Missing, skipped, failed or duplicate steps remain refusals.
 | npm ci / npm run prestart / npm test | `Supported npm tests`: `gate_env.py run --target npm-test`; same lockfile, prestart build and three default runner globs. |
 | Python service requirements + editable CLI install | Per-target owned Python 3.13 venv from the same requirements and editable declaration; no ambient pip install. |
 | Web mode E2E gate | `--target web-gate`: existing prestart/build:web, real `web_gate.js` (including ancillary browser journeys), then `node --test test/e2e/web_gate_interrupt.test.js`. |
-| Daemon merge | `--target v2-merge-ci`: same unit then smoke; CI unit 1200s and smoke 900s preserved as explicit profile constants. Ordinary local targets keep their existing bounds. No tier/host repair is bundled. |
+| Daemon merge | `--target v2-merge-ci`: same unit then smoke; CI unit 1500s and smoke 900s are explicit profile constants. Ordinary local targets keep their existing bounds. Hosted-runner unit headroom was increased after the same 9521-case suite took 1056.5s and 1196.4s; the latter completed its journal but reached the old 1200s process deadline before exit. |
 | CLI tests | `--target cli-pytest --select tests`: complete existing `services/agent-orch/tests`, prepared interpreter, existing PYTHONPATH. |
 | Shared service tests | `--target shared-pytest --select tests`: complete existing `services/_shared/tests`, prepared interpreter, existing PYTHONPATH. |
 | Failed daemon evidence | Whole `${runner.temp}/gate-evidence/**`, including started/setup-failure events, manifests, preflight identities, runner logs/JUnit and browser reports. |
@@ -31,9 +31,9 @@ process/socket capabilities and installed UTF-8 locale. Preparation/build failur
 stops before the subject and retains its receipt. No ambient credentials or
 pytest flags enter the child environment.
 
-For v2 CI the finite envelope preserves the two original tier budgets, plus the
-existing preflight/cleanup/startup reserves. The workflow's existing 40 minute
-job bound remains unchanged. Browser and npm subjects retain their existing
+For v2 CI the finite envelope is 2400s for unit plus smoke, with the existing
+120s preflight/cleanup/startup reserves (2520s total). The reviewed workflow job
+bound is 50 minutes. This is hosted CI headroom; local tier bounds stay unchanged. Browser and npm subjects retain their existing
 runner behavior and own teardown; direct pytest subjects use the existing owner
 manifest. CLI/shared service pytest has no daemon-specific capability plugin.
 
@@ -47,3 +47,5 @@ rejects raw legacy/current headless flags outside the helper and verifies actual
 helper use. Mutation fixtures prove missing helper use and comment-only claims
 fail. Rollback restores the workflow, promotion digest/step audit and profile
 from the same preimage together; retained attempt evidence is never deleted.
+
+All five daemon targets declare Node 22 alongside Python and tmux in `scripts/gate-env.json`. The launcher resolves and preflights Node before preparation or subject launch, then includes its resolved directory in the closed child PATH. This covers installations where tmux and Node occupy separate directories, including hosted CI toolcaches. Missing or unusable Node produces the `missing_node` setup diagnostic; ambient PATH is never copied into the subject.

@@ -177,6 +177,34 @@ class ToolchainResolution(Tmp):
         cfg["system_path"] = []
         return cfg
 
+    def test_daemon_node_closure_with_separate_tool_directories(self):
+        cfg = self.config()
+        profile = cfg["profiles"]["pentacle"]
+        dirs = {name: self.tmp / name for name in ("python", "tmux", "node")}
+        for folder in dirs.values():
+            folder.mkdir()
+        fake_exe(dirs["python"], "python3.13", "Python 3.13.15")
+        fake_exe(dirs["tmux"], "tmux", "tmux 3.4")
+        fake_exe(dirs["node"], "node", "v22.4.1")
+        ambient = os.pathsep.join(str(p) for p in dirs.values())
+        for name in ("v2-unit", "v2-smoke", "v2-merge", "v2-merge-ci", "v2-pytest"):
+            with self.subTest(target=name):
+                target = profile["targets"][name]
+                self.assertIn("node", target["needs"])
+                tools, failures = ge.resolve_toolchain(cfg, target["needs"], ambient_path=ambient, system="linux")
+                self.assertEqual(failures, [])
+                env = ge.build_env(cfg, profile, target, checkout=self.tmp / "co", toolchain=tools,
+                                   venv=None, home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8",
+                                   evidence=self.tmp / "e", attempt_id="split-tools", pass_env={}, ambient={})
+                child = subprocess.run(["node", "--version"], env=env, capture_output=True, text=True)
+                self.assertEqual((child.returncode, child.stdout.strip()), (0, "v22.4.1"))
+
+    def test_missing_node_has_named_setup_diagnostic(self):
+        tools, failures = ge.resolve_toolchain(self.config(), ["node"], ambient_path=str(self.tmp), system="linux")
+        self.assertEqual(tools, {})
+        self.assertEqual([f["code"] for f in failures], ["missing_node"])
+        self.assertIn("node 22", failures[0]["detail"])
+
     def test_wrong_node_major_is_rejected_and_right_one_found(self):
         old, new = self.tmp / "old", self.tmp / "new"
         old.mkdir(), new.mkdir()

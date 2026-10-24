@@ -71,6 +71,7 @@
           "gate": "unit",
           "needs": [
             "python",
+            "node",
             "tmux"
           ],
           "capabilities": "v2_host",
@@ -82,6 +83,7 @@
           "gate": "smoke",
           "needs": [
             "python",
+            "node",
             "tmux"
           ],
           "capabilities": "v2_host",
@@ -94,6 +96,7 @@
           "gate": "merge",
           "needs": [
             "python",
+            "node",
             "tmux"
           ],
           "capabilities": "v2_host",
@@ -105,6 +108,7 @@
           "kind": "pytest_files",
           "needs": [
             "python",
+            "node",
             "tmux"
           ],
           "capabilities": "v2_host",
@@ -142,16 +146,17 @@
           "gate": "merge",
           "needs": [
             "python",
+            "node",
             "tmux"
           ],
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
-            "unit": 1200,
+            "unit": 1500,
             "smoke": 900
           },
-          "timeout_s": 2100,
-          "max_timeout_s": 2100
+          "timeout_s": 2400,
+          "max_timeout_s": 2400
         },
         "cli-pytest": {
           "kind": "pytest_files",
