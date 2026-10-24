@@ -190,12 +190,47 @@ async def wait_event(root,name,timeout=15,after=0):
         await asyncio.sleep(.05)
     raise RuntimeError('missing_event_'+name)
 
+def unexpected_reply_evidence(reply):
+    """Retain protocol diagnostics only; arbitrary frame text never reaches disk.
+
+    Unknown strings and fields may contain user content or credentials. Preserve
+    their omission count instead of echoing them, with a fixed-size allow-list.
+    """
+    kinds = {'error', 'busy', 'pong', 'welcome', 'event', 'ack'}
+    codes = {'busy', 'timeout', 'rate_limited', 'authentication_required',
+             'store_unavailable', 'not_ready', 'invalid_request', 'internal_error'}
+    body = {}
+    for name in ('error_code', 'code', 'message', 'error', 'retryable'):
+        if name not in reply:
+            continue
+        value = reply[name]
+        if name in ('error_code', 'code') and isinstance(value, str) and value in codes:
+            body[name] = value
+        elif name == 'retryable' and type(value) is bool:
+            body[name] = value
+        else:
+            body[name] = '[redacted]'
+    kind = reply.get('type')
+    return {'type': kind if isinstance(kind, str) and kind in kinds else '[redacted]',
+            'body': body, 'omitted_fields': len(reply) - len(body) - int('type' in reply)}
+
+def unexpected_reply(reply, reason):
+    failure = RuntimeError(reason)
+    failure.unexpected_reply = unexpected_reply_evidence(reply)
+    return failure
+
+def error_evidence(exc):
+    error = {'type': type(exc).__name__, 'message': str(exc), 'traceback': traceback.format_exc()}
+    if hasattr(exc, 'unexpected_reply'):
+        error['unexpected_reply'] = exc.unexpected_reply
+    return error
+
 async def request(ws, ident, timeout=1):
     start=time.monotonic();await ws.send(json.dumps({'type':'ping','request_id':ident}))
     while True:
         reply=json.loads(await asyncio.wait_for(ws.recv(),timeout))
         if reply.get('request_id')==ident:
-            if reply.get('type')!='pong':raise RuntimeError('not_pong')
+            if reply.get('type')!='pong':raise unexpected_reply(reply, 'not_pong')
             return {'sent_mono_s':start,'received_mono_s':time.monotonic(),'latency_s':time.monotonic()-start}
 
 async def run(source, output):
@@ -307,7 +342,7 @@ async def run(source, output):
                                 reply=json.loads(await ws.recv())
                                 if reply.get('request_id')=='process-held':
                                     if reply.get('type')!='pong':
-                                        raise RuntimeError('held_probe_not_pong')
+                                        raise unexpected_reply(reply, 'held_probe_not_pong')
                                     break
                     await request(ws,'after-freeze',2)
                     result['cells'].append({'name':'held_'+SCENARIO,'held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
@@ -327,7 +362,7 @@ async def run(source, output):
             result['classification']='PRODUCT_RED' if all(c['valid_fault'] for c in result['cells']) and not all(c['acceptance_passed'] for c in result['cells']) else 'PASS' if all(c['acceptance_passed'] for c in result['cells']) else 'HARNESS_ERROR'
             result['failed_product_predicates']=[c['name']+': no accepted independent submission before fault release' for c in result['cells'] if not c['acceptance_passed']]
         except Exception as exc:
-            result['error']={'type':type(exc).__name__,'message':str(exc),'traceback':traceback.format_exc()}
+            result['error']=error_evidence(exc)
         finally:
             if process_stopped:
                 os.kill(daemon.pid,signal.SIGCONT);process_stopped=False

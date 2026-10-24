@@ -5,10 +5,47 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "test_gate_env.py"
+
+
+def test_supported_child_owns_ssh_and_imports_pytest_in_isolation():
+    """Exercise the actual SSH helper and -I interpreter, not a mocked chmod."""
+    import json
+
+    spec = importlib.util.spec_from_file_location("gate_env_isolation", ROOT / "scripts" / "gate_env.py")
+    gate_env = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate_env)
+    config = gate_env.load_config()
+    profile = config["profiles"]["pentacle"]
+    with tempfile.TemporaryDirectory(prefix="ge-ssh-", dir="/tmp") as folder:
+        home = Path(folder) / "h"
+        home.mkdir()
+        env = gate_env.build_env(
+            config, profile, profile["targets"]["v2-pytest"], checkout=ROOT,
+            toolchain={}, venv=Path(sys.prefix), home=home, tmp=Path(folder) / "t",
+            locale_name="C.UTF-8", evidence=Path(folder) / "e", attempt_id="isolation",
+            pass_env={}, ambient={"HOME": "/forbidden-home", "PENTACLE_SSH_CONTROL_DIR": "/forbidden-ssh"})
+        assert "PENTACLE_SSH_CONTROL_DIR" not in env
+        code = (
+            "import json,sys,site; from pathlib import Path; import pytest; "
+            "sys.path.insert(0,sys.argv[1]); import machines; "
+            "p=machines.ssh_control_path('fixture@peer'); "
+            "print(json.dumps({'socket':str(p),'pytest':pytest.__file__,"
+            "'user_site':site.ENABLE_USER_SITE,'sys_path':sys.path}))"
+        )
+        done = subprocess.run([sys.executable, "-I", "-c", code, str(ROOT / "services/chat-stream-v2")],
+                              env=env, text=True, capture_output=True, timeout=10)
+        assert done.returncode == 0, done.stderr
+        proof = json.loads(done.stdout)
+        assert Path(proof["socket"]).parent == home / ".ssh" / "cm"
+        assert (home / ".ssh/cm").stat().st_mode & 0o777 == 0o700
+        assert proof["user_site"] is False
+        assert Path(proof["pytest"]).is_relative_to(Path(sys.prefix))
+        assert all("/forbidden-" not in path for path in proof["sys_path"])
 
 
 def test_gate_env_selftest_passes() -> None:

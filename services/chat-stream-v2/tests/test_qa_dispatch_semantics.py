@@ -25,6 +25,66 @@ from test_qa_dispatch_counter import (
 )
 
 
+def test_typed_repair_commission_binds_msg_zero_report_without_inflating_rejects(monkeypatch):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
+
+    async def run():
+        store, _, _, comms, ledger, server = await state()
+        try:
+            for msg_id, report_id in ((0, "initial-reject"), (7, "repair-reject")):
+                assert (await comms.send(send_msg("qa1", msg_id=msg_id)))["delivery"] == "landed"
+                report = report_msg("qa1", report_id=report_id)
+                report["extras"]["qa_review"]["commission_msg_id"] = msg_id
+                await ledger.ingest(report)
+                result = await issue(server, "adjudicate", report_id=report_id,
+                                     adjudicated_valid=True, reason="Substantive fixture defect")
+                assert result["type"] == "coordination.spec_issue.adjudicate.ok", result
+
+            # A duplicate of the repair commission cannot become a third reject.
+            duplicate = report_msg("qa1", report_id="duplicate-repair")
+            duplicate["extras"]["qa_review"]["commission_msg_id"] = 7
+            await ledger.ingest(duplicate)
+            result = await issue(server, "adjudicate", report_id="duplicate-repair",
+                                 adjudicated_valid=True, reason="same commission")
+            assert result["error_code"] == "qa_commission_report_conflict", result
+            assert result["report_id"] == "repair-reject"
+            shown = await issue(server, "show")
+            assert shown["report_ids"] == ["initial-reject", "repair-reject"]
+            assert {r["msg_id"]: r["report_id"] for r in shown["commissions"]} == {
+                0: "initial-reject", 7: "repair-reject"}
+            for report_id in ("initial-reject", "repair-reject", "duplicate-repair"):
+                assert (await store.get_report(report_id))["msg_id"] == 0
+            diagnosed = await issue(server, "diagnose", diagnosis_id="distinct-repair",
+                                    diagnosis="two distinct commissions rejected",
+                                    pivot="repair the demonstrated surface")
+            assert diagnosed["next_cycle"] == 2, diagnosed
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("commission_id", [99, -1, True, "7"])
+def test_explicit_commission_never_falls_back_to_another_review(monkeypatch, commission_id):
+    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
+
+    async def run():
+        store, _, _, comms, ledger, server = await state()
+        try:
+            await comms.send(send_msg("qa1"))
+            report = report_msg("qa1")
+            report["extras"]["qa_review"]["commission_msg_id"] = commission_id
+            await ledger.ingest(report)
+            result = await issue(server, "adjudicate", report_id="reject-qa1",
+                                 adjudicated_valid=True, reason="wrong explicit commission")
+            assert result["error_code"] == "qa_report_binding_mismatch", result
+            assert (await issue(server, "show"))["report_ids"] == []
+        finally:
+            store.stop()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "case",
     [
