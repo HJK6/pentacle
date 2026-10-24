@@ -9,6 +9,10 @@ import {
   markOptimisticDispatchedByRequestId,
   selectSessionDetail,
   sendOptimisticMessage,
+  serverUserEchoMatchesAttachmentWrapper,
+  setTelemetrySink,
+  resetCanonicalAttachmentEchoTelemetryForTests,
+  type TelemetryPayload,
   type ChatAttachment,
   type PentacleEvent,
   type PentacleSessionSummary,
@@ -184,4 +188,137 @@ test('an unrelated server USER row is not swallowed by an image send awaiting it
   const detail = selectSessionDetail(applyPentacleEvent(state, unrelated), STREAM_ID, { visibleCount: 'all' });
   // The optimistic image bubble plus the unrelated row: two rows, wrapper not matched.
   assert.equal(detail?.transcriptItems.length, 2);
+});
+
+const DECOMPOSED_CAPTION = 'Owned Unicode 😀 cafe\u0301\nsecond line.';
+const COMPOSED_CAPTION = DECOMPOSED_CAPTION.normalize('NFC');
+
+for (const [caption, nativeCaption] of [
+  [DECOMPOSED_CAPTION, COMPOSED_CAPTION],
+  [COMPOSED_CAPTION, DECOMPOSED_CAPTION],
+]) {
+  for (const status of ['dispatched', 'acked'] as const) {
+    test(`canonical image echo clears ${status} and preserves the original ${caption === DECOMPOSED_CAPTION ? 'NFD' : 'NFC'} caption`, () => {
+      const queued = sendOptimisticMessage(buildState(), {
+        streamId: STREAM_ID, text: caption, optimisticId: OPTIMISTIC_ID,
+        requestId: REQUEST_ID, createdAt: CREATED_AT, windowStartedAt: CREATED_AT,
+        attachments: [imageAttachment()],
+      });
+      const dispatched = markOptimisticDispatchedByRequestId(queued, REQUEST_ID, CREATED_AT + 10);
+      const state = status === 'acked'
+        ? markOptimisticAckedByRequestId(dispatched, REQUEST_ID, CREATED_AT + 20)
+        : dispatched;
+      const next = applyPentacleEvent(state, wrapperEcho({
+        text: `Look at the image file at ${ATTACHMENT_PATH}, then respond to the user's message: ${nativeCaption}`,
+      }));
+      const detail = selectSessionDetail(next, STREAM_ID, { visibleCount: 'all' });
+      assert.equal(detail?.transcriptItems.length, 1);
+      const row = detail?.transcriptItems[0];
+      assert.equal(row?.optimisticId, OPTIMISTIC_ID);
+      assert.equal(row?.text, caption, 'comparison must not normalize displayed text');
+      assert.deepEqual(Array.from(row?.text ?? ''), Array.from(caption));
+      assert.equal(row?.attachments?.[0].key, SHA);
+      assert.equal(row?.sendState, undefined, 'authoritative echo clears Sending');
+      assert.equal(row?.receiptCaption, undefined, 'fallback must not invent landed proof');
+      assert.equal(next.optimisticSends?.[OPTIMISTIC_ID], undefined);
+    });
+  }
+}
+
+test('canonical wrapper remains one caption bubble through snapshots, summary fallback and duplicate echoes', () => {
+  const echo = wrapperEcho({
+    text: `Look at the image file at ${ATTACHMENT_PATH}, then respond to the user's message: ${COMPOSED_CAPTION}`,
+  });
+  const summary = session({ last_text: echo.text, last_kind: 'USER', last_event_at: echo.timestamp });
+  const initial = ackedImageSend(DECOMPOSED_CAPTION);
+  const snapshot = applySnapshotWithOptimisticReconciliation(initial, { events: [echo], sessions: [summary] });
+  const live = applyPentacleEvent(initial, echo);
+  const duplicate = applyPentacleEvent(live, echo);
+  const replay = applySnapshotWithOptimisticReconciliation(duplicate, { events: [echo], sessions: [summary] });
+  const summaryOnly = applySnapshotWithOptimisticReconciliation(replay, { events: [], sessions: [summary] });
+  for (const [stage, state] of Object.entries({ snapshot, live, duplicate, replay, summaryOnly })) {
+    const detail = selectSessionDetail(state, STREAM_ID, { visibleCount: 'all' });
+    assert.equal(detail?.transcriptItems.length, 1, `${stage}: ${JSON.stringify(detail?.transcriptItems.map((item) => ({ id: item.id, text: item.text, attachments: item.attachments })))}`);
+    assert.equal(detail?.transcriptItems[0].text, DECOMPOSED_CAPTION);
+    assert.equal(detail?.transcriptItems[0].attachments?.[0].key, SHA);
+    assert.equal(detail?.transcriptItems[0].sendState, undefined);
+  }
+});
+
+test('canonical comparison retains wrapper keys, caption distinctions and NFC-only equivalence', () => {
+  const wrapper = (caption: string, path = ATTACHMENT_PATH) =>
+    `Look at the image file at ${path}, then respond to the user's message: ${caption}`;
+  for (const [caption, nativeText, attachments] of [
+    [DECOMPOSED_CAPTION, wrapper(COMPOSED_CAPTION, '/attachments/wrong-sha.jpg'), [imageAttachment()]],
+    [DECOMPOSED_CAPTION, wrapper('a different caption'), [imageAttachment()]],
+    ['Café', wrapper('café'), [imageAttachment()]],
+    ['\uFB01', wrapper('fi'), [imageAttachment()]],
+    [DECOMPOSED_CAPTION, COMPOSED_CAPTION, [imageAttachment()]],
+    [DECOMPOSED_CAPTION, wrapper(COMPOSED_CAPTION), []],
+  ] as const) {
+    assert.equal(serverUserEchoMatchesAttachmentWrapper([...attachments], caption, nativeText), false);
+  }
+  const plain = sendOptimisticMessage(buildState(), {
+    streamId: STREAM_ID, text: DECOMPOSED_CAPTION, optimisticId: OPTIMISTIC_ID,
+    requestId: REQUEST_ID, createdAt: CREATED_AT, windowStartedAt: CREATED_AT,
+  });
+  const next = applyPentacleEvent(
+    markOptimisticDispatchedByRequestId(plain, REQUEST_ID, CREATED_AT + 10),
+    wrapperEcho({ text: COMPOSED_CAPTION }),
+  );
+  assert.equal(selectSessionDetail(next, STREAM_ID, { visibleCount: 'all' })?.transcriptItems.length, 2);
+});
+
+test('NFC multiline summary preserves caption fidelity without the canonicalization path', () => {
+  const echo = wrapperEcho({ text: `Look at the image file at ${ATTACHMENT_PATH}, then respond to the user's message: ${COMPOSED_CAPTION}` });
+  const live = applyPentacleEvent(ackedImageSend(COMPOSED_CAPTION), echo);
+  const replay = applySnapshotWithOptimisticReconciliation(live, {
+    events: [], sessions: [session({ last_text: echo.text, last_kind: 'USER', last_event_at: echo.timestamp })],
+  });
+  const rows = selectSessionDetail(replay, STREAM_ID, { visibleCount: 'all' })?.transcriptItems;
+  assert.equal(rows?.length, 1);
+  assert.equal(rows?.[0].text, COMPOSED_CAPTION);
+});
+
+test('two canonical-equivalent image sends with the same hash remain ambiguous', () => {
+  const secondId = 'optimistic_host_c_codex_one_2';
+  const secondRequest = 'send-req-2';
+  const withSecond = markOptimisticDispatchedByRequestId(sendOptimisticMessage(ackedImageSend(DECOMPOSED_CAPTION), {
+    streamId: STREAM_ID, text: COMPOSED_CAPTION, optimisticId: secondId, requestId: secondRequest,
+    createdAt: CREATED_AT + 50, windowStartedAt: CREATED_AT + 50, attachments: [imageAttachment()],
+  }), secondRequest, CREATED_AT + 60);
+  const echo = wrapperEcho({ text: `Look at the image file at ${ATTACHMENT_PATH}, then respond to the user's message: ${COMPOSED_CAPTION}` });
+  const next = applyPentacleEvent(withSecond, echo);
+  assert.equal(next.optimisticSends?.[OPTIMISTIC_ID]?.status, 'acked');
+  assert.equal(next.optimisticSends?.[secondId]?.status, 'dispatched');
+  assert.equal(next.events.some((event) => event.daemon_seq === 42 && !event.optimistic_id), true);
+  assert.equal(selectSessionDetail(next, STREAM_ID, { visibleCount: 'all' })?.transcriptItems.length, 3);
+});
+
+test('canonical reconciliation emits one safe tagged event and suppresses live/snapshot replay', () => {
+  const captured: TelemetryPayload[] = [];
+  resetCanonicalAttachmentEchoTelemetryForTests();
+  setTelemetrySink((payload) => captured.push(payload));
+  try {
+    const echo = wrapperEcho({ text: `Look at the image file at ${ATTACHMENT_PATH}, then respond to the user's message: ${COMPOSED_CAPTION}` });
+    const live = applyPentacleEvent(ackedImageSend(DECOMPOSED_CAPTION), echo);
+    const duplicate = applyPentacleEvent(live, echo);
+    applySnapshotWithOptimisticReconciliation(duplicate, { events: [echo], sessions: [session()] });
+    const tagged = captured.filter((payload) => payload.message === 'chat.compose.attachment_echo_canonical_reconciled');
+    assert.deepEqual(tagged, [{
+      subsystem: 'chat_surface', message: 'chat.compose.attachment_echo_canonical_reconciled',
+      bug_ref: 'spec_pentacle__image_send_optimistic_echo_reconciliation_2026_10', data: { comparison: 'NFC' },
+    }]);
+    assert.equal(JSON.stringify(tagged).includes(SHA), false);
+    assert.equal(JSON.stringify(tagged).includes('cafe'), false);
+    captured.length = 0;
+    resetCanonicalAttachmentEchoTelemetryForTests();
+    applyPentacleEvent(ackedImageSend(COMPOSED_CAPTION), echo);
+    assert.equal(captured.some((payload) => payload.message === 'chat.compose.attachment_echo_canonical_reconciled'), false);
+    applyPentacleEvent(ackedImageSend(DECOMPOSED_CAPTION), { ...echo, optimistic_id: OPTIMISTIC_ID });
+    assert.equal(captured.some((payload) => payload.message === 'chat.compose.attachment_echo_canonical_reconciled'), false);
+  } finally {
+    resetCanonicalAttachmentEchoTelemetryForTests();
+    setTelemetrySink(null);
+  }
 });
