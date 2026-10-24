@@ -7,8 +7,10 @@ import logging
 import os
 from pathlib import Path
 import time
+import uuid
 
 from account_store import AccountStore
+from account_revalidation import interrupt_pending
 from provider_accounts import AccountError, Binding, _component
 from sessions import VerbError
 from error_adapters import ErrorFact
@@ -32,6 +34,7 @@ class AccountRuntime:
         self.policy,self.clock,self.executor=policy or {"enabled":False},clock,executor
         self.server=self.spawnctl=self.comms=None
         self._next_probe=0; self._collector_task=None; self._stopping=False
+        self._health_epoch=uuid.uuid4().hex; self._health_started=False
 
     def attach(self,server,spawnctl,comms):
         self.server,self.spawnctl,self.comms=server,spawnctl,comms
@@ -42,6 +45,11 @@ class AccountRuntime:
         return await self.store.submit(lambda conn:function(AccountStore(conn,self.policy,initialize=False)))
 
     async def start(self):
+        # This is the owned daemon-start boundary, not a Store connection open.
+        # OFF only terminalizes old audit intents; it never restores health.
+        if not self._health_started:
+            await self.run(lambda ledger:interrupt_pending(ledger,self._health_epoch,now=self.clock()))
+            self._health_started=True
         if self.policy.get("enabled") is not True: return
         # Private verified enrollment receipts only. Never login on startup.
         for entry in self.policy.get("bindings",[]):
@@ -113,6 +121,7 @@ class AccountRuntime:
     async def record_observation(self,account,observation):
         matched=await self.run(lambda accounts:accounts.observe(account.key,observation,now=self.clock()))
         if not matched: await self._alert(account,"identity_unverified")
+        return matched
 
     async def before_input(self,row):
         # Rollback can disable new launches while existing bound agents drain.
@@ -141,7 +150,7 @@ class AccountRuntime:
 
     async def _operation(self,message):
         action=message.get("action","status"); auth=message.get("_auth_context") or {}
-        if action in {"default-set","relogin"}: await self._front_desk(auth)
+        if action in {"default-set","relogin","revalidate-health"}: await self._front_desk(auth)
         elif action in {"probe","observe-failure","observation"}:
             if not self.watcher_authorized(auth,message.get("host")):
                 # Front desk may request a bound probe, but only the fixed host
@@ -154,6 +163,7 @@ class AccountRuntime:
         allowed={"type","action","request_id","operation_id","provider","account","host","login_generation",
             "reason","kind","from_stream_id","stream_token","protocol"}
         if action=="observation": allowed.add("observation")
+        if action=="revalidate-health": allowed.add("expected_revision")
         if any(not str(k).startswith("_") and k not in allowed for k in message): raise AccountError("account_request_invalid")
         if action=="status":
             result=await self.run(lambda a:a.readback(now=self.clock()))
@@ -168,6 +178,10 @@ class AccountRuntime:
         if not self.manages(host): raise AccountError("account_feature_off")
         _component(host); _component(alias)
         if provider not in {"codex","claude"}: raise AccountError("account_request_invalid")
+        if action=="revalidate-health":
+            if not self.executor: raise AccountError("account_executor_unavailable")
+            result=await self.executor.revalidate_health(message,auth)
+            return {"type":"account.ok","accepted":True,"result":result}
         if action=="default-set":
             default=await self.run(lambda a:a.set_default(host=host,provider=provider,alias=alias))
             return {"type":"account.ok","default":default}

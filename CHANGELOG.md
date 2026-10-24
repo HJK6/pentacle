@@ -13,6 +13,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+### Added
+
+- Front-desk account health revalidation with an exact native identity proof, revision fence and durable audit receipt; ordinary probes keep existing health flags.
+
 ### Fixed
 
 - Claude account probes wait for native cache refresh eligibility; stale usage no longer marks a verified account as an identity conflict.

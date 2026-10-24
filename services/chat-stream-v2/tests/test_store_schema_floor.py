@@ -204,7 +204,11 @@ def test_pre_account_database_opens_additively_and_reopens_idempotently(tmp_path
         conn.execute("ALTER TABLE sessions DROP COLUMN account_binding")
         account_tables = [row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'v2_account_*'")]
-        assert len(account_tables) == 6
+        assert set(account_tables) == {
+            "v2_account_bindings", "v2_account_defaults", "v2_account_session_bindings",
+            "v2_account_observations", "v2_account_failures", "v2_account_recovery",
+            "v2_account_health_revalidations",
+        }
         for table in account_tables:
             conn.execute(f'DROP TABLE "{table}"')
         columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]

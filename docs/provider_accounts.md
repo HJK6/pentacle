@@ -32,6 +32,40 @@ example, the front desk can explicitly launch three agents on one permitted
 account and two on another. There is no ratio scheduler, fixed account priority,
 percentage reservation ledger or automatic quota/auth migration.
 
+## Revalidate an identity-conflict flag
+
+A successful ordinary probe does not clear a previous identity conflict. The
+authenticated front desk can explicitly revalidate an already enrolled, active
+generation after checking its status. Copy its exact generation and
+`health_revision` from that readback; do not guess the revision.
+
+```sh
+agent-orch account status --host host-a --provider claude --account primary
+agent-orch account revalidate-health --host host-a --provider claude --account primary \
+  --login-generation login-one --expected-revision 7 \
+  --operation-id desk-revalidation-one --reason identity_reviewed
+```
+
+This control requires enabled account policy and a managed host. It performs one
+bound native observation with the existing identity and freshness checks. Only
+an unchanged identity-conflict row can become healthy; a newer failure, revision,
+generation or binding change refuses the transition. Authentication must be
+verified again for every request. No login, account selection, default change or
+session migration occurs. The old failure remains visible as history.
+
+The audit receipt and health transition commit together. Reusing an operation ID
+with the same arguments reads its original receipt without another native call;
+changed arguments refuse. A replay is historical: check current status before
+admission, since a later failure may have changed health again. Interrupted
+requests never heal or automatically retry. On daemon restart their pending
+receipts become interrupted, including while policy is off, without changing
+health or defaults. A new explicitly chosen operation ID can proceed through
+the existing host locks. Store connections alone do not interrupt requests.
+
+The default RPC deadline is 210 seconds, as for a probe; explicit shorter
+deadlines are honored. Host queue time can exceed a caller's deadline. Read the
+same operation's receipt/status instead of blindly repeating provider work.
+
 ## Move a conversation
 
 Prepare the source conversation's checkpoint, including its objective, current

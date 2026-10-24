@@ -29,12 +29,17 @@ CREATE TABLE IF NOT EXISTS v2_account_failures (
     binding_key TEXT PRIMARY KEY, kind TEXT NOT NULL, observed_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS v2_account_recovery (
     binding_key TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_account_health_revalidations (
+    operation_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, binding_key TEXT NOT NULL,
+    epoch TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
 """
 
 
 def migrate(conn):
     for statement in DDL.split(";"):
         if statement.strip(): conn.execute(statement)
+    if "health_revision" not in {row[1] for row in conn.execute("PRAGMA table_info(v2_account_bindings)")}:
+        conn.execute("ALTER TABLE v2_account_bindings ADD COLUMN health_revision INTEGER NOT NULL DEFAULT 0")
 
 
 @contextlib.contextmanager
@@ -69,7 +74,8 @@ class AccountStore:
             if prior and json.loads(prior[0]) != data: raise AccountError("account_binding_immutable")
             self.conn.execute("UPDATE v2_account_bindings SET active=0 WHERE host=? AND provider=? AND alias=? AND binding_key<>?",
                 (binding.host,binding.provider,binding.alias,binding.key))
-            self.conn.execute("INSERT OR IGNORE INTO v2_account_bindings VALUES (?,?,?,?,?,?,?,?,?)",(
+            self.conn.execute("INSERT OR IGNORE INTO v2_account_bindings "
+                "(binding_key,provider,alias,host,generation,pool_id,data,health,active) VALUES (?,?,?,?,?,?,?,?,?)",(
                 binding.key,binding.provider,binding.alias,binding.host,binding.generation,binding.pool_id,
                 json.dumps(data),"healthy" if binding.healthy else "unknown",1))
 
@@ -138,7 +144,8 @@ class AccountStore:
                 "provider_id","pool_id","auth_mode","collection","observed_at","windows","ordinary_usage_allowed")}
             if (allowed["provider_id"]!=binding.provider_id or allowed["pool_id"]!=binding.pool_id
                     or allowed["auth_mode"]!="subscription"):
-                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict' WHERE binding_key=?",(key,))
+                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
+                    "health_revision=health_revision+1 WHERE binding_key=?",(key,))
                 allowed["collection"]="identity_conflict"
             # A quota probe never clears an auth failure or identity conflict.
             self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
@@ -149,9 +156,11 @@ class AccountStore:
         with transaction(self.conn):
             if self.bound(key) is None: raise AccountError("account_generation_unknown")
             if kind=="auth":
-                self.conn.execute("UPDATE v2_account_bindings SET health='auth_unhealthy' WHERE binding_key=? AND health<>'identity_conflict'",(key,))
+                self.conn.execute("UPDATE v2_account_bindings SET health=CASE WHEN health='identity_conflict' "
+                    "THEN health ELSE 'auth_unhealthy' END, health_revision=health_revision+1 WHERE binding_key=?",(key,))
             if kind=="identity":
-                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict' WHERE binding_key=?",(key,))
+                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
+                    "health_revision=health_revision+1 WHERE binding_key=?",(key,))
             self.conn.execute("INSERT OR REPLACE INTO v2_account_failures VALUES (?,?,?)",(key,kind,now))
 
     def readback(self,*,now):
@@ -162,7 +171,8 @@ class AccountStore:
             raw=self.conn.execute("SELECT data FROM v2_account_observations WHERE binding_key=?",(binding.key,)).fetchone()
             failure=self.conn.execute("SELECT kind,observed_at FROM v2_account_failures WHERE binding_key=?",(binding.key,)).fetchone()
             accounts.append(binding.public()|{"health":row["health"] if binding.enabled else "disabled","active":bool(row["active"]),
-                "observation":json.loads(raw[0]) if raw else None,"last_failure":dict(failure) if failure else None})
+                "health_revision":row["health_revision"], "observation":json.loads(raw[0]) if raw else None,
+                "last_failure":dict(failure) if failure else None})
         for cell in self.policy.get("cells",[]):
             if not isinstance(cell,dict): continue
             host,provider,alias=(cell.get(k) for k in ("host","provider","alias"))
