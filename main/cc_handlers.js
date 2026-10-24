@@ -109,7 +109,18 @@ const PRELOAD_LOCAL = {
 
 function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }
 function nowIso() { return new Date().toISOString(); }
-function normalizeChatStreamError(error) { return String(error?.error || error?.message || error || 'Daemon unavailable'); }
+function normalizeChatStreamError(error) {
+  for (const value of [error?.error, error?.message, error]) {
+    if (typeof value === 'string' && value) return value;
+  }
+  if (error?.error_code === 'server_overloaded' || error?.code === 'server_overloaded') {
+    return 'Server is busy. Try sending again.';
+  }
+  // Some daemon refusal frames carry only an error_code. Never coerce the
+  // frame itself (or a nested error object) into user-visible text.
+  return typeof error?.error_code === 'string' && error.error_code
+    ? error.error_code.replace(/_/g, ' ') : 'Daemon unavailable';
+}
 function resultError(message) { return { ok: false, error: normalizeChatStreamError(message) }; }
 
 function householdErrorCode(error) {
@@ -122,7 +133,17 @@ function householdErrorCode(error) {
 
 async function command(action) {
   try { return { ok: true, ...await action() }; }
-  catch (error) { return { ...resultError(error), code: error?.code, remediation: error?.remediation }; }
+  catch (error) {
+    const code = error?.code || error?.error_code;
+    if (code === 'server_overloaded') {
+      console.warn('[chat-stream.command-rejected]', {
+        subsystem: 'web_composer',
+        bug_ref: 'spec_pentacle__web_composer_attachment_precommit_failure_2026_10',
+        code: 'server_overloaded',
+      });
+    }
+    return { ...resultError(error), code, remediation: error?.remediation };
+  }
 }
 
 /**

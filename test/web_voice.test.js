@@ -18,6 +18,24 @@ test('one take uploads, transcribes and dispatches transcript with voice metadat
   assert.deepEqual(deps.calls[2][1], { streamId: 'home:assistant', text: 'hello', meta: { voice: { duration_s: 2 } } });
   assert.equal(deps.states.at(-1).status, 'sent');
 });
+
+test('busy transcription keeps the take for manual Retry without another upload or automatic send', async () => {
+  let attempts = 0;
+  const deps = io({ transcribe: async () => ++attempts === 1
+    ? { ok: false, error_code: 'server_overloaded' }
+    : { ok: true, text: 'retained take' } });
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: 'busy-take' }, deps);
+  await take.run();
+  assert.equal(take.snapshot().status, 'failed');
+  assert.match(take.snapshot().error, /Server is busy.*Retry/);
+  await flush();
+  assert.equal(attempts, 1);
+  assert.equal(deps.calls.filter(c => c[0] === 'send').length, 0);
+  await take.run();
+  assert.equal(take.snapshot().status, 'sent');
+  assert.equal(deps.calls.filter(c => c[0] === 'upload').length, 1);
+  assert.equal(deps.calls.filter(c => c[0] === 'send').length, 1);
+});
 for (const failure of ['upload', 'backend_unavailable']) test(`${failure} is visible and Retry retains take and transcription identity`, async () => {
   let fail = true; const deps = io();
   const original = failure === 'upload' ? deps.upload : deps.transcribe;

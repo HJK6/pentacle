@@ -19,6 +19,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Discarded voice transcriptions no longer block image uploads or ordinary chat controls. Busy uploads and voice takes show readable errors and keep unsent content for a manual retry.
 - Repair-review reports can explicitly bind their typed commission message id, preserving distinct reject counts when reports use message 0.
 - Claude account probes wait for native cache refresh eligibility; stale usage no longer marks a verified account as an identity conflict.
 
