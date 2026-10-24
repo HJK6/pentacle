@@ -261,8 +261,11 @@ def test_sigkill_then_reap_manifest_cleans(tmp_path: Path) -> None:
         saw_new_owner = False
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if manifest.exists():
+            try:
                 data = json.loads(manifest.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                pass  # Stale reaping may remove the old owner before takeover.
+            else:
                 if data["owner_pid"] != info["pid"] and data["owner_state"] == "active":
                     saw_new_owner = True
                     break
