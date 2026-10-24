@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from tests.soak.harness import Daemon, TmuxNamespace
+from tools import run_gate as gate_runner
 from tools.gate_owner_manifest import (
     initialize_manifest,
     mark_owner_stopping,
@@ -45,9 +46,33 @@ namespace.start()
 daemon = Daemon(str(root / "sessions.db"), namespace)
 daemon.start()
 daemon_pgid = os.getpgid(daemon.proc.pid)
+prepare_signals = []
 if len(sys.argv) > 3 and sys.argv[3] == "dead-leader":
-    os.kill(daemon.proc.pid, signal.SIGKILL)
-    daemon.proc.wait(timeout=5)
+    # PID-only SIGKILL can orphan the real sampler. Prepare an absent group
+    # using the existing owned-Popen group shutdown, keeping tmux alive.
+    original_signal = gate_runner._signal_process_group
+    def observed_signal(proc, signum, **kwargs):
+        prepare_signals.append(signal.Signals(signum).name)
+        return original_signal(proc, signum, **kwargs)
+    gate_runner._signal_process_group = observed_signal
+    try:
+        daemon.kill()
+    finally:
+        gate_runner._signal_process_group = original_signal
+    if gate_runner._process_group_exists(daemon_pgid):
+        import subprocess
+        members = subprocess.run(["pgrep", "-g", str(daemon_pgid), "."],
+            capture_output=True, text=True, timeout=2).stdout.split()
+        rows = subprocess.run(["ps", "-ww", "-p", ",".join(members),
+            "-o", "pid=,ppid=,pgid=,lstart=,command="], capture_output=True,
+            text=True, timeout=2).stdout if members else ""
+        detail = dict(pgid=daemon_pgid, signals=prepare_signals,
+                      daemon_returncode=daemon.proc.returncode, members=rows)
+        (root / "dead-leader-fixture-failure.json").write_text(json.dumps(detail))
+        print(json.dumps(detail), file=sys.stderr, flush=True)
+        raise RuntimeError("fixture daemon group is not absent after owned shutdown")
+    if not namespace.socket_path.is_socket():
+        raise RuntimeError("fixture lost its bound socket before stale reaping")
 
 def stop(_signum, _frame):
     mark_owner_stopping(manifest)
@@ -64,6 +89,7 @@ print(json.dumps({
     "daemon": daemon.proc.pid,
     "daemon_pgid": daemon_pgid,
     "socket": namespace.socket,
+    "preparation_signals": prepare_signals,
 }), flush=True)
 while True:
     time.sleep(1)
@@ -102,14 +128,19 @@ def _start_owner(manifest: Path, *, dead_leader: bool = False) -> tuple[subproce
                 raise AssertionError("owned owner readiness exceeded byte limit")
         line = data.split(b"\n", 1)[0].decode("utf-8")
         return proc, json.loads(line)
-    except BaseException:
+    except BaseException as first:
         if proc.poll() is None:
             proc.terminate()
             try: proc.wait(timeout=2)
             except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
+        _, stderr = proc.communicate(timeout=2)
         from tools.gate_owner_manifest import reap_manifest
-        if manifest.exists(): reap_manifest(manifest)
-        raise
+        cleanup = None
+        try:
+            if manifest.exists(): reap_manifest(manifest)
+        except Exception as exc:
+            cleanup = f"{type(exc).__name__}: {exc}"
+        raise AssertionError(f"{first}; owned stderr={stderr[-6000:]}; cleanup={cleanup}") from first
 
 
 def _socket_path(socket_name: str) -> Path:

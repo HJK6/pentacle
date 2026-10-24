@@ -217,7 +217,8 @@ def test_in_process_ceremony_uses_synthetic_signatures_without_children(tmp_path
     scenario(check)
 
 
-def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_path):
+@pytest.mark.parametrize("dead_mode", [False, True])
+def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_path, dead_mode):
     """Execute the real owner setup/handler with fake resources; omit only idle wait."""
     import ast
     import signal
@@ -227,6 +228,7 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     calls = []; handlers = {}; printed = []
     class Namespace:
         socket = "synthetic-owned-socket"
+        socket_path = SimpleNamespace(is_socket=lambda: True)
         def __init__(self, root): assert root == tmp_path
         def start(self): calls.append("namespace_start")
         def kill_server(self): calls.append("namespace_kill")
@@ -242,7 +244,9 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     fake_owner.reap_manifest = lambda path: calls.append("reap")
     monkeypatch.setitem(sys.modules, "tests.soak.harness", fake_harness)
     monkeypatch.setitem(sys.modules, "tools.gate_owner_manifest", fake_owner)
-    monkeypatch.setattr(sys, "argv", ["synthetic-owner", str(tmp_path), str(tmp_path / "manifest.json")])
+    monkeypatch.setattr(sys, "argv", ["synthetic-owner", str(tmp_path), str(tmp_path / "manifest.json"), "dead-leader" if dead_mode else "live-leader"])
+    from tools import run_gate as fixture_runner
+    monkeypatch.setattr(fixture_runner, "_process_group_exists", lambda pgid: False)
     monkeypatch.setattr(signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
     monkeypatch.setattr(os, "getpgid", lambda pid: 42420)
     tree = ast.parse(source.OWNER_SCRIPT)
@@ -252,27 +256,29 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     exec(compile(tree, "synthetic-owner-fixture", "exec"), namespace)
     with pytest.raises(SystemExit) as ended: handlers[signal.SIGTERM](signal.SIGTERM, None)
     assert ended.value.code == 0
-    assert calls == ["initialize", "namespace_start", "daemon_start", "mark_stopping", "daemon_kill", "namespace_kill", "reap"]
+    assert calls == (["initialize", "namespace_start", "daemon_start"] + (["daemon_kill"] if dead_mode else [])
+                     + ["mark_stopping", "daemon_kill", "namespace_kill", "reap"])
     assert printed[0]["daemon_pgid"] == 42420
 
 
-@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost"])
+@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor"])
 def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     """Frozen OS/event boundary exercises the real group and entry reapers."""
     import signal
     from tools import gate_owner_manifest as owner
-    state = dict(live=True, group=True, registered=False, socket=False, clock=0)
+    state = dict(live=outcome != "dead-with-survivor", group=True, registered=False, socket=False, clock=0)
     signals, observations = [], []
     class OwnedOS:
         def getpgrp(self): return 42419
         def getpgid(self, pid): return 42420
         def killpg(self, pgid, signum):
-            assert pgid == 42420 and state["registered"]
+            assert pgid == 42420
             if signum == 0:
                 if outcome == "unknown": raise PermissionError("synthetic unreadable group")
                 observations.append(state["group"])
                 if not state["group"]: raise ProcessLookupError()
                 return
+            assert state["registered"]
             signals.append(signum)
             if outcome == "denied": raise PermissionError("synthetic denied TERM")
             if outcome == "complete" or (outcome == "kill-complete" and signum == signal.SIGKILL):
@@ -305,7 +311,8 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     assert state["socket"], "group failure must not strand an independently bound socket"
     assert data["entries"] == ([] if complete else [entry])
     assert not state["registered"]
-    assert signals[0] == signal.SIGTERM
+    if outcome == "dead-with-survivor": assert not signals
+    else: assert signals[0] == signal.SIGTERM
     if outcome == "identity-lost": assert signals == [signal.SIGTERM]
     if complete: assert observations[-1] is False
 

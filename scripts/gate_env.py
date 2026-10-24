@@ -745,6 +745,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     proc = None
     owner: Optional[OwnedProcesses] = None
+    target: Optional[Dict[str, Any]] = None
     resolved_selection: Optional[List[str]] = None
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
@@ -882,17 +883,45 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         for s, h in old.items():
             signal.signal(s, h)
+        retention_reasons: List[str] = []
+        unresolved_paths: List[str] = []
+        subject_cleanup_failed = state["secondary"].get("cleanup") == "failed"
         if owner is not None and not owner.stop():
             state["secondary"]["cleanup"] = "failed"
             state["secondary"]["owned_processes"] = "unreaped"
-        # Owned scratch only: HOME, basetemp, TMPDIR. Evidence and the prepared cache stay.
-        for d in (run_dir, tmp):
-            try:
-                shutil.rmtree(d)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                state["secondary"]["cleanup"] = "failed"
+            retention_reasons.append("owner_stop_failed")
+        if subject_cleanup_failed:
+            retention_reasons.append("subject_cleanup_failed")
+        try:
+            manifest = basetemp / ".owned.json"
+            if manifest.is_symlink() or manifest.exists():
+                retention_reasons.append("owner_manifest_unresolved")
+                unresolved_paths.append(str(manifest))
+            if target and target.get("kind") == "run_gate":
+                tiers = ("unit", "smoke") if target.get("gate") == "merge" else (target.get("gate"),)
+                for tier in tiers:
+                    if tier in ("unit", "smoke", "soak"):
+                        tier_root = basetemp / tier
+                        if tier_root.is_symlink() or tier_root.exists():
+                            retention_reasons.append("tier_root_unresolved:" + tier)
+                            unresolved_paths.append(str(tier_root))
+        except OSError as exc:
+            retention_reasons.append("scratch_observation_failed:" + type(exc).__name__)
+        if retention_reasons:
+            state["secondary"]["cleanup"] = "failed"
+            state["secondary"]["retained_scratch"] = {
+                "paths": [str(run_dir), str(tmp)], "reasons": retention_reasons,
+                "unresolved_paths": unresolved_paths}
+        else:
+            # Delete owned HOME/basetemp/TMPDIR only after verified cleanup.
+            # Evidence and the prepared cache stay in their existing locations.
+            for d in (run_dir, tmp):
+                try:
+                    shutil.rmtree(d)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    state["secondary"]["cleanup"] = "failed"
         if state["secondary"].get("cleanup") == "failed" and state["outcome"] == "pass":
             state["outcome"] = "cleanup_failure"
         if not writer.terminal:

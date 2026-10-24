@@ -22,7 +22,7 @@
       "synthetic": true,
       "contains_real_traffic": false,
       "bytes": 7840,
-      "sha256": "7228c828b158182f3f0c2e004200fc83d78200cf0627e0dae472bcd365cd2742",
+      "sha256": "27998848c5384c833a9dff1bf9e9329363dc413ee08d9a6736d42ce888c2aba8",
       "purpose": "Authored synthetic portability fixture or pinned source-contract metadata for TH-H2"
     },
     {

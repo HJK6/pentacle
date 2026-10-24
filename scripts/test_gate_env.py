@@ -678,6 +678,129 @@ class PythonChromePolicy(unittest.TestCase):
         self.assertIn("--use-mock-keychain", flags)
 
 
+
+
+class ScratchRetention(Tmp):
+    """Drive the real main/finally with isolated process/preflight counterparts."""
+    def run_case(self, mode, outcome="product_failure", target="v2-pytest"):
+        co = self.tmp / "co"
+        service = co / "services/chat-stream-v2"
+        (service / "tests").mkdir(parents=True)
+        (service / "tests/test_x.py").write_text("")
+        (service / "requirements.txt").write_text("websockets==17.0.1\n")
+        short = Path(tempfile.mkdtemp(prefix="gr-", dir="/tmp"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(short, ignore_errors=True))
+        home, tmp = self.tmp / "r/home", short / "t"
+        basetemp = tmp / "b"
+        for path in [home, tmp, basetemp]: path.mkdir(parents=True)
+        (home / "sentinel").write_text("owned home")
+        (tmp / "sentinel").write_text("owned tmp")
+        evidence = self.tmp / "evidence"
+        tool = {"path": "/synthetic/tool", "realpath": "/synthetic/tool", "version": "3.13.15", "sha256": "aa"}
+        env_name = ge.OwnedProcesses.ENV
+        class Owner:
+            ENV = env_name
+            def __init__(self, service_dir, path):
+                self.path = path
+                path.write_text('{"synthetic":"owned unresolved entry"}')
+            def stop(self):
+                if mode in ("owner-failed", "cancelled"): return False
+                self.path.unlink()
+                return True
+        class Process:
+            pid = 42420
+            returncode = 0 if outcome == "pass" else 1
+            def wait(self, timeout):
+                if mode == "cancelled": raise ge.Cancelled()
+                return self.returncode
+            def poll(self): return self.returncode
+        def build(*args):
+            if mode == "manifest": (basetemp / ".owned.json").write_text('{"synthetic":"runner unresolved"}')
+            if mode == "tier":
+                (basetemp / "unit").mkdir()
+                (basetemp / "unit/sentinel").write_text("unresolved tier evidence")
+            ff = {"stage": "subject", "code": "original_assertion"} if outcome != "pass" else None
+            return ["synthetic-subject"], {"cwd": service, "classify": lambda rc, timed_out: (outcome, ff, {})}
+        patches = dict(resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []),
+            pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
+            ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []),
+            check_scratch=lambda *a, **k: [], check_node_npm=lambda *a, **k: [],
+            check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
+            run_preflight_script=lambda *a, **k: [],
+            scratch_paths=lambda *a: (home, tmp, basetemp), build_command=build,
+            OwnedProcesses=Owner, group_alive=lambda pid: mode == "survivor", stop_group=lambda process: None,
+            source_identity=lambda *a: {"sha": "synthetic", "dirty": False})
+        argv = ["run", "--profile", "pentacle", "--workspace", str(self.tmp / "workspace"),
+                "--evidence-dir", str(evidence), "--checkout", str(co), "--tmp-root", str(self.tmp / "short"),
+                "--target", target, "--spec", "synthetic", "--series", "retention", "--purpose", "negative_control"]
+        if target == "v2-pytest": argv += ["--select", "tests/test_x.py"]
+        with mock.patch.multiple(ge, **patches), mock.patch.object(ge.subprocess, "Popen", return_value=Process()):
+            code = ge.main(argv)
+        attempts = ga.build_index(evidence)["attempts"]
+        self.assertEqual(len(attempts), 1)
+        attempt = attempts[0]
+        events = [json.loads(p.read_text()) for p in sorted((evidence / "attempts" / attempt["attempt_id"]).glob("*.json"))]
+        self.assertEqual([e["state"] for e in events], ["started", "prepared", "subject_started", "terminal"], msg=json.dumps(events[-1], sort_keys=True))
+        self.assertEqual(len([e for e in events if e["state"] == "terminal"]), 1)
+        return code, attempt, events[-1], home.parent, tmp, basetemp
+
+    def check_retained(self, result, primary, reason):
+        code, attempt, terminal, run_dir, tmp, basetemp = result
+        self.assertNotEqual(code, 0)
+        self.assertEqual(attempt["primary_outcome"], primary)
+        self.assertEqual((terminal.get("secondary") or {}).get("cleanup"), "failed")
+        self.assertTrue((run_dir / "home/sentinel").is_file())
+        self.assertTrue((tmp / "sentinel").is_file())
+        retained = terminal["secondary"]["retained_scratch"]
+        self.assertEqual(retained["paths"], [str(run_dir), str(tmp)])
+        self.assertIn(reason, retained["reasons"])
+        return terminal, basetemp
+
+    def test_failed_owner_preserves_product_failure_and_both_scratch_roots(self):
+        terminal, base = self.check_retained(self.run_case("owner-failed"), "product_failure", "owner_stop_failed")
+        self.assertEqual(terminal["first_failure"], {"stage": "subject", "code": "original_assertion"})
+        self.assertEqual(terminal["secondary"]["owned_processes"], "unreaped")
+        self.assertTrue((base / ".owned.json").is_file())
+
+    def test_failed_owner_turns_only_pass_into_cleanup_failure(self):
+        terminal, _ = self.check_retained(self.run_case("owner-failed", "pass"), "cleanup_failure", "owner_stop_failed")
+        self.assertIsNone(terminal["first_failure"])
+
+    def test_failed_owner_keeps_cancellation_primary(self):
+        terminal, _ = self.check_retained(self.run_case("cancelled"), "cancelled", "owner_stop_failed")
+        self.assertEqual(terminal["first_failure"]["code"], "cancelled")
+
+    def test_unresolved_runner_manifest_is_retained_without_outer_owner(self):
+        terminal, base = self.check_retained(self.run_case("manifest", target="v2-unit"), "product_failure", "owner_manifest_unresolved")
+        self.assertTrue((base / ".owned.json").is_file())
+        self.assertEqual(terminal["first_failure"]["code"], "original_assertion")
+
+    def test_unresolved_declared_runner_tier_is_retained(self):
+        _, base = self.check_retained(self.run_case("tier", target="v2-unit"), "product_failure", "tier_root_unresolved:unit")
+        self.assertEqual((base / "unit/sentinel").read_text(), "unresolved tier evidence")
+
+    def test_live_subject_survivor_is_retained(self):
+        self.check_retained(self.run_case("survivor"), "product_failure", "subject_cleanup_failed")
+
+    def test_resolved_assertion_failure_still_deletes_normal_scratch(self):
+        code, attempt, terminal, run_dir, tmp, _ = self.run_case("clean")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(attempt["primary_outcome"], "product_failure")
+        self.assertEqual(terminal["first_failure"]["code"], "original_assertion")
+        self.assertNotEqual(terminal["secondary"].get("cleanup"), "failed")
+        self.assertNotIn("retained_scratch", terminal["secondary"])
+        self.assertFalse(run_dir.exists())
+        self.assertFalse(tmp.exists())
+
+    def test_resolved_success_still_deletes_normal_scratch(self):
+        code, attempt, terminal, run_dir, tmp, _ = self.run_case("clean", "pass", "v2-unit")
+        self.assertEqual(code, 0)
+        self.assertEqual(attempt["primary_outcome"], "pass")
+        self.assertNotIn("retained_scratch", terminal["secondary"])
+        self.assertFalse(run_dir.exists())
+        self.assertFalse(tmp.exists())
+
+
 class MigratedTargets(Tmp):
     def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
         cfg = ge.load_config()
