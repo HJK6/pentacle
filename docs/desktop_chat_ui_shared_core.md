@@ -131,3 +131,19 @@ free-text Skip as `text`. Both carry the same reserved value. Mobile's canonical
 `prompt.answer` always sends `text`; the daemon maps choice text to the existing
 `custom_text` storage path. Web's existing notification resolver sends that
 choice alias directly. Asking agents recognize either field.
+
+## Recovery during a daemon restart
+
+A normal daemon shutdown (WebSocket code 1001) keeps the current conversation
+view available for up to five seconds while the host reconnects. A send during
+that interval remains recoverable under its original request and optimistic
+message IDs. Reconnect replay waits for the authenticated connection to be
+ready, so an accepted send can recover its durable receipt without a second
+native submission. Opening a socket alone does not trigger replay.
+Authenticated recovery also refetches already-open chats, including messages
+persisted while the daemon connection was unavailable.
+
+The five-second deadline is not renewed by failed reconnect attempts. A longer
+outage shows the existing disconnected state; authentication refusals and
+other socket failures surface immediately. This recovery does not create a
+new send attempt or change the daemon's receipt and idempotency protocol.

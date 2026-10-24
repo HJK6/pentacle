@@ -1164,6 +1164,11 @@ function scheduleChatHistoryRetry(streamId, hasRows, generation = undefined, slo
   });
 }
 
+function invalidateChatHistoryLoads() {
+  state.chatStream.eventsLoadedFor.clear();
+  state.chatStream.historyLoads = {};
+}
+
 function refetchEventsForActiveChatSlots() {
   return _refetchEventsForActiveChatSlots({
     slots: state.slots,
@@ -2013,8 +2018,7 @@ function applyChatStreamState(data) {
   // state.chatStream.events via _push on the main side; only the visible
   // chat panes need an RPC backfill on reconnect.
   if (!state.chatStream.connected) {
-    state.chatStream.eventsLoadedFor.clear();
-    state.chatStream.historyLoads = {};
+    invalidateChatHistoryLoads();
   } else if (!wasConnected) {
     refetchEventsForActiveChatSlots();
     refetchAssetSnapshotsForActiveSlots();
@@ -2034,6 +2038,16 @@ function applyChatStreamState(data) {
 function applyChatStreamPayload(payload) {
   // NOT gated on chatUiEnabled(): see applyChatStreamState.
   if (!payload) return;
+  if (payload.type === '__reconnect' && Number(payload.generation) > 0) {
+    // Normal daemon recovery may keep the current view connected throughout.
+    // Its summary snapshot cannot replay a FINAL persisted while the socket
+    // was down, so backfill loaded chats independently of the visible edge.
+    invalidateChatHistoryLoads();
+    refetchEventsForActiveChatSlots();
+    refetchAssetSnapshotsForActiveSlots();
+    resyncSpawnCatalogAfterReconnect();
+    return;
+  }
   if (payload.type === 'work_lanes.inventory') {
     // A lane push is ordered by the connection state version like every other daemon frame.
     if (applyVersionedConnectionState(state.chatStream, { ...payload, connected: state.chatStream.connected }, setDegradedMode)) {

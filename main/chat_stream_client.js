@@ -24,6 +24,9 @@ const OPERATOR_AUTH_V2_PREFIX = 'pentacle-auth-v2:';
 const OPERATOR_AUTH_V2_SCHEME = 'hmac-sha256-v2';
 const OPERATOR_AUTH_V2_CLIENT_KIND = 'pentacle';
 const OPERATOR_AUTH_V2_WELCOME_TIMEOUT_MS = 5000;
+// A normal daemon shutdown is usually shorter than one native turn. Keep its
+// current chat view while reconnecting; a persistent outage still surfaces.
+const RESTART_RECOVERY_MS = 5000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const { nullLimits, validatedLimits, limitsHealthFromFrame } = require('./limits_contract');
 
@@ -179,6 +182,7 @@ class ChatStreamClient {
     this._livenessProbeInFlight = false;
     this._fetchBlobChunks = new Map();
     this._reconnectTimer = null;
+    this._restartRecoveryTimer = null;
     this._welcomeTimer = null;
     this._pendingHandshakeLimitsUpdate = null;
     this._heartbeatTimer = null;
@@ -206,10 +210,11 @@ class ChatStreamClient {
   }
 
   snapshot({ includeEvents = true } = {}) {
+    const connected = this.connected || this._restartRecoveryTimer !== null;
     return {
-      connected: this.connected,
-      hostedDashboardPolicy: this.connected ? this._hostedDashboardPolicy : null,
-      error: this._connectionError,
+      connected,
+      hostedDashboardPolicy: connected ? this._hostedDashboardPolicy : null,
+      error: connected ? null : this._connectionError,
       state_version: this._stateVersion,
       // The cache is bounded across *all* streams. It is not an authoritative
       // transcript snapshot for a renderer: treating a nonempty partial ring as
@@ -238,6 +243,7 @@ class ChatStreamClient {
 
   destroy() {
     this._destroyed = true;
+    this._clearRestartRecovery();
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -570,7 +576,8 @@ try {
   sendCommand(payload, prefix, options = {}) {
     const ws = this._ws;
     if (!this.connected || !ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.reject({ type: `${prefix}.error`, error: 'Chat stream is not connected' });
+      return Promise.reject({ type: `${prefix}.error`, error: prefix === 'send' && this._restartRecoveryTimer !== null
+        ? 'Stream disconnected' : 'Chat stream is not connected' });
     }
     // Phase 5 (desktop_chat_ui_mobile_parity): let the caller OWN the request_id
     // so the renderer's optimistic reducer can correlate send.result frames back
@@ -1250,11 +1257,28 @@ try {
     }
   }
 
+  _clearRestartRecovery() {
+    if (this._restartRecoveryTimer !== null) clearTimeout(this._restartRecoveryTimer);
+    this._restartRecoveryTimer = null;
+  }
+
+  _beginRestartRecovery() {
+    if (this._restartRecoveryTimer !== null) return; // failed reconnects cannot renew the deadline
+    this._restartRecoveryTimer = setTimeout(() => {
+      this._restartRecoveryTimer = null;
+      if (!this.connected && !this._destroyed) {
+        this._forwardFrame({ connected: false, error: this._connectionError });
+      }
+    }, RESTART_RECOVERY_MS);
+    this._restartRecoveryTimer.unref?.();
+  }
+
   _completeHandshake(ws) {
     if (ws !== this._ws || this._handshakeState !== 'hello_sent') return;
     this._handshakeState = 'ready';
     this._setConnected(true);
     this._setConnectionError(null);
+    this._clearRestartRecovery();
     this._isAlive = true;
     this._clearWelcomeTimer();
     if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
@@ -1274,6 +1298,11 @@ try {
       failure.code = error.code;
       throw failure;
     }
+    // Reconnect survivors reuse their original request IDs. Signal them only
+    // once the authenticated transport can actually reach durable receipts.
+    const prevGeneration = this._socketGeneration;
+    this._socketGeneration += 1;
+    this._forwardFrame({ type: '__reconnect', generation: prevGeneration, next_generation: this._socketGeneration });
   }
 
   _queueHandshakeLimitsUpdate(msg) {
@@ -1298,6 +1327,7 @@ try {
     if (ws !== this._ws || this._handshakeState === 'failed') return;
     const message = String(error?.code || error?.message || error || 'operator_auth_v2_required');
     this._handshakeState = 'failed';
+    this._clearRestartRecovery();
     this._pendingHandshakeLimitsUpdate = null;
     this._setConnected(false);
     this._setConnectionError(message);
@@ -1325,7 +1355,7 @@ try {
   // letting a new optimistic send wait for the next periodic heartbeat.
   noteInteraction() {
     const ws = this._ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this._handshakeState !== 'ready') return false;
     // A prior focused ping has intentionally set _isAlive false while awaiting
     // pong. Coalesce rapid/queued interactions onto that probe rather than
     // treating the transient state as a real half-open socket.
@@ -1355,6 +1385,7 @@ try {
       authMaterial = this._authMaterial();
     } catch (error) {
       const message = String(error?.code || error?.message || 'operator_auth_v2_required');
+      this._clearRestartRecovery();
       this._setConnected(false);
       this._setConnectionError(message);
       this._rejectPending(message);
@@ -1384,15 +1415,8 @@ try {
         this._failHandshake(ws, operatorAuthError('operator_auth_v2_required'));
       }, OPERATOR_AUTH_V2_WELCOME_TIMEOUT_MS);
       this._reconnectAttempt = 0;
-      const prevGeneration = this._socketGeneration;
-      this._socketGeneration += 1;
       this._pendingHandshakeLimitsUpdate = null;
-      this._forwardFrame({
-        type: '__reconnect',
-        generation: prevGeneration,
-        next_generation: this._socketGeneration,
-      });
-      if (prevGeneration > 0) {
+      if (this._socketGeneration > 0) {
         this._limits = nullLimits();
         this._limitsHealth = null;
       }
@@ -1520,8 +1544,13 @@ try {
         this._forwardFrame(msg);
       }
     });
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       if (ws !== this._ws) return;
+      const recovering = this._handshakeState !== 'failed'
+        && ((code === 1001 && (this.connected || this._restartRecoveryTimer !== null))
+          || (code === 1006 && this._restartRecoveryTimer !== null));
+      if (recovering) this._beginRestartRecovery();
+      else this._clearRestartRecovery();
       const message = this._handshakeState === 'failed'
         ? (this._connectionError || 'operator_auth_v2_required')
         : 'Stream disconnected';
@@ -1536,7 +1565,7 @@ try {
         this._heartbeatTimer = null;
       }
       this._rejectPending('Stream disconnected');
-      this._forwardFrame({ connected: false, error: message });
+      if (!recovering) this._forwardFrame({ connected: false, error: message });
       this._scheduleReconnect();
     });
     ws.on('error', (err) => {
