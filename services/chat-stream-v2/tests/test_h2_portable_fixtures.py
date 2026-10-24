@@ -112,7 +112,8 @@ def test_hermetic_daemon_launch_and_owned_shutdown_use_fake_process_boundary(mon
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(harness, "subprocess", SimpleNamespace(Popen=popen, run=run, STDOUT=-2))
     monkeypatch.setattr(harness, "leader_pgid", lambda pid: pid)
-    monkeypatch.setattr(harness, "_record_owned", lambda *args, **kwargs: None)
+    recorded = []
+    monkeypatch.setattr(harness, "_record_owned", lambda *args, **kwargs: recorded.append((args, kwargs)))
     def terminate(proc, **kwargs): terminated.append(proc.pid); proc.returncode = 0
     monkeypatch.setattr(harness, "terminate_process_group", terminate)
     daemon = harness.Daemon(str(tmp_path / "synthetic.db"), namespace)
@@ -124,6 +125,7 @@ def test_hermetic_daemon_launch_and_owned_shutdown_use_fake_process_boundary(mon
         assert all(key not in kwargs["env"] for key in ("PENTACLE_MACHINES_JSON", "SSH_AUTH_SOCK", "PENTACLE_USAGE_PROBE_HOST"))
         assert json.loads(Path(kwargs["env"]["PENTACLE_MACHINES_FILE"]).read_text()) == {"machines": [{"name": "soakhost"}]}
         assert daemon.port == 42420
+        assert recorded == [((42420, None), {"leader_pid": 42420, "socket_owner": None})]
         daemon.kill(); namespace.kill_server()
         assert terminated == [42420]
     finally:

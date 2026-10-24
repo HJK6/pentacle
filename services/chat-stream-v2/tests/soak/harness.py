@@ -360,8 +360,12 @@ class Daemon:
                 stdout=self._logf, stderr=subprocess.STDOUT, text=True,
                 **popen_kwargs,
             )
-            _record_owned(leader_pgid(self.proc.pid), self.tmux_namespace.socket,
-                          leader_pid=self.proc.pid, socket_owner=self.tmux_namespace.socket_owner)
+            # A namespace that never started owns only the daemon's group;
+            # an unused address is not a bound server/socket resource.
+            socket_owner = self.tmux_namespace.socket_owner
+            _record_owned(leader_pgid(self.proc.pid),
+                          self.tmux_namespace.socket if socket_owner else None,
+                          leader_pid=self.proc.pid, socket_owner=socket_owner)
             return self._wait_for_bind(start_off)
         except BaseException:
             self._cleanup_start_failure()
