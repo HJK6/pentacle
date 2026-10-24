@@ -1982,7 +1982,7 @@ function buildSessionTranscriptRows(
     dedupedEvents.some((item) => (
       item.event.client_origin === true &&
       (item.event.attachments?.length ?? 0) > 0 &&
-      serverUserEchoMatchesAttachmentWrapper(item.event.attachments, item.text.trim(), fallbackText)
+      serverUserEchoMatchesAttachmentWrapper(item.event.attachments, item.text.trim(), fallbackSegments?.answerText ?? session.last_text ?? '')
     ));
   const shouldAppendFallback = Boolean(
     fallbackCompareText &&

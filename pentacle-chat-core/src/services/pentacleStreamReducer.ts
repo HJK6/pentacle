@@ -166,6 +166,11 @@ type OptimisticOrphanTelemetryRecord = {
 };
 
 const optimisticOrphanTelemetryById = new Map<string, OptimisticOrphanTelemetryRecord>();
+const canonicalAttachmentEchoTelemetry = new Set<string>();
+
+export function resetCanonicalAttachmentEchoTelemetryForTests() {
+  canonicalAttachmentEchoTelemetry.clear();
+}
 
 export function resetOptimisticOrphanTelemetryForTests() {
   optimisticOrphanTelemetryById.clear();
@@ -1159,8 +1164,18 @@ export function serverUserEchoMatchesAttachmentWrapper(
   if (!ATTACHMENT_WRAPPER_MARKER.test(raw)) return false;
   const haystack = raw.toLowerCase();
   if (!keys.every((key) => haystack.includes(key))) return false;
+  const trimmedCaption = String(caption || '').trim().normalize('NFC');
+  return trimmedCaption ? raw.normalize('NFC').includes(trimmedCaption) : true;
+}
+
+function isCanonicalOnlyAttachmentEcho(
+  attachments: ChatAttachment[] | undefined,
+  caption: string | undefined,
+  eventText: string,
+) {
   const trimmedCaption = String(caption || '').trim();
-  return trimmedCaption ? raw.includes(trimmedCaption) : true;
+  return trimmedCaption.length > 0 && !eventText.includes(trimmedCaption) &&
+    serverUserEchoMatchesAttachmentWrapper(attachments, trimmedCaption, eventText);
 }
 
 function canUseTextFallbackStatus(status: OptimisticSendState['status']) {
@@ -1433,6 +1448,19 @@ function reconciledOptimisticEvent(
 ): PentacleEvent {
   const daemonSeq = Number(serverEvent.daemon_seq);
   const directMatch = serverEvent.optimistic_id === optimisticId;
+  if (!directMatch && Number.isFinite(daemonSeq) &&
+    priorEvent?.correlatedDaemonSeq !== daemonSeq &&
+    isCanonicalOnlyAttachmentEcho(optimisticAttachments, optimisticText, serverEvent.text)) {
+    const telemetryKey = `${optimisticId}:${daemonSeq}`;
+    if (!canonicalAttachmentEchoTelemetry.has(telemetryKey)) {
+      canonicalAttachmentEchoTelemetry.add(telemetryKey);
+      // Telemetry replay suppression is bounded and never affects matching.
+      if (canonicalAttachmentEchoTelemetry.size > 256) {
+        canonicalAttachmentEchoTelemetry.delete(canonicalAttachmentEchoTelemetry.values().next().value!);
+      }
+      logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_ATTACHMENT_ECHO_CANONICAL_RECONCILED, { comparison: 'NFC' });
+    }
+  }
   const priorRaw = priorEvent?.raw;
   const priorDirect = priorEvent?.receiptDirectMatch === true;
   const priorHasState = 'receipt_state' in (priorRaw ?? {});
