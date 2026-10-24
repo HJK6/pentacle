@@ -435,7 +435,7 @@ function resyncSessionSummary(
   if (summary.working === false && summary.capture_liveness === 'transport_unknown'
     && summary.pane_status !== 'pane_dead'
     && summary.session_generation && summary.session_generation === previous?.session_generation
-    && previous?.working === true && turn?.phase === 'working') {
+    && turn?.phase === 'working') {
     return { ...summary, working: true, working_label: previous.working_label };
   }
   return summary;

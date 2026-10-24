@@ -28,6 +28,17 @@ for (const type of ['snapshot', 'session.inventory']) {
     assert.equal(store.getTurnPhase(id), 'working');
   });
 }
+test('a native working root survives unknown resync before its summary catches up', () => {
+  const store = new ChatStoreController();
+  store.applyFrame({ type: 'snapshot', sessions: [unknown()], events: [] });
+  store.applyFrame({ type: 'chat.event', event: { stream_id: id, host: 'fixture', session_name: 'owned-status', provider: 'codex',
+    daemon_seq: 100, kind: 'USER', text: 'Held tool turn', timestamp: '2026-10-24T07:00:10Z', raw: { working: true } } });
+  assert.equal(store.getTurnPhase(id), 'working');
+  assert.equal(store.getState().sessions[0].working, false);
+  store.applyFrame({ type: 'snapshot', sessions: [unknown()], events: [] });
+  assert.equal(store.getTurnPhase(id), 'working');
+  assert.equal(store.getState().sessions[0].working, true);
+});
 test('a checked idle capture settles a preserved turn', () => {
   const store = active();
   store.applyFrame({ type: 'snapshot', sessions: [unknown()], events: [] });
