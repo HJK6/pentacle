@@ -1,15 +1,39 @@
 {
   "schema": "pentacle.gate-env.v1",
-  "toolchain": {"python": "3.13", "node": "22"},
+  "toolchain": {
+    "python": "3.13",
+    "node": "22"
+  },
   "reserve_s": 60,
-  "deadline": {"preflight_s": 30, "reserve_s": 60, "slack_s": 30},
+  "deadline": {
+    "preflight_s": 30,
+    "reserve_s": 60,
+    "slack_s": 30
+  },
   "max_tmpdir_bytes": 48,
   "min_free_mb": 1024,
-  "locales": ["en_US.UTF-8", "C.UTF-8"],
-  "system_path": ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
+  "locales": [
+    "en_US.UTF-8",
+    "C.UTF-8"
+  ],
+  "system_path": [
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ],
   "search_path": {
-    "darwin": ["/opt/homebrew/opt/python@3.13/bin", "/opt/homebrew/opt/node@22/bin", "/opt/homebrew/bin", "/usr/local/bin"],
-    "linux": ["/usr/local/bin", "/usr/bin", "/bin"]
+    "darwin": [
+      "/opt/homebrew/opt/python@3.13/bin",
+      "/opt/homebrew/opt/node@22/bin",
+      "/opt/homebrew/bin",
+      "/usr/local/bin"
+    ],
+    "linux": [
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin"
+    ]
   },
   "capability_sets": {
     "v2_host": [
@@ -25,35 +49,150 @@
   "profiles": {
     "pentacle": {
       "service_dir": "services/chat-stream-v2",
-      "python_requirements": ["services/chat-stream-v2/requirements.txt"],
-      "python_editable": ["services/agent-orch"],
-      "pythonpath": ["services", "services/agent-orch"],
+      "python_requirements": [
+        "services/chat-stream-v2/requirements.txt"
+      ],
+      "python_editable": [
+        "services/agent-orch"
+      ],
+      "pythonpath": [
+        "services",
+        "services/agent-orch"
+      ],
       "package_lock": "package-lock.json",
       "targets": {
         "v2-unit": {
-          "kind": "run_gate", "gate": "unit", "needs": ["python", "tmux"],
-          "capabilities": "v2_host", "timeout_s": 900, "max_timeout_s": 7200
+          "kind": "run_gate",
+          "gate": "unit",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "timeout_s": 900,
+          "max_timeout_s": 7200
         },
         "v2-smoke": {
-          "kind": "run_gate", "gate": "smoke", "needs": ["python", "tmux"],
-          "capabilities": "v2_host", "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "timeout_s": 900, "max_timeout_s": 7200
+          "kind": "run_gate",
+          "gate": "smoke",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "timeout_s": 900,
+          "max_timeout_s": 7200
         },
         "v2-merge": {
-          "kind": "run_gate", "gate": "merge", "needs": ["python", "tmux"],
-          "capabilities": "v2_host", "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "timeout_s": 1800, "max_timeout_s": 14400
+          "kind": "run_gate",
+          "gate": "merge",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "timeout_s": 1800,
+          "max_timeout_s": 14400
         },
         "v2-pytest": {
-          "kind": "pytest_files", "needs": ["python", "tmux"], "capabilities": "v2_host",
-          "select": {"root": "services/chat-stream-v2", "pattern": "^tests/test_[A-Za-z0-9_]+\\.py(::[A-Za-z0-9_]+)*$"},
-          "timeout_s": 900, "max_timeout_s": 7200
+          "kind": "pytest_files",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "select": {
+            "root": "services/chat-stream-v2",
+            "pattern": "^tests/test_[A-Za-z0-9_]+\\.py(::[A-Za-z0-9_]+)*$"
+          },
+          "timeout_s": 900,
+          "max_timeout_s": 7200
         },
         "npm-test": {
-          "kind": "npm_test", "needs": ["node", "npm"], "npm_ci": true, "process_listing": true,
-          "select": {"pattern": "^test/[A-Za-z0-9_./*-]+$"},
-          "default_patterns": ["test/*.test.js", "test/*.test.ts", "test/e2e/terminal_interaction_runtime/*.test.js"],
-          "timeout_s": 900, "max_timeout_s": 7200
+          "kind": "npm_test",
+          "needs": [
+            "node",
+            "npm"
+          ],
+          "npm_ci": true,
+          "process_listing": true,
+          "select": {
+            "pattern": "^test/[A-Za-z0-9_./*-]+$"
+          },
+          "default_patterns": [
+            "test/*.test.js",
+            "test/*.test.ts",
+            "test/e2e/terminal_interaction_runtime/*.test.js"
+          ],
+          "timeout_s": 900,
+          "max_timeout_s": 7200,
+          "npm_build": [
+            "prestart"
+          ]
+        },
+        "v2-merge-ci": {
+          "kind": "run_gate",
+          "gate": "merge",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "tier_timeouts": {
+            "unit": 1200,
+            "smoke": 900
+          },
+          "timeout_s": 2100,
+          "max_timeout_s": 2100
+        },
+        "cli-pytest": {
+          "kind": "pytest_files",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "select": {
+            "root": "services/agent-orch",
+            "pattern": "^tests(?:/test_[A-Za-z0-9_]+\\.py(?:::[A-Za-z0-9_]+)*)?$"
+          },
+          "strict_capabilities": false,
+          "timeout_s": 900,
+          "max_timeout_s": 900
+        },
+        "shared-pytest": {
+          "kind": "pytest_files",
+          "needs": [
+            "python",
+            "tmux"
+          ],
+          "select": {
+            "root": "services/_shared",
+            "pattern": "^tests(?:/test_[A-Za-z0-9_]+\\.py(?:::[A-Za-z0-9_]+)*)?$"
+          },
+          "strict_capabilities": false,
+          "timeout_s": 900,
+          "max_timeout_s": 900
+        },
+        "web-gate": {
+          "kind": "web_gate",
+          "needs": [
+            "python",
+            "node",
+            "npm",
+            "tmux"
+          ],
+          "npm_ci": true,
+          "npm_build": [
+            "prestart",
+            "build:web"
+          ],
+          "process_listing": true,
+          "capabilities": "v2_host",
+          "timeout_s": 900,
+          "max_timeout_s": 900
         }
       }
     }

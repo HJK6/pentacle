@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 // First-visit workspace default in real Chrome against a disposable daemon:
 // with an assistant composite (here bound to a direct-assistant target) a
 // fresh profile shows one pane holding the assistant chat, bound exactly as a
@@ -76,7 +77,7 @@ async function firstVisit(name, { omitAssistant }) {
   try {
     web = await require(path.join(root, 'server')).main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const port = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--disable-gpu',
+    browser = spawn(browserBinary, [...headlessChromeArgs(), '--disable-gpu',
       '--window-size=1600,900', `--user-data-dir=${path.join(dir, 'chrome')}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
     page = await cdp.connect(port, { timeoutMs: 15000 });
     await page.send('Page.navigate', { url: web.url });

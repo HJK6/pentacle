@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 // Older persisted history is reachable: a tool-heavy chat larger than the daemon's
 // newest-events window (and the store's per-stream cap) must page back to its first
 // message through "Load earlier messages". Actual browser/store/web host/transport;
@@ -32,7 +33,7 @@ async function run() {
   try {
     web = await require(path.join(root, 'server')).main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const port = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--disable-gpu',
+    browser = spawn(browserBinary, [...headlessChromeArgs(), '--disable-gpu',
       '--disable-renderer-backgrounding', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
       '--window-size=1600,900', `--user-data-dir=${path.join(out, 'chrome')}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
     page = await cdp.connect(port, { timeoutMs: 15000 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -27,7 +28,7 @@ async function runInstalled() {
   const cells = [];
   try {
     const debugPort = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(browserBinary, [...headlessChromeArgs(), '--no-sandbox',
       '--ignore-certificate-errors', '--disable-gpu', '--window-size=1600,900',
       `--user-data-dir=${path.join(OUT, 'browser-profile')}`, `--remote-debugging-port=${debugPort}`, url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });
@@ -86,7 +87,7 @@ async function run() {
     process.env.PENTACLE_CONFIG = daemon.configFile;
     web = await require('../../server').main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const debugPort = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(browserBinary, [...headlessChromeArgs(), '--no-sandbox',
       '--disable-gpu', '--window-size=1600,900', `--user-data-dir=${path.join(OUT, 'browser-profile')}`,
       `--remote-debugging-port=${debugPort}`, web.url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });

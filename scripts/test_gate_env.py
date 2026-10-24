@@ -616,5 +616,52 @@ class EntrypointReceipts(Tmp):
         self.assertEqual({a["primary_outcome"] for a in attempts}, {"setup_failure"})
 
 
+class PythonChromePolicy(unittest.TestCase):
+    def test_selenium_launch_retains_executable_headless_and_keychain_flags(self):
+        import ast
+        source = (HERE.parent / "test/e2e/report_selection_copy_gate.py").read_text()
+        tree = ast.parse(source)
+        flags = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For) or not isinstance(node.iter, (ast.Tuple, ast.List)):
+                continue
+            if not any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                       and call.func.attr == "add_argument" and call.args
+                       and isinstance(call.args[0], ast.Name) and isinstance(node.target, ast.Name)
+                       and call.args[0].id == node.target.id for statement in node.body for call in ast.walk(statement)):
+                continue
+            flags += [e.value for e in node.iter.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        self.assertIn("--headless=new", flags)
+        self.assertIn("--use-mock-keychain", flags)
+
+
+class MigratedTargets(Tmp):
+    def test_ci_merge_keeps_existing_distinct_tier_limits_and_deadline(self):
+        cfg = ge.load_config()
+        profile = cfg["profiles"]["pentacle"]
+        target = profile["targets"]["v2-merge-ci"]
+        env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
+                           home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
+                           attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S":"1"})
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("1200","900"))
+        cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
+                                       self.tmp / "ev",self.tmp / "t/b",[],2100,env)
+        self.assertNotIn("--timeout-seconds",cmd)  # runner reads preserved per-tier limits
+        self.assertIn("merge",cmd)
+        self.assertGreater(float(cmd[cmd.index("--deadline-seconds")+1]),2100+60+30)
+        self.assertGreater(result["wall_s"],2100)
+
+    def test_cli_and_shared_targets_use_their_own_roots_without_foreign_plugin(self):
+        cfg = ge.load_config(); profile = cfg["profiles"]["pentacle"]
+        for name, folder in (("cli-pytest","services/agent-orch"),("shared-pytest","services/_shared")):
+            target = profile["targets"][name]
+            selected = ge.validate_selection(target,["tests"],HERE.parent)
+            cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
+                                           self.tmp / name,self.tmp / "t/b",selected,900,{})
+            self.assertEqual(result["cwd"],HERE.parent / folder)
+            self.assertNotIn("--strict-capabilities",cmd)
+            with self.assertRaises(ge.SetupFailure):ge.validate_selection(target,[],HERE.parent)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

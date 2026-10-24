@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 
 // Real Chromium layout oracle against a disposable web host and chat daemon.
 const assert = require('node:assert/strict');
@@ -24,7 +25,7 @@ async function run() {
   process.env.PENTACLE_CONFIG = daemon.configFile;
   const web = await require('../../server').main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
   const browser = await chromium.launch({ headless: true, executablePath: browserBinary,
-    args: ['--no-sandbox'] });
+    args: headlessChromeArgs(['--no-sandbox'], { playwright: true }) });
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
   const samples = [];
   const extra = {};

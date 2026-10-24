@@ -26,13 +26,13 @@ ORIGIN_RE = re.compile(
     r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
     r"(HJK6/(?:pentacle|pentacle-private))(?:\.git)?$"
 )
-PUBLIC_WORKFLOW_SHA256 = '2a399e858673f7268b3402d2376314bf0fd9637a0a3b10b61b9eac34a7095e17'
+PUBLIC_WORKFLOW_SHA256 = '00555264710971cf2c3788a33580b4f3eb2a1ce788a0daa75cf4689e0d0fd200'
 WORKFLOWS = {
     "HJK6/pentacle": (".github/workflows/predeploy-tests.yml", "Public checks"),
     "HJK6/pentacle-private": (".github/workflows/chat-stream-v2-smoke.yml", "chat-stream-v2-smoke"),
 }
 PUBLIC_REQUIRED_STEPS = frozenset({
-    "Run npm test",
+    "Supported npm tests",
     "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py",
     "Source integrity after Chrome install",

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./e2e/lib/chrome_launch.cjs');
 
 // Read-only browser gate for the host identity surfaces. The live URL supplies
 // configured hosts/sessions; local built assets are overlaid unless disabled.
@@ -147,7 +148,7 @@ async function main() {
   const browser = await chromium.launch({
     headless: true,
     executablePath: process.env.PENTACLE_CHROME || undefined,
-    args: ['--no-sandbox'],
+    args: headlessChromeArgs(['--no-sandbox'], { playwright: true }),
   });
   const receipt = {
     urlSha256: sha(url), mode: overlay ? 'candidate-overlay' : 'served-runtime',

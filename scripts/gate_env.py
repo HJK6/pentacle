@@ -82,13 +82,19 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 problems.append("profile " + pname)
                 continue
             for tname, target in profile["targets"].items():
-                if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test"):
+                if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test", "web_gate"):
                     problems.append("target " + tname)
                     continue
                 if not isinstance(target.get("timeout_s"), int) or target["timeout_s"] <= 0 or target["timeout_s"] > target.get("max_timeout_s", 0):
                     problems.append("timeout of " + tname)
                 if target.get("capabilities") and target["capabilities"] not in config["capability_sets"]:
                     problems.append("capability set of " + tname)
+                if target.get("npm_build") and (not isinstance(target["npm_build"], list) or any(b not in ("prestart", "build:web") for b in target["npm_build"])):
+                    problems.append("npm_build of " + tname)
+                limits = target.get("tier_timeouts")
+                if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
+                    problems.append("tier_timeouts of " + tname)
+
     if problems:
         raise SetupFailure([fail("config", "malformed gate-env.json: " + ", ".join(problems), "restore the checked-in scripts/gate-env.json")])
     return config
@@ -241,6 +247,11 @@ def build_env(config: Dict[str, Any], profile: Dict[str, Any], target: Dict[str,
     if "python" in target.get("needs", []):
         env["V2_PYTHON_BIN"] = str(venv / "bin" / "python") if venv else ""
         env["PYTHONPATH"] = os.pathsep.join(str(checkout / p) for p in profile.get("pythonpath", []))
+    for tier, limit in target.get("tier_timeouts", {}).items():
+        env["V2_%s_TIMEOUT_S" % tier.upper()] = str(limit)
+    if target["kind"] == "web_gate":
+        env["PENTACLE_PYTHON"] = str(venv / "bin" / "python") if venv else ""
+        env["PENTACLE_WEB_GATE_REPORT_ROOT"] = str(evidence / "gate" / "web")
     if target["kind"] == "npm_test":
         env["PENTACLE_TEST_FILE_TIMEOUT_MS"] = "60000"
         env["PENTACLE_TEST_RUN_TIMEOUT_MS"] = str(int(target["timeout_s"]) * 1000)
@@ -566,6 +577,21 @@ def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: boo
     return "unknown", {"stage": "subject", "code": "rc_%d" % returncode}, secondary
 
 
+def classify_web(summary: Path, returncode: int, timed_out: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
+    if timed_out:
+        return "timeout_unclassified", {"stage": "subject", "code": "wall_deadline"}, {}
+    try:
+        data = json.loads(summary.read_text("utf-8"))
+    except (OSError, ValueError):
+        return "harness_failure", {"stage": "subject", "code": "missing_web_summary"}, {}
+    phases = data.get("phases", [])
+    failed = next((p for p in phases if p.get("returncode") != 0), None)
+    if not failed and returncode == 0 and len(phases) == 2:
+        return "pass", None, {"phases": len(phases)}
+    # A nonzero browser exit without assertion evidence is not a product assertion.
+    return "harness_failure", {"stage": "subject", "code": "web_gate_failed"}, {"phases": phases}
+
+
 # ---------------------------------------------------------------- runner
 
 def source_identity(checkout: Path) -> Dict[str, Any]:
@@ -773,6 +799,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures += f
         if failures:
             raise SetupFailure(failures)
+        for build in target.get("npm_build", []):
+            out = subprocess.run(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
+            build_log = evidence / ("build-%s.log" % build.replace(":", "-"))
+            build_log.write_text(out.stdout + out.stderr)
+            if out.returncode:
+                raise SetupFailure([fail("dependencies", "npm run %s failed; see %s" % (build, build_log.name))])
 
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=venv, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
@@ -875,6 +907,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT.get(state["outcome"], 1)
 
 
+def profile_root(service_dir: Path, checkout: Path) -> str:
+    return str(service_dir.relative_to(checkout))
+
+
 def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
                   selection: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[List[str], Dict[str, Any]]:
     gate_dir = evidence / "gate"
@@ -882,24 +918,33 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
     kind = target["kind"]
     if kind == "run_gate":
         tiers = 2 if target["gate"] == "merge" else 1
+        limits = target.get("tier_timeouts")
         tier_s = max(1, timeout_s // tiers)
         runner = service_dir / "tools" / "run_gate.py"
         command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
-                   "--basetemp", str(basetemp), "--timeout-seconds", str(tier_s)]
+                   "--basetemp", str(basetemp)]
+        if not limits:
+            command += ["--timeout-seconds", str(tier_s)]
         wall_s = timeout_s + config["reserve_s"]
         if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
             budget = config["deadline"]
             preflights = 1 if target["gate"] in ("smoke", "merge") else 0
             # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
-            deadline_s = tier_s * tiers + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
+            deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
         return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":
         junit = gate_dir / "pytest.junit.xml"
-        command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs", "--strict-capabilities", "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]
-        return command, {"cwd": service_dir, "classify": lambda rc, to: classify_pytest(junit, rc, to, False)}
+        command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs",
+                   *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
+                   "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]
+        return command, {"cwd": checkout / target.get("select", {}).get("root", profile_root(service_dir, checkout)), "classify": lambda rc, to: classify_pytest(junit, rc, to, False)}
+    if kind == "web_gate":
+        summary = gate_dir / "web-summary.json"
+        command = [str(venv / "bin" / "python"), str(checkout / "scripts" / "gate_web.py"), str(summary)]
+        return command, {"cwd": checkout, "classify": lambda rc, to: classify_web(summary, rc, to)}
     summary = gate_dir / "npm-test-summary.json"
     env["PENTACLE_TEST_SUMMARY_PATH"] = str(summary)
     command = ["node", "scripts/run-tests.js", *selection]

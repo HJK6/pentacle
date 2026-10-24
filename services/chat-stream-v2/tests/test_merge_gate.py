@@ -23,10 +23,10 @@ OLD = "a" * 40
 CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
-EXPECTED_PUBLIC_SHA256 = "2a399e858673f7268b3402d2376314bf0fd9637a0a3b10b61b9eac34a7095e17"
+EXPECTED_PUBLIC_SHA256 = "00555264710971cf2c3788a33580b4f3eb2a1ce788a0daa75cf4689e0d0fd200"
 CHECKOUT_LOG = (Path(__file__).parent / "fixtures/th_h5/tag_checkout.txt").read_text()
 EXPECTED_PUBLIC_STEPS = {
-    "Run npm test", "Run python3 scripts/test_check_public_residue.py",
+    "Supported npm tests", "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py", "Source integrity after Chrome install",
     "Portable microphone contracts", "Bounded dashboard dependency",
     "Web mode E2E gate", "Daemon and CLI checks", "Source integrity at gate end",

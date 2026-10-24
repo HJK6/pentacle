@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,7 +29,7 @@ async function main() {
     process.env.PENTACLE_CONFIG = config;
     web = await require(path.join(ROOT, 'server')).main(['--profile', config, '--bind', '127.0.0.1', '--port', '0']);
     const debugPort = await getFreePort();
-    browser = spawn(chrome(), ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawn(chrome(), [...headlessChromeArgs(), '--no-sandbox',
       '--disable-gpu', `--user-data-dir=${path.join(out, 'browser-profile')}`, `--remote-debugging-port=${debugPort}`, web.url], { stdio: 'ignore' });
     page = await cdp.connect(debugPort, { timeoutMs: 15000 });
     await page.waitFor('window.PentacleChatStore?.getState().connected === true', { timeoutMs: 15000 });
