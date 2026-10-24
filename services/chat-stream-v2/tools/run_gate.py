@@ -477,10 +477,13 @@ def main() -> int:
             except Exception as exc:
                 cleanup_errors.append(f"reap:{type(exc).__name__}: {exc}"[:500])
             # pytest never cleans an explicit --basetemp; evidence lives in the evidence dir.
-            for tier in tiers:
-                shutil.rmtree(basetemp / tier, ignore_errors=True)
-                if (basetemp / tier).exists():
-                    cleanup_errors.append(f"basetemp_not_removed:{tier}")
+            if not cleanup_errors and not manifest.exists():
+                for tier in tiers:
+                    shutil.rmtree(basetemp / tier, ignore_errors=True)
+                    if (basetemp / tier).exists():
+                        cleanup_errors.append(f"basetemp_not_removed:{tier}")
+            elif manifest.exists() and not cleanup_errors:
+                cleanup_errors.append("owner_manifest_unresolved")
         for signum, previous in old_handlers.items():
             signal.signal(signum, previous)
         _ACTIVE_MANIFEST_PATH = _ACTIVE_RUN_ID = None

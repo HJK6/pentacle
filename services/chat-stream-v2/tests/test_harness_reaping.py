@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ import time
 from pathlib import Path
 
 from tests.soak.harness import Daemon, TmuxNamespace
+from tools import run_gate as gate_runner
 from tools.gate_owner_manifest import (
     initialize_manifest,
     mark_owner_stopping,
@@ -43,6 +45,34 @@ namespace = TmuxNamespace(root)
 namespace.start()
 daemon = Daemon(str(root / "sessions.db"), namespace)
 daemon.start()
+daemon_pgid = os.getpgid(daemon.proc.pid)
+prepare_signals = []
+if len(sys.argv) > 3 and sys.argv[3] == "dead-leader":
+    # PID-only SIGKILL can orphan the real sampler. Prepare an absent group
+    # using the existing owned-Popen group shutdown, keeping tmux alive.
+    original_signal = gate_runner._signal_process_group
+    def observed_signal(proc, signum, **kwargs):
+        prepare_signals.append(signal.Signals(signum).name)
+        return original_signal(proc, signum, **kwargs)
+    gate_runner._signal_process_group = observed_signal
+    try:
+        daemon.kill()
+    finally:
+        gate_runner._signal_process_group = original_signal
+    if gate_runner._process_group_exists(daemon_pgid):
+        import subprocess
+        members = subprocess.run(["pgrep", "-g", str(daemon_pgid), "."],
+            capture_output=True, text=True, timeout=2).stdout.split()
+        rows = subprocess.run(["ps", "-ww", "-p", ",".join(members),
+            "-o", "pid=,ppid=,pgid=,lstart=,command="], capture_output=True,
+            text=True, timeout=2).stdout if members else ""
+        detail = dict(pgid=daemon_pgid, signals=prepare_signals,
+                      daemon_returncode=daemon.proc.returncode, members=rows)
+        (root / "dead-leader-fixture-failure.json").write_text(json.dumps(detail))
+        print(json.dumps(detail), file=sys.stderr, flush=True)
+        raise RuntimeError("fixture daemon group is not absent after owned shutdown")
+    if not namespace.socket_path.is_socket():
+        raise RuntimeError("fixture lost its bound socket before stale reaping")
 
 def stop(_signum, _frame):
     mark_owner_stopping(manifest)
@@ -57,22 +87,24 @@ signal.signal(signal.SIGTERM, stop)
 print(json.dumps({
     "pid": os.getpid(),
     "daemon": daemon.proc.pid,
-    "daemon_pgid": os.getpgid(daemon.proc.pid),
+    "daemon_pgid": daemon_pgid,
     "socket": namespace.socket,
+    "preparation_signals": prepare_signals,
 }), flush=True)
 while True:
     time.sleep(1)
 '''
 
 
-def _start_owner(manifest: Path) -> tuple[subprocess.Popen[str], dict]:
+def _start_owner(manifest: Path, *, dead_leader: bool = False) -> tuple[subprocess.Popen[str], dict]:
     env = dict(
         os.environ,
         PYTHONPATH=str(SERVICE_DIR.parent),
         V2_GATE_OWNER_MANIFEST=str(manifest),
     )
     proc = subprocess.Popen(
-        [sys.executable, "-c", OWNER_SCRIPT, str(manifest.parent), str(manifest)],
+        [sys.executable, "-c", OWNER_SCRIPT, str(manifest.parent), str(manifest),
+         "dead-leader" if dead_leader else "live-leader"],
         cwd=SERVICE_DIR,
         env=env,
         stdout=subprocess.PIPE,
@@ -96,14 +128,19 @@ def _start_owner(manifest: Path) -> tuple[subprocess.Popen[str], dict]:
                 raise AssertionError("owned owner readiness exceeded byte limit")
         line = data.split(b"\n", 1)[0].decode("utf-8")
         return proc, json.loads(line)
-    except BaseException:
+    except BaseException as first:
         if proc.poll() is None:
             proc.terminate()
             try: proc.wait(timeout=2)
             except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
+        _, stderr = proc.communicate(timeout=2)
         from tools.gate_owner_manifest import reap_manifest
-        if manifest.exists(): reap_manifest(manifest)
-        raise
+        cleanup = None
+        try:
+            if manifest.exists(): reap_manifest(manifest)
+        except Exception as exc:
+            cleanup = f"{type(exc).__name__}: {exc}"
+        raise AssertionError(f"{first}; owned stderr={stderr[-6000:]}; cleanup={cleanup}") from first
 
 
 def _socket_path(socket_name: str) -> Path:
@@ -170,19 +207,14 @@ def test_sigterm_reaps_owned_processes(tmp_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=2)
-        subprocess.run(["tmux", "-L", info["socket"], "kill-server"], check=False, timeout=3)
+        subprocess.run(["tmux", "-N", "-S", info["socket"], "kill-server"], check=False, timeout=3)
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
-@pytest.mark.skip(
-    reason=(
-        "2026-09-03: intermittent v2 tmux-socket cleanup race tracked by "
-        "spec_pentacle__v2_gate_harness_reaping_socket_race_2026_09"
-    )
-)
+@pytest.mark.requires("tmux usable", "process start identity readable")
+@pytest.mark.usefixtures("isolated_tmux_env")
 def test_sigkill_then_reap_manifest_cleans(tmp_path: Path) -> None:
     manifest = tmp_path / ".owned.json"
-    proc, info = _start_owner(manifest)
+    proc, info = _start_owner(manifest, dead_leader=True)
     child_pgid = int(info["daemon_pgid"])
     try:
         os.kill(proc.pid, signal.SIGKILL)
@@ -229,8 +261,11 @@ def test_sigkill_then_reap_manifest_cleans(tmp_path: Path) -> None:
         saw_new_owner = False
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if manifest.exists():
+            try:
                 data = json.loads(manifest.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                pass  # Stale reaping may remove the old owner before takeover.
+            else:
                 if data["owner_pid"] != info["pid"] and data["owner_state"] == "active":
                     saw_new_owner = True
                     break
@@ -359,8 +394,10 @@ def test_recycled_pgid_with_different_start_time_is_not_signalled(tmp_path: Path
             "leader_pid": dead_pid, "leader_start_identity": "Thu Jan  1 00:00:00 1970",
             "run_id": "run-under-test",
         })
-        reap_manifest(manifest, "run-under-test")
-        time.sleep(1.5)
+        from tools.gate_owner_manifest import ManifestError
+        with pytest.raises(ManifestError, match="identity"):
+            reap_manifest(manifest, "run-under-test")
+        assert manifest.exists()
         assert victim.poll() is None, "reaper signalled a group it could not identify"
     finally:
         victim.kill()
@@ -385,8 +422,10 @@ def test_missing_leader_start_identity_is_not_signalled(
             "leader_pid": victim.pid, "leader_start_identity": identity,
             "run_id": "run-under-test",
         })
-        reap_manifest(manifest, "run-under-test")
-        time.sleep(1.5)
+        from tools.gate_owner_manifest import ManifestError
+        with pytest.raises(ManifestError, match="identity"):
+            reap_manifest(manifest, "run-under-test")
+        assert manifest.exists()
         assert victim.poll() is None, "reaper signalled an incompletely identified group"
         assert socket.exists(), "reaper removed a socket for an incompletely identified group"
     finally:
@@ -409,9 +448,15 @@ def test_reap_signals_entry_whose_identity_still_matches(tmp_path: Path) -> None
             "leader_start_identity": process_start_identity(victim.pid),
             "run_id": "run-under-test",
         })
+        # The fixture owns the child; collect it concurrently so the reaper's
+        # final group observation must prove absence before it returns.
+        collector = threading.Thread(target=victim.wait, daemon=True)
+        collector.start()
         reap_manifest(manifest, "run-under-test")
-        victim.wait(timeout=10)
+        collector.join(timeout=10)
         assert victim.poll() is not None
+        assert not _process_group_exists(victim.pid)
+        assert not manifest.exists()
     finally:
         if victim.poll() is None:
             victim.kill()
@@ -469,3 +514,93 @@ def test_record_refuses_the_recorders_own_process_group(tmp_path: Path) -> None:
     initialize_manifest(manifest)
     with pytest.raises(ManifestError, match="own process group"):
         record(manifest, os.getpgrp(), None, leader_pid=os.getpid())
+
+
+def _server_exit_watch(pid: int):
+    """Independent test-side kernel witness; never the reaper's return value."""
+    import contextlib
+    import select
+    @contextlib.contextmanager
+    def watch():
+        if sys.platform == "darwin":
+            queue = select.kqueue()
+            queue.control([select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_EXIT)], 0, 0)
+            try:
+                yield lambda: any(e.ident == pid and e.fflags & select.KQ_NOTE_EXIT
+                                  for e in queue.control(None, 1, 0))
+            finally:
+                queue.close()
+        elif sys.platform.startswith("linux"):
+            descriptor = os.pidfd_open(pid, 0)
+            try:
+                yield lambda: bool(select.select([descriptor], [], [], 0)[0])
+            finally:
+                os.close(descriptor)
+        else:
+            pytest.fail("native finite exit events are required")
+    return watch()
+
+
+@pytest.mark.requires("tmux usable", "process start identity readable")
+def test_reap_cleans_socket_of_an_entry_whose_leader_already_died(tmp_path: Path) -> None:
+    from tests.soak.harness import TmuxNamespace
+    from tools import gate_owner_manifest as owner
+    namespace = TmuxNamespace(tmp_path)
+    victim = _sleeper()
+    try:
+        namespace.start()
+        identity = owner.process_start_identity(victim.pid)
+        victim.kill()
+        victim.wait(timeout=5)
+        manifest = tmp_path / "dead-leader.json"
+        _manifest_with_entry(manifest, dict(pgid=victim.pid, leader_pid=victim.pid,
+            leader_start_identity=identity, run_id="run-under-test", socket=namespace.socket,
+            socket_path=namespace.socket, socket_owner=namespace.socket_owner))
+        with _server_exit_watch(namespace.socket_owner["server_pid"]) as exited:
+            assert not exited() and namespace.socket_path.is_socket()
+            owner.reap_manifest(manifest, "run-under-test")
+            assert exited(), "reaper returned before the original tmux server exited"
+        assert not namespace.socket_path.exists()
+        assert not namespace.root.exists()
+        assert not manifest.exists()
+        assert not owner._group_exists(victim.pid)
+    finally:
+        if victim.poll() is None:
+            victim.kill(); victim.wait(timeout=5)
+        namespace.kill_server()
+
+
+@pytest.mark.requires("tmux usable", "process start identity readable")
+def test_stale_reap_live_group_requires_terminal_absence(tmp_path: Path) -> None:
+    from tests.soak.harness import TmuxNamespace
+    from tools import gate_owner_manifest as owner
+    namespace = TmuxNamespace(tmp_path)
+    stale_owner, victim = _sleeper(), _sleeper()
+    collector = threading.Thread(target=victim.wait, daemon=True)
+    try:
+        namespace.start()
+        stale_identity = owner.process_start_identity(stale_owner.pid)
+        stale_owner.kill(); stale_owner.wait(timeout=5)
+        manifest = tmp_path / "stale-live-group.json"
+        _manifest_with_entry(manifest, dict(pgid=victim.pid, leader_pid=victim.pid,
+            leader_start_identity=owner.process_start_identity(victim.pid), run_id="run-under-test",
+            socket=namespace.socket, socket_path=namespace.socket, socket_owner=namespace.socket_owner))
+        data = json.loads(manifest.read_text())
+        data.update(owner_pid=stale_owner.pid, owner_start_identity=stale_identity, owner_state="active")
+        manifest.write_text(json.dumps(data))
+        collector.start()
+        with _server_exit_watch(namespace.socket_owner["server_pid"]) as exited:
+            owner.reap_manifest(manifest)
+            assert exited()
+            assert not owner._group_exists(victim.pid), "leader exit alone is insufficient"
+            assert not manifest.exists()
+            assert not namespace.socket_path.exists() and not namespace.root.exists()
+        collector.join(timeout=5)
+        assert victim.poll() is not None
+    finally:
+        for child in [stale_owner, victim]:
+            if child.poll() is None:
+                child.kill(); child.wait(timeout=5)
+        namespace.kill_server()

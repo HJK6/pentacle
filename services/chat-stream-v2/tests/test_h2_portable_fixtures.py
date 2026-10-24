@@ -43,7 +43,7 @@ def owner_fixture(monkeypatch, tmp_path):
     monkeypatch.setattr(owner, "process_start_identity", lambda pid: identities.get(pid))
     monkeypatch.setattr(owner, "_exists", lambda pid: pid in identities)
     signals = []
-    monkeypatch.setattr(owner, "_reap_group", signals.append)
+    monkeypatch.setattr(owner, "_reap_group", lambda pgid, **kwargs: signals.append(pgid))
     transports = []
     class FakeProcess:
         def communicate(self, timeout):
@@ -65,11 +65,15 @@ def test_recorded_identity_reaping_matches_missing_recycled_and_foreign_cases(mo
     manifest.write_text(json.dumps({"schema": owner.MANIFEST_SCHEMA, "version": owner.MANIFEST_VERSION,
         "owner_pid": os.getpid(), "owner_start_identity": "owner-start", "owner_state": "stopping", "run_id": "owned-run",
         "entries": [{"pgid": 42420, "leader_pid": 42420, "leader_start_identity": recorded, "run_id": run_id, "socket": str(sock), "socket_path": str(sock)}]}))
-    owner.reap_manifest(manifest, "owned-run")
+    if run_id == "foreign-run":
+        owner.reap_manifest(manifest, "owned-run")
+    else:
+        with pytest.raises(owner.ManifestError, match="identity|ownership binding"):
+            owner.reap_manifest(manifest, "owned-run")
     assert signals == ([42420] if expected else [])
-    assert sock.exists() is not expected
-    assert len(transports) == int(expected)
-    if run_id == "foreign-run": assert manifest.exists()
+    assert sock.exists(), "a legacy unbound endpoint must never be unlinked"
+    assert not transports
+    assert manifest.exists()
 
 
 def test_recording_rejects_missing_identity_and_own_group_with_frozen_processes(monkeypatch, tmp_path):
@@ -103,12 +107,13 @@ def test_hermetic_daemon_launch_and_owned_shutdown_use_fake_process_boundary(mon
         kwargs["stdout"].write(b"listening on 127.0.0.1:42420\n")
         return child
     def run(argv, **kwargs):
-        assert argv[:2] == ["/synthetic/tmux", "-L"]
+        assert argv[:3] == ["/synthetic/tmux", "-N", "-S"]
         assert kwargs["timeout"] == 5
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(harness, "subprocess", SimpleNamespace(Popen=popen, run=run, STDOUT=-2))
     monkeypatch.setattr(harness, "leader_pgid", lambda pid: pid)
-    monkeypatch.setattr(harness, "_record_owned", lambda *args, **kwargs: None)
+    recorded = []
+    monkeypatch.setattr(harness, "_record_owned", lambda *args, **kwargs: recorded.append((args, kwargs)))
     def terminate(proc, **kwargs): terminated.append(proc.pid); proc.returncode = 0
     monkeypatch.setattr(harness, "terminate_process_group", terminate)
     daemon = harness.Daemon(str(tmp_path / "synthetic.db"), namespace)
@@ -120,6 +125,7 @@ def test_hermetic_daemon_launch_and_owned_shutdown_use_fake_process_boundary(mon
         assert all(key not in kwargs["env"] for key in ("PENTACLE_MACHINES_JSON", "SSH_AUTH_SOCK", "PENTACLE_USAGE_PROBE_HOST"))
         assert json.loads(Path(kwargs["env"]["PENTACLE_MACHINES_FILE"]).read_text()) == {"machines": [{"name": "soakhost"}]}
         assert daemon.port == 42420
+        assert recorded == [((42420, None), {"leader_pid": 42420, "socket_owner": None})]
         daemon.kill(); namespace.kill_server()
         assert terminated == [42420]
     finally:
@@ -211,7 +217,8 @@ def test_in_process_ceremony_uses_synthetic_signatures_without_children(tmp_path
     scenario(check)
 
 
-def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_path):
+@pytest.mark.parametrize("dead_mode", [False, True])
+def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_path, dead_mode):
     """Execute the real owner setup/handler with fake resources; omit only idle wait."""
     import ast
     import signal
@@ -221,6 +228,7 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     calls = []; handlers = {}; printed = []
     class Namespace:
         socket = "synthetic-owned-socket"
+        socket_path = SimpleNamespace(is_socket=lambda: True)
         def __init__(self, root): assert root == tmp_path
         def start(self): calls.append("namespace_start")
         def kill_server(self): calls.append("namespace_kill")
@@ -236,7 +244,9 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     fake_owner.reap_manifest = lambda path: calls.append("reap")
     monkeypatch.setitem(sys.modules, "tests.soak.harness", fake_harness)
     monkeypatch.setitem(sys.modules, "tools.gate_owner_manifest", fake_owner)
-    monkeypatch.setattr(sys, "argv", ["synthetic-owner", str(tmp_path), str(tmp_path / "manifest.json")])
+    monkeypatch.setattr(sys, "argv", ["synthetic-owner", str(tmp_path), str(tmp_path / "manifest.json"), "dead-leader" if dead_mode else "live-leader"])
+    from tools import run_gate as fixture_runner
+    monkeypatch.setattr(fixture_runner, "_process_group_exists", lambda pgid: False)
     monkeypatch.setattr(signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
     monkeypatch.setattr(os, "getpgid", lambda pid: 42420)
     tree = ast.parse(source.OWNER_SCRIPT)
@@ -246,5 +256,219 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     exec(compile(tree, "synthetic-owner-fixture", "exec"), namespace)
     with pytest.raises(SystemExit) as ended: handlers[signal.SIGTERM](signal.SIGTERM, None)
     assert ended.value.code == 0
-    assert calls == ["initialize", "namespace_start", "daemon_start", "mark_stopping", "daemon_kill", "namespace_kill", "reap"]
+    assert calls == (["initialize", "namespace_start", "daemon_start"] + (["daemon_kill"] if dead_mode else [])
+                     + ["mark_stopping", "daemon_kill", "namespace_kill", "reap"])
     assert printed[0]["daemon_pgid"] == 42420
+
+
+@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor"])
+def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
+    """Frozen OS/event boundary exercises the real group and entry reapers."""
+    import signal
+    from tools import gate_owner_manifest as owner
+    state = dict(live=outcome != "dead-with-survivor", group=True, registered=False, socket=False, clock=0)
+    signals, observations = [], []
+    class OwnedOS:
+        def getpgrp(self): return 42419
+        def getpgid(self, pid): return 42420
+        def killpg(self, pgid, signum):
+            assert pgid == 42420
+            if signum == 0:
+                if outcome == "unknown": raise PermissionError("synthetic unreadable group")
+                observations.append(state["group"])
+                if not state["group"]: raise ProcessLookupError()
+                return
+            assert state["registered"]
+            signals.append(signum)
+            if outcome == "denied": raise PermissionError("synthetic denied TERM")
+            if outcome == "complete" or (outcome == "kill-complete" and signum == signal.SIGKILL):
+                state.update(live=False, group=False)
+            elif outcome == "identity-lost": state["live"] = False
+    class Event:
+        def __init__(self, pid):
+            assert pid == 42420
+            state["registered"] = True
+        def wait(self, deadline):
+            if state["live"]: raise owner.ManifestError("synthetic delayed exit")
+        def close(self): state["registered"] = False
+    def clock():
+        state["clock"] += .1
+        return state["clock"]
+    monkeypatch.setattr(owner, "os", OwnedOS())
+    monkeypatch.setattr(owner, "_exists", lambda pid: state["live"])
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "recorded-start")
+    monkeypatch.setattr(owner, "_ExitEvent", Event)
+    monkeypatch.setattr(owner, "time", SimpleNamespace(monotonic=clock, sleep=lambda seconds: None))
+    monkeypatch.setattr(owner, "_reap_socket", lambda *args: state.update(socket=True))
+    entry = dict(pgid=42420, leader_pid=42420, leader_start_identity="recorded-start",
+                 socket="/synthetic/bound/socket", socket_owner={"synthetic": True}, run_id="run")
+    data = {"entries": [entry]}
+    complete = outcome in ("complete", "kill-complete")
+    if complete:
+        owner._reap_entries(data, "run")
+    else:
+        with pytest.raises(owner.ManifestError): owner._reap_entries(data, "run")
+    assert state["socket"], "group failure must not strand an independently bound socket"
+    assert data["entries"] == ([] if complete else [entry])
+    assert not state["registered"]
+    if outcome == "dead-with-survivor": assert not signals
+    else: assert signals[0] == signal.SIGTERM
+    if outcome == "identity-lost": assert signals == [signal.SIGTERM]
+    if complete: assert observations[-1] is False
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("outcome", ["complete", "delayed", "denied"])
+def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, platform, outcome):
+    from tools import gate_owner_manifest as owner
+    calls, closed = [], []
+    def pidfd_open(pid, flags):
+        calls.append(("pidfd", pid, flags))
+        if outcome == "denied": raise PermissionError("synthetic pidfd denial")
+        return 42421
+    def control(changes, count, timeout):
+        calls.append(("control", changes, count, timeout))
+        if outcome == "denied": raise PermissionError("synthetic kqueue denial")
+        return [SimpleNamespace(ident=42420, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
+    def wait(read, write, error, timeout):
+        calls.append(("select", read, timeout))
+        return (read if outcome == "complete" else [], [], [])
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(owner, "os", SimpleNamespace(pidfd_open=pidfd_open, close=closed.append))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(
+        select=wait, kqueue=lambda: SimpleNamespace(control=control, close=lambda: closed.append("kqueue")),
+        kevent=lambda pid, **kwargs: (pid, kwargs), KQ_FILTER_PROC=-5, KQ_EV_ADD=1,
+        KQ_EV_ENABLE=4, KQ_NOTE_EXIT=16, KQ_EV_ERROR=32))
+    if outcome == "denied":
+        with pytest.raises(owner.ManifestError, match="register"): owner._ExitEvent(42420)
+    else:
+        event = owner._ExitEvent(42420)
+        try:
+            if outcome == "complete": event.wait(owner.time.monotonic() + 5)
+            else:
+                with pytest.raises(owner.ManifestError, match="not observed"):
+                    event.wait(owner.time.monotonic() + 5)
+        finally: event.close()
+        assert closed == ([42421] if platform == "linux" else ["kqueue"])
+        assert len([x for x in calls if x[0] == ("select" if platform == "linux" else "control")]) == (1 if platform == "linux" else 2)
+
+
+@pytest.mark.parametrize("outcome", ["complete", "false-guard", "client-error", "event-timeout", "denied-event", "replacement", "cancellation", "recycled-server", "root-mode", "replacement-at-exit", "root-replacement-at-exit"])
+def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_path, outcome):
+    import shutil
+    import socket
+    import tempfile
+    import uuid
+    from tools import gate_owner_manifest as owner
+    root = Path(tempfile.mkdtemp(prefix="v2s-", dir="/tmp")); root.chmod(0o700)
+    address = root / "s"; endpoint = socket.socket(socket.AF_UNIX); endpoint.bind(str(address))
+    rs, ss = root.stat(), address.lstat(); nonce = uuid.uuid4().hex
+    binding = dict(nonce=nonce, server_pid=42421, server_start_identity="server-start",
+                   root_dev=rs.st_dev, root_ino=rs.st_ino, socket_dev=ss.st_dev, socket_ino=ss.st_ino)
+    state, clients, events = {"live": True}, [], []
+    class Event:
+        def __init__(self, pid):
+            events.append("register")
+            if outcome == "denied-event": raise owner.ManifestError("synthetic event denied")
+            if outcome == "replacement":
+                address.unlink()
+                address.write_text("foreign replacement")
+        def wait(self, deadline):
+            events.append("wait")
+            if outcome == "event-timeout": raise owner.ManifestError("synthetic no exit event")
+            if outcome == "cancellation": raise KeyboardInterrupt()
+            state["live"] = False
+            if outcome == "replacement-at-exit":
+                address.unlink()
+                address.write_text("foreign replacement after exit")
+            if outcome == "root-replacement-at-exit":
+                root.rename(str(root) + "-original")
+                root.mkdir(mode=0o700)
+                address.write_text("foreign root replacement")
+        def close(self): events.append("close")
+    class Client:
+        returncode = 1 if outcome in ("false-guard", "client-error") else 0
+        def communicate(self, timeout):
+            assert 0 <= timeout <= 5
+            return b"", b"synthetic refused" if self.returncode else b""
+    def popen(argv, **kwargs):
+        clients.append(argv)
+        assert argv[:4] == ["tmux", "-N", "-S", str(address)]
+        assert argv[4:6] == ["if-shell", "-F"]
+        assert str(binding["server_pid"]) in argv[6] and nonce in argv[6]
+        assert argv[7:] == ["kill-server", "run-shell 'exit 1'"]
+        assert events[0] == "register"
+        return Client()
+    monkeypatch.setattr(owner, "_exists", lambda pid: state["live"])
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start" if outcome == "recycled-server" else "server-start")
+    monkeypatch.setattr(owner, "_ExitEvent", Event)
+    monkeypatch.setattr(owner, "_REAL_POPEN", popen)
+    if outcome == "root-mode": root.chmod(0o755)
+    try:
+        if outcome == "complete":
+            owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert not address.exists() and not root.exists()
+            assert events == ["register", "wait", "close"]
+        else:
+            expected = KeyboardInterrupt if outcome == "cancellation" else owner.ManifestError
+            with pytest.raises(expected):
+                owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert address.exists() and root.exists()
+            if outcome == "replacement":
+                assert address.read_text() == "foreign replacement"
+                assert not clients
+            if outcome in ("denied-event", "recycled-server", "root-mode"): assert not clients
+            if outcome == "replacement-at-exit": assert address.read_text() == "foreign replacement after exit"
+            if outcome == "root-replacement-at-exit": assert address.read_text() == "foreign root replacement"
+    finally:
+        endpoint.close()
+        if address.exists(): address.unlink()  # only this fixture's socket or authored replacement
+        if root.exists(): root.rmdir()
+        original = Path(str(root) + "-original")
+        if original.exists():
+            (original / "s").unlink()
+            original.rmdir()
+
+
+@pytest.mark.parametrize("bad", ["owner-pid", "owner-start", "owner-state", "owner-run", "entry-run", "binding-fields", "default-socket"])
+def test_malformed_manifest_never_authorizes_cleanup(monkeypatch, tmp_path, bad):
+    from tools import gate_owner_manifest as owner
+    entry = dict(pgid=42420, leader_pid=42420, leader_start_identity="victim-start",
+                 run_id="run", socket=None, socket_path=None)
+    data = dict(schema=owner.MANIFEST_SCHEMA, version=owner.MANIFEST_VERSION,
+                owner_pid=42419, owner_start_identity="owner-start", owner_state="active", run_id="run", entries=[entry])
+    if bad == "owner-pid": data["owner_pid"] = 0
+    elif bad == "owner-start": data["owner_start_identity"] = None
+    elif bad == "owner-state": data["owner_state"] = "unknown"
+    elif bad == "owner-run": data["run_id"] = ""
+    elif bad == "entry-run": entry["run_id"] = ""
+    elif bad == "binding-fields": entry.update(socket="/tmp/v2s-synthetic/s", socket_path="/tmp/v2s-synthetic/s", socket_owner={"nonce": "incomplete"})
+    else: entry["socket"] = "default"
+    path = tmp_path / "malformed.json"; path.write_text(json.dumps(data)); before = path.read_bytes()
+    monkeypatch.setattr(owner, "_reap_group", lambda *args, **kwargs: pytest.fail("unsafe group mutation"))
+    monkeypatch.setattr(owner, "_REAL_POPEN", lambda *args, **kwargs: pytest.fail("unsafe socket client"))
+    with pytest.raises(owner.ManifestError): owner.reap_manifest(path)
+    assert path.read_bytes() == before
+
+
+def test_stale_foreign_survivors_and_live_nested_owner_are_preserved(monkeypatch, tmp_path):
+    from tools import gate_owner_manifest as owner
+    path = tmp_path / "owned.json"
+    data = dict(schema=owner.MANIFEST_SCHEMA, version=owner.MANIFEST_VERSION,
+        owner_pid=42419, owner_start_identity="owner-start", owner_state="active", run_id="original-run",
+        entries=[dict(pgid=42420, leader_pid=42420, leader_start_identity="victim-start",
+                      run_id="foreign-run", socket=None, socket_path=None)])
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(owner, "_exists", lambda pid: False)
+    monkeypatch.setattr(owner, "_reap_group", lambda *args, **kwargs: pytest.fail("foreign group mutation"))
+    monkeypatch.setattr(owner, "_REAL_POPEN", lambda *args, **kwargs: pytest.fail("foreign socket mutation"))
+    with pytest.raises(owner.ManifestError, match="foreign"):
+        owner.initialize_manifest(path, "new-run")
+    assert json.loads(path.read_text()) == data
+    owner.reap_manifest(path, "original-run")
+    assert json.loads(path.read_text()) == data
+    monkeypatch.setattr(owner, "_exists", lambda pid: True)
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "owner-start")
+    with pytest.raises(owner.ManifestBusyError, match="live gate"):
+        owner.initialize_manifest(path, "nested-run")
+    assert json.loads(path.read_text()) == data
