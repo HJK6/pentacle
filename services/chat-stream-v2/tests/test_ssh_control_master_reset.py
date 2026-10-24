@@ -22,6 +22,7 @@ class FakeSSH:
         self.events_file = root / "events.jsonl"
         self.bin = root / "ssh"
         self.control_dir = control_dir
+        self._recorded_argv: list[list[str]] | None = None
         self.state.write_text(json.dumps({
             "fresh_rc": 0, "mux": "nonzero", "exit": "success", "pid": 4242,
             "check": "master", "auto_create": "ok",
@@ -102,6 +103,8 @@ class FakeSSH:
         return path
 
     def events(self) -> list[list[str]]:
+        if self._recorded_argv is not None:
+            return self._recorded_argv
         if not self.events_file.exists():
             return []
         return [json.loads(line) for line in self.events_file.read_text().splitlines()]
@@ -132,21 +135,25 @@ def _install_deterministic_probe_runner(
     fake: FakeSSH,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    mux: tuple[int, str, bool],
+    mux: tuple[int, str, bool] | None,
     control_exit: tuple[int, str, bool],
     pid: int,
+    check: tuple[int, str, bool] | None = None,
 ) -> list[list[str]]:
-    """Replace only the two probe legs whose 0.3 s wall clock used to flake.
+    """Make the probe legs' outcomes independent of fake-process startup.
 
-    The bounded control-operation contract remains explicit: the runner returns
-    the same `(rc, output, timed_out)` tuples that `_bounded_exec` produces,
-    records the exact argv, and lets the reset assertions prove the exit,
-    unlink, and subsequent auto-master rebuild. Other tests retain the real
-    subprocess fixture, including the actual kill/reap path.
+    A Python fake that misses the probe deadline before it starts measures
+    interpreter startup, not reset semantics. The runner records the exact
+    argv in-process and returns the same `(rc, output, timed_out)` tuples that
+    `_bounded_exec` produces. `mux=None` keeps the real executable on the
+    attach-only leg, so a hanging leg still exercises the actual kill/reap
+    path. The fixture exposes those argv through events(), preserving the
+    original assertions. Post-reset run_command uses the real fake executable.
     """
     path = machines.ssh_control_path(fake.target)
     assert path is not None
     calls: list[list[str]] = []
+    fake._recorded_argv = calls
     real_exec = hosts_module._exec
 
     async def deterministic_exec(*args: str, timeout: float) -> tuple[int, str]:
@@ -157,16 +164,19 @@ def _install_deterministic_probe_runner(
         # its event and socket assertions cover the rebuild path unchanged.
         return await real_exec(*args, timeout=timeout)
 
+    real_bounded_exec = hosts_module._bounded_exec
+
     async def deterministic_bounded_exec(*args: str, timeout: float) -> tuple[int, str, bool]:
-        del timeout
         calls.append(list(args))
         if "-O" in args:
             operation = args[args.index("-O") + 1]
             if operation == "check":
-                return 0, f"Master running (pid={pid})\n", False
+                return check or (0, f"Master running (pid={pid})\n", False)
             if operation == "exit":
                 return control_exit
         if "ControlMaster=no" in args:
+            if mux is None:
+                return await real_bounded_exec(*args, timeout=timeout)
             return mux
         raise AssertionError(f"unexpected bounded probe argv: {args!r}")
 
@@ -204,7 +214,11 @@ def test_check_failure_resets_even_when_session_would_succeed(
     fake_ssh: FakeSSH, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     path = fake_ssh.install(monkeypatch)
-    fake_ssh.configure(check="nomaster", mux="healthy")
+    _install_deterministic_probe_runner(
+        fake_ssh, monkeypatch,
+        mux=(0, "", False), control_exit=(0, "", False), pid=4242,
+        check=(255, "Control socket connect: No such file\n", False),
+    )
     unlinks = _track_unlinks(monkeypatch)
     hosts = _hosts(fake_ssh)
 
@@ -226,7 +240,10 @@ def test_fresh_ok_mux_failure_resets_exact_socket_and_next_call_rebuilds(
     assert f"ControlPath={path}" in machines.ssh_tmux_command(
         fake_ssh.target, "tmux", ("has-session", "-t", "=x:"),
     )
-    fake_ssh.configure(mux="timeout")
+    fake_ssh.configure(mux="timeout")  # the real attach-only leg hangs
+    _install_deterministic_probe_runner(
+        fake_ssh, monkeypatch, mux=None, control_exit=(0, "", False), pid=4242,
+    )
     unlinks = _track_unlinks(monkeypatch)
     hosts = _hosts(fake_ssh)
 
@@ -377,8 +394,13 @@ def test_no_persistent_master_reachable_host_does_not_churn_or_falsely_reset(
     master that no longer exists (the hostc rc_255 churn)."""
     path = fake_ssh.install(monkeypatch)
     path.unlink()  # no persistent master occupies the deterministic path
-    # If the health leg were ControlMaster=auto it would create+hang here.
-    fake_ssh.configure(fresh_rc=0, auto_create="timeout", check="nomaster", exit="nomaster")
+    # A ControlMaster=auto health leg is an unexpected argv and fails here; a
+    # spurious check reports no master and would trigger a reset.
+    _install_deterministic_probe_runner(
+        fake_ssh, monkeypatch,
+        mux=(0, "", False), control_exit=(255, "", False), pid=4242,
+        check=(255, "Control socket connect: No such file\n", False),
+    )
     unlinks = _track_unlinks(monkeypatch)
     hosts = _hosts(fake_ssh)
 
