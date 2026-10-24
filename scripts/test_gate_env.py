@@ -679,20 +679,20 @@ class PythonChromePolicy(unittest.TestCase):
 
 
 class MigratedTargets(Tmp):
-    def test_ci_merge_keeps_existing_distinct_tier_limits_and_deadline(self):
+    def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
         cfg = ge.load_config()
         profile = cfg["profiles"]["pentacle"]
         target = profile["targets"]["v2-merge-ci"]
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S":"1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("1200","900"))
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("1500","900"))
         cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
-                                       self.tmp / "ev",self.tmp / "t/b",[],2100,env)
-        self.assertNotIn("--timeout-seconds",cmd)  # runner reads preserved per-tier limits
+                                       self.tmp / "ev",self.tmp / "t/b",[],target["timeout_s"],env)
+        self.assertNotIn("--timeout-seconds",cmd)  # runner reads the reviewed per-tier limits
         self.assertIn("merge",cmd)
-        self.assertGreater(float(cmd[cmd.index("--deadline-seconds")+1]),2100+60+30)
-        self.assertGreater(result["wall_s"],2100)
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds")+1]),2520)
+        self.assertEqual(result["wall_s"],2550)  # existing outer startup/teardown slack
 
     def test_cli_and_shared_targets_use_their_own_roots_without_foreign_plugin(self):
         cfg = ge.load_config(); profile = cfg["profiles"]["pentacle"]
