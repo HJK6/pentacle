@@ -28,6 +28,40 @@ def _args(**overrides):
     return Namespace(**data)
 
 
+def test_report_explicit_commission_identity_is_typed():
+    args = cli.build_parser().parse_args([
+        "report", "--msg-id", "0", "--status", "done",
+        "--result", json.dumps({"summary": "repair review", "findings": [], "next_action": "repair"}),
+        "--qa-verdict", "reject", "--target-sha", "a" * 40,
+        "--qa-reviewed-scope", "admission", "--qa-gate-evidence-digest", "b" * 64,
+        "--qa-commission-msg-id", "7",
+    ])
+    payload, _ = cli._report_payload_from_args(args)
+    assert args.msg_id == 0
+    assert payload["extras"]["qa_review"]["commission_msg_id"] == 7
+
+
+@pytest.mark.parametrize("value", [-1, True, "7"])
+def test_report_invalid_commission_identity_is_rejected(value):
+    with pytest.raises(SchemaError):
+        cli._report_payload_from_args(_args(
+            qa_verdict="reject", target_sha="a" * 40, qa_reviewed_scope="admission",
+            qa_gate_evidence_digest="b" * 64, qa_commission_msg_id=value))
+
+
+def test_explicit_commission_requires_review_evidence_and_result_file_preserves_it(tmp_path):
+    with pytest.raises(SchemaError):
+        cli._report_payload_from_args(_args(qa_commission_msg_id=7))
+    body = tmp_path / "review.json"
+    body.write_text(json.dumps({"summary": "review", "findings": [], "next_action": "repair"}))
+    payload, blob = cli._report_payload_from_args(_args(
+        result=None, result_file=str(body), qa_verdict="reject", target_sha="a" * 40,
+        qa_reviewed_scope="admission", qa_gate_evidence_digest="b" * 64,
+        qa_commission_msg_id=7))
+    assert blob is None
+    assert payload["extras"]["qa_review"]["commission_msg_id"] == 7
+
+
 def test_durable_notice_authority_does_not_depend_on_advisory_ack_fields() -> None:
     receipt = {
         "delivery_status": "delivered",

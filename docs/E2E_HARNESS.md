@@ -13,6 +13,14 @@ python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evid
 
 Targets are the closed list in `scripts/gate-env.json` (`v2-unit`, `v2-smoke`, `v2-merge`, `v2-pytest --select tests/test_x.py`, `npm-test --select test/x.test.js`); `prepare` (optionally with `--target`, to provision and preflight just that target) runs the same setup and never launches a subject or accepts `--select`; the focused `v2-pytest` target refuses to run without at least one `--select` (it never defaults to the full suite — use `v2-unit`/`v2-merge` for that). Every invocation writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before any setup, so failures, cancellation and crashes stay visible; `EVIDENCE/test-attempts.v1.json` is a derived index. The daemon targets run `run_gate.py` under a finite `--deadline-seconds` envelope (tier limits, smoke preflight and reserve) and fold its `primary_outcome` and secondary outcomes into the receipt. A changed requirement, lockfile or profile selects a new prepared cache; a drifted cache is refused until `--rebuild` (which removes only that owned directory). Exit codes: 0 pass, 1 subject failure, 3 setup failure, 130 cancelled. Running `run_gate.py` or `pytest` directly remains possible but is not the supported route. Self-test: `python3 scripts/test_gate_env.py`.
 
+Sandboxed seats use the same supported entry. Do not hand-build its venv with
+`--system-site-packages`: ambient user packages can disappear under the nested
+isolated interpreter. The prepared venv fully installs the declared requirements.
+The owned `HOME` also owns `.ssh/cm`; ambient SSH control-directory overrides are
+not forwarded. Keep the real SSH directory read-only. Put Python 3.13 and Node 22
+on the launching PATH, then use `--target v2-merge` for the serial closing gate;
+its child PATH and HOME come from the bootstrap rather than the launching shell.
+
 ## Unit and protocol checks
 
 Run the repository's normal unit gate first, through the supported entry above (`--target v2-unit`). The underlying tier runner is:

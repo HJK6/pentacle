@@ -86,7 +86,8 @@ agent-orch report --msg-id 7 --status done \
   --result '{"summary":"Reviewed admission","findings":[],"next_action":"lead_proceed"}' \
   --qa-verdict accept --target-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --qa-reviewed-scope 'admission acceptance criteria' \
-  --qa-gate-evidence-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  --qa-gate-evidence-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --qa-commission-msg-id 7
 ```
 
 The CLI copies `--target-sha` exactly into `extras.qa_review.candidate_identity`.
@@ -99,6 +100,14 @@ the new flags. The reviewer still supplies the verdict and evidence digest;
 the commissioned stream, generation and message id bind reviewer identity at
 the daemon. This producer path applies to both ACCEPT and REJECT reports.
 
+For a repair review, send a fresh typed commission with a new message id and
+report against that id. `--qa-commission-msg-id` explicitly records that id in
+`extras.qa_review.commission_msg_id`, even if the report itself uses `--msg-id 0`.
+It requires the full review evidence flags and a nonnegative integer (0 names
+the spawn commission). An explicit binding has no fallback: an absent, malformed,
+wrong-generation or wrong-scope commission cannot consume another review.
+Keep this identity in prebuilt `qa_review` JSON when not using the flags.
+
 `--qa-cycle` names the current diagnosis epoch, not a review pass number.
 Repairing the same acceptance surface and commissioning another review after
 one valid reject stays in cycle 1. Only a recorded `spec-issue diagnose` after
@@ -106,7 +115,7 @@ two valid rejects and a pivot advances that surface to cycle 2; the next
 commission then uses cycle 2. A new candidate SHA by itself does not advance
 the cycle.
 
-A verdict report filed at a different message id binds at adjudication to the
+A verdict report without an explicit commission id filed at a different message id binds at adjudication to the
 commission already holding its report id, else the exact-key commission, else
 the reviewer's single open commission in that generation, else that generation's
 only commission. Otherwise adjudication returns `qa_report_binding_mismatch`

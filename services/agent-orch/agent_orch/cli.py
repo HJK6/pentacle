@@ -3856,7 +3856,8 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
     target_sha = getattr(args, "target_sha", None)
     reviewed_scope = getattr(args, "qa_reviewed_scope", None)
     gate_evidence_digest = getattr(args, "qa_gate_evidence_digest", None)
-    qa_review_requested = reviewed_scope is not None or gate_evidence_digest is not None
+    commission_msg_id = getattr(args, "qa_commission_msg_id", None)
+    qa_review_requested = reviewed_scope is not None or gate_evidence_digest is not None or commission_msg_id is not None
     attestation_stream_id = getattr(args, "qa_attestation_stream_id", None)
     attestation_report_id = getattr(args, "qa_attestation_report_id", None)
     violations: list[dict[str, object]] = []
@@ -3887,6 +3888,11 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
             "detail": "--target-sha conflicts with target_sha in --result or --result-file",
         })
     if qa_review_requested:
+        if commission_msg_id is not None and (type(commission_msg_id) is not int or commission_msg_id < 0):
+            violations.append({
+                "field": "qa_review.commission_msg_id", "code": "invalid_value",
+                "detail": "--qa-commission-msg-id must be a nonnegative integer",
+            })
         for value, flag in ((reviewed_scope, "--qa-reviewed-scope"),
                             (gate_evidence_digest, "--qa-gate-evidence-digest"),
                             (target_sha, "--target-sha")):
@@ -3947,6 +3953,7 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
                 "candidate_identity": target_sha,
                 "reviewed_scope": reviewed_scope,
                 "gate_evidence_digest": gate_evidence_digest,
+                **({"commission_msg_id": commission_msg_id} if commission_msg_id is not None else {}),
             },
         }
     if attestation_stream_id is not None:
@@ -4003,7 +4010,7 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
                 }],
             )
         if any(getattr(args, field, None) is not None for field in (
-            "qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest",
+            "qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest", "qa_commission_msg_id",
         )):
             validate_report_payload(payload, args.status, enforce_inline_caps=True)
             return payload, None
@@ -6276,6 +6283,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--target-sha", help="Full 40-hex reviewed candidate SHA; with QA review flags, copied exactly to extras.qa_review.candidate_identity")
     report_parser.add_argument("--qa-reviewed-scope", help="Reviewer-supplied nonempty acceptance scope; requires --target-sha and --qa-gate-evidence-digest")
     report_parser.add_argument("--qa-gate-evidence-digest", help="Reviewer-supplied lowercase 64-hex SHA-256 of gate/review evidence; requires --target-sha and --qa-reviewed-scope")
+    report_parser.add_argument("--qa-commission-msg-id", type=int, help="Exact typed QA commission message id (0 for spawn, the send id for repair); requires all QA review evidence flags")
     report_parser.add_argument("--qa-attestation-stream-id")
     report_parser.add_argument("--qa-attestation-report-id")
     report_parser.add_argument("--from-stream-id", dest="from_stream_id")

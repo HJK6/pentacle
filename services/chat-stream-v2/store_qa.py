@@ -335,6 +335,18 @@ def _commission_for_report(conn, report):
         "SELECT * FROM v2_qa_commissions WHERE reviewer=? AND generation=? ORDER BY msg_id",
         (report["from_stream_id"], report["session_generation"]),
     ).fetchall()
+    review = json.loads(report["extras"] or "{}").get("qa_review", {})
+    if "commission_msg_id" in review:
+        # Explicit repair identity wins over a reused report msg_id (often 0).
+        # Never fall back when the requested generation-bound commission is
+        # absent or malformed: a typo must not consume another commission.
+        msg_id = review["commission_msg_id"]
+        if type(msg_id) is not int or msg_id < 0:
+            return None, [row["msg_id"] for row in commissions]
+        for commission in commissions:
+            if commission["msg_id"] == msg_id:
+                return commission, [msg_id]
+        return None, [row["msg_id"] for row in commissions]
     for commission in commissions:
         if commission["report_id"] == report["report_id"]:
             return commission, [commission["msg_id"]]
