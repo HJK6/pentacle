@@ -500,6 +500,21 @@ class EntrypointReceipts(Tmp):
         (a,) = self.attempts()
         self.assertEqual((a["primary_outcome"], a["history"], a["purpose"]), ("setup_failure", "first_observed", "acceptance"))
 
+    def test_resolved_default_scope_survives_setup_failure_without_prepared(self):
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({}, [ge.fail("toolchain", "fixture setup failure")]),
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+            code = self.run_main("--target", "npm-test", "--spec", "s", "--series", "x", "--purpose", "negative_control")
+        self.assertEqual(code, 3)
+        files = sorted((self.tmp / "ev" / "attempts").glob("*/*.json"))
+        events = [json.loads(p.read_text()) for p in files]
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        self.assertEqual(events[-1]["effective_selection"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["default_patterns"])
+
+    def test_unresolved_config_failure_never_fabricates_scope(self):
+        self.run_main("--target", "npm-test", patch_load=ge.SetupFailure([ge.fail("config", "fixture malformed config")]))
+        files = sorted((self.tmp / "ev" / "attempts").glob("*/*.json"))
+        self.assertFalse(any("effective_selection" in json.loads(p.read_text()) for p in files))
+
     def test_run_without_target_is_refused_after_started_receipt(self):
         self.assertEqual(self.run_main(), 3)
         self.assertEqual(self.attempts()[0]["status"], "complete")

@@ -31,6 +31,7 @@ def attempt(tmp, aid, series='a', outcome='pass', *, start=0, subject=True, term
     for seq,state in enumerate(states,1):
         event=dict(schema=ga.SCHEMA,attempt_id=aid,seq=seq,state=state,at=utc(start+offsets[state]),monotonic_s=offsets[state])
         if state=='started':event.update(identity)
+        if state in ('prepared','terminal'):event['effective_selection']=[]
         if state=='terminal':event.update(outcome=outcome,first_failure=None if outcome=='pass' else {'stage':'setup' if not subject else 'subject','code':'fixture'},secondary={})
         event['event_digest']=ga.digest_of(event)
         (folder/f'{seq:04d}-{state}.json').write_text(json.dumps(event))
@@ -181,7 +182,7 @@ def set_selection(entry, names):
     p=Path(entry['evidence_root'])/'attempts'/entry['attempt_id']/'0001-started.json'
     event=json.loads(p.read_text());event['selected']={'select':names,'pass_env_names':[]}
     event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
-    p.write_text(json.dumps(event));ga.write_index(Path(entry['evidence_root']))
+    p.write_text(json.dumps(event));seal_scope(entry,names)
 
 
 def test_changed_selector_scope_with_same_target_withholds_first_claim(tmp_path):
@@ -211,10 +212,7 @@ def test_declared_default_selectors_are_part_of_acceptance_scope(tmp_path):
     a=attempt(tmp_path,'default_old')
     b=attempt(tmp_path,'default_new',start=20,prior='default_old',outcome='product_failure')
     for entry,names in [(a,['test/one.test.js']),(b,['test/all.test.js'])]:
-        p=Path(entry['evidence_root'])/'attempts'/entry['attempt_id']/'0002-prepared.json'
-        event=json.loads(p.read_text());event['effective_selection']=names
-        event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
-        p.write_text(json.dumps(event));ga.write_index(Path(entry['evidence_root']))
+        seal_scope(entry,names)
     h=read(tmp_path,[a,b]);assert h['coverage']['unknown_history_series']==1
     assert h['first_attempt_acceptance']['denominator']==0
 
@@ -233,3 +231,53 @@ def test_malformed_selected_scope_is_invalid_coverage_not_reader_crash(tmp_path)
     p.write_text(json.dumps(event));ga.write_index(Path(a['evidence_root']))
     h=read(tmp_path,[a]);assert h['coverage']['invalid_attempts']==1
     assert h['first_attempt_acceptance']['denominator']==0
+
+
+def seal_scope(entry, names):
+    folder=Path(entry['evidence_root'])/'attempts'/entry['attempt_id']
+    for p in folder.glob('*.json'):
+        event=json.loads(p.read_text())
+        if event['state'] in ('prepared','terminal'):
+            event['effective_selection']=names
+            event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+            p.write_text(json.dumps(event))
+    ga.write_index(Path(entry['evidence_root']))
+
+
+def test_setup_failure_then_same_default_scope_retains_first_denominators(tmp_path):
+    a=attempt(tmp_path,'setup',outcome='setup_failure',subject=False,target='npm-test')
+    b=attempt(tmp_path,'retry',start=20,prior='setup',target='npm-test')
+    for entry in (a,b):seal_scope(entry,['test/*.test.js','test/*.test.ts'])
+    h=read(tmp_path,[a,b])
+    assert h['first_attempt_setup']=={'numerator':0,'denominator':1}
+    assert h['first_attempt_acceptance']=={'numerator':0,'denominator':1}
+    assert h['coverage']['unknown_history_series']==0
+
+
+@pytest.mark.parametrize('bad', [['tests/different.py'], 'not-a-list', [123]])
+def test_conflicting_or_malformed_scope_snapshot_is_invalid(tmp_path,bad):
+    a=attempt(tmp_path,'a');seal_scope(a,['tests/test_one.py'])
+    p=Path(a['evidence_root'])/'attempts/a/0004-terminal.json'
+    event=json.loads(p.read_text());event['effective_selection']=bad
+    event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+    p.write_text(json.dumps(event));ga.write_index(Path(a['evidence_root']))
+    h=read(tmp_path,[a]);assert h['coverage']['invalid_attempts']==1
+    assert h['first_attempt_acceptance']['denominator']==0
+
+
+def test_unresolved_preconfig_scope_stays_unknown(tmp_path):
+    a=attempt(tmp_path,'preconfig',outcome='setup_failure',subject=False)
+    p=Path(a['evidence_root'])/'attempts/preconfig/0002-terminal.json'
+    event=json.loads(p.read_text());event.pop('effective_selection')
+    event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+    p.write_text(json.dumps(event));ga.write_index(Path(a['evidence_root']))
+    h=read(tmp_path,[a]);assert h['coverage']['unknown_history_series']==1
+    assert h['first_attempt_setup']['denominator']==0
+    assert h['primary_outcomes']=={'setup_failure':1}
+
+
+def test_crash_without_terminal_never_fabricates_outcome_or_scope(tmp_path):
+    a=attempt(tmp_path,'crashed',subject=False,terminal=False)
+    h=read(tmp_path,[a]);assert h['primary_outcomes']=={'incomplete':1}
+    assert h['first_attempt_acceptance']['denominator']==0
+    assert h['duration_s']['n']==0

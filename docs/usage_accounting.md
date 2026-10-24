@@ -775,3 +775,10 @@ and effective selectors (including declared defaults emitted at preparation).
 Unlinked selector-scope drift withholds the series first-attempt claim while
 retaining all outcomes. A typed QA commission for one spec never counts as
 scoped QA for another broader seat tag; delivery provenance remains separate.
+
+Resolved selectors are sealed in the terminal event after successful selection
+resolution, including setup failure before `prepared`. Prepared and terminal
+snapshots must agree canonically; conflicting or malformed snapshots invalidate
+the attempt. The reader never reconstructs defaults from current configuration
+or treats an unresolved pre-config request as a resolved scope. Missing terminal
+evidence remains incomplete and never becomes a fabricated acceptance.

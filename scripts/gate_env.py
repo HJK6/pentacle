@@ -745,6 +745,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     proc = None
     owner: Optional[OwnedProcesses] = None
+    resolved_selection: Optional[List[str]] = None
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
             raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
@@ -774,6 +775,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if timeout_s > target["max_timeout_s"]:
             raise SetupFailure([fail("selection", "--timeout-seconds %d exceeds the target maximum %d" % (timeout_s, target["max_timeout_s"]))])
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
+        resolved_selection = list(selection)  # retained even when setup fails before prepared
         pass_env = {}
         for name in args.pass_env:
             if name not in os.environ:
@@ -896,7 +898,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not writer.terminal:
             try:
                 writer.emit("terminal", outcome=state["outcome"], first_failure=state["first_failure"], secondary=state["secondary"],
-                            evidence=state["evidence"], detail=state["extra"], stage=writer._state)
+                            evidence=state["evidence"], detail=state["extra"], stage=writer._state,
+                            **({"effective_selection": resolved_selection} if resolved_selection is not None else {}))
             except ga.AttemptError as exc:
                 print("[gate-env] could not write terminal receipt: %s" % exc, file=sys.stderr)
         try:

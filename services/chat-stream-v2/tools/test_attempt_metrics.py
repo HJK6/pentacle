@@ -138,9 +138,18 @@ def _read_attempt(entry):
     selected = start.get('selected', {})
     if not isinstance(selected,dict):raise EvidenceError('invalid selected scope schema')
     requested = selected.get('select', [])
-    effective = next((e['effective_selection'] for e in events if e['state']=='prepared' and 'effective_selection' in e), requested)
-    if not isinstance(effective,list) or any(not isinstance(v,str) for v in effective):raise EvidenceError('invalid selected scope')
-    acceptance_scope = ga.digest_of({'profile':start.get('profile'),'target':start.get('target'),'selectors':sorted(set(effective))})
+    if not isinstance(requested,list) or any(not isinstance(v,str) for v in requested):raise EvidenceError('invalid requested scope')
+    snapshots=[]
+    for event in events:
+        if event['state'] not in ('prepared','terminal') or 'effective_selection' not in event:continue
+        effective=event['effective_selection']
+        if not isinstance(effective,list) or any(not isinstance(v,str) or not v for v in effective):raise EvidenceError('invalid resolved scope')
+        snapshots.append(sorted(set(effective)))
+    if snapshots and any(scope!=snapshots[0] for scope in snapshots):raise EvidenceError('conflicting resolved scope')
+    if snapshots and requested and sorted(set(requested))!=snapshots[0]:raise EvidenceError('requested/resolved scope conflict')
+    # No current-profile lookup or requested[] fallback can reconstruct a missing declaration.
+    acceptance_scope = (ga.digest_of({'profile':start.get('profile'),'target':start.get('target'),'selectors':snapshots[0]})
+                        if snapshots else None)
     result=dict(folded,events=events,acceptance_scope=acceptance_scope,history_complete=start.get('history_complete') is True,
                 start=start_at,end=previous_at if terminal else None,duration=terminal.get('monotonic_s'),
                 reached_subject=any(e['state']=='subject_started' for e in events),index_root=str(root),
@@ -240,6 +249,7 @@ def summarize(data,specs,*,now,reports=(),usage=()):
         # Diagnostics establish history but never select acceptance scope or displace its first attempt.
         scope=first['acceptance_scope']
         if any(a['acceptance_scope']!=scope for a in group):complete=False
+        if any(a['status']=='complete' and a['acceptance_scope'] is None for a in group):complete=False
         extra+=max(0,len(group)-1)
         known_owners={a.get('owner_stream_id') for a in group}-{None,'unknown'}
         owners+=max(0,len(known_owners)-1)
