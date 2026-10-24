@@ -833,6 +833,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
+                    effective_selection=selection,
                     env_names=sorted(env), capabilities_checked=config["capability_sets"].get(target.get("capabilities") or "", []))
         log("preflight ok")
 
@@ -840,11 +841,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             state.update(outcome="pass", first_failure=None)
         else:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
-            writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
-            t_start = time.monotonic()
-            if target["kind"] == "pytest_files":  # run_gate and the npm runner own their own teardown; a bare pytest subject needs one
+            if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
+            writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
+            t_start = time.monotonic()
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
             timed_out = False
             try:

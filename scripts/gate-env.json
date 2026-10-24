@@ -44,6 +44,11 @@
       "tmux usable",
       "short-path unix-socket directory writable",
       "environment: isolated Python dependencies"
+    ],
+    "pytest_owner": [
+      "ps birth readable",
+      "process start identity readable",
+      "environment: isolated Python dependencies"
     ]
   },
   "profiles": {
@@ -163,7 +168,8 @@
           "max_timeout_s": 900,
           "directory_select": [
             "tests"
-          ]
+          ],
+          "capabilities": "pytest_owner"
         },
         "shared-pytest": {
           "kind": "pytest_files",
@@ -180,7 +186,8 @@
           "max_timeout_s": 900,
           "directory_select": [
             "tests"
-          ]
+          ],
+          "capabilities": "pytest_owner"
         },
         "web-gate": {
           "kind": "web_gate",

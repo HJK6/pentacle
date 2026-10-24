@@ -175,3 +175,61 @@ def test_delivery_updates_close_the_same_artifact_observation(tmp_path):
     h=read(tmp_path,[a],reports=[ready,accepted,accepted])
     assert len(h['delivery'])==1 and h['delivery'][0]['duration_s']==40
     assert h['delivery'][0]['proof_ref']=='accepted'
+
+
+def set_selection(entry, names):
+    p=Path(entry['evidence_root'])/'attempts'/entry['attempt_id']/'0001-started.json'
+    event=json.loads(p.read_text());event['selected']={'select':names,'pass_env_names':[]}
+    event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+    p.write_text(json.dumps(event));ga.write_index(Path(entry['evidence_root']))
+
+
+def test_changed_selector_scope_with_same_target_withholds_first_claim(tmp_path):
+    a=attempt(tmp_path,'narrow');set_selection(a,['tests/test_one.py'])
+    b=attempt(tmp_path,'broad',start=20,prior='narrow',outcome='product_failure');set_selection(b,['tests/test_all.py'])
+    h=read(tmp_path,[a,b]);assert h['first_attempt_acceptance']['denominator']==0
+    assert h['coverage']['unknown_history_series']==1
+    assert h['primary_outcomes']=={'pass':1,'product_failure':1}
+
+
+def test_typed_qa_of_other_spec_does_not_leak_through_broader_tags(tmp_path):
+    row={'report_id':'r','spec_id':'spec_other','spec_ids':['spec_other',SPEC],
+         'qa_verdict':'accept','qa_surface':'surface','qa_cycle':1,'target_sha':'a'*40}
+    h=read(tmp_path,[attempt(tmp_path,'a')],reports=[row])
+    assert h['qa']['scoped_reports']==0 and h['qa']['surfaces']==[]
+
+
+def test_complete_diagnostic_lineage_keeps_first_acceptance_measurable(tmp_path):
+    a=attempt(tmp_path,'diagnostic',purpose='diagnostic')
+    b=attempt(tmp_path,'acceptance',start=20,prior='diagnostic',history=False)
+    h=read(tmp_path,[a,b]);assert h['first_attempt_acceptance']=={'numerator':1,'denominator':1}
+    assert h['first_attempt_setup']=={'numerator':1,'denominator':1}
+    assert h['coverage']['unknown_history_series']==0
+
+
+def test_declared_default_selectors_are_part_of_acceptance_scope(tmp_path):
+    a=attempt(tmp_path,'default_old')
+    b=attempt(tmp_path,'default_new',start=20,prior='default_old',outcome='product_failure')
+    for entry,names in [(a,['test/one.test.js']),(b,['test/all.test.js'])]:
+        p=Path(entry['evidence_root'])/'attempts'/entry['attempt_id']/'0002-prepared.json'
+        event=json.loads(p.read_text());event['effective_selection']=names
+        event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+        p.write_text(json.dumps(event));ga.write_index(Path(entry['evidence_root']))
+    h=read(tmp_path,[a,b]);assert h['coverage']['unknown_history_series']==1
+    assert h['first_attempt_acceptance']['denominator']==0
+
+
+def test_canonical_selector_order_preserves_logical_scope(tmp_path):
+    a=attempt(tmp_path,'a');b=attempt(tmp_path,'b',start=20,prior='a')
+    set_selection(a,['tests/test_two.py','tests/test_one.py'])
+    set_selection(b,['tests/test_one.py','tests/test_two.py'])
+    h=read(tmp_path,[a,b]);assert h['first_attempt_acceptance']=={'numerator':1,'denominator':1}
+
+
+def test_malformed_selected_scope_is_invalid_coverage_not_reader_crash(tmp_path):
+    a=attempt(tmp_path,'a');p=Path(a['evidence_root'])/'attempts/a/0001-started.json'
+    event=json.loads(p.read_text());event['selected']='invalid'
+    event['event_digest']=ga.digest_of({k:v for k,v in event.items() if k!='event_digest'})
+    p.write_text(json.dumps(event));ga.write_index(Path(a['evidence_root']))
+    h=read(tmp_path,[a]);assert h['coverage']['invalid_attempts']==1
+    assert h['first_attempt_acceptance']['denominator']==0

@@ -767,3 +767,11 @@ Claude/Codex buckets, their completeness and API-equivalent proxy labels remain
 authoritative. Reasoning is already a subset of output and is never added again;
 cached input remains separate. No model ranking or universal waste score is
 inferred from this incomplete subset.
+
+The reader validates complete lineage across all purposes, then selects the first
+acceptance attempt; an initial complete-history diagnostic does not hide later
+measurable acceptance. Canonical acceptance identity includes target, profile
+and effective selectors (including declared defaults emitted at preparation).
+Unlinked selector-scope drift withholds the series first-attempt claim while
+retaining all outcomes. A typed QA commission for one spec never counts as
+scoped QA for another broader seat tag; delivery provenance remains separate.

@@ -135,7 +135,13 @@ def _read_attempt(entry):
         matches=[row for row in rows if isinstance(row,dict) and row.get('attempt_id')==aid]
         index_drift=len(matches)!=1 or matches[0]!=folded
     except (EvidenceError,AttributeError):index_drift=True
-    result=dict(folded,events=events,history_complete=start.get('history_complete') is True,
+    selected = start.get('selected', {})
+    if not isinstance(selected,dict):raise EvidenceError('invalid selected scope schema')
+    requested = selected.get('select', [])
+    effective = next((e['effective_selection'] for e in events if e['state']=='prepared' and 'effective_selection' in e), requested)
+    if not isinstance(effective,list) or any(not isinstance(v,str) for v in effective):raise EvidenceError('invalid selected scope')
+    acceptance_scope = ga.digest_of({'profile':start.get('profile'),'target':start.get('target'),'selectors':sorted(set(effective))})
+    result=dict(folded,events=events,acceptance_scope=acceptance_scope,history_complete=start.get('history_complete') is True,
                 start=start_at,end=previous_at if terminal else None,duration=terminal.get('monotonic_s'),
                 reached_subject=any(e['state']=='subject_started' for e in events),index_root=str(root),
                 index_drift=index_drift,unverified_refs=refs_missing,
@@ -216,18 +222,24 @@ def summarize(data,specs,*,now,reports=(),usage=()):
     missing=[a for a in data['missing'] if a.get('spec_id') in specs]
     acceptance=[a for a in attempts if a['purpose']=='acceptance']
     by_series=defaultdict(list)
+    all_by_series=defaultdict(list)
+    for a in attempts:all_by_series[(a['spec_id'],a['series_id'])].append(a)
     for a in acceptance:by_series[(a['spec_id'],a['series_id'])].append(a)
     bad_series={(a.get('spec_id'),a.get('series_id')) for a in invalid+missing}
     setup_num=setup_den=pass_num=pass_den=pending=unknown=extra=owners=0
     for series,group in by_series.items():
         group.sort(key=lambda a:(a['start'],a['attempt_id']))
-        first=group[0];seen=set();complete=not data['manifest_errors'] and series not in bad_series and first['history_complete'] and first.get('prior_attempt_id') is None
-        target=first.get('target')
-        for a in group:
+        first=group[0]
+        lineage=sorted(all_by_series[series],key=lambda a:(a['start'],a['attempt_id']))
+        root=lineage[0];seen=set()
+        complete=not data['manifest_errors'] and series not in bad_series and root['history_complete'] and root.get('prior_attempt_id') is None
+        for a in lineage:
             prior=a.get('prior_attempt_id')
             if prior and prior not in seen:complete=False
-            if a.get('target')!=target:complete=False  # a changed acceptance target needs its own explicit lineage
             seen.add(a['attempt_id'])
+        # Diagnostics establish history but never select acceptance scope or displace its first attempt.
+        scope=first['acceptance_scope']
+        if any(a['acceptance_scope']!=scope for a in group):complete=False
         extra+=max(0,len(group)-1)
         known_owners={a.get('owner_stream_id') for a in group}-{None,'unknown'}
         owners+=max(0,len(known_owners)-1)
@@ -257,6 +269,10 @@ def summarize(data,specs,*,now,reports=(),usage=()):
         seen_reports.add(row.get('report_id'));selected_reports.append(row)
         verdict=row.get('qa_verdict')
         if verdict not in ('accept','reject'):continue
+        if row.get('spec_id') not in specs:
+            # Known QA commission for another spec is not QA for a broader seat tag.
+            if row.get('spec_id') is None:unknown_qa+=1
+            continue
         if not row.get('qa_surface') or type(row.get('qa_cycle')) is not int or row['qa_cycle']<=0 or not SHA.fullmatch(str(row.get('target_sha',''))):
             unknown_qa+=1;continue
         key=(row['spec_id'],row['qa_surface'],row['qa_cycle'])
