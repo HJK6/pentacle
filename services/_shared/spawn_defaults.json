@@ -10,6 +10,10 @@
     "codex": {
       "model": "gpt-6-luna",
       "effort": "max"
+    },
+    "gemini": {
+      "model": "gemini-3.1-pro-preview",
+      "effort": "default"
     }
   },
   "host_overrides": {},

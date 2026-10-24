@@ -27,7 +27,7 @@ def parser():
     p.add_argument('--credential-file', type=Path, required=True)
     p.add_argument('--physical-host', required=True)
     p.add_argument('--name', required=True)
-    p.add_argument('--provider', choices=('claude', 'codex'), required=True)
+    p.add_argument('--provider', choices=('claude', 'codex', 'gemini'), required=True)
     p.add_argument('--model', required=True)
     p.add_argument('--effort', required=True)
     p.add_argument('--private-workspace', type=Path, required=True)

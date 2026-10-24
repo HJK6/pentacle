@@ -1,0 +1,5 @@
+{"sessionId":"a1b2c3d4-1111-2222-3333-444455556666","projectHash":"fixture"}
+{"id":"g1","type":"gemini","content":"Checking","toolCalls":[{"id":"t1","name":"read_file","args":{"path":"a"}}]}
+{"id":"g1","type":"gemini","content":"Checking","toolCalls":[{"id":"t1","name":"read_file","args":{"path":"a"},"result":[{"functionResponse":{"response":{"output":"ok"}}}]}]}
+{"$patch":{"updates":[{"id":"g1","toolCalls":[{"id":"t1","result":[{"functionResponse":{"response":{"output":"ok"}}}]}]}]}}
+{"$rewindTo":"g1"}

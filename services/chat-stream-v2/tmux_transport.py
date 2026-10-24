@@ -28,7 +28,7 @@ POLL_INTERVAL_S = 0.1
 CAPTURE_LINES = "-200"
 NEEDLE_MAX = 24
 
-TRANSCRIPT_DIRS = ("/.claude/projects/", "/.codex/sessions/")
+TRANSCRIPT_DIRS = ("/.claude/projects/", "/.codex/sessions/", "/.gemini/sessions/")
 #: A delayed-restart adoption means the brief was among the LAST things
 #: submitted before the crash, so it lives near the tail of the log. Read only
 #: the tail: bounds the boot-path file read without losing the relevant span.

@@ -196,8 +196,22 @@ def transcript_allowed(path: str, provider: str, binding: Mapping | None = None)
     if not isinstance(path, str) or not path.endswith(".jsonl"):
         return False
     if binding is None:
+        if provider == "gemini":
+            candidate = Path(path)
+            native_root = (Path.home() / ".gemini/tmp").resolve()
+            try:
+                resolved = candidate.resolve(strict=True)
+                relative = resolved.relative_to(native_root)
+                stable = candidate.parent.name == "sessions" and candidate.parent.parent.name == ".gemini"
+                return (candidate.is_absolute() and resolved.is_file()
+                        and len(relative.parts) == 3 and relative.parts[1] == "chats"
+                        and (candidate == resolved or (stable and candidate.is_symlink())))
+            except (OSError, ValueError, RuntimeError):
+                return False
         fragment = "/.codex/sessions/" if provider == "codex" else "/.claude/"
         return fragment in path
+    if provider == "gemini":
+        return False  # Named subscription-account roots are not implemented.
     if binding.get("provider") != provider:
         return False
     root = binding.get("transcript_root")

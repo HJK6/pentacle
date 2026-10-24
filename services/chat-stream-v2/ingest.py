@@ -480,7 +480,7 @@ class Ingest:
         # normalizer (`codex_rollout_norm`) — the claude normalizer is never
         # pointed at them. Any third provider still short-circuits rather than
         # being parsed by a normalizer that was not written for it.
-        if provider not in ("claude", "codex"):
+        if provider not in ("claude", "codex", "gemini"):
             return 0
 
         if not st.path:
@@ -583,6 +583,17 @@ class Ingest:
             st.session_id = native
         elif not st.session_id and provider == "claude":
             st.session_id = str(row.get("claude_session_id") or "")
+        if provider == "gemini":
+            native = await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
+            expected = str(row.get("claude_session_id") or st.session_id or "")
+            if not native or (expected and native != expected):
+                _close_stream(st)
+                st.path, st.offset, st.file_id = "", 0, None
+                log.warning("Gemini recording identity refused", extra={
+                    "subsystem": "ingest", "bug_ref": "gemini_provider_identity",
+                })
+                return 0
+            st.session_id = native
         if size < st.offset:
             # Rotation/truncation in place: replay from the start; dedup keeps
             # it exact.
@@ -821,7 +832,14 @@ class Ingest:
             return 0
         if isinstance(binding, dict) and await self._provider_root(row, name) is None:
             return 0
-        events = normalize_claude_jsonl_records(records, host=host, session_name=name)
+        if provider == "gemini":
+            from gemini_jsonl_norm import normalize_gemini_jsonl_records
+            events = normalize_gemini_jsonl_records(
+                records, host=host, session_name=name,
+                default_session_id=st.session_id,
+            )
+        else:
+            events = normalize_claude_jsonl_records(records, host=host, session_name=name)
         appended = 0
         capped = False
         for payload in events:
@@ -862,7 +880,7 @@ class Ingest:
             if path and not transcript_allowed(path, row.get("provider"), account): return None
         if (not isinstance(binding, dict) or not row.get("session_generation")
                 or binding.get("generation") != row.get("session_generation")
-                or row.get("provider") not in {"codex", "claude"}):
+                or row.get("provider") not in {"codex", "claude", "gemini"}):
             return None
         pid = codex_source_pane_pid(row.get("pane_pid"))
         started = canonical_start(binding.get("pane_started_at"))
@@ -932,7 +950,7 @@ class Ingest:
             observation["reason"] = "start_mismatch" if started != prior_start else "proof_unavailable"
             return row  # recorded/first-bind paths cannot seed recovery authority
         provider = row.get("provider")
-        if provider not in {"codex", "claude"} or transcript.get("provider") != provider:
+        if provider not in {"codex", "claude", "gemini"} or transcript.get("provider") != provider:
             observation["reason"] = "foreign_identity"
             return row
         if provider == "claude" and row.get("jsonl_path"):
@@ -1101,6 +1119,8 @@ def _provider_from_session_name(name: str) -> str | None:
         return "codex"
     if "claude" in lowered:
         return "claude"
+    if "gemini" in lowered:
+        return "gemini"
     return None
 
 

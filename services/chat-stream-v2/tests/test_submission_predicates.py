@@ -279,3 +279,58 @@ def test_codex_159_bulleted_queue_header_is_native_queue() -> None:
     assert prompt_in_native_queue(CODEX_159_QUEUED, "some other message", "codex") is False
     # The pre-0.159 unbulleted shape still matches.
     assert prompt_in_native_queue(SAMPLE_QUEUED, SAMPLE_BODY, "codex") is True
+
+
+# -- gemini --------------------------------------------------------------------
+# Real `tmux capture-pane` snapshots of a live detached gemini-cli pane
+# (fixtures/gemini_*_pane.txt): a gemini-cli chrome change fails loudly here
+# instead of silently un-proving spawns.
+from boot_ready import (  # noqa: E402
+    DRAFT_PREDICATES,
+    READY_PREDICATES,
+    SUBMIT_PREDICATES,
+    gemini_prompt_in_active_draft,
+    gemini_prompt_ready,
+    gemini_prompt_submitted,
+)
+
+GEMINI_PROMPT = "PREDICATE_TEST_ONE"
+
+
+def _gemini_pane(name: str) -> str:
+    return (Path(__file__).resolve().parent / "fixtures" / name).read_text(encoding="utf-8")
+
+
+def test_gemini_unsubmitted_draft_is_not_submitted() -> None:
+    pane = _gemini_pane("gemini_draft_pane.txt")
+    assert gemini_prompt_submitted(pane, GEMINI_PROMPT) is False
+    assert gemini_prompt_in_active_draft(pane, GEMINI_PROMPT) is True
+
+
+def test_gemini_submitted_prompt_is_submitted() -> None:
+    pane = _gemini_pane("gemini_submitted_pane.txt")
+    assert gemini_prompt_submitted(pane, GEMINI_PROMPT) is True
+    assert gemini_prompt_in_active_draft(pane, GEMINI_PROMPT) is False
+
+
+def test_gemini_idle_pane_is_ready_and_proves_nothing() -> None:
+    pane = _gemini_pane("gemini_idle_pane.txt")
+    assert gemini_prompt_ready(pane) is True
+    assert gemini_prompt_submitted(pane, GEMINI_PROMPT) is False
+    assert gemini_prompt_in_active_draft(pane, GEMINI_PROMPT) is False
+
+
+def test_gemini_baseline_draft_is_vetoed_by_marker_delta() -> None:
+    """The unsubmitted draft contains the prompt; only NEW evidence after the
+    baseline proves submission (mirrors the codex stale-history veto)."""
+    baseline = _gemini_pane("gemini_idle_pane.txt")
+    draft = _gemini_pane("gemini_draft_pane.txt")
+    assert submission_proven_after(draft, baseline, GEMINI_PROMPT, "gemini") is False
+    assert submission_proven_after(
+        _gemini_pane("gemini_submitted_pane.txt"), draft, GEMINI_PROMPT, "gemini") is True
+
+
+def test_gemini_is_wired_into_the_dispatch_tables() -> None:
+    assert READY_PREDICATES["gemini"] is gemini_prompt_ready
+    assert SUBMIT_PREDICATES["gemini"] is gemini_prompt_submitted
+    assert DRAFT_PREDICATES["gemini"] is gemini_prompt_in_active_draft

@@ -1182,8 +1182,8 @@ def spawn(args: argparse.Namespace) -> int:
     if not handoff and not provider:
         print("agent-orch spawn: validation failed: --provider is required unless --handoff is used", file=sys.stderr)
         return 2
-    if model is not None and provider is not None and provider not in {"claude", "codex"}:
-        print("agent-orch spawn: validation failed: --model requires --provider claude or codex", file=sys.stderr)
+    if model is not None and provider is not None and provider not in {"claude", "codex", "gemini"}:
+        print("agent-orch spawn: validation failed: --model requires --provider claude, codex or gemini", file=sys.stderr)
         return 2
     stored_handoff = (
         _stored_handoff_request(config, handoff_from_stream_id, getattr(args, "idempotency_key", None))

@@ -44,6 +44,7 @@ class MachineConfig:
     agent_orch_bin_dir: str | None = None
     label: str | None = None
     smoke_optional: bool = False
+    gemini_bin: str = "gemini"
 
     @property
     def is_local(self) -> bool:
@@ -65,6 +66,7 @@ def _default_local_machine() -> MachineConfig:
         tmux_bin="tmux",
         claude_bin=str(home / ".local/bin/claude"),
         codex_bin="codex",
+        gemini_bin="gemini",
         projects_root=str(home / ".claude/projects"),
         cwd=str(home / "agent-workspace"),
         label="Local",
@@ -90,7 +92,7 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
     is_remote = ssh_target is not None
     if is_remote:
         for field in (
-            "claude_bin", "codex_bin", "cwd", "projects_root",
+            "claude_bin", "codex_bin", "gemini_bin", "cwd", "projects_root",
             "agent_orch_bin_dir",
         ):
             value = raw.get(field)
@@ -102,6 +104,7 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
     # peer session with local paths.
     claude_default = "" if is_remote else defaults.claude_bin
     codex_default = "" if is_remote else defaults.codex_bin
+    gemini_default = "" if is_remote else (defaults.gemini_bin or "")
     projects_default = "" if is_remote else defaults.projects_root
     cwd_default = "" if is_remote else defaults.cwd
     return MachineConfig(
@@ -111,6 +114,7 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
         tmux_bin=_expand(str(raw.get("tmux_bin") or defaults.tmux_bin)),
         claude_bin=_expand(str(raw.get("claude_bin") or claude_default)),
         codex_bin=_expand(str(raw.get("codex_bin") or codex_default)),
+        gemini_bin=_expand(str(raw.get("gemini_bin") or gemini_default)),
         projects_root=_expand(str(raw.get("projects_root") or projects_default)),
         cwd=_expand(str(raw.get("cwd") or cwd_default)),
         agent_orch_bin_dir=(

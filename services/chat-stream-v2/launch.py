@@ -104,6 +104,7 @@ class LocalMachine:
     codex_bin: str
     projects_root: str
     agent_orch_bin_dir: str | None = None
+    gemini_bin: str = "gemini"
 
 
 def local_machine(
@@ -112,6 +113,7 @@ def local_machine(
     cwd: str | None = None,
     claude_bin: str | None = None,
     codex_bin: str | None = None,
+    gemini_bin: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -127,6 +129,7 @@ def local_machine(
         codex_cwd=resolved_cwd,
         claude_bin=resolved_claude,
         codex_bin=codex_bin or "codex",
+        gemini_bin=gemini_bin or "gemini",
         projects_root=projects_root or os.path.join(home, ".claude/projects"),
         # Keep an explicit profile/CLI value here. When it is absent, the
         # provider-specific command builder derives the fallback after the
@@ -144,7 +147,7 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
     (the cutover-day remote-canary failure mode). The active provider is
     validated independently so a Codex-only legacy profile does not need a
     Claude path merely to launch Codex."""
-    if provider not in ("claude", "codex"):
+    if provider not in ("claude", "codex", "gemini"):
         raise ValueError(f"provider_unknown: {provider}")
     provider_bin = getattr(cfg, f"{provider}_bin", "") or ""
     if not (provider_bin and cfg.cwd and cfg.projects_root):
@@ -152,6 +155,8 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
             f"machines.json entry for {cfg.name} lacks {provider}_bin/cwd/projects_root"
         )
     ssh_target = getattr(cfg, "ssh_target", None)
+    if provider == "gemini" and ssh_target is not None:
+        raise ValueError("gemini_remote_unsupported: native recording ingest is local only")
     if ssh_target is not None and not str(ssh_target).strip():
         raise ValueError(f"machines.json entry for {cfg.name} has a blank ssh_target")
     explicit_agent_orch = getattr(cfg, "agent_orch_bin_dir", None)
@@ -175,6 +180,7 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
         codex_cwd=getattr(cfg, "codex_cwd", None) or cfg.cwd,
         claude_bin=cfg.claude_bin or "",
         codex_bin=cfg.codex_bin or "",
+        gemini_bin=getattr(cfg, "gemini_bin", "") or "",
         projects_root=cfg.projects_root,
         agent_orch_bin_dir=(
             explicit_agent_orch
@@ -195,7 +201,7 @@ def raw_command_machine_from_config(cfg: Any) -> LocalMachine:
     paths. Never fall back to the daemon's ambient PATH for a remote target.
     """
     explicit_agent_orch = getattr(cfg, "agent_orch_bin_dir", None)
-    provider_bin = getattr(cfg, "claude_bin", "") or getattr(cfg, "codex_bin", "") or ""
+    provider_bin = getattr(cfg, "claude_bin", "") or getattr(cfg, "codex_bin", "") or getattr(cfg, "gemini_bin", "") or ""
     provider_executable = _shell_executable(provider_bin) if provider_bin else ""
     is_remote = getattr(cfg, "ssh_target", None) is not None
     if is_remote and not explicit_agent_orch and not os.path.isabs(provider_executable):
@@ -294,6 +300,7 @@ def local_machine_from_config(
     cwd: str | None = None,
     claude_bin: str | None = None,
     codex_bin: str | None = None,
+    gemini_bin: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -307,6 +314,7 @@ def local_machine_from_config(
         cwd=cwd or cfg.cwd or None,
         claude_bin=claude_bin or cfg.claude_bin or None,
         codex_bin=codex_bin or cfg.codex_bin or None,
+        gemini_bin=gemini_bin or getattr(cfg, "gemini_bin", None) or None,
         projects_root=projects_root or cfg.projects_root or None,
         agent_orch_bin_dir=(
             agent_orch_bin_dir or cfg.agent_orch_bin_dir or None
@@ -379,7 +387,7 @@ def agent_orch_path_export(
             provider_bin=provider_bin, tmux_bin="tmux",
         )
     if not bin_dir and machine:
-        machine_provider_bin = machine.claude_bin or machine.codex_bin
+        machine_provider_bin = machine.claude_bin or machine.codex_bin or machine.gemini_bin
         if machine_provider_bin:
             bin_dir = _agent_orch_bin_dir_default(
                 provider_bin=machine_provider_bin, tmux_bin="tmux",
@@ -435,6 +443,49 @@ def _claude_command(
         f"--permission-mode bypassPermissions "
         f"--disallowed-tools {CLAUDE_DISALLOWED_TOOLS} "
         f"{model_flag}{effort_flag}{metadata_flag}{identity_flag} {shlex.quote(session_id)}"
+    )
+
+
+def _gemini_command(
+    machine: LocalMachine, tmux_session: str, session_id: str,
+    stream_token_file: str,
+    *, launch_model: str | None, launch_effort: str | None,
+    operator_facing: bool = False,
+    resume: bool = False,
+    resume_cwd: str | None = None,
+) -> str:
+    """Keep the provider TTY attached; discover its native recording separately."""
+    gemini_bin = _resolve_local_executable(_shell_executable(machine.gemini_bin))
+    model_flag = f"--model {shlex.quote(launch_model)} " if launch_model else ""
+    identity_flag = f"--resume {shlex.quote(session_id)}" if resume else f"--session-id {shlex.quote(session_id)}"
+    transcript_dir = os.path.join(machine.cwd, ".gemini/sessions")
+    transcript_file = os.path.join(transcript_dir, f"{session_id}.jsonl")
+    # Match the FULL native header identity, not only the filename's 8-char
+    # prefix. Quote glob prefixes so spaces in HOME/project names are preserved.
+    # A helper runs at most 240 polls and stops after provider exit.
+    # Resume already has an exact, identity-checked native path; no watcher.
+    header_pattern = shlex.quote(r'"sessionId"[[:space:]]*:[[:space:]]*"' + session_id + '"')
+    watcher = ""
+    if not resume:
+        watcher = (
+            "owner=$$; { ( i=0; while [ $i -lt 240 ] && kill -0 \"$owner\" 2>/dev/null; do "
+            "match=; count=0; for f in \"$HOME\"/.gemini/tmp/*/chats/session-*-"
+            f"{session_id[:8]}.jsonl; do "
+            "[ -f \"$f\" ] || continue; "
+            f"head -c 4096 \"$f\" | head -n 1 | grep -Eq {header_pattern} || continue; "
+            "match=$f; count=$((count+1)); done; "
+            "[ $count -gt 1 ] && exit 1; "
+            f"[ $count -eq 1 ] && {{ ln -sfn \"$match\" {shlex.quote(transcript_file)}; exit; }}; "
+            "i=$((i+1)); sleep 0.5; done ) >/dev/null 2>&1 & }; "
+        )
+    return (
+        f"command -v {shlex.quote(gemini_bin)} >/dev/null 2>&1 && "
+        f"mkdir -p {shlex.quote(transcript_dir)} && "
+        f"cd {shlex.quote(resume_cwd or machine.cwd)} && "
+        f"{agent_orch_path_export(machine, provider_bin=gemini_bin)}"
+        f"{{ {watcher}"
+        f"{stream_env_assignments(machine, tmux_session, stream_token_file)} "
+        f"exec {shlex.quote(gemini_bin)} {model_flag}{identity_flag}; }}"
     )
 
 
@@ -568,6 +619,8 @@ def build_launch(
     (no flag passed, CLI default used) and the canonical value for an explicit
     request — matching v1's `launch_model = model if requested_model is not None`.
     """
+    if account_binding is not None and provider == "gemini":
+        raise ValueError("gemini_named_accounts_unsupported")
     if account_binding is not None:
         from provider_accounts import ENV_ALLOWLIST, transcript_allowed
         if (account_binding.provider != provider or account_binding.host != machine.name
@@ -635,6 +688,46 @@ def build_launch(
             command=command,
             session_id="",
             jsonl_path="",
+            stream_token=stream_token,
+            stream_token_file=stream_token_file,
+        )
+    if provider == "gemini":
+        if launch_effort not in (None, "default"):
+            raise ValueError("gemini_effort_unsupported: use default")
+        session_id = resume_session_id or str(uuid.uuid4())
+        try:
+            if str(uuid.UUID(session_id)) != session_id:
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise ValueError("gemini_session_id_invalid") from None
+        if resume_session_id is not None:
+            from provider_accounts import transcript_allowed
+            if not resume_jsonl_path or not transcript_allowed(resume_jsonl_path, "gemini"):
+                raise ValueError("gemini_resume_recording_required")
+            try:
+                import json
+                with open(resume_jsonl_path, encoding="utf-8") as recording:
+                    native = json.loads(recording.readline(4096))
+                if not isinstance(native, dict) or native.get("sessionId") != session_id:
+                    raise ValueError()
+            except (OSError, ValueError):
+                raise ValueError("gemini_resume_identity_mismatch") from None
+        command = _gemini_command(
+            machine, tmux_session, session_id, stream_token_file,
+            launch_model=launch_model, launch_effort=launch_effort,
+            operator_facing=operator_facing,
+            resume=resume_session_id is not None,
+            resume_cwd=resume_cwd or cwd,
+        )
+        jsonl_path = (
+            resume_jsonl_path
+            if resume_session_id is not None and resume_jsonl_path
+            else os.path.join(machine.cwd, ".gemini/sessions", f"{session_id}.jsonl")
+        )
+        return LaunchPlan(
+            command=command,
+            session_id=session_id,
+            jsonl_path=jsonl_path,
             stream_token=stream_token,
             stream_token_file=stream_token_file,
         )

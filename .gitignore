@@ -23,3 +23,5 @@ __pycache__/
 # In-memory-session-store daemons (--session-store :memory:) write a literal
 # ":memory:.rehydrate-seq/" dir in cwd; never commit these test artifacts.
 :memory:*
+/.gemini/
+/.pentacle-stream-tokens/
