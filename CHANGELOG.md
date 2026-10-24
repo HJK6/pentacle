@@ -13,6 +13,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+### Fixed
+
+- Claude account probes wait for native cache refresh eligibility; stale usage no longer marks a verified account as an identity conflict.
+
 ## 2026-10-23 (3)
 
 ### Added

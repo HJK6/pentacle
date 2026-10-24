@@ -7,6 +7,7 @@ invoked solely by the account recovery coordinator, after daemon admission.
 from __future__ import annotations
 import contextlib
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -18,7 +19,11 @@ import re
 from provider_accounts import AccountError, Binding, environment
 
 
-def _stop(process):
+def _stop(process, *, interrupt=False):
+    if interrupt and process.poll() is None:
+        # The Python /usage adapter must run its owned-tmux finally block.
+        with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(process.pid, signal.SIGINT)
+        with contextlib.suppress(subprocess.TimeoutExpired): process.wait(timeout=10)
     with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(process.pid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired): process.wait(timeout=5)
     for stream in (process.stdin, process.stdout, process.stderr):
@@ -40,7 +45,7 @@ def classify_error(value) -> str:
     return "provider_rpc_failed"
 
 
-def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, **kwargs):
+def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, interrupt_cleanup=False, **kwargs):
     """Own and reap every native/probe descendant on all exits, including alarm."""
     process = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, **kwargs)
@@ -48,7 +53,7 @@ def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, 
         stdout, stderr = process.communicate(input=input, timeout=timeout)
         if len(stdout) + len(stderr) > 2_000_000: raise AccountError("provider_response_invalid")
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-    finally: _stop(process)
+    finally: _stop(process, interrupt=interrupt_cleanup)
 
 
 class CodexRPC:
@@ -164,7 +169,7 @@ def _run(argv, *, binding, run=subprocess.run, cwd=None, timeout=90):
 
 def claude_identity(binding: Binding, *, run=subprocess.run, expected_email=None) -> dict:
     try:
-        status = json.loads(_run([binding.executable, "auth", "status", "--json"], binding=binding, run=run))
+        status = json.loads(_run([binding.executable, "auth", "status", "--json"], binding=binding, run=run, timeout=10))
     except ValueError: raise AccountError("provider_response_invalid") from None
     if status.get("loggedIn") is False: raise AccountError("provider_auth_failed")
     if (status.get("loggedIn") is not True or status.get("authMethod") != "claude.ai"
@@ -187,25 +192,71 @@ def claude_identity(binding: Binding, *, run=subprocess.run, expected_email=None
             "email_verified": expected_email is not None}
 
 
-def claude_observation(binding: Binding, *, collect_usage, run=subprocess.run, now=time.time, expected_email=None) -> dict:
-    started = now()
-    identity = claude_identity(binding, run=run, expected_email=expected_email)
-    # collect_usage drives the existing bounded /usage adapter with THIS env,
-    # pinned executable and a configured trusted cwd. Never use the default cache.
-    collect_usage(binding, environment(binding))
+def _claude_cache(binding):
     try:
         data = json.loads((Path(binding.home) / ".claude.json").read_text())
     except (OSError, ValueError): raise AccountError("provider_cache_unavailable") from None
-    cache, login = data.get("cachedUsageUtilization") or {}, data.get("oauthAccount") or {}
-    ended = now()
-    stamp = cache.get("fetchedAtMs")
-    if (not isinstance(stamp, (float, int)) or isinstance(stamp, bool)
-            or not started <= stamp / 1000 <= ended
-            or not cache.get("accountUuid") or cache.get("accountUuid") != login.get("accountUuid")
-            or login.get("organizationUuid") != identity["pool_id"]
+    if not isinstance(data, dict): raise AccountError("provider_cache_stale")
+    cache, login = data.get("cachedUsageUtilization"), data.get("oauthAccount")
+    return (cache if isinstance(cache, dict) else {}, login if isinstance(login, dict) else {})
+
+
+def _finite_time(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool): return False
+    try: return math.isfinite(value)
+    except OverflowError: return False
+
+
+def _wait_claude_refresh(binding, identity, started, now):
+    # The pinned native writer throttles cache writes for 60s. The daemon's
+    # existing host slot excludes its collector; other native writers may still
+    # provide a valid after-fence fetch. Never extend the monotonic wait budget.
+    deadline = time.monotonic() + 61
+    previous = started
+    while True:
+        cache, login = _claude_cache(binding)
+        account = cache.get("accountUuid")
+        if ((isinstance(account, str) and account and account != identity["provider_id"])
+                or login.get("accountUuid") != identity["provider_id"]
+                or login.get("organizationUuid") != identity["pool_id"]):
+            raise AccountError("provider_identity_or_cache_unverified")
+        current, stamp = now(), cache.get("fetchedAtMs")
+        if not _finite_time(current) or current < previous:
+            raise AccountError("provider_cache_stale")
+        previous = current
+        if not isinstance(account, str) or not account or not _finite_time(stamp):
+            return current  # One collection can repair missing cache metadata.
+        fetched = stamp / 1000
+        if fetched > current: raise AccountError("provider_cache_stale")
+        if fetched >= started: return current
+        delay = fetched + 60.5 - current
+        if delay <= 0: return current
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise AccountError("provider_cache_stale")
+        time.sleep(min(delay, remaining))
+
+
+def claude_observation(binding: Binding, *, collect_usage, run=subprocess.run, now=time.time, expected_email=None,
+                       wait_for_refresh=False) -> dict:
+    started = now()
+    if not _finite_time(started): raise AccountError("provider_cache_stale")
+    identity = claude_identity(binding, run=run, expected_email=expected_email)
+    last_wall = _wait_claude_refresh(binding, identity, started, now) if wait_for_refresh else started
+    # collect_usage drives the existing bounded /usage adapter with THIS env,
+    # pinned executable and a configured trusted cwd. Never use the default cache.
+    collect_usage(binding, environment(binding))
+    cache, login = _claude_cache(binding)
+    account = cache.get("accountUuid")
+    if (login.get("organizationUuid") != identity["pool_id"]
             or login.get("accountUuid") != identity["provider_id"]
+            or (isinstance(account, str) and account and account != identity["provider_id"])
             or claude_identity(binding, run=run, expected_email=expected_email) != identity):
         raise AccountError("provider_identity_or_cache_unverified")
+    ended, stamp = now(), cache.get("fetchedAtMs")
+    if (not _finite_time(ended) or ended < last_wall or not _finite_time(stamp)
+            or not started <= stamp / 1000 <= ended
+            or not isinstance(account, str) or not account):
+        raise AccountError("provider_cache_stale")
     usage = cache.get("utilization")
     if not isinstance(usage, dict): raise AccountError("provider_windows_invalid")
     windows = {}
