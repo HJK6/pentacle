@@ -23,10 +23,10 @@ OLD = "a" * 40
 CANDIDATE = "b" * 40
 TAG_OBJECT = "c" * 40
 WORKFLOW_TEXT = "name: Public checks\non:\n  push:\njobs:\n  checks:\n    steps:\n      - run: npm test\n"
-EXPECTED_PUBLIC_SHA256 = "2a399e858673f7268b3402d2376314bf0fd9637a0a3b10b61b9eac34a7095e17"
+EXPECTED_PUBLIC_SHA256 = "6a1e50c3343b549752844e032ed8642859245841812a24cba93776affa345ecb"
 CHECKOUT_LOG = (Path(__file__).parent / "fixtures/th_h5/tag_checkout.txt").read_text()
 EXPECTED_PUBLIC_STEPS = {
-    "Run npm test", "Run python3 scripts/test_check_public_residue.py",
+    "Supported npm tests", "Run python3 scripts/test_check_public_residue.py",
     "Run python3 scripts/check_public_residue.py", "Source integrity after Chrome install",
     "Portable microphone contracts", "Bounded dashboard dependency",
     "Web mode E2E gate", "Daemon and CLI checks", "Source integrity at gate end",
@@ -149,7 +149,7 @@ def test_public_workflow_real_git_accepts_audited_bytes(tmp_path: Path, monkeypa
     merge_gate._public_workflow(candidate, path)
 
 
-@pytest.mark.parametrize("change", ["missing", "remove_interrupt", "remove_shared", "arbitrary_byte"])
+@pytest.mark.parametrize("change", ["missing", "remove_web_target", "remove_shared", "arbitrary_byte"])
 def test_public_workflow_real_git_refuses_changed_or_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
@@ -160,8 +160,8 @@ def test_public_workflow_real_git_refuses_changed_or_missing(
         workflow += b"\n"
     else:
         command = {
-            "remove_interrupt": b"          node --test test/e2e/web_gate_interrupt.test.js\n",
-            "remove_shared": b"          python -m pytest services/_shared/tests\n",
+            "remove_web_target": b"          --target web-gate --spec ci-public-checks --series \"ci-${GITHUB_RUN_ID}-web\"\n",
+            "remove_shared": b"--target shared-pytest --select tests",
         }[change]
         assert workflow.count(command) == 1
         workflow = workflow.replace(command, b"", 1)

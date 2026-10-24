@@ -82,13 +82,19 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 problems.append("profile " + pname)
                 continue
             for tname, target in profile["targets"].items():
-                if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test"):
+                if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test", "web_gate"):
                     problems.append("target " + tname)
                     continue
                 if not isinstance(target.get("timeout_s"), int) or target["timeout_s"] <= 0 or target["timeout_s"] > target.get("max_timeout_s", 0):
                     problems.append("timeout of " + tname)
                 if target.get("capabilities") and target["capabilities"] not in config["capability_sets"]:
                     problems.append("capability set of " + tname)
+                if target.get("npm_build") and (not isinstance(target["npm_build"], list) or any(b not in ("prestart", "build:web") for b in target["npm_build"])):
+                    problems.append("npm_build of " + tname)
+                limits = target.get("tier_timeouts")
+                if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
+                    problems.append("tier_timeouts of " + tname)
+
     if problems:
         raise SetupFailure([fail("config", "malformed gate-env.json: " + ", ".join(problems), "restore the checked-in scripts/gate-env.json")])
     return config
@@ -153,7 +159,7 @@ def resolve_toolchain(config: Dict[str, Any], needs: List[str], *, ambient_path:
                 hit, more = find_exe("python3", dirs, want_major=major, run=run)
                 rejected += more
             if hit is None:
-                failures.append(fail("toolchain", "no %s %s executable found (%s)" % (key, major, "; ".join(rejected) or "none on search path"),
+                failures.append(fail("missing_node" if key == "node" else "toolchain", "no %s %s executable found (%s)" % (key, major, "; ".join(rejected) or "none on search path"),
                                      "install %s %s or add its directory to PATH" % (key, major)))
             else:
                 found[key] = hit
@@ -241,6 +247,11 @@ def build_env(config: Dict[str, Any], profile: Dict[str, Any], target: Dict[str,
     if "python" in target.get("needs", []):
         env["V2_PYTHON_BIN"] = str(venv / "bin" / "python") if venv else ""
         env["PYTHONPATH"] = os.pathsep.join(str(checkout / p) for p in profile.get("pythonpath", []))
+    for tier, limit in target.get("tier_timeouts", {}).items():
+        env["V2_%s_TIMEOUT_S" % tier.upper()] = str(limit)
+    if target["kind"] == "web_gate":
+        env["PENTACLE_PYTHON"] = str(venv / "bin" / "python") if venv else ""
+        env["PENTACLE_WEB_GATE_REPORT_ROOT"] = str(evidence / "gate" / "web")
     if target["kind"] == "npm_test":
         env["PENTACLE_TEST_FILE_TIMEOUT_MS"] = "60000"
         env["PENTACLE_TEST_RUN_TIMEOUT_MS"] = str(int(target["timeout_s"]) * 1000)
@@ -412,7 +423,7 @@ def check_node_npm(run, toolchain: Dict[str, Any], env: Dict[str, str]) -> List[
     failures = []
     for tool in ("node", "npm"):
         if tool in toolchain and _version(run, tool, "--version", env=env) is None:
-            failures.append(fail("toolchain", "%s does not run from the child PATH" % tool, "fix the owned PATH resolution"))
+            failures.append(fail("missing_node" if tool == "node" else "toolchain", "%s does not run from the child PATH" % tool, "fix the owned PATH resolution"))
     return failures
 
 
@@ -462,7 +473,8 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
         if item.startswith("-") or ".." in Path(item).parts or item.startswith("/") or not pattern.match(item):
             raise SetupFailure([fail("selection", "selector %r does not match the target's declared pattern" % item, "")])
         file_part = item.split("::", 1)[0]
-        if "*" not in file_part and not (root / file_part).is_file():
+        declared_directory = file_part in target.get("directory_select", []) and (root / file_part).is_dir()
+        if "*" not in file_part and not (root / file_part).is_file() and not declared_directory:
             raise SetupFailure([fail("selection", "selector %r names no existing file" % item, "")])
         out.append(item)
     return out
@@ -566,6 +578,21 @@ def classify_npm(summary: Path, returncode: int, timed_out: bool, cancelled: boo
     return "unknown", {"stage": "subject", "code": "rc_%d" % returncode}, secondary
 
 
+def classify_web(summary: Path, returncode: int, timed_out: bool) -> Tuple[str, Optional[Dict[str, str]], Dict[str, Any]]:
+    if timed_out:
+        return "timeout_unclassified", {"stage": "subject", "code": "wall_deadline"}, {}
+    try:
+        data = json.loads(summary.read_text("utf-8"))
+    except (OSError, ValueError):
+        return "harness_failure", {"stage": "subject", "code": "missing_web_summary"}, {}
+    phases = data.get("phases", [])
+    failed = next((p for p in phases if p.get("returncode") != 0), None)
+    if not failed and returncode == 0 and len(phases) == 2:
+        return "pass", None, {"phases": len(phases)}
+    # A nonzero browser exit without assertion evidence is not a product assertion.
+    return "harness_failure", {"stage": "subject", "code": "web_gate_failed"}, {"phases": phases}
+
+
 # ---------------------------------------------------------------- runner
 
 def source_identity(checkout: Path) -> Dict[str, Any]:
@@ -598,21 +625,25 @@ def evidence_refs(folder: Path) -> List[Dict[str, Any]]:
 
 
 def stop_group(proc: subprocess.Popen, grace: float = 20.0) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
+    # Every subject is launched with start_new_session=True: its PID is the
+    # retained group identity even after wait() has reaped the session leader.
+    pgid = proc.pid
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if pgid is not None:
-            try:
-                os.killpg(pgid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
         try:
-            proc.wait(timeout=grace)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            proc.poll()
+            return
+        except PermissionError:
+            return  # caller records surviving group as an unproved cleanup
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            proc.poll()  # reap the leader without mistaking it for the group
+            if not group_alive(pgid):
+                return
+            time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    proc.poll()
+
 
 
 class OwnedProcesses:
@@ -671,6 +702,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--purpose", choices=ga.PURPOSES)
     parser.add_argument("--attempt-manifest", type=Path)
     parser.add_argument("--prior-attempt")
+    parser.add_argument("--history-complete", action="store_true", help="assert complete first-invocation history for this new stable series; never for a retry")
     parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--tmp-root", type=Path)
     parser.add_argument("--rebuild", action="store_true")
@@ -691,7 +723,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "owner_stream_id": os.environ.get("AGENT_ORCH_STREAM_ID") or UNKNOWN,
         "owner_generation": os.environ.get("PENTACLE_SESSION_GENERATION") or UNKNOWN,
         "history": "unknown" if missing_identity else ("continues" if args.prior_attempt else "first_observed"),
-        "history_complete": False if missing_identity else None,
+        "history_complete": bool(args.history_complete and not missing_identity and not args.prior_attempt),
         "requested_at": ga.utc_now(),
         "identities": {"source": source_identity(checkout), "harness": harness_identity(), "config": None, "profile": None},
         "selected": {"select": list(args.select), "pass_env_names": list(args.pass_env)},
@@ -713,7 +745,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     proc = None
     owner: Optional[OwnedProcesses] = None
+    resolved_selection: Optional[List[str]] = None
     try:
+        if args.history_complete and (missing_identity or args.prior_attempt):
+            raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
         config = load_config(CONFIG_PATH)
@@ -740,6 +775,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if timeout_s > target["max_timeout_s"]:
             raise SetupFailure([fail("selection", "--timeout-seconds %d exceeds the target maximum %d" % (timeout_s, target["max_timeout_s"]))])
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
+        resolved_selection = list(selection)  # retained even when setup fails before prepared
         pass_env = {}
         for name in args.pass_env:
             if name not in os.environ:
@@ -773,6 +809,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures += f
         if failures:
             raise SetupFailure(failures)
+        for build in target.get("npm_build", []):
+            out = subprocess.run(["npm", "run", build], cwd=str(checkout), env=env, capture_output=True, text=True, timeout=300)
+            build_log = evidence / ("build-%s.log" % build.replace(":", "-"))
+            build_log.write_text(out.stdout + out.stderr)
+            if out.returncode:
+                raise SetupFailure([fail("dependencies", "npm run %s failed; see %s" % (build, build_log.name))])
 
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=venv, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
@@ -793,6 +835,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
+                    effective_selection=selection,
                     env_names=sorted(env), capabilities_checked=config["capability_sets"].get(target.get("capabilities") or "", []))
         log("preflight ok")
 
@@ -800,11 +843,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             state.update(outcome="pass", first_failure=None)
         else:
             command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
-            writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
-            t_start = time.monotonic()
-            if target["kind"] == "pytest_files":  # run_gate and the npm runner own their own teardown; a bare pytest subject needs one
+            if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
+            writer.emit("subject_started", command_kind=target["kind"], argv_digest=ga.digest_of(command), timeout_s=timeout_s)
+            t_start = time.monotonic()
             proc = subprocess.Popen(command, cwd=str(results["cwd"]), env=env, start_new_session=True)
             timed_out = False
             try:
@@ -855,7 +898,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not writer.terminal:
             try:
                 writer.emit("terminal", outcome=state["outcome"], first_failure=state["first_failure"], secondary=state["secondary"],
-                            evidence=state["evidence"], detail=state["extra"], stage=writer._state)
+                            evidence=state["evidence"], detail=state["extra"], stage=writer._state,
+                            **({"effective_selection": resolved_selection} if resolved_selection is not None else {}))
             except ga.AttemptError as exc:
                 print("[gate-env] could not write terminal receipt: %s" % exc, file=sys.stderr)
         try:
@@ -875,6 +919,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     return EXIT.get(state["outcome"], 1)
 
 
+def profile_root(service_dir: Path, checkout: Path) -> str:
+    return str(service_dir.relative_to(checkout))
+
+
 def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
                   selection: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[List[str], Dict[str, Any]]:
     gate_dir = evidence / "gate"
@@ -882,24 +930,33 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
     kind = target["kind"]
     if kind == "run_gate":
         tiers = 2 if target["gate"] == "merge" else 1
+        limits = target.get("tier_timeouts")
         tier_s = max(1, timeout_s // tiers)
         runner = service_dir / "tools" / "run_gate.py"
         command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
-                   "--basetemp", str(basetemp), "--timeout-seconds", str(tier_s)]
+                   "--basetemp", str(basetemp)]
+        if not limits:
+            command += ["--timeout-seconds", str(tier_s)]
         wall_s = timeout_s + config["reserve_s"]
         if "--deadline-seconds" in runner.read_text("utf-8"):  # runner owns the finite envelope when it supports one
             budget = config["deadline"]
             preflights = 1 if target["gate"] in ("smoke", "merge") else 0
             # The runner measures the envelope from its own start, so launch/git-status time eats a bare sum: keep a start margin.
-            deadline_s = tier_s * tiers + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
+            deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
         return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":
         junit = gate_dir / "pytest.junit.xml"
-        command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs", "--strict-capabilities", "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]
-        return command, {"cwd": service_dir, "classify": lambda rc, to: classify_pytest(junit, rc, to, False)}
+        command = [str(venv / "bin" / "python"), "-m", "pytest", *selection, "-q", "-rs",
+                   *(["--strict-capabilities"] if target.get("strict_capabilities", True) else []),
+                   "--junitxml=%s" % junit, "--basetemp", str(basetemp / "pytest")]
+        return command, {"cwd": checkout / target.get("select", {}).get("root", profile_root(service_dir, checkout)), "classify": lambda rc, to: classify_pytest(junit, rc, to, False)}
+    if kind == "web_gate":
+        summary = gate_dir / "web-summary.json"
+        command = [str(venv / "bin" / "python"), str(checkout / "scripts" / "gate_web.py"), str(summary)]
+        return command, {"cwd": checkout, "classify": lambda rc, to: classify_web(summary, rc, to)}
     summary = gate_dir / "npm-test-summary.json"
     env["PENTACLE_TEST_SUMMARY_PATH"] = str(summary)
     command = ["node", "scripts/run-tests.js", *selection]

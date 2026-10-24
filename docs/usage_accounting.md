@@ -702,3 +702,83 @@ truncation, invalid input, generation/host fences, transaction rollback, report
 interleaving, lineage, attribution, migration and public readbacks. The v2 merge
 gate and agent-orch tests are the final local source gates; passing them does not
 establish runtime activation.
+
+## Explicit test-attempt health
+
+`agent-orch usage rollup --spec SPEC --attempt-manifest PATH --json` adds an
+optional `test_health` block beside existing usage/time data. Repeat the flag for
+independent-reviewer manifests. Without it, existing output fields and accounting
+semantics stay unchanged. Text output shows first-setup and first-acceptance
+numerator/denominator, pending/unknown/invalid/missing coverage, retry count and
+p50/p95 duration with sample count. This is the observed subset, not a fleet
+reliability percentage. Raw receipts remain authoritative; an index drift is
+reported while valid events remain usable.
+
+Manifests explicitly name absolute **local evidence roots**. Supplying a manifest
+authorizes reading its named roots, bounded event/index files and root-contained
+hash references. Readers reject traversal, symlink escapes, oversized input,
+duplicate JSON keys, conflicting attempt IDs, invalid transitions, UTC chronology,
+nonfinite/fabricated monotonic durations and digest mismatch. Remote hosts are
+reported as missing coverage; no network fetch/discovery, execution or live-ledger
+mutation happens. Register raw evidence through the existing artifact policy at
+milestones. Do not supply an untrusted manifest with roots you do not intend to
+read. Limits are 32 manifests, 2048 supplied entries, 1 MiB per manifest, 256 KiB
+per event and 4 MiB per derived index.
+
+A stable series survives rebase, source SHA changes, corrected setup and owner
+replacement. Every root invocation counts once; child observations never allocate
+extra attempts. A changed acceptance target uses a new series with an explicit
+scope-change receipt linking the old series; retain both histories in the manifest.
+Within-series target drift and missing prior attempts withhold first-attempt
+claims. Diagnostic and planned negative-control attempts remain visible by purpose
+and duration, outside acceptance numerators/failure counts.
+
+Complete history must be asserted explicitly. `gate_env.py --history-complete`
+is permitted only with full identity on the first invocation of a known new
+series; never use it on a retry or merely because no older manifest was supplied.
+Use `--prior-attempt ID` for retries and preserve the first invocation. Older
+`first_observed` receipts without the explicit flag remain unknown history.
+Pending setup is neither success nor failure. A setup failure counts in the
+first-setup denominator even though pytest never launched; pending terminal
+acceptance is censored. An invalid/missing member withholds that series' first
+claim. Unknown historical messages are never classified from prose.
+
+Failure signatures use only explicit stage/error-code/test-node fields. Primary
+outcomes survive secondary cleanup/reporting problems. QA report IDs deduplicate
+redelivery; typed generation-bound `store_qa` commissions supply spec/surface/cycle
+and exact candidate. Missing join provenance is reported separately; legacy
+`qa_rounds` is unchanged. Durations use nearest-rank quantiles. Current receipts
+emit combined prepare/preflight and subject/cleanup intervals; the separate
+unemitted phase endpoints remain unknown. Known queue/hold time reuses the
+existing per-spec ledger calculation.
+
+Normal completion reports may carry `extras.delivery = {kind: source_only|runtime,
+source_ready_at, runtime_accepted_at, artifact_identity, proof_ref}`. UTC endpoints
+and exact artifact/proof references are mandatory for an observed delivery.
+A source-only endpoint is labelled `source_delivered`; a runtime endpoint is
+`runtime_accepted`. Missing acceptance remains right-censored with elapsed time;
+merge/QA success never synthesizes runtime acceptance. No endpoint means no zero
+cost. Invalid contracts remain explicitly censored.
+
+Per-attempt usage placement requires matching owner stream **and generation**, a
+timed record and exactly one nonoverlapping observed root interval. Untimed,
+cumulative, ambiguous or missing-provenance records remain unknown. Existing
+Claude/Codex buckets, their completeness and API-equivalent proxy labels remain
+authoritative. Reasoning is already a subset of output and is never added again;
+cached input remains separate. No model ranking or universal waste score is
+inferred from this incomplete subset.
+
+The reader validates complete lineage across all purposes, then selects the first
+acceptance attempt; an initial complete-history diagnostic does not hide later
+measurable acceptance. Canonical acceptance identity includes target, profile
+and effective selectors (including declared defaults emitted at preparation).
+Unlinked selector-scope drift withholds the series first-attempt claim while
+retaining all outcomes. A typed QA commission for one spec never counts as
+scoped QA for another broader seat tag; delivery provenance remains separate.
+
+Resolved selectors are sealed in the terminal event after successful selection
+resolution, including setup failure before `prepared`. Prepared and terminal
+snapshots must agree canonically; conflicting or malformed snapshots invalidate
+the attempt. The reader never reconstructs defaults from current configuration
+or treats an unresolved pre-config request as a resolved scope. Missing terminal
+evidence remains incomplete and never becomes a fabricated acceptance.

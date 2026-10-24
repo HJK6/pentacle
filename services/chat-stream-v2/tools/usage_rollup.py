@@ -209,11 +209,12 @@ def _identity(account_source: Any, conflict: Any, account_id: Any) -> tuple[str 
 
 class Rec:
     __slots__ = ('host', 'provider', 'native', 'key', 'stream_id', 'tokens', 'total', 'has_row',
-                 'observed', 'model', 'account', 'account_state', 'cls', 'dollars', 'reasoning')
+                 'observed', 'model', 'account', 'account_state', 'cls', 'dollars', 'reasoning', 'generation')
 
     def __init__(self, row: sqlite3.Row, pricing: Pricing):
         self.host, self.provider, self.native = row['host'], row['provider'], row['native_session_id']
         self.key, self.stream_id = row['record_key'], row['stream_id']
+        self.generation = row['generation'] if 'generation' in row.keys() else None
         try:
             raw = _ints(json.loads(row['tokens']))
         except (TypeError, ValueError):
@@ -574,7 +575,7 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
 
 
 RECORDS_SQL = """
-SELECT r.host, r.provider, r.native_session_id, r.record_key, r.stream_id, r.tokens,
+SELECT r.host, r.provider, r.native_session_id, r.record_key, r.stream_id, r.generation, r.tokens,
        p.record_key IS NOT NULL AS has_row, p.observed_at, p.model,
        i.account_id, i.account_source, i.conflict
 FROM v2_usage_records r
@@ -594,6 +595,7 @@ class Sources:
         self.seats: dict[str, Seat] = {}
         self.records: list[Rec] = []
         self.reports: list[tuple[str, str | None, float | None]] = []
+        self.health_reports: dict[str, dict[str, Any]] = {}
         self.cards: list[tuple[str | None, str | None, float, float]] = []
         self.holds: list[tuple[str, float, float]] = []
         self.history: list[dict[str, Any]] = []
@@ -679,9 +681,38 @@ class Sources:
             for row in conn.execute('SELECT collection_host, stream_id, updated_at FROM v2_usage_state'):
                 self.usage_state.append((row['collection_host'], row['stream_id'], parse_ts(row['updated_at'])))
         if 'v2_reports' in tables:
-            for row in conn.execute('SELECT from_stream_id, qa_verdict, ingested_at, created_at FROM v2_reports'):
-                at = parse_ts(row['ingested_at']) or parse_ts(row['created_at'])
-                self.reports.append((row['from_stream_id'], row['qa_verdict'], at))
+            commissions = {}
+            if 'v2_qa_commissions' in tables:
+                for row in conn.execute('SELECT * FROM v2_qa_commissions WHERE report_id IS NOT NULL'):
+                    commissions[row['report_id']] = dict(row)
+            for raw in conn.execute('SELECT * FROM v2_reports'):
+                row = dict(raw)
+                at = parse_ts(row.get('ingested_at')) or parse_ts(row.get('created_at'))
+                self.reports.append((row.get('from_stream_id'), row.get('qa_verdict'), at))
+                rid = row.get('report_id')
+                if not rid:
+                    continue
+                try:
+                    extras = json.loads(row.get('extras') or '{}')
+                except (ValueError, TypeError):
+                    extras = {}
+                if not isinstance(extras, dict):
+                    extras = {}
+                commission = commissions.get(rid, {})
+                typed = (commission.get('reviewer') == row.get('from_stream_id')
+                         and commission.get('generation') == row.get('session_generation'))
+                specs = normalize_spec_ids(row.get('provenance_qualified_spec_ids'))
+                seat = self.seats.get(row.get('from_stream_id'))
+                if not specs and seat:
+                    specs = seat.specs
+                scope_spec = commission.get('spec_id') if typed else (specs[0] if len(specs) == 1 else None)
+                self.health_reports[rid] = {
+                    'report_id': rid, 'spec_id': scope_spec, 'spec_ids': specs,
+                    'qa_verdict': row.get('qa_verdict'), 'target_sha': row.get('target_sha'),
+                    'qa_surface': commission.get('surface') if typed else None,
+                    'qa_cycle': commission.get('cycle') if typed else None,
+                    'delivery': extras.get('delivery'),
+                }
         if 'holds' in tables:
             for row in conn.execute('SELECT owner_stream, acquired_at, expires_at, released_at FROM holds'):
                 start = parse_ts(row['acquired_at'])
@@ -1050,13 +1081,24 @@ def time_metrics(ctx: Context, spec_id: str, streams: list[str]) -> dict[str, An
     return out
 
 
+def _test_health(ctx: Context, specs: set[str]) -> dict[str, Any]:
+    from test_attempt_metrics import summarize
+    streams = {stream for spec in specs for stream in ctx.streams_by_spec.get(spec, ())}
+    records = { (r.host, r.provider, r.native, r.key): r for r in ctx.src.records if r.stream_id in streams }
+    usage = [{'id': '|'.join(key), 'provider': r.provider, 'stream_id': r.stream_id,
+              'generation': r.generation, 'observed': r.observed, 'tokens': r.tokens}
+             for key, r in records.items()]
+    return summarize(ctx.test_health_inputs, specs, now=ctx.src.now,
+                     reports=list(ctx.src.health_reports.values()), usage=usage)
+
+
 def spec_rollup(ctx: Context, spec_id: str) -> dict[str, Any]:
     spec_id = normalize_spec_ids(spec_id)[0]
     streams = sorted(ctx.streams_by_spec.get(spec_id, ()))
     recs = [r for s in streams for r in ctx.records_by_stream.get(s, ())]
     codex = [c for s in streams for c in ctx.codex_by_stream.get(s, ())]
     item = ctx.src.work_items.get(spec_id)
-    return {
+    result = {
         'spec_id': spec_id,
         'work_item': None if item is None else {'status': item.status, 'completed_at': iso(item.completed_at),
                                                 'epic': item.epic, 'kind': item.kind, 'path': item.path},
@@ -1069,6 +1111,11 @@ def spec_rollup(ctx: Context, spec_id: str) -> dict[str, Any]:
                               / max(1, sum(1 for r in recs if r.provider == 'claude')), 6),
         'time': time_metrics(ctx, spec_id, streams),
     }
+    if getattr(ctx, 'test_health_inputs', None) is not None:
+        result['test_health'] = _test_health(ctx, {spec_id})
+        result['test_health']['known_queue_hold_h'] = result['time']['known_wait_h']
+    return result
+
 
 
 def fleet_totals(ctx: Context) -> dict[str, Any]:
@@ -1104,7 +1151,7 @@ def project_rollup(ctx: Context, project: str) -> dict[str, Any]:
     streams = sorted({s for spec in members for s in ctx.streams_by_spec.get(spec, ())})
     recs = [r for s in streams for r in ctx.records_by_stream.get(s, ())]
     codex = [c for s in streams for c in ctx.codex_by_stream.get(s, ())]
-    return {
+    result = {
         'project': project,
         'kind': 'epic' if project.startswith('epic_') else 'repo',
         'member_specs': members,
@@ -1113,6 +1160,10 @@ def project_rollup(ctx: Context, project: str) -> dict[str, Any]:
         'codex': summarize_codex(codex, ctx),
         'specs': [spec_rollup(ctx, spec) for spec in members],
     }
+    if getattr(ctx, 'test_health_inputs', None) is not None:
+        result['test_health'] = _test_health(ctx, set(members))
+    return result
+
 
 
 def _quartiles(values: list[float]) -> dict[str, float] | None:
@@ -1895,6 +1946,16 @@ def write_private(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _health_text(h: dict[str, Any]) -> str:
+    setup, passed, coverage = h['first_attempt_setup'], h['first_attempt_acceptance'], h['coverage']
+    return (f"  test health: first setup {setup['numerator']}/{setup['denominator']}"
+            f" acceptance {passed['numerator']}/{passed['denominator']}"
+            f" pending={coverage['pending_series']} unknown_history={coverage['unknown_history_series']}"
+            f" invalid={coverage['invalid_attempts']} missing={coverage['missing_artifacts']}"
+            f" attempts={coverage['valid_attempts']} retries={h['churn']['additional_acceptance_attempts']}"
+            f" duration p50/p95={h['duration_s']['p50']}/{h['duration_s']['p95']}s (n={h['duration_s']['n']})")
+
+
 def render_text(result: dict[str, Any]) -> str:
     out = []
 
@@ -1950,12 +2011,21 @@ def render_text(result: dict[str, Any]) -> str:
         for row in result['fleet_totals']['by_account']:
             out.append(f"fleet {row['account_id']}: attributed={row['attributed']['tokens']:,}"
                        f" unattributed={row['unattributed']['tokens']:,}")
+    for spec in result.get('specs', []):
+        if 'test_health' in spec:
+            out.append(spec['spec_id'] + ':')
+            out.append(_health_text(spec['test_health']))
+    if 'test_health' in result.get('project', {}):
+        out.append('project test health:')
+        out.append(_health_text(result['project']['test_health']))
     return '\n'.join(out)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='agent-orch usage rollup', description=__doc__.splitlines()[0])
     parser.add_argument('--spec', nargs='+', default=[])
+    parser.add_argument('--attempt-manifest', action='append', default=[], metavar='PATH',
+                        help='explicit local attempt manifest (repeatable; no remote fetching)')
     parser.add_argument('--project')
     parser.add_argument('--since')
     parser.add_argument('--until')
@@ -2011,6 +2081,12 @@ def run(argv: list[str] | None = None) -> tuple[int, dict[str, Any]]:
         cal_path = Path(args.calibration).expanduser() if args.calibration else data_dir / CALIBRATION_NAME
         cal = Calibration(json.loads(cal_path.read_text()), cal_path) if cal_path.exists() else Calibration(None, None)
     ctx = Context(src, cal, since=since, until=until)
+    if args.attempt_manifest:
+        from test_attempt_metrics import EvidenceError, read_manifests
+        try:
+            ctx.test_health_inputs = read_manifests([Path(p) for p in args.attempt_manifest])
+        except EvidenceError as exc:
+            raise RollupError('attempt manifests: ' + str(exc)) from exc
     if args.spec:
         result['specs'] = [spec_rollup(ctx, spec) for spec in args.spec]
     if args.project:

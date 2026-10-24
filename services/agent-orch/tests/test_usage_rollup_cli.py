@@ -56,6 +56,9 @@ def test_usage_rollup_resolves_from_a_release_install(tmp_path):
     ignore = shutil.ignore_patterns(".venv", "tests", "__pycache__", "node_modules")
     for name in ("agent-orch", "_shared", "chat-stream-v2"):
         shutil.copytree(services_src / name, services / name, ignore=ignore)
+    scripts = release / "app" / "scripts" / "lib"
+    scripts.mkdir(parents=True)
+    shutil.copy2(services_src.parent / "scripts/lib/gate_attempts.py", scripts / "gate_attempts.py")
     installer._runtime_dependency_bundle(release / "app")
     prepared = subprocess.run(
         ["sh", "-lc", installer._runtime_prepare_command(str(release), ">=3.11")],
@@ -70,3 +73,26 @@ def test_usage_rollup_resolves_from_a_release_install(tmp_path):
 
     assert helped.returncode == 0, helped.stderr
     assert "--spec" in helped.stdout and "--calibrate" in helped.stdout
+    # Read a real manifest through the installed CLI in an isolated immutable release.
+    import json
+    import sqlite3
+    data = tmp_path / "ledger"
+    data.mkdir()
+    conn = sqlite3.connect(data / "sessions.db")
+    conn.execute("PRAGMA user_version=1")
+    conn.close()
+    manifest = tmp_path / "attempts.json"
+    manifest.write_text(json.dumps({"schema":"pentacle.test-attempt-manifest.v1","attempts":[]}))
+    rolled = subprocess.run([str(launcher),"usage","rollup","--spec","spec_fixture","--attempt-manifest",str(manifest),
+                             "--data-dir",str(data),"--work-root",str(tmp_path / "work"),"--json"],
+                            text=True,capture_output=True,env=env)
+    assert rolled.returncode == 0, rolled.stderr
+    assert json.loads(rolled.stdout)["specs"][0]["test_health"]["coverage"]["valid_attempts"] == 0
+
+
+def test_attempt_manifests_forward_verbatim_without_dispatch_changes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv: calls.append(argv) or 0)
+    args = ["--spec", "spec_x", "--attempt-manifest", "/tmp/first.json", "--attempt-manifest", "/tmp/reviewer.json", "--json"]
+    assert cli.main(["usage", "rollup", *args]) == 0
+    assert calls == [[sys.executable, str(cli.USAGE_ROLLUP_TOOL), *args]]
