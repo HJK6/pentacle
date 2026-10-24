@@ -62,7 +62,7 @@ def _number(value):
 def _child(root, *parts):
     p = root
     for part in parts:
-        if not isinstance(part,str) or not ID.fullmatch(part):raise EvidenceError('unsafe path component')
+        if not isinstance(part,str) or part in ('.','..') or not ID.fullmatch(part):raise EvidenceError('unsafe path component')
         p = p / part
         if p.is_symlink():raise EvidenceError('symlink escape')
     if not p.resolve().is_relative_to(root):raise EvidenceError('path escape')
@@ -182,26 +182,31 @@ def _quantiles(values):
 
 
 def _delivery(reports,now):
-    output=[];seen=set()
+    output=[];artifacts={}
     for report in reports:
         d=report.get('delivery')
         if not isinstance(d,dict):continue
         try:
             if d.get('kind') not in ('source_only','runtime') or not d.get('artifact_identity') or not d.get('proof_ref'):raise EvidenceError('incomplete delivery identity')
-            key=ga.digest_of(d)
-            if key in seen:continue
-            seen.add(key)
             start=_utc(d.get('source_ready_at'))
             end=_utc(d['runtime_accepted_at']) if d.get('runtime_accepted_at') is not None else None
             if start>now or end is not None and (end<start or end>now):raise EvidenceError('delivery chronology')
-            row={'artifact_identity':d['artifact_identity'],'proof_ref':d['proof_ref'],'kind':d['kind'],
-                 'endpoint':'runtime_accepted' if d['kind']=='runtime' else 'source_delivered',
-                 'censored':end is None}
-            if end is None:row['elapsed_so_far_s']=round(now-start,6)
-            else:row['duration_s']=round(end-start,6)
-            output.append(row)
+            key=(d['kind'],ga.digest_of(d['artifact_identity']))
+            previous=artifacts.get(key)
+            if previous is None:
+                artifacts[key]=dict(d,start=start,end=end)
+            else:
+                previous['start']=min(previous['start'],start)
+                if end is not None and (previous['end'] is None or end<previous['end']):
+                    previous.update(end=end,proof_ref=d['proof_ref'])
         except (EvidenceError,TypeError):
             output.append({'report_id':report.get('report_id'),'censored':True,'reason':'invalid delivery contract'})
+    for d in artifacts.values():
+        row={'artifact_identity':d['artifact_identity'],'proof_ref':d['proof_ref'],'kind':d['kind'],
+             'endpoint':'runtime_accepted' if d['kind']=='runtime' else 'source_delivered','censored':d['end'] is None}
+        if d['end'] is None:row['elapsed_so_far_s']=round(now-d['start'],6)
+        else:row['duration_s']=round(d['end']-d['start'],6)
+        output.append(row)
     return output
 
 

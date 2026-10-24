@@ -165,3 +165,13 @@ def test_malformed_manifest_is_visible_and_cannot_claim_complete_history(tmp_pat
     m=metrics().read_manifests([good,bad],local_hosts={'local'})
     h=metrics().summarize(m,{SPEC},now=BASE.timestamp()+100)
     assert h['coverage']['manifest_errors'] and h['first_attempt_acceptance']['denominator']==0
+
+
+def test_delivery_updates_close_the_same_artifact_observation(tmp_path):
+    a=attempt(tmp_path,'a')
+    delivery=dict(kind='runtime',source_ready_at=utc(0),runtime_accepted_at=None,artifact_identity='a',proof_ref='ready')
+    ready={'report_id':'ready','spec_id':SPEC,'delivery':delivery}
+    accepted={'report_id':'accepted','spec_id':SPEC,'delivery':dict(delivery,runtime_accepted_at=utc(40),proof_ref='accepted')}
+    h=read(tmp_path,[a],reports=[ready,accepted,accepted])
+    assert len(h['delivery'])==1 and h['delivery'][0]['duration_s']==40
+    assert h['delivery'][0]['proof_ref']=='accepted'
