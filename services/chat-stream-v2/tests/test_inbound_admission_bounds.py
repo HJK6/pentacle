@@ -112,6 +112,43 @@ def test_global_allocation_limit_and_control_reserve(monkeypatch):
     asyncio.run(run())
 
 
+def test_abandoned_transcriptions_share_parked_bounds_without_blocking_ordinary_reads():
+    async def run():
+        daemon = Server()
+        release = asyncio.Event()
+        entered = []
+
+        async def hold(msg):
+            entered.append(msg["request_id"])
+            await release.wait()
+            return {"type": msg["type"] + ".ok"}
+
+        async def read(msg):
+            return {"type": "ordinary_read.ok"}
+
+        daemon.handlers["transcribe_blob"] = hold
+        daemon.handlers["await_report"] = hold
+        daemon.handlers["ordinary_read"] = read
+        async with clients(daemon, 2, ["seat:web", "seat:reporter"]) as (web, reporter):
+            try:
+                for index in range(5):
+                    web.request("transcribe_blob", f"take-{index}")
+                    reporter.request("await_report", f"report-{index}")
+                await eventually(lambda: len(refusals(web)) == 1 and len(refusals(reporter)) == 1)
+                assert len(entered) == 8
+                assert daemon._admission_pools["parked"].total[0] == 8
+                assert daemon._admission_pools["ordinary"].total[0] == 0
+                web.request("ordinary_read", "upload-capacity")
+                await eventually(lambda: any(f.get("request_id") == "upload-capacity" for f in web.sent))
+                assert not any(f.get("request_id") == "upload-capacity" for f in refusals(web))
+            finally:
+                release.set()
+            await eventually(lambda: not request_tasks())
+            assert all(pool.total[0] == 0 for pool in daemon._admission_pools.values())
+        assert all(pool.total[0] == 0 for pool in daemon._admission_pools.values())
+    asyncio.run(run())
+
+
 def test_shared_principal_cannot_multiply_ordinary_budget():
     async def run():
         daemon = Server()

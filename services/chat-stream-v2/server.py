@@ -1659,7 +1659,9 @@ class Server:
                 principal = self._admission_principal(websocket)
                 durable = _is_send_frame(raw)
                 pool = "durable" if durable else "ordinary"
-                if isinstance(verb, str) and verb in {"await_report", "await_spawn"}:
+                # Discarded voice takes may still await the transcription
+                # backend. Keep them bounded without consuming upload/UI credits.
+                if isinstance(verb, str) and verb in {"await_report", "await_spawn", "transcribe_blob"}:
                     pool = "parked"
                 elif isinstance(verb, str) and verb in {"ping", "spawn_cancel"} and principal != ("shared", "preauth"):
                     pool = "control"

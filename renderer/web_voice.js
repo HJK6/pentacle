@@ -24,6 +24,7 @@ function failureMessage(error) {
   if (code === 'backend_unavailable') return 'Transcription is unavailable right now.';
   if (code === 'upload_failed' || code === 'upload') return 'Audio upload failed.';
   if (code === 'too_long') return 'That recording is too long to transcribe.';
+  if (code === 'server_overloaded') return 'Server is busy. Retry when ready.';
   return String(code || 'Voice recording failed.');
 }
 

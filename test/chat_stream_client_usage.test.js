@@ -210,6 +210,32 @@ test('image upload bridge passes the renderer base64 bytes to the blob client', 
   assert.deepEqual(received.data, bytes);
 });
 
+test('coded upload refusal is readable and emits only one safe diagnostic', async (t) => {
+  const { createCcHandlers, createCollector, normalizeChatStreamError } = require('../main/cc_handlers');
+  const warnings = [];
+  t.mock.method(console, 'warn', (...args) => warnings.push(args));
+  const collector = createCollector();
+  const refusal = { type: 'upload_blob_init.error', error_code: 'server_overloaded', retryable: true };
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: {
+    uploadBlob: async () => { throw refusal; },
+  }, harness: true }).register(collector);
+  const reply = await collector.table['chat-stream:upload-blob'].handler({}, { dataBase64: 'YWJj' });
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /Server is busy/);
+  assert.equal(reply.code, 'server_overloaded');
+  assert.deepEqual(warnings, [['[chat-stream.command-rejected]', {
+    subsystem: 'web_composer',
+    bug_ref: 'spec_pentacle__web_composer_attachment_precommit_failure_2026_10',
+    code: 'server_overloaded',
+  }]]);
+  assert.equal(normalizeChatStreamError(new Error('Disconnected')), 'Disconnected');
+  assert.equal(normalizeChatStreamError('timed_out'), 'timed_out');
+  assert.equal(normalizeChatStreamError({ error: 'timed_out', message: 'later' }), 'timed_out');
+  assert.equal(normalizeChatStreamError({ error: 'Specific reason', error_code: 'server_overloaded' }), 'Specific reason');
+  assert.equal(normalizeChatStreamError({ error: {}, message: 'Useful reason' }), 'Useful reason');
+  assert.equal(normalizeChatStreamError({}), 'Daemon unavailable');
+});
+
 const NULL_LIMITS = Object.freeze([
   Object.freeze({ id: 'claude', label: 'Claude', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
   Object.freeze({ id: 'fable', label: 'Fable', pct: null, resets_at_iso: null, resets_text: null, upstream_reported_at: null, probed_at: null }),
