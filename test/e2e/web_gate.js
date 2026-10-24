@@ -25,6 +25,7 @@ const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 
 const cdp = require('./lib/cdp');
+const { daemonLogTail } = require('./lib/daemon_log_tail');
 const scenarios = require('./lib/web_scenarios');
 const { REBIND_HOST } = require('./lib/cross_origin_scenario');
 
@@ -311,6 +312,10 @@ async function startDaemon(args, scratch, runtime, fixtures = [
       runtime.daemonProc = null;
     }
   }
+  const secrets = Object.values(runtime.fixtureTokens || {});
+  try { secrets.push(fs.readFileSync(runtime.fixtureOperatorTokenPath, 'utf8').trim()); } catch { /* unreadable fixture token */ }
+  lastErr = lastErr || new Error('daemon failed to start');
+  lastErr.daemonLogTail = daemonLogTail(path.join(scratch, 'daemon.log'), secrets);
   try { fs.closeSync(daemonLog); } catch {}
   throw lastErr || new Error('daemon failed to start');
 }
@@ -620,7 +625,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   } catch (e) {
     fs.writeFileSync(path.join(report.dir, 'chrome.log'), chromeLog.join(''));
     console.error(`\n◀ web_gate: FAIL — ${e && e.message}`);
-    try { report.write({ error: String(e && e.stack ? e.stack : e) }); } catch {}
+    try { report.write({ error: String(e && e.stack ? e.stack : e), ...(e && e.daemonLogTail !== undefined ? { daemon_log_tail: e.daemonLogTail } : {}) }); } catch {}
     console.error(`  artifacts: ${report.dir}`);
     return 1;
   } finally {
