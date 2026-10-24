@@ -8,6 +8,7 @@ import uuid
 
 from account_store import transaction
 from provider_accounts import AccountError, Binding
+from account_revalidation import revalidate_health
 
 
 class AccountExecutor:
@@ -48,13 +49,17 @@ class AccountExecutor:
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
             return await self._observe_locked(account)
 
-    async def _observe_locked(self, account):
+    async def _observe_locked(self, account, *, require_match=False):
         try:
             result = await self.execute(account, "observe", uuid.uuid4().hex)
             observation = result.get("observation")
             if result["outcome"] == "ok" and isinstance(observation, dict) and result.get("binding_key") == account.key:
-                await self.runtime.record_observation(account, observation)
+                matched=await self.runtime.record_observation(account, observation)
+                if require_match and matched is not True:
+                    return {"outcome":"provider_identity_or_cache_unverified"}
                 return result
+            if require_match and result["outcome"]=="ok":
+                result={"outcome":"account_host_response_invalid"}
             kind = {"provider_auth_failed": "auth", "provider_quota_blocked": "quota",
                     "provider_capacity": "capacity", "provider_transport_failed": "network",
                     "provider_permission_denied": "permission", "subscription_identity_unverified": "identity",
@@ -71,6 +76,9 @@ class AccountExecutor:
         await self.runtime.run(lambda ledger: ledger.observe(account.key, {
             "provider_id": account.provider_id, "pool_id": account.pool_id, "auth_mode": "subscription",
             "collection": "failed", "observed_at": None, "windows": {}}, now=self.runtime.clock()))
+
+    async def revalidate_health(self, message, auth):
+        return await revalidate_health(self,message,auth)
 
     async def recover(self, account, *, relogin, operation_id):
         if not operation_id or len(operation_id) > 160: raise AccountError("account_operation_id_required")

@@ -6,7 +6,7 @@ import uuid
 
 def register(subparsers):
     parser = subparsers.add_parser("account", help="daemon-owned provider account controls")
-    parser.add_argument("action", choices=("default", "status", "relogin", "probe", "report-failure", "observe-failure"))
+    parser.add_argument("action", choices=("default", "status", "relogin", "probe", "revalidate-health", "report-failure", "observe-failure"))
     parser.add_argument("--provider", choices=("codex", "claude"))
     parser.add_argument("--account")
     parser.add_argument("default_action", nargs="?", choices=("set",))
@@ -15,9 +15,10 @@ def register(subparsers):
     parser.add_argument("--kind", choices=("auth", "quota", "capacity", "network", "permission"))
     parser.add_argument("--login-generation")
     parser.add_argument("--operation-id")
+    parser.add_argument("--expected-revision", type=int)
     parser.add_argument("--from", dest="from_stream_id")
     parser.add_argument("--timeout", type=float, default=None,
-                        help="RPC deadline seconds (probe: 210; other actions: 30)")
+                        help="RPC deadline seconds (probe/revalidate-health: 210; other actions: 30)")
     parser.set_defaults(func=execute)
 
 
@@ -26,11 +27,16 @@ def execute(args):
     from .stream_id import discover_leader_stream_id_short
     from .wsclient import account_once
     from .cli import _print_response, _direct_rpc_transport_error
+    if args.action == "revalidate-health" and (
+            type(args.expected_revision) is not int or args.expected_revision < 0
+            or not all((args.host, args.provider, args.account, args.operation_id, args.reason, args.login_generation))
+            or args.login_generation == "active"):
+        _print_response({"type": "account.error", "error_code": "account_request_invalid"}); return 2
     config = load_config()
     actor = args.from_stream_id or discover_leader_stream_id_short(config)
     payload = {"type": "account", "action": "default-set" if args.action == "default" else args.action, "from_stream_id": actor,
                "request_id": "account-" + uuid.uuid4().hex}
-    for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id"):
+    for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id", "expected_revision"):
         value = getattr(args, field, None)
         if value is not None: payload[field] = value
     if (args.action == "default") != (args.default_action == "set"):
@@ -38,7 +44,7 @@ def execute(args):
     if args.action != "status":
         payload.setdefault("login_generation", "active")
     try:
-        timeout = args.timeout if args.timeout is not None else (210 if args.action == "probe" else 30)
+        timeout = args.timeout if args.timeout is not None else (210 if args.action in {"probe", "revalidate-health"} else 30)
         reply = asyncio.run(account_once(config, payload, timeout=timeout))
     except Exception as exc:
         reply, code, _ = _direct_rpc_transport_error("account", payload["request_id"], exc)
