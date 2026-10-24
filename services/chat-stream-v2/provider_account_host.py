@@ -6,6 +6,7 @@ Install/configure it only with the account feature's separate activation grant.
 """
 from __future__ import annotations
 import argparse
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ class NativeHost:
         self.registry = Registry(Path(config["registry"]), Path(config["root"]))
         self.journal = self.registry.path.parent / "account-operations"
         self.observation = observation or self._observation
+        self._probe_observation = observation or partial(self._observation, wait_for_refresh=True)
 
     def _cell(self, provider, alias):
         try: cell = self.config["cells"][f"{provider}:{alias}"]
@@ -35,11 +37,12 @@ class NativeHost:
             raise AccountError("account_cell_disabled")
         return cell
 
-    def _observation(self, binding):
+    def _observation(self, binding, *, wait_for_refresh=False):
         verify_binary(binding, run=self.run)
         cell = self._cell(binding.provider, binding.alias)
         if binding.provider == "codex": return codex_observation(binding, expected_email=cell.get("expected_email"))
-        return claude_observation(binding, collect_usage=self._claude_usage, run=self.run, expected_email=cell.get("expected_email"))
+        return claude_observation(binding, collect_usage=self._claude_usage, run=self.run,
+            expected_email=cell.get("expected_email"), wait_for_refresh=wait_for_refresh)
 
     def _claude_usage(self, binding, env):
         cell = self._cell(binding.provider, binding.alias)
@@ -51,7 +54,8 @@ class NativeHost:
                      "PENTACLE_USAGE_CLAUDE_OAUTH": "0", "PENTACLE_USAGE_CWD": cell["cwd"],
                      "PENTACLE_USAGE_NAMED_ACCOUNT": "1"}
         try:
-            result = self.run(command, env=env, capture_output=True, text=True, timeout=70, start_new_session=True, umask=0o077)
+            result = self.run(command, env=env, capture_output=True, text=True, timeout=70,
+                interrupt_cleanup=True, start_new_session=True, umask=0o077)
         except (OSError, subprocess.SubprocessError): raise AccountError("provider_probe_failed") from None
         if result.returncode: raise AccountError(classify_error((result.stdout or "") + (result.stderr or "")))
         # The display scrape is discarded; the one coherent named-home cache
@@ -100,7 +104,7 @@ class NativeHost:
             if action == "observe":
                 if active is None or active.generation != expected_generation:
                     raise AccountError("account_login_generation_stale")
-                result = self.observation(active)
+                result = self._probe_observation(active)
                 return {"outcome": "ok", "binding_key": active.key, "observation": result}
             if action not in {"enroll", "status"}: raise AccountError("account_action_invalid")
             prior = self._read_operation(operation_id)
@@ -159,7 +163,7 @@ def main(argv=None):
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(300 if args.action == "enroll" else 90)
+        signal.alarm(300 if args.action == "enroll" else 180 if args.action == "observe" else 90)
         result = NativeHost(config).handle(args.action, provider=args.provider, alias=args.account,
             expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation)
         print(json.dumps(result))

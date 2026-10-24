@@ -143,6 +143,25 @@ The readback includes timestamps, freshness, reset, original identity, conflict
 and configured cap. Missing/stale/incomplete usage is visibly unknown, never zero.
 Freshness is informational; there is no new fixed-age launch admission gate.
 
+Claude's native cache writer throttles updates for 60 seconds. Bound observations
+wait, when needed, for cache-write eligibility under the existing host slot,
+with a 61-second monotonic limit and one native usage collection. Freshness is
+measured against the observing host's own start time; another native writer's
+same-identity fetch during that operation is valid. A stale, missing or malformed
+cache returns `provider_cache_stale` and a failed collection, preserving account
+health. Actual identity disagreement still refuses and marks the account unsafe.
+Neither result clears an existing authentication or identity failure.
+
+The observe host alarm is 180 seconds, its daemon command deadline 200 seconds,
+and the `account probe` CLI default 210 seconds. Other account actions keep their
+prior deadlines. An explicit shorter timeout is honored. Time queued behind
+another cell can exceed the caller's deadline; that is a caller timeout, not an
+identity failure or permission to retry login. The daemon operation remains
+bounded. Enrollment retains its prior budget and immediate identity readbacks;
+a throttled second enrollment readback can still refuse safely. Existing falsely
+marked health rows require a separately authorized disposition, not automatic
+healing from a successful usage probe.
+
 `account_caps[provider][verified_pool_id]` carries the existing operational cap
 value verbatim for that account across hosts. It does not introduce new units,
 percentages, margins or enforcement semantics. Do not infer an account allocation

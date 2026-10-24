@@ -16,7 +16,8 @@ def register(subparsers):
     parser.add_argument("--login-generation")
     parser.add_argument("--operation-id")
     parser.add_argument("--from", dest="from_stream_id")
-    parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--timeout", type=float, default=None,
+                        help="RPC deadline seconds (probe: 210; other actions: 30)")
     parser.set_defaults(func=execute)
 
 
@@ -37,7 +38,8 @@ def execute(args):
     if args.action != "status":
         payload.setdefault("login_generation", "active")
     try:
-        reply = asyncio.run(account_once(config, payload, timeout=args.timeout))
+        timeout = args.timeout if args.timeout is not None else (210 if args.action == "probe" else 30)
+        reply = asyncio.run(account_once(config, payload, timeout=timeout))
     except Exception as exc:
         reply, code, _ = _direct_rpc_transport_error("account", payload["request_id"], exc)
         _print_response(reply); return code

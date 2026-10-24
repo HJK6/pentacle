@@ -26,10 +26,12 @@ class AccountExecutor:
                 "--login-generation", account.generation, "--operation-id", hashlib.sha256(operation_id.encode()).hexdigest()]
         if generation: args += ["--new-generation", generation]
         try:
-            code, output = await self.hosts.run_command(account.host, *args, timeout=320 if action == "enroll" else 100)
+            code, output = await self.hosts.run_command(account.host, *args,
+                timeout=320 if action == "enroll" else 200 if action == "observe" else 100)
             if len(output) > 65536: raise AccountError("account_host_response_invalid")
             result = json.loads(output)
         except AccountError: raise
+        except TimeoutError: raise AccountError("provider_timeout") from None
         except Exception: raise AccountError("account_host_unreachable") from None
         if not isinstance(result, dict) or not isinstance(result.get("outcome"), str):
             raise AccountError("account_host_response_invalid")
@@ -37,7 +39,7 @@ class AccountExecutor:
             "provider_auth_failed", "provider_quota_blocked", "provider_capacity", "provider_transport_failed",
             "provider_permission_denied", "provider_timeout", "provider_probe_failed", "provider_identity_changed",
             "subscription_identity_unverified", "provider_identity_unavailable", "provider_identity_or_cache_unverified",
-            "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_windows_invalid",
+            "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_cache_stale", "provider_windows_invalid",
             "account_login_generation_stale"}:
             raise AccountError("account_host_failed")
         return result
