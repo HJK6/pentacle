@@ -405,12 +405,16 @@ function reconcileWorkingByStreamForResync(
   sessions: PentacleSessionSummary[],
   survivingStreamIds: Set<string>,
   now: number,
+  previousSessions: Map<string, PentacleSessionSummary>,
 ): Record<string, TurnState> {
-  const daemonWorking = new Map(sessions.map((session) => [session.stream_id, Boolean(session.working)]));
+  const daemonSessions = new Map(sessions.map((session) => [session.stream_id, session]));
   const next: Record<string, TurnState> = {};
   for (const [streamId, turn] of Object.entries(previous ?? {})) {
     if (!survivingStreamIds.has(streamId)) continue;
-    if (turn.phase === 'working' && daemonWorking.get(streamId) === false) {
+    const previousGeneration = previousSessions.get(streamId)?.session_generation;
+    const nextGeneration = daemonSessions.get(streamId)?.session_generation;
+    if (previousGeneration && nextGeneration && previousGeneration !== nextGeneration) continue;
+    if (turn.phase === 'working' && daemonSessions.get(streamId)?.working === false) {
       next[streamId] = { ...turn, phase: 'idle', endReason: 'working_false', endedAt: now };
       emitTurnPhaseDerived(streamId, 'idle', 'resync', null);
       continue;
@@ -418,6 +422,23 @@ function reconcileWorkingByStreamForResync(
     next[streamId] = turn;
   }
   return next;
+}
+
+// A restart adopts durable rows before a generation has a checked pane
+// observation. Its explicit unknown false cannot settle an established turn.
+function resyncSessionSummary(
+  incoming: PentacleSessionSummary,
+  previous: PentacleSessionSummary | undefined,
+  turn: TurnState | undefined,
+): PentacleSessionSummary {
+  const summary = stripTransientSummary(normalizeSession(incoming), previous);
+  if (summary.working === false && summary.capture_liveness === 'transport_unknown'
+    && summary.pane_status !== 'pane_dead'
+    && summary.session_generation && summary.session_generation === previous?.session_generation
+    && previous?.working === true && turn?.phase === 'working') {
+    return { ...summary, working: true, working_label: previous.working_label };
+  }
+  return summary;
 }
 
 export function beginPentacleTurn(
@@ -2757,7 +2778,7 @@ export function applyPentacleSnapshotMessage(
 ): PentacleStreamState {
   const existingSessions = new Map(state.sessions.map((item) => [item.stream_id, item]));
   const sessions = Array.isArray(message.sessions)
-    ? sortSessions(message.sessions.map((item) => stripTransientSummary(normalizeSession(item), existingSessions.get(item.stream_id))))
+    ? sortSessions(message.sessions.map((item) => resyncSessionSummary(item, existingSessions.get(item.stream_id), state.workingByStream?.[item.stream_id])))
     : [];
   const hosts = mergeHostsWithSessions(message.hosts || {}, sessions);
   const survivingStreamIds = new Set(sessions.map((item) => item.stream_id));
@@ -2792,6 +2813,7 @@ export function applyPentacleSnapshotMessage(
     sessions,
     survivingStreamIds,
     now,
+    existingSessions,
   );
   // A full-events snapshot (a working session's hello carrying its in-band USER
   // working root, or a full-events desktop client) can SEED a working turn that
@@ -3117,9 +3139,8 @@ export function applyPentacleSessionInventory(
   now: number = Date.now(),
 ): PentacleStreamState {
   const existingSessions = new Map(state.sessions.map((item) => [item.stream_id, item]));
-  const sorted = sortSessions(sessions.map((item) => stripTransientSummary(
-    normalizeSession(item),
-    existingSessions.get(item.stream_id),
+  const sorted = sortSessions(sessions.map((item) => resyncSessionSummary(
+    item, existingSessions.get(item.stream_id), state.workingByStream?.[item.stream_id],
   )));
   const survivingStreamIds = new Set(sorted.map((item) => item.stream_id));
   const workingByStream = reconcileWorkingByStreamForResync(
@@ -3127,6 +3148,7 @@ export function applyPentacleSessionInventory(
     sorted,
     survivingStreamIds,
     now,
+    existingSessions,
   );
   const eventContentVersionByStream: Record<string, number> = {};
   for (const [streamId, version] of Object.entries(state.eventContentVersionByStream ?? {})) {

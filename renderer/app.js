@@ -1958,6 +1958,19 @@ function applyWorkLanesPayload(payload) {
   scheduleSidebarRerender();
 }
 
+// The shared reducer owns working/turn reconciliation. Keep the sidebar's
+// legacy inventory projection aligned with that result, including resyncs.
+function withSharedWorkingProjection(payload) {
+  if (!Array.isArray(payload?.sessions)) return payload;
+  const projected = new Map((window.PentacleChatStore?.getState?.()?.sessions || [])
+    .map(session => [session.stream_id, session]));
+  return { ...payload, sessions: payload.sessions.map(session => {
+    const shared = projected.get(session.stream_id);
+    if (!session.session_generation || session.session_generation !== shared?.session_generation) return session;
+    return { ...session, working: shared.working, working_label: shared.working_label };
+  }) };
+}
+
 function applyChatStreamState(data) {
   // NOT gated on chatUiEnabled(): the sidebar visibility filter consumes
   // state.chatStream.sessions regardless of whether the in-slot chat UI is
@@ -1965,6 +1978,7 @@ function applyChatStreamState(data) {
   // `state.slotViewModes[slot] === 'chat'`, so chat-UI work only fires when
   // chat UI is actually active.
   if (!data) return;
+  data = withSharedWorkingProjection(data);
   const wasConnected = state.chatStream.connected;
   // Flip degraded mode immediately on WS connection state change rather
   // than waiting for the next inventory-frame render. Without this,
@@ -2038,6 +2052,7 @@ function applyChatStreamState(data) {
 function applyChatStreamPayload(payload) {
   // NOT gated on chatUiEnabled(): see applyChatStreamState.
   if (!payload) return;
+  payload = withSharedWorkingProjection(payload);
   if (payload.type === '__reconnect' && Number(payload.generation) > 0) {
     // Normal daemon recovery may keep the current view connected throughout.
     // Its summary snapshot cannot replay a FINAL persisted while the socket
@@ -6216,11 +6231,11 @@ async function performWebChatResync() {
     boundStreams: state.slotChatBoundStream,
     currentSessions: window.PentacleChatStore?.getState?.()?.sessions || state.chatStream.sessions,
   });
+  window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...snapshot });
   applyChatStreamState(snapshot);
   if (Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
     renderLimits(snapshot.limits, snapshot.limits_health ?? null);
   }
-  window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...snapshot });
   restoreSlotsAfterReconnect();
   hydrateOpenDurableQuestions();
 }
@@ -9079,12 +9094,12 @@ CFG_READY.then((cfg) => {
   // after main has already received the snapshot starts with an empty cache
   // and renders nested tmux sessions until the next inventory event.
   window.cc.getChatStreamState().then((snapshot) => {
+    window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     applyChatStreamState(snapshot);
     if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
       renderLimits(snapshot.limits, snapshot.limits_health ?? null);
     }
     warmSpawnCatalog();
-    window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...(snapshot || {}) });
     bindChatPopout();
     hydrateOpenDurableQuestions();
   }).catch(() => {

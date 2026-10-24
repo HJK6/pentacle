@@ -66,6 +66,11 @@ async function run() {
           history:document.querySelector('#cell-0 .slot-chat-history-state')?.textContent || null,
           draft:document.querySelector('#cell-0 .slot-chat-compose-input')?.value,
           attachments:document.querySelectorAll('#cell-0 .slot-chat-attachment-chip').length,
+          phase:window.PentacleChatStore.getTurnPhase(${JSON.stringify(targetId)}),
+          summaryWorking:s.sessions.find(row=>row.stream_id===${JSON.stringify(targetId)})?.working,
+          sidebarWorking:!!document.querySelector('.session-item[data-stream-id="${targetId}"] .activity-indicator.working'),
+          statusWorking:!!document.querySelector('#cell-0 .slot-chat-status.is-working'),
+          inputDisabled:document.querySelector('#cell-0 .slot-chat-compose-input')?.disabled,
           buildId:window.__PENTACLE_CONFIG__.buildId
         };
       })()`);
@@ -150,6 +155,36 @@ async function run() {
     await page.send('Page.reload'); await wait(800); await attach(); await wait(1000);
     const reloaded = await capture('reloaded');
     assert.equal(reloaded.rows, before.rows); assert.equal(reloaded.answers, 1);
+    // Replay R2's known-active -> authenticated unknown-bootstrap transition
+    // through the real host, socket, shared store and sidebar/detail renderer.
+    // Only the owned loopback daemon counterpart is controlled here.
+    const activeRoot = { ...row('USER', 'Held status continuity fixture', 300), raw: { working: true } };
+    daemon.events.push(activeRoot); daemon.emitEvent(activeRoot);
+    daemon.setTargetSummary({ working: true, working_label: 'Working 106s',
+      capture_liveness: 'idle', pane_status: 'pane_alive' });
+    await page.waitFor(`window.PentacleChatStore.getTurnPhase(${JSON.stringify(targetId)}) === 'working'`, { timeoutMs: 5000 });
+    await wait(250);
+    const statusBefore = await capture('status-before');
+    assert.equal(statusBefore.sidebarWorking, true); assert.equal(statusBefore.statusWorking, true);
+    daemon.disconnect(1001);
+    daemon.setTargetSummary({ working: false, working_label: '', capture_liveness: 'transport_unknown' }, false);
+    const priorHello = daemon.requests.filter(r => r.type === 'hello').length;
+    for (let i=0; i<50 && daemon.requests.filter(r => r.type === 'hello').length === priorHello; i++) await wait(100);
+    await wait(300);
+    const statusUnknown = await capture('status-unknown-bootstrap');
+    assert.equal(statusUnknown.phase, 'working', 'unknown bootstrap cannot release the established same-generation turn');
+    assert.equal(statusUnknown.summaryWorking, true);
+    assert.equal(statusUnknown.sidebarWorking, true); assert.equal(statusUnknown.statusWorking, true);
+    assert.equal(statusUnknown.inputDisabled, statusBefore.inputDisabled, 'composer retains its active-turn behavior');
+    daemon.emitFrame({ type: 'working.state', stream_id: targetId, tokens_phase: 'down', elapsed_ms: 128000 });
+    await wait(150);
+    assert.equal((await capture('status-checked-working')).phase, 'working');
+    daemon.setTargetSummary({ working: false, working_label: '', capture_liveness: 'idle' });
+    await wait(300);
+    const statusIdle = await capture('status-checked-idle');
+    assert.equal(statusIdle.phase, 'idle'); assert.equal(statusIdle.summaryWorking, false);
+    assert.equal(statusIdle.sidebarWorking, false); assert.equal(statusIdle.statusWorking, false);
+    assert.equal(statusIdle.inputDisabled, false);
     const requests = daemon.requests.filter(r => r.stream_id);
     assert.ok(requests.every(r => r.stream_id.startsWith('mock-host:')), 'only isolated fixture streams contacted');
     fs.writeFileSync(path.join(out, 'console.json'), JSON.stringify(page.consoleLines));

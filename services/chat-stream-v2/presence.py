@@ -790,7 +790,8 @@ class RemotePresence:
         """Rows with an in-flight turn: genuine activity within the active window
         (the universal ``genuine_activity_at`` signal, advanced by BOTH local
         ingest and remote event-push for claude and codex), or a capture that
-        last read working (so a turn's end transition is not missed). Offline
+        last read working (so a turn's end transition is not missed), plus one
+        priming capture per never-observed live generation after boot. Offline
         hosts and dead panes are skipped so the fast cadence stays cheap."""
         ttl = self.cfg.working_active_ttl_s
         targets: list[tuple[str, dict[str, Any]]] = []
@@ -811,7 +812,12 @@ class RemotePresence:
             ga = row.get("genuine_activity_at")
             if isinstance(ga, (int, float)) and not isinstance(ga, bool):
                 recent = (now - float(ga)) <= ttl
-            if recent or (state is not None and state.working):
+            # Bootstrap each live generation through the existing checked
+            # capture owner once, even if no new transcript event arrives.
+            # An attempted capture records liveness (including failure), so
+            # idle/failed generations do not become a new polling workload.
+            unobserved = state is None or not state.capture_liveness
+            if unobserved or recent or (state is not None and state.working):
                 targets.append((host, row))
         return targets
 

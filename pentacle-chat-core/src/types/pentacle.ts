@@ -243,6 +243,8 @@ export interface PentacleSessionSummary {
   pending: boolean;
   working: boolean;
   working_label?: string;
+  // Existing daemon capture metadata: transport_unknown is not checked idle.
+  capture_liveness?: string;
   // Canonical daemon lifecycle for newly admitted sessions. Older daemons and
   // legacy rows may omit it or project a non-modern compatibility value.
   bootstrap_state?: 'queued' | 'starting' | 'ready' | 'failed' | string | null;
