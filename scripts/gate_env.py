@@ -473,7 +473,8 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
         if item.startswith("-") or ".." in Path(item).parts or item.startswith("/") or not pattern.match(item):
             raise SetupFailure([fail("selection", "selector %r does not match the target's declared pattern" % item, "")])
         file_part = item.split("::", 1)[0]
-        if "*" not in file_part and not (root / file_part).is_file():
+        declared_directory = file_part in target.get("directory_select", []) and (root / file_part).is_dir()
+        if "*" not in file_part and not (root / file_part).is_file() and not declared_directory:
             raise SetupFailure([fail("selection", "selector %r names no existing file" % item, "")])
         out.append(item)
     return out
