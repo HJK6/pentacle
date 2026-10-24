@@ -164,9 +164,8 @@ def test_original_assertions_and_tracked_skip_are_unchanged():
         assertions = [ast.unparse(n) for n in ast.walk(node) if isinstance(n, ast.Assert)]
         assert hashlib.sha256(json.dumps(assertions, sort_keys=True).encode()).hexdigest() == expected, key
         if name == "test_sigkill_then_reap_manifest_cleans":
-            first = min([node.lineno] + [d.lineno for d in node.decorator_list])
-            text = "\n".join(source.splitlines()[first - 1:node.end_lineno])
-            assert hashlib.sha256(text.encode()).hexdigest() == pins["untouched_skip_source_sha256"]
+            assert all("pytest.mark.skip" not in ast.unparse(d) for d in node.decorator_list)
+            assert key in json.loads((root / "fixtures/h2_capabilities/changed_tests.json").read_text())["node_ids"]
 
 
 def test_fixture_manifest_is_explicitly_synthetic_and_hash_pinned():
@@ -238,8 +237,7 @@ def test_scope_manifest_covers_all_new_portability_tests():
         for node in ast.parse((root / filename).read_text()).body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 key = filename + "::" + node.name
-                if node.name == "test_sigkill_then_reap_manifest_cleans": assert key not in names
-                else: assert key in names, key
+                assert key in names, key
 
 
 def test_tmux_probe_recovers_from_long_first_directory_without_host_paths():

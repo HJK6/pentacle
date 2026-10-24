@@ -25,6 +25,7 @@ probe (see test_soak.py's offline-host note).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -33,6 +34,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -47,7 +49,10 @@ from tools.run_gate import (
     _set_parent_death_signal,
     terminate_process_group,
 )
-from tools.gate_owner_manifest import leader_pgid, manifest_path_from_env, record, resolve_tmux_socket
+from tools.gate_owner_manifest import (
+    ManifestError, _lock, _reap_socket, _socket_objects, leader_pgid,
+    manifest_path_from_env, process_start_identity, record,
+)
 
 SERVICE_DIR = Path(__file__).resolve().parents[2]
 
@@ -66,10 +71,11 @@ _SAMPLER_COMMAND_TIMEOUT_S = 5.0
 
 
 def _record_owned(pgid: int | None = None, socket: str | None = None,
-                  leader_pid: int | None = None) -> None:
+                  leader_pid: int | None = None,
+                  socket_owner: dict | None = None) -> None:
     path = manifest_path_from_env()
     if path is not None:
-        record(path, pgid, socket, leader_pid=leader_pid)
+        record(path, pgid, socket, leader_pid=leader_pid, socket_owner=socket_owner)
 
 
 class SamplerInfrastructureError(RuntimeError):
@@ -160,24 +166,37 @@ class TmuxNamespace:
         if not real_tmux:
             raise RuntimeError("tmux is required for the soak tier")
         self.real_tmux = real_tmux
-        self.socket = f"v2s{uuid.uuid4().hex[:8]}"
-        self.keepalive = f"__v2ns_{self.socket}"
-        self.socket_path = resolve_tmux_socket(self.socket)
-        self.machines_file = tmp_path / f"machines-{self.socket}.json"
+        self.nonce = uuid.uuid4().hex
+        self._manifest = manifest_path_from_env()
+        with self._ownership_lock():
+            self.root = Path(tempfile.mkdtemp(prefix="v2s-", dir="/tmp"))
+            self.root.chmod(0o700)
+            self._root_identity = (self.root.stat().st_dev, self.root.stat().st_ino)
+        self.socket_path = self.root / "s"
+        self.socket = str(self.socket_path)
+        self.socket_owner: dict | None = None
+        name = f"v2s{self.nonce[:8]}"
+        self.keepalive = f"__v2ns_{name}"
+        self.machines_file = tmp_path / f"machines-{name}.json"
         self.machines_file.write_text(
             json.dumps({"machines": [{"name": LOCAL_HOST}]}, indent=2) + "\n",
             encoding="utf-8",
         )
         self._env = dict(os.environ)
         self._env.pop("TMUX", None)
-        self.wrapper = tmp_path / f"tmux-{self.socket}"
+        self._env.pop("TMUX_TMPDIR", None)
+        self.wrapper = tmp_path / f"tmux-{name}"
         self.wrapper.write_text(
             "#!/bin/sh\n"
-            f"exec {shlex.quote(self.real_tmux)} -L {shlex.quote(self.socket)} \"$@\"\n",
+            f"exec {shlex.quote(self.real_tmux)} -N -S {shlex.quote(self.socket)} \"$@\"\n",
             encoding="utf-8",
         )
         self.wrapper.chmod(0o755)
         self.started = False
+
+    def _ownership_lock(self):
+        return _lock(self._manifest) if self._manifest is not None else contextlib.nullcontext()
+
 
     def child_env(self, **overrides: str) -> dict[str, str]:
         env = dict(self._env)
@@ -194,11 +213,12 @@ class TmuxNamespace:
             env.pop(name, None)
         env["PENTACLE_MACHINES_FILE"] = str(self.machines_file)
         env.pop("TMUX", None)
+        env.pop("TMUX_TMPDIR", None)
         return env
 
     def run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [self.real_tmux, "-L", self.socket, *args],
+            [self.real_tmux, "-N", "-S", self.socket, *args],
             env=self.child_env(),
             capture_output=True,
             text=True,
@@ -214,21 +234,51 @@ class TmuxNamespace:
     def start(self) -> None:
         if self.started:
             return
-        result = self.run("new-session", "-d", "-s", self.keepalive, "sleep", "600")
-        if result.returncode != 0:
-            self.run("kill-server")
-            self.socket_path.unlink(missing_ok=True)
-            raise AssertionError(
-                result.stderr or result.stdout or "private tmux server failed to start"
-            )
-        self.started = True
+        with self._ownership_lock():
+            result = subprocess.run(
+                [self.real_tmux, "-f", "/dev/null", "-S", self.socket,
+                 "new-session", "-d", "-s", self.keepalive, "sleep", "600", ";",
+                 "set-option", "-g", "@v2_gate_nonce", self.nonce, ";",
+                 "display-message", "-p", "#{pid}"],
+                env=self.child_env(), capture_output=True, text=True, timeout=5)
+            try:
+                pid = int(result.stdout.strip())
+                identity = process_start_identity(pid)
+                if result.returncode or not identity:
+                    raise ManifestError(result.stderr or "private tmux server has no identity")
+                root, socket = self.root.stat(), self.socket_path.lstat()
+                self.socket_owner = dict(nonce=self.nonce, server_pid=pid,
+                    server_start_identity=identity, root_dev=root.st_dev, root_ino=root.st_ino,
+                    socket_dev=socket.st_dev, socket_ino=socket.st_ino)
+                fd, present = _socket_objects(self.socket, self.socket_owner)
+                os.close(fd)
+                if not present:
+                    raise ManifestError("new private tmux socket is absent")
+                self.started = True
+            except BaseException:
+                if self.socket_owner is not None:
+                    _reap_socket(self.socket, self.socket_owner, time.monotonic() + 5, self.real_tmux)
+                elif not self.socket_path.exists() and self.root.exists():
+                    self._remove_empty_root()
+                # Unknown partial ownership is retained, never guessed/unlinked.
+                raise
+
+    def _remove_empty_root(self) -> None:
+        root = self.root.lstat()
+        if self.root.is_symlink() or (root.st_dev, root.st_ino) != self._root_identity:
+            raise ManifestError("private tmux root identity changed")
+        self.root.rmdir()
 
     def kill_server(self) -> None:
-        """Kill only this run's server; safe after partial setup or prior cleanup."""
-        if self.started:
-            self.run("kill-server")
-        self.socket_path.unlink(missing_ok=True)
-        self.started = False
+        """Wait for this bound server's exit before removing its socket/root."""
+        with self._ownership_lock():
+            if self.socket_owner is not None:
+                _reap_socket(self.socket, self.socket_owner, time.monotonic() + 5, self.real_tmux)
+            elif self.socket_path.exists():
+                raise ManifestError("cannot clean an unbound private tmux socket")
+            elif self.root.exists():
+                self._remove_empty_root()
+            self.started = False
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +361,7 @@ class Daemon:
                 **popen_kwargs,
             )
             _record_owned(leader_pgid(self.proc.pid), self.tmux_namespace.socket,
-                          leader_pid=self.proc.pid)
+                          leader_pid=self.proc.pid, socket_owner=self.tmux_namespace.socket_owner)
             return self._wait_for_bind(start_off)
         except BaseException:
             self._cleanup_start_failure()
