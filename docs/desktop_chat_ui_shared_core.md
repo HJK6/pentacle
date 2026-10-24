@@ -147,3 +147,13 @@ The five-second deadline is not renewed by failed reconnect attempts. A longer
 outage shows the existing disconnected state; authentication refusals and
 other socket failures surface immediately. This recovery does not create a
 new send attempt or change the daemon's receipt and idempotency protocol.
+
+A restart's first summary can report `working: false` with
+`capture_liveness: transport_unknown` before observing a live pane. For the
+same generation, this unobserved summary preserves an already-established
+active turn and its sidebar status. A checked idle capture, terminal event,
+removed stream or new generation releases the old active phase. The daemon's
+existing bounded working capture primes each never-observed live generation
+once after boot, even without a new transcript event. Idle or failed priming
+does not create repeated fast captures; normal activity and working captures
+retain their existing refresh rules.

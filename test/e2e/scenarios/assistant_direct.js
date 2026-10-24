@@ -204,6 +204,8 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
       }
     },
     setTargetHistoryReplyDelay(ms) { targetHistoryReplyDelayMs = Math.max(0, Number(ms) || 0); },
+    setTargetSummary(fields, broadcast = true) { Object.assign(target, fields); if (broadcast) inventory(); },
+    emitFrame(frame) { for (const socket of server.clients) send(socket, frame); },
     setGeneration(value) { target.session_generation = value; inventory(); },
     setPaneQuestion(question) { target.question = question; inventory(); },
     setDurableQuestion(notification) { durableQuestion = notification; inventory(); },

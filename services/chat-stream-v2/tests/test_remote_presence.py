@@ -920,3 +920,96 @@ def test_working_refresh_defaults_meet_ac1_bounds() -> None:
     # grace spans more than one tick so a single missed spinner frame mid-turn is
     # bridged rather than flapped off.
     assert cfg.working_clear_grace_ms > cfg.working_refresh_interval_s * 1000
+
+
+def _cold_generation_presence(*, working=False, failed=False, config=None):
+    sid = "hostb:v2-bootstrap"
+    sessions = _sessions_with([{
+        **_row("hostb", "v2-bootstrap"), "provider": "codex",
+        "session_generation": "bootstrap-1", "working": False,
+        "online": True, "pane_status": "pane_alive",
+        "capture_liveness": "transport_unknown",
+    }])
+    tmux = _CheckedPreviewTmux((0, "v2-bootstrap\t123\n"),
+        "ready\n❯\nWorking (106s · thinking)\n" if working else "ready\nidle\n")
+    tmux.checked_ok = not failed
+    hosts = _FakeHosts(LOCAL, {"hostb": tmux}, online={"hostb": True})
+    frames = []
+    async def broadcast(frame):
+        frames.append(frame)
+    presence = RemotePresence(sessions, hosts, config=config, broadcast=broadcast)
+    return sid, sessions, tmux, hosts, presence, frames
+
+
+def test_bootstrap_primes_long_held_remote_turn_without_new_event():
+    sid, sessions, tmux, hosts, presence, frames = _cold_generation_presence(working=True)
+    assert not sessions.get(sid).get("genuine_activity_at")
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 1
+    assert sessions.get(sid)["working"] is True
+    assert any(frame.get("type") == "working.state" and frame.get("tokens_phase") == "down"
+               for frame in frames)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_bootstrap_idle_or_failed_generation_is_primed_only_once(failed):
+    sid, sessions, tmux, hosts, presence, frames = _cold_generation_presence(failed=failed)
+    for _ in range(4):
+        asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 1
+    assert sessions.get(sid)["working"] is False
+    assert sessions.get(sid)["capture_liveness"] == ("transport_unknown" if failed else "idle")
+    # Going offline and online cannot convert a failed/idle prime into polling.
+    hosts._online["hostb"] = False
+    asyncio.run(presence.refresh_active_working())
+    hosts._online["hostb"] = True
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 1
+
+
+@pytest.mark.parametrize("blocked", ["host_offline", "row_offline", "dead"])
+def test_bootstrap_prime_respects_liveness(blocked):
+    sid, sessions, tmux, hosts, presence, frames = _cold_generation_presence(working=True)
+    if blocked == "host_offline":
+        hosts._online["hostb"] = False
+    else:
+        sessions.apply_live(sid, **({"online": False} if blocked == "row_offline" else {"pane_status": "pane_dead"}))
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 0
+    assert not sessions.get(sid)["working"]
+
+
+def test_bootstrap_prime_is_bounded_rotates_and_admits_each_new_generation():
+    sid, sessions, tmux, hosts, presence, frames = _cold_generation_presence(
+        config=PresenceConfig(preview_max_rows_per_pass=1))
+    other = {**sessions.get(sid), **_row("hostb", "v2-bootstrap-other")}
+    sessions._inv[other["stream_id"]] = other
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 1
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 2
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 2
+    sessions._inv[sid] = {**sessions.get(sid), "session_generation": "bootstrap-2"}
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 3
+    asyncio.run(presence.refresh_active_working())
+    assert tmux.checked_calls == 3
+
+
+def test_bootstrap_capture_cannot_land_on_successor_generation():
+    sid, sessions, tmux, hosts, presence, frames = _cold_generation_presence(working=True)
+    blocker = _BlockingCheckedPreviewTmux(tmux.result, tmux.preview)
+    hosts._tmux["hostb"] = blocker
+    async def run():
+        task = asyncio.create_task(presence.refresh_active_working())
+        await blocker.capture_started.wait()
+        sessions._inv[sid] = {**sessions.get(sid), "session_generation": "bootstrap-2"}
+        blocker.release_capture.set()
+        await task
+    asyncio.run(run())
+    assert not sessions.get(sid)["working"]
+    assert not any(frame.get("type") == "working.state" and frame.get("tokens_phase") == "down" for frame in frames)
+    asyncio.run(presence.refresh_active_working())
+    assert sessions.get(sid)["working"] is True
+    assert blocker.checked_calls == 2
