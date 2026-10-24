@@ -624,21 +624,25 @@ def evidence_refs(folder: Path) -> List[Dict[str, Any]]:
 
 
 def stop_group(proc: subprocess.Popen, grace: float = 20.0) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
+    # Every subject is launched with start_new_session=True: its PID is the
+    # retained group identity even after wait() has reaped the session leader.
+    pgid = proc.pid
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if pgid is not None:
-            try:
-                os.killpg(pgid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
         try:
-            proc.wait(timeout=grace)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            proc.poll()
+            return
+        except PermissionError:
+            return  # caller records surviving group as an unproved cleanup
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            proc.poll()  # reap the leader without mistaking it for the group
+            if not group_alive(pgid):
+                return
+            time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    proc.poll()
+
 
 
 class OwnedProcesses:
@@ -697,6 +701,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--purpose", choices=ga.PURPOSES)
     parser.add_argument("--attempt-manifest", type=Path)
     parser.add_argument("--prior-attempt")
+    parser.add_argument("--history-complete", action="store_true", help="assert complete first-invocation history for this new stable series; never for a retry")
     parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--tmp-root", type=Path)
     parser.add_argument("--rebuild", action="store_true")
@@ -717,7 +722,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "owner_stream_id": os.environ.get("AGENT_ORCH_STREAM_ID") or UNKNOWN,
         "owner_generation": os.environ.get("PENTACLE_SESSION_GENERATION") or UNKNOWN,
         "history": "unknown" if missing_identity else ("continues" if args.prior_attempt else "first_observed"),
-        "history_complete": False if missing_identity else None,
+        "history_complete": bool(args.history_complete and not missing_identity and not args.prior_attempt),
         "requested_at": ga.utc_now(),
         "identities": {"source": source_identity(checkout), "harness": harness_identity(), "config": None, "profile": None},
         "selected": {"select": list(args.select), "pass_env_names": list(args.pass_env)},
@@ -740,6 +745,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     proc = None
     owner: Optional[OwnedProcesses] = None
     try:
+        if args.history_complete and (missing_identity or args.prior_attempt):
+            raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
         if args.command == "run" and not args.target:
             raise SetupFailure([fail("identity_args", "run needs --target")])
         config = load_config(CONFIG_PATH)

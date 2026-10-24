@@ -149,7 +149,7 @@ def test_public_workflow_real_git_accepts_audited_bytes(tmp_path: Path, monkeypa
     merge_gate._public_workflow(candidate, path)
 
 
-@pytest.mark.parametrize("change", ["missing", "remove_interrupt", "remove_shared", "arbitrary_byte"])
+@pytest.mark.parametrize("change", ["missing", "remove_web_target", "remove_shared", "arbitrary_byte"])
 def test_public_workflow_real_git_refuses_changed_or_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
@@ -160,8 +160,8 @@ def test_public_workflow_real_git_refuses_changed_or_missing(
         workflow += b"\n"
     else:
         command = {
-            "remove_interrupt": b"          node --test test/e2e/web_gate_interrupt.test.js\n",
-            "remove_shared": b"          python -m pytest services/_shared/tests\n",
+            "remove_web_target": b"          --target web-gate --spec ci-public-checks --series \"ci-${GITHUB_RUN_ID}-web\"\n",
+            "remove_shared": b"--target shared-pytest --select tests",
         }[change]
         assert workflow.count(command) == 1
         workflow = workflow.replace(command, b"", 1)
