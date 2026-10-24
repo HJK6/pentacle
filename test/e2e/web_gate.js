@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 
 // ── Pentacle web-mode E2E gate (lane 3 of spec_pentacle__web_mode_2026_09) ───
 //
@@ -569,11 +570,11 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       cdpPort = args.cdpPort || await freePort();
       assertNotStopping(runtime);
       chrome = spawn(chromeBin, [
-        '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+        ...headlessChromeArgs(), `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
         '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-        '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000',
+        '--disable-gpu', '--window-size=1600,1000',
         // A HOME without a login keychain (isolated gate runs) otherwise leaves the page target at about:blank on macOS.
-        '--use-mock-keychain', url,
+        url,
         ...withResolverRule(runtime.modelerFixture?.chromeArgs || [], `MAP ${REBIND_HOST} 127.0.0.1`),
       ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       chrome.stdout.on('data', (d) => chromeLog.push(String(d)));
@@ -633,7 +634,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   }
 }
 
-function allocateReportDir(now = () => new Date(), root = path.join(__dirname, 'runs')) {
+function allocateReportDir(now = () => new Date(), root = process.env.PENTACLE_WEB_GATE_REPORT_ROOT || path.join(__dirname, 'runs')) {
   const stamp = now().toISOString().replace(/[:.]/g, '-');
   fs.mkdirSync(root, { recursive: true });
   return path.join(fs.mkdtempSync(path.join(root, `${stamp}-`)), 'web_gate');

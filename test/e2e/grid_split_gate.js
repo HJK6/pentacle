@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 // Full shipped renderer in Electron and Chrome; isolated profile/daemon/tmux
 // fixtures. Reuses the public CDP and web-host harness, never the live app.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
@@ -31,7 +32,7 @@ async function run(surface,output) {
     if(surface==='web') {
       host=await startHost(['--profile',profile,'--port','0']);
       const chrome=process.env.PENTACLE_CHROME || (process.platform==='darwin'?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':'google-chrome');
-      proc=spawn(chrome,['--headless=new', '--use-mock-keychain','--no-first-run','--no-default-browser-check','--disable-gpu','--window-size=1280,800',...args,`http://127.0.0.1:${host.port}`],{stdio:['ignore',log,log]});
+      proc=spawn(chrome,[...headlessChromeArgs(), '--disable-gpu','--window-size=1280,800',...args,`http://127.0.0.1:${host.port}`],{stdio:['ignore',log,log]});
     } else {
       proc=spawn(require('electron'),[ROOT,...args],{env:{...process.env,PENTACLE_CONFIG:profile,PENTACLE_HARNESS:'1'},stdio:['ignore',log,log]});
     }

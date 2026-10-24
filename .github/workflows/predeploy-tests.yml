@@ -7,7 +7,7 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,9 +40,12 @@ jobs:
             fi
           done
           exit 1
-      - run: npm ci
-      - run: npm run prestart
-      - run: npm test
+      - name: Supported npm tests
+        run: >-
+          python3 scripts/gate_env.py run --profile pentacle
+          --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${RUNNER_TEMP}/gate-evidence/npm"
+          --target npm-test --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-npm"
+          --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/attempt-manifest.json"
       - run: python3 scripts/test_check_public_residue.py
       - run: python3 scripts/check_public_residue.py
       - name: Portable microphone contracts
@@ -55,7 +58,6 @@ jobs:
           npm run build
           npm run check:dist
           npm test
-      - run: python -m pip install -r services/chat-stream-v2/requirements.txt -e services/agent-orch
       - name: Install Chrome for the web E2E gate
         timeout-minutes: 5
         run: |
@@ -64,31 +66,24 @@ jobs:
       - name: Source integrity after Chrome install
         run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
       - name: Web mode E2E gate
-        run: |
-          npm run build:web
-          node test/e2e/web_gate.js
-          node --test test/e2e/web_gate_interrupt.test.js
+        run: >-
+          python3 scripts/gate_env.py run --profile pentacle
+          --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${RUNNER_TEMP}/gate-evidence/web"
+          --target web-gate --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-web"
+          --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/attempt-manifest.json"
       - name: Daemon and CLI checks
-        env:
-          V2_UNIT_TIMEOUT_S: '1200'
-          V2_GATE_EVIDENCE_DIR: ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           umask 077
-          export PYTHONPATH="${GITHUB_WORKSPACE}/services:${GITHUB_WORKSPACE}/services/agent-orch"
-          python services/chat-stream-v2/tools/run_gate.py merge --basetemp "/tmp/pentacle-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python -m pytest services/agent-orch/tests
-          python -m pytest services/_shared/tests
-      - name: Retain failed daemon gate evidence
+          python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${RUNNER_TEMP}/gate-evidence/daemon" --target v2-merge-ci --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/attempt-manifest.json"
+          python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${RUNNER_TEMP}/gate-evidence/cli" --target cli-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-cli" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/attempt-manifest.json"
+          python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env" --evidence-dir "${RUNNER_TEMP}/gate-evidence/shared" --target shared-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-shared" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/attempt-manifest.json"
+      - name: Retain failed gate evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: daemon-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: supported-gates-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/v2-merge-evidence.json
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/*.log
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/*.junit.xml
-            ${{ runner.temp }}/pentacle-gate-${{ github.run_id }}-${{ github.run_attempt }}/u4-upload/**
+          path: ${{ runner.temp }}/gate-evidence/**
       - name: Source integrity at gate end
         run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"

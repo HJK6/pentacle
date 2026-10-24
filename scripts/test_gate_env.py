@@ -177,6 +177,34 @@ class ToolchainResolution(Tmp):
         cfg["system_path"] = []
         return cfg
 
+    def test_daemon_node_closure_with_separate_tool_directories(self):
+        cfg = self.config()
+        profile = cfg["profiles"]["pentacle"]
+        dirs = {name: self.tmp / name for name in ("python", "tmux", "node")}
+        for folder in dirs.values():
+            folder.mkdir()
+        fake_exe(dirs["python"], "python3.13", "Python 3.13.15")
+        fake_exe(dirs["tmux"], "tmux", "tmux 3.4")
+        fake_exe(dirs["node"], "node", "v22.4.1")
+        ambient = os.pathsep.join(str(p) for p in dirs.values())
+        for name in ("v2-unit", "v2-smoke", "v2-merge", "v2-merge-ci", "v2-pytest"):
+            with self.subTest(target=name):
+                target = profile["targets"][name]
+                self.assertIn("node", target["needs"])
+                tools, failures = ge.resolve_toolchain(cfg, target["needs"], ambient_path=ambient, system="linux")
+                self.assertEqual(failures, [])
+                env = ge.build_env(cfg, profile, target, checkout=self.tmp / "co", toolchain=tools,
+                                   venv=None, home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8",
+                                   evidence=self.tmp / "e", attempt_id="split-tools", pass_env={}, ambient={})
+                child = subprocess.run(["node", "--version"], env=env, capture_output=True, text=True)
+                self.assertEqual((child.returncode, child.stdout.strip()), (0, "v22.4.1"))
+
+    def test_missing_node_has_named_setup_diagnostic(self):
+        tools, failures = ge.resolve_toolchain(self.config(), ["node"], ambient_path=str(self.tmp), system="linux")
+        self.assertEqual(tools, {})
+        self.assertEqual([f["code"] for f in failures], ["missing_node"])
+        self.assertIn("node 22", failures[0]["detail"])
+
     def test_wrong_node_major_is_rejected_and_right_one_found(self):
         old, new = self.tmp / "old", self.tmp / "new"
         old.mkdir(), new.mkdir()
@@ -500,6 +528,21 @@ class EntrypointReceipts(Tmp):
         (a,) = self.attempts()
         self.assertEqual((a["primary_outcome"], a["history"], a["purpose"]), ("setup_failure", "first_observed", "acceptance"))
 
+    def test_resolved_default_scope_survives_setup_failure_without_prepared(self):
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({}, [ge.fail("toolchain", "fixture setup failure")]),
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+            code = self.run_main("--target", "npm-test", "--spec", "s", "--series", "x", "--purpose", "negative_control")
+        self.assertEqual(code, 3)
+        files = sorted((self.tmp / "ev" / "attempts").glob("*/*.json"))
+        events = [json.loads(p.read_text()) for p in files]
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        self.assertEqual(events[-1]["effective_selection"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["default_patterns"])
+
+    def test_unresolved_config_failure_never_fabricates_scope(self):
+        self.run_main("--target", "npm-test", patch_load=ge.SetupFailure([ge.fail("config", "fixture malformed config")]))
+        files = sorted((self.tmp / "ev" / "attempts").glob("*/*.json"))
+        self.assertFalse(any("effective_selection" in json.loads(p.read_text()) for p in files))
+
     def test_run_without_target_is_refused_after_started_receipt(self):
         self.assertEqual(self.run_main(), 3)
         self.assertEqual(self.attempts()[0]["status"], "complete")
@@ -614,6 +657,53 @@ class EntrypointReceipts(Tmp):
         self.assertEqual(len(attempts), 2)
         self.assertEqual({a["history"] for a in attempts}, {"first_observed", "continues"})
         self.assertEqual({a["primary_outcome"] for a in attempts}, {"setup_failure"})
+
+
+class PythonChromePolicy(unittest.TestCase):
+    def test_selenium_launch_retains_executable_headless_and_keychain_flags(self):
+        import ast
+        source = (HERE.parent / "test/e2e/report_selection_copy_gate.py").read_text()
+        tree = ast.parse(source)
+        flags = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For) or not isinstance(node.iter, (ast.Tuple, ast.List)):
+                continue
+            if not any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                       and call.func.attr == "add_argument" and call.args
+                       and isinstance(call.args[0], ast.Name) and isinstance(node.target, ast.Name)
+                       and call.args[0].id == node.target.id for statement in node.body for call in ast.walk(statement)):
+                continue
+            flags += [e.value for e in node.iter.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        self.assertIn("--headless=new", flags)
+        self.assertIn("--use-mock-keychain", flags)
+
+
+class MigratedTargets(Tmp):
+    def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
+        cfg = ge.load_config()
+        profile = cfg["profiles"]["pentacle"]
+        target = profile["targets"]["v2-merge-ci"]
+        env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
+                           home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
+                           attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S":"1"})
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("1500","900"))
+        cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
+                                       self.tmp / "ev",self.tmp / "t/b",[],target["timeout_s"],env)
+        self.assertNotIn("--timeout-seconds",cmd)  # runner reads the reviewed per-tier limits
+        self.assertIn("merge",cmd)
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds")+1]),2520)
+        self.assertEqual(result["wall_s"],2550)  # existing outer startup/teardown slack
+
+    def test_cli_and_shared_targets_use_their_own_roots_without_foreign_plugin(self):
+        cfg = ge.load_config(); profile = cfg["profiles"]["pentacle"]
+        for name, folder in (("cli-pytest","services/agent-orch"),("shared-pytest","services/_shared")):
+            target = profile["targets"][name]
+            selected = ge.validate_selection(target,["tests"],HERE.parent)
+            cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
+                                           self.tmp / name,self.tmp / "t/b",selected,900,{})
+            self.assertEqual(result["cwd"],HERE.parent / folder)
+            self.assertNotIn("--strict-capabilities",cmd)
+            with self.assertRaises(ge.SetupFailure):ge.validate_selection(target,[],HERE.parent)
 
 
 if __name__ == "__main__":

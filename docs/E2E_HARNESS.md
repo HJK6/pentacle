@@ -405,3 +405,10 @@ The browser scenario can save `voice-recording.png` and `voice-transcribing.png`
 in its run directory. Treat them as evidence only when they were produced by a
 verified synthetic run; this document does not assert that screenshots or any
 particular candidate's browser gates have passed.
+
+The supported clean-HOME web entry is `python3 scripts/gate_env.py run --profile
+pentacle --target web-gate` with the workspace/evidence/spec/series/purpose/manifest
+identity options in the gate environment guide. It prepares the existing builds,
+then runs the real browser journey and interrupt contract, retaining reports in
+the evidence root. Shared JS Chrome flags live in `test/e2e/lib/chrome_launch.cjs`.
+See [the CI step audit](ci_gate_step_audit.md) for the exact preserved CI coverage.

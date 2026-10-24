@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 
 // Proof driver for the compact-first compose bar + view-pills changes.
 // Reuses the hermetic web_gate harness: seeds an
@@ -141,8 +142,8 @@ async function run(args) {
 
     const cdpPort = await gate.freePort();
     chrome = spawn(CHROME, [
-      '--headless=new', '--use-mock-keychain', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
-      '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1600,1000', url,
+      ...headlessChromeArgs(), `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${userDataDir}`,
+      '--disable-gpu', '--window-size=1600,1000', url,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     session = await cdp.connect(cdpPort, { match: new RegExp(`127\\.0\\.0\\.1:${host.port}`) });
 

@@ -233,7 +233,7 @@ def fold_attempt(attempt_dir: Path) -> Dict[str, Any]:
         "primary_outcome": (terminal or {}).get("outcome") if terminal else ("incomplete" if status != "invalid" else UNKNOWN),
     }
     for key in ("spec_id", "series_id", "prior_attempt_id", "purpose", "host", "owner_stream_id",
-                "owner_generation", "history", "started_at", "identities", "target", "profile"):
+                "owner_generation", "history", "history_complete", "started_at", "identities", "target", "profile"):
         if key in started:
             result[key] = started[key]
     if terminal:

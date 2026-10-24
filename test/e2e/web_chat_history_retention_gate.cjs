@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 // Actual browser/store/transport; only the loopback daemon counterpart is a fixture.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -37,7 +38,7 @@ async function run() {
   try {
     web = await require(path.join(root, 'server')).main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const port = await getFreePort();
-    browser = spawn(browserBinary, ['--headless=new', '--use-mock-keychain', '--no-first-run', '--no-default-browser-check', '--disable-gpu',
+    browser = spawn(browserBinary, [...headlessChromeArgs(), '--disable-gpu',
       '--window-size=1600,900', `--user-data-dir=${path.join(out, 'chrome')}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
     page = await cdp.connect(port, { timeoutMs: 15000 });
     // Accelerate only the existing ten-minute build poll. Baseline/candidate use
