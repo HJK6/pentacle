@@ -62,6 +62,7 @@ async function run() {
           answers:document.querySelectorAll('#cell-0 .slot-chat-v3-answers').length,
           assistant:document.querySelector('#cell-0 .slot-chat-list')?.textContent.includes('Fixture assistant history'),
           user:document.querySelector('#cell-0 .slot-chat-list')?.textContent.includes('Fixture user history'),
+          outageFinals:Array.from(document.querySelectorAll('#cell-0 .slot-chat-row')).filter(row=>row.textContent.includes('Final persisted during graceful outage')).length,
           history:document.querySelector('#cell-0 .slot-chat-history-state')?.textContent || null,
           draft:document.querySelector('#cell-0 .slot-chat-compose-input')?.value,
           attachments:document.querySelectorAll('#cell-0 .slot-chat-attachment-chip').length,
@@ -75,8 +76,18 @@ async function run() {
     };
     await attach();
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-list')?.textContent.includes('Fixture assistant history')", { timeoutMs: 10000 });
-    const before = await capture('before');
+    let before = await capture('before');
     assert.equal(before.answers, 1);
+    // The browser /cc connection and its loaded chat stay open. Persist the
+    // FINAL only after normal daemon shutdown, without broadcasting it; the
+    // summary reconnect snapshot has no transcript events.
+    daemon.disconnect(1001); await wait(50);
+    daemon.events.push(row('ASSIST_TEXT', 'Final persisted during graceful outage', 20));
+    await wait(1750);
+    const graceful = await capture('graceful-reconnect');
+    assert.ok(graceful.fetches > before.fetches, 'authenticated reconnect refetches an already-loaded chat even without a visible disconnect');
+    assert.equal(graceful.outageFinals, 1, 'the FINAL persisted during the outage renders exactly once without reload');
+    before = graceful;
     daemon.disconnect(); await wait(1800);
     const reconnect = await capture('reconnect');
     assert.equal(reconnect.rows, before.rows);

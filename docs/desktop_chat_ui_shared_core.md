@@ -140,6 +140,8 @@ that interval remains recoverable under its original request and optimistic
 message IDs. Reconnect replay waits for the authenticated connection to be
 ready, so an accepted send can recover its durable receipt without a second
 native submission. Opening a socket alone does not trigger replay.
+Authenticated recovery also refetches already-open chats, including messages
+persisted while the daemon connection was unavailable.
 
 The five-second deadline is not renewed by failed reconnect attempts. A longer
 outage shows the existing disconnected state; authentication refusals and
