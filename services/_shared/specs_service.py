@@ -8,6 +8,8 @@ import json
 import threading
 import time
 import stat
+import hashlib
+import io
 from contextlib import contextmanager
 import yaml
 from collections import defaultdict
@@ -23,7 +25,6 @@ from .specs_parser import (
     DEFAULT_STATUSES,
     SYNTHETIC_SPEC_PROGRESS,
     is_sync_conflict as _is_spec_sync_conflict,
-    parse_statuses_json,
     parse_work_folder,
     declared_spec_id,
     has_declared_spec_id,
@@ -39,14 +40,37 @@ SPEC_DOCUMENT_PREFIXES = ("spec_", "work_")
 SOURCE_READ_ERRORS = (OSError, ValueError, UnicodeError, yaml.YAMLError)
 
 
+def _content_digest(content):
+    return hashlib.sha256(content).digest() if content is not None else None
+
+
+def _decode_identity_bytes(content):
+    # Match Path.read_text's universal-newline behavior, including lone CR.
+    with io.TextIOWrapper(io.BytesIO(content), encoding="utf-8", newline=None) as source:
+        return source.read()
+
+
+def _parse_identity_bytes(path, content):
+    """Path-labelled parse boundary; content was captured without reopening."""
+    return specs_parser.load_frontmatter(_decode_identity_bytes(content)) if content is not None else {}
+
+
+def _input_token(captured):
+    fingerprint, content, read_error = captured
+    return fingerprint, _content_digest(content), read_error
+
+
 @contextmanager
-def _bounded_directory(path: Path):
+def _bounded_directory(path: Path, *, parent_fd: int | None = None):
     """Open and recheck a directory chain without following ancestor symlinks."""
     if ".." in path.parts:
         raise ValueError("work_path_invalid")
     absolute = path.absolute()
 
     def open_chain():
+        if parent_fd is not None:
+            return os.open(absolute.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                           dir_fd=parent_fd)
         fd = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
         try:
             for part in absolute.parts[1:]:
@@ -221,6 +245,8 @@ class SpecsSubsystem:
         self._explicit_root = memory_root is not None
         self.memory_root, self.memory_root_source = ((Path(memory_root), "explicit") if self._explicit_root
                                                       else _resolve_specs_memory_root())
+        if self.memory_root is not None:
+            self.memory_root = self.memory_root.resolve()
         self.session_summaries = session_summaries
         self.changed_callback = changed_callback
         self.retry_interval_s = retry_interval_s
@@ -228,9 +254,7 @@ class SpecsSubsystem:
         self._monotonic = monotonic
         self._timer_factory = timer_factory
         self.disabled = self.memory_root is None or (not self._explicit_root and not self.memory_root.is_dir())
-        # Cache statuses using the full identity-bearing file fingerprint.
-        # Preserved mtime cannot conceal a permission, inode or contents change. Missing/invalid file → DEFAULT_STATUSES fallback inside
-        # parse_statuses_json with a logged warning.
+        # Each reuse checks captured content as well as metadata/read outcome.
         self._statuses: list[dict[str, Any]] = list(DEFAULT_STATUSES)
         self._status_order: dict[str, int] = {s["name"]: s["order"] for s in DEFAULT_STATUSES}
         self._statuses_fingerprint = object()
@@ -274,56 +298,52 @@ class SpecsSubsystem:
                 self._debounce_timer = None
         self._stop_observer()
 
-    def _load_statuses(self) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        """Return (statuses_list, name_to_order). Reload on identity metadata change.
+    def _capture_statuses_input(self):
+        return self._read_identity_input(self.memory_root / "work" / "statuses.json",
+                                         allow_read_fallback=not self._explicit_root)
 
-        Thread-safe; multiple list_specs callers can race the reload but the
-        worst case is one extra parse — the result is the same.
-        """
+    def _load_statuses(self, *, captured=None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Reuse parsed statuses only after checking current captured content."""
         if self.memory_root is None:
             return self._statuses, self._status_order
-        if self._explicit_root:
-            # An absent config uses the same documented defaults; malformed or
-            # escaping config is an error offline, never an environment fallback.
-            with _bounded_directory(self.memory_root / "work") as fd:
-                try:
-                    source = _BoundedSource(fd, "statuses.json")
-                    before = source.stat()
-                    payload = json.loads(source.read_text())
-                    after = source.stat()
-                    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-                            after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                        raise WorkFilesUnsettled("work_files_unsettled")
-                except FileNotFoundError:
-                    return self._statuses, self._status_order
-            if not isinstance(payload, dict) or not isinstance(payload.get("statuses"), list):
-                raise ValueError("work_statuses_invalid")
-            statuses = payload["statuses"]
-            if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
-                   or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", item["name"])
-                   or isinstance(item.get("order"), bool) or not isinstance(item.get("order"), int)
-                   for item in statuses):
-                raise ValueError("work_statuses_invalid")
-            if len({s["name"] for s in statuses}) != len(statuses):
-                raise ValueError("work_statuses_invalid")
-            return statuses, {s["name"]: s["order"] for s in statuses}
-        statuses_path = self.memory_root / "work" / "statuses.json"
+        if captured is None:
+            captured = self._capture_statuses_input()
+        token = _input_token(captured)
         with self._statuses_lock:
-            fingerprint = self._identity_fingerprint(statuses_path)
-            if fingerprint != self._statuses_fingerprint:
-                statuses, order = parse_statuses_json(self.memory_root)
-                if fingerprint != self._identity_fingerprint(statuses_path):
-                    raise SpecResolutionUnavailable("spec_statuses_changed")
+            if token != self._statuses_fingerprint:
+                fingerprint, content, _read_error = captured
+                if self._explicit_root:
+                    if fingerprint is None:
+                        statuses = list(DEFAULT_STATUSES)
+                    else:
+                        payload = json.loads(_decode_identity_bytes(content))
+                        if not isinstance(payload, dict) or not isinstance(payload.get("statuses"), list):
+                            raise ValueError("work_statuses_invalid")
+                        statuses = payload["statuses"]
+                        if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                               or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", item["name"])
+                               or isinstance(item.get("order"), bool) or not isinstance(item.get("order"), int)
+                               for item in statuses):
+                            raise ValueError("work_statuses_invalid")
+                        if len({s["name"] for s in statuses}) != len(statuses):
+                            raise ValueError("work_statuses_invalid")
+                    order = {s["name"]: s["order"] for s in statuses}
+                else:
+                    try:
+                        text = _decode_identity_bytes(content) if content is not None else None
+                    except UnicodeError:
+                        text = None
+                    statuses, order = specs_parser.parse_statuses_text(text)
                 self._statuses = statuses
                 self._status_order = order
-                self._statuses_fingerprint = fingerprint
+                self._statuses_fingerprint = token
             return self._statuses, self._status_order
 
     def _status_names(self) -> set[str]:
         statuses, _ = self._load_statuses()
         return {s["name"] for s in statuses}
 
-    def _work_dirs(self) -> list[Path]:
+    def _work_dirs(self, *, statuses=None) -> list[Path]:
         """All folders under `work/` that look like status buckets.
 
         Includes every entry in `statuses.json` AND any additional directories
@@ -333,7 +353,9 @@ class SpecsSubsystem:
         if self.disabled:
             return []
         work_root = self.memory_root / "work"
-        known = [work_root / s["name"] for s in self._load_statuses()[0]]
+        if statuses is None:
+            statuses = self._load_statuses()[0]
+        known = [work_root / s["name"] for s in statuses]
         seen = {p.name for p in known}
         on_disk = []
         if work_root.is_dir():
@@ -563,24 +585,66 @@ class SpecsSubsystem:
         return sum(1 for path in root.rglob("*") if _is_spec_sync_conflict(path)) if root.exists() else 0
 
     @staticmethod
-    def _identity_fingerprint(path):
+    def _identity_fingerprint(path, *, directory_fd=None):
         try:
-            value = path.lstat()
+            value = (path.lstat() if directory_fd is None else
+                     os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False))
         except FileNotFoundError:
             return None
+        return SpecsSubsystem._opened_fingerprint(path, value)
+
+    @staticmethod
+    def _opened_fingerprint(path, value):
         if not stat.S_ISREG(value.st_mode):
             raise SpecResolutionUnavailable("spec_identity_not_regular")
         return (str(path), value.st_dev, value.st_ino, value.st_size,
                 value.st_mtime_ns, value.st_ctime_ns)
 
+    def _read_identity_input(self, path, *, directory_fd=None, allow_read_fallback=False):
+        """Capture one bounded regular file, retaining a permitted read failure."""
+        if directory_fd is None:
+            with _bounded_directory(path.parent) as directory:
+                return self._read_identity_input(path, directory_fd=directory,
+                                                 allow_read_fallback=allow_read_fallback)
+        before = self._identity_fingerprint(path, directory_fd=directory_fd)
+        if before is None:
+            return None, None, None
+        content, read_error, fd = None, None, None
+        try:
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory_fd)
+            except OSError as exc:
+                if not allow_read_fallback:
+                    raise
+                read_error = type(exc).__name__
+            if fd is not None:
+                if self._opened_fingerprint(path, os.fstat(fd)) != before:
+                    raise SpecResolutionUnavailable("spec_identity_changed")
+                try:
+                    with os.fdopen(fd, "rb", closefd=False) as source:
+                        content = source.read()
+                except OSError as exc:
+                    if not allow_read_fallback:
+                        raise
+                    read_error = type(exc).__name__
+                if self._opened_fingerprint(path, os.fstat(fd)) != before:
+                    raise SpecResolutionUnavailable("spec_identity_changed")
+            if self._identity_fingerprint(path, directory_fd=directory_fd) != before:
+                raise SpecResolutionUnavailable("spec_identity_changed")
+        finally:
+            if fd is not None:
+                os.close(fd)
+        return before, content, read_error
+
     def _scan_folders_by_id(self, status_dirs=None, *, strict=False):
-        """Fresh bounded-depth metadata enumeration; parse only changed files.
+        """Capture and seal current bytes; parse only changed content.
 
         Keep only the current tree's inputs. A failed capture never publishes
         partial inputs or falls back to a last-success authorization snapshot.
         """
         with self._identity_lock:
-            folders, identities, cache, fingerprints, directories = defaultdict(list), {}, {}, {}, {}
+            folders, identities, cache, inputs, directories = defaultdict(list), {}, {}, {}, {}
             for status_dir in self._work_dirs() if status_dirs is None else status_dirs:
                 try:
                     before = status_dir.lstat()
@@ -589,38 +653,45 @@ class SpecsSubsystem:
                 if not stat.S_ISDIR(before.st_mode):
                     continue
                 directories[status_dir] = (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
-                for child in status_dir.iterdir():
-                    if _is_spec_sync_conflict(child) or child.is_symlink() or not child.is_dir():
-                        continue
-                    path = child / "spec.md"
-                    try:
-                        fingerprint = self._identity_fingerprint(path)
-                        prior = self._identity_cache.get(path)
-                        if prior is not None and prior[0] == fingerprint:
-                            declared_id, has_id = prior[1:]
-                        else:
-                            front = specs_parser._frontmatter(path)
-                            has_id = bool(front.get("id"))
-                            declared_id = str(front.get("id") or child.name)
-                        if self._identity_fingerprint(path) != fingerprint:
-                            raise SpecResolutionUnavailable("spec_identity_changed")
-                    except SOURCE_READ_ERRORS:
-                        if strict:
-                            raise SpecResolutionUnavailable("spec_identity_unavailable") from None
-                        continue
-                    fingerprints[path] = fingerprint
-                    cache[path] = (fingerprint, declared_id, has_id)
-                    identities[child] = (declared_id, has_id)
-                    aliases = set(self._spec_id_aliases(declared_id))
-                    if self._folder_name_is_declared_alias(child.name, declared_id):
-                        aliases.add(child.name)
-                    for alias in aliases:
-                        folders[alias].append((status_dir.name, child))
+                with _bounded_directory(status_dir) as status_fd:
+                    for child in status_dir.iterdir():
+                        if _is_spec_sync_conflict(child) or child.is_symlink() or not child.is_dir():
+                            continue
+                        path = child / "spec.md"
+                        try:
+                            with _bounded_directory(child, parent_fd=status_fd) as directory:
+                                captured = self._read_identity_input(path, directory_fd=directory)
+                            fingerprint, content, _read_error = captured
+                            token = _input_token(captured)
+                            digest = token[1]
+                            prior = self._identity_cache.get(path)
+                            if prior is not None and prior[3] == digest:
+                                declared_id, has_id = prior[1:3]
+                            else:
+                                front = _parse_identity_bytes(path, content)
+                                has_id = bool(front.get("id"))
+                                declared_id = str(front.get("id") or child.name)
+                        except SOURCE_READ_ERRORS:
+                            if strict:
+                                raise SpecResolutionUnavailable("spec_identity_unavailable") from None
+                            continue
+                        inputs.setdefault(status_dir, {})[path] = token
+                        cache[path] = (fingerprint, declared_id, has_id, digest)
+                        identities[child] = (declared_id, has_id)
+                        aliases = set(self._spec_id_aliases(declared_id))
+                        if self._folder_name_is_declared_alias(child.name, declared_id):
+                            aliases.add(child.name)
+                        for alias in aliases:
+                            folders[alias].append((status_dir.name, child))
             # Recheck the whole capture. This detects edits to an early file
             # while a later file parses, including preserved-mtime replacement.
-            for path, fingerprint in fingerprints.items():
-                if self._identity_fingerprint(path) != fingerprint:
-                    raise SpecResolutionUnavailable("spec_identity_changed")
+            for status_dir, paths in inputs.items():
+                with _bounded_directory(status_dir) as status_fd:
+                    for path, captured in paths.items():
+                        with _bounded_directory(path.parent, parent_fd=status_fd) as directory:
+                            current = self._read_identity_input(path, directory_fd=directory)
+                        if _input_token(current) != captured:
+                            raise SpecResolutionUnavailable("spec_identity_changed")
             for path, fingerprint in directories.items():
                 value = path.lstat()
                 if (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns) != fingerprint:
@@ -744,9 +815,10 @@ class SpecsSubsystem:
                             raise SpecResolutionUnavailable("spec_root_unavailable")
                         root = self.memory_root / "work" if self.memory_root else None
                         root_before = root.stat() if root else None
-                        config_before = self._identity_fingerprint(root / "statuses.json") if root else None
-                        allowed = set(self._spawn_work_dirs())
-                        current = self._scan_folders_by_id(strict=True)
+                        config_before = self._capture_statuses_input() if root else None
+                        statuses, _order = self._load_statuses(captured=config_before)
+                        allowed = {root / status["name"] for status in statuses} if root else set()
+                        current = self._scan_folders_by_id(status_dirs=self._work_dirs(statuses=statuses), strict=True)
                         tree = _IdentityIndex(
                             {key: [entry for entry in entries if entry[1].parent in allowed]
                              for key, entries in current.items()},
@@ -762,7 +834,7 @@ class SpecsSubsystem:
                             root_after = root.stat()
                             if ((root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns, root_before.st_ctime_ns)
                                     != (root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns, root_after.st_ctime_ns)
-                                    or config_before != self._identity_fingerprint(root / "statuses.json")):
+                                    or _input_token(config_before) != _input_token(self._capture_statuses_input())):
                                 raise SpecResolutionUnavailable("spec_identity_changed")
                         snapshot = SpecResolutionSnapshot(self, catalog, tree)
                         future.set_result(snapshot)
