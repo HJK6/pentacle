@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const WebSocket = require('ws');
 const providerFailure = require('./fixtures/limits_provider_failure.json');
@@ -140,7 +141,7 @@ test('image upload frames obey the daemon one MiB decoded chunk limit', async (t
   sendFrame(ws, { type: 'upload_blob.init.ok', request_id: 'upload-boundary' });
   await new Promise((resolve) => setImmediate(resolve));
   const chunks = ws.sent.filter((frame) => frame.type === 'upload_blob_chunk');
-  sendFrame(ws, { type: 'upload_blob.ok', request_id: 'upload-boundary', blob_sha: 'fixture' });
+  sendFrame(ws, { type: 'upload_blob.ok', request_id: 'upload-boundary', blob_sha: createHash('sha256').update(bytes).digest('hex') });
   await pending;
   assert.ok(chunks.length >= 2, 'a one MiB plus one byte image needs multiple chunks');
   assert.ok(chunks.every((frame) => Buffer.from(frame.data_b64, 'base64').length <= 1024 * 1024));
@@ -166,7 +167,7 @@ test('image upload boundaries preserve exact bytes through the final frame', asy
     assert.ok(chunks.slice(0, -1).every((frame) => frame.final === false));
     assert.equal(chunks.at(-1).final, true);
     assert.deepEqual(Buffer.concat(chunks.map((frame) => Buffer.from(frame.data_b64, 'base64'))), bytes);
-    sendFrame(ws, { type: 'upload_blob.ok', request_id: id, blob_sha: 'fixture' });
+    sendFrame(ws, { type: 'upload_blob.ok', request_id: id, blob_sha: createHash('sha256').update(bytes).digest('hex') });
     await pending;
   }
 });

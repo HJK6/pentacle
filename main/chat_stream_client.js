@@ -9,6 +9,7 @@ const WebSocket = require('ws');
 const perf = require('./perf_telemetry');
 const { validateVoiceAnswers } = require('./voice_answers_meta');
 const { runtimeDirectory, desktopRuntimePath } = require('./runtime_paths');
+const { OrdinaryRequestQueue, BYPASS, BACKGROUND } = require('./chat_stream_request_queue');
 const {
   SOURCE_STATE_TO_UI,
   SCHEDULE_LIFECYCLE_EVENT_SOURCE_STATE,
@@ -498,6 +499,8 @@ try {
   }
 
   _rejectPending(errorMessage) {
+    this._ordinaryRequests?.close();
+    this._ordinaryRequests = null;
     for (const [requestId, pending] of this._pending.entries()) {
       this._streamEventChunks.delete(requestId);
       pending.reject({
@@ -512,6 +515,7 @@ try {
   _handleFetchBlobChunk(msg) {
     if (!msg || msg.type !== 'fetch_blob.chunk' || typeof msg.request_id !== 'string') return false;
     const requestId = msg.request_id;
+    if (!this._pending.has(requestId) || this._pending.get(requestId).expired) return true;
     const entry = this._fetchBlobChunks.get(requestId) || {
       blob_sha: msg.blob_sha,
       size_bytes: msg.size_bytes,
@@ -526,6 +530,7 @@ try {
 
   _handleCommandResponse(msg) {
     if (msg?.type === 'request_stream_events.chunk' && typeof msg.request_id === 'string') {
+      if (!this._pending.has(msg.request_id) || this._pending.get(msg.request_id).expired) return true;
       const chunks = this._streamEventChunks.get(msg.request_id) || [];
       if (Array.isArray(msg.events)) chunks.push(...msg.events);
       this._streamEventChunks.set(msg.request_id, chunks);
@@ -539,8 +544,11 @@ try {
     const isOk = type.endsWith('.ok') || type.endsWith('.already_closed') || isSendReceipt;
     const isError = type.endsWith('.error') || type.endsWith('.failed');
     if (!isOk && !isError) return false;
+    const upload = this._uploadRefusals?.get(msg.request_id);
+    if (isError && upload) upload.error = msg;
     const pending = this._pending.get(msg.request_id);
     if (!pending) return false;
+    if (isError && pending.retry?.(msg)) return true;
     this._pending.delete(msg.request_id);
     if (type === 'request_stream_events.ok') {
       const chunks = this._streamEventChunks.get(msg.request_id);
@@ -586,6 +594,9 @@ try {
     const request_id = (options && typeof options.requestId === 'string' && options.requestId)
       ? options.requestId
       : this._requestId(prefix);
+    if (this._pending.has(request_id)) {
+      return Promise.reject({ type: `${prefix}.error`, request_id, error: 'Request is already pending' });
+    }
     // A finite timeoutMs bounds the pending promise so a daemon that never
     // sends a matching reply (dropped/mismatched frame, unresponsive satellite,
     // a handler that raises before replying) surfaces a rejection the caller
@@ -595,33 +606,87 @@ try {
     // send throw below), so it never fires against an already-resolved request.
     const timeoutMs = Number.isFinite(options?.timeoutMs) && options.timeoutMs > 0
       ? options.timeoutMs : null;
+    const ordinary = !BYPASS.has(payload.type);
+    if (ordinary && (!Object.hasOwn(this, '_ordinaryRequests') || !this._ordinaryRequests)) {
+      this._ordinaryRequests = new OrdinaryRequestQueue();
+    }
+    const queue = ordinary ? this._ordinaryRequests : null;
     return new Promise((resolve, reject) => {
-      let timer = null;
-      const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
-      const settleResolve = (value) => { clear(); resolve(value); };
-      const settleReject = (error) => { clear(); reject(error); };
-      this._pending.set(request_id, {
-        prefix, resolve: settleResolve, reject: settleReject,
+      let timer = null, retryTimer = null, graceTimer = null, retries = 0;
+      const clear = () => {
+        for (const handle of [timer, retryTimer, graceTimer]) if (handle) clearTimeout(handle);
+        timer = retryTimer = graceTimer = null;
+      };
+      const release = () => { if (queue) queue.release(job); };
+      const settleResolve = value => { clear(); release(); resolve(value); };
+      const settleReject = error => { clear(); release(); reject(error); };
+      const pending = {
+        prefix, resolve: settleResolve, reject: settleReject, expired: false,
         rawResponse: options?.rawResponse === true,
-      });
-      if (timeoutMs) {
-        timer = setTimeout(() => {
-          if (!this._pending.has(request_id)) return;
+      };
+      const timeout = () => {
+        if (this._pending.get(request_id) !== pending) return;
+        pending.expired = true;
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        this._streamEventChunks.delete(request_id);
+        this._fetchBlobChunks.delete(request_id);
+        const error = { type: `${prefix}.error`, request_id, error: 'timed_out',
+          message: `${prefix} timed out after ${timeoutMs || 30000}ms` };
+        if (queue && job.state === 'active') {
+          // A caller timeout says nothing about the daemon's credit. Keep a
+          // bounded tombstone, without dropping the shared web-host socket.
+          reject(error);
+          graceTimer = setTimeout(() => {
+            if (this._pending.get(request_id) !== pending) return;
+            this._pending.delete(request_id);
+            release();
+          }, 60000);
+          graceTimer.unref?.();
+        } else {
           this._pending.delete(request_id);
-          this._streamEventChunks.delete(request_id);
-          this._fetchBlobChunks.delete(request_id);
-          reject({ type: `${prefix}.error`, request_id, error: 'timed_out',
-            message: `${prefix} timed out after ${timeoutMs}ms` });
-        }, timeoutMs);
-        if (typeof timer.unref === 'function') timer.unref();
-      }
-      try {
-        ws.send(JSON.stringify({ ...payload, request_id }));
-      } catch (e) {
-        clear();
-        this._pending.delete(request_id);
-        reject({ type: `${prefix}.error`, request_id, error: e.message || String(e) });
-      }
+          settleReject(error);
+        }
+      };
+      const armQueueTimeout = () => { if (!timeoutMs) { timer = setTimeout(timeout, 30000); timer.unref?.(); } };
+      const job = { bytes: Buffer.byteLength(JSON.stringify({ ...payload, request_id })),
+        background: BACKGROUND.has(payload.type), state: 'new', run: () => {
+          if (!timeoutMs && timer) { clearTimeout(timer); timer = null; }
+          try {
+            if (ws !== this._ws || !this.connected || ws.readyState !== WebSocket.OPEN) throw Error('Stream disconnected');
+            options.beforeSend?.();
+            ws.send(JSON.stringify({ ...payload, request_id }));
+          } catch (e) {
+            this._pending.delete(request_id);
+            settleReject(e?.error_code ? e : { type: `${prefix}.error`, request_id, error: e.message || String(e) });
+          }
+        } };
+      const enqueue = () => {
+        if (this._pending.get(request_id) !== pending || pending.expired) return;
+        const error = queue.add(job);
+        if (error) {
+          this._pending.delete(request_id);
+          settleReject({ type: `${prefix}.error`, request_id, error });
+        }
+      };
+      pending.retry = error => {
+        if (!queue || pending.expired || retries || error.error_code !== 'server_overloaded' || error.retryable !== true
+          || !(BACKGROUND.has(payload.type) || payload.type === 'upload_blob_init') || ws !== this._ws) return false;
+        retries++;
+        release();
+        this._streamEventChunks.delete(request_id);
+        this._fetchBlobChunks.delete(request_id);
+        armQueueTimeout();
+        retryTimer = setTimeout(() => { retryTimer = null; enqueue(); }, 250);
+        retryTimer.unref?.();
+        return true;
+      };
+      // Correlation is installed before queueing, including a waiting final
+      // upload chunk. An earlier nonfinal refusal must cancel that job.
+      this._pending.set(request_id, pending);
+      if (timeoutMs) { timer = setTimeout(timeout, timeoutMs); timer.unref?.(); }
+      else if (queue) armQueueTimeout();
+      if (queue) enqueue();
+      else job.run();
     });
   }
 
@@ -700,22 +765,36 @@ try {
     // only the final one. Send nonfinal frames directly on the same socket;
     // awaiting each as an RPC would hang forever. Register the final reply via
     // sendCommand so disconnect or a lost final response remains a visible error.
-    const chunkBytes = 1024 * 1024;
-    const ws = this._ws;
-    for (let offset = 0; offset + chunkBytes < buffer.length; offset += chunkBytes) {
-      if (!this.connected || ws !== this._ws || ws?.readyState !== WebSocket.OPEN) {
-        throw new Error('Chat stream disconnected during image upload');
+    if (!Object.hasOwn(this, '_uploadRefusals')) this._uploadRefusals = new Map();
+    const upload = { error: null };
+    this._uploadRefusals.set(uploadRequestId, upload);
+    try {
+      const chunkBytes = 1024 * 1024;
+      const ws = this._ws;
+      for (let offset = 0; offset + chunkBytes < buffer.length; offset += chunkBytes) {
+        if (upload.error) throw upload.error;
+        if (!this.connected || ws !== this._ws || ws?.readyState !== WebSocket.OPEN) {
+          throw new Error('Chat stream disconnected during image upload');
+        }
+        ws.send(JSON.stringify({
+          type: 'upload_blob_chunk', request_id: uploadRequestId,
+          data_b64: buffer.subarray(offset, offset + chunkBytes).toString('base64'), final: false,
+        }));
       }
-      ws.send(JSON.stringify({
-        type: 'upload_blob_chunk', request_id: uploadRequestId,
-        data_b64: buffer.subarray(offset, offset + chunkBytes).toString('base64'), final: false,
-      }));
+      const finalOffset = buffer.length > 0 ? Math.floor((buffer.length - 1) / chunkBytes) * chunkBytes : 0;
+      const receipt = await this.sendCommand(
+        { type: 'upload_blob_chunk', data_b64: buffer.subarray(finalOffset).toString('base64'), final: true },
+        'upload_blob', { requestId: uploadRequestId, timeoutMs,
+          beforeSend: () => { if (upload.error) throw upload.error; } },
+      );
+      if (upload.error) throw upload.error;
+      if (receipt.blob_sha !== crypto.createHash('sha256').update(buffer).digest('hex')) {
+        throw new Error('Image upload could not be verified. Try sending again.');
+      }
+      return receipt;
+    } finally {
+      if (this._uploadRefusals.get(uploadRequestId) === upload) this._uploadRefusals.delete(uploadRequestId);
     }
-    const finalOffset = buffer.length > 0 ? Math.floor((buffer.length - 1) / chunkBytes) * chunkBytes : 0;
-    return this.sendCommand(
-      { type: 'upload_blob_chunk', data_b64: buffer.subarray(finalOffset).toString('base64'), final: true },
-      'upload_blob', { requestId: uploadRequestId, timeoutMs },
-    );
   }
 
   fetchBlob({ blobSha, requestId } = {}) {

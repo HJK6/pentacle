@@ -165,9 +165,11 @@ test('actual RPC times out at 12 seconds without retrying a mutation', async (t)
   assert.equal(settled, false);
   t.mock.timers.tick(1);
   assert.deepEqual(await pending, { ok: false, error_code: 'timed_out', error: 'timed_out' });
-  assert.equal(client._pending.size, 0);
+  assert.equal(client._pending.size, 1, 'uncertain daemon work retains its local credit');
   t.mock.timers.tick(24000);
   assert.equal(sent.length, 1);
+  t.mock.timers.tick(36000);
+  assert.equal(client._pending.size, 0, 'the local tombstone expires after60s without a socket reset');
 });
 
 test('actual _rejectPending disconnect reaches the handler as disconnected', async (t) => {
