@@ -280,7 +280,7 @@ def test_sigkill_then_reap_manifest_cleans(tmp_path: Path) -> None:
         assert outer_log.read_text(encoding="utf-8") == "outer evidence\n"
         assert not (outer_evidence / "v2-unit-evidence.json").exists()
         os.kill(next_run.pid, signal.SIGTERM)
-        next_run.wait(timeout=30)
+        next_run.communicate(timeout=30)
         assert not manifest.exists()
     finally:
         if "next_run" in locals() and next_run.poll() is None:
