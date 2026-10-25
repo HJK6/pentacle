@@ -146,3 +146,72 @@ def test_environment_root_status_config_preserved_mtime_matches_cold_oracle(tmp_
     os.utime(config,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
     assert subject.canonical_spec_identity('spec_fixture__one') is None
     assert subject.canonical_spec_identities(['spec_fixture__one'])==configured().canonical_spec_identities(['spec_fixture__one'])
+
+
+def alias_file_timestamps(path, monkeypatch):
+    """Real bytes and inode, with one file's recorded timestamps held constant."""
+    original_lstat, original_fstat = Path.lstat, os.fstat
+    recorded = original_lstat(path)
+
+    class AliasedStat:
+        def __init__(self, current):
+            self.current = current
+
+        def __getattr__(self, name):
+            if name in ('st_mtime', 'st_ctime', 'st_mtime_ns', 'st_ctime_ns'):
+                return getattr(recorded, name)
+            return getattr(self.current, name)
+
+    def lstat(current, *args, **kwargs):
+        value = original_lstat(current, *args, **kwargs)
+        return AliasedStat(value) if current == path else value
+
+    def fstat(fd):
+        value = original_fstat(fd)
+        if (value.st_dev, value.st_ino) == (recorded.st_dev, recorded.st_ino):
+            return AliasedStat(value)
+        return value
+
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    monkeypatch.setattr(os, 'fstat', fstat)
+
+
+def test_same_metadata_changed_id_matches_current_bytes(tmp_path, monkeypatch):
+    path = document(tmp_path)
+    alias_file_timestamps(path, monkeypatch)
+    subject = service(tmp_path)
+    before = subject.spec_resolution_snapshot()
+    fingerprint = subject._identity_fingerprint(path)
+    path.write_text('---\nid: spec_fixture__new\n---\n')
+    assert subject._identity_fingerprint(path) == fingerprint
+    after = subject.spec_resolution_snapshot()
+    assert after.canonical_spec_identity('spec_fixture__one') is None
+    assert after.canonical_spec_identity('spec_fixture__new') == 'spec_fixture__new'
+    assert before.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
+
+
+def test_same_metadata_changed_status_never_authorizes_removed_bucket(tmp_path, monkeypatch):
+    import json
+    document(tmp_path, status='allowed')
+    config = tmp_path / 'work/statuses.json'
+    config.write_text(json.dumps({'statuses': [{'name': 'allowed', 'order': 1}]}))
+    alias_file_timestamps(config, monkeypatch)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(tmp_path.resolve()))
+    subject = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda ids: None)
+    assert subject.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
+    fingerprint = subject._identity_fingerprint(config)
+    config.write_text(json.dumps({'statuses': [{'name': 'removed', 'order': 1}]}))
+    assert subject._identity_fingerprint(config) == fingerprint
+    assert subject.canonical_spec_identity('spec_fixture__one') is None
+
+
+def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, monkeypatch):
+    from _shared.spec_reader import SpecReader
+    path = document(tmp_path)
+    alias_file_timestamps(path, monkeypatch)
+    reader = SpecReader(tmp_path)
+    fingerprint = reader.service._identity_fingerprint(path)
+    path.write_text('---\nid: spec_fixture__new\n---\n')
+    assert reader.service._identity_fingerprint(path) == fingerprint
+    with pytest.raises(ValueError, match='spec_changed'):
+        reader.read('spec_fixture__one')
