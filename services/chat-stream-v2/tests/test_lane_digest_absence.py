@@ -35,6 +35,11 @@ async def seeded(tmp_path, monkeypatch):
     monkeypatch.setattr(time, 'time', lambda: clock[0])
     monkeypatch.setenv('PENTACLE_LANE_DIGEST_S', '5')
     store = Store(str(tmp_path / 'fixture.db')); store.start()
+    def bind_archive(conn):
+        from retention import initialize_history_pair
+        with conn:
+            initialize_history_pair(conn)
+    await store.submit(bind_archive)
     sid = 'host-a:root'
     tmux = NoInput()
     sessions = Sessions(store, tmux=tmux, local_host='host-a')
@@ -234,7 +239,8 @@ def test_both_existing_bounds_are_required(tmp_path, monkeypatch, attempts, age,
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('race', ['generation', 'lease', 'lease_expired', 'notice', 'late_positive'])
+@pytest.mark.parametrize('race', ['generation', 'lease', 'lease_expired', 'notice', 'late_positive',
+                                  'archive_pair', 'archive_attachment', 'archive_file'])
 def test_readback_cannot_commit_after_its_evidence_or_owner_changes(tmp_path, monkeypatch, race):
     async def run():
         import digest_delivery_proof as proof
@@ -258,6 +264,20 @@ def test_readback_cannot_commit_after_its_evidence_or_owner_changes(tmp_path, mo
                 await edit_notice(store, old['notice_id'], 'lease_until', clock[0] - 1)
             elif race == 'notice':
                 await edit_notice(store, old['notice_id'], 'body', 'different body')
+            elif race == 'archive_pair':
+                def change_pair(conn):
+                    with conn:
+                        conn.execute("UPDATE v2_send_receipt_sequence SET pair_id='replacement-pair'")
+                await store.submit(change_pair)
+            elif race == 'archive_attachment':
+                await store.submit(lambda conn: setattr(conn, 'history_attachment_identity', (-1, -1)))
+            elif race == 'archive_file':
+                import sqlite3
+                path = tmp_path/'sessions_archive.db'
+                replacement = tmp_path/'replacement.db'
+                with sqlite3.connect(path) as source, sqlite3.connect(replacement) as dest:
+                    source.backup(dest)
+                replacement.replace(path)
             else:
                 await store.append_session_event(binding[0], {'kind': 'USER', 'text': old['body'],
                     'stream_id': binding[0], 'timestamp': stamp(clock[0])}, identity='raced-proof', limit=5000)
@@ -325,4 +345,65 @@ def test_negative_is_durable_and_not_replayed_after_restart(tmp_path, monkeypatc
             assert (await replacement.work_owed())['total'] == 1
         finally:
             replacement.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['unpaired', 'replaced', 'attachment_changed'])
+def test_untrusted_archive_is_unknown_even_with_a_valid_anchor(tmp_path, monkeypatch, mode):
+    async def run():
+        import sqlite3
+        store, queue, old, binding, _, _ = await seeded(tmp_path, monkeypatch)
+        try:
+            await store.append_session_event(binding[0], {'kind': 'USER', 'text': 'another'},
+                                              identity='archive-extra', limit=5000)
+            await archive_old_events(store, binding[0], keep=1)
+            from retention import _attached_history
+            await store.submit(_attached_history)
+            path = tmp_path/'sessions_archive.db'
+            if mode == 'unpaired':
+                with sqlite3.connect(path) as archive:
+                    archive.execute("UPDATE v2_receipt_route_archive SET pair_id='unpaired'")
+            elif mode == 'replaced':
+                replacement = tmp_path/'replacement.db'
+                with sqlite3.connect(path) as source, sqlite3.connect(replacement) as dest:
+                    source.backup(dest)
+                replacement.replace(path)
+            else:
+                await store.submit(lambda conn: setattr(conn, 'history_attachment_identity', (-1, -1)))
+            assert await queue.deliver_now(old['notice_id']) is False
+            row = await stored(store, old['notice_id'])
+            assert row['terminal_at'] is None and row['delivered_at'] is None
+            assert row['last_error'].startswith('absence_readback_unknown:archive_')
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('event', [
+    {'kind': 'TELL', 'raw': []},
+    {'kind': 'TELL', 'raw': None},
+    {'kind': 'TELL', 'raw': False},
+    {'kind': 'TELL', 'raw': {'peer_wire_text': []}},
+    {'kind': 'USER', 'text': []},
+    {'kind': 'USER', 'text': None},
+    {'kind': 'USER', 'text': 'caption', 'provider_text_digest': []},
+    {'kind': 'USER', 'text': 'caption', 'provider_text_digest': 'not-a-digest'},
+    {'kind': 'SYSTEM', 'text': {}},
+    {'kind': 'SYSTEM', 'text': 'caption', 'provider_text_digest': False},
+])
+def test_malformed_submission_fields_cannot_prove_absence(tmp_path, monkeypatch, event):
+    async def run():
+        store, queue, old, _, _, _ = await seeded(tmp_path, monkeypatch)
+        try:
+            def corrupt(conn):
+                with conn:
+                    conn.execute('UPDATE session_event_tail SET event_json=? WHERE identity=?',
+                                 (json.dumps(event), 'later'))
+            await store.submit(corrupt)
+            assert await queue.deliver_now(old['notice_id']) is False
+            row = await stored(store, old['notice_id'])
+            assert row['terminal_at'] is None and row['delivered_at'] is None
+            assert row['last_error'] == 'absence_readback_unknown:malformed_event'
+        finally:
+            store.stop()
     asyncio.run(run())

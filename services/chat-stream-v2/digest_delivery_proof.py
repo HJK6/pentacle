@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -49,14 +50,55 @@ def _read_rows(conn, target, birth, anchor, tip, cap, deadline):
     return rows
 
 
-def _archive_rows(path, target, birth, anchor, tip, deadline):
+def _archive_binding(conn, path):
+    if path is None:
+        return None
+    from retention import _sequence
+    pair = _sequence(conn)
+    if (pair is None or not pair['archive_ready'] or not pair['pair_id']
+            or Path(pair['archive_path']) != path):
+        raise ValueError('archive_unpaired')
+    return pair['pair_id'], getattr(conn, 'history_attachment_identity', None)
+
+
+def _valid_event(event, target):
+    if (not isinstance(event, dict) or event.get('stream_id', target) != target
+            or not isinstance(event.get('kind'), str)):
+        return False
+    if event['kind'] in {'USER', 'SYSTEM', 'TELL'}:
+        if 'provider_text_digest' in event and (not isinstance(event['provider_text_digest'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', event['provider_text_digest']) is None):
+            return False
+        if event['kind'] in {'USER', 'SYSTEM'} and not isinstance(event.get('text'), str):
+            return False
+        if event['kind'] == 'TELL':
+            raw = event.get('raw', {})
+            if not isinstance(raw, dict) or ('peer_wire_text' in raw
+                    and not isinstance(raw['peer_wire_text'], str)):
+                return False
+            if 'text' in event and not isinstance(event['text'], str):
+                return False
+    return True
+
+
+def _archive_rows(path, target, birth, anchor, tip, deadline, binding):
     if path is None or not path.is_file():
         return [], None
     identity = _file_identity(path)
+    if binding is None:
+        raise ValueError('archive_unpaired')
+    if binding[1] is not None and identity[0][:2] != binding[1]:
+        raise ValueError('archive_attachment_changed')
     remaining = max(0.001, deadline - time.monotonic())
     with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True,
                                  timeout=remaining)) as conn:
         conn.execute('PRAGMA query_only=ON')
+        marker_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='v2_receipt_route_archive'").fetchone()
+        marker = conn.execute('SELECT version,pair_id FROM v2_receipt_route_archive '
+                              'WHERE singleton=1').fetchone() if marker_table else None
+        if marker is None or tuple(marker) != (1, binding[0]):
+            raise ValueError('archive_pair_mismatch')
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         rows = _read_rows(conn, target, birth, anchor, tip, ARCHIVE_USER_LIMIT, deadline)
     if _file_identity(path) != identity:
@@ -124,13 +166,14 @@ async def reconcile(store, notice_id, owner, *, max_attempts):
         row, meta, target, birth, anchor, tip, digest, tell = values
         rows = _read_rows(conn, target, birth, anchor, tip, HOT_ROW_LIMIT, deadline)
         archive_path = getattr(conn, 'history_archive_path', None)
-        return values, rows, Path(archive_path) if archive_path else None
+        path = Path(archive_path) if archive_path else None
+        return values, rows, path, _archive_binding(conn, path)
 
     try:
-        values, hot, archive_path = await store.submit(snapshot)
+        values, hot, archive_path, binding = await store.submit(snapshot)
         row, meta, target, birth, anchor, tip, digest, tell = values
         archived, archive_identity = await asyncio.to_thread(
-            _archive_rows, archive_path, target, birth, anchor, tip, deadline)
+            _archive_rows, archive_path, target, birth, anchor, tip, deadline, binding)
         merged = {}
         for eid, body in hot + archived:
             if eid in merged and merged[eid] != body:
@@ -143,9 +186,7 @@ async def reconcile(store, notice_id, owner, *, max_attempts):
             if time.monotonic() >= deadline:
                 return unknown('readback_bound')
             event = json.loads(body)
-            if not isinstance(event, dict) or event.get('stream_id', target) != target:
-                return unknown('malformed_event')
-            if event.get('kind') == 'TELL' and not isinstance(event.get('raw') or {}, dict):
+            if not _valid_event(event, target):
                 return unknown('malformed_event')
             if eid > anchor:
                 events.append((eid, event))
@@ -162,7 +203,8 @@ async def reconcile(store, notice_id, owner, *, max_attempts):
                 conn.execute('BEGIN IMMEDIATE')
                 current = _current(conn, notice_id, owner, max_attempts)
                 current_archive = getattr(conn, 'history_archive_path', None)
-                if (current != values or _file_identity(archive_path) != archive_identity
+                if (current != values or _archive_binding(conn, archive_path) != binding
+                        or _file_identity(archive_path) != archive_identity
                         or (Path(current_archive) if current_archive else None) != archive_path):
                     return unknown('evidence_changed')
                 if (_read_rows(conn, target, birth, anchor, tip, HOT_ROW_LIMIT, deadline) != hot
