@@ -233,6 +233,18 @@ async def request(ws, ident, timeout=1):
             if reply.get('type')!='pong':raise unexpected_reply(reply, 'not_pong')
             return {'sent_mono_s':start,'received_mono_s':time.monotonic(),'latency_s':time.monotonic()-start}
 
+async def post_main_release_ping(ws, held_responded):
+    # The pending held probe and the new probe share the existing release budget.
+    async with asyncio.timeout(2):
+        if not held_responded:
+            while True:
+                reply = json.loads(await ws.recv())
+                if reply.get('request_id') == 'held-main':
+                    if reply.get('type') != 'pong':
+                        raise unexpected_reply(reply, 'held_probe_not_pong')
+                    break
+        return await request(ws, 'after-main', 2)
+
 async def run(source, output):
     from websockets.asyncio.client import connect
     result={'base':BASE,'source':str(source),'source_identity':{str(f.relative_to(source)):hashlib.sha256(f.read_bytes()).hexdigest() for f in [source/'services/chat-stream-v2/main.py',source/'services/chat-stream-v2/store.py',source/'services/chat-stream-v2/server.py',source/'services/chat-stream-v2/loop_watchdog.py',source/'services/chat-stream-v2/alerts.py',source/'services/chat-stream-v2/error_adapters.py'] if f.exists()},'synthetic_only':True,'classification':'HARNESS_ERROR','cells':[],
@@ -272,7 +284,7 @@ async def run(source, output):
                     await asyncio.sleep(max(0,held['mono_s']+6.5-time.monotonic()))
                     main_end=time.monotonic();pre_main_release=json.loads((root/'sink-receipt.json').read_text()) if (root/'sink-receipt.json').exists() else []
                     main_progress=(root/'daemon-progress.json').exists();control(root,'release_main');released=await wait_event(root,'main_released')
-                    await request(ws,'after-main',2)
+                    await post_main_release_ping(ws, main_responded)
                     result['cells'].append({'name':'held_MAIN','held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
                         'main_ping_responded_while_held':main_responded,'progress_snapshot_present_while_held':main_progress,
                         'receipt_before_release':any(held['mono_s']<r['accepted_mono_s']<main_end and r['payload']['condition']=='active' for r in pre_main_release),'acceptance_passed':any(held['mono_s']<r['accepted_mono_s']<main_end and r['payload']['condition']=='active' for r in pre_main_release),

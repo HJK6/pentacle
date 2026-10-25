@@ -67,3 +67,79 @@ def test_declared_ping_admission_failure_keeps_exact_safe_enums():
     assert frame["body"]["retryable"] is True
     assert "secret-canary" not in json.dumps(frame)
     assert len(json.dumps(frame)) <= 1024
+
+
+@pytest.mark.parametrize("held_responded,replies,reason,expected_sends", [
+    (False, [{"type": "ping.error", "request_id": "held-main", "error_code": "server_overloaded", "retryable": True}], "held_probe_not_pong", 0),
+    (False, [{"type": "pong", "request_id": "held-main"}, {"type": "ping.error", "request_id": "after-main", "error_code": "server_overloaded", "retryable": True}], "not_pong", 1),
+    (True, [{"type": "ping.error", "request_id": "after-main", "error_code": "server_overloaded", "retryable": True}], "not_pong", 1),
+])
+def test_post_main_release_keeps_strict_correlated_error_capture(held_responded, replies, reason, expected_sends):
+    class Socket:
+        def __init__(self):
+            self.replies = iter(replies)
+            self.sent = []
+
+        async def send(self, frame):
+            self.sent.append(json.loads(frame))
+
+        async def recv(self):
+            return json.dumps(next(self.replies))
+
+    socket = Socket()
+    with pytest.raises(RuntimeError, match="^" + reason + "$") as caught:
+        asyncio.run(harness.post_main_release_ping(socket, held_responded))
+    captured = harness.error_evidence(caught.value)["unexpected_reply"]
+    assert captured["type"] == "ping.error"
+    assert captured["body"]["error_code"] == "server_overloaded"
+    assert captured["body"]["retryable"] is True
+    assert len(socket.sent) == expected_sends
+    assert all(frame == {"type": "ping", "request_id": "after-main"} for frame in socket.sent)
+
+
+@pytest.mark.parametrize("held_responded", [False, True])
+def test_post_main_release_preserves_seen_and_unseen_prior_pong(held_responded):
+    class Socket:
+        def __init__(self):
+            self.replies = iter(([{"type": "event", "request_id": "unrelated"},
+                                  {"type": "pong", "request_id": "held-main"}]
+                                 if not held_responded else [])
+                                + [{"type": "pong", "request_id": "after-main"}])
+            self.sent = []
+            self.prior_seen = held_responded
+
+        async def send(self, frame):
+            assert self.prior_seen
+            self.sent.append(json.loads(frame))
+
+        async def recv(self):
+            reply = next(self.replies)
+            if reply.get("request_id") == "held-main":
+                self.prior_seen = True
+            return json.dumps(reply)
+
+    socket = Socket()
+    assert asyncio.run(harness.post_main_release_ping(socket, held_responded))["latency_s"] >= 0
+    assert socket.sent == [{"type": "ping", "request_id": "after-main"}]
+
+
+def test_post_main_release_pending_drain_is_bounded_without_sending_new_probe():
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.cancelled = False
+
+        async def send(self, frame):
+            self.sent.append(json.loads(frame))
+
+        async def recv(self):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    socket = Socket()
+    with pytest.raises(TimeoutError):
+        asyncio.run(harness.post_main_release_ping(socket, False))
+    assert socket.cancelled
+    assert socket.sent == []
