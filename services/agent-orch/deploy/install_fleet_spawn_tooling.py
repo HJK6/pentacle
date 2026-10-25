@@ -1088,9 +1088,29 @@ def main() -> int:
     parser.add_argument("--preflight-receipt", metavar="PATH", help="required for forward live installs; validate exact preparation inputs")
     parser.add_argument("--resume", metavar="STAMP", help="resume the exact staged immutable rollout stamp")
     parser.add_argument("--rollback", metavar="STAMP", help="restore the previous pointer recorded for rollout stamp")
+    parser.add_argument("--install-report-consumer", metavar="RELEASE",
+                        help="root-only publisher consumer install from an existing release; no fleet rollout")
+    parser.add_argument("--consumer-manifest-sha256", metavar="SHA256",
+                        help="FD-pinned manifest digest for --install-report-consumer")
     args = parser.parse_args()
     if not SHA.fullmatch(args.commit):
         parser.error("--commit must be a full immutable 40-character SHA")
+    if args.install_report_consumer:
+        if (not args.consumer_manifest_sha256 or args.dry_run or args.preflight or args.preflight_receipt
+                or args.resume or args.rollback or args.host_config or args.ssh_target
+                or args.hosts != "local" or args.run_host != "local" or args.private_artifact):
+            parser.error("consumer install requires its pinned manifest and cannot perform a fleet rollout")
+        try:
+            import runpy
+            install = runpy.run_path(str(Path(__file__).with_name("report_consumer_install.py")))["install"]
+            result = install(Path(args.install_report_consumer), args.commit, args.consumer_manifest_sha256)
+            print(json.dumps(result, sort_keys=True), flush=True)
+            return 0
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(json.dumps({"ok": False, "mode": "report_consumer", "error": str(exc)}), flush=True)
+            return 1
+    if args.consumer_manifest_sha256:
+        parser.error("--consumer-manifest-sha256 requires --install-report-consumer")
     try:
         hosts = _load_hosts(args.host_config)
         names = [name.strip() for name in args.hosts.split(",")]
