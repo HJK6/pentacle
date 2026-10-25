@@ -346,6 +346,7 @@ _ADMISSION_LIMITS = {
     "parked": (16, 4, 4, 1 << 20, 256 << 10, 256 << 10),
     "durable": (32, 8, 8, 32 << 20, 8 << 20, 8 << 20),
     "control": (4, 1, 1, 64 << 10, 16 << 10, 16 << 10),
+    "diag": (1, 1, 1, 16 << 10, 16 << 10, 16 << 10),
 }
 
 
@@ -353,17 +354,20 @@ class _RequestPool:
     """Synchronous admission: no queue, semaphore waiter or admission task."""
 
     def __init__(self, name: str, limits: tuple[int, ...]) -> None:
-        self.limits = (max(1, int(os.environ.get(
+        # Diagnostics are deliberately single-flight, including across principals.
+        self.limits = limits if name == "diag" else (max(1, int(os.environ.get(
             f"PENTACLE_ADMIT_{name.upper()}", limits[0]))), *limits[1:])
         self.total = [0, 0]
         self.connections: dict[Any, list[int]] = {}
         self.principals: dict[tuple[str, str], list[int]] = {}
+        self.credits: dict[int, _RequestCredit] = {}
 
     @staticmethod
     def _fits(usage: list[int], count: int, size: int, raw_size: int) -> bool:
         return usage[0] < count and usage[1] + raw_size <= size
 
-    def acquire(self, websocket: Any, principal: tuple[str, str], size: int):
+    def acquire(self, websocket: Any, principal: tuple[str, str], size: int,
+                *, verb: str = "unknown", connection_id: str | None = None):
         g, c, p, gb, cb, pb = self.limits
         connection = self.connections.get(websocket, [0, 0])
         identity = self.principals.get(principal, [0, 0])
@@ -376,7 +380,13 @@ class _RequestPool:
         for usage in (self.total, connection, identity):
             usage[0] += 1
             usage[1] += size
-        return _RequestCredit(self, websocket, principal, size)
+        if connection_id is None:
+            connection_id = next((c.connection_id for c in self.credits.values()
+                                  if c.websocket is websocket), None) or uuid.uuid4().hex
+        credit = _RequestCredit(self, websocket, principal, size, verb=verb,
+                                connection_id=connection_id, started=_monotonic())
+        self.credits[id(credit)] = credit
+        return credit
 
     @staticmethod
     def _return(mapping, key, size):
@@ -394,6 +404,9 @@ class _RequestCredit:
     principal: tuple[str, str]
     size: int
     released: bool = False
+    verb: str = "unknown"
+    connection_id: str = ""
+    started: float = 0.0
 
     def transfer(self, principal: tuple[str, str]) -> bool:
         if principal == self.principal:
@@ -413,6 +426,7 @@ class _RequestCredit:
         if self.released:
             return
         self.released = True
+        self.pool.credits.pop(id(self), None)
         self.pool.total[0] -= 1
         self.pool.total[1] -= self.size
         self.pool._return(self.pool.connections, self.websocket, self.size)
@@ -743,6 +757,7 @@ class Server:
         self._admission_connection_limit = max(1, int(os.environ.get("PENTACLE_ADMIT_CONNECTIONS", 32)))
         self._admission_pools = {name: _RequestPool(name, limits)
                                  for name, limits in _ADMISSION_LIMITS.items()}
+        self._admission_diag_key = uuid.uuid4().bytes
         self._client_identities: dict[Any, str] = {}
         self._consent_sent: dict[Any, dict[str, str]] = {}
         # Per-client hello.subscribe state drives projection of broadcasts and
@@ -1666,10 +1681,17 @@ class Server:
                 # backend. Keep them bounded without consuming upload/UI credits.
                 if isinstance(verb, str) and verb in {"await_report", "await_spawn", "transcribe_blob"}:
                     pool = "parked"
+                elif verb == "daemon.stats" and principal != ("shared", "preauth"):
+                    pool = "diag"
                 elif isinstance(verb, str) and verb in {"ping", "spawn_cancel"} and principal != ("shared", "preauth"):
                     pool = "control"
                 raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
-                credit = self._admission_pools[pool].acquire(websocket, principal, raw_size)
+                safe_verb = (verb if isinstance(verb, str) and verb in self.handlers
+                             and len(verb.encode("utf-8", errors="replace")) <= 64 else "unknown")
+                diagnostic = self._connection_diagnostics.get(websocket)
+                credit = self._admission_pools[pool].acquire(
+                    websocket, principal, raw_size, verb=safe_verb,
+                    connection_id=diagnostic.conn_id if diagnostic is not None else None)
                 if credit is None:
                     self._refuse_request(websocket, request)
                     continue
@@ -5087,6 +5109,56 @@ class Server:
             log.exception("request_stream_events failed stream_id=%s", stream_id)
             yield await asyncio.to_thread(_encoded_stream_events_error, request_id, str(exc))
 
+    def _admission_snapshot(self) -> dict[str, Any]:
+        """Current holders only; no await, request data, raw identities or history."""
+        now = _monotonic()
+
+        def principal_id(principal):
+            return hashlib.blake2s(repr(principal).encode("utf-8"),
+                                   key=self._admission_diag_key, digest_size=12).hexdigest()
+
+        def verbs(credits):
+            result = {}
+            for credit in credits:
+                row = result.setdefault(credit.verb, {"count": 0, "oldest_age_ms": 0})
+                row["count"] += 1
+                row["oldest_age_ms"] = max(row["oldest_age_ms"],
+                    max(0, int((now - credit.started) * 1000)))
+            return result
+
+        pools = {}
+        for name, pool in self._admission_pools.items():
+            credits = list(pool.credits.values())
+            connections = {}
+            principals = {}
+            for credit in credits:
+                connections.setdefault(credit.websocket, []).append(credit)
+                principals.setdefault(credit.principal, []).append(credit)
+            connection_rows = [dict(
+                connection_id=held[0].connection_id, active=websocket in self._clients,
+                principal_ids=sorted({principal_id(c.principal) for c in held}),
+                tasks=len(held), bytes=sum(c.size for c in held), held_verbs=verbs(held),
+            ) for websocket, held in connections.items()]
+            principal_rows = [dict(
+                principal_id=principal_id(principal),
+                kind=principal[0] if principal[0] in {"seat", "service", "credential", "shared"} else "unknown",
+                connection_ids=sorted({c.connection_id for c in held}),
+                tasks=len(held), bytes=sum(c.size for c in held), held_verbs=verbs(held),
+            ) for principal, held in principals.items()]
+            pools[name] = dict(
+                usage={"tasks": pool.total[0], "bytes": pool.total[1]},
+                limits={axis: {"tasks": pool.limits[i], "bytes": pool.limits[i + 3]}
+                        for i, axis in enumerate(("global", "connection", "principal"))},
+                held_verbs=verbs(credits),
+                connections=sorted(connection_rows, key=lambda r: r["connection_id"]),
+                principals=sorted(principal_rows, key=lambda r: r["principal_id"]),
+            )
+        return {"schema": 1, "subsystem": "admission",
+                "bug_ref": "spec_pentacle__admission_observability_web_shared_credits_2026_10",
+                "connections": {"count": self._admission_connections,
+                                "limit": self._admission_connection_limit},
+                "pools": pools}
+
     async def _on_daemon_stats(self, _msg: dict[str, Any]) -> dict[str, Any]:
         from managed_logs import status as managed_log_status
         lifecycle = None
@@ -5096,6 +5168,7 @@ class Server:
         stats = {
             "unsupported_in_v2": self._unsupported_stats_snapshot(),
             "seat_tokens": self.token_telemetry.snapshot(),
+            "admission": self._admission_snapshot(),
         }
         boot_queue_depths = getattr(self.spawnctl, "boot_queue_depths", None)
         if callable(boot_queue_depths):
