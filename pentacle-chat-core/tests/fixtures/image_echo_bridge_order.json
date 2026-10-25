@@ -1,0 +1,39 @@
+{
+  "provenance": "Sanitized captured fixture889c4420: caption NFD, native wrapper NFC/LF, recovered raw fields and +345ms echo ordering retained. Initial optimistic store was not captured; tests create it through sendTurn. Event raw recovered read-only, lower trust than live selector. Host/seat/path/marker/UUID strings sanitized.",
+  "created_at": "2026-10-25T00:07:54.267Z",
+  "caption": "IMAGE_ECHO_FIXTURE\nOwned Unicode 😀 café\nsecond line.",
+  "attachment": {
+    "key": "80abc5a46494d410a450a3a5f9b664ebe72838bd497f3e39d9918142d2f9b136",
+    "mime": "image/png",
+    "width": 24,
+    "height": 24,
+    "bytes": 88,
+    "sha256": "80abc5a46494d410a450a3a5f9b664ebe72838bd497f3e39d9918142d2f9b136"
+  },
+  "event": {
+    "host": "fixture",
+    "kind": "USER",
+    "provider": "claude",
+    "raw": {
+      "envelope_source": "Look at the image file at /fixture/attachments/80abc5a46494d410a450a3a5f9b664ebe72838bd497f3e39d9918142d2f9b136.png, then respond to the user's message: IMAGE_ECHO_FIXTURE\nOwned Unicode 😀 café\nsecond line.",
+      "host": "fixture",
+      "is_sidechain": false,
+      "jsonl_event_index": 0,
+      "jsonl_record_uuid": "fixture-native",
+      "parent_uuid": "fixture-parent",
+      "provider": "claude",
+      "session_name": "image-echo",
+      "source": "structured",
+      "source_session_identity": "fixture-session",
+      "transport": "claude-jsonl",
+      "user_delivery_state": "sent",
+      "uuid": "fixture-native"
+    },
+    "session_id": "fixture-session",
+    "session_name": "image-echo",
+    "stream_id": "fixture:image-echo",
+    "text": "Look at the image file at /fixture/attachments/80abc5a46494d410a450a3a5f9b664ebe72838bd497f3e39d9918142d2f9b136.png, then respond to the user's message: IMAGE_ECHO_FIXTURE\nOwned Unicode 😀 café\nsecond line.",
+    "timestamp": "2026-10-25T00:07:54.612Z",
+    "daemon_seq": 459926943
+  }
+}

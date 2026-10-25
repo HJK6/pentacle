@@ -19,7 +19,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
-- Image sends with canonically equivalent Unicode captions reconcile into one caption and image bubble instead of leaving a second row marked sending.
+- Image sends with canonically equivalent Unicode captions reconcile into one caption and image bubble even when the native echo arrives before the send result, instead of leaving a second row marked sending.
 - Discarded voice transcriptions no longer block image uploads or ordinary chat controls. Busy uploads and voice takes show readable errors and keep unsent content for a manual retry.
 - Repair-review reports can explicitly bind their typed commission message id, preserving distinct reject counts when reports use message 0.
 - Claude account probes wait for native cache refresh eligibility; stale usage no longer marks a verified account as an identity conflict.
