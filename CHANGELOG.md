@@ -20,6 +20,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- New image sends with decomposed Unicode captions retain their caption and image after chat reload.
+
 - Web page-load reads leave request capacity for image uploads; queued user actions take priority over background reads, and image uploads verify the complete file digest before reporting success.
 
 - Image sends with canonically equivalent Unicode captions reconcile into one caption and image bubble even when the native echo arrives before the send result, instead of leaving a second row marked sending.
