@@ -7,6 +7,7 @@ work-index drain, bounded to thirty seconds, then returns
 contains the spec, observed status/time and recovery commands with the observed
 document revisions. `pending: true` means the disposition remains outstanding;
 an unavailable publisher or an uncertain same-ID request grants no close.
+The target generation is pinned before that wait even when the request omits it.
 
 Move the item through the memory publisher with `reason`, `next_action` and
 requesting-stream attribution, or assign a successor with
@@ -19,7 +20,8 @@ generation, child-preservation and local/remote close checks still apply.
 
 Only an open, non-presumed-dead lead/nexus with the effective assignment is a
 successor. Authority tags alone, QA/planner/worker roles, closed seats and other
-assignments do not qualify. Gone/offline manager closes and other involuntary
+assignments do not qualify. Only positively confirmed gone manager panes bypass
+the disposition check; uncertain liveness keeps it active. Other involuntary
 close kinds proceed through their existing lifecycle checks.
 Stale or unavailable work observations allow the close and retain unknown debt.
 

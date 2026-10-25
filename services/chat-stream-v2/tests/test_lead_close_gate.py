@@ -231,6 +231,82 @@ def test_generation_replaced_during_refresh_is_never_closed():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("cached_target", [True, False])
+def test_parent_socket_close_without_generation_never_closes_refresh_replacement(cached_target):
+    async def run():
+        parent_stream = f"{HOST}:parent"
+        store, sessions, server, tmux, row = await environment(parent_stream_id=parent_stream)
+        stream = f"{HOST}:v2-lead"
+        try:
+            await store.open_session(HOST, "parent", role="worker")
+            await store.grant_stream_token(HOST, "parent",
+                hashlib.sha256(b"disposable-parent-token").hexdigest(), STREAM_TOKEN_HASH_VERSION)
+            if not cached_target:
+                sessions._inv.pop(stream)
+            async def refresh():
+                await store.mark_closed(HOST, "v2-lead", expected_generation=row["session_generation"],
+                    closed_at="2026-10-25T02:00:00Z", pane_status="pane_dead", close_kind="operator_close")
+                await store.open_session(HOST, "v2-lead", role="lead", parent_stream_id=parent_stream,
+                                         assigned_spec_id="spec_demo__item_00")
+            sessions.refresh_work_for_close = refresh
+            port = await server.bind()
+            async with connect(f"ws://127.0.0.1:{port}", close_timeout=0) as ws:
+                await ws.send(json.dumps({"type": "hello", "from_stream_id": parent_stream,
+                    "stream_token": "disposable-parent-token",
+                    "subscribe": {"snapshot": False, "mode": "rpc"}}))
+                await ws.send(json.dumps({"type": "close", "request_id": "parent-unpinned-close",
+                                          "stream_id": stream}))
+                async with asyncio.timeout(5):
+                    while True:
+                        reply = json.loads(await ws.recv())
+                        if reply.get("request_id") == "parent-unpinned-close":
+                            break
+            current = await store.fetch_session(HOST, "v2-lead")
+            assert current["session_generation"] != row["session_generation"]
+            assert current["status"] == "open" and tmux.kills == 0, {
+                "reply_type": reply.get("type"), "status": current["status"], "kills": tmux.kills}
+            assert reply["type"] == "close.already_closed"
+        finally:
+            await server.close()
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("probe_result", ["raises", "unknown", "unreachable", None])
+def test_uncertain_manager_probe_cannot_skip_gate_before_a_later_live_probe(probe_result):
+    async def run():
+        store, sessions, server, tmux, row = await environment()
+        probes, refreshes = [], []
+        async def state(_name):
+            probes.append(probe_result)
+            if probe_result == "raises":
+                raise OSError("transient synthetic liveness failure")
+            return probe_result
+        async def refresh():
+            refreshes.append(True)
+        tmux.session_state = state
+        tmux.alive = True  # The later termination-path has_session sees a live, idle pane.
+        sessions.refresh_work_for_close = refresh
+        await store.update_session(HOST, "v2-lead", pane_status="pane_unknown")
+        try:
+            try:
+                result = await sessions.close(HOST, "v2-lead", expected_generation=row["session_generation"],
+                                              close_kind="manager_close", requires_idle=True)
+            except VerbError as exc:
+                assert exc.code == "lead_close_requires_disposition"
+            else:
+                current = await store.fetch_session(HOST, "v2-lead")
+                pytest.fail(f"manager close bypassed disposition: closed={result.get('closed')}, "
+                            f"failed={result.get('failed')}, "
+                            f"status={current['status']}, kills={tmux.kills}, {refreshes=}")
+            assert probes == [probe_result] and refreshes == [True]
+            assert (await store.fetch_session(HOST, "v2-lead"))["status"] == "open"
+            assert tmux.kills == 0
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("live", [True, False])
 def test_manager_close_gates_an_actually_live_pane_even_with_unknown_cached_presence(live):
     async def run():

@@ -1408,15 +1408,19 @@ class Sessions:
         if context is None:
             return
         if close_kind == "manager_close":
-            tmux = self.hosts.tmux_for(host) if self.hosts is not None and not self.hosts.is_local(host) else self.tmux
             try:
+                tmux = self.hosts.tmux_for(host) if self.hosts is not None and not self.hosts.is_local(host) else self.tmux
                 probe = getattr(tmux, "session_state", None)
-                live = (await asyncio.wait_for(probe(name), timeout=5) == "alive" if probe is not None
-                        else bool(tmux) and await asyncio.wait_for(tmux.has_session(name), timeout=5))
+                if callable(probe):
+                    state = await asyncio.wait_for(probe(name), timeout=5)
+                elif tmux and await asyncio.wait_for(tmux.has_session(name), timeout=5):
+                    state = "alive"
+                else:
+                    state = "unknown"
             except Exception:
-                live = False
-            if not live:
-                return  # Gone/offline manager closes remain involuntary.
+                state = "unknown"
+            if state == "gone":
+                return  # Only confirmed absence makes this an involuntary close.
         refresh = getattr(self, "refresh_work_for_close", None)
         if refresh is not None:
             try:
@@ -1459,7 +1463,8 @@ class Sessions:
         report) passes `expected_generation` so the close is fenced to exactly
         that generation: `_close_locked` re-reads the authoritative row and
         refuses (never kills) when a close/reopen produced a different
-        generation. When omitted, the current inventory generation is used.
+        generation. When omitted, the current inventory generation is used,
+        falling back to the first durable row before awaiting a refresh.
 
         `requires_hidden` fences a hidden-only close (the sweep): the
         authoritative row's visibility is re-read INSIDE the lifecycle lock, so
@@ -1476,6 +1481,8 @@ class Sessions:
         async with self._lifecycle_lock(host, session_name):
             row = await self.store.fetch_session(host, session_name)
             self.assistant.guard_close(row, close_kind)
+            if expected_generation is None and row is not None:
+                expected_generation = self._row_generation(row)
             if row and row.get("status") == "open" and (
                 expected_generation is None or self._row_generation(row) == expected_generation
             ):
