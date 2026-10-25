@@ -38,13 +38,22 @@ and record its SHA/PID. The deploy transaction stamps that checkout SHA as
 `prior_sha` before either kickstart or plist reload; `--rollback` selects the
 previously stamped `prior_sha`. Post-activation failures retain the applied stamp
 and require inspection before retrying. Direct daemon `launchctl` restarts bypass
-this contract and are not a sanctioned release path. `tools/merge_gate.py promote`
-only advances Git; follow promotion with the gated deploy entrypoint in the
-coordinated runtime window. Focused coverage is in
+this contract and are not a sanctioned release path. Land source through the
+[protected PR route](repo_workflow.md#landing-on-main), then use the gated deploy
+entrypoint in the coordinated runtime window. `tools/merge_gate.py promote` is
+retired and refuses before any external command; merging a PR does not deploy. Focused coverage is in
 `services/chat-stream-v2/tests/test_deploy_log_guard.py`; the local release gate is
 `python services/chat-stream-v2/tools/run_gate.py merge`.
 
-Release notes are the root `CHANGELOG.md`. A PR with a user-visible change adds a bullet under `## Unreleased`. The release owner cuts the section on the candidate branch before its `Public checks` run: rename `## Unreleased` to the UTC date heading (`## YYYY-MM-DD`, with ` (2)` for a later cut that day) and add a fresh empty `## Unreleased` above it; a release with no user-visible change gets the single bullet `Internal changes only.` `tools/merge_gate.py promote` refuses with `changelog_missing`, `changelog_unchanged`, `changelog_not_cut` or `changelog_malformed` before the evidence check, tag or push, and reports the first dated section as `changelog` (`heading`, `bullets`) in its result. Run `promote` from a checkout of the candidate SHA, never an older checkout, so the check cannot be absent; record that checkout SHA with the promotion output.
+Release notes are the root `CHANGELOG.md`. A PR with a user-visible change adds
+a bullet under `## Unreleased`. Before the release candidate's `Public checks`
+run, the release owner cuts the UTC dated section on that branch and adds a
+fresh empty `## Unreleased` above it; use `Internal changes only.` when the
+release has no user-visible change. The release owner and relay retain the
+checks for a present, changed, well-formed changelog with no uncut release
+bullets, and record its dated heading and candidate SHA. The retired promotion
+tool does not enforce changelog checks. See [Release notes](repo_workflow.md#release-notes).
+
 
 Live tools use `PENTACLE_SMOKE_HOSTS` or `PENTACLE_SATELLITE_HOSTS` when supplied; otherwise they read the existing machine configuration (inline `PENTACLE_MACHINES_JSON`, `PENTACLE_MACHINES_FILE`, user machines.json, then a local-only default). Pinning selects remote machines only and refuses an empty target set before opening the Store. Empty or duplicate explicit lists fail. Scheduled smoke follows the same machine configuration. Local tool identity uses `PENTACLE_HOST_ID`, `AGENT_ORCH_HOST_ID`, then the configured local machine.
 

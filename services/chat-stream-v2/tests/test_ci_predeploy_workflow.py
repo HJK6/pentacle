@@ -20,7 +20,24 @@ PROFILE = CONFIG['profiles']['pentacle']
 
 def _step():
     workflow = yaml.safe_load(PREDEPLOY.read_text())
-    return workflow, next(s for s in workflow['jobs']['checks']['steps'] if s.get('name') == 'Daemon and CLI checks')
+    expected = {'frontend': {'npm-test'}, 'web': {'web-gate'},
+                'daemon': {'v2-merge-ci'}, 'contracts': {'cli-pytest', 'shared-pytest'}}
+    jobs = workflow['jobs']
+    assert set(jobs) == set(expected) | {'checks'}
+    assert set(jobs['checks']['needs']) == set(expected)
+    assert len(jobs['checks']['needs']) == len(expected)
+    assert jobs['checks']['if'] == '${{ always() }}'
+    commands = []
+    for job_id, targets in expected.items():
+        lines = [line for step in jobs[job_id]['steps'] for line in step.get('run', '').splitlines()
+                 if 'scripts/gate_env.py' in line]
+        argv = [shlex.split(line) for line in lines]
+        assert len(argv) == len(targets)
+        assert all(args[:3] == ['python3', 'scripts/gate_env.py', 'run'] for args in argv)
+        assert {args[args.index('--target') + 1] for args in argv} == targets
+        if job_id in ('daemon', 'contracts'):
+            commands.extend(line.replace('${GITHUB_JOB}', job_id) for line in lines)
+    return workflow, {'run': '\n'.join(commands)}
 
 
 def _invocations(step):
@@ -80,7 +97,7 @@ def test_predeploy_uses_the_shared_services_import_root(tmp_path):
 
 def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     workflow, step = _step()
-    job = workflow['jobs']['checks']
+    job = workflow['jobs']['daemon']
     assert job['timeout-minutes'] == 50
     argv = _invocations(step)['v2-merge-ci']
     target, command, _, env, _ = _trace('v2-merge-ci', argv, tmp_path)
@@ -93,15 +110,28 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     assert CONFIG['profiles']['pentacle']['targets']['v2-unit']['timeout_s'] == 900
     assert CONFIG['profiles']['pentacle']['targets']['v2-smoke']['timeout_s'] == 900
     assert CONFIG['profiles']['pentacle']['targets']['v2-merge']['timeout_s'] == 1800
-    upload = next(s for s in job['steps'] if s.get('uses') == 'actions/upload-artifact@v4')
-    assert upload['if'] == 'failure()' and upload['with']['retention-days'] == 7
     runner_temp = tmp_path / 'runner-temp'
     root = runner_temp / 'gate-evidence'
-    patterns = upload['with']['path'].replace('${{ runner.temp }}', str(runner_temp)).splitlines()
-    assert patterns and all(p.startswith(str(root) + '/') and '..' not in Path(p).parts for p in patterns)
+    patterns = []
+    for job_id in ('frontend', 'web', 'daemon', 'contracts'):
+        uploads = [s for s in workflow['jobs'][job_id]['steps']
+                   if s.get('uses') == 'actions/upload-artifact@v4' and s.get('if') == '${{ failure() }}']
+        assert len(uploads) == 1
+        upload = uploads[0]
+        assert upload['with']['retention-days'] == 7
+        job_root = root / job_id
+        selected = upload['with']['path'].replace('${{ runner.temp }}', str(runner_temp)).replace('${{ github.job }}', job_id).splitlines()
+        assert selected and all(p.startswith(str(job_root) + '/') and '..' not in Path(p).parts for p in selected)
+        patterns.extend(selected)
+        assert any(fnmatch.fnmatch(str(job_root / 'attempt-manifest.json'), pattern) for pattern in selected)
+        for other in ('frontend', 'web', 'daemon', 'contracts'):
+            if other != job_id:
+                assert not any(fnmatch.fnmatch(str(root / other / 'attempt-manifest.json'), pattern) for pattern in selected)
     included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in patterns)
-    for required in ['daemon/gate/v2-merge-evidence.json','daemon/gate/unit.log','daemon/gate/unit.junit.xml',
-                     'daemon/attempts/a/0001-started.json','attempt-manifest.json','web/gate/web/verdict.json']:
+    for required in ['daemon/daemon/gate/v2-merge-evidence.json','daemon/daemon/gate/unit.log','daemon/daemon/gate/unit.junit.xml',
+                     'daemon/daemon/attempts/a/0001-started.json','daemon/attempt-manifest.json','web/web/gate/web/verdict.json',
+                     'frontend/npm/attempts/a/0001-started.json','contracts/cli/gate/pytest.junit.xml',
+                     'contracts/shared/gate/pytest.junit.xml']:
         assert included(root / required), required
     # Trace all invocation paths: database/scratch and credential HOME live outside the uploaded roots.
     for name, args in _invocations(step).items():
@@ -117,11 +147,11 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
 def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(tmp_path, monkeypatch):
     from tests.cosmo_e2e import harness
     workflow, step = _step()
-    assert workflow['jobs']['checks']['runs-on'] == 'ubuntu-latest'
+    assert workflow['jobs']['daemon']['runs-on'] == 'ubuntu-latest'
     monkeypatch.delenv('COSMO_E2E_DISPOSABLE_BASE', raising=False)
     monkeypatch.setattr(harness, '_disposable_base', lambda: Path('/tmp').resolve())
-    workspace = Path('/opt/ci-runner/_temp/gate-env')
-    evidence = Path('/opt/ci-runner/_temp/gate-evidence/daemon')
+    workspace = Path('/opt/ci-runner/_temp/gate-env/daemon')
+    evidence = Path('/opt/ci-runner/_temp/gate-evidence/daemon/daemon')
     home,tmp,base = ge.scratch_paths(workspace, Path('/tmp/ge-ci'), '12345678-owned')
     argv = _invocations(step)['v2-merge-ci']
     _, command, _, _, _ = _trace('v2-merge-ci',argv,tmp_path,scratch=base,workspace=workspace,evidence=evidence)
