@@ -604,3 +604,64 @@ def test_stale_reap_live_group_requires_terminal_absence(tmp_path: Path) -> None
             if child.poll() is None:
                 child.kill(); child.wait(timeout=5)
         namespace.kill_server()
+
+
+@pytest.mark.requires("tmux usable", "process start identity readable")
+def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path) -> None:
+    """An exited but uncollected original server is not a live resource."""
+    from tests.soak.harness import TmuxNamespace
+    from tools import gate_owner_manifest as owner
+
+    namespace = TmuxNamespace(tmp_path)
+    with (tmp_path / "foreground-tmux.log").open("wb") as log:
+        server = subprocess.Popen(
+            [namespace.real_tmux, "-D", "-f", "/dev/null", "-S", namespace.socket],
+            env=namespace.child_env(), stdout=subprocess.DEVNULL, stderr=log,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not namespace.socket_path.is_socket():
+                assert server.poll() is None, "owned foreground tmux exited before binding"
+                assert time.monotonic() < deadline, "owned foreground tmux did not bind"
+                time.sleep(.01)
+            result = namespace.run("set-option", "-g", "@v2_gate_nonce", namespace.nonce)
+            assert result.returncode == 0, result.stderr
+            result = namespace.run("display-message", "-p", "#{pid}")
+            assert result.returncode == 0, result.stderr
+            assert int(result.stdout.strip()) == server.pid
+            identity = owner.process_start_identity(server.pid)
+            assert identity
+            rs, ss = namespace.root.stat(), namespace.socket_path.lstat()
+            namespace.socket_owner = dict(
+                nonce=namespace.nonce, server_pid=server.pid,
+                server_start_identity=identity, root_dev=rs.st_dev, root_ino=rs.st_ino,
+                socket_dev=ss.st_dev, socket_ino=ss.st_ino,
+            )
+            with _server_exit_watch(server.pid) as exited:
+                assert not exited()
+                owner._reap_socket(namespace.socket, namespace.socket_owner,
+                                   time.monotonic() + 5, namespace.real_tmux)
+                assert exited(), "first cleanup returned before kernel exit"
+            assert not namespace.socket_path.exists()
+            assert not namespace.root.exists()
+            # poll()/wait() would collect the child and hide the Linux ordering.
+            state = None
+            if sys.platform.startswith("linux"):
+                state = Path(f"/proc/{server.pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                assert state == "Z"
+                assert owner._exists(server.pid)
+                assert owner.process_start_identity(server.pid) == identity
+            print(json.dumps(dict(fixture="foreground-tmux-before-reap",
+                kernel_exit=True, pid=server.pid, linux_state=state,
+                pid_exists=owner._exists(server.pid), socket_absent=True,
+                root_absent=True)), flush=True)
+            owner._reap_socket(namespace.socket, namespace.socket_owner,
+                               time.monotonic() + 5, namespace.real_tmux)
+            assert not namespace.root.exists()
+        finally:
+            if server.poll() is None:
+                server.terminate()  # only this Popen child, never an ambient server
+            server.wait(timeout=5)
+            if namespace.socket_path.exists() or namespace.root.exists():
+                namespace.kill_server()

@@ -1,6 +1,7 @@
 """Small, conservative ownership manifest for one v2 gate invocation."""
 from __future__ import annotations
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -372,7 +373,44 @@ def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
     except FileNotFoundError:
         if not live:
             return  # ESRCH plus absent exclusive root: no original resource remains.
-        raise ManifestError("private socket root vanished while its server is live")
+        if sys.platform == "darwin":
+            # An exited, uncollected process returns EV_ERROR/ESRCH at registration.
+            # Interpret it only here, after the bound exclusive root is absent.
+            kernel = None
+            try:
+                kernel = select.kqueue()
+                events = kernel.control([select.kevent(
+                    pid, filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                    fflags=select.KQ_NOTE_EXIT)], 1, 0)
+                if _exists(pid) and process_start_identity(pid) != identity:
+                    raise ManifestError("tmux identity changed after event registration")
+                if len(events) != 1:
+                    raise ManifestError("no bound terminal registration event")
+                event = events[0]
+                matching = event.ident == pid and event.filter == select.KQ_FILTER_PROC
+                terminal = (event.data == errno.ESRCH if event.flags & select.KQ_EV_ERROR
+                            else bool(event.fflags & select.KQ_NOTE_EXIT))
+                if not matching or not terminal:
+                    raise ManifestError("no bound terminal registration event")
+            except (OSError, AttributeError, ManifestError) as exc:
+                raise ManifestError("private socket root vanished while its server is live") from exc
+            finally:
+                if kernel is not None:
+                    kernel.close()
+            return
+        # Linux may retain an exited server PID until its parent collects it.
+        # An absent root is terminal only with the same bound instance's exit.
+        exited = _ExitEvent(pid)
+        try:
+            if _exists(pid) and process_start_identity(pid) != identity:
+                raise ManifestError("tmux identity changed after event registration")
+            exited.wait(time.monotonic())
+        except ManifestError as exc:
+            raise ManifestError("private socket root vanished while its server is live") from exc
+        finally:
+            exited.close()
+        return
     except OSError as exc:
         raise ManifestError(f"cannot verify private socket objects: {exc}") from exc
     event = None
