@@ -80,7 +80,7 @@ async def environment(**fields):
     store = Store(); store.start()
     tmux = IdleTmux()
     sessions = Sessions(store, tmux=tmux, local_host=HOST)
-    server = Server(store=store, sessions=sessions, local_host=HOST)
+    server = Server(store=store, sessions=sessions, local_host=HOST, port=0)
     await cached(store)
     row = await store.open_session(HOST, "v2-lead", pane_status="pane_alive",
         **({"role": "lead", "assigned_spec_id": "spec_demo__item_00"} | fields))
@@ -238,6 +238,7 @@ def test_parent_socket_close_without_generation_never_closes_refresh_replacement
         store, sessions, server, tmux, row = await environment(parent_stream_id=parent_stream)
         stream = f"{HOST}:v2-lead"
         try:
+            assert server.port == 0, "socket fixture must use an owned ephemeral port"
             await store.open_session(HOST, "parent", role="worker")
             await store.grant_stream_token(HOST, "parent",
                 hashlib.sha256(b"disposable-parent-token").hexdigest(), STREAM_TOKEN_HASH_VERSION)
