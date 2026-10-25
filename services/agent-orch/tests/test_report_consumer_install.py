@@ -20,7 +20,11 @@ DEPLOY = Path(__file__).parents[1] / "deploy"
 def load(name):
     spec = importlib.util.spec_from_file_location(name, DEPLOY / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    bytecode = sys.dont_write_bytecode
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = bytecode
     return module
 
 
