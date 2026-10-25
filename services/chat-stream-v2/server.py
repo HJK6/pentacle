@@ -318,6 +318,8 @@ SCOPED_ALLOWED_VERBS = frozenset({
     "register_push",
 })
 SCOPE_DENIED_CODE = "scope_denied"
+WORK_REPORT_READER = "work-report-reader"
+WORK_REPORT_READER_TOKEN_FILE_ENV = "PENTACLE_WORK_REPORT_READER_TOKEN_FILE"
 #: Server-owned opt-in (default OFF = strict). When OFF, a verified internal
 #: seat token authenticates the seat but does NOT by itself confer operator
 #: authority, so privileged operator RPCs (grant_token, spawn_freeze/unfreeze,
@@ -922,6 +924,7 @@ class Server:
             "assistant.publish": self._on_assistant_publish,
             "assistant.operation": self._on_assistant_operation,
             "work.unattended": self._on_work_unattended,
+            "work.report.get": self._on_work_report_get,
             "work_lanes.list": self._on_work_lanes_list,
             "work_lanes.show": self._on_work_lanes_show,
             "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
@@ -2182,6 +2185,7 @@ class Server:
         if handler is None and not (
             websocket is not None
             and (self._client_system_producers.get(websocket) == BOT_MESSAGING_PRODUCER_STREAM_ID
+                 or self._client_system_producers.get(websocket) == WORK_REPORT_READER
                  or wmi_brief_producer.is_actor(self._client_system_producers.get(websocket))
                  or (report_actor is not None
                      and self._client_system_producers.get(websocket) == report_actor))
@@ -2223,6 +2227,9 @@ class Server:
                       and self.account_runtime.watcher_authorized(service_auth, msg.get("host"))
                       and msg.get("action") in {"probe", "observe-failure", "observation"}):
                     pass  # Typed payload and generation checks are in AccountRuntime.
+                elif service_auth["service_actor"] == WORK_REPORT_READER:
+                    if verb != "work.report.get":
+                        return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
                 elif wmi_brief_producer.is_actor(service_auth["service_actor"]):
                     if verb != "tell":
                         return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
@@ -2331,7 +2338,7 @@ class Server:
                     if not readable:
                         return [self._auth_error_frame(verb, request_id, "blob_forbidden")]
             if verb in {
-                "hello", "list_sessions", "inspect_stream", "request_stream_events", "send.receipt.get",
+                "hello", "list_sessions", "inspect_stream", "request_stream_events", "send.receipt.get", "work.report.get",
                 # Upload verbs carry the owning connection so an interrupted
                 # upload can be torn down when that connection closes.
                 "upload_blob_init", "upload_blob_chunk",
@@ -2704,6 +2711,7 @@ class Server:
         """Fixed principals whose credential is a user-owned 0600 token file,
         re-read on every RPC (removal/rotation revokes bound sockets too)."""
         sources = {
+            WORK_REPORT_READER: os.environ.get(WORK_REPORT_READER_TOKEN_FILE_ENV),
             WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV),
             BOT_MESSAGING_PRODUCER_STREAM_ID: os.environ.get(BOT_MESSAGING_STREAM_TOKEN_FILE_ENV),
         }
@@ -4673,6 +4681,31 @@ class Server:
     async def _on_work_unattended(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg, require_inventory=False)
         return {"type": "work.unattended.ok", "unattended_work": await self.store.work_unattended(now=time.time())}
+
+    async def _on_work_report_get(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if self.store is None:
+            raise VerbError("unavailable", "report store is unavailable")
+        auth = msg.get("_auth_context") or {}
+        if not (auth.get("service_authenticated") and auth.get("service_actor") == WORK_REPORT_READER):
+            self._work_lanes_reader(msg, require_inventory=False)
+        report_id = msg.get("report_id")
+        if any(not key.startswith("_") and key not in {
+            "type", "request_id", "report_id", "from_stream_id", "stream_token",
+        } for key in msg):
+            raise VerbError("invalid_report_lookup", "report_id is the only lookup argument")
+        if not isinstance(report_id, str) or not report_id.strip() or len(report_id) > 200:
+            raise VerbError("invalid_report_id", "report_id must be a nonempty string of at most 200 characters")
+        # Only ingestion is authoritative. Rejection history and live reporter
+        # sessions have no bearing on this immutable accepted row.
+        try:
+            report = await self.store.get_report(report_id)
+        except Exception as exc:
+            raise VerbError("unavailable", "report store is unavailable") from exc
+        if report is None:
+            raise VerbError("not_found", "no ingested report with this report_id")
+        return {"type": "work.report.get.ok", **{key: report.get(key) for key in (
+            "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at",
+        )}}
 
     async def _on_work_lanes_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)

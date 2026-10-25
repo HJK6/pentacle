@@ -6429,6 +6429,9 @@ def main(argv: list[str] | None = None) -> int:
     # flag-like tokens (-i, -v, -h, -p, -J), so we slice argv ourselves before
     # any argparse logic runs.
     effective_argv = sys.argv[1:] if argv is None else argv
+    if list(effective_argv[:2]) == ["report", "get"]:
+        from .work_report_cli import main as report_get_main
+        return report_get_main(effective_argv[2:])
     if effective_argv and effective_argv[0] == "ssh":
         return ssh_passthrough(list(effective_argv[1:]))
     # `agent-orch usage rollup ...` is likewise sliced before argparse so the
