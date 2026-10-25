@@ -20,9 +20,28 @@ Use synthetic rows and `coordinator` through `satellite` labels in tests. The ex
 
 Spawn, spec attach/detach, QA and report attestation use request-local identity
 views. Every new capture enumerates permitted work folders and checks file path,
-device, inode, size, mtime and ctime. Unchanged documents reuse parsed identity
-inputs; snapshots never reread live identity documents. Polling works without a
-watcher. Metadata work remains proportional to the folder count.
+device, inode, size, mtime and ctime, and captures the actual bytes. A content
+digest controls parsed-identity reuse, so timestamp quantization cannot hide a
+same-size edit. A second content/metadata pass seals the whole capture before
+publication. Unchanged bytes avoid YAML reparsing; completed snapshots never
+reread live identity documents. Polling works without a watcher. Reads remain
+proportional to current input bytes and directory enumeration stays shallow.
+
+The configured memory root is resolved once and exposed as `memory_root`.
+An explicit root resolves its ancestors while its final component remains
+subject to no-follow admission; environment roots retain full resolution.
+Directory and file opens below the admitted root reject symlink redirection.
+Status inputs are captured once per snapshot and sealed after scanning. The
+presentation status loader also checks content. Environment-root JSON retains
+its existing read/decode/extraction fallback and conversion errors; explicit-root
+JSON retains strict row/name/order validation. A stable environment read failure
+uses defaults, while a changed read outcome invalidates the capture. Card and
+catalog freshness otherwise retains its existing presentation behavior.
+
+SpecReader checks the consumed bytes against the scanned identity digest before
+returning identity and text, in addition to descriptor/path/directory and repeated
+consumption checks. Identity parsing preserves universal newlines; returned
+reader text preserves its original UTF-8 line endings.
 
 Overlapping snapshot captures share one rebuild. Async snapshot admission is
 bounded to 16 callers; Store single/batch compatibility resolution has at most

@@ -102,7 +102,16 @@ def is_sync_conflict(path: str | Path) -> bool:
 def parse_statuses_json(memory_root: str | Path):
     path = Path(memory_root) / "work" / "statuses.json"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        text = None
+    return parse_statuses_text(text)
+
+
+def parse_statuses_text(text: str | None):
+    """Keep fallback extraction separate from the existing strict conversion."""
+    try:
+        payload = json.loads(text)
         statuses = list(payload.get("statuses") or [])
     except Exception:
         statuses = list(DEFAULT_STATUSES)
