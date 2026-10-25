@@ -26,7 +26,14 @@ Store operation. With 10,000 synthetic notices, an ineligible event's unnecessar
 notice scan took 0.779 ms median. The repair eliminates SQL for ineligible inputs;
 this is not a measured workload-wide improvement or a user-decode benchmark.
 
-Candidate comparison and installed acceptance are pending. These measurements
+With the same harness, generated input and Python runtime, candidate median
+Store execution was 1.946 ms for asset scope and 2.016 ms for question lineage.
+The ineligible projection at 10,000 notices took 0.001 ms. All three met the
+predeclared decision bound of at most half their baseline. The candidate queue
+witness overlapped a real 2.071 ms scope read; the append waited 2.019 ms and
+then inserted durably. No artificial Store delay was added.
+
+Installed acceptance remains pending. These measurements
 do not establish exclusive attribution of the historical 85-second ingestion
 delay or current production event rates. Native event preparation time is not
 the durable commit time. No scheduler, concurrency, polling, schema or index
