@@ -20,6 +20,7 @@ const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./w
 const { branding } = require('./branding_scenario');
 const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_scenario');
 const { scheduledSection } = require('./scheduled_section_scenario');
+const { providerVisibility } = require('./provider_visibility_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -496,6 +497,7 @@ const SCENARIOS = [
   ['default-pane-assistant', defaultPaneAssistant],
   ['transport-and-config', transportAndConfig],
   ['branding', branding],
+  ['provider-visibility', providerVisibility],
   // Opens and closes its own foreign-origin targets; the served page is untouched.
   ['cross-origin-boundary', crossOriginBoundary],
   ['settings-version-line', settingsVersionLine],

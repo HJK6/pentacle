@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from _shared import spawn_profiles
 from _shared.spawn_profiles import SpawnProfileError, catalog, resolve_handoff, resolve_spawn, validate_v2
 
@@ -486,3 +488,77 @@ def test_available_models_config_rejects_unknown_model(monkeypatch, tmp_path) ->
             raise AssertionError("invalid available_models was accepted")
     finally:
         spawn_profiles.load_spawn_config.cache_clear()
+
+
+@pytest.fixture
+def installation_config(monkeypatch, tmp_path):
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    path = tmp_path / "spawn_defaults.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", path)
+    spawn_profiles.load_spawn_config.cache_clear()
+
+    def configure(available, *, providers=None):
+        if providers is not None:
+            config["providers"] = {p: config["providers"][p] for p in providers}
+            path.write_text(json.dumps(config), encoding="utf-8")
+        path.with_name("spawn_defaults.local.json").write_text(
+            json.dumps({"schema_version": 1, "available_models": available}), encoding="utf-8"
+        )
+        spawn_profiles.load_spawn_config.cache_clear()
+        return catalog()
+
+    yield configure
+    spawn_profiles.load_spawn_config.cache_clear()
+
+
+@pytest.mark.parametrize("hidden", ["codex", "gemini"])
+def test_local_empty_list_hides_provider_only_from_advertised_models(installation_config, hidden):
+    result = installation_config({hidden: []})
+    assert set(result["available_models"]) == set(spawn_profiles.MODELS) - {hidden}
+    assert result["models"] == spawn_profiles.MODELS
+    assert hidden in result["profiles"]["desktop_manual"]
+    assert hidden in result["spawn_defaults"]["providers"]
+    for provider, models in result["available_models"].items():
+        assert models == spawn_profiles.MODELS[provider]  # missing key means full
+    model, definition = next(iter(spawn_profiles.MODELS[hidden].items()))
+    effort = definition["efforts"][0]
+    assert resolve_spawn(provider=hidden, model=model, effort=effort)["model"] == model
+    assert validate_v2(
+        provider=hidden, spawn_profile="desktop_manual", schema="SpawnRequestV2",
+        model=model, effort=effort, catalog_version=result["catalog_version"],
+        resolution_source="explicit_override",
+    )["model"] == model
+    assert resolve_handoff(
+        source_provider=hidden, source_model=model, source_effort=effort, source_role="worker",
+    ).spawn["model"] == model
+    if hidden == "codex":
+        assert resolve_spawn(provider=hidden, model="sol", effort="high")["model"] == "gpt-6.1-sol"
+
+
+def test_only_gemini_can_be_advertised(installation_config):
+    result = installation_config({"claude": [], "codex": []})
+    assert result["available_models"] == {"gemini": spawn_profiles.MODELS["gemini"]}
+
+
+@pytest.mark.parametrize("providers", [("claude", "codex", "gemini"), ("claude", "codex")])
+def test_all_configured_providers_hidden_is_rejected(installation_config, providers):
+    with pytest.raises(SpawnProfileError, match="at least one provider") as exc:
+        installation_config({p: [] for p in providers}, providers=providers)
+    assert exc.value.code == "spawn_config_invalid"
+
+
+@pytest.mark.parametrize("available", [
+    {"unknown": []}, {"codex": ["unknown"]}, {"codex": None}, {"codex": "gpt-6.1-sol"},
+    {"codex": {}}, {"codex": [[]]}, [], "invalid",
+])
+def test_invalid_local_availability_is_rejected(installation_config, available):
+    with pytest.raises(SpawnProfileError) as exc:
+        installation_config(available)
+    assert exc.value.code == "spawn_config_invalid"
+
+
+@pytest.mark.parametrize("available", [None, {}])
+def test_null_or_empty_policy_keeps_full_catalog(installation_config, available):
+    result = installation_config(available)
+    assert result["available_models"] == result["models"]

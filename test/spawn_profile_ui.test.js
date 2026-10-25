@@ -15,7 +15,7 @@ test('manual spawn UI uses catalog-backed Codex Sol high factory defaults and ve
 });
 
 function extractFunction(name) {
-  const src = app.match(new RegExp(`function ${name}\\([^]*?\\n}`));
+  const src = app.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`));
   assert.ok(src, `${name} function found in renderer/app.js`);
   return src[0];
 }
@@ -130,6 +130,86 @@ test('spawn picker displays mapped labels while retaining raw option values and 
 
 function loadCatalogForNewSession() {
   return new Function(`${extractFunction('catalogForNewSession')}; return catalogForNewSession;`)();
+}
+
+function visibilityPicker(available, preferences = {}, selection = null) {
+  const models = {
+    claude: { 'claude-default': { efforts: ['high'] }, 'claude-visible': { efforts: ['low'] } },
+    codex: { 'codex-default': { efforts: ['high'] } },
+    gemini: { 'gemini-default': { efforts: ['default'] } },
+  };
+  const catalog = {
+    profiles: { desktop_manual: Object.fromEntries(Object.entries(models).map(([p, entries]) => [p, [Object.keys(entries)[0], Object.values(entries)[0].efforts[0]]])) },
+    models,
+    available_models: available,
+  };
+  return new Function('response', 'prefs', 'initialSelection', `
+    let newSessionCatalog = null, newSessionSelection = initialSelection, newSessionError = '', observedSpawnPreferences = null;
+    const SPAWN_PREFERENCES_KEY = 'pentacle.spawnPreferences.v1';
+    let storageHandler;
+    const window = { addEventListener: (name, callback) => { storageHandler = callback; } };
+    const document = { getElementById: () => ({ style: { display: 'none' } }) };
+    const spawnPreferences = () => prefs;
+    const spawnCatalogLoader = { peek: () => null, load: async () => ({ ok: true, catalog: response }) };
+    const renderNewSessionModal = () => {};
+    ${['catalogForNewSession', 'catalogProviders', 'catalogTuple', 'selectionForProvider', 'loadSpawnCatalog', 'warmSpawnCatalog', 'preferenceIsNewer'].map(extractFunction).join('\n')}
+    ${app.match(/window\.addEventListener\('storage',[^]*?\n}\);/)[0]}
+    newSessionCatalog = catalogForNewSession(response);
+    return { catalogTuple, catalogProviders, selectionForProvider, loadSpawnCatalog, warmSpawnCatalog,
+      catalog: () => newSessionCatalog, selection: () => newSessionSelection,
+      storage: (incoming) => { Object.assign(prefs, incoming); storageHandler({ key: SPAWN_PREFERENCES_KEY, newValue: JSON.stringify(incoming) }); } };
+  `)(catalog, { defaultProvider: 'codex', byProvider: {}, ...preferences }, selection);
+}
+
+test('hidden provider has no tuple; saved hidden provider falls back to first advertised choice', () => {
+  const picker = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } });
+  assert.equal(picker.catalogTuple('codex'), null);
+  assert.deepEqual(picker.catalogProviders(picker.catalog()), ['gemini']);
+  assert.deepEqual(picker.selectionForProvider('codex'), { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+test('hidden default model and invalid effort fall back within the visible provider', () => {
+  const picker = visibilityPicker({ claude: { 'claude-visible': { efforts: ['low'] } } });
+  assert.deepEqual(picker.catalogProviders(picker.catalog()), ['claude']);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'claude-default', effort: 'high' }),
+    { provider: 'claude', model: 'claude-visible', effort: 'low' });
+});
+
+test('visible saved choices survive, and an empty projection never restores full models', () => {
+  const picker = visibilityPicker({ claude: { 'claude-visible': { efforts: ['low', 'high'] } } });
+  assert.deepEqual(picker.selectionForProvider('claude', { model: 'claude-visible', effort: 'high' }),
+    { provider: 'claude', model: 'claude-visible', effort: 'high' });
+  const empty = visibilityPicker({});
+  assert.deepEqual(empty.catalogProviders(empty.catalog()), []);
+  assert.equal(empty.selectionForProvider('codex'), null);
+});
+
+test('storage preference for a hidden provider selects the first advertised provider', () => {
+  const picker = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } });
+  picker.storage({ schemaVersion: 1, revision: 2, defaultProvider: 'codex', byProvider: { codex: { model: 'codex-default', effort: 'high' } } });
+  assert.deepEqual(picker.selection(), { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+for (const method of ['loadSpawnCatalog', 'warmSpawnCatalog']) {
+  for (const visible of ['claude', 'gemini']) {
+    test(`${method} replaces a hidden Codex preference with advertised ${visible}`, async () => {
+      const model = `${visible}-default`;
+      const effort = visible === 'gemini' ? 'default' : 'high';
+      const picker = visibilityPicker({ [visible]: { [model]: { efforts: [effort] } } },
+        { defaultProvider: 'codex', byProvider: { codex: { model: 'codex-default', effort: 'high' } } });
+      await picker[method]();
+      await new Promise(setImmediate);
+      assert.deepEqual(picker.selection(), { provider: visible, model, effort });
+    });
+  }
+  test(`${method} retains a visible Gemini preference when other providers are visible`, async () => {
+    const picker = visibilityPicker({
+      claude: { 'claude-default': { efforts: ['high'] } }, gemini: { 'gemini-default': { efforts: ['default'] } },
+    }, { defaultProvider: 'gemini' });
+    await picker[method]();
+    await new Promise(setImmediate);
+    assert.equal(picker.selection().provider, 'gemini');
+  });
 }
 
 test('catalogForNewSession swaps in available_models and preserves its list order (operator 7c2717e4)', () => {

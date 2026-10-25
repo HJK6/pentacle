@@ -73,6 +73,31 @@ def test_mobile_then_desktop_does_not_mutate_shared_catalog(catalog):
     assert catalog == before
 
 
+@pytest.mark.parametrize('hidden', [('gemini',), ('codex',), ('claude', 'codex')])
+def test_local_visibility_round_trips_through_client_projections(monkeypatch, tmp_path, hidden):
+    import json
+    from _shared import spawn_profiles
+
+    policy = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text())
+    config_path = tmp_path / 'spawn_defaults.json'
+    config_path.write_text(json.dumps(policy))
+    config_path.with_name('spawn_defaults.local.json').write_text(json.dumps({
+        'schema_version': 1, 'available_models': {p: [] for p in hidden},
+    }))
+    monkeypatch.setattr(spawn_profiles, 'SPAWN_DEFAULTS_PATH', config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        expected = set(policy['providers']) - set(hidden)
+        for client in ('web', 'agent-orch', 'pentacle-mobile'):
+            result = reply(client)
+            visible = expected & {'claude', 'codex'} if client == 'pentacle-mobile' else expected
+            assert set(result['available_models']) == visible
+            assert result['models'] == spawn_profiles.MODELS
+            assert set(result['profiles']['desktop_manual']) == set(policy['providers'])
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
 @pytest.mark.parametrize('hello_client, forged_client', [('pentacle-mobile', 'pentacle'), ('pentacle', 'pentacle-mobile')])
 def test_real_dispatch_uses_hello_label_and_strips_rpc_auth_context(catalog, hello_client, forged_client):
     import json

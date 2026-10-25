@@ -15,6 +15,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Added
 
+- Installations can hide whole providers from advertised New Chat choices with empty `available_models` lists; web respects visibility and saved-choice fallbacks while explicit launches stay compatible. Legacy mobile UI support requires a later app release.
 - Daemon stats show current admission usage and held verbs with opaque holder ids; diagnostic reads have isolated bounded capacity that cannot consume ping credits.
 - Front-desk account health revalidation with an exact native identity proof, revision fence and durable audit receipt; ordinary probes keep existing health flags.
 
