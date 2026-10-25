@@ -47,3 +47,23 @@ def test_unrecognized_strings_are_redacted_and_pong_still_passes():
             return json.dumps(next(self.replies))
 
     assert asyncio.run(harness.request(Socket(), "probe"))["latency_s"] >= 0
+
+
+def test_declared_ping_admission_failure_keeps_exact_safe_enums():
+    class Socket:
+        async def send(self, frame):
+            assert json.loads(frame) == {"type": "ping", "request_id": "probe"}
+
+        async def recv(self):
+            return json.dumps({"type": "ping.error", "request_id": "probe",
+                               "error_code": "server_overloaded", "retryable": True,
+                               "message": "secret-canary", "token": "secret-canary"})
+
+    with pytest.raises(RuntimeError, match="^not_pong$") as caught:
+        asyncio.run(harness.request(Socket(), "probe"))
+    frame = harness.error_evidence(caught.value)["unexpected_reply"]
+    assert frame["type"] == "ping.error"
+    assert frame["body"]["error_code"] == "server_overloaded"
+    assert frame["body"]["retryable"] is True
+    assert "secret-canary" not in json.dumps(frame)
+    assert len(json.dumps(frame)) <= 1024

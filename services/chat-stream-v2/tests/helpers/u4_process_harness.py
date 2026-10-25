@@ -196,9 +196,9 @@ def unexpected_reply_evidence(reply):
     Unknown strings and fields may contain user content or credentials. Preserve
     their omission count instead of echoing them, with a fixed-size allow-list.
     """
-    kinds = {'error', 'busy', 'pong', 'welcome', 'event', 'ack'}
+    kinds = {'error', 'busy', 'pong', 'welcome', 'event', 'ack', 'ping.error'}
     codes = {'busy', 'timeout', 'rate_limited', 'authentication_required',
-             'store_unavailable', 'not_ready', 'invalid_request', 'internal_error'}
+             'store_unavailable', 'not_ready', 'invalid_request', 'internal_error', 'server_overloaded'}
     body = {}
     for name in ('error_code', 'code', 'message', 'error', 'retryable'):
         if name not in reply:
