@@ -149,10 +149,48 @@ def test_question_scope_keeps_phantom_cycles_and_depth_bound():
                 await store.open_session("fixture", name, provider="claude", visibility="hidden",
                                          parent_stream_id=parent)
                 parent = "fixture:" + name
-                if depth <= 64:
+                # The existing ancestry limit visits 64 nodes, including root.
+                if depth < 64:
                     expected.append(parent)
             assert await sessions.visible_question_scope_stream_ids("fixture:depth-root") == expected
         finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_real_store_scope_keeps_current_and_missing_generation_fences(tmp_path):
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        assets = None
+        try:
+            await _scope_fixture(store)
+            row = await store.fetch_session("fixture", "lead")
+            binding = {"stream_id": STREAM, "generation": row["session_generation"]}
+            async def roots(viewer):
+                return [binding]
+            assets = Assets(str(tmp_path / "generation-assets.db"),
+                            sessions=Sessions(store, local_host="fixture"), chat_roots=roots)
+            await assets.start()
+            first = await assets._chat_scope("assistant:chat")
+            assert STREAM in first and "fixture:z_child" in first
+            assert "fixture:unrelated" not in first
+            replacement = await store.open_session("fixture", "lead", provider="claude",
+                                                    session_generation="fixture-replacement")
+            assert replacement["session_generation"] != binding["generation"]
+            assert await assets._chat_scope("assistant:chat") == ["assistant:chat"]
+            binding["generation"] = replacement["session_generation"]
+            assert await assets._chat_scope("assistant:chat") == first
+            await store.submit(lambda conn: (
+                conn.execute("DELETE FROM v2_session_generations WHERE host='fixture' AND session_name='unrelated'"),
+                conn.commit()))
+            binding.update(stream_id="fixture:unrelated", generation="None")
+            assert await assets._chat_scope("assistant:chat") == ["assistant:chat"]
+            binding["generation"] = ""
+            assert await assets._chat_scope("assistant:chat") == ["assistant:chat"]
+        finally:
+            if assets is not None:
+                await assets.stop()
             store.stop()
     asyncio.run(go())
 
