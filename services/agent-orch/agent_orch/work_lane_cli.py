@@ -90,6 +90,25 @@ def add_work_parser(subparsers) -> None:
     unattended.add_argument("--json", action="store_true")
     unattended.add_argument("--timeout", type=float, default=30.0)
     unattended.set_defaults(func=cmd_unattended)
+    owed = sub.add_parser("owed", help="unresolved dispositions from ended lead assignments")
+    owed.add_argument("--json", action="store_true")
+    owed.add_argument("--timeout", type=float, default=30.0)
+    owed.set_defaults(func=cmd_owed)
+
+
+def cmd_owed(args: argparse.Namespace) -> int:
+    try:
+        response = _call(args, {"type": "work.owed"})
+    except Exception as exc:  # noqa: BLE001
+        print(f"agent-orch work owed: {exc}", file=sys.stderr)
+        return 1
+    if args.json or not str(response.get("type") or "").endswith(".ok"):
+        return _finish(response)
+    work = response["owed_dispositions"]
+    print(f"{work['total']} dispositions owed [{work['quality']}]; digest {work['digest_delivery']}")
+    for item in work["items"]:
+        print(f"    {item['spec_id']}  {item['closing_stream_id']}  {item['quality']}  parent {item['parent_stream_id']}")
+    return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:

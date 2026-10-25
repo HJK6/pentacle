@@ -112,15 +112,18 @@ class _BoundedSource:
     def is_symlink(self):
         return stat.S_ISLNK(self.stat().st_mode)
 
-    def read_text(self, *, encoding="utf-8"):
+    def read_bytes(self):
         fd = os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("work_source_not_regular")
-            with os.fdopen(fd, "r", encoding=encoding, closefd=False) as source:
+            with os.fdopen(fd, "rb", closefd=False) as source:
                 return source.read()
         finally:
             os.close(fd)
+
+    def read_text(self, *, encoding="utf-8"):
+        return self.read_bytes().decode(encoding)
 
 
 class _BoundedFolder:

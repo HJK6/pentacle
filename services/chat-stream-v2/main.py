@@ -552,6 +552,7 @@ async def run(args: argparse.Namespace) -> int:
     sessions.set_inventory_emitter(inventory_emitter)
     work_lanes = WorkLanesInventory(store, sessions, server.broadcast, specs=specs,
                                    episode_sink=WorkLaneAlertSink(alerts))
+    sessions.refresh_work_for_close = work_lanes.refresh_for_close
     server.work_lanes = work_lanes
     _session_emit = inventory_emitter.emit_if_changed
 

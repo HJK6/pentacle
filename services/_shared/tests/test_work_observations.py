@@ -43,12 +43,12 @@ def test_artifacts_and_symlinks_are_never_read(tmp_path, monkeypatch):
     artifact.mkdir()
     (artifact / "spec.md").write_text("broken secret-looking placeholder")
     (tmp_path / "work" / "in_progress" / "link").symlink_to(folder, target_is_directory=True)
-    original = Path.read_text
+    original = Path.read_bytes
     def guarded(path, *args, **kwargs):
         assert "_artifacts" not in path.parts
         assert "nested" not in path.parts
         return original(path, *args, **kwargs)
-    monkeypatch.setattr(Path, "read_text", guarded)
+    monkeypatch.setattr(Path, "read_bytes", guarded)
     result = subsystem(tmp_path, monkeypatch).scan_work_observations()
     assert len(result["candidates"][ID]) == 1
 
@@ -78,13 +78,13 @@ def test_split_write_and_conflict_keep_quality_stale(tmp_path, monkeypatch):
 def test_permission_error_and_inflight_yaml_write_are_distinguished(tmp_path, monkeypatch):
     folder = write_item(tmp_path)
     service = subsystem(tmp_path, monkeypatch)
-    read_text = Path.read_text
+    read_bytes = Path.read_bytes
     def deny(path, *args, **kwargs):
         if path == folder / "summary.md":
             raise PermissionError("synthetic permission failure")
-        return read_text(path, *args, **kwargs)
+        return read_bytes(path, *args, **kwargs)
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "read_text", deny)
+        patch.setattr(Path, "read_bytes", deny)
         result = service.scan_work_observations()
         assert result["errors"][str(folder)]["quality"] == "error"
     (folder / "spec.md").write_text("---\nid: [in flight\n")

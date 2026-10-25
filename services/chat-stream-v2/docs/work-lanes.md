@@ -2,6 +2,9 @@
 
 Fixture: `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json` (`schema: work_lanes_inventory_v2`). The daemon projection test and both chat-core TypeScript suites assert against that file; it is the contract.
 
+Assigned-lead close guards, owed dispositions and `work owed` use the existing
+index and digest paths; see [Lead disposition and close](lead-dispositions.md).
+
 ## Capability
 
 Clients send `capabilities.work_lanes_v1: true` in `hello`. Only such non-scoped clients receive lane data. Scoped clients never do.

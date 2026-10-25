@@ -251,6 +251,7 @@ def _build_child_report_ready(
     qa_attestation_reasons: object | None = None,
     effective_model: object | None = None, effective_effort: object | None = None,
     disposition_context: object | None = None,
+    owes_disposition_on_close: object | None = None,
     **_: Any,
 ) -> str:
     resolved_notice_id = str(notice_id or _report_notice_id(report_id))
@@ -277,6 +278,8 @@ def _build_child_report_ready(
         lines.append(f"effective_effort={effective_effort}")
     if _valid_disposition_context(disposition_context, report_id):
         lines.append("disposition_context=" + json.dumps(disposition_context, sort_keys=True, separators=(",", ":")))
+    if isinstance(owes_disposition_on_close, bool):
+        lines.append("owes_disposition_on_close=" + str(owes_disposition_on_close).lower())
     return f"{_notice_marker(resolved_notice_id)}\n" + "\n".join(lines)
 
 
@@ -292,7 +295,8 @@ _CHILD_REPORT = re.compile(
     rf"(?:(?:qa_attestation_state=unverified)\nqa_attestation_reasons=(?P<qa_reasons>[A-Za-z0-9_.:-]+(?:,[A-Za-z0-9_.:-]+)*)\n)?"
     rf"summary=(?P<summary>[^\r\n]+)"
     rf"(?:\neffective_model=(?P<effective_model>[^\s=]+)\neffective_effort=(?P<effective_effort>[^\s=]+))?"
-    rf"(?:\ndisposition_context=(?P<disposition_context>[^\r\n]*))?$"
+    rf"(?:\ndisposition_context=(?P<disposition_context>[^\r\n]*))?"
+    rf"(?:\nowes_disposition_on_close=(?P<owes_disposition_on_close>true|false))?$"
 )
 
 
@@ -309,6 +313,9 @@ def _match_child_report_ready(text: str, **_: Any) -> dict[str, Any] | None:
         "msg_id": match["msg_id"],
         "status": match["status"],
     }
+
+    if match["owes_disposition_on_close"] is not None:
+        result["owes_disposition_on_close"] = match["owes_disposition_on_close"] == "true"
 
     try:
         context = json.loads(match["disposition_context"] or "null")

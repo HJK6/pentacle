@@ -195,7 +195,21 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
         found = re.search(rf"^\*\*{re.escape(name)}\*\*[ \t]*[—–-][ \t]*(.+)$", summary, re.M)
         return found[1].strip()[:280] if found else None
 
+    parked = None
+    tracking = _section(spec, "Tracking") or ""
+    declarations = re.findall(r"^[ \t]*- parked:[ \t]*(.*)$", tracking, re.M)
+    if status == "blocked" and declarations:
+        declaration = declarations[-1]
+        match = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2}) (\S+) — (\S.*)", declaration)
+        if match:
+            try:
+                date.fromisoformat(match[1])
+            except ValueError:
+                pass
+            else:
+                parked = f"{match[1]} {match[2]} — {' '.join(match[3].split())}"
     return {"title": fm.get("title"), "status": status,
+            **({"parked_declaration": parked} if parked else {}),
             "terminal": status if status in ("completed", "deprecated") else None,
             "ac_checked": checked if ac is not None else None,
             "ac_total": len(boxes) if ac is not None else None,

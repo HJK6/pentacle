@@ -38,7 +38,7 @@ def test_report_reader_lookup_and_scope(tmp_path, monkeypatch):
             assert not server._operator_authenticated(peer)
             missing = await rpc("work.report.get", report_id="missing")
             assert missing["error_code"] == "not_found", missing
-            for verb in ("list_sessions", "session_close", "send", "notification.create", "report", "unknown.verb"):
+            for verb in ("list_sessions", "session_close", "send", "notification.create", "report", "work.owed", "unknown.verb"):
                 assert (await rpc(verb))["error_code"] == "system_producer_forbidden"
             token.unlink()
             assert (await rpc("work.report.get", report_id="missing"))["error_code"] == "system_producer_auth_required"
