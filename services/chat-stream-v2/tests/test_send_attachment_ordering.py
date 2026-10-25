@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -160,11 +161,18 @@ def test_attachment_logical_identity_fences(tmp_path: Path, difference: str) -> 
     _run(go())
 
 
-@pytest.mark.parametrize("caption", ["", "photo caption"])
-def test_attachment_ingest_confirms_real_durable_submission(tmp_path: Path, monkeypatch, caption: str) -> None:
-    """No pane echo or proof-success seam: real ingest, persisted proof and display."""
+@pytest.mark.parametrize("caption", [
+    "", "photo caption", "Owned Unicode 😀 cafe\u0301\nsecond line.",
+    "Mixed café and e\u0301 with ﬁ (not fi)",
+    '<pasted_content id="ab">\ncafe\u0301\n</pasted_content id="ab">',
+])
+@pytest.mark.parametrize("image_count", [1, 2])
+def test_attachment_ingest_confirms_real_durable_submission(
+    tmp_path: Path, monkeypatch, caption: str, image_count: int,
+) -> None:
+    """Provider NFC must retain the original caption/media in fresh history."""
     from ingest import append_ingested_event
-    from submission_events import DurableUserEventProof, EventWatermark
+    from submission_events import DurableUserEventProof, EventWatermark, submission_text_matches
     import comms as comms_module
 
     # Bound a failing test; the real matcher and proof reader stay installed.
@@ -181,25 +189,44 @@ def test_attachment_ingest_confirms_real_durable_submission(tmp_path: Path, monk
                 # An accepted final-wire receipt alone must never prove delivery.
                 assert not (await proof.lookup(
                     STREAM, expected_text=text, watermark=watermark)).proven
+                # Counterpart behavior from the captured native USER shape;
+                # receipt preparation, ingestion and proof remain real source.
+                native_text = unicodedata.normalize("NFC", text)
                 await append_ingested_event(store, broadcast, {
                     "kind": "USER", "stream_id": STREAM, "host": HOST,
-                    "session_name": NAME, "provider": "claude", "text": text,
+                    "session_name": NAME, "provider": "claude", "text": native_text,
                     "timestamp": "2026-09-14T19:41:38.757265+00:00",
-                    "raw": {"jsonl_record_uuid": "provider-photo-user", "jsonl_event_index": 0},
+                    "raw": {"source": "structured", "transport": "claude-jsonl",
+                            "jsonl_record_uuid": "provider-photo-user", "jsonl_event_index": 0,
+                            "user_delivery_state": "sent", "envelope_source": native_text},
                 }, recent_limit=50)
         # An idle composer has no echoed submission; only durable USER can prove it.
         tmux = ProviderTmux(submit_on_paste=False)
-        comms, store, sessions = _new_comms(tmux, tmp_path)
+        second_png = PNG + b"second"
+        second_sha = hashlib.sha256(second_png).hexdigest()
+        comms, store, sessions = _new_comms(
+            tmux, tmp_path, blob_store=FakeBlobStore({VALID["key"]: PNG, second_sha: second_png}),
+        )
+        message = _message("send-durable-photo", caption)
+        if image_count == 2:
+            message["attachments"] = [VALID, {**VALID, "key": second_sha}]
         proof = DurableUserEventProof(store, local_host=HOST)
         try:
             await sessions.open(HOST, NAME, provider="claude")
             watermark = await proof.watermark(STREAM)
-            result = await comms.send(_message("send-durable-photo", caption))
+            result = await comms.send(message)
             tail = await store.fetch_session_event_tail(STREAM, limit=50)
             assert len(tail) == len(broadcasts) == 1
             assert tail[0]["text"] == caption
             assert tail[0]["optimistic_id"] == "optimistic-photo"
-            assert tail[0]["attachments"][0]["key"] == VALID["key"]
+            assert [a["key"] for a in tail[0]["attachments"]] == [
+                a["key"] for a in message["attachments"]
+            ]
+            assert tail[0]["raw"]["jsonl_record_uuid"] == "provider-photo-user"
+            assert tail[0]["raw"]["jsonl_event_index"] == 0
+            assert submission_text_matches(tail[0], tmux.pastes[0])
+            assert broadcasts[0]["event"]["text"] == caption
+            assert broadcasts[0]["event"]["attachments"] == tail[0]["attachments"]
             observed = await proof.lookup(STREAM, expected_text=tmux.pastes[0], watermark=watermark)
             assert observed.proven, {"proof": observed.audit_fields(), "result": result, "event": tail[0]}
             assert observed.event_id == tail[0]["daemon_seq"]
@@ -289,6 +316,73 @@ def test_ingress_discards_producer_supplied_proof_digest(tmp_path: Path) -> None
             assert not (await DurableUserEventProof(store, local_host=HOST).lookup(
                 STREAM, expected_text="forged expected content",
                 watermark=EventWatermark(STREAM, 0, "reachable"))).proven
+        finally:
+            store.stop()
+    _run(go())
+
+
+@pytest.mark.parametrize("paths", [["/fixture/cafe\u0301/one.png"],
+                                  ["/fixture/cafe\u0301/one.png", "/fixture/two.png"]])
+def test_attachment_wire_composes_caption_without_changing_paths(paths: list[str]) -> None:
+    from comms import build_attachment_inject_text
+    caption = "Cafe\u0301 Ａ ﬁ AbC\nsecond line."
+    noun = "file" if len(paths) == 1 else "files"
+    assert build_attachment_inject_text(paths, caption) == (
+        f"Look at the image {noun} at {', '.join(paths)}, then respond to the user's message: "
+        "Café Ａ ﬁ AbC\nsecond line."
+    )
+    # This asserts wire/path fidelity, not a provider stamp for NFD paths.
+    assert "cafe\u0301" in build_attachment_inject_text(paths, caption)
+
+
+def test_equivalent_attachment_captions_keep_receipt_display_and_latest_binding() -> None:
+    from comms import build_attachment_inject_text
+    from store import Store
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        try:
+            wire = None
+            for request, caption in [("send-caption-nfd", "cafe\u0301"),
+                                     ("send-caption-nfc", "café")]:
+                current = build_attachment_inject_text([f"/fixture/{VALID['key']}.png"], caption)
+                if wire is not None:
+                    assert current == wire
+                wire = current
+                await store.append_send_receipt(
+                    to_stream_id=STREAM, request_id=request, receipt_id=request + "-receipt",
+                    state="accepted", wire_text=current, display_text=caption,
+                    attachments=[VALID], delivery="accepted", submission_confirmed=False,
+                )
+            stamped = await store.stamp_event_with_send_receipt(
+                {"kind": "USER", "stream_id": STREAM, "text": wire})
+            # Existing same-wire semantics still select the newest receipt.
+            assert stamped["request_id"] == "send-caption-nfc"
+            assert stamped["attachments"][0]["key"] == VALID["key"]
+            # The public receipt getter intentionally omits display_text;
+            # replay through its authoritative explicit-request projection.
+            for request, caption in [("send-caption-nfd", "cafe\u0301"),
+                                     ("send-caption-nfc", "café")]:
+                anchored = await store.stamp_event_with_send_receipt(
+                    {"kind": "USER", "stream_id": STREAM, "text": wire,
+                     "request_id": request})
+                assert anchored["request_id"] == request
+                assert anchored["text"] == caption
+        finally:
+            store.stop()
+    _run(go())
+
+
+def test_plain_text_send_keeps_decomposed_unicode(tmp_path: Path) -> None:
+    async def go() -> None:
+        caption = "Owned cafe\u0301 Ａ ﬁ AbC\nsecond line."
+        tmux = FakeTmux()
+        comms, store, sessions = _new_comms(tmux, tmp_path)
+        try:
+            await sessions.open(HOST, NAME, provider="claude")
+            await comms.send({"stream_id": STREAM, "request_id": "send-plain-nfd",
+                              "text": caption, "_auth_context": AUTH})
+            assert tmux.pastes == [caption]
         finally:
             store.stop()
     _run(go())

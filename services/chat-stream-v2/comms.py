@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -243,7 +244,9 @@ def validate_send_attachments(value: object, *, max_bytes: int = ATTACHMENT_MAX_
 def build_attachment_inject_text(paths: list[str], caption: str) -> str:
     if not paths:
         raise AttachmentValidationError("at least one attachment path is required")
-    caption = (caption or "").strip()
+    # Native echoes can compose Unicode; keep their receipt wire identical.
+    # The original operator caption remains in SendPlan.display_text.
+    caption = unicodedata.normalize("NFC", (caption or "").strip())
     noun = "file" if len(paths) == 1 else "files"
     joined = ", ".join(paths)
     if caption:
