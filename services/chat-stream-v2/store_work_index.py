@@ -118,6 +118,14 @@ def _prepare_file(path: str, scan: dict, *, settle_s: float, sweep: bool):
 class WorkIndexStoreMixin:
     _work_index_fault = None
 
+    async def work_owed(self, *, now=None, root_binding=None):
+        from work_owed import owed_dispositions_conn
+        return await self.submit(lambda conn: owed_dispositions_conn(conn, now=now, root_binding=root_binding))
+
+    async def lead_close_context(self, stream, generation):
+        from work_owed import lead_close_context_conn
+        return await self.submit(lambda conn: lead_close_context_conn(conn, stream, generation))
+
     async def work_unattended(self, *, now: float | None = None) -> dict:
         from work_unattended import unattended_work_conn
         return await self.submit(lambda conn: unattended_work_conn(conn, now=now))
@@ -170,7 +178,12 @@ class WorkIndexStoreMixin:
                     for spec_id in member_ids(lane):
                         holders.setdefault(spec_id, []).append(lane)
                 current = prepared
-                if current is None or current[0] != state:
+                # Assignment metadata shares this JSON row but does not change
+                # the observation snapshot used by off-loop preparation.
+                from work_owed import STATE_KEY, reconcile_dispositions_conn
+                def observation_state(value):
+                    return {key: field for key, field in value.items() if key != STATE_KEY}
+                if current is None or observation_state(current[0]) != observation_state(state):
                     # Memory Stores and a concurrent accepted scan use the same
                     # oracle here. Never publish a delta against a changed base.
                     current = _prepare_records(conn.execute(
@@ -209,6 +222,7 @@ class WorkIndexStoreMixin:
                 conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
                              "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
                              (json.dumps(state, separators=(",", ":")),))
+                reconcile_dispositions_conn(conn, now)
                 conn.commit()
                 return {"changed": changes, "stale_scan": False}
             except BaseException:

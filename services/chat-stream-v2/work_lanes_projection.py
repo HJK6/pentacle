@@ -235,6 +235,13 @@ class WorkLanesInventory:
         self._index_lock = asyncio.Lock()
         self._watcher_start: asyncio.Task[None] | None = None
 
+    async def refresh_for_close(self):
+        """One caller waits on the existing coalesced drain, bounded by close."""
+        self._index_dirty = True
+        self.refresh()
+        if self._task is not None:
+            await asyncio.shield(self._task)
+
     def refresh(self) -> None:
         """Coalesced, non-blocking: reconcile lead loss then emit if changed.
 

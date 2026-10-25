@@ -36,7 +36,8 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     """Read exactly the two source files, checking identities around the read."""
     paths = (folder / "spec.md", folder / "summary.md")
     before = [_signature(p) for p in paths]
-    texts = [p.read_text(encoding="utf-8") for p in paths]
+    contents = [p.read_bytes() for p in paths]
+    texts = [content.decode("utf-8") for content in contents]
     after = [_signature(p) for p in paths]
     unsettled = (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
                  or not all(text.strip() for text in texts))
@@ -57,7 +58,9 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     facts["title"] = facts["title"] if isinstance(facts["title"], str) else None
     digest = hashlib.sha256(json.dumps([status, *texts], ensure_ascii=False).encode()).hexdigest()
     return {"spec_id": identity, "quality": "fresh", "facts": facts,
-            "source_hash": digest, "path": str(folder), "error": None}
+            "source_hash": digest, "path": str(folder), "error": None,
+            "document_revisions": {name: hashlib.sha256(content).hexdigest()
+                                   for name, content in zip(("spec.md", "summary.md"), contents)}}
 
 
 def unresolved_member(spec_id: str, quality: str = "missing", error: str | None = None) -> dict:
@@ -99,7 +102,9 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
                       "prior": {k: old.get(k) for k in fields}, "next": {k: facts.get(k) for k in fields},
                       "source_changed_at": source_changed}
         record.update(member=member, last_good=copy.deepcopy(facts), path=candidate["path"],
-                      source_hash=candidate["source_hash"], incident=None, bad_since=None, bad_sweeps=0)
+                      source_hash=candidate["source_hash"],
+                      document_revisions=candidate.get("document_revisions") or {},
+                      incident=None, bad_since=None, bad_sweeps=0)
     else:
         if quality in ("missing", "ambiguous"):
             if record.get("incident") != quality:

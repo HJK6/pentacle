@@ -319,15 +319,18 @@ def test_offline_unsettled_coherent_read_is_not_accepted(tmp_path, monkeypatch, 
     from agent_orch import cli
     from _shared import specs_service
     folder = write_spec(tmp_path, "spec_demo__bridge", NUMERIC)
-    source = specs_service._BoundedSource.read_text
+    source = specs_service._BoundedSource.read_bytes
+    injected = []
     def racing_read(self, **kwargs):
-        text = source(self, **kwargs)
+        content = source(self, **kwargs)
         if self.name == "summary.md":
             (folder / "spec.md").write_text((folder / "spec.md").read_text() + "\nchanged during read\n")
-        return text
-    monkeypatch.setattr(specs_service._BoundedSource, "read_text", racing_read)
+            injected.append(self.name)
+        return content
+    monkeypatch.setattr(specs_service._BoundedSource, "read_bytes", racing_read)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(manifest("spec_demo__bridge"))))
     assert cli.main(["work-lane", "estimate-preview", "--memory-root", str(tmp_path), "--lanes-json", "-"]) == 1
+    assert injected
     assert {"spec_id": "spec_demo__bridge", "code": "work_files_unsettled"} in json.loads(capsys.readouterr().out)["errors"]
 
 

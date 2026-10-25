@@ -145,7 +145,7 @@ def coalesce_notice_conn(conn, notice, report=None, *, enrich_report=True):
             # Optional cached facts can advance after ingest. Replay retains the
             # first durable body; ordinary content and all routing identities
             # still pass the existing conflict check below.
-            base = lambda body: body.split("\ndisposition_context=", 1)[0]
+            base = lambda body: body.split("\ndisposition_context=", 1)[0].split("\nowes_disposition_on_close=", 1)[0]
             if base(prior[0]) == base(notice["body"]):
                 notice = {**notice, "body": prior[0]}
         elif enrich_report:
@@ -226,6 +226,14 @@ def report_notice_body_conn(conn, report):
         effective_model=report.get("effective_model"),
         effective_effort=report.get("effective_effort"),
     )
+    try:
+        from work_owed import owes_on_close_conn
+        fields["owes_disposition_on_close"] = owes_on_close_conn(
+            conn, str(report.get("from_stream_id") or ""), report.get("session_generation"))
+    except Exception:
+        # Enrichment must not lose an ingested report or assert a false clear.
+        fields["owes_disposition_on_close"] = True
+        log.exception("subsystem=report_context action=owed_quality_unknown")
     try:
         from work_unattended import report_disposition_context_conn
         context = report_disposition_context_conn(conn, report)
@@ -327,6 +335,8 @@ def install_default_conn(conn, child_sid, now):
 
 def lifecycle_watch_conn(conn, now):
     """Retire replaced owners/targets; close's terminal fact precedes retirement."""
+    from work_owed import reconcile_dispositions_conn
+    reconcile_dispositions_conn(conn, now)
     rows = conn.execute("SELECT * FROM v2_watch_wake WHERE state='active'").fetchall()
     for row in rows:
         owner = _live(conn, row["owner"], row["owner_generation"])
@@ -373,6 +383,8 @@ def move_watch_custody_conn(conn, source, generation, target, target_generation,
         return 0  # Closed-owner recovery retains its manual restore path.
     if not _live(conn, target, target_generation):
         raise ValueError("stale_generation")
+    from work_owed import move_disposition_custody_conn
+    move_disposition_custody_conn(conn, source, generation, target, target_generation, child=child)
     where = "owner=? AND owner_generation=?"
     args = (source, generation)
     child_where = " AND child=? AND child_generation=?" if child else ""
@@ -763,6 +775,8 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
         # An unobserved root interval cannot certify continuous descendant idle.
         conn.execute("DELETE FROM v2_fleet_seat_idle")
         return 0
+    from work_owed import disposition_root_conn
+    disposition_root_conn(conn, (root_sid, root_gen), now)
     children = {}
     for sid, row in members.items():
         children.setdefault(row.get("parent_stream_id"), []).append(sid)
@@ -852,8 +866,11 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
     if now < state["next_due"]:
         return count
     from work_unattended import unattended_work_conn, unattended_signature
+    from work_owed import owed_dispositions_conn
     unattended = unattended_work_conn(conn, now=now)
-    facts = _json({"lanes": digest_lanes, "unattended_work": unattended_signature(unattended)})
+    owed = owed_dispositions_conn(conn, now=now, root_binding=(root_sid, root_gen))
+    facts = _json({"lanes": digest_lanes, "unattended_work": unattended_signature(unattended),
+                   "owed_dispositions": owed})
     digest = hashlib.sha256(facts.encode()).hexdigest()
     sequence = state["sequence"]
     # Equality refers to the last durable enqueue, not provider delivery. A
@@ -865,13 +882,21 @@ def _evaluate_fleet_conn(conn, observations, root_binding, now):
     ).fetchone() if digest == state["last_hash"] else None
     recover = digest == state["last_hash"] and (
         previous is None or (previous["terminal_at"] and not previous["delivered_at"]))
-    if digest != state["last_hash"] or recover:
+    pending = conn.execute("SELECT 1 FROM v2_outbound_notices WHERE kind='lane_digest' "
+        "AND recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL "
+        "AND json_extract(metadata,'$.root_generation')=? LIMIT 1", (root_sid, root_gen)).fetchone()
+    if owed["total"] and pending:
+        conn.execute("UPDATE v2_fleet_digest_state SET next_due=? WHERE root=? AND root_generation=?",
+                     (now + digest_s, root_sid, root_gen))
+        return count
+    if digest != state["last_hash"] or recover or owed["total"]:
         sequence += 1
         nid = _id("lane_digest", epochs["lane_digest"], root_sid, root_gen, sequence)
         body = build_message_envelope(
             "lane_digest", notice_id=nid, lanes=render_lanes,
             unattended_work={**{key: value for key, value in unattended.items() if key != "omitted"},
                              "items": unattended["items"][:8]},
+            owed_dispositions={**owed, "items": owed["items"][:8]},
             evaluated_at=_stamp(now),
         )
         _insert_outbound_notice_conn(

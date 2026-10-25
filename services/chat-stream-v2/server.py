@@ -925,6 +925,7 @@ class Server:
             "assistant.operation": self._on_assistant_operation,
             "work.unattended": self._on_work_unattended,
             "work.report.get": self._on_work_report_get,
+            "work.owed": self._on_work_owed,
             "work_lanes.list": self._on_work_lanes_list,
             "work_lanes.show": self._on_work_lanes_show,
             "work_lanes.adopt_preview": self._on_work_lanes_adopt_preview,
@@ -4707,6 +4708,12 @@ class Server:
             "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at",
         )}}
 
+    async def _on_work_owed(self, msg: dict[str, Any]) -> dict[str, Any]:
+        self._work_lanes_reader(msg, require_inventory=False)
+        reader = getattr(getattr(self, "watch_wake", None), "root_binding", None)
+        root = reader() if callable(reader) else None
+        return {"type": "work.owed.ok", "owed_dispositions": await self.store.work_owed(now=time.time(), root_binding=root)}
+
     async def _on_work_lanes_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)
         limit = msg.get("limit", 200)
@@ -5201,6 +5208,10 @@ class Server:
                     )
             else:
                 coordinator_authorized = True
+        if coordinator_authorized and msg.get("operator_confirm") is True:
+            # The existing explicit parent-authorized operator route is an
+            # involuntary close. A self-supplied flag never acquires it.
+            close_kind = "operator_close"
         claim_verified: str | None = None
         claim_mismatch: dict[str, Any] | None = None
         if isinstance(msg.get("ac_claim"), dict) and self.ledger is not None:
@@ -5230,7 +5241,7 @@ class Server:
         defer_if_working = bool(msg.get("defer_if_working"))
         if expired_self_close:
             actor_kind, auth_kind = "expired_self", "expired"
-        elif close_kind == "operator_close":
+        elif close_kind == "operator_close" and not coordinator_authorized:
             actor_kind, auth_kind = "operator", "operator_authenticated"
         elif close_kind == "manager_close":
             actor_kind, auth_kind = "manager", "token_verified"

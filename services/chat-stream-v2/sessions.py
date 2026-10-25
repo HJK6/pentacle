@@ -19,6 +19,7 @@ from mirror import _extract_live_state, _provider_from_session_name
 from v2_runtime import iso_now
 
 VISIBILITIES = ("default", "visible", "hidden", "subagent")
+LEAD_CLOSE_REFRESH_TIMEOUT_S = 30.0
 #: Close escalation ladder windows (spec 2026-08-05 `close.degraded` DELETION
 #: ruling). Graceful tmux kill is confirmed within the first window; a pane that
 #: survives it is SIGKILLed by pid and confirmed within the second. Both bounded
@@ -1399,6 +1400,39 @@ class Sessions:
             restored = self._cache(row)
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
+    async def _guard_lead_disposition(self, host, name, generation, close_kind):
+        if close_kind not in {"session_close", "manager_close"} or not generation:
+            return
+        stream = f"{host}:{name}"
+        context = await self.store.lead_close_context(stream, generation)
+        if context is None:
+            return
+        if close_kind == "manager_close":
+            tmux = self.hosts.tmux_for(host) if self.hosts is not None and not self.hosts.is_local(host) else self.tmux
+            try:
+                probe = getattr(tmux, "session_state", None)
+                live = (await asyncio.wait_for(probe(name), timeout=5) == "alive" if probe is not None
+                        else bool(tmux) and await asyncio.wait_for(tmux.has_session(name), timeout=5))
+            except Exception:
+                live = False
+            if not live:
+                return  # Gone/offline manager closes remain involuntary.
+        refresh = getattr(self, "refresh_work_for_close", None)
+        if refresh is not None:
+            try:
+                await asyncio.wait_for(refresh(), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
+            except Exception:
+                # An unavailable refresh cannot turn cached progress into a
+                # disposition. The caller retains the operator-close recovery.
+                pass
+        context = await self.store.lead_close_context(stream, generation)
+        if context is not None:
+            from work_owed import disposition_commands
+            raise VerbError("lead_close_requires_disposition", "Lead disposition is pending; move the item, assign a successor, or use an authorized operator close.",
+                spec_id=context["spec_id"], observed_status=context["status"],
+                observed_at=context["observed_at"], pending=True,
+                next_commands=disposition_commands(context))
+
     async def close(
         self,
         host: str,
@@ -1442,6 +1476,12 @@ class Sessions:
         async with self._lifecycle_lock(host, session_name):
             row = await self.store.fetch_session(host, session_name)
             self.assistant.guard_close(row, close_kind)
+            if row and row.get("status") == "open" and (
+                expected_generation is None or self._row_generation(row) == expected_generation
+            ):
+                # Do not hold the shared graph lock during the bounded index
+                # wait. Target generation is rechecked again below before kill.
+                await self._guard_lead_disposition(host, session_name, self._row_generation(row), close_kind)
             # Admission and termination share the same graph fence as reparent
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.

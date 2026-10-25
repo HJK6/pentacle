@@ -444,12 +444,16 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
         save_authorization(conn,grant_record)
         finalize_attempt(conn,row)
     audit(conn,cid,'committed',row['actor'],row['actor_generation'],receipt=row['receipt'])
+    from work_owed import reconcile_dispositions_conn
+    reconcile_dispositions_conn(conn, time.time())
     return row
 
 
 def _move_custody(conn,cid,sid,gen,target,tgen):
     # Current custody is mutable; original intent, decisions and reports remain
     # unchanged. The journal explains every exact-generation substitution.
+    from work_owed import move_disposition_custody_conn
+    move_disposition_custody_conn(conn, sid, gen, target, tgen)
     for key,gkey in (('bound_stream_id','bound_generation'),('visible_chat_stream_id','visible_chat_generation')):
         conn.execute(f'''UPDATE v2_assistant_composite_lanes SET {key}=?,{gkey}=?,version=version+1,updated_at=?
             WHERE {key}=? AND {gkey}=?''',(target,tgen,stamp(),sid,gen))
