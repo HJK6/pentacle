@@ -20,6 +20,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Web page-load reads leave request capacity for image uploads; queued user actions take priority over background reads, and image uploads verify the complete file digest before reporting success.
+
 - Image sends with canonically equivalent Unicode captions reconcile into one caption and image bubble even when the native echo arrives before the send result, instead of leaving a second row marked sending.
 - Discarded voice transcriptions no longer block image uploads or ordinary chat controls. Busy uploads and voice takes show readable errors and keep unsent content for a manual retry.
 - Repair-review reports can explicitly bind their typed commission message id, preserving distinct reject counts when reports use message 0.
