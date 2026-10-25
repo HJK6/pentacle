@@ -1,5 +1,6 @@
 """Copied-byte verification, refresh, and clean reader dispatch regressions."""
 import hashlib
+import grp
 import importlib.util
 import io
 import json
@@ -185,6 +186,43 @@ def test_failed_probe_preserves_selection_and_refresh_retains_previous(install, 
     assert install._active() == "releases/" + "b" * 40
 
 
+@pytest.mark.parametrize("prior_previous", [False, True])
+@pytest.mark.parametrize("fault", ["previous", "active", "readback"])
+def test_failed_selection_restores_both_pointer_preimages(install, tmp_path, monkeypatch,
+                                                        prior_previous, fault):
+    if prior_previous:
+        a, ap = bundle(tmp_path / "a", "a" * 40)
+        install.install(a, "a" * 40, ap)
+    b, bp = bundle(tmp_path / "b", "b" * 40)
+    install.install(b, "b" * 40, bp)
+    before = {name: os.readlink(install.ROOT / name) if os.path.lexists(install.ROOT / name) else None
+              for name in ("active", "previous")}
+    c, cp = bundle(tmp_path / "c", "c" * 40)
+    link, active = install._link, install._active
+    injected = False
+    def failing_link(name, target):
+        nonlocal injected
+        if not injected and fault == name:
+            injected = True
+            raise OSError("injected pointer selection failure")
+        return link(name, target)
+    def failing_readback():
+        nonlocal injected
+        selected = active()
+        if not injected and fault == "readback" and selected == "releases/" + "c" * 40:
+            injected = True
+            raise OSError("injected pointer readback failure")
+        return selected
+    monkeypatch.setattr(install, "_link", failing_link)
+    monkeypatch.setattr(install, "_active", failing_readback)
+    with pytest.raises(OSError, match="injected pointer"):
+        install.install(c, "c" * 40, cp)
+    assert injected
+    after = {name: os.readlink(install.ROOT / name) if os.path.lexists(install.ROOT / name) else None
+             for name in ("active", "previous")}
+    assert after == before
+
+
 def test_root_only_and_unsafe_ancestor_refused(tmp_path):
     m = load("report_consumer_install")
     with pytest.raises(ValueError, match="requires root"):
@@ -237,10 +275,11 @@ def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "__file__", str(prefix / "releases" / ("a" * 40) / "agent-orch"))
     monkeypatch.setattr(m, "_root_path", lambda path: None)
     monkeypatch.setattr(m.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=os.getuid()))
+    monkeypatch.setattr(grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=0))
     fstat = m.os.fstat
     def root_info(fd):
         real = fstat(fd)
-        return SimpleNamespace(st_uid=0, st_mode=real.st_mode, st_size=real.st_size)
+        return SimpleNamespace(st_uid=0, st_gid=0, st_mode=real.st_mode, st_size=real.st_size)
     monkeypatch.setattr(m.os, "fstat", root_info)
     monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: SimpleNamespace(
         stdout="file metadata\n 0: user:_triforce_memory allow read\n"))
@@ -251,6 +290,19 @@ def test_config_returns_exact_clean_environment(configured):
     m, _ = configured
     assert m.reader_environment() == {m.TOKEN: "synthetic-reader", m.URL: "ws://127.0.0.1:1",
                                       "AGENT_ORCH_TOKEN": ""}
+
+
+def test_config_requires_wheel_group_before_reading(configured, monkeypatch):
+    m, _ = configured
+    fstat = m.os.fstat
+    def wrong_group(fd):
+        info = fstat(fd)
+        return SimpleNamespace(st_uid=info.st_uid, st_gid=1,
+                               st_mode=info.st_mode, st_size=info.st_size)
+    monkeypatch.setattr(m.os, "fstat", wrong_group)
+    monkeypatch.setattr(m.json, "load", lambda _: pytest.fail("config read before group check"))
+    with pytest.raises(ValueError, match="unsafe reader configuration"):
+        m.reader_environment()
 
 
 @pytest.mark.parametrize("acl", ["", "0: group:staff allow read", "0: user:_triforce_memory allow read,write",

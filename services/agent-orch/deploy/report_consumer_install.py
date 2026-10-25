@@ -62,19 +62,30 @@ def _link(name: str, target: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _active() -> str | None:
-    path = ROOT / "active"
+def _pointer(name: str) -> str | None:
+    path = ROOT / name
     if not os.path.lexists(path):
         return None
     if not path.is_symlink() or path.lstat().st_uid != _ROOT_UID:
-        raise ValueError("unsafe consumer active pointer")
+        raise ValueError("unsafe consumer " + name + " pointer")
     value = os.readlink(path)
     if not re.fullmatch(r"releases/[0-9a-f]{40}", value):
-        raise ValueError("consumer active pointer outside release prefix")
+        raise ValueError("consumer " + name + " pointer outside release prefix")
     release = ROOT / value
     _directory(release)
     _inventory(release)
     return value
+
+
+def _active() -> str | None:
+    return _pointer("active")
+
+
+def _restore_pointer(name: str, target: str | None) -> None:
+    if target is None:
+        (ROOT / name).unlink(missing_ok=True)
+    else:
+        _link(name, target)
 
 
 def _extract(archive: Path, destination: Path) -> None:
@@ -132,6 +143,7 @@ def install(source: Path, commit: str, manifest_sha256: str) -> dict:
             raise ValueError("unsafe consumer installation lock")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = _active()
+        old_previous = _pointer("previous")
         launcher = ROOT / "agent-orch"
         if os.path.lexists(launcher) and (not launcher.is_symlink()
                 or launcher.lstat().st_uid != _ROOT_UID or os.readlink(launcher) != "active/agent-orch"):
@@ -174,17 +186,17 @@ def install(source: Path, commit: str, manifest_sha256: str) -> dict:
             # Installing it first is safe: refresh requires the same link target.
             if not os.path.lexists(launcher):
                 _link("agent-orch", "active/agent-orch")
-            if old is not None:
-                _link("previous", old)
             try:
+                if old is not None:
+                    _link("previous", old)
                 _link("active", "releases/" + commit)
                 if _active() != "releases/" + commit or launcher.resolve() != release / "agent-orch":
                     raise ValueError("consumer activation readback mismatch")
             except Exception:
-                if old is None:
-                    (ROOT / "active").unlink(missing_ok=True)
-                else:
-                    _link("active", old)
+                try:
+                    _restore_pointer("active", old)
+                finally:
+                    _restore_pointer("previous", old_previous)
                 raise
             return {"ok": True, "mode": "report_consumer", "commit": commit,
                     "manifest_sha256": manifest_sha256, "wrapper_sha256": _hash(release / "agent-orch"),

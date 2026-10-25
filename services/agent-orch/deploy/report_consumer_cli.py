@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import grp
 import os
 from pathlib import Path
 import pwd
@@ -39,6 +40,7 @@ def reader_environment() -> dict[str, str]:
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_gid != grp.getgrnam("wheel").gr_gid
                 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 16384):
             raise ValueError("unsafe reader configuration")
         acl = subprocess.run(["/bin/ls", "-lde", str(config)], check=True,
