@@ -316,8 +316,10 @@ class OutboundNoticeQueue:
             except Exception as exc:  # noqa: BLE001 - guard failure is retryable
                 return await self._retry(
                     row,
-                    f"notice guard failed: {exc}",
+                    'absence_readback_unknown:notice_guard_failed' if self._pending_digest(row)
+                    else f"notice guard failed: {exc}",
                     "retry the guarded notice",
+                    proof_pending=self._pending_digest(row), digest_readback=False,
                 )
             if decision is not None and decision.action != "deliver":
                 if decision.action == "terminal":
@@ -402,7 +404,8 @@ class OutboundNoticeQueue:
             if code in _TERMINAL_CODES:
                 await self._terminal(row, reason, "inspect the terminal notice reason and recipient lifecycle")
                 return "terminal"
-            return await self._retry(row, reason, "retry after the recorded backoff")
+            return await self._retry(row, reason, "retry after the recorded backoff",
+                                     proof_pending=self._pending_digest(row))
 
         if isinstance(reply, dict) and reply.get("assistant_backend_ingress") == "persisted_suppressed":
             await self._terminal(row, "persisted_suppressed", "routine ingress persisted without provider delivery")
@@ -416,6 +419,7 @@ class OutboundNoticeQueue:
                 proof_pending
                 and reply.get("proof_state") == "row_missing"
                 and self._past_proof_floor(row)
+                and not self._pending_digest(row)
             ):
                 await self._terminal(
                     row,
@@ -454,10 +458,31 @@ class OutboundNoticeQueue:
 
     async def _retry(
         self, row: dict[str, Any], error: str, next_action: str, *, proof_pending: bool = False,
-        authoritative_negative: bool = False,
+        authoritative_negative: bool = False, digest_readback: bool = True,
     ) -> str:
         attempts = max(1, int(row.get("attempts") or 1))
         if attempts >= self.config.max_attempts:
+            if (digest_readback and row.get('kind') == NOTICE_KIND_LANE_DIGEST and proof_pending
+                    and self._past_proof_floor(row)):
+                from digest_delivery_proof import reconcile
+                outcome = await reconcile(self.store, str(row['notice_id']), self.owner,
+                                          max_attempts=self.config.max_attempts)
+                if outcome['state'] == 'terminal':
+                    return 'terminal'
+                if outcome['state'] == 'proven':
+                    promoted = await self.store.promote_tell_delivery(
+                        outcome['tell_id'], outcome['digest'], proof=outcome['proof'])
+                    if promoted is not None:
+                        completed = await self.store.complete_outbound_notice(
+                            str(row['notice_id']), owner=self.owner)
+                        if completed:
+                            callback = self._delivered_callbacks.get(str(row['kind']))
+                            if callback is not None:
+                                await callback(row)
+                            return 'delivered'
+                    outcome = {'state': 'unknown', 'reason': 'positive_proof_fence_changed'}
+                error = 'absence_readback_unknown:' + outcome['reason']
+                next_action = 'retry complete original-generation digest readback; never resend'
             if str(row.get("kind")) == NOTICE_KIND_NOTIFICATION_ANSWER:
                 await self._terminal(row, "unconfirmed_after_bound",
                                      "inspect the original producer transcript; reconcile this intent, do not resend")
@@ -485,6 +510,11 @@ class OutboundNoticeQueue:
             next_action=next_action,
         )
         return "retry"
+
+    @staticmethod
+    def _pending_digest(row: dict[str, Any]) -> bool:
+        return (row.get('kind') == NOTICE_KIND_LANE_DIGEST and str(row.get('last_error') or '').startswith(
+            ('submission_proof_pending', 'absence_readback_unknown:')))
 
     @staticmethod
     def _past_proof_floor(row: dict[str, Any]) -> bool:

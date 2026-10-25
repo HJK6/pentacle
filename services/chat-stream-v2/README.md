@@ -162,6 +162,20 @@ provide replay identity, so re-reading a completion does not duplicate it.
 Successful completions and token bookkeeping remain excluded. This visibility
 does not resume a task, switch models, or produce a completion report.
 
+## Pending lane digests
+
+An old `lane_digest` with committed-pending submission proof is reconciled by
+the existing notice retry loop after both its retry and proof-age bounds.
+Positive proof completes the original delivery. Otherwise, a complete ordered
+read from its reachable, positive watermark through the current generation's
+event tip (including archived events) may record `delivery_absent_after_bound`.
+That terminal negative retains the original tell without acknowledging or
+resubmitting it; current owed facts can use the next ordinary digest deadline.
+Incomplete, unavailable or changed evidence stays pending with a typed
+`absence_readback_unknown:<reason>` in the existing error/action fields.
+`agent-orch ledger get <tell_id>` remains read-only. Do not resend or manually
+terminalize a pending notice to obtain fresh debt delivery.
+
 ## Tests and supported integrations
 
 ```sh
