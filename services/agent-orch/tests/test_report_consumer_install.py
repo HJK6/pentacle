@@ -79,7 +79,33 @@ def install(tmp_path, monkeypatch):
         return original_directory(path)
     monkeypatch.setattr(m, "_directory", directory)
     monkeypatch.setattr(m.os, "geteuid", lambda: 0)
-    return m
+    try:
+        yield m
+    finally:
+        # Production releases stay immutable. This unprivileged fixture owns
+        # its temporary installation and must release it for strict gate cleanup.
+        if m.ROOT.is_dir() and not m.ROOT.is_symlink():
+            for path in [m.ROOT, *m.ROOT.rglob("*")]:
+                if path.is_symlink():
+                    continue
+                info = path.stat()
+                if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+                    path.chmod(stat.S_IMODE(info.st_mode) | stat.S_IWUSR)
+
+
+def test_fixture_teardown_allows_strict_gate_removal(tmp_path):
+    owned = tmp_path / "owned"; owned.mkdir()
+    with pytest.MonkeyPatch.context() as patch:
+        lifecycle = install.__wrapped__(owned, patch)
+        engine = next(lifecycle)
+        try:
+            source, pin = bundle(owned / "source", "a" * 40)
+            engine.install(source, "a" * 40, pin)
+            assert stat.S_IMODE((engine.ROOT / "releases" / ("a" * 40)).stat().st_mode) == 0o555
+        finally:
+            lifecycle.close()
+    shutil.rmtree(owned)
+    assert not owned.exists()
 
 
 def test_private_home_failure_then_consumer_executes_from_export(install, tmp_path):
