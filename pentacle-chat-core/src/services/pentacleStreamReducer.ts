@@ -1250,9 +1250,17 @@ function findUnambiguousOptimisticEchoMatch(
       (send.text === event.text ||
         serverUserEchoMatchesAttachmentWrapper(send.attachments, send.text, event.text))
     ));
-  const windowMatches = sameTextCandidates.filter(([, send]) => (
-    optimisticMatchesServerUser(send, event, windowMs)
-  ));
+  const windowMatches = sameTextCandidates.filter(([, send]) => {
+    // A keyed attachment wrapper has already proved caption equivalence. Use
+    // comparison-only text so the normal stream/identity/time guards also work
+    // while the send bridge is pending (status queued). Do not parse a literal
+    // caption as an authenticated provider wrapper or change the stored event.
+    const comparisonEvent = send.text !== event.text &&
+      serverUserEchoMatchesAttachmentWrapper(send.attachments, send.text, event.text)
+      ? { ...event, text: send.text, raw: undefined, provider_wrapper: undefined }
+      : event;
+    return optimisticMatchesServerUser(send, comparisonEvent, windowMs);
+  });
   if (windowMatches.length === 1) return windowMatches[0][0];
   if (windowMatches.length > 1) return null;
 
