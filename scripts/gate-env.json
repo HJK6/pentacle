@@ -104,6 +104,23 @@
           "timeout_s": 1800,
           "max_timeout_s": 14400
         },
+        "v2-merge-capacity": {
+          "kind": "run_gate",
+          "gate": "merge",
+          "needs": [
+            "python",
+            "node",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
+          "tier_timeouts": {
+            "unit": 1200,
+            "smoke": 900
+          },
+          "timeout_s": 2100,
+          "max_timeout_s": 2100
+        },
         "v2-pytest": {
           "kind": "pytest_files",
           "needs": [

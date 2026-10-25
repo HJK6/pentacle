@@ -107,6 +107,8 @@ def fixture_set(tmp_path, helper):
         db = sqlite3.connect(path)
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA wal_autocheckpoint=0")
+        # Seed each fixture in one durable transaction; keep the committed WAL hot.
+        db.execute("BEGIN")
         db.execute("PRAGMA user_version=37")
         db.execute("CREATE TABLE records(id INTEGER PRIMARY KEY, logical_id TEXT UNIQUE, payload TEXT, metadata TEXT)")
         db.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
