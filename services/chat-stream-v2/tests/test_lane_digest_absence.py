@@ -407,3 +407,79 @@ def test_malformed_submission_fields_cannot_prove_absence(tmp_path, monkeypatch,
         finally:
             store.stop()
     asyncio.run(run())
+
+
+
+def test_missing_archive_after_guarded_anchor_restore_is_not_absence(tmp_path, monkeypatch):
+    async def run():
+        import hashlib
+        import sqlite3
+        import history_repair as repair
+        from test_history_repair import _source_rows, _old_event
+        store, queue, old, binding, _, clock = await seeded(tmp_path, monkeypatch)
+        try:
+            source_records = _source_rows()[0]
+            queued, record = source_records
+            event = _old_event(record, kind='USER', text=record['message']['content'])
+            event.update(host='host-a', session_name='root', stream_id=binding[0])
+            event['raw'].update(host='host-a', session_name='root')
+            source_lines = [(json.dumps(r, sort_keys=True, separators=(',', ':')) + '\n').encode()
+                            for r in source_records]
+            record_shas = {r['uuid']: hashlib.sha256(b).hexdigest() for r, b in zip(source_records, source_lines)}
+            source_sha = hashlib.sha256(b''.join(source_lines)).hexdigest()
+            def delete_anchor(conn):
+                body = json.dumps(event, sort_keys=True, separators=(',', ':'))
+                with conn:
+                    # Fixture initialization models a valid legacy image-meta watermark.
+                    conn.execute('UPDATE session_event_tail SET event_json=?,event_key=?,event_ts=?,identity=? '
+                        'WHERE identity=?', (body, hashlib.sha256(body.encode()).hexdigest(),
+                        record['timestamp'], repair._identity_key(event), 'anchor'))
+                anchor = conn.execute('SELECT event_id FROM session_event_tail WHERE identity=?',
+                                      (repair._identity_key(event),)).fetchone()[0]
+                birth = conn.execute("SELECT created_at FROM sessions WHERE host='host-a' AND session_name='root'").fetchone()[0]
+                scope = {'schema_version': 1, 'target': {'host': 'host-a', 'session_name': 'root',
+                    'stream_id': binding[0], 'session_created_at': birth, 'session_generation': binding[1]},
+                    'source': {'jsonl_sha256': source_sha, 'records': [
+                        {'class': 'queued_notice', 'source_uuid': queued['uuid'], 'source_line_number': 1,
+                         'source_sha256': record_shas[queued['uuid']],
+                         'attachment_source_uuid': queued['attachment']['source_uuid']},
+                        {'class': 'image_meta', 'source_uuid': record['uuid'], 'source_line_number': 2,
+                         'source_sha256': record_shas[record['uuid']]}]},
+                    'database_snapshot_sha256': 'b' * 64}
+                manifest = repair.freeze_manifest(conn, source_records, scope_packet=scope,
+                    expected_scope_sha256=repair.scope_packet_sha256(scope),
+                    source_record_sha256_by_uuid=record_shas,
+                    source_jsonl_sha256=source_sha, database_snapshot_sha256='b' * 64)
+                kwargs = {'expected_manifest_sha256': repair.manifest_sha256(manifest),
+                    'source_jsonl_sha256': source_sha, 'preimages_path': tmp_path/'anchor-preimage.json'}
+                assert repair.apply_manifest(conn, manifest, **kwargs)['status'] == 'applied'
+                assert conn.execute('SELECT 1 FROM session_event_tail WHERE event_id=?', (anchor,)).fetchone() is None
+                return anchor, manifest, kwargs
+            anchor, manifest, kwargs = await store.submit(delete_anchor)
+            positive = await store.append_session_event(binding[0], {'kind': 'USER', 'text': old['body'],
+                'stream_id': binding[0], 'timestamp': stamp(clock[0])}, identity='archived-positive', limit=5000)
+            await store.append_session_event(binding[0], {'kind': 'USER', 'text': 'newest'},
+                                              identity='newest', limit=5000)
+            await archive_old_events(store, binding[0], keep=1)
+            def restore(conn):
+                assert repair.rollback_manifest(conn, manifest, **kwargs)['status'] == 'rolled_back'
+                ids = [r[0] for r in conn.execute('SELECT event_id FROM session_event_tail WHERE stream_id=?', (binding[0],))]
+                assert anchor in ids and positive not in ids and max(ids) > positive > anchor
+            await store.submit(restore)
+            archive = tmp_path/'sessions_archive.db'
+            with sqlite3.connect(archive) as conn:
+                assert conn.execute('SELECT 1 FROM session_event_tail WHERE event_id=?', (positive,)).fetchone()
+            retained = tmp_path/'retained-archive.db'
+            archive.rename(retained)
+            assert await queue.deliver_now(old['notice_id']) is False
+            row = await stored(store, old['notice_id'])
+            assert row['terminal_at'] is None and row['delivered_at'] is None
+            assert row['last_error'] == 'absence_readback_unknown:archive_unavailable'
+            retained.rename(archive)
+            assert await queue.deliver_now(old['notice_id']) is True
+            tell = await store.get_tell_delivery(old['tell_id'])
+            assert tell['reply']['proof_event_id'] == positive
+            assert tell['reply']['submission_attempts'] == 1
+        finally:
+            store.stop()
+    asyncio.run(run())

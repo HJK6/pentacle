@@ -82,8 +82,10 @@ def _valid_event(event, target):
 
 
 def _archive_rows(path, target, birth, anchor, tip, deadline, binding):
-    if path is None or not path.is_file():
+    if path is None:
         return [], None
+    if not path.is_file():
+        raise ValueError('archive_unavailable')
     identity = _file_identity(path)
     if binding is None:
         raise ValueError('archive_unpaired')
