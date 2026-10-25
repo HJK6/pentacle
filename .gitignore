@@ -4,6 +4,7 @@ out/
 /renderer/dist/chat_core.bundle.js
 /.ui-review/desktop-chat/
 .env
+/.env.*
 *.log
 .DS_Store
 .slot-state.json
@@ -11,6 +12,7 @@ out/
 *.backup-*
 pentacle.config.js
 configs/*.local.js
+/configs/*off-stage.js
 services/chat-stream-v2/machines.local.json
 /.pentacle-sync/
 .pentacle-deploy/
