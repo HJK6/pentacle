@@ -472,3 +472,112 @@ def test_stale_foreign_survivors_and_live_nested_owner_are_preserved(monkeypatch
     with pytest.raises(owner.ManifestBusyError, match="live gate"):
         owner.initialize_manifest(path, "nested-run")
     assert json.loads(path.read_text()) == data
+
+
+@pytest.mark.parametrize("outcome", ["terminal", "pid-reaped", "live", "denied-event",
+                                      "recycled-before", "recycled-after", "unreadable-after"])
+def test_absent_bound_root_requires_same_instance_kernel_exit(monkeypatch, tmp_path, outcome):
+    from types import SimpleNamespace
+    from tools import gate_owner_manifest as owner
+    binding = dict(nonce="a" * 32, server_pid=42421, server_start_identity="server-start",
+                   root_dev=1, root_ino=1, socket_dev=1, socket_ino=1)
+    state, events, clients = {"registered": False}, [], []
+    address = "/tmp/v2s-synthetic-absent/s"
+    def objects(*args):
+        raise FileNotFoundError("owned synthetic root absent")
+    def identity(pid):
+        if outcome == "recycled-before" or (state["registered"] and outcome == "recycled-after"):
+            return "foreign-start"
+        if state["registered"] and outcome == "unreadable-after":
+            return None
+        return "server-start"
+    class Event:
+        def __init__(self, pid):
+            events.append("register")
+            if outcome == "denied-event":
+                raise owner.ManifestError("synthetic registration denied")
+            state["registered"] = True
+        def wait(self, deadline):
+            assert deadline == 100.0, "absent-root check must not extend the deadline"
+            events.append("wait")
+            if outcome == "live":
+                raise owner.ManifestError("synthetic terminal event not ready")
+        def close(self):
+            events.append("close")
+    def popen(*args, **kwargs):
+        clients.append(args)
+        raise AssertionError("absent-root reentry must never signal or contact tmux")
+    monkeypatch.setattr(owner, "_exists", lambda pid: not (state["registered"] and outcome == "pid-reaped"))
+    monkeypatch.setattr(owner, "process_start_identity", identity)
+    monkeypatch.setattr(owner, "_socket_objects", objects)
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(owner, "_ExitEvent", Event)
+    monkeypatch.setattr(owner, "_REAL_POPEN", popen)
+    monkeypatch.setattr(owner, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    if outcome in ("terminal", "pid-reaped"):
+        owner._reap_socket(address, binding, 105.0)
+        assert events == ["register", "wait", "close"]
+    else:
+        with pytest.raises(owner.ManifestError):
+            owner._reap_socket(address, binding, 105.0)
+        if outcome == "recycled-before":
+            assert events == []
+        elif outcome == "denied-event":
+            assert events == ["register"]
+        elif outcome == "live":
+            assert events == ["register", "wait", "close"]
+        else:
+            assert events == ["register", "close"]
+    assert not clients
+
+
+@pytest.mark.parametrize("outcome", ["esrch", "note-exit", "pid-reaped", "live", "denied",
+    "wrong-pid", "wrong-filter", "wrong-error", "recycled-before", "recycled-after",
+    "unreadable-after"])
+def test_absent_bound_root_darwin_registration_witness(monkeypatch, outcome):
+    from types import SimpleNamespace
+    from tools import gate_owner_manifest as owner
+    binding = dict(nonce="a" * 32, server_pid=42421, server_start_identity="server-start",
+                   root_dev=1, root_ino=1, socket_dev=1, socket_ino=1)
+    state, calls = {"registered": False}, []
+    def identity(pid):
+        if outcome == "recycled-before" or (state["registered"] and outcome == "recycled-after"):
+            return "foreign-start"
+        return None if state["registered"] and outcome == "unreadable-after" else "server-start"
+    def objects(*args):
+        raise FileNotFoundError("owned synthetic root absent")
+    class Kernel:
+        def control(self, changes, count, timeout):
+            assert len(changes) == count == 1 and timeout == 0
+            assert changes[0] == dict(ident=42421, filter=-5, flags=5, fflags=0x80000000)
+            calls.append("register")
+            state["registered"] = True
+            if outcome == "denied":
+                raise PermissionError("synthetic event denied")
+            if outcome == "live":
+                return []
+            return [SimpleNamespace(ident=42422 if outcome == "wrong-pid" else 42421,
+                filter=-1 if outcome == "wrong-filter" else -5,
+                flags=0 if outcome == "note-exit" else 0x4000,
+                fflags=0x80000000 if outcome == "note-exit" else 0,
+                data=1 if outcome == "wrong-error" else 3)]
+        def close(self):
+            calls.append("close")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("absent-root witness must not signal, unlink, contact tmux or use global exit helper")
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(kqueue=Kernel,
+        kevent=lambda ident, **kw:dict(ident=ident, **kw), KQ_FILTER_PROC=-5,
+        KQ_EV_ADD=1, KQ_EV_ENABLE=4, KQ_NOTE_EXIT=0x80000000, KQ_EV_ERROR=0x4000))
+    monkeypatch.setattr(owner, "_exists", lambda pid:not(state["registered"] and outcome == "pid-reaped"))
+    monkeypatch.setattr(owner, "process_start_identity", identity)
+    monkeypatch.setattr(owner, "_socket_objects", objects)
+    monkeypatch.setattr(owner, "_REAL_POPEN", forbidden)
+    monkeypatch.setattr(owner, "_ExitEvent", forbidden)
+    monkeypatch.setattr(owner.os, "unlink", forbidden)
+    if outcome in ("esrch", "note-exit", "pid-reaped"):
+        owner._reap_socket("/tmp/v2s-synthetic-absent/s", binding, 105.0)
+    else:
+        with pytest.raises(owner.ManifestError):
+            owner._reap_socket("/tmp/v2s-synthetic-absent/s", binding, 105.0)
+    assert calls == ([] if outcome == "recycled-before" else ["register", "close"])
