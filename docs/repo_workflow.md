@@ -29,43 +29,52 @@ boundary; it does not make every excluded file confidential by definition.
 
 ## Landing on `main`
 
-`main` is branch-protected: push the exact commit to a branch, let the
-`Public checks` workflow go green on that SHA, then fast-forward `main` with an
-explicit refspec (`git push origin <sha>:refs/heads/main`) and read it back
-with `git ls-remote`. Private exception projections retain their source-to-public mapping receipts.
-External contributions and normal development use this same public main line.
+Public writes go through the designated release relay. Keep the applicable local
+gates, independent review and public-content checks before publishing the exact
+candidate branch and opening its pull request. The required GitHub Actions
+context remains `checks` (app ID `15368`); branch protection must not be relaxed.
 
-For web/daemon main landings, the public promotion helper adds an exact-run guard before
-that fast-forward. From this public checkout, set
-`PENTACLE_GITHUB_REPOSITORY=HJK6/pentacle` and run
-`python3 tools/merge_gate.py promote --candidate <full-sha> --run-id <push-run-id>`.
-It accepts only a completed successful branch-push `Public checks` run for that
-SHA on the same repository and current branch tip. The candidate's tracked
-`.github/workflows/predeploy-tests.yml` must match the audited command digest,
-and the run's job steps must prove Node, residue, web, v2/CLI and source-integrity
-checks succeeded. It creates and verifies the annotated `v2-gate/<sha>` tag,
-then advances `main` with a compare-and-swap push. Read back remote `main` and
-the tag after promotion. The private repository has its own mapped smoke
-workflow; an unknown or mismatched repository is refused.
+The release owner records the reviewed PR head SHA, the hosted run's matching
+head SHA, and the actual checkout SHA/tree. `Public checks` runs on pull requests
+and pushes to `main`. Its four isolated partitions must all succeed, including
+their required steps and source-integrity guards. The final `checks` aggregate
+fails unless every expected partition succeeds; a green label from an unrelated
+head or incomplete run is insufficient. Retain the per-job summaries and review
+failure/cancellation evidence before retrying.
 
-The tag push starts another required workflow run. The helper now waits in
-one invocation under a single absolute checks budget (default 900 seconds, above the eight to ten minutes a real tag run takes;
---checks-timeout-seconds). It pushes a missing annotated tag once, then considers
-only the newest matching push run/attempt for the exact candidate SHA, tag name,
-mapped workflow and repository. An older or unrelated green run cannot satisfy
-the gate. Each polling request is bounded by the remaining budget, including
-late-response rejection. Public required job/step coverage remains mandatory.
+Merge only that reviewed head through the protected PR route, using the existing
+expected-head guard, for example:
 
-It reports still_running, required_checks_missing, final_red and timeout as
-non-success; only stable green evidence allows the existing main CAS. The exact
-remote annotated tag object and peel are revalidated after waiting. Re-entry
-still skips a redundant tag push only when remote and local tag objects match.
-Keep the pre-push guard enabled and preserve refusal receipts. This source
-change does not authorize dot to execute a promotion or mutate main.
+```sh
+gh pr merge <PR> --merge --match-head-commit <reviewed-head-sha>
+```
+
+A changed head requires renewed evidence for the changed inputs. Read back the
+PR's head, merged state and `merge_commit_sha`, then remote `main` and its required
+checks. Record the reviewed head and actual merged SHA separately when a merge
+commit differs. Check source/tree identity when GitHub tests a synthetic PR merge.
+Preserve accepted evidence only for unchanged source, harness and configuration.
+Local release gates, changelog review, deployment windows, installed readbacks and
+rollback remain the release owner's obligations; a source merge does not deploy.
+
+`tools/merge_gate.py promote` is retired and refuses before any external command.
+It is not an alternate landing route. The retained `verify-tag` command verifies
+existing legacy tags; creating a new promotion tag is not a prerequisite for the
+protected PR route. Private exception projections retain their source-to-public
+mapping receipts.
 
 ### Release notes
 
-A PR with a user-visible change adds a bullet under `## Unreleased` in `CHANGELOG.md`. Before the candidate's `Public checks` run, the release owner cuts the section on the candidate branch (rename `## Unreleased` to `## YYYY-MM-DD`, add a fresh empty `## Unreleased`; `Internal changes only.` when nothing is user-visible). `promote` refuses a candidate whose changelog is missing, unchanged from `origin/main`, still has bullets under `Unreleased`, or is malformed, before it checks the run or creates a tag, and its result reports `changelog` (the first dated heading and bullet count). Run `promote` from a checkout of the candidate SHA so the check is present, and record that SHA with the output. The FD relay carries the PR like any public write.
+A PR with a user-visible change adds a bullet under `## Unreleased` in
+`CHANGELOG.md`. Before a release candidate's `Public checks` run, the release
+owner cuts the section on that branch: rename `## Unreleased` to the UTC date
+heading (`## YYYY-MM-DD`, with ` (2)` for a later cut that day), then add a fresh
+empty `## Unreleased` above it. Use `Internal changes only.` when the release has
+no user-visible change. The release owner and relay verify that the changelog
+exists, changed from the base, is well formed and has no uncut release bullets;
+record the dated heading and candidate SHA with the release evidence. These
+checks remain on the PR release route; the retired promotion tool does not
+perform them.
 
 ## Push guard
 
@@ -107,47 +116,10 @@ pair matches.
 
 Historical private exclusions are reviewed by content; ordinary source and portable tests move through the same public gates. See [Public source boundary](public_boundary.md) for the shipped batch and retained private inputs.
 
-### TH-H5 promotion evidence details
+### Historical TH-H5 promotion evidence
 
-The new bounded wait applies to the audited public HJK6/pentacle workflow.
-The separately mapped private workflow's existing promotion behavior is unchanged;
-this packet does not invent an audited private checkout contract.
-
-A workflow run's short head_branch plus push event does not distinguish a tag
-from a same-named branch. The public gate therefore retrieves only the selected
-attempt's whole job log (GitHub serves no per-step log endpoint; gh needs
---allow-escape-sequences to print it) and parses a bounded leading prefix. It
-validates the first fetch and checkout groups, which belong to the first
-checkout step, against the exact candidate and refs/tags/v2-gate/<sha>. A branch-style checkout, later forged
-favorable text, missing job identity, inaccessible log, or malformed evidence
-cannot establish green. The existing workflow digest proves that checkout is
-the first action and has no repository/ref override.
-
-The run high-water mark survives temporarily regressed or omitted API snapshots.
-A newly absent remote tag also requires complete pre-push history with no matching
-historical runs; deleted/recreated tag identity is refused rather than reusing
-stale green. Existing exact annotated-tag re-entry remains supported. History,
-polling, job/step proof and final tag revalidation share one absolute deadline.
-If the API does not expose the documented proof, the gate fails closed. No
-workflow, required-check, permission or token change is made.
-
-API assumptions and source-derived fixture references:
-- https://docs.github.com/en/rest/actions/workflow-runs
-- https://docs.github.com/en/rest/actions/workflow-jobs#download-step-logs-for-a-workflow-run-job
-- https://raw.githubusercontent.com/actions/checkout/v4/src/input-helper.ts
-- https://raw.githubusercontent.com/actions/checkout/v4/src/ref-helper.ts
-- https://raw.githubusercontent.com/actions/checkout/v4/src/git-command-manager.ts
-
-The step endpoint returns redirected plain text; gh api follows the redirect.
-Its step position is zero-based (1 for the checkout step whose metadata number is
-2). Attempt-specific job retrieval supplies attempt provenance; job.run_attempt
-is validated when present but is not assumed to exist in the documented payload.
-
-Synthetic validation uses only the existing fake-gh seam. The previous
-queued-check/re-entry test is intentionally updated: the former two main-push
-attempts become one main push after checks finish in one invocation; tag push
-remains exactly once. Other existing test assertions are preserved. Baseline
-replay of that journey failed on the premature main push (1 failed, 0.09s).
-The new polling tests exercise latest/superseded attempts, red/missing/timeout,
-late replies, tag mutation, branch/log spoofing, stale history and incomplete
-evidence. No real promotion, remote tag update, main push or deploy was executed.
+TH-H5's exact-tag checkout, polling, CAS and deadline evidence describes the
+retired promotion path. Its [synthetic fixture manifest](../services/chat-stream-v2/tests/fixtures/th_h5/MANIFEST.json)
+and tag log are retained as historical evidence. They do not establish current
+PR checks or authorize a tag/main mutation. Current landing and head/readback
+requirements are in [Landing on main](#landing-on-main).
