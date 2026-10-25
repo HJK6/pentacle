@@ -182,6 +182,14 @@ def _project_daemon_notice_events_conn(
     stripped = [_strip_reserved_daemon_notice(event) for event in events]
     event_ids_by_stream: dict[str, set[int]] = {}
     for event in stripped:
+        # Necessary predicates of the final proof check only. Keep stripping
+        # universal, and leave authority to the exact binding checks below.
+        if (
+            str(event.get("kind") or "").upper() != "USER"
+            or _nonempty_client_binding(event)
+            or not str(event.get("text") or "").startswith("[pentacle-notice:")
+        ):
+            continue
         stream_id = str(event.get("stream_id") or "")
         event_id = event.get("daemon_seq")
         if (
@@ -3349,6 +3357,31 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
             else:
                 rows = conn.execute("SELECT * FROM sessions WHERE status=?", (status,)).fetchall()
             return [_session_row(conn, r) for r in rows]
+
+        return await self.submit(_op)
+
+    async def list_session_lineage(self) -> list[dict[str, Any]]:
+        """Ownership fields for every retained session, including closed rows.
+
+        Scope walks do not need session JSON, usage or report hydration. Keep
+        table order so question scope retains the full-read API's ordering.
+        """
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """SELECT s.host, s.session_name, s.parent_stream_id,
+                          s.handoff_from_stream_id, s.visibility, g.generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g
+                     ON g.host=s.host AND g.session_name=s.session_name
+                   ORDER BY s.rowid"""
+            ).fetchall()
+            return [{
+                "stream_id": f"{row['host']}:{row['session_name']}",
+                "parent_stream_id": row["parent_stream_id"],
+                "handoff_from_stream_id": row["handoff_from_stream_id"],
+                "visibility": row["visibility"],
+                "session_generation": str(row["generation"]) if row["generation"] is not None else "",
+            } for row in rows]
 
         return await self.submit(_op)
 

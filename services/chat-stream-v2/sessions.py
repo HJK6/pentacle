@@ -859,7 +859,7 @@ class Sessions:
         <lead>` must still resolve a since-closed hidden child up to its lead
         (v1 read `list_sessions(status=None)` for the same reason)."""
         records: dict[str, dict[str, Any]] = {}
-        for row in await self.store.list_sessions(status=None):
+        for row in await self.store.list_session_lineage():
             sid = str(row.get("stream_id") or "").strip()
             if not sid:
                 continue
