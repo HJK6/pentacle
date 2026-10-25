@@ -246,7 +246,10 @@ class SpecsSubsystem:
         self.memory_root, self.memory_root_source = ((Path(memory_root), "explicit") if self._explicit_root
                                                       else _resolve_specs_memory_root())
         if self.memory_root is not None:
-            self.memory_root = self.memory_root.resolve()
+            # Strict explicit roots must still admit their final component
+            # through the no-follow reader, even when ancestors are aliases.
+            self.memory_root = (self.memory_root.parent.resolve() / self.memory_root.name
+                                if self._explicit_root else self.memory_root.resolve())
         self.session_summaries = session_summaries
         self.changed_callback = changed_callback
         self.retry_interval_s = retry_interval_s

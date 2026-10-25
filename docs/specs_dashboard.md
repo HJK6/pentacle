@@ -27,8 +27,10 @@ publication. Unchanged bytes avoid YAML reparsing; completed snapshots never
 reread live identity documents. Polling works without a watcher. Reads remain
 proportional to current input bytes and directory enumeration stays shallow.
 
-The configured memory root is resolved once and exposed as the canonical
-`memory_root`; directory and file opens below it reject symlink redirection.
+The configured memory root is resolved once and exposed as `memory_root`.
+An explicit root resolves its ancestors while its final component remains
+subject to no-follow admission; environment roots retain full resolution.
+Directory and file opens below the admitted root reject symlink redirection.
 Status inputs are captured once per snapshot and sealed after scanning. The
 presentation status loader also checks content. Environment-root JSON retains
 its existing read/decode/extraction fallback and conversion errors; explicit-root

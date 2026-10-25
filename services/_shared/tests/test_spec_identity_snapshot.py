@@ -345,6 +345,26 @@ def test_root_with_symlinked_ancestor_pins_canonical_path(tmp_path, monkeypatch,
     assert subject.spec_id_for_path(real / 'work/in_progress/fixture__one/spec.md') == 'fixture__one'
 
 
+@pytest.mark.parametrize('explicit', [False, True])
+def test_explicit_root_itself_stays_no_follow(tmp_path, monkeypatch, explicit):
+    root = tmp_path / 'real'
+    document(root)
+    alias = tmp_path / 'root_link'
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(alias))
+    subject = SpecsSubsystem(memory_root=alias if explicit else None,
+                             session_summaries=lambda: [], changed_callback=lambda ids: None)
+    if explicit:
+        with pytest.raises(SpecResolutionUnavailable):
+            subject.spec_resolution_snapshot()
+        result = subject.scan_work_observations()
+        assert result['available'] is False
+        assert result['error'] == 'work_root_unavailable'
+    else:
+        assert subject.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
+        assert subject.memory_root == root.resolve()
+
+
 def test_symlinked_child_cannot_authorize(tmp_path):
     outside = document(tmp_path / 'outside')
     root = tmp_path / 'root'
