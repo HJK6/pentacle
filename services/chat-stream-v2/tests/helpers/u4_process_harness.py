@@ -196,9 +196,9 @@ def unexpected_reply_evidence(reply):
     Unknown strings and fields may contain user content or credentials. Preserve
     their omission count instead of echoing them, with a fixed-size allow-list.
     """
-    kinds = {'error', 'busy', 'pong', 'welcome', 'event', 'ack'}
+    kinds = {'error', 'busy', 'pong', 'welcome', 'event', 'ack', 'ping.error'}
     codes = {'busy', 'timeout', 'rate_limited', 'authentication_required',
-             'store_unavailable', 'not_ready', 'invalid_request', 'internal_error'}
+             'store_unavailable', 'not_ready', 'invalid_request', 'internal_error', 'server_overloaded'}
     body = {}
     for name in ('error_code', 'code', 'message', 'error', 'retryable'):
         if name not in reply:
@@ -232,6 +232,18 @@ async def request(ws, ident, timeout=1):
         if reply.get('request_id')==ident:
             if reply.get('type')!='pong':raise unexpected_reply(reply, 'not_pong')
             return {'sent_mono_s':start,'received_mono_s':time.monotonic(),'latency_s':time.monotonic()-start}
+
+async def post_main_release_ping(ws, held_responded):
+    # The pending held probe and the new probe share the existing release budget.
+    async with asyncio.timeout(2):
+        if not held_responded:
+            while True:
+                reply = json.loads(await ws.recv())
+                if reply.get('request_id') == 'held-main':
+                    if reply.get('type') != 'pong':
+                        raise unexpected_reply(reply, 'held_probe_not_pong')
+                    break
+        return await request(ws, 'after-main', 2)
 
 async def run(source, output):
     from websockets.asyncio.client import connect
@@ -272,7 +284,7 @@ async def run(source, output):
                     await asyncio.sleep(max(0,held['mono_s']+6.5-time.monotonic()))
                     main_end=time.monotonic();pre_main_release=json.loads((root/'sink-receipt.json').read_text()) if (root/'sink-receipt.json').exists() else []
                     main_progress=(root/'daemon-progress.json').exists();control(root,'release_main');released=await wait_event(root,'main_released')
-                    await request(ws,'after-main',2)
+                    await post_main_release_ping(ws, main_responded)
                     result['cells'].append({'name':'held_MAIN','held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
                         'main_ping_responded_while_held':main_responded,'progress_snapshot_present_while_held':main_progress,
                         'receipt_before_release':any(held['mono_s']<r['accepted_mono_s']<main_end and r['payload']['condition']=='active' for r in pre_main_release),'acceptance_passed':any(held['mono_s']<r['accepted_mono_s']<main_end and r['payload']['condition']=='active' for r in pre_main_release),

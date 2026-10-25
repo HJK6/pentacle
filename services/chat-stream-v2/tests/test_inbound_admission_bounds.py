@@ -735,3 +735,114 @@ def test_barrier_repair_preserves_ordinary_and_explicit_cancellation(durable, ca
         await asyncio.sleep(0)
         assert pool.total == [0, 0] and not pool.connections and not pool.principals
     asyncio.run(run())
+
+
+def test_batched_ping_counterpart_records_exact_admission_refusal():
+    """A controlled overlap, not a claim about a previously redacted CI frame."""
+    from helpers import u4_process_harness as harness
+
+    async def run():
+        emitted = asyncio.Queue()
+
+        class CounterpartSocket(Socket):
+            async def send(self, frame):
+                await super().send(frame)
+                emitted.put_nowait(frame)
+
+        class Client:
+            async def send(self, frame):
+                # Queue both requests before yielding to the real server reader.
+                socket.incoming.put_nowait(frame)
+
+            async def recv(self):
+                return await emitted.get()
+
+        daemon = Server()
+        socket = CounterpartSocket()
+        task = asyncio.create_task(daemon._handle_client(socket))
+        try:
+            await eventually(lambda: bool(socket.sent))
+            assert daemon._admission_pools["control"].limits[1:3] == (1, 1)
+            socket.request("ping", "held-main")
+            with pytest.raises(RuntimeError, match="^not_pong$") as caught:
+                await harness.request(Client(), "after-main")
+            actual = next(frame for frame in socket.sent
+                          if frame.get("request_id") == "after-main")
+            assert actual == {"type": "ping.error", "request_id": "after-main",
+                              "error_code": "server_overloaded", "retryable": True}
+            print("U4_CONTROLLED_FRAME " + json.dumps({
+                name: actual[name] for name in ("type", "error_code", "retryable")}, sort_keys=True))
+            captured = harness.error_evidence(caught.value)["unexpected_reply"]
+            assert captured["type"] == actual["type"]
+            assert captured["body"]["error_code"] == actual["error_code"]
+            assert captured["body"]["retryable"] is True
+            await eventually(lambda: not request_tasks()
+                             and daemon._admission_pools["control"].total == [0, 0])
+            assert any(frame.get("type") == "pong" and frame.get("request_id") == "held-main"
+                       for frame in socket.sent)
+            assert daemon._admission_pools["control"].total == [0, 0]
+            assert (await harness.request(Client(), "drained-control"))["latency_s"] >= 0
+            await eventually(lambda: not request_tasks()
+                             and daemon._admission_pools["control"].total == [0, 0])
+            assert len(refusals(socket)) == 1
+        finally:
+            await socket.close()
+            await asyncio.gather(task)
+        assert not request_tasks()
+        assert not daemon._admission_pools["control"].connections
+        assert not daemon._admission_pools["control"].principals
+    asyncio.run(run())
+
+
+def test_post_main_release_drains_pending_ping_before_real_server_probe():
+    """Replay the held counterpart through the actual shared helper and Server."""
+    from helpers import u4_process_harness as harness
+
+    async def run():
+        emitted = asyncio.Queue()
+        observed_prior_pong = False
+        send_observations = []
+
+        class CounterpartSocket(Socket):
+            async def send(self, frame):
+                await super().send(frame)
+                emitted.put_nowait(frame)
+
+        class Client:
+            async def send(self, frame):
+                send_observations.append(observed_prior_pong)
+                socket.incoming.put_nowait(frame)
+
+            async def recv(self):
+                nonlocal observed_prior_pong
+                raw = await emitted.get()
+                frame = json.loads(raw)
+                if frame.get("request_id") == "held-main" and frame.get("type") == "pong":
+                    observed_prior_pong = True
+                return raw
+
+        daemon = Server()
+        socket = CounterpartSocket()
+        task = asyncio.create_task(daemon._handle_client(socket))
+        try:
+            await eventually(lambda: bool(socket.sent))
+            assert daemon._admission_pools["control"].limits[1:3] == (1, 1)
+            socket.request("ping", "held-main")
+            try:
+                result = await harness.post_main_release_ping(Client(), False)
+            except RuntimeError as exc:
+                print("U4_DRAIN_FAILURE " + json.dumps(harness.error_evidence(exc)["unexpected_reply"], sort_keys=True))
+                raise
+            assert result["latency_s"] >= 0
+            assert send_observations == [True]
+            assert not refusals(socket)
+            assert [frame.get("request_id") for frame in socket.sent if frame.get("type") == "pong"] == ["held-main", "after-main"]
+            await eventually(lambda: not request_tasks()
+                             and daemon._admission_pools["control"].total == [0, 0])
+        finally:
+            await socket.close()
+            await asyncio.gather(task)
+        assert not request_tasks()
+        assert not daemon._admission_pools["control"].connections
+        assert not daemon._admission_pools["control"].principals
+    asyncio.run(run())
