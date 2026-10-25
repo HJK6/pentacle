@@ -150,7 +150,7 @@ def test_environment_root_status_config_preserved_mtime_matches_cold_oracle(tmp_
 
 def alias_file_timestamps(path, monkeypatch):
     """Real bytes and inode, with one file's recorded timestamps held constant."""
-    original_lstat, original_fstat = Path.lstat, os.fstat
+    original_stat, original_lstat, original_fstat = os.stat, os.lstat, os.fstat
     recorded = original_lstat(path)
 
     class AliasedStat:
@@ -162,17 +162,22 @@ def alias_file_timestamps(path, monkeypatch):
                 return getattr(recorded, name)
             return getattr(self.current, name)
 
-    def lstat(current, *args, **kwargs):
-        value = original_lstat(current, *args, **kwargs)
-        return AliasedStat(value) if current == path else value
-
-    def fstat(fd):
-        value = original_fstat(fd)
+    def alias(value):
         if (value.st_dev, value.st_ino) == (recorded.st_dev, recorded.st_ino):
             return AliasedStat(value)
         return value
 
-    monkeypatch.setattr(Path, 'lstat', lstat)
+    def stat(current, *args, **kwargs):
+        return alias(original_stat(current, *args, **kwargs))
+
+    def lstat(current, *args, **kwargs):
+        return alias(original_lstat(current, *args, **kwargs))
+
+    def fstat(fd):
+        return alias(original_fstat(fd))
+
+    monkeypatch.setattr(os, 'stat', stat)
+    monkeypatch.setattr(os, 'lstat', lstat)
     monkeypatch.setattr(os, 'fstat', fstat)
 
 
@@ -187,6 +192,7 @@ def test_same_metadata_changed_id_matches_current_bytes(tmp_path, monkeypatch):
     after = subject.spec_resolution_snapshot()
     assert after.canonical_spec_identity('spec_fixture__one') is None
     assert after.canonical_spec_identity('spec_fixture__new') == 'spec_fixture__new'
+    assert subject._identity_cache[path][0] == fingerprint
     assert before.canonical_spec_identity('spec_fixture__one') == 'spec_fixture__one'
 
 
@@ -203,6 +209,7 @@ def test_same_metadata_changed_status_never_authorizes_removed_bucket(tmp_path, 
     config.write_text(json.dumps({'statuses': [{'name': 'removed', 'order': 1}]}))
     assert subject._identity_fingerprint(config) == fingerprint
     assert subject.canonical_spec_identity('spec_fixture__one') is None
+    assert subject._statuses_fingerprint[0] == fingerprint
 
 
 def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, monkeypatch):
@@ -215,3 +222,4 @@ def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, mo
     assert reader.service._identity_fingerprint(path) == fingerprint
     with pytest.raises(ValueError, match='spec_changed'):
         reader.read('spec_fixture__one')
+    assert reader.service._identity_cache[path][0] == fingerprint
