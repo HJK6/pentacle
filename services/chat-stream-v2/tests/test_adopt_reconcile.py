@@ -1,5 +1,6 @@
 """Adoption of a live pane reconciles to a definite outcome. Outcomes are
-exactly delivered or failed:
+delivered or failed once authoritative evidence is reachable; a Store timeout
+defers to the existing scheduled reconciliation:
 
   transcript needle present   -> delivered/transcript   (submitted before crash)
   transcript located, absent  -> failed/transcript_absent
@@ -618,34 +619,244 @@ def test_transcript_absent_with_unreachable_store_never_repastes(
     assert result[3].pasted == []
 
 
+@pytest.mark.parametrize("delayed_final_read", [False, True], ids=["reachable", "delayed-final-read"])
 def test_peer_no_event_and_no_transcript_still_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, delayed_final_read: bool,
 ) -> None:
+    import threading
+    from reconciler import SessionReconciler
+
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.3)
     brief = "[example-service-notice:no-event]\nnever submitted"
+    started = time.perf_counter()
+    host, name, request_id = "hostc", "no-event", "owned-no-event"
+    control = {"applied": False, "target_tail_index": 2}
+    trace = {"schema": "adoption-scheduled-reconcile.v1", "delayed_final_read": delayed_final_read,
+             "settlements": [], "proofs": [], "reconcile_calls": [], "control": control,
+             "peer_probe_counts": {"birth": 0, "tree": 0, "lsof": 0}, "unexpected_commands": []}
+    releases = []
+    blocker_tasks = []
 
     async def run() -> tuple[str, str, str]:
         store = Store(":memory:")
         store.start()
+        scheduled_task = None
         try:
             tmux = PeerEventTmux(alive=True, pane_pid=DEAD_PID, screen="model loading")
-            sessions = Sessions(store, tmux=tmux, local_host="hosta")
-            proof = DurableUserEventProof(store, local_host="hosta")
-            ctl = SpawnCtl(store, sessions, tmux=tmux, hosts=None, submission_proof=proof)
-            return await ctl._settle_adoption(
-                "hostc", "no-event", brief, tmux,
-                delivery_receipt={
-                    "proof_watermark": 0,
-                    "proof_watermark_state": "reachable",
-                },
-            )
-        finally:
-            store.stop()
 
-    assert asyncio.run(run()) == (
-        "failed", "agent_never_started",
-        "boot deadline expired with no provider transcript ever created",
-    )
+            class PeerHosts:
+                local_host = "hosta"
+                peers = {host: object()}
+
+                def is_online(self, candidate):
+                    return candidate in {self.local_host, host}
+
+                def tmux_for(self, candidate):
+                    assert candidate == host
+                    return tmux
+
+                async def run_command(self, candidate, *argv, **kwargs):
+                    assert candidate == host
+                    if argv == ("ps", "-o", "lstart=", "-p", DEAD_PID):
+                        trace["peer_probe_counts"]["birth"] += 1
+                        return 1, ""  # The synthetic pane has no readable process birth.
+                    if argv == ("ps", "-eo", "pid=,ppid="):
+                        trace["peer_probe_counts"]["tree"] += 1
+                        return 0, ""  # No synthetic provider descendants exist.
+                    if argv == ("lsof", "-p", DEAD_PID, "-Fn"):
+                        trace["peer_probe_counts"]["lsof"] += 1
+                        return 1, ""  # No process owns a provider transcript.
+                    trace["unexpected_commands"].append({"program": argv[0] if argv else None, "argc": len(argv)})
+                    raise AssertionError("unexpected owned peer probe")
+
+            hosts = PeerHosts()
+            sessions = Sessions(store, tmux=tmux, local_host="hosta", hosts=hosts)
+            proof = DurableUserEventProof(store, local_host="hosta")
+            ctl = SpawnCtl(store, sessions, tmux=tmux, hosts=hosts, submission_proof=proof)
+            original_tail = store.fetch_session_event_tail
+            original_proof = ctl._adoption_event_proof
+            original_settle = ctl._settle_adoption
+            original_reconcile = ctl.reconcile_spawn_intents
+            tail_count = 0
+
+            async def observed_tail(*args, **kwargs):
+                nonlocal tail_count
+                tail_count += 1
+                release = None
+                try:
+                    if delayed_final_read and tail_count == control["target_tail_index"]:
+                        control["applied"] = True
+                        release = threading.Event()
+                        releases.append(release)
+                        entered = asyncio.Event()
+                        loop = asyncio.get_running_loop()
+
+                        def hold_owned_worker(_conn):
+                            control["worker_enter_s"] = time.perf_counter() - started
+                            loop.call_soon_threadsafe(entered.set)
+                            try:
+                                release.wait()
+                            finally:
+                                control["worker_return_s"] = time.perf_counter() - started
+
+                        blocker_tasks.append(asyncio.create_task(store.submit(hold_owned_worker)))
+                        await entered.wait()
+                        control["entered_ack_s"] = time.perf_counter() - started
+                        control["progress_before_target"] = store.progress.snapshot()
+                    return await original_tail(*args, **kwargs)
+                except BaseException as exc:
+                    if release is not None:
+                        control["target_exception"] = type(exc).__name__
+                    raise
+                finally:
+                    if release is not None:
+                        control["progress_at_release"] = store.progress.snapshot()
+                        control["release_s"] = time.perf_counter() - started
+                        release.set()
+
+            async def observed_proof(*args, **kwargs):
+                value = await original_proof(*args, **kwargs)
+                trace["proofs"].append({"timeout_s": kwargs["timeout_s"], **value.audit_fields()})
+                return value
+
+            async def observed_settle(*args, **kwargs):
+                value = await original_settle(*args, **kwargs)
+                trace["settlements"].append(value)
+                return value
+
+            async def observed_reconcile(*args, **kwargs):
+                trace["reconcile_calls"].append(dict(kwargs))
+                return await original_reconcile(*args, **kwargs)
+
+            monkeypatch.setattr(store, "fetch_session_event_tail", observed_tail)
+            monkeypatch.setattr(ctl, "_adoption_event_proof", observed_proof)
+            monkeypatch.setattr(ctl, "_settle_adoption", observed_settle)
+            monkeypatch.setattr(ctl, "reconcile_spawn_intents", observed_reconcile)
+            assert await store.reserve_stream_id(host, name, ttl_s=30, request_id=request_id, nonce="TEST")
+            assert await store.record_spawn_intent(host, name, {
+                "open_fields": {"objective": "Exercise interrupted spawn adoption", "provider": "claude"},
+                "brief": brief,
+                "delivery_receipt": {"proof_watermark": 0, "proof_watermark_state": "reachable"},
+            })
+            await store.mark_tmux_created(host, name, pane_pid=DEAD_PID)
+            # main() performs startup reconciliation before scheduling run_forever().
+            startup = await ctl.reconcile_spawn_intents()
+            assert len(trace["settlements"]) == 1
+            initial = trace["settlements"][0]
+            trace["initial"] = initial
+            if initial[0] == "indeterminate":
+                assert initial == (
+                    "indeterminate", "live_pane_unproven",
+                    "event_store_timeout: adoption reconciliation deferred",
+                )
+                assert startup == {"adopted": 0, "released": 0}
+                retained = await store.reservations(include_expired=True)
+                assert len(retained) == 1 and retained[0]["request_id"] == request_id
+                pending = await store.get_spawn_outcome(host, name)
+                assert pending["state"] == "indeterminate"
+                assert pending["reason"] == initial[2]
+                assert pending["delivery_receipt"]["proof_state"] == "unreachable"
+                scheduled = asyncio.get_running_loop().create_future()
+
+                async def on_tick():
+                    trace["scheduled_tick_completed"] = True
+                    scheduled.set_result(None)
+
+                reconciler = SessionReconciler(sessions, hosts, spawnctl=ctl, on_reconcile_tick=on_tick)
+                trace["interval_s"] = reconciler.cfg.interval_s
+                original_once = reconciler.reconcile_once
+
+                async def observed_once():
+                    try:
+                        return await original_once()
+                    except Exception as exc:
+                        # Fail on the first broken pass instead of consuming error-backoff retries.
+                        scheduled.set_exception(exc)
+                        raise
+
+                monkeypatch.setattr(reconciler, "reconcile_once", observed_once)
+                scheduled_task = asyncio.create_task(reconciler.run_forever(), name="owned-adoption-first-pass")
+                await scheduled  # The real first pass is immediate; later passes keep the 60 s interval.
+                assert trace["reconcile_calls"] == [{}, {"limit": 1, "recurring": True}]
+                assert len(trace["settlements"]) == 2
+            else:
+                assert startup == {"adopted": 1, "released": 0}
+            outcome = await store.get_spawn_outcome(host, name)
+            assert outcome is not None
+            value = (outcome["state"], outcome["delivery_evidence"], outcome["reason"])
+            trace["terminal"] = value
+            trace["remaining_reservations"] = len(await store.reservations(include_expired=True))
+            trace["tmux_pastes"] = len(tmux.pasted)
+            return value
+        finally:
+            if scheduled_task is not None:
+                scheduled_task.cancel()
+                await asyncio.gather(scheduled_task, return_exceptions=True)
+                trace["scheduled_task_cancelled"] = scheduled_task.cancelled()
+            for gate in releases:
+                gate.set()
+            worker = store._thread
+            trace["store_stopped"] = store.stop()
+            await asyncio.gather(*blocker_tasks, return_exceptions=True)
+            control["blocker_tasks_done"] = [task.done() for task in blocker_tasks]
+            control["blocker_task_errors"] = [
+                "CancelledError" if task.cancelled() else
+                (type(task.exception()).__name__ if task.exception() else None)
+                for task in blocker_tasks]
+            trace["worker_alive_after_stop"] = bool(worker and worker.is_alive())
+            trace["store_progress_after_stop"] = store.progress.snapshot()
+
+    try:
+        assert asyncio.run(run()) == (
+            "failed", "agent_never_started",
+            "boot deadline expired with no provider transcript ever created",
+        )
+    finally:
+        trace["elapsed_s"] = time.perf_counter() - started
+        evidence_root = os.environ.get("PENTACLE_GATE_EVIDENCE_DIR")
+        if evidence_root:
+            mode = "delayed-final-read" if delayed_final_read else "reachable"
+            try:
+                (Path(evidence_root) / "gate" / f"adoption-reconcile-{mode}.json").write_text(
+                    json.dumps(trace, sort_keys=True) + "\n", encoding="utf-8")
+            except OSError as exc:
+                trace["persistence_error_type"] = type(exc).__name__
+        print("ADOPTION_RECONCILE " + json.dumps(trace, sort_keys=True), flush=True)
+    assert trace["remaining_reservations"] == 0
+    assert trace["tmux_pastes"] == 0
+    assert trace["unexpected_commands"] == []
+    assert all(count > 0 for count in trace["peer_probe_counts"].values())
+    assert trace["store_stopped"] is True
+    assert trace["worker_alive_after_stop"] is False
+    progress = trace["store_progress_after_stop"]
+    assert progress["pending_count"] == 0
+    assert progress["enqueued_seq"] == progress["started_seq"] == progress["finished_seq"]
+    if delayed_final_read:
+        assert control["applied"] is True
+        assert trace["scheduled_tick_completed"] is True
+        assert trace["scheduled_task_cancelled"] is True
+        assert trace["interval_s"] == 60.0
+        assert trace["initial"] == (
+            "indeterminate", "live_pane_unproven",
+            "event_store_timeout: adoption reconciliation deferred",
+        )
+        assert trace["proofs"][0]["proof_state"] == "pending"
+        assert trace["proofs"][1]["proof_state"] == "unreachable"
+        assert trace["proofs"][1]["proof_reason"] == "event_store_timeout"
+        before, after = control["progress_before_target"], control["progress_at_release"]
+        assert before["enqueued_seq"] == before["started_seq"] == before["finished_seq"] + 1
+        assert after["enqueued_seq"] == before["enqueued_seq"] + 1
+        assert after["started_seq"] == before["started_seq"]
+        assert after["finished_seq"] == before["finished_seq"]
+        assert after["pending_count"] == 1
+        assert control["worker_enter_s"] <= control["entered_ack_s"] <= control["release_s"] <= control["worker_return_s"]
+        assert control["target_exception"] == "CancelledError"
+        assert control["blocker_tasks_done"] == [True]
+        assert control["blocker_task_errors"] == [None]
+    else:
+        assert control["applied"] is False
+
+
 
 
 def test_dead_pane_settles_failed() -> None:
