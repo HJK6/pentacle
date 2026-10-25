@@ -118,7 +118,16 @@ class UIVerbs:
 
     async def spawn_catalog_get(self, msg: dict[str, Any]) -> dict[str, Any]:
         rid = str(msg.get("request_id") or "")
-        return {"type": "spawn_catalog_get.ok", "request_id": rid, **spawn_catalog()}
+        response = {"type": "spawn_catalog_get.ok", "request_id": rid, **spawn_catalog()}
+        context = msg.get("_auth_context")
+        if isinstance(context, dict) and context.get("connection_client") == "pentacle-mobile":
+            available = response.get("available_models")
+            if isinstance(available, dict):
+                # Older mobile clients reject additive providers in this optional narrowing.
+                response["available_models"] = {
+                    provider: models for provider, models in available.items() if provider in {"claude", "codex"}
+                }
+        return response
 
     async def grant_token(self, msg: dict[str, Any]) -> dict[str, Any]:
         rid = str(msg.get("request_id") or "")
