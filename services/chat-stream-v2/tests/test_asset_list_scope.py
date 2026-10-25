@@ -33,8 +33,7 @@ class _FakeSessions:
     def get(self, stream_id: str):
         return self._rows.get(stream_id)
 
-    async def list_sessions(self, status=None):
-        assert status is None
+    async def list_session_lineage(self):
         return [{"stream_id": sid, **row} for sid, row in self._rows.items()]
 
 

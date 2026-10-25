@@ -482,7 +482,7 @@ class Assets:
     async def _chat_scope(self, viewer: str) -> list[str]:
         """Durable ownership, including closed workers and handoff continuity."""
         store = getattr(self._sessions, "store", None)
-        rows = await store.list_sessions(status=None) if store is not None else []
+        rows = await store.list_session_lineage() if store is not None else []
         records = {row["stream_id"]: row for row in rows}
         roots = {viewer}
         if self._chat_roots is not None:
