@@ -44,6 +44,7 @@ from retention import (HistoryConnection, prepare_history_schema, history_query,
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 from prockill import canonical_start
+from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary
 
 import attachment_locks
 import store_exchange
@@ -607,6 +608,25 @@ def _project_send_receipt_row(
     if meta:
         result["meta"] = meta
     return result
+
+
+def _restore_message_summary_conn(conn: sqlite3.Connection, session: dict[str, Any]) -> None:
+    """Rebuild one preview from a bounded, lifecycle-matched projected tail."""
+    tail = conn.execute(
+        "SELECT event_id, event_json FROM session_event_tail "
+        "WHERE stream_id=? AND session_created_at=? ORDER BY event_id DESC LIMIT ?",
+        (session["stream_id"], session["created_at"], SUMMARY_TAIL_LIMIT),
+    ).fetchall()
+    events = []
+    for item in tail:
+        try:
+            event = json.loads(item["event_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            events.append({**event, "daemon_seq": int(item["event_id"])})
+    for event in _project_session_events_conn(conn, events):
+        apply_message_summary(session, event)
 
 
 def _project_session_events_conn(
@@ -6309,9 +6329,19 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 WHERE s.status = 'open'
                 """
             ).fetchall()
-            return [_session_row(conn, row) for row in rows]
+            result = [_session_row(conn, row) for row in rows]
+            for session in result:
+                _restore_message_summary_conn(conn, session)
+            return result
 
-        return await self.submit(_op)
+        def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            conn.execute("SAVEPOINT session_inventory_snapshot")
+            try:
+                return _op(conn)
+            finally:
+                conn.execute("RELEASE session_inventory_snapshot")
+
+        return await self.submit(snapshot)
 
     async def bind_observer_transcript(
         self, stream_id: str, *, generation: str, pane_pid: str,

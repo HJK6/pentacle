@@ -17,6 +17,8 @@ import prockill
 from assistant_policy import AssistantPolicy
 from mirror import _extract_live_state, _provider_from_session_name
 from v2_runtime import iso_now
+from session_summary import (MESSAGE_SUMMARY_FIELDS, apply_message_summary,
+                             event_timestamp_epoch as _event_timestamp_epoch)
 
 VISIBILITIES = ("default", "visible", "hidden", "subagent")
 LEAD_CLOSE_REFRESH_TIMEOUT_S = 30.0
@@ -69,22 +71,6 @@ _DAEMON_NUDGE_USER_PREFIXES = (
     "Please update your status card:",
     "Please run: agent-orch title",
 )
-
-
-def _event_timestamp_epoch(value: object) -> float | None:
-    stamp = str(value or "").strip()
-    if not stamp:
-        return None
-    try:
-        parsed = datetime.fromisoformat(
-            stamp[:-1] + "+00:00" if stamp.endswith(("Z", "z")) else stamp
-        )
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            return None
-        epoch = parsed.timestamp()
-    except (TypeError, ValueError):
-        return None
-    return epoch if math.isfinite(epoch) else None
 
 
 def genuine_activity_epoch(event: object) -> float | None:
@@ -209,6 +195,8 @@ def with_bootstrap_state(
     """Project whether a newly-opened seat produced any normalized event."""
     result = dict(row)
     internal_seen = bool(result.pop("_bootstrap_event_seen", False))
+    for key in MESSAGE_SUMMARY_FIELDS - {"last_text", "last_kind"}:
+        result.pop(key, None)
     seen = internal_seen if event_seen is None else event_seen
     if str(result.get("status") or "open") != "open":
         return result
@@ -691,18 +679,22 @@ class Sessions:
             return dict(row)
 
     def apply_genuine_activity_event(
-        self, stream_id: str, event: dict[str, Any]
+        self, stream_id: str, event: dict[str, Any], *, expected_generation: str | None = None,
     ) -> dict[str, Any] | None:
         """Advance event time and genuine-turn state after a durable insert."""
         with self._inventory_context():
             row = self._inv.get(stream_id)
-            if row is None:
+            if row is None or (expected_generation is not None
+                               and row.get("session_generation") != expected_generation):
                 return None
             floor = _event_timestamp_epoch(row.get("created_at"))
             timestamp = _event_timestamp_epoch(event.get("timestamp"))
             if floor is None or timestamp is None or timestamp < floor:
                 return dict(row)
             row["_bootstrap_event_seen"] = True
+            if apply_message_summary(row, event):
+                log.debug("session message preview advanced stream=%s", stream_id,
+                          extra={"subsystem": "session_summary", "bug_ref": "session_summary_missing_preview_2026_10"})
             user_epoch = operator_user_epoch(event, row.get("created_at"))
             generation = str(row.get("session_generation") or "")
             if user_epoch is not None and generation:
@@ -763,7 +755,14 @@ class Sessions:
             raise VerbError("unknown_session", "Unknown or inactive session")
         sid = row["stream_id"]
         with self._inventory_context():
-            merged = {**self._inv.get(sid, {}), **row, **overlay}
+            previous = self._inv.get(sid, {})
+            changed_generation = previous and self._inventory_generation(previous) != self._inventory_generation(row)
+            merged = {**previous, **row, **overlay}
+            if changed_generation:
+                for key in MESSAGE_SUMMARY_FIELDS:
+                    merged.pop(key, None)
+                if "last_event_at" not in row and "last_event_at" not in overlay:
+                    merged.pop("last_event_at", None)
             if str(merged.get("status") or "open") == "open":
                 self._set_inventory_row_locked(sid, merged)
             else:
