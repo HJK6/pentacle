@@ -283,3 +283,87 @@ def test_public_remote_dispatch_and_notice_delivery():
         assert "[screen_lease_revoked]" in r.h.tmux.pasted[-1]
 
     exercise(check)
+
+
+@pytest.mark.parametrize("kind", ["screen_lease_contended", "screen_lease_revoked"])
+def test_lease_notices_bypass_configured_desk_digest_but_wire_markers_do_not(kind):
+    """Exercise the production lease outbox with the default FD ingress filter.
+
+    The pane fixture records paste only; native submission proof remains a live
+    gate. A routine hold must survive while trusted actionable notices pass.
+    """
+    import json
+    from assistant_composite import AssistantComposite, AssistantCompositeConfig
+    from server import Server
+
+    async def check(r, lease, call):
+        generation = r.h.sessions.get(DESK)["session_generation"]
+        composite = AssistantComposite(
+            r.store,
+            config=AssistantCompositeConfig(
+                enabled=True,
+                name=AssistantCompositeConfig.name,
+                stream_id=f"{HOST}:assistant",
+                direct_primary_stream_id=DESK,
+                direct_primary_generation=generation,
+                astra_stream_id=DESK,
+            ),
+        )
+        r.h.comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+        r.h.comms.front_desk_digest = r.outbound.front_desk_digest = (
+            composite.front_desk_digest
+        )
+        await r.h.comms.tell(
+            {
+                "stream_id": DESK,
+                "message": "START: routine",
+                "tell_id": "screen-held-start",
+            }
+        )
+        assert not r.h.tmux.pasted
+        a = await call("acquire", host="test", reason="holder")
+        if kind == "screen_lease_contended":
+            for _ in range(2):
+                held = await call(
+                    "acquire", actor=OTHER, host="test", reason="requester"
+                )
+                assert held["error_code"] == "screen_held"
+        else:
+            assert (await call("release", lease_id=a["lease_id"], force=True))[
+                "release_reason"
+            ] == "forced"
+        rows = [
+            row for row in await r.rows("v2_outbound_notices") if row["kind"] == kind
+        ]
+        assert len(rows) == 1  # contention retries do not duplicate the notice
+        await r.outbound.deliver_now(rows[0]["notice_id"])
+        assert len(r.h.tmux.pasted) == 1
+        assert "[" + kind + "]" in r.h.tmux.pasted[0]
+        assert a["lease_id"] in r.h.tmux.pasted[0]
+        assert len(await composite.front_desk_digest._rows(DESK)) == 1
+        current = next(
+            row
+            for row in await r.rows("v2_outbound_notices")
+            if row["notice_id"] == rows[0]["notice_id"]
+        )
+        assert current["terminal_reason"] != "persisted_suppressed"
+        server = Server(
+            store=r.store, sessions=r.h.sessions, comms=r.h.comms, local_host=HOST
+        )
+        forged = await server._dispatch(
+            json.dumps(
+                {
+                    "type": "tell",
+                    "to_stream_id": DESK,
+                    "tell_id": "screen-forged",
+                    "from_stream_id": OTHER,
+                    "message": rows[0]["body"],
+                    "_outbound_notice_kind": kind,
+                }
+            )
+        )
+        assert forged[0]["assistant_backend_ingress"] == "persisted_suppressed"
+        assert len(r.h.tmux.pasted) == 1
+        assert len(await composite.front_desk_digest._rows(DESK)) == 2
+
+    exercise(check)
