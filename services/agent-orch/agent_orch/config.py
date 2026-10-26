@@ -12,20 +12,24 @@ DEFAULT_WS_URL = "ws://127.0.0.1:7791"
 
 
 @dataclass(frozen=True)
+class OperatorTokenSource:
+    env_name: str
+    env_present: bool
+    path: Path
+
+
+@dataclass(frozen=True)
 class Config:
     ws_url: str
     token: str
     host_id: str
     runtime_dir: Path
     memory_repo_path: Path | None = None
+    operator_token_source: OperatorTokenSource | None = None
 
 
 def _agent_config_path() -> Path:
     return Path("~/.agent-orch/config.json").expanduser()
-
-
-def _token_path() -> Path:
-    return Path("~/.config/pentacle-stream/token").expanduser()
 
 
 def _read_json_config() -> dict[str, Any]:
@@ -45,13 +49,6 @@ def _config_chat_stream_url(config: dict[str, Any]) -> str | None:
         return None
     value = chat_stream.get("url")
     return value if isinstance(value, str) and value else None
-
-
-def _file_token() -> str | None:
-    path = _token_path()
-    if not path.exists():
-        return None
-    return path.read_text(encoding="utf-8").strip()
 
 
 def _sanitize_hostname(short_hostname: str) -> str:
@@ -94,11 +91,11 @@ def load_config() -> Config:
         or DEFAULT_WS_URL
     )
 
-    token = os.environ.get("AGENT_ORCH_TOKEN")
-    if token is None:
-        token = _file_token()
-    if token is None:
-        token = ""
+    operator_source = OperatorTokenSource(
+        env_name="AGENT_ORCH_TOKEN",
+        env_present="AGENT_ORCH_TOKEN" in os.environ,
+        path=Path("~/.config/pentacle-stream/token").expanduser(),
+    )
 
     host_id = local_host_id(config)
 
@@ -113,8 +110,9 @@ def load_config() -> Config:
 
     return Config(
         ws_url=ws_url,
-        token=token,
+        token="",
         host_id=host_id,
         runtime_dir=runtime_dir,
         memory_repo_path=memory_repo_path,
+        operator_token_source=operator_source,
     )
