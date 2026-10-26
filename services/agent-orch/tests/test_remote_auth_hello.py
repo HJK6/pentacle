@@ -5,6 +5,7 @@ import time
 import pytest
 
 from agent_orch.config import Config
+from send_boundary_capture import wire_frame
 from agent_orch.wsclient import WebsocketClient, _read_rpc_frame
 
 
@@ -13,7 +14,10 @@ def test_persistent_client_hello_carries_actual_seat_token(monkeypatch, tmp_path
     monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE", raising=False)
     monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "local:seat")
     monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "synthetic-seat-token")
-    hello = WebsocketClient(Config("ws://unused", "", "local", tmp_path))._hello()
+    cfg = Config("ws://unused", "", "local", tmp_path)
+    frame = WebsocketClient(cfg)._hello()
+    assert "stream_token" not in frame
+    hello = asyncio.run(wire_frame(cfg, frame))
     assert hello["from_stream_id"] == "local:seat"
     assert hello["stream_token"] == "synthetic-seat-token"
 

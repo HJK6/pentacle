@@ -32,13 +32,13 @@ pathlib.Path.home = classmethod(lambda cls: root)
 os.path.expanduser = expand
 service = source.parent.parent
 sys.path[:0] = [str(service), str(source.parent), str(service.parent), str(service.parent / 'agent-orch')]
-from agent_orch import config
+from agent_orch import config, send_boundary
 import local_admin
-paths = [config._agent_config_path(), config._token_path(), local_admin.DEFAULT_PATH,
+paths = [config._agent_config_path(), send_boundary._token_path(), local_admin.DEFAULT_PATH,
          pathlib.Path(os.environ['AGENT_ORCH_RUNTIME_DIR']).expanduser(),
          pathlib.Path(os.environ['AGENT_ORCH_MEMORY_REPO']).expanduser()]
 assert all(p.resolve().is_relative_to(root) for p in paths)
-assert config._file_token() == 'synthetic-config-token'
+assert send_boundary._file_token() == 'synthetic-config-token'
 loaded = config.load_config()
 assert loaded.runtime_dir.is_relative_to(root) and loaded.memory_repo_path.is_relative_to(root)
 assert loaded.host_id == 'node-a'

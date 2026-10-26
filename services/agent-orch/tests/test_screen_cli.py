@@ -1,3 +1,5 @@
+
+from send_boundary_capture import wire_frame
 """Screen lease argument, envelope, authentication and retry contracts."""
 
 import asyncio
@@ -74,12 +76,13 @@ def test_rpc_public_status_and_authenticated_mutators(monkeypatch):
     calls = []
 
     async def rpc(config, payload, **kw):
+        payload = await wire_frame(config, payload)
         calls.append((payload, kw))
         return {"type": payload["type"] + ".ok"}
 
     monkeypatch.setattr(wsclient, "_one_shot_rpc", rpc)
     monkeypatch.setattr(wsclient, "_resolved_rpc_from_stream_id", lambda: "test:seat")
-    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "fixture-token")
+    monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "fixture-token")
     asyncio.run(wsclient.screen_lease_once(object(), {"type": "screen.lease.status"}))
     assert "stream_token" not in calls[-1][0] and calls[-1][1]["from_stream_id"] is None
     for v in ["acquire", "renew", "release"]:

@@ -2,6 +2,43 @@
 
 Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one agent spawn, drive, and observe other agents without the leader's LLM context having to read raw tmux scrollback.
 
+## Outbound credentials
+
+`agent_orch/send_boundary.py` owns credential loading and websocket serialization.
+Credential loaders live only in that module; callers must use its deferred
+frame policies instead of importing loaders from `wsclient` or `config`.
+Every hello and request uses `send_frame`; credential-free pongs, upload chunks
+and blob fetches use the checked `send_uncredentialed` path. Builders and queued
+requests retain credential policies and opaque caller inputs, and resolve identity
+again when sending, including retries and reconnect replay.
+
+The fixed service identities are `altum-bot-cd`,
+`amaterasu:wmi-pg-dailybackup` and `work-report-reader`. The first two use only
+the private, user-owned token file named by `AGENT_ORCH_STREAM_TOKEN_FILE`;
+the reader uses only `PENTACLE_WORK_REPORT_READER_TOKEN`, preserving its bytes.
+Conflicting service identity sources or unusable service credentials stop the
+send and close the connection. Service CLI failures exit 2 with one diagnostic
+containing the identity and credential source, without credential values.
+For service callers, command output is buffered until completion so a refused
+request produces only that diagnostic.
+`report get` preserves its consumer contract: JSON `unavailable`, exit 1.
+The reader authenticates its hello; its lookup request has only `type`,
+`request_id` and `report_id`. Dashboard ownership transfer rejects service
+identities before connecting; operator envelope proofs stay inside the boundary.
+
+Ordinary seat/operator credential precedence and transmitted frames are retained.
+`load_config()` records an operator source descriptor without reading its value;
+the boundary loads it after resolving identity. An explicitly empty operator
+environment token skips the file. Direct `Config(token=...)` callers remain
+supported as explicit sources. `thread` checks source presence first and retains
+its existing unauthorized result when the boundary finds an unusable seat token.
+Attachment path checks obtain token-file paths through a metadata-only accessor.
+
+`tests/test_send_boundary_census.py` inventories the package's sends, connects,
+credential reads and writes; mutation tests exercise the listed bypass forms. The wire
+matrix compares ordinary frames with the committed base capture. Merging this
+change updates source only; installing the client is a separate rollout.
+
 → See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for system context. Setup guide: see [../../docs/agent_orchestration_setup.md](../../docs/agent_orchestration_setup.md) for installing `chat_streamd`, `agent-orch`, per-machine config, autostart, and smoke tests. That guide installs the CLI into the checkout-local virtual environment; `bash services/agent-orch/install.sh` is an alternative user-level install that needs Python 3.12 or later (3.13 on macOS).
 
 Optional named subscription accounts are default OFF. The front desk can choose

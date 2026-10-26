@@ -7,6 +7,8 @@ Contract: services/chat-stream-v2/docs/external-work.md.
 """
 from __future__ import annotations
 
+from .send_boundary import ServiceCredentialUnavailable
+
 import argparse
 import asyncio
 import json
@@ -20,6 +22,8 @@ def _call(args: argparse.Namespace, payload: dict[str, Any]) -> int:
     try:
         response = asyncio.run(cli.external_work_once(
             cli.load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0)))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 - one readable error line, never the payload
         print(f"agent-orch external-work: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

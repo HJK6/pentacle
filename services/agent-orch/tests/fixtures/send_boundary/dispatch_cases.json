@@ -1,0 +1,1666 @@
+[
+  {
+    "command": "start",
+    "argv": [
+      "start"
+    ],
+    "handler": "agent_orch.cli.start",
+    "network_entry": null,
+    "not_applicable": "deprecated no-op"
+  },
+  {
+    "command": "stop",
+    "argv": [
+      "stop"
+    ],
+    "handler": "agent_orch.cli.stop",
+    "network_entry": null,
+    "not_applicable": "deprecated no-op"
+  },
+  {
+    "command": "wake",
+    "argv": [
+      "wake",
+      "list"
+    ],
+    "handler": "agent_orch.cli.watch_wake",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "watch",
+    "argv": [
+      "watch",
+      "list"
+    ],
+    "handler": "agent_orch.cli.watch_wake",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spawn",
+    "argv": [
+      "spawn",
+      "--provider",
+      "codex",
+      "--model",
+      "gpt-6-luna",
+      "--effort",
+      "max",
+      "--host",
+      "fixture",
+      "--top-level",
+      "--objective",
+      "fixture",
+      "--initial-prompt",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.spawn",
+    "network_entry": "spawn_once",
+    "not_applicable": null
+  },
+  {
+    "command": "thread",
+    "argv": [
+      "thread",
+      "fixture:child"
+    ],
+    "handler": "agent_orch.cli.thread",
+    "network_entry": "_one_shot_rpc",
+    "not_applicable": null
+  },
+  {
+    "command": "spawn-cancel",
+    "argv": [
+      "spawn-cancel",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.spawn_cancel",
+    "network_entry": "spawn_cancel_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spawn-status",
+    "argv": [
+      "spawn-status",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.spawn_status",
+    "network_entry": "spawn_status_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spawn-freeze",
+    "argv": [
+      "spawn-freeze",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.spawn_freeze",
+    "network_entry": "spawn_freeze_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spawn-unfreeze",
+    "argv": [
+      "spawn-unfreeze"
+    ],
+    "handler": "agent_orch.cli.spawn_unfreeze",
+    "network_entry": "spawn_freeze_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule list",
+    "argv": [
+      "schedule",
+      "list"
+    ],
+    "handler": "agent_orch.cli.schedule_list",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule get",
+    "argv": [
+      "schedule",
+      "get",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_get",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule cancel",
+    "argv": [
+      "schedule",
+      "cancel",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_cancel",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule reschedule",
+    "argv": [
+      "schedule",
+      "reschedule",
+      "fixture",
+      "--delay",
+      "120"
+    ],
+    "handler": "agent_orch.cli.schedule_reschedule",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule run",
+    "argv": [
+      "schedule",
+      "run",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_run",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule receipt",
+    "argv": [
+      "schedule",
+      "receipt",
+      "fixture",
+      "--phase",
+      "accepted"
+    ],
+    "handler": "agent_orch.cli.schedule_receipt",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring add",
+    "argv": [
+      "schedule",
+      "recurring",
+      "add",
+      "--name",
+      "fixture",
+      "--every",
+      "daily",
+      "--at-time",
+      "12:00",
+      "--provider",
+      "codex",
+      "--spec-id",
+      "fixture__task",
+      "--model",
+      "gpt-6-luna",
+      "--effort",
+      "max",
+      "--initial-prompt",
+      "fixture",
+      "--objective",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_recurring_add",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring set",
+    "argv": [
+      "schedule",
+      "recurring",
+      "set",
+      "fixture",
+      "--name",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_recurring_set",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring list",
+    "argv": [
+      "schedule",
+      "recurring",
+      "list"
+    ],
+    "handler": "agent_orch.cli.schedule_recurring_list",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring get",
+    "argv": [
+      "schedule",
+      "recurring",
+      "get",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.schedule_recurring_get",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring pause",
+    "argv": [
+      "schedule",
+      "recurring",
+      "pause",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.command",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring resume",
+    "argv": [
+      "schedule",
+      "recurring",
+      "resume",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.command",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring run",
+    "argv": [
+      "schedule",
+      "recurring",
+      "run",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.command",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "schedule recurring rm",
+    "argv": [
+      "schedule",
+      "recurring",
+      "rm",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.command",
+    "network_entry": "schedule_once",
+    "not_applicable": null
+  },
+  {
+    "command": "send",
+    "argv": [
+      "send",
+      "fixture:target",
+      "1",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.send",
+    "network_entry": "send_once",
+    "not_applicable": null
+  },
+  {
+    "command": "send-file",
+    "argv": [
+      "send-file",
+      "__PNG__"
+    ],
+    "handler": "agent_orch.cli.send_file",
+    "network_entry": "upload_blob_once / file_delivery",
+    "not_applicable": null
+  },
+  {
+    "command": "send-image",
+    "argv": [
+      "send-image",
+      "__PNG__"
+    ],
+    "handler": "agent_orch.cli.send_image",
+    "network_entry": "upload_blob_once / send_image_once",
+    "not_applicable": null
+  },
+  {
+    "command": "send-receipt",
+    "argv": [
+      "send-receipt",
+      "fixture:target",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.send_receipt",
+    "network_entry": "send_receipt_once",
+    "not_applicable": null
+  },
+  {
+    "command": "send-cancel",
+    "argv": [
+      "send-cancel",
+      "fixture:target",
+      "1"
+    ],
+    "handler": "agent_orch.cli.send_cancel",
+    "network_entry": "send_cancel_once",
+    "not_applicable": null
+  },
+  {
+    "command": "tell",
+    "argv": [
+      "tell",
+      "fixture:peer",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.tell",
+    "network_entry": "tell_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant publish",
+    "argv": [
+      "assistant",
+      "publish",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--publish-kind",
+      "prose",
+      "--message",
+      "fixture",
+      "--proactive"
+    ],
+    "handler": "agent_orch.cli.assistant_publish",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant operation",
+    "argv": [
+      "assistant",
+      "operation",
+      "--operation",
+      "lane.admit",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--dispatch-id",
+      "fixture",
+      "--payload",
+      "{}"
+    ],
+    "handler": "agent_orch.cli.assistant_operation",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant binding",
+    "argv": [
+      "assistant",
+      "binding"
+    ],
+    "handler": "agent_orch.cli.assistant_binding",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant rebind",
+    "argv": [
+      "assistant",
+      "rebind",
+      "--request-id",
+      "fixture",
+      "--clear"
+    ],
+    "handler": "agent_orch.cli.assistant_rebind",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant transfer",
+    "argv": [
+      "assistant",
+      "transfer",
+      "status",
+      "--command-id",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.assistant_transfer",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant authority",
+    "argv": [
+      "assistant",
+      "authority"
+    ],
+    "handler": "agent_orch.cli.assistant_authority",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "assistant ruling",
+    "argv": [
+      "assistant",
+      "ruling",
+      "--ruling-request-id",
+      "fixture",
+      "--request-id",
+      "fixture",
+      "--ruling",
+      "approve"
+    ],
+    "handler": "agent_orch.cli.assistant_ruling",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "account",
+    "argv": [
+      "account",
+      "status"
+    ],
+    "handler": "agent_orch.account_cli.execute",
+    "network_entry": "account_once",
+    "not_applicable": null
+  },
+  {
+    "command": "capacity-retry",
+    "argv": [
+      "capacity-retry",
+      "status",
+      "--all"
+    ],
+    "handler": "agent_orch.cli.capacity_retry_control",
+    "network_entry": "capacity_retry_once",
+    "not_applicable": null
+  },
+  {
+    "command": "park",
+    "argv": [
+      "park",
+      "fixture:target",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.park",
+    "network_entry": "park_once",
+    "not_applicable": null
+  },
+  {
+    "command": "unpark",
+    "argv": [
+      "unpark",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.unpark",
+    "network_entry": "park_once",
+    "not_applicable": null
+  },
+  {
+    "command": "hold acquire",
+    "argv": [
+      "hold",
+      "acquire",
+      "fixture",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.hold",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "hold release",
+    "argv": [
+      "hold",
+      "release",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.hold",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "hold list",
+    "argv": [
+      "hold",
+      "list"
+    ],
+    "handler": "agent_orch.cli.hold",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "oblige",
+    "argv": [
+      "oblige",
+      "fixture:target",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.oblige",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "obligation list",
+    "argv": [
+      "obligation",
+      "list"
+    ],
+    "handler": "agent_orch.cli.obligation",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "obligation waive",
+    "argv": [
+      "obligation",
+      "waive",
+      "fixture",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.obligation",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec-issue adjudicate",
+    "argv": [
+      "spec-issue",
+      "adjudicate",
+      "--spec-id",
+      "fixture__task",
+      "--surface",
+      "fixture",
+      "--cycle",
+      "1",
+      "fixture",
+      "--reason",
+      "fixture",
+      "--valid"
+    ],
+    "handler": "agent_orch.cli.spec_issue",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec-issue diagnose",
+    "argv": [
+      "spec-issue",
+      "diagnose",
+      "--spec-id",
+      "fixture__task",
+      "--surface",
+      "fixture",
+      "--cycle",
+      "1",
+      "--diagnosis-id",
+      "fixture",
+      "--diagnosis",
+      "fixture",
+      "--pivot",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.spec_issue",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec-issue show",
+    "argv": [
+      "spec-issue",
+      "show",
+      "--spec-id",
+      "fixture__task",
+      "--surface",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.spec_issue",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec-issue list",
+    "argv": [
+      "spec-issue",
+      "list"
+    ],
+    "handler": "agent_orch.cli.spec_issue",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec-issue clear",
+    "argv": [
+      "spec-issue",
+      "clear",
+      "--stream",
+      "fixture:target",
+      "--spec-id",
+      "fixture__task"
+    ],
+    "handler": "agent_orch.cli.spec_issue",
+    "network_entry": "coordination_once",
+    "not_applicable": null
+  },
+  {
+    "command": "notify",
+    "argv": [
+      "notify",
+      "--message",
+      "fixture",
+      "--title",
+      "fixture",
+      "--dedup-key",
+      "fixture",
+      "--producer",
+      "fixture",
+      "--severity",
+      "info",
+      "--destination",
+      "pentacle-updates"
+    ],
+    "handler": "agent_orch.cli.notify",
+    "network_entry": "notification_create_once",
+    "not_applicable": null
+  },
+  {
+    "command": "investigation decide",
+    "argv": [
+      "investigation",
+      "decide",
+      "fixture",
+      "--decision",
+      "false_positive"
+    ],
+    "handler": "agent_orch.cli.investigation",
+    "network_entry": "investigation_once",
+    "not_applicable": null
+  },
+  {
+    "command": "investigation list",
+    "argv": [
+      "investigation",
+      "list"
+    ],
+    "handler": "agent_orch.cli.investigation",
+    "network_entry": "investigation_once",
+    "not_applicable": null
+  },
+  {
+    "command": "investigation drain",
+    "argv": [
+      "investigation",
+      "drain"
+    ],
+    "handler": "agent_orch.cli.investigation",
+    "network_entry": "investigation_once",
+    "not_applicable": null
+  },
+  {
+    "command": "investigation split",
+    "argv": [
+      "investigation",
+      "split",
+      "fixture",
+      "--event-id",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.investigation",
+    "network_entry": "investigation_once",
+    "not_applicable": null
+  },
+  {
+    "command": "role set",
+    "argv": [
+      "role",
+      "set",
+      "fixture:target",
+      "worker"
+    ],
+    "handler": "agent_orch.cli.role_set",
+    "network_entry": "role_set_once",
+    "not_applicable": null
+  },
+  {
+    "command": "role get",
+    "argv": [
+      "role",
+      "get",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.role_get",
+    "network_entry": "role_get_once",
+    "not_applicable": null
+  },
+  {
+    "command": "nexus list",
+    "argv": [
+      "nexus",
+      "list"
+    ],
+    "handler": "agent_orch.cli.nexus",
+    "network_entry": "nexus_once",
+    "not_applicable": null
+  },
+  {
+    "command": "nexus context",
+    "argv": [
+      "nexus",
+      "context"
+    ],
+    "handler": "agent_orch.cli.nexus",
+    "network_entry": "nexus_once",
+    "not_applicable": null
+  },
+  {
+    "command": "nexus inspect",
+    "argv": [
+      "nexus",
+      "inspect",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.nexus",
+    "network_entry": "nexus_once",
+    "not_applicable": null
+  },
+  {
+    "command": "nexus route",
+    "argv": [
+      "nexus",
+      "route",
+      "fixture",
+      "--kind",
+      "decision",
+      "--message",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.nexus",
+    "network_entry": "nexus_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane estimate-preview",
+    "argv": [
+      "work-lane",
+      "estimate-preview",
+      "--memory-root",
+      "__ROOT__",
+      "--lanes-json",
+      "-"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_estimate_preview",
+    "network_entry": null,
+    "not_applicable": "local estimator"
+  },
+  {
+    "command": "work-lane list",
+    "argv": [
+      "work-lane",
+      "list",
+      "--composite-stream-id",
+      "fixture:composite"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_list",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane show",
+    "argv": [
+      "work-lane",
+      "show",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_show",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane adopt",
+    "argv": [
+      "work-lane",
+      "adopt",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--preview"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_adopt",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-state",
+    "argv": [
+      "work-lane",
+      "set-state",
+      "fixture",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--to",
+      "active"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_state",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-lead",
+    "argv": [
+      "work-lane",
+      "set-lead",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--lead-stream-id",
+      "fixture:lead",
+      "--lead-generation",
+      "fixture-generation"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_lead",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-chat",
+    "argv": [
+      "work-lane",
+      "set-chat",
+      "fixture",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--chat-stream-id",
+      "fixture:chat"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_chat",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-text",
+    "argv": [
+      "work-lane",
+      "set-text",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--title",
+      "fixture"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_text",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane add-member",
+    "argv": [
+      "work-lane",
+      "add-member",
+      "fixture",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_add_member",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-members",
+    "argv": [
+      "work-lane",
+      "set-members",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--member",
+      "spec_fixture"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_members",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane set-owner",
+    "argv": [
+      "work-lane",
+      "set-owner",
+      "fixture",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--to",
+      "fd"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_set_owner",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane update",
+    "argv": [
+      "work-lane",
+      "update",
+      "fixture",
+      "--expected-version",
+      "1",
+      "--request-id",
+      "fixture",
+      "--composite-stream-id",
+      "fixture:composite",
+      "--kind",
+      "major_decision",
+      "--source-id",
+      "fixture",
+      "--summary",
+      "fixture"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_update",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work-lane request-confirmation",
+    "argv": [
+      "work-lane",
+      "request-confirmation",
+      "fixture",
+      "--action",
+      "set_state:done",
+      "--title",
+      "fixture",
+      "--body",
+      "fixture"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_request_confirmation",
+    "network_entry": "prompt_ask_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work unattended",
+    "argv": [
+      "work",
+      "unattended"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_unattended",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "work owed",
+    "argv": [
+      "work",
+      "owed"
+    ],
+    "handler": "agent_orch.work_lane_cli.cmd_owed",
+    "network_entry": "assistant_once",
+    "not_applicable": null
+  },
+  {
+    "command": "screen acquire",
+    "argv": [
+      "screen",
+      "acquire",
+      "--host",
+      "fixture",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.screen_cli.cmd_screen",
+    "network_entry": "screen_lease_once",
+    "not_applicable": null
+  },
+  {
+    "command": "screen renew",
+    "argv": [
+      "screen",
+      "renew",
+      "fixture"
+    ],
+    "handler": "agent_orch.screen_cli.cmd_screen",
+    "network_entry": "screen_lease_once",
+    "not_applicable": null
+  },
+  {
+    "command": "screen release",
+    "argv": [
+      "screen",
+      "release",
+      "fixture"
+    ],
+    "handler": "agent_orch.screen_cli.cmd_screen",
+    "network_entry": "screen_lease_once",
+    "not_applicable": null
+  },
+  {
+    "command": "screen status",
+    "argv": [
+      "screen",
+      "status"
+    ],
+    "handler": "agent_orch.screen_cli.cmd_screen",
+    "network_entry": "screen_lease_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work show",
+    "argv": [
+      "external-work",
+      "show"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_show",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "external-work record",
+    "argv": [
+      "external-work",
+      "record",
+      "--file",
+      "__JSON__"
+    ],
+    "handler": "agent_orch.external_work_cli.cmd_record",
+    "network_entry": "external_work_once",
+    "not_applicable": null
+  },
+  {
+    "command": "prompt ask",
+    "argv": [
+      "prompt",
+      "ask",
+      "--title",
+      "fixture",
+      "--body",
+      "fixture",
+      "--mode",
+      "free_text"
+    ],
+    "handler": "agent_orch.cli.prompt_ask",
+    "network_entry": "prompt_ask_once",
+    "not_applicable": null
+  },
+  {
+    "command": "prompt status",
+    "argv": [
+      "prompt",
+      "status",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.prompt_status",
+    "network_entry": "prompt_status_once",
+    "not_applicable": null
+  },
+  {
+    "command": "prompt answer",
+    "argv": [
+      "prompt",
+      "answer",
+      "fixture",
+      "--text",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.prompt_answer",
+    "network_entry": "prompt_answer_once",
+    "not_applicable": null
+  },
+  {
+    "command": "prompt cancel",
+    "argv": [
+      "prompt",
+      "cancel",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.prompt_cancel",
+    "network_entry": "prompt_cancel_once",
+    "not_applicable": null
+  },
+  {
+    "command": "prompt list",
+    "argv": [
+      "prompt",
+      "list"
+    ],
+    "handler": "agent_orch.cli.prompt_list",
+    "network_entry": "prompt_list_once",
+    "not_applicable": null
+  },
+  {
+    "command": "voice-answer answer",
+    "argv": [
+      "voice-answer",
+      "answer",
+      "fixture",
+      "--recording-id",
+      "fixture",
+      "--text",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.voice_answer_answer",
+    "network_entry": "voice_answer_once",
+    "not_applicable": null
+  },
+  {
+    "command": "triage scan-publish",
+    "argv": [
+      "triage",
+      "scan-publish",
+      "--memory-root",
+      "__ROOT__"
+    ],
+    "handler": "agent_orch.cli.triage_scan_publish",
+    "network_entry": "fetch_snapshot / notification_create_once",
+    "not_applicable": null
+  },
+  {
+    "command": "triage apply-answer",
+    "argv": [
+      "triage",
+      "apply-answer",
+      "--memory-root",
+      "__ROOT__"
+    ],
+    "handler": "agent_orch.cli.<lambda>",
+    "network_entry": null,
+    "not_applicable": "local memory annotation"
+  },
+  {
+    "command": "dashboard add",
+    "argv": [
+      "dashboard",
+      "add",
+      "--id",
+      "fixture",
+      "--title",
+      "fixture",
+      "--url",
+      "https://example.com"
+    ],
+    "handler": "agent_orch.cli.dashboard",
+    "network_entry": "dashboard_once",
+    "not_applicable": null
+  },
+  {
+    "command": "dashboard remove",
+    "argv": [
+      "dashboard",
+      "remove",
+      "--id",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.dashboard",
+    "network_entry": "dashboard_once",
+    "not_applicable": null
+  },
+  {
+    "command": "dashboard transfer-owner",
+    "argv": [
+      "dashboard",
+      "transfer-owner",
+      "--to-stream",
+      "fixture:target",
+      "--target-generation",
+      "fixture-generation",
+      "--expected-owner",
+      "fixture:owner",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.dashboard",
+    "network_entry": "dashboard_once",
+    "not_applicable": null
+  },
+  {
+    "command": "asset",
+    "argv": [
+      "asset",
+      "health"
+    ],
+    "handler": "agent_orch.cli.asset",
+    "network_entry": "asset_health_once",
+    "not_applicable": null
+  },
+  {
+    "command": "title",
+    "argv": [
+      "title",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.title",
+    "network_entry": "rename_once",
+    "not_applicable": null
+  },
+  {
+    "command": "status",
+    "argv": [
+      "status",
+      "--goal",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.status",
+    "network_entry": "status_card_once",
+    "not_applicable": null
+  },
+  {
+    "command": "close",
+    "argv": [
+      "close",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.close",
+    "network_entry": "close_once",
+    "not_applicable": null
+  },
+  {
+    "command": "drain-sessions",
+    "argv": [
+      "drain-sessions",
+      "fixture:target",
+      "--operator-confirm"
+    ],
+    "handler": "agent_orch.cli.drain_sessions",
+    "network_entry": "drain_sessions_once",
+    "not_applicable": null
+  },
+  {
+    "command": "reconcile status",
+    "argv": [
+      "reconcile",
+      "status"
+    ],
+    "handler": "agent_orch.cli.reconcile_status",
+    "network_entry": "reconcile_status_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent request",
+    "argv": [
+      "consent",
+      "request",
+      "designate",
+      "--reason",
+      "fixture",
+      "--target",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent status",
+    "argv": [
+      "consent",
+      "status",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent cancel",
+    "argv": [
+      "consent",
+      "cancel",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent deny",
+    "argv": [
+      "consent",
+      "deny",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key offer",
+    "argv": [
+      "consent-key",
+      "offer",
+      "--credential",
+      "credential-fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key devices",
+    "argv": [
+      "consent-key",
+      "devices"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key list",
+    "argv": [
+      "consent-key",
+      "list"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key status",
+    "argv": [
+      "consent-key",
+      "status",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key cancel",
+    "argv": [
+      "consent-key",
+      "cancel",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "consent-key revoke",
+    "argv": [
+      "consent-key",
+      "revoke",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.consent_command",
+    "network_entry": "consent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "lifecycle inspect",
+    "argv": [
+      "lifecycle",
+      "inspect"
+    ],
+    "handler": "agent_orch.cli.lifecycle",
+    "network_entry": "assistant_lifecycle_once",
+    "not_applicable": null
+  },
+  {
+    "command": "lifecycle transfer",
+    "argv": [
+      "lifecycle",
+      "transfer",
+      "fixture:target",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.lifecycle",
+    "network_entry": "assistant_lifecycle_once",
+    "not_applicable": null
+  },
+  {
+    "command": "lifecycle revoke",
+    "argv": [
+      "lifecycle",
+      "revoke",
+      "--emergency",
+      "--reason",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.lifecycle",
+    "network_entry": "assistant_lifecycle_once",
+    "not_applicable": null
+  },
+  {
+    "command": "reparent",
+    "argv": [
+      "reparent",
+      "fixture:target",
+      "--to",
+      "fixture:parent",
+      "--expected-generation",
+      "fixture-generation"
+    ],
+    "handler": "agent_orch.cli.reparent",
+    "network_entry": "reparent_once",
+    "not_applicable": null
+  },
+  {
+    "command": "await",
+    "argv": [
+      "await",
+      "fixture:target",
+      "1"
+    ],
+    "handler": "agent_orch.cli.await_command",
+    "network_entry": "await_report_once",
+    "not_applicable": null
+  },
+  {
+    "command": "report",
+    "argv": [
+      "report",
+      "--status",
+      "done",
+      "--msg-id",
+      "1",
+      "--result",
+      "{\"summary\":\"fixture\",\"findings\":[],\"next_action\":\"fixture\"}"
+    ],
+    "handler": "agent_orch.cli.report",
+    "network_entry": "report_once",
+    "not_applicable": null
+  },
+  {
+    "command": "grant-self-token",
+    "argv": [
+      "grant-self-token"
+    ],
+    "handler": "agent_orch.cli.grant_self_token",
+    "network_entry": "grant_token_once",
+    "not_applicable": null
+  },
+  {
+    "command": "await-spawn",
+    "argv": [
+      "await-spawn",
+      "--request-id",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.await_spawn",
+    "network_entry": "await_spawn_once",
+    "not_applicable": null
+  },
+  {
+    "command": "list",
+    "argv": [
+      "list"
+    ],
+    "handler": "agent_orch.cli.list_sessions",
+    "network_entry": "fetch_snapshot",
+    "not_applicable": null
+  },
+  {
+    "command": "models",
+    "argv": [
+      "models"
+    ],
+    "handler": "agent_orch.cli.models",
+    "network_entry": "spawn_catalog_get_once",
+    "not_applicable": null
+  },
+  {
+    "command": "profiles",
+    "argv": [
+      "profiles"
+    ],
+    "handler": "agent_orch.cli.models",
+    "network_entry": "spawn_catalog_get_once",
+    "not_applicable": null
+  },
+  {
+    "command": "visibility set",
+    "argv": [
+      "visibility",
+      "set",
+      "fixture:target",
+      "default"
+    ],
+    "handler": "agent_orch.cli.visibility_set",
+    "network_entry": "set_visibility_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec attach",
+    "argv": [
+      "spec",
+      "attach",
+      "fixture:target",
+      "fixture__task"
+    ],
+    "handler": "agent_orch.cli.spec_update",
+    "network_entry": "spec_update_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec detach",
+    "argv": [
+      "spec",
+      "detach",
+      "fixture:target",
+      "fixture__task"
+    ],
+    "handler": "agent_orch.cli.spec_update",
+    "network_entry": "spec_update_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec assign",
+    "argv": [
+      "spec",
+      "assign",
+      "fixture:target",
+      "fixture__task"
+    ],
+    "handler": "agent_orch.cli.spec_update",
+    "network_entry": "spec_update_once",
+    "not_applicable": null
+  },
+  {
+    "command": "spec unassign",
+    "argv": [
+      "spec",
+      "unassign",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.spec_update",
+    "network_entry": "spec_update_once",
+    "not_applicable": null
+  },
+  {
+    "command": "inspect",
+    "argv": [
+      "inspect",
+      "fixture:target"
+    ],
+    "handler": "agent_orch.cli.inspect",
+    "network_entry": "inspect_stream_once",
+    "not_applicable": null
+  },
+  {
+    "command": "usage",
+    "argv": [
+      "usage",
+      "--host",
+      "fixture",
+      "--account",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.usage",
+    "network_entry": "account_once",
+    "not_applicable": null
+  },
+  {
+    "command": "ledger get",
+    "argv": [
+      "ledger",
+      "get",
+      "fixture"
+    ],
+    "handler": "agent_orch.cli.ledger_get",
+    "network_entry": "ledger_get_once",
+    "not_applicable": null
+  },
+  {
+    "command": "audit inbound",
+    "argv": [
+      "audit",
+      "inbound"
+    ],
+    "handler": "agent_orch.cli.inbound_audit",
+    "network_entry": "inbound_audit_once",
+    "not_applicable": null
+  },
+  {
+    "command": "ssh",
+    "argv": [
+      "ssh"
+    ],
+    "handler": "agent_orch.cli.<lambda>",
+    "network_entry": null,
+    "not_applicable": "subprocess passthrough"
+  },
+  {
+    "command": "report get",
+    "argv": [
+      "report",
+      "get",
+      "fixture",
+      "--json"
+    ],
+    "handler": "agent_orch.work_report_cli.main",
+    "network_entry": "work_report_cli.get_report",
+    "expected_exit": 1
+  }
+]

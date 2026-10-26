@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_orch.config import load_config
+from agent_orch.send_boundary import resolve_operator_token
 
 
 def test_config_precedence(monkeypatch, tmp_path):
@@ -24,7 +25,8 @@ def test_config_precedence(monkeypatch, tmp_path):
 
     config = load_config()
     assert config.ws_url == "ws://file"
-    assert config.token == "tok"
+    assert config.token == ""
+    assert resolve_operator_token(config).value == "tok"
     assert config.host_id == "file-host"
     assert config.runtime_dir == home / ".agent-orch"
     assert config.memory_repo_path is None
@@ -35,7 +37,8 @@ def test_config_precedence(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ORCH_RUNTIME_DIR", str(tmp_path / "runtime"))
     config = load_config()
     assert config.ws_url == "ws://env"
-    assert config.token == "tok"
+    assert config.token == ""
+    assert resolve_operator_token(config).value == "tok"
     assert config.host_id == "env-host"
     assert config.runtime_dir == tmp_path / "runtime"
     assert config.memory_repo_path is None

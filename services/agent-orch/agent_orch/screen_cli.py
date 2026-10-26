@@ -1,5 +1,7 @@
 """Request a host's screen before cooperative desktop automation."""
 
+from .send_boundary import ServiceCredentialUnavailable
+
 import asyncio
 import json
 import sys
@@ -17,6 +19,8 @@ def cmd_screen(args):
         response = asyncio.run(
             cli.screen_lease_once(cli.load_config(), payload, timeout=args.timeout)
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch screen: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

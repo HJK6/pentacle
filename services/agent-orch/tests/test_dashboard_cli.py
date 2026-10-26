@@ -1,3 +1,5 @@
+
+from send_boundary_capture import wire_frame
 from agent_orch import cli
 import pytest
 
@@ -35,6 +37,8 @@ def test_dashboard_transport_supplies_seat_token_and_expected_response_family(mo
     monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE",raising=False)
     monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN","synthetic-dashboard-token")
     async def rpc(config,payload,**kwargs):
+        assert "stream_token" not in payload
+        payload = await wire_frame(config, payload)
         assert payload["stream_token"]=="synthetic-dashboard-token"
         assert kwargs["prefix"]=="dashboard"
         assert kwargs["from_stream_id"]=="node-alpha:seat"

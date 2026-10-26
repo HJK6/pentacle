@@ -23,7 +23,7 @@ from spawnctl import SpawnCtl  # noqa: E402
 from tmux_transport import Tmux
 from store import STREAM_TOKEN_HASH_VERSION, Store  # noqa: E402
 from uiverbs import UIVerbs  # noqa: E402
-from agent_orch.wsclient import stream_token_from_env  # noqa: E402
+from agent_orch.send_boundary import stream_token_from_env  # noqa: E402
 
 
 def test_issuance_event_is_debug_and_token_free(caplog: pytest.LogCaptureFixture) -> None:

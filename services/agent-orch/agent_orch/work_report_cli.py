@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import replace
 import json
 import os
 import time
@@ -11,6 +10,7 @@ import uuid
 
 from .config import load_config
 from . import wsclient
+from .send_boundary import reader_identity_ready, send_frame
 
 READER = "work-report-reader"
 TOKEN_ENV = "PENTACLE_WORK_REPORT_READER_TOKEN"
@@ -27,21 +27,15 @@ async def get_report(config, report_id: str, *, timeout: float = 20.0) -> dict:
     request_id = f"work-report-{uuid.uuid4()}"
     try:
         async with asyncio.timeout(timeout):
-            token = os.environ.get(TOKEN_ENV)
-            if token is not None:
-                if not token.strip():
-                    raise PermissionError("reader credential is empty")
-                hello = wsclient._rpc_hello(
-                    replace(config, token=""), from_stream_id=READER, infer_from_env=False,
-                    identity_token=token, infer_identity_token=False,
-                )
-            else:
-                hello = wsclient._rpc_hello(config)
+            explicit = READER if TOKEN_ENV in os.environ else None
+            identity = reader_identity_ready(explicit)
+            hello = wsclient._rpc_hello(config, from_stream_id=explicit)
             async with wsclient.websockets.connect(config.ws_url, open_timeout=timeout, close_timeout=0,
                                                    max_size=wsclient.WEBSOCKET_MAX_SIZE) as ws:
-                await ws.send(json.dumps(hello))
-                await ws.send(json.dumps({"type": "work.report.get", "request_id": request_id,
-                                          "report_id": report_id}))
+                await send_frame(ws, hello, identity, config=config, explicit_from_stream_id=explicit, compact=False)
+                await send_frame(ws, {"type": "work.report.get", "request_id": request_id,
+                                      "report_id": report_id}, identity, config=config,
+                                 explicit_from_stream_id=explicit, compact=False)
                 return await wsclient._read_rpc_response(ws, request_id, prefix="work.report.get", deadline=deadline)
     except Exception:
         # Transport/auth details can contain URLs or secrets; keep the public

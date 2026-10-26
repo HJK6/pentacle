@@ -277,11 +277,12 @@ class Gateway:
             raise Refused("authenticated_actor_required")
 
     async def rpc(self, payload):
-        from agent_orch.wsclient import _one_shot_rpc, _stream_token_from_env
+        from agent_orch.wsclient import _one_shot_rpc
+        from agent_orch.send_boundary import defer_stream_token
         payload = dict(payload)
         if not payload["type"].startswith("assistant."):
             payload["from_stream_id"] = self.actor
-            payload["stream_token"] = _stream_token_from_env()
+            payload = defer_stream_token(payload, keep=False, include_empty=True)
         return await _one_shot_rpc(self.config, payload, prefix=payload["type"],
                                   from_stream_id=self.actor, timeout=30)
 
@@ -305,10 +306,11 @@ class Gateway:
         return await asyncio.to_thread(command, self.manifest["route_command"], inputs)
 
     async def spawn(self, payload):
-        from agent_orch.wsclient import _one_shot_rpc, _stream_token_from_env, _await_starting_spawn
+        from agent_orch.wsclient import _one_shot_rpc, _await_starting_spawn
+        from agent_orch.send_boundary import defer_stream_token
         # Authenticate the independent executor without parenting the target.
         # The existing CLI's --top-level path omits inferred seat identity.
-        payload={**payload,"from_stream_id":self.actor,"stream_token":_stream_token_from_env()}
+        payload = defer_stream_token({**payload, "from_stream_id": self.actor}, keep=False, include_empty=True)
         response=await _one_shot_rpc(self.config,payload,prefix="spawn",from_stream_id=self.actor,timeout=180)
         if response.get("type")=="spawn.ok" and response.get("state")=="starting":
             response=await _await_starting_spawn(self.config,response,deadline=time.monotonic()+180)

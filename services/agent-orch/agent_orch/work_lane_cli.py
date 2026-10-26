@@ -7,6 +7,8 @@ Contract: services/chat-stream-v2/docs/work-lanes.md.
 """
 from __future__ import annotations
 
+from .send_boundary import ServiceCredentialUnavailable
+
 import argparse
 import asyncio
 import hashlib
@@ -69,6 +71,8 @@ def _print_members(members):
 def cmd_unattended(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work.unattended"})
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work unattended: {exc}", file=sys.stderr)
         return 1
@@ -100,6 +104,8 @@ def add_work_parser(subparsers) -> None:
 def cmd_owed(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work.owed"})
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work owed: {exc}", file=sys.stderr)
         return 1
@@ -116,6 +122,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work_lanes.list", "include_done": bool(args.include_done),
                                 "limit": args.limit, **({"members": True} if args.members else {})})
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane list: {exc}", file=sys.stderr)
         return 1
@@ -135,6 +143,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     try:
         response = _call(args, {"type": "work_lanes.show", "lane_id": args.lane_id,
                                 **({"members": True} if args.members else {})})
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane show: {exc}", file=sys.stderr)
         return 1
@@ -166,6 +176,8 @@ def _operation(args: argparse.Namespace, operation: str, payload: dict[str, Any]
         message["expected_lane_version"] = args.expected_version
     try:
         return _finish(_call(args, message))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane: {exc}", file=sys.stderr)
         return 1
@@ -248,6 +260,8 @@ def cmd_add_member(args: argparse.Namespace) -> int:
             if attempt == 0 and response.get("error_code") == "assistant_lane_version_conflict":
                 continue
             return _finish(response)
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane add-member: {exc}", file=sys.stderr)
         return 1
@@ -279,6 +293,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             return _finish(_call(args, {"type": "work_lanes.adopt_preview",
                                         "composite_stream_id": args.composite_stream_id,
                                         **({"epic": args.epic} if args.epic else {})}))
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:  # noqa: BLE001
             print(f"agent-orch work-lane adopt: {exc}", file=sys.stderr)
             return 1
@@ -305,6 +321,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
                    "operation": "work_lane.adopt", "payload": payload}
         try:
             response = _call(args, message)
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:  # noqa: BLE001
             response = {"type": "error", "error": str(exc)}
         print(json.dumps({"adoption_key": entry.get("adoption_key"), "response": response},
@@ -332,6 +350,8 @@ def cmd_request_confirmation(args: argparse.Namespace) -> int:
     try:
         response = asyncio.run(cli.prompt_ask_once(cli.load_config(), payload,
                                                    timeout=float(args.timeout or 30.0)))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"agent-orch work-lane request-confirmation: {exc}", file=sys.stderr)
         return 1

@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from .send_boundary import ServiceCredentialUnavailable, SeatCredentialUnavailable, resolve_outbound_identity, seat_credential_source_present, defer_stream_token
 from .config import load_config
 from . import screen_cli, external_work_cli, prompt_protocol, triage, work_lane_cli
 from . import role_baseline, schema
@@ -76,7 +77,6 @@ from .wsclient import (
     spawn_status_once,
     spawn_freeze_once,
     spawn_catalog_get_once,
-    stream_token_from_env,
     tell_once,
     upload_blob_once,
     send_image_once,
@@ -599,6 +599,8 @@ def _direct_rpc_transport_error(
     prefix: str, request_id: str | None, exc: BaseException, *,
     recovery: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], int, str]:
+    if isinstance(exc, ServiceCredentialUnavailable):
+        raise exc
     if isinstance(exc, TimeoutError):
         response: dict[str, object] = {
             "type": f"{prefix}.error",
@@ -665,6 +667,8 @@ def _schedule_ok(response: dict[str, object]) -> bool:
 def _run_schedule_once(payload: dict[str, object], timeout: float) -> tuple[dict[str, object], int | None, str | None]:
     try:
         return asyncio.run(schedule_once(load_config(), payload, timeout=timeout)), None, None
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(
             "schedule",
@@ -682,6 +686,8 @@ def _schedule_actor_payload(
     if not actor and hasattr(args, "from_stream_id"):
         try:
             actor = discover_leader_stream_id_short(load_config())
+        except ServiceCredentialUnavailable:
+            raise
         except Exception:
             actor = None
     if actor:
@@ -722,6 +728,8 @@ def schedule_get(args: argparse.Namespace) -> int:
         if isinstance(prompt_b64, str) and prompt_b64:
             try:
                 prompt = base64.b64decode(prompt_b64).decode("utf-8")
+            except ServiceCredentialUnavailable:
+                raise
             except Exception:
                 prompt = "<prompt decode failed>"
             print()
@@ -905,6 +913,8 @@ def schedule_recurring_get(args: argparse.Namespace) -> int:
         if isinstance(prompt_b64, str) and prompt_b64 and not getattr(args, "json", False):
             try:
                 prompt = base64.b64decode(prompt_b64).decode("utf-8")
+            except ServiceCredentialUnavailable:
+                raise
             except Exception:
                 prompt = "<prompt decode failed>"
             print()
@@ -1200,6 +1210,8 @@ def spawn(args: argparse.Namespace) -> int:
                 config, payload,
                 timeout=float(getattr(args, "timeout", None) or SPAWN_RPC_TIMEOUT_DEFAULT_S),
             ))
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             response, exit_code, message = _direct_rpc_transport_error("spawn", str(payload["request_id"]), exc)
             _print_response(response)
@@ -1255,6 +1267,8 @@ def spawn(args: argparse.Namespace) -> int:
     except SpawnProfileError as exc:
         print(f"agent-orch spawn: validation failed: {exc.code}: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch spawn: handoff lookup failed: {exc}", file=sys.stderr)
         return 5
@@ -1328,6 +1342,8 @@ def spawn(args: argparse.Namespace) -> int:
         payload.update(initial_prompt_payload)
         try:
             response = asyncio.run(schedule_once(config, payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0)))
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             response, exit_code, message = _direct_rpc_transport_error(
                 "schedule",
@@ -1432,6 +1448,8 @@ def spawn(args: argparse.Namespace) -> int:
             payload,
             timeout=float(getattr(args, "timeout", None) or SPAWN_RPC_TIMEOUT_DEFAULT_S),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(
             "spawn",
@@ -1476,6 +1494,8 @@ def spawn_cancel(args: argparse.Namespace) -> int:
         response = asyncio.run(spawn_cancel_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("spawn_cancel", None, exc)
         _print_response(response)
@@ -1493,6 +1513,8 @@ def spawn_status(args: argparse.Namespace) -> int:
         response = asyncio.run(spawn_status_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("spawn_status", None, exc)
         _print_response(response)
@@ -1512,6 +1534,8 @@ def spawn_freeze(args: argparse.Namespace) -> int:
         response = asyncio.run(spawn_freeze_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("spawn_freeze", None, exc)
         _print_response(response)
@@ -1529,6 +1553,8 @@ def spawn_unfreeze(args: argparse.Namespace) -> int:
         response = asyncio.run(spawn_freeze_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("spawn_unfreeze", None, exc)
         _print_response(response)
@@ -1593,6 +1619,8 @@ def send(args: argparse.Namespace) -> int:
         _print_response({"type": "send.error", "ok": False, "error_code": "chat_streamd_unreachable", "error": "chat_streamd_unreachable", "message": str(exc)})
         print(f"agent-orch send: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         _print_response({"type": "send.error", "ok": False, "error_code": "connection_dropped", "error": "connection_dropped", "message": str(exc)})
         print(f"agent-orch send: connection dropped after request may have been sent: {exc}", file=sys.stderr)
@@ -1660,6 +1688,8 @@ def send_receipt(args: argparse.Namespace) -> int:
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         _print_response({
             "type": "send.receipt.get.error", "ok": False,
@@ -1673,6 +1703,8 @@ def send_receipt(args: argparse.Namespace) -> int:
 def send_cancel(args: argparse.Namespace) -> int:
     try:
         response = asyncio.run(send_cancel_once(load_config(), args.msg_id, timeout=float(getattr(args, "timeout", 30.0) or 30.0)))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("send.cancel", None, exc)
         _print_response(response)
@@ -1718,6 +1750,8 @@ def tell(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch tell: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch tell: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -1738,6 +1772,8 @@ def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int
         response = asyncio.run(assistant_once(
             load_config(), payload, timeout=float(getattr(args, "timeout", 30.0) or 30.0),
         ))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(
             str(payload.get("type") or "assistant"), None, exc,
@@ -1847,6 +1883,8 @@ def assistant_rebind(args: argparse.Namespace) -> int:
                 "type": "assistant.binding",
                 "request_id": f"assistant-binding-{uuid.uuid4()}",
             }, timeout=args.timeout))
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             response, exit_code, message = _direct_rpc_transport_error("assistant.binding", None, exc)
             _print_response(response)
@@ -1910,6 +1948,8 @@ def assistant_transfer(args: argparse.Namespace) -> int:
                 {**payload,'local_admin_token':_local_admin_token(config)},timeout=args.timeout,local_admin=True))
             _print_response(response)
             return 0 if response.get('type')=='assistant.transfer.ok' else 1
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             print(f'agent-orch transfer authorization-revoke: {type(exc).__name__}',file=sys.stderr)
             return 1
@@ -1950,6 +1990,8 @@ def _park_rpc(args: argparse.Namespace, *, command: str) -> int:
         request["event_id"] = args.event_id
     try:
         response = asyncio.run(park_once(config, request, timeout=float(args.timeout)))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(command, request.get("request_id") if isinstance(request.get("request_id"), str) else None, exc)
         _print_response(response)
@@ -1978,6 +2020,8 @@ def capacity_retry_control(args: argparse.Namespace) -> int:
         payload.update(target_stream_id=args.target, expected_session_generation=args.generation)
     try:
         reply = asyncio.run(capacity_retry_once(config, payload, timeout=args.timeout))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         reply, code, message = _direct_rpc_transport_error("capacity_retry.control", payload["request_id"], exc)
         _print_response(reply)
@@ -2015,6 +2059,8 @@ def _coordination_request(args: argparse.Namespace, payload: dict[str, object], 
     except OSError as exc:
         print(f"agent-orch coordination: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         guidance = _receipt_recovery_guidance(_receipt_recovery_for_payload(payload))
         print(
@@ -2285,6 +2331,8 @@ def notify(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-orch notify: validation failed: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(
             "notification", None, exc
@@ -2351,6 +2399,8 @@ def investigation(args: argparse.Namespace) -> int:
             return 0 if response.get("type") == "investigation.split.ok" else 1
         print("agent-orch investigation: unknown command", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("investigation", None, exc)
         _print_response(response)
@@ -2460,6 +2510,8 @@ def nexus(args: argparse.Namespace) -> int:
             return 2
         _print_response(response)
         return 0 if response.get("type") == f"nexus.{command}.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("nexus", None, exc)
         _print_response(response)
@@ -2508,6 +2560,8 @@ def repo(args: argparse.Namespace) -> int:
         response = asyncio.run(repo_once(config, payload, timeout=timeout))
         _print_response(response)
         return 0 if response.get("type") == f"repo.{command}.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("repo", None, exc)
         _print_response(response)
@@ -2651,6 +2705,8 @@ def prompt_ask(args: argparse.Namespace) -> int:
         print(json.dumps(response, separators=(",", ":")))
         print(f"agent-orch prompt ask: validation failed: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         envelope = _prompt_envelope_from_args(args)
         response, _exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
@@ -2675,6 +2731,8 @@ def prompt_status(args: argparse.Namespace) -> int:
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if response.get("type") == "prompt.status.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
         response["question_id"] = args.question_id
@@ -2715,6 +2773,8 @@ def prompt_answer(args: argparse.Namespace) -> int:
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if response.get("type") == "prompt.answer.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
         response["question_id"] = args.question_id
@@ -2753,6 +2813,8 @@ def voice_answer_answer(args: argparse.Namespace) -> int:
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if response.get("type") == "voice_answer.answer.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("voice_answer", None, exc)
         response["recording_id"] = args.recording_id
@@ -2782,6 +2844,8 @@ def prompt_cancel(args: argparse.Namespace) -> int:
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if response.get("type") == "prompt.cancel.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
         response["question_id"] = args.question_id
@@ -2810,6 +2874,8 @@ def prompt_list(args: argparse.Namespace) -> int:
         )
         print(json.dumps(response, separators=(",", ":")))
         return 0 if response.get("type") == "prompt.list.ok" else 1
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
         print(json.dumps(response, separators=(",", ":")))
@@ -3015,6 +3081,8 @@ def dashboard(args: argparse.Namespace) -> int:
     except ValueError as exc:
         _print_response({"type":"dashboard.error", "error_code":"dashboard_invalid", "error":str(exc)})
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("dashboard", None, exc)
         _print_response(response)
@@ -3140,6 +3208,8 @@ def asset(args: argparse.Namespace) -> int:
         _print_response(response)
         print(f"agent-orch asset: asset_invalid: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("asset", None, exc)
         _print_response(response)
@@ -3181,6 +3251,8 @@ def title(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch title: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch title: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -3219,6 +3291,8 @@ def role_set(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch role set: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch role set: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -3248,6 +3322,8 @@ def role_get(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch role get: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch role get: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -3302,6 +3378,8 @@ def status(args: argparse.Namespace) -> int:
             )
             if response.get("type") != "status_card.ok":
                 break
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("status_card", None, exc)
         _print_response(response)
@@ -3564,6 +3642,8 @@ def close(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch close: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch close: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -3588,6 +3668,8 @@ def drain_sessions(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-orch drain-sessions: validation failed: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("drain_sessions", None, exc)
         _print_response(response)
@@ -3607,6 +3689,8 @@ def reconcile_status(args: argparse.Namespace) -> int:
                 timeout=timeout,
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("reconcile.status", None, exc)
         _print_response(response)
@@ -3688,6 +3772,8 @@ def consent_command(args: argparse.Namespace) -> int:
             fields["intent_id"] = args.request_id
         response = asyncio.run(consent_once(config, verb, fields, timeout=args.timeout,
                                              from_stream_id=caller, local_admin=local))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         # Transport exceptions must not render the outbound admin token.
         print(f"agent-orch {args.consent_family}: {type(exc).__name__}", file=sys.stderr)
@@ -3729,6 +3815,8 @@ def lifecycle(args: argparse.Namespace) -> int:
                 timeout=timeout, local_admin=True))
             _print_response(response)
             return 0 if response.get("type") == "assistant.lifecycle.ok" else 1
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             print(f"agent-orch lifecycle revoke: {type(exc).__name__}", file=sys.stderr)
             return 1
@@ -3753,6 +3841,8 @@ def lifecycle(args: argparse.Namespace) -> int:
                 "expected_revision": expected if expected is not None
                 else int((inspected.get("grant") or {}).get("revision") or 0),
             })
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("assistant.lifecycle", None, exc)
         _print_response(response)
@@ -3807,6 +3897,8 @@ def reparent(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch reparent: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch reparent: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -3838,6 +3930,8 @@ def await_command(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"agent-orch await: chat_streamd unreachable: {exc}", file=sys.stderr)
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch await: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         return 65
@@ -4062,6 +4156,8 @@ def _verify_report_durability_after_transport_error(
                 timeout=max(1.0, min(timeout, 5.0)),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(
             f"agent-orch report: report durability unknown for report_id={report_id}; "
@@ -4172,6 +4268,8 @@ def _reconcile_report_notice_delivery(
                     timeout=max(1.0, min(timeout, 5.0)),
                 )
             )
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             return {
                 "delivery_status": "failed",
@@ -4301,6 +4399,8 @@ def _best_effort_record_report_rejection(status: str, msg_id: int | None) -> Non
         # The daemon re-validates, records the rejection for a self-close seat,
         # then returns its own schema error — which we discard.
         asyncio.run(report_once(config, request, timeout=5.0))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception:  # noqa: BLE001 - best-effort; the schema rejection stays primary
         pass
 
@@ -4372,6 +4472,8 @@ def send_image(args: argparse.Namespace) -> int:
     config = load_config()
     try:
         upload = asyncio.run(upload_blob_once(config, data, timeout=timeout))
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 - surface a stable transport error
         print(f"agent-orch send-image: blob upload failed: {exc}", file=sys.stderr)
         return 1
@@ -4395,6 +4497,8 @@ def send_image(args: argparse.Namespace) -> int:
     except PermissionError as exc:
         print(f"agent-orch send-image: not authorized: {exc}", file=sys.stderr)
         return 66
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 - stable transport error surface
         print(f"agent-orch send-image: {exc}", file=sys.stderr)
         return 1
@@ -4489,6 +4593,8 @@ def report(args: argparse.Namespace) -> int:
     if getattr(args, "terminate", False):
         try:
             terminate_decision = _resolve_self_terminate(config, from_stream_id)
+        except ServiceCredentialUnavailable:
+            raise
         except Exception as exc:
             print(
                 f"agent-orch report: terminate classification failed: {exc}",
@@ -4575,6 +4681,8 @@ def report(args: argparse.Namespace) -> int:
                 state="confirmed_after_transport_error",
             )
         return 64
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch report: connection dropped after request may have been sent: {exc}", file=sys.stderr)
         durable_report = _verify_report_durability_after_transport_error(
@@ -4685,6 +4793,8 @@ def report(args: argparse.Namespace) -> int:
                         disposition_waived_reason=getattr(args, "disposition_waived_reason", None),
                     )
                 )
+            except ServiceCredentialUnavailable:
+                raise
             except Exception as exc:
                 print(f"agent-orch report: terminate close failed: {exc}", file=sys.stderr)
                 return 5
@@ -4770,6 +4880,8 @@ def await_spawn(args: argparse.Namespace) -> int:
                 timeout=max(30.0, float(args.timeout) + 5.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error(
             "await_spawn",
@@ -4791,6 +4903,8 @@ def list_sessions(args: argparse.Namespace) -> int:
             timeout=float(timeout) if timeout is not None else None,
             events_mode="summary",
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("snapshot", None, exc)
         _print_response(response)
@@ -4809,6 +4923,8 @@ def models(args: argparse.Namespace) -> int:
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         print(f"agent-orch models: chat_streamd unavailable: {exc}", file=sys.stderr)
         return 64
@@ -4829,6 +4945,8 @@ def visibility_set(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-orch visibility set: validation failed: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("set_visibility", None, exc)
         _print_response(response)
@@ -4855,6 +4973,8 @@ def spec_update(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-orch spec {args.spec_command}: validation failed: {exc}", file=sys.stderr)
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("session.spec_update", None, exc)
         _print_response(response)
@@ -4983,18 +5103,23 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
 
 def thread(args: argparse.Namespace) -> int:
     from .wsclient import _one_shot_rpc
-    token = stream_token_from_env()
-    if not token:
+    identity = resolve_outbound_identity()
+    if identity.kind not in {"service", "ambiguous"} and not seat_credential_source_present():
         print("agent-orch thread: unauthorized (verified seat token required)", file=sys.stderr)
         return 2
-    payload = {"type": "thread.read", "request_id": f"thread-{uuid.uuid4()}",
-               "child_stream_id": args.child, "stream_token": token}
+    payload = defer_stream_token({"type": "thread.read", "request_id": f"thread-{uuid.uuid4()}",
+                                  "child_stream_id": args.child}, keep=False, require=True)
     if args.limit is not None:
         payload["limit"] = args.limit
     if args.cursor is not None:
         payload["cursor"] = args.cursor
     try:
         response = asyncio.run(_one_shot_rpc(load_config(), payload, prefix="thread", timeout=args.timeout))
+    except SeatCredentialUnavailable:
+        print("agent-orch thread: unauthorized (verified seat token required)", file=sys.stderr)
+        return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, code, _ = _direct_rpc_transport_error("thread.read", payload["request_id"], exc)
         _print_response(response)
@@ -5017,6 +5142,8 @@ def inspect(args: argparse.Namespace) -> int:
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("inspect_stream", None, exc)
         _print_response(response)
@@ -5042,6 +5169,8 @@ def ledger_get(args: argparse.Namespace) -> int:
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("ledger_get", None, exc)
         _print_response(response)
@@ -5066,6 +5195,8 @@ def inbound_audit(args: argparse.Namespace) -> int:
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
             )
         )
+    except ServiceCredentialUnavailable:
+        raise
     except Exception as exc:
         response, exit_code, message = _direct_rpc_transport_error("inbound_audit", None, exc)
         _print_response(response)
@@ -6425,6 +6556,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _service_credential_error(exc: ServiceCredentialUnavailable) -> int:
+    print(f"agent-orch: {exc}", file=sys.stderr)
+    return 2
+
+
+def _invoke_command(args: argparse.Namespace) -> int:
+    identity = resolve_outbound_identity(getattr(args, "from_stream_id", None))
+    if identity.kind not in {"service", "ambiguous"}:
+        return args.func(args)
+    # Service failures have one diagnostic even when a builder printed a
+    # request key or a warning before reaching the boundary. Other outcomes
+    # retain those existing messages and exit behavior.
+    import contextlib
+    import io
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = args.func(args)
+    except ServiceCredentialUnavailable:
+        raise
+    except BaseException:
+        sys.stdout.write(stdout.getvalue())
+        sys.stderr.write(stderr.getvalue())
+        raise
+    sys.stdout.write(stdout.getvalue())
+    sys.stderr.write(stderr.getvalue())
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     # Pre-argparse intercept: `agent-orch ssh ...` is a true ssh(1) passthrough.
     # argparse.REMAINDER does NOT work here -- it stops capturing on leading
@@ -6449,14 +6609,18 @@ def main(argv: list[str] | None = None) -> int:
         parser = build_parser()
         args = parser.parse_args(rewritten)
         try:
-            return args.func(args)
+            return _invoke_command(args)
+        except ServiceCredentialUnavailable as exc:
+            return _service_credential_error(exc)
         except Exception as exc:
             print(str(exc), file=sys.stderr)
             return 1
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        return _invoke_command(args)
+    except ServiceCredentialUnavailable as exc:
+        return _service_credential_error(exc)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

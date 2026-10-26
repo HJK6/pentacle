@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from send_boundary_capture import wire_frame
+
 import asyncio
 import concurrent.futures
 import json
@@ -62,6 +64,7 @@ def test_prompt_and_notification_resolution_helpers_carry_agent_identity(monkeyp
     seen = []
 
     async def fake_one_shot(_config, payload, *, prefix, timeout, from_stream_id=None, **kwargs):
+        payload = await wire_frame(_config, payload)
         seen.append((prefix, dict(payload), from_stream_id))
         return {"type": f"{prefix}.ok"}
 
@@ -1197,7 +1200,8 @@ def test_system_notification_identity_never_falls_back_to_legacy_token(monkeypat
         "from_stream_id": producer,
     }
 
-    assert wsclient._attach_agent_identity(payload) == producer
+    stream_id, payload = wsclient._attach_agent_identity(payload)
+    assert stream_id == producer
     assert "stream_token" not in payload
     hello = wsclient._rpc_hello(
         Config("ws://test", "legacy-config-token", "hostc", tmp_path),
@@ -1205,8 +1209,10 @@ def test_system_notification_identity_never_falls_back_to_legacy_token(monkeypat
         identity_token=None,
         infer_identity_token=False,
     )
-    assert hello["from_stream_id"] == producer
     assert "stream_token" not in hello
+    from agent_orch.send_boundary import ServiceCredentialUnavailable
+    with pytest.raises(ServiceCredentialUnavailable):
+        asyncio.run(wire_frame(Config("ws://test", "legacy-config-token", "hostc", tmp_path), hello))
 
 
 def test_asset_publish_once_sends_direct_rpc_with_session_identity(monkeypatch, tmp_path):

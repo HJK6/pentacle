@@ -35,7 +35,7 @@ def configure(monkeypatch, tmp_path, sockets, attempts=1):
         return socket
 
     monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
-    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "synthetic-token")
+    monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "synthetic-token")
     monkeypatch.setattr(wsclient, "_retry_backoff_s", lambda policy, attempt: 0.0)
     monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_MAX_ATTEMPTS", str(attempts))
     monkeypatch.delenv("AGENT_ORCH_RPC_RETRY_DEADLINE_S", raising=False)
