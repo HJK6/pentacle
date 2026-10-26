@@ -8,7 +8,7 @@ from .specs_service import SpecsSubsystem, _resolve_specs_memory_root, _content_
 
 class SpecReader:
     """One fresh resolver index per check; no observer, cached catalog or writes."""
-    def __init__(self, root: str | Path | None) -> None:
+    def __init__(self, root: str | Path | None, *, identity_only: bool = False) -> None:
         self.root = Path(root) if root is not None else _resolve_specs_memory_root()[0]
         if self.root is None or not (self.root / 'work').is_dir():
             raise ValueError('spec_root_unavailable')
@@ -16,7 +16,10 @@ class SpecReader:
         statuses_input = self.service._capture_statuses_input()
         statuses, _order = self.service._load_statuses(captured=statuses_input)
         status_dirs = self.service._work_dirs(statuses=statuses)
-        self.index = self.service._scan_folders_by_id(status_dirs=status_dirs, strict=True)
+        # Only checkpoints opt in; WIP admission still seals the whole board's
+        # bytes. read() always binds consumed target bytes to this capture.
+        self.index = self.service._scan_folders_by_id(
+            status_dirs=status_dirs, strict=True, identity_only=identity_only)
         if _input_token(statuses_input) != _input_token(self.service._capture_statuses_input()):
             raise ValueError('spec_changed')
         self.consumed: dict[Path, ConsumedSpec] = {}

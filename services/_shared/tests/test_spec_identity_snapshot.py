@@ -213,11 +213,12 @@ def test_same_metadata_changed_status_never_authorizes_removed_bucket(tmp_path, 
     assert subject._statuses_fingerprint[0] == fingerprint
 
 
-def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, monkeypatch):
+@pytest.mark.parametrize('identity_only', [False, True])
+def test_same_metadata_scan_to_consume_changed_identity_is_rejected(tmp_path, monkeypatch, identity_only):
     from _shared.spec_reader import SpecReader
     path = document(tmp_path)
     alias_file_timestamps(path, monkeypatch)
-    reader = SpecReader(tmp_path)
+    reader = SpecReader(tmp_path, identity_only=identity_only)
     fingerprint = reader.service._identity_fingerprint(path)
     path.write_text('---\nid: spec_fixture__new\n---\n')
     assert reader.service._identity_fingerprint(path) == fingerprint
