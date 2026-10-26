@@ -28,6 +28,7 @@
     "gpt-6-luna": {"class": "codex_standard", "assumption": "Luna priced as the standard tier"},
     "gpt-5.6-luna": {"class": "codex_standard", "assumption": "Luna 5.6 priced as the standard tier"},
     "codex-auto-review": {"class": "codex_standard", "assumption": "auto-review priced as the standard tier"},
-    "gpt-5.6-terra": {"class": "codex_small", "assumption": "Terra priced as the small tier"}
+    "gpt-5.6-terra": {"class": "codex_small", "assumption": "Terra priced as the small tier"},
+    "gpt-6.1-terra": {"class": "codex_small", "assumption": "Terra 6.1 priced as the small tier"}
   }
 }

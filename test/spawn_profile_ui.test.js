@@ -40,6 +40,7 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel('gpt-6-astra'), '6 Astra');
   assert.equal(modelLabel('gpt-6-sol'), '6 Sol');
   assert.equal(modelLabel('gpt-6.1-sol'), '6.1 Sol');
+  assert.equal(modelLabel('gpt-6.1-terra'), '6.1 Terra');
   assert.equal(modelLabel('gpt-6-luna'), '6 Luna');
   assert.equal(modelLabel('gpt-5.6-luna'), '5.6 Luna');
   assert.equal(modelLabel('claude-opus-6'), 'Opus 6');
@@ -254,6 +255,19 @@ test('spawn picker renders model options in catalog (available_models) order (op
   ).container.querySelectorAll('#spawn-model option')].map((option) => option.value);
   // No client-side sort: options follow the catalog key order as given.
   assert.deepEqual(options, ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra']);
+});
+
+test('spawn picker offers 6.1 Terra beside 6 Luna from the fleet available_models list', () => {
+  const catalogForNewSession = loadCatalogForNewSession();
+  const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const fleet = { 'gpt-6-luna': { efforts }, 'gpt-6.1-sol': { efforts }, 'gpt-6.1-terra': { efforts }, 'gpt-6-astra': { efforts } };
+  const narrowed = catalogForNewSession({ models: { codex: { 'gpt-6-sol': { efforts }, ...fleet } }, available_models: { codex: fleet } });
+  const options = [...renderProfileForTest(
+    { provider: 'codex', model: 'gpt-6.1-terra', effort: 'xhigh' }, narrowed.models.codex, [],
+  ).container.querySelectorAll('#spawn-model option')].map((option) => [option.value, option.textContent]);
+  assert.deepEqual(options, [
+    ['gpt-6-luna', '6 Luna'], ['gpt-6.1-sol', '6.1 Sol'], ['gpt-6.1-terra', '6.1 Terra'], ['gpt-6-astra', '6 Astra'],
+  ]);
 });
 
 test('spawn picker enumerates catalog-backed providers and exposes Claude/Fable without fabricating providers', () => {

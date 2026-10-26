@@ -44,11 +44,12 @@ MODELS = {
         "claude-fable-5-1": {"aliases": ("fable", "claude-fable-5-1", "claude-fable-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
     "codex": {
-        "gpt-5.6-terra": {"aliases": ("gpt-5.6-terra", "terra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-5.6-terra": {"aliases": ("gpt-5.6-terra",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-5.6-sol": {"aliases": ("gpt-5.6-sol",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-5.6-luna": {"aliases": ("gpt-5.6-luna",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-sol": {"aliases": ("gpt-6-sol",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6.1-sol": {"aliases": ("gpt-6.1-sol", "sol-6.1", "sol"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "gpt-6.1-terra": {"aliases": ("gpt-6.1-terra", "terra-6.1", "terra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-luna": {"aliases": ("gpt-6-luna", "luna"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "gpt-6-astra": {"aliases": ("gpt-6-astra", "astra"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
@@ -78,7 +79,10 @@ MODELS = {
 # "opus", "sonnet" is not a profile default, so moving it does not diverge from any
 # no-model default. "claude-fable-5" stays an alias of claude-fable-5-1 (operator
 # ruling 2026-09-01: never launch Fable 5 when 5.1 exists) so old clients and
-# handoffs from Fable 5 seats resolve to 5.1 instead of failing.
+# handoffs from Fable 5 seats resolve to 5.1 instead of failing. The bare "terra"
+# alias follows gpt-6.1-terra like "sol" (operator 2026-10-26); gpt-5.6-terra
+# remains available by full ID. Codex also reports an "ultra" effort, which no
+# catalog entry offers yet.
 INTENTIONALLY_UNSPAWNABLE = {
     "claude": frozenset({
         "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",

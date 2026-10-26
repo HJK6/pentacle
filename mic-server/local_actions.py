@@ -14,7 +14,7 @@ ASSISTANT_NAME = os.environ.get('MIC_ASSISTANT_NAME', '').strip() or 'Zephyr'
 PROMPT_VERSION = 'voice-actions-v5-option-grounding'
 MODEL = 'qwen3:8b'
 MODELS = {'astra': ('codex', 'gpt-6-astra'), 'sol': ('codex', 'gpt-6.1-sol'),
-          'terra': ('codex', 'gpt-5.6-terra'), 'luna': ('codex', 'gpt-6-luna'),
+          'terra': ('codex', 'gpt-6.1-terra'), 'luna': ('codex', 'gpt-6-luna'),
           'opus': ('claude', 'claude-opus-4-8'), 'sonnet': ('claude', 'claude-sonnet-5'),
           'fable': ('claude', 'claude-fable-5-1')}
 # Operator-selected voice defaults: triforce-memory/docs/config/agent_orchestration.md
