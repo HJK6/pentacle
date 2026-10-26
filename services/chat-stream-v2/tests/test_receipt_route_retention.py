@@ -9,10 +9,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import platform
 from pathlib import Path
 import resource
 import sqlite3
 import statistics
+import sys
 import time
 
 import pytest
@@ -477,10 +479,26 @@ def test_fixed_candidate_input_steps_do_not_scale_with_unrelated_history(tmp_pat
     asyncio.run(run())
 
 
-def test_incident_fixture_bounded_batches_and_twenty_interleaved_reads(tmp_path):
+def test_incident_fixture_bounded_batches_and_twenty_interleaved_reads(tmp_path, monkeypatch):
     async def run():
         from loop_watchdog import RequestTiming, request_timing
         store = running(tmp_path)
+        delays, queue_times, callbacks, loop_delays, highwater = [], [], [], [], [0]
+        order, tasks, batches = [], [], []
+        family_bytes, result = {}, None
+        active = True
+        batch_move = r.move_history_batch
+
+        def observed_batch(conn, table, **kwargs):
+            order.append(dict(event="batch_start", table=table, at=time.perf_counter()))
+            try:
+                batch = batch_move(conn, table, **kwargs)
+                batches.append(dict(table=table, **batch))
+                return batch
+            finally:
+                order.append(dict(event="batch_end", table=table, at=time.perf_counter()))
+
+        monkeypatch.setattr(r, "move_history_batch", observed_batch)
         try:
             def seed(c):
                 c.executemany("INSERT INTO v2_send_receipts(to_stream_id,request_id,receipt_id,state,display_text,content_kind,delivery,submission_confirmed,created_at) VALUES(?,?,?,'landed',?,'text','landed',1,?)", [(TARGET,str(i),str(i),"x"*256,OLD) for i in range(14469)])
@@ -490,33 +508,46 @@ def test_incident_fixture_bounded_batches_and_twenty_interleaved_reads(tmp_path)
                 return {table: c.execute('SELECT SUM(' + '+'.join('COALESCE(octet_length("'+column+'"),0)' for column in r._columns(c,table)) + '+8) FROM '+table).fetchone()[0] for table in r.HISTORY_TABLES}
             family_bytes=await store.submit(total_bytes)
             job = r.RetentionJob(store)
-            delays, queue_times, callbacks, loop_delays, highwater = [], [], [], [], [0]
-            active = True
             async def loop_probe():
                 while active:
                     start=time.perf_counter(); await asyncio.sleep(.001)
                     loop_delays.append(max(0, time.perf_counter()-start-.001)); highwater[0]=max(highwater[0],store.pending())
             async def reads():
-                for _ in range(20):
+                for index in range(20):
                     timing=RequestTiming(); token=request_timing.set(timing); started=time.perf_counter()
-                    try: assert await store.submit(lambda c:c.execute("SELECT 1").fetchone()[0]) == 1
-                    finally: request_timing.reset(token)
-                    delays.append(time.perf_counter()-started); queue_times.append(timing.queue_s); callbacks.append(timing.execution_s)
+                    try:
+                        assert await store.submit(lambda c:c.execute("SELECT 1").fetchone()[0]) == 1
+                        order.append(dict(event="read_complete", index=index, at=time.perf_counter()))
+                    finally:
+                        request_timing.reset(token)
+                        delays.append(time.perf_counter()-started); queue_times.append(timing.queue_s); callbacks.append(timing.execution_s)
                     await asyncio.sleep(.002)
-            probe=asyncio.create_task(loop_probe())
-            result, _ = await asyncio.gather(job.run_pass(), reads())
-            active=False; await probe
-            assert 0 < result.receipts_moved + result.routes_moved <= 2000
-            assert all(b['examined']<=500 and b['materialized_bytes']<=1024*1024 for b in result.history_batches)
-            assert max(delays)<.2 and max(loop_delays)<.2
+            tasks = [asyncio.create_task(loop_probe()), asyncio.create_task(job.run_pass()), asyncio.create_task(reads())]
+            result, _ = await asyncio.gather(*tasks[1:])
+            active = False
+            await tasks[0]
+        finally:
+            active = False
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            store.stop()
             def stats(values):
+                if not values:
+                    return None
                 ordered=sorted(values);return dict(p50=statistics.median(values),p95=ordered[max(0,int(len(ordered)*.95)-1)],max=max(values))
             report=dict(receipts=14469,routes=928,receipt_body_bytes=14469*256,route_body_bytes=928*256,total_payload_bytes=family_bytes,
                         request_s=stats(delays),queue_s=stats(queue_times),callback_s=stats(callbacks),loop_delay_s=stats(loop_delays),
-                        queue_highwater=highwater[0],rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,host_load=os.getloadavg(),batches=result.history_batches)
-            print("incident_metrics",json.dumps(report,sort_keys=True))
-            assert len(delays)==20
-        finally: store.stop()
+                        request_samples_s=delays,queue_samples_s=queue_times,callback_samples_s=callbacks,loop_samples_s=loop_delays,
+                        queue_highwater=highwater[0],rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,host_load=os.getloadavg(),
+                        python=sys.version,executable=sys.executable,platform=platform.platform(),batches=batches,order=order)
+            print("incident_metrics",json.dumps(report,sort_keys=True),flush=True)
+        assert 0 < result.receipts_moved + result.routes_moved <= 2000
+        assert all(b['examined']<=500 and b['materialized_bytes']<=1024*1024 for b in result.history_batches)
+        assert len(delays)==20
+        assert max(delays)<.2, "request_s max must be < 0.2s"
+        assert max(loop_delays)<.2, "loop_delay_s max must be < 0.2s"
     asyncio.run(run())
 
 
