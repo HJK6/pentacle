@@ -106,11 +106,11 @@ def test_remote_fd_adapter_preserves_only_url_on_stdout(tmp_path):
 
 @pytest.mark.parametrize("case", ["worker", "stale-generation", "wrong-token", "closed", "missing-token"])
 def test_fd_verification_uses_authenticated_binding_and_generation(monkeypatch, case):
-    from agent_orch import config, wsclient
+    from agent_orch import config, send_boundary, wsclient
     token = "fixture-only-token"
     monkeypatch.setattr(config, "load_config", lambda: object())
     monkeypatch.setattr(wsclient, "_resolved_rpc_from_stream_id", lambda: "fixture:worker" if case == "worker" else "fixture:fd")
-    monkeypatch.setattr(wsclient, "stream_token_from_env", lambda: None if case == "missing-token" else token)
+    monkeypatch.setattr(send_boundary, "stream_token_from_env", lambda: None if case == "missing-token" else token)
     async def binding(*args, **kwargs): return {"type":"assistant.binding.ok", "stream_id":"fixture:fd", "generation":"g", "composite_stream_id":"fixture:assistant"}
     monkeypatch.setattr(wsclient, "assistant_once", binding)
     row = {"session_generation": "old" if case == "stale-generation" else "g", "status":"closed" if case == "closed" else "open",

@@ -46,7 +46,8 @@ def _command(arguments, *, run=subprocess.run):
 
 def verify_front_desk(*, command=_command):
     from agent_orch.config import load_config
-    from agent_orch.wsclient import assistant_once, stream_token_from_env, _resolved_rpc_from_stream_id
+    from agent_orch.send_boundary import stream_token_from_env
+    from agent_orch.wsclient import assistant_once, _resolved_rpc_from_stream_id
     actor, token = _resolved_rpc_from_stream_id(), stream_token_from_env()
     if not actor or not token: raise AccountError("account_control_unauthorized")
     try:
