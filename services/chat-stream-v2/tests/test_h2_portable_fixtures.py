@@ -261,7 +261,7 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     assert printed[0]["daemon_pgid"] == 42420
 
 
-@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor"])
+@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor", "terminal-complete", "terminal-survivor"])
 def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     """Frozen OS/event boundary exercises the real group and entry reapers."""
     import signal
@@ -285,11 +285,14 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
                 state.update(live=False, group=False)
             elif outcome == "identity-lost": state["live"] = False
     class Event:
+        terminal = False
         def __init__(self, pid):
             assert pid == 42420
             state["registered"] = True
+            self.terminal = outcome.startswith("terminal-")
+            if outcome == "terminal-complete": state.update(live=False, group=False)
         def wait(self, deadline):
-            if state["live"]: raise owner.ManifestError("synthetic delayed exit")
+            if state["live"] and not self.terminal: raise owner.ManifestError("synthetic delayed exit")
         def close(self): state["registered"] = False
     def clock():
         state["clock"] += .1
@@ -303,7 +306,7 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     entry = dict(pgid=42420, leader_pid=42420, leader_start_identity="recorded-start",
                  socket="/synthetic/bound/socket", socket_owner={"synthetic": True}, run_id="run")
     data = {"entries": [entry]}
-    complete = outcome in ("complete", "kill-complete")
+    complete = outcome in ("complete", "kill-complete", "terminal-complete")
     if complete:
         owner._reap_entries(data, "run")
     else:
@@ -311,7 +314,7 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     assert state["socket"], "group failure must not strand an independently bound socket"
     assert data["entries"] == ([] if complete else [entry])
     assert not state["registered"]
-    if outcome == "dead-with-survivor": assert not signals
+    if outcome in ("dead-with-survivor", "terminal-complete", "terminal-survivor"): assert not signals
     else: assert signals[0] == signal.SIGTERM
     if outcome == "identity-lost": assert signals == [signal.SIGTERM]
     if complete: assert observations[-1] is False
@@ -329,8 +332,12 @@ def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, pla
     def control(changes, count, timeout):
         calls.append(("control", changes, count, timeout))
         if outcome == "denied": raise PermissionError("synthetic kqueue denial")
-        return [SimpleNamespace(ident=42420, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
+        return [SimpleNamespace(ident=42420, filter=-5, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
     def wait(read, write, error, timeout):
+        if timeout == 0:
+            # These existing cases start live; completion arrives during wait.
+            calls.append(("probe", read, timeout))
+            return [], [], []
         calls.append(("select", read, timeout))
         return (read if outcome == "complete" else [], [], [])
     monkeypatch.setattr(owner, "sys", SimpleNamespace(platform=platform))
@@ -367,6 +374,7 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
                    root_dev=rs.st_dev, root_ino=rs.st_ino, socket_dev=ss.st_dev, socket_ino=ss.st_ino)
     state, clients, events = {"live": True}, [], []
     class Event:
+        terminal = False
         def __init__(self, pid):
             events.append("register")
             if outcome == "denied-event": raise owner.ManifestError("synthetic event denied")
@@ -492,6 +500,7 @@ def test_absent_bound_root_requires_same_instance_kernel_exit(monkeypatch, tmp_p
             return None
         return "server-start"
     class Event:
+        terminal = False
         def __init__(self, pid):
             events.append("register")
             if outcome == "denied-event":
@@ -581,3 +590,122 @@ def test_absent_bound_root_darwin_registration_witness(monkeypatch, outcome):
         with pytest.raises(owner.ManifestError):
             owner._reap_socket("/tmp/v2s-synthetic-absent/s", binding, 105.0)
     assert calls == ([] if outcome == "recycled-before" else ["register", "close"])
+
+
+@pytest.mark.parametrize("outcome", ["esrch", "wrong-pid", "wrong-filter", "wrong-error",
+    "denied", "note-exit", "note-wrong-filter", "missing-filter"])
+def test_darwin_exit_registration_requires_matching_terminal_event(monkeypatch, outcome):
+    from tools import gate_owner_manifest as owner
+    closed = []
+    def control(changes, count, timeout):
+        if outcome == "denied": raise PermissionError("synthetic denial")
+        fields = dict(ident=42421 if outcome == "wrong-pid" else 42420,
+            filter=-1 if outcome in ("wrong-filter", "note-wrong-filter") else -5,
+            flags=0 if outcome.startswith("note-") or outcome == "missing-filter" else 32,
+            fflags=16, data=1 if outcome == "wrong-error" else owner.errno.ESRCH)
+        if outcome == "missing-filter": fields.pop("filter")
+        return [SimpleNamespace(**fields)]
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(
+        kqueue=lambda: SimpleNamespace(control=control, close=lambda: closed.append(True)),
+        kevent=lambda pid, **kwargs: (pid, kwargs), KQ_FILTER_PROC=-5, KQ_EV_ADD=1,
+        KQ_EV_ENABLE=4, KQ_NOTE_EXIT=16, KQ_EV_ERROR=32))
+    if outcome in ("esrch", "note-exit"):
+        event = owner._ExitEvent(42420)
+        try:
+            assert event.terminal
+            event.wait(owner.time.monotonic())
+        finally: event.close()
+    else:
+        with pytest.raises(owner.ManifestError):
+            event = owner._ExitEvent(42420)
+            try: event.wait(owner.time.monotonic())
+            finally: event.close()
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("outcome", ["terminal", "recycled", "replacement", "root-replacement"])
+def test_terminal_bound_socket_preserves_ownership_without_contact(monkeypatch, outcome):
+    import socket
+    import tempfile
+    import uuid
+    from tools import gate_owner_manifest as owner
+    root = Path(tempfile.mkdtemp(prefix="v2s-", dir="/tmp")); root.chmod(0o700)
+    address = root / "s"
+    endpoint = socket.socket(socket.AF_UNIX); endpoint.bind(str(address))
+    rs, ss = root.stat(), address.lstat()
+    binding = dict(nonce=uuid.uuid4().hex, server_pid=42421, server_start_identity="server-start",
+                   root_dev=rs.st_dev, root_ino=rs.st_ino, socket_dev=ss.st_dev, socket_ino=ss.st_ino)
+    state, events = {"registered": False}, []
+    class Event:
+        terminal = True
+        def __init__(self, pid):
+            assert pid == binding["server_pid"]
+            state["registered"] = True
+            events.append("register")
+            if outcome == "replacement":
+                address.unlink()
+                address.write_text("foreign replacement")
+            if outcome == "root-replacement":
+                root.rename(str(root) + "-original")
+                root.mkdir(mode=0o700)
+                address.write_text("foreign replacement")
+        def wait(self, deadline): pytest.fail("terminal witness needs no wait")
+        def close(self): events.append("close")
+    def forbidden(*args, **kwargs): pytest.fail("terminal server must never be contacted")
+    monkeypatch.setattr(owner, "_ExitEvent", Event)
+    monkeypatch.setattr(owner, "_exists", lambda pid: True)
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start"
+        if outcome == "recycled" and state["registered"] else "server-start")
+    monkeypatch.setattr(owner, "_REAL_POPEN", forbidden)
+    try:
+        if outcome == "terminal":
+            owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert not address.exists() and not root.exists()
+        else:
+            with pytest.raises(owner.ManifestError):
+                owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert address.exists() and root.exists()
+            if outcome in ("replacement", "root-replacement"):
+                assert address.read_text() == "foreign replacement"
+        assert events == ["register", "close"]
+    finally:
+        endpoint.close()
+        if address.exists(): address.unlink()
+        if root.exists(): root.rmdir()
+        original = Path(str(root) + "-original")
+        if original.exists():
+            (original / "s").unlink()
+            original.rmdir()
+
+
+@pytest.mark.parametrize("outcome", ["exited", "live-then-exit", "live", "denied-probe"])
+def test_linux_pidfd_registration_observes_terminal_readiness(monkeypatch, outcome):
+    from tools import gate_owner_manifest as owner
+    polls, closed = [], []
+    def poll(read, write, error, timeout):
+        assert read == [42421] and write == error == []
+        polls.append(timeout)
+        if outcome == "denied-probe": raise PermissionError("synthetic readiness denial")
+        ready = outcome == "exited" or (outcome == "live-then-exit" and len(polls) == 2)
+        return read if ready else [], [], []
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(owner, "os", SimpleNamespace(pidfd_open=lambda pid, flags: 42421, close=closed.append))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(select=poll))
+    monkeypatch.setattr(owner, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    if outcome == "denied-probe":
+        with pytest.raises(owner.ManifestError, match="register"):
+            owner._ExitEvent(42420)
+    else:
+        event = owner._ExitEvent(42420)
+        try:
+            assert event.terminal == (outcome == "exited")
+            if outcome == "live":
+                with pytest.raises(owner.ManifestError, match="not observed"):
+                    event.wait(105.0)
+            else:
+                event.wait(105.0)
+                assert event.terminal
+        finally: event.close()
+    assert polls == ([0] if outcome in ("exited", "denied-probe") else [0, 5.0])
+    assert closed == [42421]
