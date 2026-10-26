@@ -736,6 +736,10 @@ class SessionReconciler:
         ps_result = await self._host_command(
             host, "ps", "-eo", "pid=,ppid=,uid=,pgid=,sid=,lstart=,command="
         )
+        if ps_result is not None and ps_result[0] != 0:
+            # Darwin rejects sid but may still print a shifted, partial table.
+            # Probe on the owning host, under the same timeout and proof fences.
+            ps_result = await self._host_command(host, "python3", "-c", prockill.SESSION_ID_PROBE)
         boot_result = await self._host_command(host, "sysctl", "-n", "kern.boottime")
         if boot_result is None or boot_result[0] != 0 or not boot_result[1].strip():
             boot_result = await self._host_command(host, "cat", "/proc/sys/kernel/random/boot_id")

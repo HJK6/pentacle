@@ -24,6 +24,7 @@ import pytest
 from sessions import Sessions  # noqa: E402
 from server import Server  # noqa: E402
 from store import Store  # noqa: E402
+from sessions import VerbError
 
 HOST = "hosta"
 
@@ -76,6 +77,32 @@ async def _build(tmux: _BaseTmux, name: str) -> tuple[Store, Sessions, Server]:
     await store.open_session(HOST, name, visibility="hidden")
     await sessions.refresh()
     return store, sessions, server
+
+
+@pytest.mark.parametrize("successor", ["hostb:successor", "", None])
+@pytest.mark.parametrize("caller", ["operator", "self", "unauthenticated"])
+def test_close_progeny_refused_before_resolution_or_side_effects(monkeypatch, successor, caller):
+    async def go():
+        tmux = IdleTmux()
+        store, sessions, server = await _build(tmux, "progeny")
+        sid = f"{HOST}:progeny"
+        auth = _operator() if caller == "operator" else (
+            {"token_verified": True, "stream_id": sid} if caller == "self" else {})
+        async def must_not_resolve(msg):
+            raise AssertionError("unsupported progeny reached target resolution")
+        monkeypatch.setattr(sessions, "resolve", must_not_resolve)
+        try:
+            with pytest.raises(VerbError) as raised:
+                await server._on_close({"stream_id": sid, "progeny_stream_id": successor,
+                                        "operator_confirm": True, "_auth_context": auth})
+            assert raised.value.code == "close_progeny_unsupported"
+            assert "spawn --handoff" in str(raised.value)
+            assert tmux.kills == 0
+            assert (await store.fetch_session(HOST, "progeny"))["status"] == "open"
+            assert await store.latest_close_audit(sid) is None
+        finally:
+            store.stop()
+    asyncio.run(go())
 
 
 # --- Runtime close generation fence ----------------------------------------- #
