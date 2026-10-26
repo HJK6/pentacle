@@ -246,13 +246,21 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
                     challenge: dict | None) -> dict:
     wire = dict(frame)
     token = None
+    required_token = None
+    if frame.require_seat_token:
+        # thread's base preflight rejects an unusable seat credential before
+        # loading any operator credential. Keep that order after identity has
+        # resolved, and reuse this token for the frame being sent.
+        required_token = stream_token_from_env()
+        if not required_token:
+            raise SeatCredentialUnavailable()
     if frame.hello_style:
         operator = resolve_operator_token(config)
         explicit = frame.explicit_identity
         stream_id = identity.stream_id if frame.infer_identity else explicit
         style = frame.hello_style
         if style in {"persistent", "snapshot"}:
-            token = stream_token_from_env()
+            token = required_token if frame.require_seat_token else stream_token_from_env()
             if style == "snapshot" and operator.value:
                 wire["token"] = operator.value
             if stream_id and token:
@@ -262,7 +270,7 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
         elif style == "normal":
             if stream_id:
                 wire["from_stream_id"] = stream_id
-                token = stream_token_from_env()
+                token = required_token if frame.require_seat_token else stream_token_from_env()
                 if token:
                     wire["stream_token"] = token
             if operator.value:
@@ -272,7 +280,7 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
                 wire["token"] = operator.value
             token = frame.identity_token
             if token is None and frame.infer_identity_token:
-                token = stream_token_from_env()
+                token = required_token if frame.require_seat_token else stream_token_from_env()
             if stream_id and (token or not frame.infer_identity_token):
                 wire["from_stream_id"] = stream_id
                 if token:
@@ -287,7 +295,7 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
         if action == "caller":
             wire = _insert(wire, before, {argument: frame.caller[argument]})
         else:
-            token = stream_token_from_env()
+            token = required_token if frame.require_seat_token else stream_token_from_env()
             if token:
                 fields = {}
                 if identity_with_token:
@@ -295,10 +303,6 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
                 if not argument or "stream_token" not in wire:
                     fields["stream_token"] = token
                 wire = _insert(wire, before, fields)
-    if frame.require_seat_token:
-        token = stream_token_from_env()
-        if not token:
-            raise SeatCredentialUnavailable()
     return wire
 
 

@@ -314,3 +314,37 @@ def test_reader_real_preargparse_cli_contract(monkeypatch, tmp_path, capsys, val
     else:
         assert not sockets
         assert json.loads(output.out)["error_code"] == "unavailable"
+
+
+@pytest.mark.parametrize("state", ["missing-file", "empty-file", "unreadable-file", "empty-env"])
+def test_thread_unusable_seat_source_precedes_operator_loader(monkeypatch, tmp_path, capsys, state):
+    token = tmp_path / "seat-token"
+    env = {"HOME": str(tmp_path), "AGENT_ORCH_HOST_ID": "fixture"}
+    if state == "empty-env":
+        env["AGENT_ORCH_STREAM_TOKEN"] = ""
+    else:
+        env["AGENT_ORCH_STREAM_TOKEN_FILE"] = str(token)
+        if state != "missing-file":
+            token.write_text("" if state == "empty-file" else "FILE-sentinel")
+            token.chmod(0o600)
+    monkeypatch.setattr(os, "environ", env)
+    reads = []
+    def operator_loader(*args):
+        reads.append(True)
+        raise PermissionError("operator file unreadable")
+    monkeypatch.setattr(b, "_file_token", operator_loader)
+    if state == "unreadable-file":
+        original = Path.read_text
+        def read(self, *args, **kwargs):
+            if self == token:
+                raise PermissionError("seat file unreadable")
+            return original(self, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", read)
+    socket = Socket()
+    monkeypatch.setattr(w.websockets, "connect", lambda *args, **kwargs: Connection(socket))
+    assert cli.main(["thread", "fixture:child", "--timeout", "1"]) == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert output.err == "agent-orch thread: unauthorized (verified seat token required)\n"
+    assert not reads
+    assert not socket.raw and socket.closed
