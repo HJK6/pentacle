@@ -65,6 +65,15 @@ def inventory(package):
         module = ".".join(path.relative_to(package).with_suffix("").parts)
         tree = ast.parse(path.read_text())
         parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        constants = {node.targets[0].id: node.value.value for node in ast.walk(tree)
+                     if isinstance(node, ast.Assign) and len(node.targets) == 1
+                     and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
+                     and isinstance(node.value.value, str)}
+        websocket_names = {alias.asname or alias.name for node in ast.walk(tree)
+                           if isinstance(node, ast.Import) for alias in node.names if alias.name == "websockets"}
+        connect_names = {alias.asname or alias.name for node in ast.walk(tree)
+                         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("websockets")
+                         for alias in node.names if alias.name == "connect"}
         def qualified(node):
             parts = []
             while node is not None:
@@ -75,7 +84,7 @@ def inventory(package):
         def fail(node, reason):
             errors.append(f"{module}:{node.lineno}:{qualified(node)}: {reason}")
         def literal(node):
-            return node.value if isinstance(node, ast.Constant) else None
+            return node.value if isinstance(node, ast.Constant) else constants.get(node.id) if isinstance(node, ast.Name) else None
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 name = ast.unparse(node.func).split(".")[-1]
@@ -83,7 +92,10 @@ def inventory(package):
                     sends.append((module, qualified(node)))
                     if module != BOUNDARY or qualified(node) not in {"send_frame", "send_uncredentialed"}:
                         fail(node, "direct send outside boundary")
-                if isinstance(node.func, ast.Attribute) and name == "connect" and ast.unparse(node.func.value).endswith("websockets"):
+                if ((isinstance(node.func, ast.Attribute) and name == "connect"
+                     and (ast.unparse(node.func.value) in websocket_names
+                          or ast.unparse(node.func.value).endswith(".websockets")))
+                        or (isinstance(node.func, ast.Name) and name in connect_names)):
                     connects.append((module, qualified(node)))
                     if (module, qualified(node)) not in CONNECTS:
                         fail(node, "unlisted connect")
@@ -99,6 +111,12 @@ def inventory(package):
                         fail(node, "credential loader outside boundary")
                     if isinstance(node.func, ast.Attribute) and name in {"get", "pop", "setdefault"} and ast.unparse(node.func.value) in {"os.environ", "environ"} and node.args and literal(node.args[0]) in ENV:
                         fail(node, "credential environment read outside boundary")
+                    if ast.unparse(node.func) == "os.getenv" and node.args and literal(node.args[0]) in ENV:
+                        fail(node, "credential environment read outside boundary")
+                    if name == "setdefault" and node.args and literal(node.args[0]) in KEYS:
+                        fail(node, "credential write outside boundary")
+                    if name == "getattr" and len(node.args) >= 2 and literal(node.args[1]) == "token":
+                        fail(node, "Config.token read outside boundary")
                     for keyword in node.keywords:
                         if keyword.arg in KEYS and name in {"dict", "Frame", "update", "replace", "Config"}:
                             # Config(token='') is a compatibility field, not a frame.
@@ -108,20 +126,30 @@ def inventory(package):
                 continue
             # This path-name literal also catches dynamic comprehensions such
             # as os.environ.get(k) for k in ('AGENT_ORCH_STREAM_TOKEN_FILE',).
-            if isinstance(node, ast.Constant) and node.value == "AGENT_ORCH_STREAM_TOKEN_FILE":
+            if isinstance(node, ast.Constant) and node.value in ENV:
                 # ssh's static SendEnv name list is routing metadata, without
                 # a value lookup. It does not load a credential or file path.
                 ancestor = parents.get(node)
                 while ancestor is not None and not isinstance(ancestor, ast.Assign):
                     ancestor = parents.get(ancestor)
                 names = [ast.unparse(target) for target in ancestor.targets] if ancestor else []
-                if module != "cli" or names != ["SSH_SEND_ENV_NAMES"]:
-                    fail(node, "credential file-path lookup outside boundary")
+                parent = parents.get(node)
+                presence = (isinstance(parent, ast.Compare) and len(parent.ops) == 1
+                            and isinstance(parent.ops[0], (ast.In, ast.NotIn))
+                            and ast.unparse(parent.comparators[0]) == "os.environ")
+                descriptor_name = (isinstance(parent, ast.keyword) and parent.arg == "env_name"
+                                   and isinstance(parents.get(parent), ast.Call)
+                                   and ast.unparse(parents[parent].func) == "OperatorTokenSource")
+                allowed = ((module == "cli" and names == ["SSH_SEND_ENV_NAMES"])
+                           or (module == "config" and node.value == "AGENT_ORCH_TOKEN" and (presence or descriptor_name))
+                           or (module == "work_report_cli" and names == ["TOKEN_ENV"] and not qualified(node)))
+                if not allowed:
+                    fail(node, "credential environment read or path lookup outside boundary")
             if isinstance(node, ast.Subscript) and literal(node.slice) in KEYS and isinstance(node.ctx, ast.Store):
                 fail(node, "credential write outside boundary")
             if isinstance(node, ast.Subscript) and ast.unparse(node.value) in {"os.environ", "environ"} and literal(node.slice) in ENV:
                 fail(node, "credential environment read outside boundary")
-            if isinstance(node, ast.Attribute) and node.attr == "token" and ast.unparse(node.value) in {"config", "self.config", "cfg"}:
+            if isinstance(node, ast.Attribute) and node.attr == "token":
                 fail(node, "Config.token read outside boundary")
             if isinstance(node, ast.Dict) and any(literal(k) in KEYS for k in node.keys):
                 fail(node, "credential dict outside boundary")
@@ -144,6 +172,15 @@ def test_package_egress_inventory():
     ("return os.environ.get('AGENT_ORCH_TOKEN')", "credential environment read"),
     ("frame['stream_token'] = 'injected'", "credential write"),
     ("return websockets.connect('ws://fixture.invalid')", "unlisted connect"),
+    ("return os.getenv('AGENT_ORCH_TOKEN')", "credential environment read"),
+    ("TOKEN_NAME = 'PENTACLE_WORK_REPORT_READER_TOKEN'\n    return os.environ.get(TOKEN_NAME)", "credential environment read"),
+    ("TOKEN_NAME = 'AGENT_ORCH_STREAM_TOKEN'\n    return os.environ[TOKEN_NAME]", "credential environment read"),
+    ("return [os.environ.get(name) for name in ('AGENT_ORCH_TOKEN',)]", "credential environment read"),
+    ("frame.setdefault('stream_token', 'injected')", "credential write"),
+    ("return client.config.token", "Config.token read"),
+    ("return getattr(config, 'token')", "Config.token read"),
+    ("from websockets import connect as dial\n    return dial('ws://fixture.invalid')", "unlisted connect"),
+    ("import websockets as transport\n    return transport.connect('ws://fixture.invalid')", "unlisted connect"),
 ])
 def test_guard_rejects_injected_bypass(tmp_path, injection, reason):
     package = tmp_path / "agent_orch"

@@ -24,7 +24,8 @@ for import_root in (WORKTREE / "services", WORKTREE / "services" / "agent-orch",
     sys.path.insert(0, str(import_root))
 
 from agent_orch.config import load_config
-from agent_orch.wsclient import _one_shot_rpc, _stream_token_from_env
+from agent_orch.wsclient import _one_shot_rpc
+from agent_orch.send_boundary import defer_stream_token
 from live_window import LiveWindow, authenticated_operator_connection, write_receipt
 from machines import configured_local_host, load_machines
 
@@ -157,7 +158,7 @@ class D2Journey:
         try:
             os.environ["AGENT_ORCH_STREAM_TOKEN_FILE"] = str(self._token_path(stream_id))
             body = {**payload, "from_stream_id": stream_id, "request_id": str(payload.get("request_id") or uuid.uuid4())}
-            body["stream_token"] = _stream_token_from_env()
+            body = defer_stream_token(body, keep=False, include_empty=True)
             reply = asyncio.run(_one_shot_rpc(self.cfg, body, prefix=body["type"].split(".")[0], from_stream_id=stream_id, timeout=timeout))
             if not str(reply.get("type", "")).endswith(".ok"):
                 raise RuntimeError(f"owned actor operation rejected: {_redact(reply)!r}")

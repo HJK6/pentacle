@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import threading
 import time
+import subprocess
+import sys
 
 import pytest
 
@@ -348,3 +350,34 @@ def test_thread_unusable_seat_source_precedes_operator_loader(monkeypatch, tmp_p
     assert output.err == "agent-orch thread: unauthorized (verified seat token required)\n"
     assert not reads
     assert not socket.raw and socket.closed
+
+
+@pytest.mark.parametrize("token", [None, "", "LEGACY-sentinel"])
+def test_migrated_tool_policy_keeps_nullable_wire_token(monkeypatch, tmp_path, token):
+    monkeypatch.setattr(os, "environ", {} if token is None else {"AGENT_ORCH_STREAM_TOKEN": token})
+    cfg = config.Config("ws://fixture.invalid", "", "fixture", tmp_path)
+    frame = b.defer_stream_token({"type": "fixture", "request_id": "fixture", "from_stream_id": "fixture:seat"},
+                                 keep=False, include_empty=True)
+    assert "stream_token" not in frame
+    socket = Socket()
+    asyncio.run(b.send_frame(socket, frame, config=cfg))
+    assert json.loads(socket.raw[0])["stream_token"] == (token or None)
+
+
+def test_uncredentialed_frame_check_survives_python_optimization():
+    program = """
+import asyncio
+from agent_orch.send_boundary import send_uncredentialed
+class Socket:
+    async def send(self, raw):
+        raise RuntimeError('forbidden send reached')
+try:
+    asyncio.run(send_uncredentialed(Socket(), {'type': 'pong', 'token': 'synthetic'}))
+except AssertionError:
+    pass
+else:
+    raise RuntimeError('credential check missing')
+"""
+    result = subprocess.run([sys.executable, "-O", "-c", program],
+                            env={"PYTHONPATH": str(Path(__file__).parents[1])}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

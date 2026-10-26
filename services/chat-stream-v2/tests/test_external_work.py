@@ -628,7 +628,7 @@ def test_real_cli_round_trip_over_a_loopback_socket(tmp_path, monkeypatch, capsy
         monkeypatch.setattr(cli, "load_config", lambda: Config(f"ws://127.0.0.1:{port}", "", HOST, tmp_path))
         monkeypatch.delenv("AGENT_ORCH_INTERNAL_LEADER_STREAM_ID", raising=False)
         actor = [DESK]
-        monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: rig.tokens[actor[0]])
+        monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: rig.tokens[actor[0]])
         queue = tmp_path / "queue.md"
         queue.write_text("# synthetic queue\n- packet://2 ready\n")
         record_file = tmp_path / "record.json"

@@ -190,8 +190,8 @@ def test_public_close_cli_fences_reopened_target(tmp_path, monkeypatch, capsys, 
             assert original["session_generation"] != replacement["session_generation"]
             monkeypatch.setattr(cli, "load_config", lambda: Config(close.rpc_url, "", HOST, tmp_path))
             monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _: MANAGER)
-            monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "fixture-manager-token")
-            monkeypatch.setattr(wsclient, "_stream_token_from_file", lambda *a, **k: "fixture-manager-token")
+            monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "fixture-manager-token")
+            monkeypatch.setattr("agent_orch.send_boundary._stream_token_from_file", lambda *a, **k: "fixture-manager-token")
             command = ["close", HOST + ":target", "--reason", REASON]
             if generation != "omitted":
                 expected = original if generation == "stale" else replacement

@@ -5,6 +5,8 @@ Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one age
 ## Outbound credentials
 
 `agent_orch/send_boundary.py` owns credential loading and websocket serialization.
+Credential loaders live only in that module; callers must use its deferred
+frame policies instead of importing loaders from `wsclient` or `config`.
 Every hello and request uses `send_frame`; credential-free pongs, upload chunks
 and blob fetches use the checked `send_uncredentialed` path. Builders and queued
 requests retain credential policies and opaque caller inputs, and resolve identity
@@ -17,6 +19,8 @@ the reader uses only `PENTACLE_WORK_REPORT_READER_TOKEN`, preserving its bytes.
 Conflicting service identity sources or unusable service credentials stop the
 send and close the connection. Service CLI failures exit 2 with one diagnostic
 containing the identity and credential source, without credential values.
+For service callers, command output is buffered until completion so a refused
+request produces only that diagnostic.
 `report get` preserves its consumer contract: JSON `unavailable`, exit 1.
 The reader authenticates its hello; its lookup request has only `type`,
 `request_id` and `report_id`. Dashboard ownership transfer rejects service
@@ -31,7 +35,7 @@ its existing unauthorized result when the boundary finds an unusable seat token.
 Attachment path checks obtain token-file paths through a metadata-only accessor.
 
 `tests/test_send_boundary_census.py` inventories the package's sends, connects,
-credential reads and writes; mutation tests prove bypass detection. The wire
+credential reads and writes; mutation tests exercise the listed bypass forms. The wire
 matrix compares ordinary frames with the committed base capture. Merging this
 change updates source only; installing the client is a separate rollout.
 

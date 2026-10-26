@@ -201,10 +201,12 @@ def prepare_frame(payload: dict) -> Frame:
 
 
 def defer_stream_token(payload: dict, *, enabled=True, keep=True,
-                       from_stream_id=None, identity_with_token=False, require=False) -> Frame:
+                       from_stream_id=None, identity_with_token=False, require=False,
+                       include_empty=False) -> Frame:
     frame = prepare_frame(payload)
     if enabled:
-        frame.edits.append((tuple(frame) + tuple(frame.caller), "stream", keep, from_stream_id, identity_with_token))
+        action = "nullable-stream" if include_empty else "stream"
+        frame.edits.append((tuple(frame) + tuple(frame.caller), action, keep, from_stream_id, identity_with_token))
     frame.require_seat_token |= require
     return frame
 
@@ -296,7 +298,7 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
             wire = _insert(wire, before, {argument: frame.caller[argument]})
         else:
             token = required_token if frame.require_seat_token else stream_token_from_env()
-            if token:
+            if token or action == "nullable-stream":
                 fields = {}
                 if identity_with_token:
                     fields["from_stream_id"] = stream_id
@@ -339,5 +341,6 @@ async def send_frame(ws, payload: dict, identity: OutboundIdentity | None = None
 async def send_uncredentialed(ws, frame: dict, *, compact=True):
     if getattr(ws, "_agent_orch_credential_failed", False):
         raise ServiceCredentialUnavailable(resolve_outbound_identity())
-    assert CREDENTIAL_KEYS.isdisjoint(frame), "credential in uncredentialed frame"
+    if not CREDENTIAL_KEYS.isdisjoint(frame):
+        raise AssertionError("credential in uncredentialed frame")
     await ws.send(json.dumps(frame, separators=(",", ":") if compact else None))
