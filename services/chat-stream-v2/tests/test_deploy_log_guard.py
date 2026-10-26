@@ -250,3 +250,32 @@ def test_explicit_guard_overrides_missing_default(isolated_release, tmp_path):
         assert any(call[0] == "launchctl" for call in calls)
     finally:
         override.rmdir()
+
+
+def _managed_window(module, tmp_path, monkeypatch, stdout, stderr):
+    from managed_logs import Config
+    config = Config(tmp_path / 'daemon.out', tmp_path / 'daemon.err')
+    for path in (config.stdout, config.stderr):
+        path.write_text('prior\n')
+    monkeypatch.setattr(module, '_daemon_log_paths', lambda _: (config.stdout, config.stderr))
+    monkeypatch.setattr(module, '_managed_log_config', lambda _: config)
+    offsets = module._capture_log_offsets((config.stdout, config.stderr))
+    for path, content in ((config.stdout, stdout), (config.stderr, stderr)):
+        with path.open('a') as stream:
+            stream.write(content)
+    return module._scan_slow_consumer_window(module.SERVICES['chat-streamd-v2'], offsets)
+
+
+@pytest.mark.parametrize('sink', ['stdout', 'stderr', 'both', 'neither'])
+@pytest.mark.parametrize('diagnostic', ['', 'INFO ws client=reader close code=1011\n',
+                                      'WARNING slow_consumer overflow client=reader\n'])
+def test_legacy_boot_prefix_cannot_prove_managed_generation(tmp_path, monkeypatch, sink, diagnostic):
+    module = _load_deploy(tmp_path, monkeypatch)
+    boot = module.V2_BOOT_LINE + ' 127.0.0.1:1234\n'
+    result = _managed_window(module, tmp_path, monkeypatch,
+                             boot if sink in ('stdout', 'both') else '',
+                             (boot if sink in ('stderr', 'both') else '') + diagnostic)
+    assert result['outcome'] == module.SLOW_CONSUMER_FAILED
+    assert result['attribution']['outcome'] == 'attribution_ambiguous'
+    assert result['attribution']['reasons']
+    assert result['scan_complete']

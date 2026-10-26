@@ -1273,8 +1273,14 @@ def _scan_slow_consumer_window(
                     if boot_marker_seen and (seen or not has_boot):
                         yield line
         scan = classify_slow_consumer_lines(selected(), boot_marker_seen=boot_marker_seen, max_examples=100)
-        if not boot_marker_seen:
-            scan["outcome"] = SLOW_CONSUMER_FAILED
+        # A bare listening prefix identifies neither the process nor its boot.
+        # Stage-one diagnosis is deliberately fail-closed even when both sinks
+        # contain that legacy prefix. Preserve observed failures as evidence.
+        scan["outcome"] = SLOW_CONSUMER_FAILED
+        scan["attribution"] = {
+            "outcome": "attribution_ambiguous",
+            "reasons": ["managed logs lack activated process generation proof"],
+        }
         return {**scan, "scan_complete": True, "inputs": inputs,
                 "bytes_read": sum(i["bytes_read"] for i in inputs),
                 "log_paths": [str(path) for path in paths]}
