@@ -426,7 +426,7 @@ class AssistantComposite:
         return binding
 
     async def binding(self) -> dict[str, Any]:
-        return {"type": "assistant.binding.ok", **await self.store.get_assistant_binding(
+        return {"type": "assistant.binding.ok", "composite_stream_id": self.config.stream_id, **await self.store.get_assistant_binding(
             env_binding=self._env_binding(), name=self.env_config.name,
         )}
 

@@ -8,6 +8,28 @@ from provider_accounts import AccountError, Binding, Registry
 from provider_account_native import codex_observation, claude_observation, enroll
 
 
+def test_operator_callback_is_not_login_success_until_matching_native_completion(tmp_path):
+    from provider_account_host import OperatorBrowser
+    from provider_account_native import native_login
+    import os
+    reader, writer = os.pipe(); callback = OperatorBrowser(writer)
+    closed, reads = [], []
+    class RPC:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): closed.append(True)
+        def call(self, method, params):
+            return {"type":"chatgpt", "loginId":"expected", "authUrl":"https://auth.openai.com/oauth/authorize?state=fixture-only"}
+        def read(self, deadline):
+            reads.append(True)
+            return {"method":"account/login/completed", "params":{"loginId":"wrong" if len(reads)==1 else "expected", "success":True}}
+    try:
+        assert native_login(binding(tmp_path), callback, rpc_factory=RPC) == "ok"
+        assert len(reads) == 2 and closed == [True]
+        assert os.read(reader, 8193).count(b"\n") == 1
+    finally: callback.close(); os.close(reader)
+
+
 def binding(tmp_path, provider="codex"):
     return Binding(provider, "primary", "host-a", str(tmp_path), "login-a", "browser-a", "/bin/echo", "fixture-1", "macos")
 

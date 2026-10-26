@@ -151,7 +151,7 @@ class AccountRuntime:
 
     async def _operation(self,message):
         action=message.get("action","status"); auth=message.get("_auth_context") or {}
-        if action in {"default-set","relogin","revalidate-health"}: await self._front_desk(auth)
+        if action in {"default-set","relogin","revalidate-health","upgrade"}: await self._front_desk(auth)
         elif action in {"probe","observe-failure","observation"}:
             if not self.watcher_authorized(auth,message.get("host")):
                 # Front desk may request a bound probe, but only the fixed host
@@ -163,6 +163,9 @@ class AccountRuntime:
         else: raise AccountError("account_action_invalid")
         allowed={"type","action","request_id","operation_id","provider","account","host","login_generation",
             "reason","kind","from_stream_id","stream_token","protocol"}
+        if action=="upgrade":
+            allowed.discard("kind")
+            allowed.update({"new_generation","expected_version","expected_executable_sha256"})
         if action=="observation": allowed.add("observation")
         if action=="revalidate-health": allowed.add("expected_revision")
         if any(not str(k).startswith("_") and k not in allowed for k in message): raise AccountError("account_request_invalid")
@@ -179,6 +182,11 @@ class AccountRuntime:
         _component(host); _component(alias)
         if provider not in {"codex","claude"}: raise AccountError("account_request_invalid")
         if not self.manages(host,provider): raise AccountError("account_feature_off")
+        if action=="upgrade":
+            if not self.executor: raise AccountError("account_executor_unavailable")
+            from account_upgrade import upgrade
+            result=await upgrade(self.executor,message,auth)
+            return {"type":"account.ok","accepted":True,"result":result}
         if action=="revalidate-health":
             if not self.executor: raise AccountError("account_executor_unavailable")
             result=await self.executor.revalidate_health(message,auth)

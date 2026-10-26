@@ -13,6 +13,8 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import stat
+from urllib.parse import urlsplit
 
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
@@ -21,13 +23,60 @@ from provider_account_native import (
 )
 
 
+def authorization_url(value):
+    """Validate in memory; errors never include the authorization material."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 8192
+            or any(ord(c) <= 32 or ord(c) >= 127 for c in value)):
+        raise AccountError("account_browser_url_invalid")
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or parsed.netloc != "auth.openai.com"
+                or parsed.username or parsed.password or parsed.fragment):
+            raise ValueError()
+    except ValueError: raise AccountError("account_browser_url_invalid") from None
+    return value
+
+
+class OperatorBrowser:
+    """One private inherited pipe/socket. Never inherited by native children."""
+    def __init__(self, fd):
+        try:
+            if type(fd) is not int or fd < 3: raise ValueError()
+            mode = os.fstat(fd).st_mode
+            if not (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)) or os.isatty(fd): raise ValueError()
+            import fcntl
+            if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY: raise ValueError()
+            os.set_inheritable(fd, False)
+        except (OSError, ValueError): raise AccountError("account_browser_fd_invalid") from None
+        self.fd = fd
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def __call__(self, binding, url):
+        if self.fd is None or binding.provider != "codex": raise AccountError("account_browser_fd_invalid")
+        try:
+            data = (authorization_url(url) + "\n").encode()
+            # A socket/pipe write can be partial; the reader enforces the same bound.
+            while data:
+                count = os.write(self.fd, data)
+                if count <= 0: raise OSError()
+                data = data[count:]
+            return {"outcome": "ok"}
+        except OSError: raise AccountError("account_browser_delivery_failed") from None
+        finally: self.close()
+
+
 class NativeHost:
-    def __init__(self, config, *, run=subprocess.run, login=native_login, observation=None):
+    def __init__(self, config, *, run=subprocess.run, login=native_login, observation=None, operator_browser=None):
         self.config, self.run, self.login = config, native_run if run is subprocess.run else run, login
         self.registry = Registry(Path(config["registry"]), Path(config["root"]))
         self.journal = self.registry.path.parent / "account-operations"
         self.observation = observation or self._observation
         self._probe_observation = observation or partial(self._observation, wait_for_refresh=True)
+        self.operator_browser = operator_browser
 
     def _cell(self, provider, alias):
         try: cell = self.config["cells"][f"{provider}:{alias}"]
@@ -62,6 +111,7 @@ class NativeHost:
         # read supplies identity, all windows and the actual upstream timestamp.
 
     def _browser(self, binding, url):
+        if self.operator_browser is not None: return self.operator_browser(binding, url)
         helper = self.config.get("browser_helper")
         if not isinstance(helper, dict): raise AccountError("account_browser_unconfigured")
         try:
@@ -95,6 +145,8 @@ class NativeHost:
         write_private_json(self.journal / (_component(operation_id) + ".json"), state)
 
     def handle(self, action, *, provider, alias, expected_generation, operation_id, generation=None):
+        if self.operator_browser is not None and (action != "enroll" or provider != "codex"):
+            raise AccountError("account_browser_fd_invalid")
         _component(alias)
         if provider not in {"codex", "claude"}:
             raise AccountError("account_request_invalid")
@@ -155,16 +207,21 @@ def main(argv=None):
     parser.add_argument("--login-generation", required=True)
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--new-generation")
+    parser.add_argument("--operator-browser-fd", type=int)
     args = parser.parse_args(argv)
     # The location is host-owned configuration, never a worker's --target.
     path = Path.home() / ".config/pentacle/provider-account-host.json"
+    browser = None
     try:
+        if args.operator_browser_fd is not None:
+            if args.action != "enroll" or args.provider != "codex": raise AccountError("account_browser_fd_invalid")
+            browser = OperatorBrowser(args.operator_browser_fd)
         _private(path.parent, directory=True); _private(path, directory=False)
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
         signal.alarm(300 if args.action == "enroll" else 180 if args.action == "observe" else 90)
-        result = NativeHost(config).handle(args.action, provider=args.provider, alias=args.account,
+        result = NativeHost(config, operator_browser=browser).handle(args.action, provider=args.provider, alias=args.account,
             expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation)
         print(json.dumps(result))
         return 0
@@ -172,7 +229,9 @@ def main(argv=None):
         print(json.dumps({"outcome": str(exc)})); return 1
     except Exception:
         print(json.dumps({"outcome": "account_host_failed"})); return 1
-    finally: signal.alarm(0)
+    finally:
+        signal.alarm(0)
+        if browser is not None: browser.close()
 
 
 if __name__ == "__main__": raise SystemExit(main())

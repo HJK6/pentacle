@@ -64,20 +64,24 @@ class AccountStore:
         if initialize: migrate(conn); conn.commit()
 
     def register(self,binding: Binding):
+        with transaction(self.conn):
+            self._register(binding)
+
+    def _register(self,binding: Binding):
+        """Caller owns the transaction; used for atomic verified imports."""
         for value in (binding.alias,binding.host,binding.generation): _component(value)
         if (not binding.provider_id or not binding.pool_id or binding.provider not in {"codex","claude"}
                 or binding.default_revision != 0):
             raise AccountError("account_binding_unverified")
         data=asdict(binding)
-        with transaction(self.conn):
-            prior=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(binding.key,)).fetchone()
-            if prior and json.loads(prior[0]) != data: raise AccountError("account_binding_immutable")
-            self.conn.execute("UPDATE v2_account_bindings SET active=0 WHERE host=? AND provider=? AND alias=? AND binding_key<>?",
-                (binding.host,binding.provider,binding.alias,binding.key))
-            self.conn.execute("INSERT OR IGNORE INTO v2_account_bindings "
-                "(binding_key,provider,alias,host,generation,pool_id,data,health,active) VALUES (?,?,?,?,?,?,?,?,?)",(
-                binding.key,binding.provider,binding.alias,binding.host,binding.generation,binding.pool_id,
-                json.dumps(data),"healthy" if binding.healthy else "unknown",1))
+        prior=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(binding.key,)).fetchone()
+        if prior and json.loads(prior[0]) != data: raise AccountError("account_binding_immutable")
+        self.conn.execute("UPDATE v2_account_bindings SET active=0 WHERE host=? AND provider=? AND alias=? AND binding_key<>?",
+            (binding.host,binding.provider,binding.alias,binding.key))
+        self.conn.execute("INSERT OR IGNORE INTO v2_account_bindings "
+            "(binding_key,provider,alias,host,generation,pool_id,data,health,active) VALUES (?,?,?,?,?,?,?,?,?)",(
+            binding.key,binding.provider,binding.alias,binding.host,binding.generation,binding.pool_id,
+            json.dumps(data),"healthy" if binding.healthy else "unknown",1))
 
     def bound(self,key):
         row=self.conn.execute("SELECT data FROM v2_account_bindings WHERE binding_key=?",(key,)).fetchone()
@@ -138,18 +142,22 @@ class AccountStore:
 
     def observe(self,key,observation,*,now):
         with transaction(self.conn):
-            binding=self.bound(key)
-            if binding is None: raise AccountError("account_generation_unknown")
-            allowed={k:observation.get(k) for k in (
-                "provider_id","pool_id","auth_mode","collection","observed_at","windows","ordinary_usage_allowed")}
-            if (allowed["provider_id"]!=binding.provider_id or allowed["pool_id"]!=binding.pool_id
-                    or allowed["auth_mode"]!="subscription"):
-                self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
-                    "health_revision=health_revision+1 WHERE binding_key=?",(key,))
-                allowed["collection"]="identity_conflict"
-            # A quota probe never clears an auth failure or identity conflict.
-            self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
-            return allowed["collection"]!="identity_conflict"
+            return self._observe(key,observation,now=now)
+
+    def _observe(self,key,observation,*,now):
+        """Caller owns the transaction; validation matches ordinary observation."""
+        binding=self.bound(key)
+        if binding is None: raise AccountError("account_generation_unknown")
+        allowed={k:observation.get(k) for k in (
+            "provider_id","pool_id","auth_mode","collection","observed_at","windows","ordinary_usage_allowed")}
+        if (allowed["provider_id"]!=binding.provider_id or allowed["pool_id"]!=binding.pool_id
+                or allowed["auth_mode"]!="subscription"):
+            self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
+                "health_revision=health_revision+1 WHERE binding_key=?",(key,))
+            allowed["collection"]="identity_conflict"
+        # A quota probe never clears an auth failure or identity conflict.
+        self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
+        return allowed["collection"]!="identity_conflict"
 
     def failure(self,key,kind,*,now):
         if kind not in {"auth","quota","capacity","network","permission","identity"}: raise AccountError("provider_signal_invalid")
