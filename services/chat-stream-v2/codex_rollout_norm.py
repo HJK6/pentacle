@@ -162,6 +162,14 @@ def normalize_codex_rollout_record(
         code = error.get("codex_error_info") if isinstance(error, dict) else None
         if code == "server_overloaded":
             text = "Codex turn failed: selected model is at capacity (server_overloaded)."
+        elif (
+            isinstance(code, dict)
+            and isinstance(code.get("response_too_many_failed_attempts"), dict)
+            and type(code["response_too_many_failed_attempts"].get("http_status_code")) is int
+            and code["response_too_many_failed_attempts"]["http_status_code"] == 429
+        ):
+            code = "provider_throttled"
+            text = "Codex turn failed: provider throttled the request (HTTP 429)."
         else:
             code = "unknown"
             text = "Codex turn failed with a provider error."

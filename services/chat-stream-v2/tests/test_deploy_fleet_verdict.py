@@ -111,14 +111,18 @@ def test_local_incomplete_never_becomes_partial(tmp_path, monkeypatch, capsys, l
     assert len(stamp["fleet_smoke"]["cells"]) == 8
 
 
-def test_remote_quota_is_still_exit_9(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("reason", ["quota_exhausted", "provider_throttled"])
+def test_remote_environmental_error_is_still_exit_9(tmp_path, monkeypatch, capsys, reason):
     payload = _partial_payload()
     for row in payload["untested"]:
-        row["reason"] = "quota_exhausted"
+        row["reason"] = reason
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=2)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
     assert code == deploy_mod.EXIT_FLEET_SMOKE_UNTESTED == 9
     assert schedules == []
+    assert not stamp["fleet_smoke"]["issues"]
+    assert all(reason in row["reasons"] for row in stamp["fleet_smoke"]["cells"]
+               if row["host"] == "satellite")
 
 
 def test_every_host_cell_and_reason_survives_stamp_and_stdout(tmp_path, monkeypatch, capsys):

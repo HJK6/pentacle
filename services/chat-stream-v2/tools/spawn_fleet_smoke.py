@@ -139,6 +139,15 @@ class CodexQuotaExhausted(RuntimeError):
         super().__init__(f"quota_exhausted: {detail}")
 
 
+class ProviderTurnError(RuntimeError):
+    """A structured terminal error, never arbitrary provider error text."""
+
+    def __init__(self, code: str | None, progress: str) -> None:
+        self.code = code if isinstance(code, str) and code in {"provider_throttled", "server_overloaded"} else "unknown"
+        reason = "provider_throttled" if self.code == "provider_throttled" else "provider_error"
+        super().__init__(f"event: {reason} ({self.code}); {progress}")
+
+
 def _codex_quota_reset(pane_text: str) -> tuple[bool, str | None]:
     """Is `pane_text` a Codex usage-limit surface, and if so its reset time?
 
@@ -248,13 +257,23 @@ def run_cell(
         if inject_stage == stage:
             raise RuntimeError("forced failure")
         if prompt_mode == "promptless":
-            rpc({
+            stage = "send"
+            sent = rpc({
                 "type": "send",
                 "host": host,
                 "session_name": stream_id.partition(":")[2],
                 "text": f"Reply exactly {marker} and do nothing else.",
                 "optimistic_id": str(uuid.uuid4()),
             }, "send")
+            if (sent.get("type") != "send.result" or not sent.get("receipt_id")
+                    or sent.get("delivery") not in {
+                        "accepted", "landed", "committed_pending_proof", "persisted",
+                    }):
+                raise RuntimeError(
+                    "send_accepted=false; input_accepted=unknown; "
+                    "transcript_bound=unknown; reply_seen=unknown"
+                )
+            stage = "event"
         wait_event(stream_id, marker)
         if validate_session is not None:
             session_metrics = validate_session(stream_id, marker)
@@ -272,14 +291,17 @@ def run_cell(
         # Best-effort: a capture/classify error must never skip teardown or mask
         # the red. Forced test injections (`inject_stage`) are never classified.
         try:
-            if inject_stage is None and provider == "codex" and stage in ("event", "readiness") and stream_id:
+            if (not isinstance(exc, ProviderTurnError) and inject_stage is None
+                    and provider == "codex" and stage in ("event", "readiness") and stream_id):
                 pane = (capture_pane or _capture_cell_pane)(host, stream_id.partition(":")[2])
                 is_quota, reset_at = _codex_quota_reset(pane)
                 if is_quota:
                     cell_error = CodexQuotaExhausted(host, reset_at)
         except Exception:
             pass
-        if cell_error is None:
+        if isinstance(exc, ProviderTurnError):
+            cell_error = exc
+        elif cell_error is None:
             cell_error = RuntimeError(f"{stage}: {exc}")
 
     # Teardown ALWAYS runs. A leak is a failure even when the cell also hit a
@@ -354,6 +376,10 @@ def classify_cell_outcome(error: Exception) -> dict[str, object]:
     """Classify environmental cells without turning them into a daemon red."""
     if isinstance(error, CodexQuotaExhausted):
         return {"class": "untested", "reason": "quota_exhausted", "reset_at": error.reset_at}
+    if isinstance(error, ProviderTurnError):
+        return ({"class": "untested", "reason": "provider_throttled"}
+                if error.code == "provider_throttled"
+                else {"class": "failure", "reason": "provider_error"})
     detail = str(error).lower()
     if any(marker in detail for marker in _UNAVAILABLE_MARKERS):
         return {"class": "untested", "reason": "host_unavailable"}
@@ -384,6 +410,7 @@ def _operator_connection(
         registry.configure_runtime(operator.snapshot)
         ws = operator.socket
         pushes: list[dict] = []
+        accepted_sends: set[str] = set()
         state_frames: list[list[dict]] = []
         control_latencies_ms: list[float | None] = []
         history_latencies_ms: list[float] = []
@@ -477,6 +504,11 @@ def _operator_connection(
                     history_latencies_ms.append((time.monotonic() - started) * 1000)
                 if prefix in {"spawn_catalog_get", "asset.list", "ping"}:
                     control_latencies_ms.append((time.monotonic() - started) * 1000)
+                if (prefix == "send" and frame.get("type") == "send.result"
+                        and frame.get("receipt_id") and frame.get("delivery") in {
+                            "accepted", "landed", "committed_pending_proof", "persisted",
+                        }):
+                    accepted_sends.add(str(frame.get("to_stream_id") or ""))
                 return frame
 
         def wait_ready(stream_id: str) -> None:
@@ -491,15 +523,38 @@ def _operator_connection(
 
         def wait_event(stream_id: str, marker: str) -> None:
             deadline = time.monotonic() + timeout
+            input_accepted = transcript_bound = "unknown"
+
+            def progress() -> str:
+                send_accepted = "true" if stream_id in accepted_sends else "unknown"
+                return (f"send_accepted={send_accepted}; input_accepted={input_accepted}; "
+                        f"transcript_bound={transcript_bound}; reply_seen=unknown")
+
             while time.monotonic() < deadline:
                 for frame in pushes:
                     event = frame.get("event") or {}
-                    if event.get("stream_id") == stream_id and event.get("kind") in ASSISTANT_KINDS and marker in str(event.get("text") or ""):
+                    if event.get("stream_id") != stream_id:
+                        continue
+                    raw = event.get("raw") or {}
+                    structured = raw.get("source") == "structured"
+                    if (event.get("kind") == "USER" and structured
+                            and marker in str(event.get("text") or "")):
+                        input_accepted = transcript_bound = "true"
+                    if (event.get("kind") == "ERROR" and structured
+                            and raw.get("subtype") == "provider-turn-error"):
+                        transcript_bound = "true"
+                        raise ProviderTurnError(raw.get("provider_error_code"), progress())
+                    if event.get("kind") in ASSISTANT_KINDS and marker in str(event.get("text") or ""):
                         drain_pushes_after_marker()
                         return
-                frame = receive(max(0.1, deadline - time.monotonic()))
+                try:
+                    frame = receive(max(0.1, deadline - time.monotonic()))
+                except TimeoutError as exc:
+                    raise RuntimeError(f"reply wait timed out; {progress()}") from exc
+                except Exception as exc:
+                    raise RuntimeError(f"reply wait failed; {progress()}; {exc}") from exc
                 record_push(frame)
-            raise RuntimeError("timed out waiting for assistant event")
+            raise RuntimeError(f"reply wait timed out; {progress()}")
 
         def validate_session(stream_id: str, _marker: str) -> dict:
             # A provider can commit trailing turn records (Claude's SYSTEM
