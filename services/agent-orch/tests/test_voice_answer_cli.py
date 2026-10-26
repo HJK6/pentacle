@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from send_boundary_capture import wire_frame
+
 import asyncio
 import json
 
@@ -81,6 +83,7 @@ def test_voice_answer_once_carries_seat_identity_and_is_retry_eligible(monkeypat
     seen = []
 
     async def fake_one_shot(_config, payload, *, prefix, timeout, from_stream_id=None, **kwargs):
+        payload = await wire_frame(_config, payload)
         seen.append((prefix, dict(payload), from_stream_id))
         return {"type": f"{prefix}.answer.ok"}
 

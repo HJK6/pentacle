@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from send_boundary_capture import wire_frame
+
 import json
 from argparse import Namespace
 import errno
@@ -330,11 +332,12 @@ def _capture_send_transport(monkeypatch, tmp_path, responses):
     queue = list(responses)
 
     async def fake_one_shot(_config, payload, *, prefix, timeout=30.0, from_stream_id=None, **_kwargs):
+        payload = await wire_frame(_config, payload)
         sent.append({"prefix": prefix, "payload": json.loads(json.dumps(payload)), "from": from_stream_id})
         return {**queue.pop(0), "request_id": payload.get("request_id")}
 
     monkeypatch.setattr(wsclient, "_one_shot_rpc", fake_one_shot)
-    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "synthetic-seat-token")
+    monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "synthetic-seat-token")
     monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "example-host-s", tmp_path))
     monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "example-sender:seat-s")
     return sent

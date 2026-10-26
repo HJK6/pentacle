@@ -113,6 +113,17 @@ class Connection:
         await self.socket.close()
 
 
+async def wire_frame(config, payload):
+    """Observe one deferred frame at the actual serialization boundary."""
+    from agent_orch.send_boundary import send_frame
+    socket = Socket()
+    try:
+        await send_frame(socket, payload, config=config)
+        return json.loads(socket.raw[0])
+    finally:
+        await socket.close()
+
+
 def cell_key(path, identity, state, caller):
     return "/".join((path, identity, state, caller))
 
@@ -288,6 +299,9 @@ def run_cell(path, identity, state="F1", caller="none", *, form="bearer", seat_e
         import contextlib
         import io
         stdout, stderr = io.StringIO(), io.StringIO()
+        # Route logging through the same captured stderr under pytest and the
+        # standalone -I invocation (pytest otherwise installs root handlers).
+        stack.enter_context(patch.object(w.logger, "warning", lambda fmt, *args: print(fmt % args, file=sys.stderr)))
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 if path == "thread":

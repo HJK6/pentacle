@@ -19,6 +19,9 @@ def test_base_wire_parity(key, expected):
         actual = run_cell(path, identity, state, form=caller)
     else:
         actual = run_cell(path, identity, state, caller)
+    # Parity concerns transmitted bytes, not a socket opened then closed
+    # before admission. Dashboard's stronger no-connect rule is tested below.
+    actual["frames"] = [frames for frames in actual["frames"] if frames]
     assert actual == expected
 
 
@@ -30,6 +33,11 @@ def test_service_wire_matrix(path, identity, state, caller):
     actual = run_cell(path, identity, state, caller)
     assert actual["closed"]
     frames = [json.loads(raw) for socket in actual["frames"] for raw in socket]
+    if path == "status" and identity == "CD":
+        # This extra builder-policy row rejects a colon-free self stream id
+        # before transport on the base too. Its egress class is covered by rpc.
+        assert not frames and actual["error"] == "ValueError"
+        return
     if state != "F1":
         assert not frames, (path, identity, state, frames)
         if path == "thread":

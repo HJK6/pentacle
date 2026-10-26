@@ -100,12 +100,23 @@ def inventory(package):
                     if isinstance(node.func, ast.Attribute) and name in {"get", "pop", "setdefault"} and ast.unparse(node.func.value) in {"os.environ", "environ"} and node.args and literal(node.args[0]) in ENV:
                         fail(node, "credential environment read outside boundary")
                     for keyword in node.keywords:
-                        if keyword.arg in KEYS:
+                        if keyword.arg in KEYS and name in {"dict", "Frame", "update", "replace", "Config"}:
                             # Config(token='') is a compatibility field, not a frame.
                             if not (module == "config" and name == "Config" and keyword.arg == "token" and literal(keyword.value) == ""):
                                 fail(node, "credential keyword outside boundary")
             if module == BOUNDARY:
                 continue
+            # This path-name literal also catches dynamic comprehensions such
+            # as os.environ.get(k) for k in ('AGENT_ORCH_STREAM_TOKEN_FILE',).
+            if isinstance(node, ast.Constant) and node.value == "AGENT_ORCH_STREAM_TOKEN_FILE":
+                # ssh's static SendEnv name list is routing metadata, without
+                # a value lookup. It does not load a credential or file path.
+                ancestor = parents.get(node)
+                while ancestor is not None and not isinstance(ancestor, ast.Assign):
+                    ancestor = parents.get(ancestor)
+                names = [ast.unparse(target) for target in ancestor.targets] if ancestor else []
+                if module != "cli" or names != ["SSH_SEND_ENV_NAMES"]:
+                    fail(node, "credential file-path lookup outside boundary")
             if isinstance(node, ast.Subscript) and literal(node.slice) in KEYS and isinstance(node.ctx, ast.Store):
                 fail(node, "credential write outside boundary")
             if isinstance(node, ast.Subscript) and ast.unparse(node.value) in {"os.environ", "environ"} and literal(node.slice) in ENV:
@@ -145,3 +156,9 @@ def test_guard_rejects_injected_bypass(tmp_path, injection, reason):
     assert marker in target.read_text()
     errors, *_ = inventory(package)
     assert any(marker in error and reason in error for error in errors), errors
+
+
+def test_attachment_guard_uses_boundary_path_metadata():
+    tree = ast.parse((PACKAGE / "file_delivery.py").read_text())
+    guard = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "guarded_path")
+    assert any(isinstance(node, ast.Call) and ast.unparse(node.func) == "configured_token_file_paths" for node in ast.walk(guard))

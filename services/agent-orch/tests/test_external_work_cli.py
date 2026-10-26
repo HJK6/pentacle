@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from send_boundary_capture import wire_frame
+
 import asyncio
 import json
 
@@ -56,11 +58,12 @@ def test_rpc_helper_attaches_seat_identity_and_refuses_other_verbs(monkeypatch):
     calls = []
 
     async def fake_rpc(_config, payload, **kwargs):
+        payload = await wire_frame(_config, payload)
         calls.append((payload, kwargs))
         return {"type": "external_work.show.ok"}
 
     monkeypatch.setattr(wsclient, "_one_shot_rpc", fake_rpc)
-    monkeypatch.setattr(wsclient, "_stream_token_from_env", lambda: "synthetic-token")
+    monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "synthetic-token")
     monkeypatch.delenv("AGENT_ORCH_INTERNAL_LEADER_STREAM_ID", raising=False)
     monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "test:desk")
     asyncio.run(wsclient.external_work_once(object(), {"type": "external_work.show"}))
