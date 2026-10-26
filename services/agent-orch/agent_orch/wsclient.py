@@ -96,7 +96,7 @@ RPC_RETRY_ELIGIBLE_TYPES = frozenset(
         "await_report",
         "await_spawn",
         # Read-only, and daemon-deduped on (watch_id, request_id).
-        "external_work.show", "external_work.record",
+        "external_work.show", "external_work.record", "screen.lease.status",
         "fetch_blob",
         "inspect_stream",
         "thread.read",
@@ -1828,6 +1828,25 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
     prefix = verb
     payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=prefix, timeout=timeout, from_stream_id=from_stream_id)
+
+
+async def screen_lease_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    """Status is public; lease mutations carry the verified calling seat identity.
+
+    Mutations are deliberately excluded from automatic RPC retries: release is
+    not idempotent, and retrying an expired acquisition can mint a new lease.
+    """
+    verb = payload.get("type")
+    if verb not in {"screen.lease." + v for v in ("acquire", "renew", "release", "status")}:
+        raise ValueError("screen_lease_verb_invalid")
+    actor = None
+    if verb != "screen.lease.status":
+        actor = _resolved_rpc_from_stream_id()
+        token = _stream_token_from_env()
+        if actor and token:
+            payload.update(from_stream_id=actor, stream_token=token)
+    payload.setdefault("request_id", f"screen-{uuid.uuid4()}")
+    return await _one_shot_rpc(config, payload, prefix=verb, timeout=timeout, from_stream_id=actor)
 
 
 async def external_work_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:

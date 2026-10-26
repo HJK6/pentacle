@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .config import load_config
-from . import external_work_cli, prompt_protocol, triage, work_lane_cli
+from . import screen_cli, external_work_cli, prompt_protocol, triage, work_lane_cli
 from . import role_baseline, schema
 from .stream_id import discover_leader_stream_id_short, env_stream_id
 from .wsclient import (
@@ -34,6 +34,7 @@ from .wsclient import (
     close_once,
     coordination_once,
     capacity_retry_once,
+    screen_lease_once,
     external_work_once,
     drain_sessions_once,
     fetch_snapshot,
@@ -5891,6 +5892,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     work_lane_cli.add_parser(subparsers)
     work_lane_cli.add_work_parser(subparsers)
+    screen_cli.add_parser(subparsers)
     external_work_cli.add_parser(subparsers)
     prompt_parser = subparsers.add_parser("prompt")
     prompt_sub = prompt_parser.add_subparsers(dest="prompt_command", required=True)

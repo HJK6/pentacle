@@ -741,6 +741,9 @@ async def run(args: argparse.Namespace) -> int:
     server.handlers.update(watch_wake.wire_handlers())
     from external_work import install as install_external_work
     install_external_work(server, store, sessions, outbound, assistant_composite)
+    from screen_lease import ScreenLease
+    screen_lease = ScreenLease(store, [args.local_host, *peers], env_binding=assistant_composite._env_binding)
+    server.handlers.update(screen_lease.wire_handlers())
 
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.

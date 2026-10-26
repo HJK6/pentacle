@@ -71,6 +71,7 @@ from store_exchange import ExchangeStoreMixin
 from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
 from store_work_index import WorkIndexStoreMixin
 from store_work_lane_episodes import WorkLaneEpisodesStoreMixin
+from store_screen_lease import SCREEN_LEASE_DDL, ScreenLeaseStoreMixin, release_holder_conn
 from store_external_work import EXTERNAL_WORK_DDL, _ExternalWorkStoreMixin
 from store_routing import (
     ASSISTANT_COMPOSITE_LANES_DDL,
@@ -1445,7 +1446,7 @@ def _iso_epoch(value: object) -> float | None:
 
 from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
 
-class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
@@ -1811,7 +1812,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                     conn.execute("RELEASE assistant_operation_constraint")
                     raise
             ensure_work_lane_schema(conn)
-            for ddl in EXTERNAL_WORK_DDL:
+            for ddl in (*EXTERNAL_WORK_DDL, *SCREEN_LEASE_DDL):
                 conn.execute(ddl)
             conn.execute(REPORTS_DDL)
             conn.execute(REPORTS_INDEX_DDL)
@@ -3164,6 +3165,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 return None
             store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
+            release_holder_conn(conn, stream_id, time.time())
             store_capacity_retry.cancel(conn, stream_id, reason="close")
             if close_kind == "operator_offline_close":
                 generation_row = conn.execute(
@@ -3245,6 +3247,7 @@ class Store(WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStor
                 return None
             store_usage.history_close_conn(conn, host, session_name)
             stream_id = f"{host}:{session_name}"
+            release_holder_conn(conn, stream_id, time.time())
             stamp = _routing_iso_now()
             conn.execute(
                 """UPDATE v2_outbound_notices
