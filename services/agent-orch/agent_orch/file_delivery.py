@@ -15,6 +15,8 @@ import re
 import stat
 import sys
 
+from .send_boundary import ServiceCredentialUnavailable, configured_token_file_paths
+
 from _shared.chat_attachment_types import (
     ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_PURPOSE, AttachmentError,
     sanitized_filename, validated_media_type,
@@ -48,8 +50,8 @@ def guarded_path(value):
     xdg = os.environ.get('XDG_CONFIG_HOME')
     if xdg:
         roots += [Path(xdg).expanduser() / p for p in ('pentacle-stream', 'pentacle', 'agent-orch', 'dot', 'gcloud', 'gh', 'op')]
-    explicit = [Path(os.environ[k]).expanduser() for k in
-        ('AGENT_ORCH_STREAM_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+    explicit = configured_token_file_paths() + [Path(os.environ[k]).expanduser() for k in
+        ('AWS_SHARED_CREDENTIALS_FILE',
          'AWS_CONFIG_FILE', 'GOOGLE_APPLICATION_CREDENTIALS')
         if os.environ.get(k)]
     explicit += [Path(value).expanduser() for value in
@@ -218,6 +220,8 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
     except (OSError, UnicodeError, ValueError):
         _print({'type': 'send_file.error', 'error_code': 'file_or_receipt_invalid'})
         return 2
+    except ServiceCredentialUnavailable:
+        raise
     except Exception:
         # Transport exceptions can contain credentials, URLs or request payloads.
         _print({'type': 'send_file.error', 'error_code': 'transport_error'})

@@ -20,58 +20,21 @@ import websockets.exceptions
 
 from . import agent_orch_version
 from .config import Config
+from .send_boundary import (
+    Frame, prepare_frame, defer_stream_token, hello_frame, caller_stream_token,
+    resolve_outbound_identity, resolve_operator_token, ServiceCredentialUnavailable,
+    SeatCredentialUnavailable, send_frame, send_uncredentialed,
+)
 from .schema import validate_inbox
 
 
 logger = logging.getLogger(__name__)
 
 AGENT_ORCH_CAPABILITY_FLAGS = ["spec_id", "stream_token", "status"]
-FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID = "altum-bot-cd"
-WMI_BACKUP_NOTIFICATION_PRODUCER_ID = "amaterasu:wmi-pg-dailybackup"
-SYSTEM_NOTIFICATION_PRODUCER_IDS = frozenset({
-    FIXED_SYSTEM_NOTIFICATION_PRODUCER_ID, WMI_BACKUP_NOTIFICATION_PRODUCER_ID,
-})
 
 
 def _agent_orch_capabilities_payload() -> dict[str, Any]:
     return {"version": agent_orch_version(), "flags": list(AGENT_ORCH_CAPABILITY_FLAGS)}
-
-
-def _stream_token_from_file() -> str | None:
-    """Read only the user-owned mode-0600 token file, if configured."""
-    token_file = os.environ.get("AGENT_ORCH_STREAM_TOKEN_FILE")
-    if not token_file:
-        return None
-    try:
-        path = Path(token_file).expanduser()
-        stat_result = path.stat()
-        if (
-            not path.is_file()
-            or stat_result.st_uid != os.getuid()
-            or stat_result.st_mode & 0o077
-        ):
-            return None
-        value = path.read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        return None
-    return value or None
-
-
-def stream_token_from_env() -> str | None:
-    """Read the seat token from its private file, falling back to legacy env.
-
-    Spawned v2 seats carry only ``AGENT_ORCH_STREAM_TOKEN_FILE`` in their
-    environment. Refuse a file that is not a user-owned, mode-0600 regular
-    file so the replacement cannot silently become another readable surface.
-    """
-    token_file = os.environ.get("AGENT_ORCH_STREAM_TOKEN_FILE")
-    if token_file:
-        return _stream_token_from_file()
-    token = os.environ.get("AGENT_ORCH_STREAM_TOKEN")
-    return token if token else None
-
-
-_stream_token_from_env = stream_token_from_env
 
 
 WEBSOCKET_MAX_SIZE = 128 * 1024 * 1024
@@ -516,7 +479,7 @@ class WebsocketClient:
             close_timeout=keepalive.close_timeout,
         ) as ws:
             self._ws = ws
-            await ws.send(json.dumps(self._hello(), separators=(",", ":")))
+            await send_frame(ws, self._hello(), config=self.config)
             async for raw in ws:
                 message = json.loads(raw)
                 await self._handle_message(message)
@@ -533,14 +496,7 @@ class WebsocketClient:
             "host": self.config.host_id,
             "agent_orch_capabilities": _agent_orch_capabilities_payload(),
         }
-        leader_stream_id = _resolved_rpc_from_stream_id()
-        stream_token = _stream_token_from_env()
-        if leader_stream_id and stream_token:
-            hello["from_stream_id"] = leader_stream_id
-            hello["stream_token"] = stream_token
-        if self.config.token:
-            hello["token"] = self.config.token
-        return hello
+        return hello_frame(hello, "persistent")
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         message_type = message.get("type")
@@ -548,7 +504,7 @@ class WebsocketClient:
             raise PermissionError(str(message.get("error_code") or message.get("error") or message_type))
         if message_type == "ping":
             if self._ws:
-                await self._ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
+                await send_uncredentialed(self._ws, {"type": "pong"})
             return
         if message_type == "snapshot":
             hosts = message.get("hosts", [])
@@ -761,7 +717,7 @@ class WebsocketClient:
                 ):
                     return None
             pending.send_owner = owner
-            return dict(pending.payload)
+            return Frame(pending.payload)
 
     def _clear_pending_send_claim(
         self,
@@ -862,7 +818,7 @@ class WebsocketClient:
                 pending.resume_in_flight = False
                 return False
         try:
-            await self._ws.send(json.dumps(payload, separators=(",", ":")))
+            await send_frame(self._ws, payload, config=self.config)
         except Exception:
             self._clear_pending_send_claim(request_id, pending, owner=owner, resume_failed=owner.startswith("resume:"))
             raise
@@ -879,6 +835,7 @@ class WebsocketClient:
         return False
 
     def _rpc(self, prefix: str, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = prepare_frame(payload)
         request_id = payload.get("request_id") or f"{prefix}-{uuid.uuid4()}"
         payload["request_id"] = request_id
         call_timeout = self._rpc_call_timeout(payload)
@@ -1020,6 +977,8 @@ class WebsocketClient:
                         self._clear_pending_send_claim(request_id, pending, owner=owner)
                         raise
                     future.result(timeout=5)
+                except (ServiceCredentialUnavailable, SeatCredentialUnavailable):
+                    raise
                 except Exception as exc:
                     if not retry_eligible:
                         if prefix == "send":
@@ -1106,8 +1065,7 @@ class WebsocketClient:
             # Daemon resume hook: reuse this claude session_id so the original
             # stream_id/dashboard row reopens via `claude --resume`.
             payload["resume_session_id"] = resume_session_id
-        if (parent_stream_id or handoff_from_stream_id) and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
+        payload = defer_stream_token(payload, enabled=bool((parent_stream_id or handoff_from_stream_id)), keep=False)
         spawn_request_id = payload.setdefault("request_id", request_id or f"spawn-{uuid.uuid4()}")
         payload.setdefault("idempotency_key", spawn_request_id)
         payload["client_rpc_timeout_s"] = self.rpc_timeout
@@ -1136,8 +1094,7 @@ class WebsocketClient:
             payload["initial_prompt"] = initial_prompt
         if initial_prompt_blob_sha is not None:
             payload["initial_prompt_blob_sha"] = initial_prompt_blob_sha
-        if created_by_stream_id and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
+        payload = defer_stream_token(payload, enabled=bool((created_by_stream_id)), keep=False)
         return self._rpc("schedule", payload)
 
     def schedule_list(self, state: str | None = None) -> dict[str, Any]:
@@ -1174,8 +1131,7 @@ class WebsocketClient:
         payload: dict[str, Any] = {"type": "send", "host": host, "session_name": session_name, "text": text}
         if from_stream_id is not None:
             payload["from_stream_id"] = from_stream_id
-            if _stream_token_from_env():
-                payload["stream_token"] = _stream_token_from_env()
+            payload = defer_stream_token(payload, enabled=bool(True), keep=False)
         if msg_id is not None:
             payload["msg_id"] = msg_id
         if retry:
@@ -1213,8 +1169,7 @@ class WebsocketClient:
             payload["request_id"] = request_id
         if urgent:
             payload["urgent"] = True
-        if _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
+        payload = defer_stream_token(payload, enabled=bool(True), keep=False)
         return self._rpc("tell", payload)
 
     def close_rpc(
@@ -1243,8 +1198,7 @@ class WebsocketClient:
             payload["caller_stream_id"] = caller_stream_id
         if progeny_stream_id is not None:
             payload["progeny_stream_id"] = progeny_stream_id
-        if (from_stream_id or caller_stream_id) and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
+        payload = defer_stream_token(payload, enabled=bool((from_stream_id or caller_stream_id)), keep=False)
         return self._rpc("close", payload)
 
     def set_visibility(self, host: str, session_name: str, visibility: str) -> dict[str, Any]:
@@ -1317,8 +1271,7 @@ class WebsocketClient:
             body["reason"] = reason
         if result_blob_sha is not None:
             body["result_blob_sha"] = result_blob_sha
-        if _stream_token_from_env():
-            body["stream_token"] = _stream_token_from_env()
+        body = defer_stream_token(body, enabled=bool(True), keep=False)
         return self._rpc("report", body)
 
     def upload_blob(self, data: bytes, *, request_id: str | None = None) -> dict[str, Any]:
@@ -1382,13 +1335,8 @@ async def _fetch_snapshot_async(config: Config, timeout: float, *, events_mode: 
         }
         if events_mode:
             hello["subscribe"]["events_mode"] = events_mode
-        if config.token:
-            hello["token"] = config.token
-        stream_id = _resolved_rpc_from_stream_id()
-        stream_token = _stream_token_from_env()
-        if stream_id and stream_token:
-            hello.update(from_stream_id=stream_id, stream_token=stream_token)
-        await ws.send(json.dumps(hello, separators=(",", ":")))
+        hello = hello_frame(hello, "snapshot")
+        await send_frame(ws, hello, config=config)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic()))
@@ -1396,7 +1344,7 @@ async def _fetch_snapshot_async(config: Config, timeout: float, *, events_mode: 
             if message.get("type") in {"auth.error", "hello.error"}:
                 raise PermissionError(str(message.get("error_code") or message.get("error") or message["type"]))
             if message.get("type") == "ping":
-                await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
+                await send_uncredentialed(ws, {"type": "pong"})
                 continue
             if message.get("type") == "snapshot":
                 hosts = message.get("hosts", [])
@@ -1422,7 +1370,7 @@ def fetch_snapshot(config: Config, timeout: float | None = None, *, events_mode:
                     events_mode=events_mode,
                 )
             )
-        except PermissionError:
+        except (PermissionError, ServiceCredentialUnavailable, SeatCredentialUnavailable):
             raise
         except (asyncio.TimeoutError, SnapshotTimeout, OSError) as exc:
             last_exc = exc
@@ -1442,15 +1390,7 @@ def _hello(config: Config, from_stream_id: str | None = None, *, infer_internal_
         "host": config.host_id,
         "agent_orch_capabilities": _agent_orch_capabilities_payload(),
     }
-    resolved_stream_id = _resolved_rpc_from_stream_id(from_stream_id) if infer_internal_leader else from_stream_id
-    if resolved_stream_id:
-        hello["from_stream_id"] = resolved_stream_id
-        stream_token = _stream_token_from_env()
-        if stream_token:
-            hello["stream_token"] = stream_token
-    if config.token:
-        hello["token"] = config.token
-    return hello
+    return hello_frame(hello, "normal", from_stream_id, infer_identity=infer_internal_leader)
 
 
 def _resolved_rpc_from_stream_id(from_stream_id: str | None = None) -> str | None:
@@ -1467,25 +1407,18 @@ def _resolved_rpc_from_stream_id(from_stream_id: str | None = None) -> str | Non
     return None
 
 
-def _attach_agent_identity(payload: dict[str, Any]) -> str | None:
-    """Carry the calling seat's identity on one-shot authenticated RPCs."""
+def _attach_agent_identity(payload: dict[str, Any]) -> tuple[str | None, Frame]:
+    """Record the caller and send-time credential policy without loading it."""
+    payload = prepare_frame(payload)
     stream_id = (
         payload.get("from_stream_id")
         if isinstance(payload.get("from_stream_id"), str) and payload.get("from_stream_id")
         else _resolved_rpc_from_stream_id()
     )
-    if not stream_id:
-        return None
-    payload["from_stream_id"] = stream_id
-    if "stream_token" not in payload:
-        stream_token = (
-            _stream_token_from_file()
-            if stream_id in SYSTEM_NOTIFICATION_PRODUCER_IDS
-            else _stream_token_from_env()
-        )
-        if stream_token:
-            payload["stream_token"] = stream_token
-    return stream_id
+    if stream_id:
+        payload["from_stream_id"] = stream_id
+        payload = defer_stream_token(payload)
+    return stream_id, payload
 
 
 def _rpc_hello(
@@ -1496,18 +1429,9 @@ def _rpc_hello(
     identity_token: str | None = None,
     infer_identity_token: bool = True,
 ) -> dict[str, Any]:
-    resolved_from_stream_id = _resolved_rpc_from_stream_id(from_stream_id) if infer_from_env else from_stream_id
-    stream_token = identity_token
-    if stream_token is None and infer_identity_token:
-        stream_token = _stream_token_from_env()
-    hello = _hello(
-        config,
-        infer_internal_leader=False,
-    )
-    if resolved_from_stream_id and (stream_token or not infer_identity_token):
-        hello["from_stream_id"] = resolved_from_stream_id
-        if stream_token:
-            hello["stream_token"] = stream_token
+    hello = hello_frame(_hello(config, infer_internal_leader=False), "rpc", from_stream_id,
+                        infer_identity=infer_from_env, identity_token=identity_token,
+                        infer_identity_token=infer_identity_token)
     hello["subscribe"] = {
         "snapshot": False,
         "mode": "rpc",
@@ -1536,13 +1460,13 @@ async def _connect_ready(config: Config, timeout: float, from_stream_id: str | N
     )
     _own_socket(ws)
     try:
-        await ws.send(json.dumps(_hello(config, from_stream_id=from_stream_id), separators=(",", ":")))
+        await send_frame(ws, _hello(config, from_stream_id=from_stream_id), config=config)
         deadline = time.monotonic() + snapshot_timeout
         while time.monotonic() < deadline:
             raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic()))
             message = json.loads(raw)
             if message.get("type") == "ping":
-                await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
+                await send_uncredentialed(ws, {"type": "pong"})
                 continue
             if message.get("type") == "snapshot":
                 return ws, message
@@ -1561,6 +1485,7 @@ async def _connect_rpc_ready(
     infer_from_env: bool = True,
     identity_token: str | None = None,
     infer_identity_token: bool = True,
+    require_seat_token: bool = False,
 ):
     keepalive = _websocket_keepalive_from_env()
     ws = await websockets.connect(
@@ -1571,13 +1496,14 @@ async def _connect_rpc_ready(
         close_timeout=keepalive.close_timeout,
     )
     _own_socket(ws)
-    await ws.send(json.dumps(_rpc_hello(
-        config,
-        from_stream_id=from_stream_id,
-        infer_from_env=infer_from_env,
-        identity_token=identity_token,
-        infer_identity_token=infer_identity_token,
-    ), separators=(",", ":")))
+    hello = _rpc_hello(config, from_stream_id=from_stream_id, infer_from_env=infer_from_env,
+                       identity_token=identity_token, infer_identity_token=infer_identity_token)
+    hello.require_seat_token = require_seat_token
+    try:
+        await send_frame(ws, hello, config=config)
+    except BaseException:
+        await _close_within(ws, _OWNER_DEADLINE.get())
+        raise
     return ws
 
 
@@ -1597,7 +1523,7 @@ async def _read_rpc_frame(
         message = json.loads(raw)
         message_type = str(message.get("type", ""))
         if message_type == "ping":
-            await ws.send(json.dumps({"type": "pong"}, separators=(",", ":")))
+            await send_uncredentialed(ws, {"type": "pong"})
             continue
         if message_type in {"auth.error", "hello.error"}:
             raise PermissionError(str(message.get("error_code") or message.get("error") or message_type))
@@ -1721,6 +1647,7 @@ async def _one_shot_rpc(
 ) -> dict[str, Any]:
     """`deadline_at` (monotonic) caps the retry deadline and every wait, for a
     caller that owns an outer absolute deadline."""
+    payload = prepare_frame(payload)
     request_id = payload["request_id"]
     if deadline_at is None:
         deadline_at = _OWNER_DEADLINE.get()
@@ -1745,11 +1672,14 @@ async def _one_shot_rpc(
             wait_timeout = timeout
             if retry_eligible:
                 wait_timeout = min(timeout, _retry_wait_timeout(retry_deadline, attempts, retry_policy.max_attempts))
-            if infer_from_env:
+            if payload.require_seat_token:
+                ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id,
+                                              infer_from_env=infer_from_env, require_seat_token=True)
+            elif infer_from_env:
                 ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id)
             else:
                 ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id, infer_from_env=False)
-            await ws.send(json.dumps(payload, separators=(",", ":")))
+            await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
             sent_any = True
             response_deadline = time.monotonic() + wait_timeout + response_timeout_extra
             response = await _read_rpc_response(ws, request_id, prefix=prefix, deadline=response_deadline)
@@ -1757,7 +1687,7 @@ async def _one_shot_rpc(
             if hook is not None:
                 hook(response)  # before the socket cleanup in `finally`
             return response
-        except PermissionError:
+        except (PermissionError, ServiceCredentialUnavailable, SeatCredentialUnavailable):
             raise
         except TimeoutError as exc:
             retry_reason = "rpc_timeout"
@@ -1796,16 +1726,14 @@ async def _one_shot_rpc(
 
 async def report_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"report-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="report", timeout=timeout, from_stream_id=from_stream_id)
 
 
 async def tell_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"tell-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="tell", timeout=timeout, from_stream_id=from_stream_id)
 
@@ -1823,8 +1751,8 @@ async def assistant_once(config: Config, payload: dict[str, Any], *, timeout: fl
                     # the mutators stay `assistant.operation` with `operation: work_lane.*`.
                     "work.unattended", "work.owed", "work_lanes.list", "work_lanes.show", "work_lanes.adopt_preview"}:
         raise ValueError("assistant_verb_invalid")
-    if verb == 'assistant.transfer' and from_stream_id and _stream_token_from_env():
-        payload.update(from_stream_id=from_stream_id,stream_token=_stream_token_from_env())
+    payload = defer_stream_token(payload, enabled=verb == "assistant.transfer" and bool(from_stream_id),
+                                 keep=False, from_stream_id=from_stream_id, identity_with_token=True)
     prefix = verb
     payload.setdefault("request_id", f"assistant-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=prefix, timeout=timeout, from_stream_id=from_stream_id)
@@ -1842,9 +1770,8 @@ async def screen_lease_once(config: Config, payload: dict[str, Any], *, timeout:
     actor = None
     if verb != "screen.lease.status":
         actor = _resolved_rpc_from_stream_id()
-        token = _stream_token_from_env()
-        if actor and token:
-            payload.update(from_stream_id=actor, stream_token=token)
+        payload = defer_stream_token(payload, enabled=bool(actor), keep=False,
+                                     from_stream_id=actor, identity_with_token=True)
     payload.setdefault("request_id", f"screen-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=verb, timeout=timeout, from_stream_id=actor)
 
@@ -1854,9 +1781,8 @@ async def external_work_once(config: Config, payload: dict[str, Any], *, timeout
     if payload.get("type") not in {"external_work.show", "external_work.record"}:
         raise ValueError("external_work_verb_invalid")
     from_stream_id = _resolved_rpc_from_stream_id()
-    stream_token = _stream_token_from_env()
-    if from_stream_id and stream_token:
-        payload.update(from_stream_id=from_stream_id, stream_token=stream_token)
+    payload = defer_stream_token(payload, enabled=bool(from_stream_id), keep=False,
+                                 from_stream_id=from_stream_id, identity_with_token=True)
     payload.setdefault("request_id", f"external-work-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="external_work", timeout=timeout,
                                from_stream_id=from_stream_id)
@@ -1869,8 +1795,7 @@ async def send_image_once(config: Config, payload: dict[str, Any], *, timeout: f
     payload carries ``from_stream_id`` + ``stream_token`` for identity, never a
     separate target."""
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"send_image-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="send_image", timeout=timeout, from_stream_id=from_stream_id)
 
@@ -1898,31 +1823,27 @@ async def inbound_audit_once(
 
 async def park_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'park')}-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=str(payload.get("type") or "park"), timeout=timeout, from_stream_id=from_stream_id)
 
 
 async def capacity_retry_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     actor = payload.get("from_stream_id")
-    if actor and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((actor)), keep=True)
     payload.setdefault("request_id", f"capacity-retry-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="capacity_retry", timeout=timeout, from_stream_id=actor)
 
 
 async def account_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     actor = payload.get("from_stream_id")
-    if actor and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((actor)), keep=True)
     return await _one_shot_rpc(config, payload, prefix="account", timeout=timeout, from_stream_id=actor)
 
 
 async def coordination_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'coordination')}-{uuid.uuid4()}")
     family = str(payload.get("type", "")).split(".", 1)[0]
     prefix = family if family in {"watch", "wake"} else "coordination"
@@ -1931,24 +1852,21 @@ async def coordination_once(config: Config, payload: dict[str, Any], *, timeout:
 
 async def spawn_cancel_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"spawn_cancel-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="spawn_cancel", timeout=timeout, from_stream_id=from_stream_id)
 
 
 async def spawn_status_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"spawn_status-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="spawn_status", timeout=timeout, from_stream_id=from_stream_id)
 
 
 async def spawn_freeze_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'spawn_freeze')}-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix=str(payload.get("type") or "spawn_freeze"), timeout=timeout, from_stream_id=from_stream_id)
 
@@ -1956,18 +1874,16 @@ async def spawn_freeze_once(config: Config, payload: dict[str, Any], *, timeout:
 async def notification_create_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = _attach_agent_identity(payload)
-    service_identity = from_stream_id in SYSTEM_NOTIFICATION_PRODUCER_IDS
-    identity_token = payload.get("stream_token") if isinstance(payload.get("stream_token"), str) else None
+    from_stream_id, payload = _attach_agent_identity(payload)
+    identity_token = caller_stream_token(payload)
     ws = await _connect_rpc_ready(
         config,
         from_stream_id=from_stream_id,
         identity_token=identity_token,
-        infer_identity_token=not service_identity,
     )
     try:
         request_id = payload.setdefault("request_id", f"notification-create-{uuid.uuid4()}")
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        await send_frame(ws, payload, config=config)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(
             ws,
@@ -1984,7 +1900,7 @@ async def notification_create_once(
 async def notification_resolve_by_dedup_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     payload.setdefault("request_id", f"notification-resolve-dedup-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config,
@@ -1998,7 +1914,7 @@ async def notification_resolve_by_dedup_once(
 async def notification_resolve_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     payload.setdefault("request_id", f"notification-resolve-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config,
@@ -2023,8 +1939,7 @@ async def nexus_once(
         stream_id = _resolved_rpc_from_stream_id()
         if stream_id:
             payload["from_stream_id"] = stream_id
-    if "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool(True), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'nexus')}-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="nexus", timeout=timeout)
 
@@ -2036,8 +1951,7 @@ async def repo_once(
         stream_id = _resolved_rpc_from_stream_id()
         if stream_id:
             payload["from_stream_id"] = stream_id
-    if "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool(True), keep=True)
     payload.setdefault("request_id", f"{payload.get('type', 'repo')}-{uuid.uuid4()}")
     return await _one_shot_rpc(config, payload, prefix="repo", timeout=timeout)
 
@@ -2048,7 +1962,6 @@ async def _catalog_operator_rpc(config: Config, payload: dict[str, Any], *,
     # Reuse the existing envelope/proof protocol; never send its proof key or
     # fall back to legacy bearer authentication after a credential failure.
     from _shared import operator_auth
-    credential = operator_auth.decode_envelope(config.token)
     deadline = time.monotonic() + timeout
     keepalive = _websocket_keepalive_from_env()
     ws = await asyncio.wait_for(websockets.connect(
@@ -2063,35 +1976,30 @@ async def _catalog_operator_rpc(config: Config, payload: dict[str, Any], *,
                 or challenge.get("scheme") != operator_auth.AUTH_SCHEME):
             raise ValueError("operator credential challenge unavailable")
         hello = _rpc_hello(config, from_stream_id=caller)
-        hello.pop("token", None)
-        hello["client"] = credential["client_kind"]
-        hello["auth_v2"] = {
-            "scheme": operator_auth.AUTH_SCHEME, "credential_id": credential["credential_id"],
-            "proof": operator_auth.make_proof(credential["proof_key"], challenge.get("nonce"),
-                                               credential["credential_id"], credential["client_kind"]),
-        }
-        await asyncio.wait_for(ws.send(json.dumps(hello)), timeout=max(0.01, deadline - time.monotonic()))
+        await asyncio.wait_for(send_frame(ws, hello, config=config, explicit_from_stream_id=caller, challenge=challenge, compact=False), timeout=max(0.01, deadline - time.monotonic()))
         while True:
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic())))
             if frame.get("type") == "ping":
-                await asyncio.wait_for(ws.send(json.dumps({"type": "pong"})),
+                await asyncio.wait_for(send_uncredentialed(ws, {"type": "pong"}, compact=False),
                                        timeout=max(0.01, deadline - time.monotonic()))
                 continue
             if frame.get("type") != "ready":
                 raise PermissionError("operator credential RPC admission refused")
             break
-        await asyncio.wait_for(ws.send(json.dumps(payload)), timeout=max(0.01, deadline - time.monotonic()))
+        await asyncio.wait_for(send_frame(ws, payload, config=config, explicit_from_stream_id=caller, compact=False), timeout=max(0.01, deadline - time.monotonic()))
         return await _read_rpc_response(ws, payload["request_id"], prefix="dashboard", deadline=deadline)
     finally:
         await _close_within(ws, deadline)
 
 
 async def dashboard_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
-    caller = _asset_caller_identity(payload)
+    caller, payload = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"dashboard-{uuid.uuid4()}")
     if payload.get("type") == "dashboard.owner.transfer":
-        from _shared import operator_auth
-        if config.token.startswith(operator_auth.ENVELOPE_PREFIX):
+        identity = resolve_outbound_identity(caller)
+        if identity.kind in {"service", "ambiguous"}:
+            raise ServiceCredentialUnavailable(identity)
+        if resolve_operator_token(config).form == "envelope":
             return await _catalog_operator_rpc(config, payload, caller=caller, timeout=timeout)
         if not caller:
             raise ValueError("operator auth v2 credential envelope or authenticated seat is required")
@@ -2108,8 +2016,7 @@ async def asset_publish_once(
         if isinstance(payload.get("stream_id"), str)
         else None
     )
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", f"asset-publish-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config,
@@ -2120,7 +2027,8 @@ async def asset_publish_once(
     )
 
 
-def _asset_caller_identity(payload: dict[str, Any]) -> str | None:
+def _asset_caller_identity(payload: dict[str, Any]) -> tuple[str | None, Frame]:
+    payload = prepare_frame(payload)
     caller_stream_id = (
         payload.get("from_stream_id")
         if isinstance(payload.get("from_stream_id"), str)
@@ -2132,15 +2040,14 @@ def _asset_caller_identity(payload: dict[str, Any]) -> str | None:
     )
     if caller_stream_id:
         payload.setdefault("from_stream_id", caller_stream_id)
-        if "stream_token" not in payload and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
-    return caller_stream_id
+        payload = defer_stream_token(payload, enabled=bool(True), keep=True)
+    return caller_stream_id, payload
 
 
 async def asset_list_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    caller_stream_id = _asset_caller_identity(payload)
+    caller_stream_id, payload = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"asset-list-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="asset.list", timeout=timeout, from_stream_id=caller_stream_id
@@ -2150,7 +2057,7 @@ async def asset_list_once(
 async def asset_get_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    caller_stream_id = _asset_caller_identity(payload)
+    caller_stream_id, payload = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"asset-get-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="asset.get", timeout=timeout, from_stream_id=caller_stream_id
@@ -2167,7 +2074,7 @@ async def asset_health_once(
 async def asset_comments_list_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    caller_stream_id = _asset_caller_identity(payload)
+    caller_stream_id, payload = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"asset-comments-list-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="asset.comments.list", timeout=timeout, from_stream_id=caller_stream_id
@@ -2177,7 +2084,7 @@ async def asset_comments_list_once(
 async def asset_comment_resolve_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    caller_stream_id = _asset_caller_identity(payload)
+    caller_stream_id, payload = _asset_caller_identity(payload)
     payload.setdefault("request_id", f"asset-comment-resolve-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="asset.comment.resolve", timeout=timeout, from_stream_id=caller_stream_id
@@ -2202,7 +2109,7 @@ async def notification_await_once(
             "notification_id": notification_id,
             "timeout": timeout,
         }
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        await send_frame(ws, payload, config=config)
         deadline = time.monotonic() + timeout + 1.0
         return await _read_rpc_response(
             ws,
@@ -2228,9 +2135,7 @@ async def prompt_ask_once(
     payload.setdefault("request_id", f"prompt-ask-{uuid.uuid4()}")
     if from_stream_id is not None:
         payload["from_stream_id"] = from_stream_id
-        stream_token = _stream_token_from_env()
-        if stream_token:
-            payload["stream_token"] = stream_token
+        payload = defer_stream_token(payload, keep=False)
     return await _one_shot_rpc(
         config,
         payload,
@@ -2254,7 +2159,7 @@ async def prompt_status_once(
 async def prompt_answer_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     payload.setdefault("request_id", f"prompt-answer-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="prompt", timeout=timeout, from_stream_id=from_stream_id
@@ -2265,7 +2170,7 @@ async def voice_answer_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
     """Answer one bound question for a voice take (voice_answers.v1) as the calling seat."""
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     payload.setdefault("request_id", f"voice-answer-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="voice_answer", timeout=timeout, from_stream_id=from_stream_id
@@ -2275,7 +2180,7 @@ async def voice_answer_once(
 async def prompt_cancel_once(
     config: Config, payload: dict[str, Any], *, timeout: float = 30.0
 ) -> dict[str, Any]:
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     payload.setdefault("request_id", f"prompt-cancel-{uuid.uuid4()}")
     return await _one_shot_rpc(
         config, payload, prefix="prompt", timeout=timeout, from_stream_id=from_stream_id
@@ -2291,12 +2196,11 @@ async def prompt_list_once(
 
 async def _inbox_once_attempt(config: Config, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
     stream_id = payload.get("stream_id") if isinstance(payload.get("stream_id"), str) else None
-    if stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((stream_id)), keep=True)
     ws = await _connect_rpc_ready(config, from_stream_id=stream_id)
     try:
         request_id = payload.setdefault("request_id", f"inbox-{uuid.uuid4()}")
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=stream_id)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(ws, request_id, prefix="inbox", deadline=deadline)
     finally:
@@ -2331,8 +2235,7 @@ async def inbox_once(config: Config, payload: dict[str, Any], *, timeout: float 
 
 async def send_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
     from_stream_id = payload.get("from_stream_id") if isinstance(payload.get("from_stream_id"), str) else None
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     if isinstance(payload.get("inbox"), dict):
         validate_inbox(payload["inbox"])
     payload["type"] = "send"
@@ -2357,11 +2260,11 @@ async def send_receipt_once(
     # visibility projection as chat events, or every actual target is hidden.
     ws, _snapshot = await _connect_ready(config, timeout)
     try:
-        await ws.send(json.dumps({
+        await send_frame(ws, {
             "type": "send.receipt.get",
             "to_stream_id": target,
             "request_id": receipt_request,
-        }, separators=(",", ":")))
+        }, config=config)
         return await _read_rpc_response(
             ws, receipt_request, prefix="send.receipt.get",
             deadline=time.monotonic() + timeout,
@@ -2378,8 +2281,7 @@ async def spawn_once(
         payload.get("handoff_from_stream_id") if isinstance(payload.get("handoff_from_stream_id"), str) else None
     )
     asserted_stream_id = handoff_from_stream_id or parent_stream_id
-    if asserted_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((asserted_stream_id)), keep=True)
     payload["type"] = "spawn"
     request_id = payload.setdefault("request_id", f"spawn-{uuid.uuid4()}")
     payload.setdefault("idempotency_key", request_id)
@@ -2691,8 +2593,7 @@ async def schedule_once(config: Config, payload: dict[str, Any], *, timeout: flo
     )
     if from_stream_id:
         payload.setdefault("from_stream_id", from_stream_id)
-    if from_stream_id and "stream_token" not in payload and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=True)
     payload.setdefault("request_id", str(uuid.uuid4()))
     return await _one_shot_rpc(config, payload, prefix="schedule", timeout=timeout, from_stream_id=from_stream_id)
 
@@ -2768,8 +2669,7 @@ async def spec_update_once(
     }
     if from_stream_id:
         payload["from_stream_id"] = from_stream_id
-    if from_stream_id and _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool((from_stream_id)), keep=False)
     return await _one_shot_rpc(config, payload, prefix="session.spec_update", timeout=timeout, from_stream_id=from_stream_id)
 
 
@@ -2795,8 +2695,7 @@ async def status_card_once(
         "from_stream_id": stream_id,
         **fields,
     }
-    if _stream_token_from_env():
-        payload["stream_token"] = _stream_token_from_env()
+    payload = defer_stream_token(payload, enabled=bool(True), keep=False)
     return await _one_shot_rpc(config, payload, prefix="status_card", timeout=timeout, from_stream_id=stream_id)
 
 
@@ -2882,7 +2781,7 @@ async def rename_once(
         "source": source,
     }
     try:
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        await send_frame(ws, payload, config=config)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(ws, request_id, prefix="rename", deadline=deadline)
     finally:
@@ -2932,7 +2831,7 @@ async def role_set_once(
     }
     if baseline_content is not None:
         payload["baseline_content"] = baseline_content
-    from_stream_id = _attach_agent_identity(payload)
+    from_stream_id, payload = _attach_agent_identity(payload)
     return await _one_shot_rpc(
         config, payload, prefix="role.set", from_stream_id=from_stream_id, timeout=timeout,
     )
@@ -3012,11 +2911,8 @@ async def close_once(
             payload["disposition_waived_reason"] = disposition_waived_reason
         if expected_generation is not None:
             payload["expected_generation"] = expected_generation
-        if (from_stream_id or caller_stream_id) and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
-        await ws.send(
-            json.dumps(payload, separators=(",", ":"))
-        )
+        payload = defer_stream_token(payload, enabled=bool((from_stream_id or caller_stream_id)), keep=False)
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(ws, request_id, prefix="close", deadline=deadline)
     finally:
@@ -3065,9 +2961,8 @@ async def reparent_once(
             payload["caller_stream_id"] = caller_stream_id
         if expected_generation is not None:
             payload["expected_generation"] = expected_generation
-        if (from_stream_id or caller_stream_id) and _stream_token_from_env():
-            payload["stream_token"] = _stream_token_from_env()
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        payload = defer_stream_token(payload, enabled=bool((from_stream_id or caller_stream_id)), keep=False)
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(ws, request_id, prefix="reparent", deadline=deadline)
     finally:
@@ -3092,9 +2987,8 @@ async def assistant_lifecycle_once(
         payload: dict[str, Any] = {**fields, "type": "assistant.lifecycle", "request_id": request_id}
         if from_stream_id:
             payload["from_stream_id"] = from_stream_id
-            if _stream_token_from_env():
-                payload["stream_token"] = _stream_token_from_env()
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+            payload = defer_stream_token(payload, enabled=bool(True), keep=False)
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
         deadline = time.monotonic() + timeout
         return await _read_rpc_response(ws, request_id, prefix="assistant.lifecycle", deadline=deadline)
     finally:
@@ -3112,9 +3006,8 @@ async def consent_once(config: Config, verb: str, fields: dict[str, Any], *,
         payload = {**fields, "type": verb, "request_id": request_id}
         if from_stream_id and not local_admin:
             payload["from_stream_id"] = from_stream_id
-            if _stream_token_from_env():
-                payload["stream_token"] = _stream_token_from_env()
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+            payload = defer_stream_token(payload, enabled=bool(True), keep=False)
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
         return await _read_rpc_response(ws, request_id, prefix=verb, deadline=time.monotonic() + timeout)
     finally:
         await ws.close()
@@ -3148,7 +3041,7 @@ async def grant_token_once(
             "request_id": request_id,
             "stream_id": stream_id,
         }
-        await ws.send(json.dumps(payload, separators=(",", ":")))
+        await send_frame(ws, payload, config=config, explicit_from_stream_id=from_stream_id)
         deadline = time.monotonic() + timeout + 1.0
         return await _read_rpc_response(
             ws,
@@ -3226,7 +3119,7 @@ async def upload_blob_once(
             init_payload["purpose"] = purpose
         if filename is not None:
             init_payload["filename"] = filename
-        await ws.send(json.dumps(init_payload, separators=(",", ":")))
+        await send_frame(ws, init_payload, config=config)
         deadline = time.monotonic() + timeout
         init = await _read_rpc_frame(
             ws,
@@ -3247,17 +3140,12 @@ async def upload_blob_once(
                 chunks.append(data[offset : offset + chunk_size])
                 offset += chunk_size
         for index, chunk in enumerate(chunks):
-            await ws.send(
-                json.dumps(
-                    {
+            await send_uncredentialed(ws, {
                         "type": "upload_blob_chunk",
                         "request_id": request_id,
                         "data_b64": base64.b64encode(chunk).decode("ascii"),
                         "final": index == len(chunks) - 1,
-                    },
-                    separators=(",", ":"),
-                )
-            )
+                    })
             if index == len(chunks) - 1:
                 return await _read_rpc_response(
                     ws,
@@ -3282,7 +3170,7 @@ async def upload_prompt_blob_once(
     ws = await _connect_rpc_ready(config)
     request_id = request_id or f"upload-prompt-{uuid.uuid4()}"
     try:
-        await ws.send(json.dumps({"type": "upload_prompt_blob_init", "request_id": request_id, "size_hint_bytes": len(data)}, separators=(",", ":")))
+        await send_frame(ws, {"type": "upload_prompt_blob_init", "request_id": request_id, "size_hint_bytes": len(data)}, config=config)
         deadline = time.monotonic() + timeout
         init = await _read_rpc_frame(
             ws,
@@ -3300,17 +3188,12 @@ async def upload_prompt_blob_once(
             chunks.append(data[offset : offset + chunk_size])
             offset += chunk_size
         for index, chunk in enumerate(chunks):
-            await ws.send(
-                json.dumps(
-                    {
+            await send_uncredentialed(ws, {
                         "type": "upload_prompt_blob_chunk",
                         "request_id": request_id,
                         "data_b64": base64.b64encode(chunk).decode("ascii"),
                         "final": index == len(chunks) - 1,
-                    },
-                    separators=(",", ":"),
-                )
-            )
+                    })
             if index == len(chunks) - 1:
                 return await _read_rpc_response(
                     ws,
@@ -3328,7 +3211,7 @@ async def _fetch_blob_once_attempt(config: Config, blob_sha: str, *, request_id:
     ws = await _connect_rpc_ready(config)
     chunks: list[bytes] = []
     try:
-        await ws.send(json.dumps({"type": "fetch_blob", "request_id": request_id, "blob_sha": blob_sha}, separators=(",", ":")))
+        await send_uncredentialed(ws, {"type": "fetch_blob", "request_id": request_id, "blob_sha": blob_sha})
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             message = await _read_rpc_frame(

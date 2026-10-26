@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Mapping
+from collections.abc import Mapping as MappingABC
 
 from .config import Config
 
@@ -81,8 +82,9 @@ def resolve_operator_token(config: Config) -> ResolvedOperatorToken:
     else:
         loaded = _file_token(source.path)
         kind, value = ("file", loaded) if loaded is not None else ("none", "")
-    from _shared.operator_auth import ENVELOPE_PREFIX
-    return ResolvedOperatorToken(kind, value, "envelope" if value.startswith(ENVELOPE_PREFIX) else "bearer")
+    # Recognizing the wire prefix must not make ordinary standalone CLI
+    # installations depend on the optional dashboard proof implementation.
+    return ResolvedOperatorToken(kind, value, "envelope" if value.startswith("pentacle-auth-v2:") else "bearer")
 
 
 def _stream_token_from_file() -> str | None:
@@ -111,6 +113,12 @@ def seat_credential_source_present() -> bool:
     return "AGENT_ORCH_STREAM_TOKEN_FILE" in os.environ or "AGENT_ORCH_STREAM_TOKEN" in os.environ
 
 
+def configured_token_file_paths() -> list[Path]:
+    """Metadata for attachment path refusal; never open a credential file."""
+    value = os.environ.get("AGENT_ORCH_STREAM_TOKEN_FILE")
+    return [Path(value).expanduser()] if value else []
+
+
 def reader_identity_ready(explicit: str | None) -> OutboundIdentity:
     identity = resolve_outbound_identity(explicit)
     if identity.kind == "ambiguous":
@@ -132,12 +140,33 @@ def operator_auth_v2_hello_fields(resolved: ResolvedOperatorToken, challenge: di
     }}
 
 
+class CallerInputs(MappingABC):
+    """Keep caller input references opaque until the ordinary identity branch."""
+    def __init__(self, source, keys):
+        self.source = source
+        self.keys = tuple(keys)
+
+    def __iter__(self):
+        return iter(self.keys)
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, key):
+        if key not in self.keys:
+            raise KeyError(key)
+        return self.source[key]
+
+
 class Frame(dict):
     """A credential-free queued frame with non-serialized credential policy."""
     def __init__(self, payload=()):
-        super().__init__(payload)
+        # Do not even read a supplied credential while building the wire
+        # dictionary. Only the ordinary branch dereferences CallerInputs.
+        super().__init__((key, payload[key]) for key in payload if key not in CREDENTIAL_KEYS)
+        self.origin = payload.origin if isinstance(payload, Frame) else payload if isinstance(payload, dict) else None
         self.edits = []
-        self.caller = {}
+        self.caller = CallerInputs(payload, [key for key in payload if key in CREDENTIAL_KEYS])
         self.hello_style = None
         self.explicit_identity = None
         self.infer_identity = True
@@ -146,16 +175,25 @@ class Frame(dict):
         self.require_seat_token = False
         if isinstance(payload, Frame):
             self.edits = list(payload.edits)
-            self.caller = dict(payload.caller)
+            self.caller = payload.caller
             for name in ("hello_style", "explicit_identity", "infer_identity", "identity_token", "infer_identity_token", "require_seat_token"):
                 setattr(self, name, getattr(payload, name))
         else:
             before = []
-            for key in list(self):
+            for key in payload:
                 if key in CREDENTIAL_KEYS:
-                    self.caller[key] = self.pop(key)
                     self.edits.append((tuple(before), "caller", key, None, False))
                 before.append(key)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if self.origin is not None and key not in CREDENTIAL_KEYS:
+            self.origin[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
 
 
 def prepare_frame(payload: dict) -> Frame:
@@ -184,6 +222,8 @@ def hello_frame(payload: dict, style: str, explicit=None, *, infer_identity=True
 
 def caller_stream_token(frame: Frame) -> str | None:
     """Pass a caller credential between plans without putting it in a payload."""
+    if resolve_outbound_identity(frame.get("from_stream_id")).kind in {"service", "ambiguous"}:
+        return None
     return frame.caller.get("stream_token")
 
 
