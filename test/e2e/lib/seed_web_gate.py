@@ -44,6 +44,12 @@ TRANSCRIPT = [
     ("ASSIST_TEXT", "fixture assistant reply for the web gate"),
 ]
 
+# Latest message of the second-host fixture: its sidebar preview must read as
+# plain text (sidebar-preview-plain-text scenario) while the chat keeps Markdown.
+MARKDOWN_PREVIEW = [
+    ("ASSIST_TEXT", "## Result\n- **Gate** passed with *italics*, `inline code` and a [link](https://example.com/docs)"),
+]
+
 
 SCHEDULE_FIXTURE = {
     "recurring_id": "5ced0000-0000-4000-8000-000000000001",
@@ -160,8 +166,12 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
                             'producer_generation': producer['session_generation']}
                 Path(db).parent.joinpath('voice-answers-fixture.json').write_text(json.dumps(manifest))
         appended = 0
-        for index, (kind, text) in enumerate(TRANSCRIPT):
+        transcript = TRANSCRIPT + (MARKDOWN_PREVIEW if session == 'web-gate-second-host' else [])
+        for index, (kind, text) in enumerate(transcript):
             event = _event(stream_id, kind, text, index)
+            if index >= len(TRANSCRIPT):
+                # The summary only takes messages from this session's lifecycle.
+                event["timestamp"] = _iso(datetime.now(timezone.utc))
             result = await store.append_session_event(
                 stream_id, event, identity=_identity_key(event), limit=500,
             )

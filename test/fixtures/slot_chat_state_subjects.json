@@ -100,6 +100,24 @@
       "expected_output": "Sidebar detail can keep a normal human-readable message.",
       "input": "I’m checking the renderer path against the websocket state now.",
       "expected": "I’m checking the renderer path against the websocket state now."
+    },
+    {
+      "name": "inline-markdown-becomes-plain-text",
+      "expected_output": "The one-line preview drops emphasis, code ticks and link syntax, keeping the visible words.",
+      "input": "**Bold** status with *italics*, _underscored_, ~~struck~~, `inline code` and a [link](https://example.com/docs).",
+      "expected": "Bold status with italics, underscored, struck, inline code and a link."
+    },
+    {
+      "name": "block-prefixes-and-fences-become-one-line",
+      "expected_output": "Heading, list, quote and fence markers at line start are dropped and lines join with single spaces.",
+      "input": "## Result\n\n- **Gate** passed\n1. Next step\n> quoted __note__\n```js\nconst x = 1;\n```",
+      "expected": "Result Gate passed Next step quoted note const x = 1;"
+    },
+    {
+      "name": "identifiers-and-code-content-stay-intact",
+      "expected_output": "Underscores inside identifiers and marker characters inside code spans are not treated as Markdown.",
+      "input": "Renamed snake_case_name and kept `a*b*c` plus 2 * 3 * 4",
+      "expected": "Renamed snake_case_name and kept a*b*c plus 2 * 3 * 4"
     }
   ],
   "composer_cases": [
