@@ -52,6 +52,21 @@ if config.get("reap_fails"):
             raise OSError("injected reap failure")
         return real_reap(manifest)
     run_gate.reap_manifest = reap
+if config.get("signal_at_fork"):
+    # The Linux subject launch runs a preexec_fn, so CPython runs at-fork hooks; a SIGTERM
+    # handled inside one is reported as unraisable instead of reaching the runner's frame.
+    import signal
+    real_kwargs = run_gate._process_group_popen_kwargs
+    def linux_shaped_kwargs():
+        kwargs = real_kwargs()
+        kwargs["preexec_fn"] = kwargs["preexec_fn"] or (lambda: None)
+        return kwargs
+    run_gate._process_group_popen_kwargs = linux_shaped_kwargs
+    def signal_in_hook():
+        if signal.getsignal(signal.SIGTERM) is run_gate._owner_signal_handler:
+            os.kill(os.getpid(), signal.SIGTERM)
+            sum(range(10000))
+    os.register_at_fork(after_in_parent=signal_in_hook)
 sys.argv = ["run_gate.py", *config["argv"]]
 raise SystemExit(run_gate.main())
 '''
@@ -147,6 +162,20 @@ def test_external_sigterm_is_attributed_separately(tmp_path: Path) -> None:
     assert unit["termination"] == {"kind": "external_signal", "signal": "SIGTERM"}
     assert "missing_junit" in unit["secondary_outcomes"] and unit["progress"]["active_nodes"] == ["test_synthetic.py::test_slow"]
     assert _subject_gone(unit)
+
+
+def test_external_sigterm_handled_in_fork_hook_still_terminates(tmp_path: Path) -> None:
+    # CI 40379334084: the SIGTERM landed while the subject was forking; logging's at-fork hook
+    # swallowed the KeyboardInterrupt and the subject ran to the tier bound.
+    source = "import time, pytest\n@pytest.mark.timeout(60)\ndef test_slow():\n    time.sleep(40)\n"
+    started = time.monotonic()
+    code, data, output = _gate(tmp_path, source, argv=["unit", "--timeout-seconds", "40"], signal_at_fork=True)
+    unit = data["tiers"][0]
+    assert "Exception ignored in" in output  # the stimulus really was swallowed
+    assert code == 1 and unit["reason"] == "terminated" and unit["timed_out"] is False
+    assert unit["termination"] == {"kind": "external_signal", "signal": "SIGTERM"}
+    assert time.monotonic() - started < 30
+    assert unit["subprocess_returncode"] in (-signal.SIGTERM, -signal.SIGKILL)
 
 
 def test_runner_sigkill_leaves_visibly_unfinished_evidence(tmp_path: Path) -> None:
