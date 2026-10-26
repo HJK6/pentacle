@@ -676,7 +676,6 @@ def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path, alre
                 namespace.kill_server()
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="native Darwin ESRCH registration")
 @pytest.mark.requires("process start identity readable")
 def test_owned_group_exit_between_identity_check_and_registration(tmp_path: Path, monkeypatch) -> None:
     """Schedule the native race without replacing the kernel witness or reaper."""

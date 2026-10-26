@@ -356,7 +356,7 @@ def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, pla
         assert len([x for x in calls if x[0] == ("select" if platform == "linux" else "control")]) == (1 if platform == "linux" else 2)
 
 
-@pytest.mark.parametrize("outcome", ["complete", "false-guard", "client-error", "event-timeout", "denied-event", "replacement", "cancellation", "recycled-server", "root-mode", "replacement-at-exit", "root-replacement-at-exit", "terminal", "terminal-recycled", "terminal-replacement", "terminal-root-replacement"])
+@pytest.mark.parametrize("outcome", ["complete", "false-guard", "client-error", "event-timeout", "denied-event", "replacement", "cancellation", "recycled-server", "root-mode", "replacement-at-exit", "root-replacement-at-exit"])
 def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_path, outcome):
     import shutil
     import socket
@@ -373,14 +373,8 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
         terminal = False
         def __init__(self, pid):
             events.append("register")
-            state["registered"] = True
-            self.terminal = outcome.startswith("terminal")
-            if outcome == "terminal-root-replacement":
-                root.rename(str(root) + "-original")
-                root.mkdir(mode=0o700)
-                address.write_text("foreign root replacement")
             if outcome == "denied-event": raise owner.ManifestError("synthetic event denied")
-            if outcome in ("replacement", "terminal-replacement"):
+            if outcome == "replacement":
                 address.unlink()
                 address.write_text("foreign replacement")
         def wait(self, deadline):
@@ -402,7 +396,6 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
             assert 0 <= timeout <= 5
             return b"", b"synthetic refused" if self.returncode else b""
     def popen(argv, **kwargs):
-        assert not outcome.startswith("terminal"), "terminal server must never be contacted"
         clients.append(argv)
         assert argv[:4] == ["tmux", "-N", "-S", str(address)]
         assert argv[4:6] == ["if-shell", "-F"]
@@ -411,25 +404,24 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
         assert events[0] == "register"
         return Client()
     monkeypatch.setattr(owner, "_exists", lambda pid: state["live"])
-    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start" if outcome == "recycled-server" or (outcome == "terminal-recycled" and state.get("registered")) else "server-start")
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start" if outcome == "recycled-server" else "server-start")
     monkeypatch.setattr(owner, "_ExitEvent", Event)
     monkeypatch.setattr(owner, "_REAL_POPEN", popen)
     if outcome == "root-mode": root.chmod(0o755)
     try:
-        if outcome in ("complete", "terminal"):
+        if outcome == "complete":
             owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
             assert not address.exists() and not root.exists()
-            assert events == (["register", "close"] if outcome == "terminal" else ["register", "wait", "close"])
-            if outcome == "terminal": assert not clients
+            assert events == ["register", "wait", "close"]
         else:
             expected = KeyboardInterrupt if outcome == "cancellation" else owner.ManifestError
             with pytest.raises(expected):
                 owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
             assert address.exists() and root.exists()
-            if outcome in ("replacement", "terminal-replacement"):
+            if outcome == "replacement":
                 assert address.read_text() == "foreign replacement"
                 assert not clients
-            if outcome in ("denied-event", "recycled-server", "root-mode") or outcome.startswith("terminal"): assert not clients
+            if outcome in ("denied-event", "recycled-server", "root-mode"): assert not clients
             if outcome == "replacement-at-exit": assert address.read_text() == "foreign replacement after exit"
             if outcome == "root-replacement-at-exit": assert address.read_text() == "foreign root replacement"
     finally:
@@ -626,3 +618,58 @@ def test_darwin_exit_registration_requires_matching_terminal_event(monkeypatch, 
             try: event.wait(owner.time.monotonic())
             finally: event.close()
     assert closed == [True]
+
+
+@pytest.mark.parametrize("outcome", ["terminal", "recycled", "replacement", "root-replacement"])
+def test_terminal_bound_socket_preserves_ownership_without_contact(monkeypatch, outcome):
+    import socket
+    import tempfile
+    import uuid
+    from tools import gate_owner_manifest as owner
+    root = Path(tempfile.mkdtemp(prefix="v2s-", dir="/tmp")); root.chmod(0o700)
+    address = root / "s"
+    endpoint = socket.socket(socket.AF_UNIX); endpoint.bind(str(address))
+    rs, ss = root.stat(), address.lstat()
+    binding = dict(nonce=uuid.uuid4().hex, server_pid=42421, server_start_identity="server-start",
+                   root_dev=rs.st_dev, root_ino=rs.st_ino, socket_dev=ss.st_dev, socket_ino=ss.st_ino)
+    state, events = {"registered": False}, []
+    class Event:
+        terminal = True
+        def __init__(self, pid):
+            assert pid == binding["server_pid"]
+            state["registered"] = True
+            events.append("register")
+            if outcome == "replacement":
+                address.unlink()
+                address.write_text("foreign replacement")
+            if outcome == "root-replacement":
+                root.rename(str(root) + "-original")
+                root.mkdir(mode=0o700)
+                address.write_text("foreign replacement")
+        def wait(self, deadline): pytest.fail("terminal witness needs no wait")
+        def close(self): events.append("close")
+    def forbidden(*args, **kwargs): pytest.fail("terminal server must never be contacted")
+    monkeypatch.setattr(owner, "_ExitEvent", Event)
+    monkeypatch.setattr(owner, "_exists", lambda pid: True)
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start"
+        if outcome == "recycled" and state["registered"] else "server-start")
+    monkeypatch.setattr(owner, "_REAL_POPEN", forbidden)
+    try:
+        if outcome == "terminal":
+            owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert not address.exists() and not root.exists()
+        else:
+            with pytest.raises(owner.ManifestError):
+                owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
+            assert address.exists() and root.exists()
+            if outcome in ("replacement", "root-replacement"):
+                assert address.read_text() == "foreign replacement"
+        assert events == ["register", "close"]
+    finally:
+        endpoint.close()
+        if address.exists(): address.unlink()
+        if root.exists(): root.rmdir()
+        original = Path(str(root) + "-original")
+        if original.exists():
+            (original / "s").unlink()
+            original.rmdir()
