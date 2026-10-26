@@ -151,3 +151,48 @@ def test_operator_enrollment_failure_keeps_predecessor_and_secret_free_journal(t
         else: assert turns == ["account/login/start"] and closed == [True]
     finally:
         browser.close(); os.close(reader)
+def _adopt_host(tmp_path, *, foreign=False, link=False):
+    private=tmp_path/'private'; private.mkdir(mode=0o700)
+    real=tmp_path/'accounts'/'ours'/'codex'; real.mkdir(parents=True,mode=0o700); real.chmod(0o700)
+    auth=real/'auth.json'; auth.write_text('fake-only'); auth.chmod(0o600)
+    keep=real/'AGENTS.md'; keep.write_text('keep'); keep.chmod(0o600)
+    home=real
+    if link: home=tmp_path/'linked'; home.symlink_to(real)
+    cell={'enabled':True,'expected_provider_id':'id-ours','profile_ref':'google-ours','executable':'/bin/echo','version':'fixture',
+        'executable_sha256':hashlib.sha256(Path('/bin/echo').read_bytes()).hexdigest(),'platform':'macos','model':'m','effort':'medium',
+        'cwd':str(tmp_path),'adopt_home':str(home),'bootstrap':{'config.toml':'model = "m"\n','AGENTS.md':'replacement'}}
+    config={'host':'host-a','registry':str(private/'registry.json'),'root':str(private/'homes'),
+        'cells':{'codex:ours':cell,'codex:plain':dict(cell,adopt_home=None)}}
+    def login(*_): raise AssertionError('adoption must never log in')
+    def observation(account): return {'provider_id':'foreign' if foreign else 'id-ours','pool_id':'pool-ours','auth_mode':'subscription'}
+    def run(argv,**kwargs): return SimpleNamespace(returncode=0,stdout='fixture' if argv[-1]=='--version' else 'OK')
+    return NativeHost(config,run=run,login=login,observation=observation),real
+
+
+def test_host_adopts_configured_signed_in_home_in_place_without_touching_credentials(tmp_path):
+    host,real=_adopt_host(tmp_path)
+    before=(real/'auth.json').stat()
+    result=host.handle('adopt',provider='codex',alias='ours',expected_generation='unenrolled',operation_id='one',generation='adopted-1')
+    assert result['outcome']=='ok' and result['binding']['home']==str(real) and result['binding']['provider_id']=='id-ours'
+    after=(real/'auth.json').stat()
+    assert (real/'auth.json').read_text()=='fake-only' and (after.st_ino,after.st_mtime_ns)==(before.st_ino,before.st_mtime_ns)
+    assert (real/'AGENTS.md').read_text()=='keep' and (real/'config.toml').read_text().startswith('model = "m"')
+    assert host.registry.active('codex','ours','host-a').home==str(real)
+    assert host.handle('adopt',provider='codex',alias='ours',expected_generation='unenrolled',operation_id='one',generation='adopted-1')==result
+    assert not (tmp_path/'private'/'homes').exists()
+
+
+def test_host_adoption_refuses_unconfigured_symlinked_or_foreign_homes(tmp_path):
+    (tmp_path/'a').mkdir()
+    host,_=_adopt_host(tmp_path/'a')
+    with pytest.raises(AccountError,match='account_adopt_unsupported'):
+        host.handle('adopt',provider='codex',alias='plain',expected_generation='unenrolled',operation_id='x',generation='g')
+    with pytest.raises(AccountError,match='account_home_outside_registry'):
+        host.registry.prepare(provider='codex',alias='plain',host='host-a',generation='g',profile_ref='p',
+            executable='/bin/echo',version='fixture',platform='macos',home=str(tmp_path/'elsewhere'))
+    for kwargs in ({'link':True},{'foreign':True}):
+        root=tmp_path/next(iter(kwargs)); root.mkdir()
+        host,_=_adopt_host(root,**kwargs)
+        result=host.handle('adopt',provider='codex',alias='ours',expected_generation='unenrolled',operation_id='y',generation='g')
+        assert result['outcome']=='account_enrollment_failed'
+        assert host.registry.active('codex','ours','host-a') is None

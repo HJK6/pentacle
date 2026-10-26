@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
-    claude_observation, codex_observation, enroll, native_login, verify_binary,
+    adopt, claude_observation, codex_observation, enroll, native_login, verify_binary,
     native_run, classify_error,
 )
 
@@ -72,7 +72,9 @@ class OperatorBrowser:
 class NativeHost:
     def __init__(self, config, *, run=subprocess.run, login=native_login, observation=None, operator_browser=None):
         self.config, self.run, self.login = config, native_run if run is subprocess.run else run, login
-        self.registry = Registry(Path(config["registry"]), Path(config["root"]))
+        adopted = [cell["adopt_home"] for cell in config.get("cells", {}).values()
+                   if isinstance(cell, dict) and cell.get("adopt_home")]
+        self.registry = Registry(Path(config["registry"]), Path(config["root"]), adopted)
         self.journal = self.registry.path.parent / "account-operations"
         self.observation = observation or self._observation
         self._probe_observation = observation or partial(self._observation, wait_for_refresh=True)
@@ -158,7 +160,8 @@ class NativeHost:
                     raise AccountError("account_login_generation_stale")
                 result = self._probe_observation(active)
                 return {"outcome": "ok", "binding_key": active.key, "observation": result}
-            if action not in {"enroll", "status"}: raise AccountError("account_action_invalid")
+            if action not in {"enroll", "adopt", "status"}: raise AccountError("account_action_invalid")
+            if action == "adopt" and not cell.get("adopt_home"): raise AccountError("account_adopt_unsupported")
             prior = self._read_operation(operation_id)
             identity = {"provider": provider, "alias": alias, "expected_generation": expected_generation,
                         "generation": generation}
@@ -181,16 +184,22 @@ class NativeHost:
             try:
                 draft = self.registry.prepare(provider=provider, alias=alias, host=self.config["host"], generation=generation,
                     profile_ref=cell["profile_ref"], executable=cell["executable"], version=cell["version"], platform=cell["platform"],
-                    observer_executable=cell.get("observer_executable"))
+                    observer_executable=cell.get("observer_executable"),
+                    home=cell["adopt_home"] if action == "adopt" else None)
                 if (draft.executable_sha256 != cell["executable_sha256"] or
                         (draft.observer_executable and draft.observer_executable_sha256 != cell.get("observer_executable_sha256"))):
                     raise AccountError("provider_executable_changed")
                 def identity_readback(binding):
                     row = self.observation(binding)
                     return {key: row.get(key) for key in ("provider_id", "pool_id", "auth_mode", "email_verified")}
-                bound = enroll(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
-                    browser_authorize=self._browser, login=self.login, identity=identity_readback,
-                    model=cell["model"], effort=cell["effort"], cwd=cell["cwd"], manifest=cell.get("bootstrap", {}), run=self.run)
+                if action == "adopt":
+                    bound = adopt(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
+                        identity=identity_readback, model=cell["model"], effort=cell["effort"], cwd=cell["cwd"],
+                        manifest=cell.get("bootstrap", {}), run=self.run)
+                else:
+                    bound = enroll(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
+                        browser_authorize=self._browser, login=self.login, identity=identity_readback,
+                        model=cell["model"], effort=cell["effort"], cwd=cell["cwd"], manifest=cell.get("bootstrap", {}), run=self.run)
                 result = identity | {"state": "done", "outcome": "ok", "binding": bound.public()}
             except AccountError as exc:
                 safe = str(exc) if str(exc) in {"human_reseed_required", "cancelled", "locked_keychain"} else "account_enrollment_failed"
@@ -201,7 +210,7 @@ class NativeHost:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("observe", "enroll", "status"))
+    parser.add_argument("action", choices=("observe", "enroll", "adopt", "status"))
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--login-generation", required=True)
@@ -220,7 +229,7 @@ def main(argv=None):
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(300 if args.action == "enroll" else 180 if args.action == "observe" else 90)
+        signal.alarm(300 if args.action in {"enroll", "adopt"} else 180 if args.action == "observe" else 90)
         result = NativeHost(config, operator_browser=browser).handle(args.action, provider=args.provider, alias=args.account,
             expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation)
         print(json.dumps(result))

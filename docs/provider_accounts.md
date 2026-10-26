@@ -271,6 +271,14 @@ profiles or human authentication needs return a safe code. The front desk drives
 the flow to that step and supplies the specific host/account browser instruction.
 Authorization URLs/codes and credential contents are not logs or evidence.
 
+A Codex cell may instead name `adopt_home`, an absolute private (0700, owned,
+non-symlink) home that is already signed in to that account. The `adopt` action
+takes the same arguments as `enroll` and registers that home in place. It runs no
+login, never creates, copies, moves or renames credential files, and writes only
+absent bootstrap files. Activation still needs the pinned binary, the expected
+subscription identity, a minimal turn and an unchanged identity reread. The
+registry accepts only the configured adopted homes outside the generation layout.
+
 ## Usage, availability and re-login
 
 Usage reads the bound home, joins native identity coherently and reports every
