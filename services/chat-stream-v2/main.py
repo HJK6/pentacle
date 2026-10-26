@@ -87,6 +87,23 @@ from window_schedule import WindowSchedule
 log = logging.getLogger("chat_streamd_v2")
 
 
+def _emit_boot_marker(host: str, port: int) -> None:
+    # One synchronously flushed identity in both managed sinks. Keep the
+    # listening prefix for existing boot consumers; never yield between writes.
+    try:
+        process_start = " ".join(subprocess.check_output(
+            ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True,
+            timeout=5,
+        ).split())
+    except (OSError, subprocess.SubprocessError):
+        process_start = ""  # The deploy selector will refuse unproven identity.
+    generation = json.dumps({"pid": os.getpid(), "start": process_start,
+                             "boot_uuid": str(uuid.uuid4())}, separators=(",", ":"))
+    boot_line = f"generation={generation} chat_streamd_v2 listening on {host}:{port}"
+    print(boot_line, file=sys.stdout, flush=True)
+    print(boot_line, file=sys.stderr, flush=True)
+
+
 def _wire_cosmo_reply_push(assistant_composites: dict, push_reply) -> None:
     """Wire the Cosmo reply-push hook to the Daff composite ONLY.
 
@@ -856,20 +873,7 @@ async def run(args: argparse.Namespace) -> int:
 
     # 1. BIND FIRST. Nothing above this line may block on I/O.
     port = await server.bind(start_serving=False)
-    # One synchronously flushed identity in both managed sinks. Keep the
-    # listening prefix for existing boot consumers; never yield between writes.
-    try:
-        process_start = " ".join(subprocess.check_output(
-            ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True,
-            timeout=5,
-        ).split())
-    except (OSError, subprocess.SubprocessError):
-        process_start = ""  # The deploy selector will refuse unproven identity.
-    generation = json.dumps({"pid": os.getpid(), "start": process_start,
-                             "boot_uuid": str(uuid.uuid4())}, separators=(",", ":"))
-    boot_line = f"chat_streamd_v2 listening on {binds[0]}:{port} generation={generation}"
-    print(boot_line, file=sys.stdout, flush=True)
-    print(boot_line, file=sys.stderr, flush=True)
+    _emit_boot_marker(binds[0], port)
     # Install the shutdown handler immediately after bind, BEFORE the blocking
     # init below. A SIGTERM during boot must trigger the graceful path (set the
     # stop future), not the default disposition that kills the process (rc=-15);

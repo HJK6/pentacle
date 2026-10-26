@@ -44,7 +44,7 @@ def packet_inputs(tmp_path, content, captured_utc):
     from deploy.packet.log_scan import generation_ranges
     identity = dict(pid=222, start='Mon Jan 1 12:00:00 2024',
                     boot_uuid='9d530b43-e74b-46e4-a7f8-e597f7440ef8')
-    boot = 'chat_streamd_v2 listening on fixture generation=' + json.dumps(identity) + '\n'
+    boot = 'generation=' + json.dumps(identity) + ' chat_streamd_v2 listening on fixture:1234\n'
     stdout, stderr = tmp_path/'source.out', tmp_path/'source.err'
     stdout.write_text(boot)
     stderr.write_text(content.replace(BOOT, boot))

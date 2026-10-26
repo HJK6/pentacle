@@ -138,7 +138,9 @@ still permits checkout and stamp changes.
 
 The daemon binds plain and optional TLS listeners in a paused state, writes the
 `chat_streamd_v2 listening on` record to both managed streams with identical
-PID, canonical process start and boot UUID, then starts accepting. Plain clients
+PID, canonical process start and boot UUID, then starts accepting. The structured
+identity precedes the original listening text, keeping its terminal `host:port`
+for existing port readers. Plain clients
 may receive connection refusal during TLS socket setup and can reconnect after
 startup. An optional TLS start failure leaves the plain listener available.
 

@@ -107,9 +107,11 @@ def generation_ranges(groups, expected_pid, expected_start):
                 if matching:
                     boot_after = True
                 try:
-                    if not line.startswith(BOOT_PREFIX + ' '):
-                        raise ValueError('invalid boot prefix')
-                    identity = json.loads(line.split(' generation=', 1)[1])
+                    if not line.startswith('generation='):
+                        raise ValueError('missing generation prefix')
+                    identity, end = json.JSONDecoder().raw_decode(line[len('generation='):])
+                    if not line[len('generation=') + end:].startswith(' ' + BOOT_PREFIX + ' '):
+                        raise ValueError('invalid listening record')
                     if (not isinstance(identity, dict) or type(identity.get('pid')) is not int
                             or not isinstance(identity.get('start'), str)
                             or not identity['start'].strip()

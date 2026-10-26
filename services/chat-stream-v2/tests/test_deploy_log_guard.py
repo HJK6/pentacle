@@ -293,7 +293,7 @@ _BOOT_UUID = '9d530b43-e74b-46e4-a7f8-e597f7440ef8'
 def _boot(**changes):
     identity = dict(pid=222, start=_ACTIVE_START, boot_uuid=_BOOT_UUID)
     identity.update(changes)
-    return 'chat_streamd_v2 listening on 127.0.0.1:1234 generation=' + json.dumps(identity) + '\n'
+    return 'generation=' + json.dumps(identity) + ' chat_streamd_v2 listening on 127.0.0.1:1234\n'
 
 
 def _diag(event, conn='reader', **values):
@@ -397,7 +397,7 @@ def test_marker_and_old_evidence_survive_retained_rotation(tmp_path, monkeypatch
     def rotate(config):
         raw = config.stderr.read_bytes()
         # A marker split between retained generations remains one record.
-        split = raw.index(b' generation=') + 7
+        split = raw.index(b'generation=') + 7
         config.stderr.rename(Path(str(config.stderr)+'.1'))
         Path(str(config.stderr)+'.1').write_bytes(raw[:split])
         config.stderr.write_bytes(raw[split:])
@@ -473,3 +473,20 @@ def test_unanswered_old_writer_query_cannot_prove_exit(tmp_path, monkeypatch):
     result = _managed_window(module, tmp_path, monkeypatch, _boot(), _boot(), **proof)
     assert result['outcome'] == 'failed'
     assert result['attribution']['outcome'] == 'attribution_ambiguous'
+
+
+@pytest.mark.parametrize('probe_fails', [False, True])
+def test_real_boot_producer_preserves_existing_port_readers(monkeypatch, capsys, probe_fails):
+    import re
+    import main as daemon
+    def process_start(*args, **kwargs):
+        if probe_fails:
+            raise subprocess.CalledProcessError(1, args[0])
+        return _ACTIVE_START
+    monkeypatch.setattr(daemon.subprocess, 'check_output', process_start)
+    daemon._emit_boot_marker('127.0.0.1', 1234)
+    captured = capsys.readouterr()
+    assert captured.out == captured.err
+    # These are the existing wire/soak readers, unchanged.
+    assert int(captured.out.rsplit(':', 1)[1].strip()) == 1234
+    assert re.search(r'chat_streamd_v2 listening on 127\.0\.0\.1:(\d+)', captured.out)[1] == '1234'

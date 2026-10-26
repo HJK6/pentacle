@@ -956,8 +956,8 @@ _U2_START = "Mon Jan 1 12:00:00 2024"
 
 
 def _u2_boot():
-    return deploy_mod.V2_BOOT_LINE + ' fixture generation=' + json.dumps(dict(
-        pid=999, start=_U2_START, boot_uuid='9d530b43-e74b-46e4-a7f8-e597f7440ef8')) + '\n'
+    return 'generation=' + json.dumps(dict(
+        pid=999, start=_U2_START, boot_uuid='9d530b43-e74b-46e4-a7f8-e597f7440ef8')) + ' ' + deploy_mod.V2_BOOT_LINE + ' fixture:1234\n'
 
 
 def _u2_generation():
