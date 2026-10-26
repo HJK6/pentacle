@@ -251,7 +251,7 @@ def build_attachment_inject_text(paths: list[str], caption: str) -> str:
     joined = ", ".join(paths)
     if caption:
         return f"Look at the image {noun} at {joined}, then respond to the user's message: {caption}"
-    return f"Image at {joined}" if len(paths) == 1 else f"Images at {joined}"
+    return f"Look at the image {noun} at {joined}, then respond to the user's message."
 
 
 class _AttachmentMaterializer:

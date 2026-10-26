@@ -404,7 +404,7 @@ def test_photo_only_accept_materialize_echo(tmp_path: Path) -> None:
         assert len(tmux.pastes) == 1
         path = tmp_path / "attachments" / f"{SHA}.png"
         assert path.read_bytes() == PNG
-        assert tmux.pastes[0] == f"Image at {path}"
+        assert tmux.pastes[0] == f"Look at the image file at {path}, then respond to the user's message."
     finally:
         store.stop()
 
@@ -451,7 +451,7 @@ def test_remote_attachment_materializes_on_agent_host(tmp_path: Path) -> None:
         path, data = tmux.staged[0]
         assert path == f"/tmp/public-fixture/.cache/pentacle-stream/attachments/{SHA}.png"
         assert data == PNG
-        assert tmux.pastes == [f"Image at {path}"]
+        assert tmux.pastes == [f"Look at the image file at {path}, then respond to the user's message."]
     finally:
         store.stop()
 
