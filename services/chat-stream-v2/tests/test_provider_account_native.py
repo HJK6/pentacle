@@ -196,3 +196,127 @@ def test_codex_permission_retains_unknown_through_daemon_readback(tmp_path,permi
         ledger.register(account); ledger.observe(account.key,observed,now=1000)
         assert ledger.readback(now=1000)["quota_pools"][0]["observation"]["ordinary_usage_allowed"] is expected
     finally: conn.close()
+
+
+# The counterpart emits native-shaped frames; CodexRPC and its transport run unchanged.
+@pytest.fixture
+def native_rpc(tmp_path):
+    import subprocess
+    import sys
+    from provider_account_native import CodexRPC
+    processes = []
+    script = r'''
+import json, sys, time
+scenario = json.loads(sys.argv[1])
+reads = 0
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    if 'id' not in request:
+        continue
+    if method == 'initialize':
+        result = {'userAgent': 'fixture'}
+    elif method == 'account/read':
+        assert request['params'] == {'refreshToken': False}
+        reads += 1
+        if reads == 1:
+            print(json.dumps({'method': 'remoteControl/status/changed', 'params': {
+                'environmentId': None, 'installationId': None, 'serverName': None, 'status': 'disabled'}}), flush=True)
+            for status in scenario.get('startup', []):
+                print(json.dumps({'method': 'account/updated', 'params': status}), flush=True)
+            if scenario.get('error'):
+                print(json.dumps({'id': request['id'], 'error': {'message': 'rate_limit'}}), flush=True)
+                continue
+            if scenario.get('timeout'):
+                time.sleep(10)
+                continue
+        if reads == 2 and scenario.get('notify_at') == 'second_read':
+            print(json.dumps({'method': 'account/updated', 'params': {'authMode': 'chatgpt', 'planType': 'pro'}}), flush=True)
+        result = {'account': dict({'type': 'chatgpt', 'planType': 'pro', 'id': 'identity-a',
+                                  'email': 'person@example.test'}, **(scenario.get('after', {}) if reads == 2 else scenario.get('first', {})))}
+    elif method == 'account/rateLimits/read':
+        if scenario.get('notify_at') == 'quota':
+            print(json.dumps({'method': 'account/updated', 'params': {'authMode': 'chatgpt', 'planType': 'pro'}}), flush=True)
+        result = {'accountId': 'identity-a', 'rateLimits': {'primary': {
+            'usedPercent': 15, 'resetsAt': 2000, 'windowDurationMins': 300}}}
+    else:
+        result = {}
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+'''
+    def factory(scenario):
+        def create(account):
+            def popen(argv, **kwargs):
+                process = subprocess.Popen([sys.executable, '-u', '-c', script, json.dumps(scenario)], **kwargs)
+                processes.append(process)
+                return process
+            return CodexRPC(account, timeout=2 if not scenario.get('timeout') else .2, popen=popen)
+        return create
+    yield factory
+    assert processes and all(process.poll() is not None for process in processes)
+    assert all(stream.closed for process in processes for stream in (process.stdin, process.stdout) if stream)
+
+
+@pytest.mark.parametrize('startup', [[], [{'authMode': 'chatgpt', 'planType': 'pro'}],
+    [{'authMode': 'chatgpt', 'planType': 'pro'}] * 2], ids=['native-0.153.4', 'native-0.160.0', 'repeated-status'])
+def test_codex_initial_status_uses_authoritative_account_baseline(tmp_path, native_rpc, startup):
+    row = codex_observation(binding(tmp_path), rpc_factory=native_rpc({'startup': startup}), now=lambda: 1000,
+                            expected_email='person@example.test')
+    assert row['provider_id'] == row['pool_id'] == 'identity-a'
+    assert row['windows']['codex:300']['pct'] == 15
+    assert row['email_verified'] is True
+
+
+@pytest.mark.parametrize('status', [
+    {'authMode': 'chatgpt', 'planType': 'pro', 'id': 'foreign'},
+    {'authMode': 'chatgpt', 'planType': 'pro', 'email': 'other@example.test'},
+    {'authMode': 'chatgpt', 'planType': 'pro', 'accountId': 'foreign'},
+    {'authMode': 'chatgpt', 'planType': 'team'},
+    {'authMode': 'apiKey', 'planType': 'pro'},
+    {'authMode': 'chatgpt', 'planType': None},
+    {'authMode': 'chatgpt', 'planType': ''},
+    {'authMode': 'chatgpt', 'planType': 1},
+    {'authMode': 'chatgpt'}, {}, None, [],
+])
+def test_codex_initial_identity_change_or_malformed_status_refuses(tmp_path, native_rpc, status):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'startup': [status]}))
+
+
+@pytest.mark.parametrize('first', [{'type': 'apiKey'}, {'planType': 'team'}])
+def test_codex_startup_status_must_match_first_account_reply(tmp_path, native_rpc, first):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+            'startup': [{'authMode': 'chatgpt', 'planType': 'pro'}], 'first': first}))
+
+
+def test_codex_conflicting_initial_statuses_refuse(tmp_path, native_rpc):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'startup': [
+            {'authMode': 'chatgpt', 'planType': 'team'}, {'authMode': 'chatgpt', 'planType': 'pro'}]}))
+
+
+@pytest.mark.parametrize('notify_at', ['quota', 'second_read'])
+def test_codex_status_after_first_account_reply_always_refuses(tmp_path, native_rpc, notify_at):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'notify_at': notify_at}))
+
+
+@pytest.mark.parametrize('after', [{'id': 'identity-b'}, {'email': 'other@example.test'}, {'planType': 'team'}])
+def test_codex_before_after_identity_mismatch_refuses(tmp_path, native_rpc, after):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'after': after}))
+
+
+@pytest.mark.parametrize('scenario,code', [({'error': True}, 'provider_quota_blocked'),
+                                        ({'timeout': True}, 'provider_timeout')])
+def test_codex_initial_status_does_not_swallow_error_or_timeout(tmp_path, native_rpc, scenario, code):
+    with pytest.raises(AccountError, match=code):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc(dict(scenario,
+            startup=[{'authMode': 'chatgpt', 'planType': 'pro'}])))
+
+
+def test_codex_interrupted_initial_read_reaps_native_process(tmp_path, native_rpc):
+    rpc = native_rpc({})(binding(tmp_path))
+    with pytest.raises(KeyboardInterrupt):
+        with rpc:
+            raise KeyboardInterrupt()

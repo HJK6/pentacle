@@ -59,6 +59,7 @@ def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, 
 class CodexRPC:
     def __init__(self, binding: Binding, *, timeout=60, popen=subprocess.Popen):
         self.timeout, self.pending, self.sequence = timeout, bytearray(), 0
+        self.account_read_complete = False
         self.process = popen([binding.executable, "-c", 'cli_auth_credentials_store="file"',
                              "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"', "app-server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -104,17 +105,32 @@ class CodexRPC:
         identifier = self.sequence
         self.send({"id": identifier, "method": method, "params": params or {}})
         deadline = time.monotonic() + self.timeout
+        startup_status = None
         while True:
             value = self.read(deadline)
             if value.get("method") == "account/updated":
-                # An identity change while observing a pool invalidates the
-                # entire coherent read; never join old quota to a new login.
                 if method not in {"initialize", "account/login/start"}:
-                    raise AccountError("provider_identity_changed")
+                    status = value.get("params")
+                    # Native startup can announce status before the first
+                    # account reply. That reply must confirm the same plan.
+                    if (method != "account/read" or self.account_read_complete
+                            or not isinstance(status, dict) or set(status) != {"authMode", "planType"}
+                            or status["authMode"] != "chatgpt"
+                            or not isinstance(status["planType"], str) or not status["planType"]
+                            or (startup_status is not None and status != startup_status)):
+                        raise AccountError("provider_identity_changed")
+                    startup_status = status
             if value.get("id") == identifier:
                 if "error" in value: raise AccountError(classify_error(value["error"]))
                 result = value.get("result")
                 if not isinstance(result, dict): raise AccountError("provider_response_invalid")
+                if method == "account/read":
+                    self.account_read_complete = True
+                    account = result.get("account")
+                    if startup_status is not None and (not isinstance(account, dict)
+                            or account.get("type") != startup_status["authMode"]
+                            or account.get("planType") != startup_status["planType"]):
+                        raise AccountError("provider_identity_changed")
                 return result
 
 
