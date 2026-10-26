@@ -6633,25 +6633,36 @@ function catalogTuple(provider, preferred = null) {
   const profile = catalog.profiles?.desktop_manual || {};
   const defaults = profile[provider];
   const entries = catalog.models?.[provider] || {};
+  const models = Object.keys(entries);
+  if (!Array.isArray(defaults) || !models.length) return null;
   const remembered = preferred || spawnPreferences().byProvider?.[provider];
-  const model = remembered?.model && entries[remembered.model] ? remembered.model : defaults?.[0];
+  const candidateModel = remembered ? remembered.model : defaults[0];
+  const recoveringModel = !entries[candidateModel];
+  const model = recoveringModel ? models[0] : candidateModel;
   const efforts = entries[model]?.efforts || [];
-  const effort = remembered?.effort && efforts.includes(remembered.effort) ? remembered.effort : (defaults?.[1] || efforts[0]);
+  const effort = !recoveringModel && remembered?.effort && efforts.includes(remembered.effort)
+    ? remembered.effort : (!remembered && !recoveringModel && efforts.includes(defaults[1]) ? defaults[1] : efforts[0]);
   return model && effort ? { provider, model, effort } : null;
 }
 
-function selectionForProvider(provider) {
-  return catalogTuple(provider, newSessionSelection?.provider === provider ? newSessionSelection : null);
+function selectionForProvider(provider, preferred = null) {
+  const providers = catalogProviders(newSessionCatalog);
+  const visibleProvider = providers.includes(provider) ? provider : providers[0];
+  const remembered = preferred || (newSessionSelection?.provider === provider ? newSessionSelection : null)
+    || spawnPreferences().byProvider?.[provider];
+  const entries = newSessionCatalog?.models?.[visibleProvider] || {};
+  if (visibleProvider !== provider || (remembered && !entries[remembered.model]?.efforts?.includes(remembered.effort))) {
+    const [model, definition] = Object.entries(entries)[0] || [];
+    return catalogTuple(visibleProvider, { model, effort: definition?.efforts?.[0] });
+  }
+  return catalogTuple(provider, remembered);
 }
 
 function catalogProviders(catalog) {
   const profile = catalog?.profiles?.desktop_manual || {};
   const models = catalog?.models || {};
-  return Object.keys(profile).filter((provider) => {
-    const tuple = profile[provider];
-    const efforts = Array.isArray(tuple) ? models[provider]?.[tuple[0]]?.efforts : null;
-    return Array.isArray(efforts) && efforts.includes(tuple[1]);
-  });
+  return Object.keys(models).filter((provider) =>
+    Array.isArray(profile[provider]) && Object.keys(models[provider] || {}).length > 0);
 }
 
 function modelLabel(model) {
@@ -6845,7 +6856,7 @@ async function loadSpawnCatalog() {
   }
   newSessionCatalog = catalogForNewSession(response.catalog);
   const prefs = spawnPreferences();
-  newSessionSelection = selectionForProvider(prefs.defaultProvider === 'claude' ? 'claude' : 'codex');
+  newSessionSelection = selectionForProvider(prefs.defaultProvider);
   renderNewSessionModal();
   return true;
 }
@@ -6855,7 +6866,7 @@ function warmSpawnCatalog() {
     if (!response?.ok || !response.catalog?.profiles?.desktop_manual) return;
     newSessionCatalog = catalogForNewSession(response.catalog);
     const prefs = spawnPreferences();
-    newSessionSelection = selectionForProvider(prefs.defaultProvider === 'claude' ? 'claude' : 'codex');
+    newSessionSelection = selectionForProvider(prefs.defaultProvider);
   }).catch(() => {
     // A disconnected cold start remains retryable through loadSpawnCatalog().
   });
@@ -7573,7 +7584,7 @@ window.addEventListener('storage', (event) => {
     if (incoming?.schemaVersion !== 1 || !preferenceIsNewer(incoming, observedSpawnPreferences)) return;
     observedSpawnPreferences = incoming;
     if (document.getElementById('new-session-overlay')?.style.display === 'none' && newSessionCatalog) {
-      newSessionSelection = catalogTuple(incoming.defaultProvider === 'claude' ? 'claude' : 'codex', incoming.byProvider?.[incoming.defaultProvider]);
+      newSessionSelection = selectionForProvider(incoming.defaultProvider, incoming.byProvider?.[incoming.defaultProvider]);
     }
   } catch (_) { /* ignore malformed external storage */ }
 });

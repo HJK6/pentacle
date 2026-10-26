@@ -35,6 +35,32 @@ keep their previous advertised provider set. Add a Gemini provider row containin
 that policy. The shipped public policy includes this optional provider row.
 Catalog entries alone do not launch a process or choose a new default provider.
 
+To hide a provider from this installation's advertised New Chat choices, set an
+empty list in `services/_shared/spawn_defaults.local.json`:
+
+```json
+{"schema_version": 1, "available_models": {"gemini": []}}
+```
+
+Omitted provider keys keep their full catalog. A nonempty list narrows that
+provider to the listed canonical model IDs, in list order; unknown providers or
+models are rejected. To advertise only Gemini, use
+`"available_models": {"claude": [], "codex": []}`. Hiding every configured
+provider is rejected. Restart the daemon after changing local policy.
+
+Web New Chat offers only advertised providers and uses the first advertised
+choice when a saved provider or default model is hidden. Full model definitions
+remain available for existing sessions, explicit launches, aliases and handoffs;
+visibility is not an access restriction. CLI `agent-orch models` returns both
+the advertised `available_models` map and the full `models` map.
+
+Legacy mobile builds still show Claude/Codex buttons and fall back to full
+models for an omitted provider; honoring provider hiding needs a later app
+release. Their compatibility projection still excludes Gemini from advertised
+choices, even on a Gemini-only installation. No mobile UI hiding is implied.
+Before rolling back to a version that rejects empty lists, remove these local
+empty-list overrides.
+
 Interactive stdout stays attached to the terminal. A helper polls native
 `$HOME/.gemini/tmp/<project>/chats/session-*-<shortId>.jsonl` recordings at most
 240 times, at half-second intervals, and stops within one poll after the provider

@@ -173,8 +173,8 @@ def load_spawn_config() -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise _config_error("unsupported spawn defaults schema")
     # Deployment-owned per-host limits live beside the shipped policy in
-    # ``spawn_defaults.local.json`` (never shipped); only ``host_overrides`` is
-    # merged, so the shared file stays identical across checkouts.
+    # ``spawn_defaults.local.json`` (never shipped); host overrides are merged
+    # and optional picker availability replaces the shipped map.
     local_path = SPAWN_DEFAULTS_PATH.with_name("spawn_defaults.local.json")
     if local_path.exists():
         try:
@@ -216,6 +216,8 @@ def load_spawn_config() -> dict[str, Any]:
             _config_tuple(provider, merged)
     if raw.get("available_models") is not None:
         _validate_available_models(raw["available_models"])
+        if not _available_model_ids(raw):
+            raise _config_error("available_models must advertise at least one provider")
     profiles = raw.get("profiles", {})
     handoff = profiles.get("agent_orch", {}).get("handoff") if isinstance(profiles, dict) else None
     if not isinstance(handoff, dict):
@@ -230,8 +232,9 @@ def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
     ``available_models`` map in the spawn config (provider -> list of canonical
     model ids, each a subset of ``MODELS``) narrows the picker to the currently
     launchable set. Absent — the shipped public default — the full ``MODELS``
-    catalog is advertised. ``load_spawn_config`` has already validated any
-    provided map, so each listed id is known.
+    catalog is advertised. A missing provider key keeps its full catalog; an
+    empty list hides the provider. Full ``MODELS`` remains launchable.
+    ``load_spawn_config`` validates every provided id.
     """
     configured = config.get("available_models")
     result: dict[str, tuple[str, ...]] = {}
@@ -239,7 +242,9 @@ def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
         if provider not in config["providers"]:
             continue
         ids = configured.get(provider) if isinstance(configured, dict) else None
-        result[provider] = tuple(ids) if ids else tuple(MODELS[provider])
+        if ids == []:
+            continue
+        result[provider] = tuple(ids) if ids is not None else tuple(MODELS[provider])
     return result
 
 
@@ -249,10 +254,10 @@ def _validate_available_models(available: object) -> None:
     for provider, ids in available.items():
         if provider not in MODELS:
             raise _config_error(f"available_models lists unknown provider: {provider}")
-        if not isinstance(ids, list) or not ids:
-            raise _config_error(f"available_models[{provider}] must be a non-empty list")
+        if not isinstance(ids, list):
+            raise _config_error(f"available_models[{provider}] must be a list")
         for model_id in ids:
-            if model_id not in MODELS[provider]:
+            if not isinstance(model_id, str) or model_id not in MODELS[provider]:
                 raise _config_error(
                     f"available_models[{provider}] lists unknown model: {model_id}"
                 )
