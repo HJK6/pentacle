@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from .specs_parser import _section, _without_fences, parse_work_facts
-from .specs_service import SOURCE_READ_ERRORS
+from .specs_service import SOURCE_READ_ERRORS, _decode_identity_bytes, _input_token
 
 ESTIMATE_FORMS = ("`- remaining_work_h: <p25>–<p75> (median <m>) as_of YYYY-MM-DD [provisional]`, "
                   "`- remaining_work_h: n/a — umbrella|coordination`, or "
@@ -61,11 +61,19 @@ def work_checkpoint(spec_id: str, *, root: str | Path | None = None) -> dict[str
     """Return ``{state: valid|invalid|unverifiable, facts, deficiencies, error}`` from the current files."""
     from .spec_reader import SpecReader
     try:
-        reader = SpecReader(root)
+        reader = SpecReader(root, identity_only=True)
         status, folder, _identity, spec_text = reader.read(spec_id)
         summary_path = Path(folder) / "summary.md"
-        summary_text = summary_path.read_text(encoding="utf-8")
-        changed = max((Path(folder) / "spec.md").stat().st_mtime, summary_path.stat().st_mtime)
+        summary = reader.service._read_identity_input(summary_path)
+        if summary[1] is None:
+            raise FileNotFoundError(summary_path)
+        summary_text = _decode_identity_bytes(summary[1])
+        # Seal the consumed pair, including summary body changes and a spec
+        # publication while the summary was read. Never mix their revisions.
+        reader.read(spec_id)
+        if _input_token(summary) != _input_token(reader.service._read_identity_input(summary_path)):
+            raise ValueError("spec_changed")
+        changed = max(reader.consumed[Path(folder) / "spec.md"].fingerprint[4], summary[0][4]) / 1e9
     except (ValueError, *SOURCE_READ_ERRORS) as exc:
         return {"state": "unverifiable", "spec_id": spec_id, "facts": None, "deficiencies": [],
                 "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__}

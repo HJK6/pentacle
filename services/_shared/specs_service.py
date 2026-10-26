@@ -643,7 +643,7 @@ class SpecsSubsystem:
                 os.close(fd)
         return before, content, read_error
 
-    def _scan_folders_by_id(self, status_dirs=None, *, strict=False):
+    def _scan_folders_by_id(self, status_dirs=None, *, strict=False, identity_only=False):
         """Capture and seal current bytes; parse only changed content.
 
         Keep only the current tree's inputs. A failed capture never publishes
@@ -689,15 +689,21 @@ class SpecsSubsystem:
                             aliases.add(child.name)
                         for alias in aliases:
                             folders[alias].append((status_dir.name, child))
-            # Recheck the whole capture. This detects edits to an early file
-            # while a later file parses, including preserved-mtime replacement.
+            # Recheck the whole capture. Checkpoints may tolerate body-only
+            # publication; their reader separately binds the consumed target
+            # to the full captured token. Other consumers seal every byte.
             for status_dir, paths in inputs.items():
                 with _bounded_directory(status_dir) as status_fd:
                     for path, captured in paths.items():
                         with _bounded_directory(path.parent, parent_fd=status_fd) as directory:
                             current = self._read_identity_input(path, directory_fd=directory)
                         if _input_token(current) != captured:
-                            raise SpecResolutionUnavailable("spec_identity_changed")
+                            if not identity_only:
+                                raise SpecResolutionUnavailable("spec_identity_changed")
+                            front = _parse_identity_bytes(path, current[1])
+                            identity = (str(front.get("id") or path.parent.name), bool(front.get("id")))
+                            if identity != identities[path.parent]:
+                                raise SpecResolutionUnavailable("spec_identity_changed")
             for path, fingerprint in directories.items():
                 value = path.lstat()
                 if (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns) != fingerprint:
