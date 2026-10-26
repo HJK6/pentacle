@@ -89,6 +89,12 @@ def test_real_socket_cli_accepted_and_rejected_reports(tmp_path, monkeypatch):
                 return proc.returncode, json.loads(out)
 
             code, response = await cli(saved["report_id"])
+            # A1.4: a named reader credential plus seat identity is ambiguous.
+            assert code == 1 and response["error_code"] == "unavailable"
+            # The installed publisher and reader launcher strip seat identity.
+            env.pop("AGENT_ORCH_STREAM_ID")
+            env.pop("AGENT_ORCH_STREAM_TOKEN")
+            code, response = await cli(saved["report_id"])
             assert code == 0, response
             expected = {key: saved[key] for key in (
                 "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at")}
