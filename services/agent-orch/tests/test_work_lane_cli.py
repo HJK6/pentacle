@@ -228,3 +228,77 @@ def test_unattended_is_read_only_and_reports_quality(monkeypatch, capsys):
     work.update(quality="unavailable", count=0, error="work_index_unavailable", items=[])
     assert _run(["work", "unattended"]) == 0
     assert "unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("conflicts", [0, 1, 2])
+def test_add_member_preserves_concurrent_members_and_bounds_retry(monkeypatch, capsys, conflicts):
+    version, members, attempts = 3, ["spec_demo__first"], 0
+    def reply(payload):
+        nonlocal version, members, attempts
+        if payload["type"] == "work_lanes.show":
+            return {"type": "work_lanes.show.ok", "lane": {"version": version, "members": members.copy()}}
+        attempts += 1
+        assert payload["operation"] == "work_lane.set_members"
+        assert payload["expected_lane_version"] == version
+        if attempts <= conflicts:
+            version += 1
+            members.append(f"spec_demo__concurrent_{attempts}")
+            return {"type": "assistant.operation.error", "error_code": "assistant_lane_version_conflict"}
+        assert payload["payload"] == {"members": [*members, "spec_demo__new"]}
+        version += 1
+        members.append("spec_demo__new")
+        return {"type": "assistant.operation.ok", "lane": {"version": version, "members": members}}
+    sent = _wire(monkeypatch, reply)
+    assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new"]) == (1 if conflicts == 2 else 0)
+    assert attempts == min(conflicts + 1, 2)
+    writes = [m for m in sent if m["type"] == "assistant.operation"]
+    assert all(m["request_id"] for m in writes)
+    if len(writes) == 2:
+        assert writes[0]["request_id"] != writes[1]["request_id"]
+    assert json.loads(capsys.readouterr().out)["type"] == ("assistant.operation.error" if conflicts == 2 else "assistant.operation.ok")
+
+
+@pytest.mark.parametrize("error", ["work_lane_members_unchanged", "work_lane_member_unresolved", "work_lane_actor_unverified"])
+def test_add_member_preserves_other_refusals_without_retry(monkeypatch, capsys, error):
+    def reply(payload):
+        if payload["type"] == "work_lanes.show":
+            return {"type": "work_lanes.show.ok", "lane": {"version": 7, "members": ["spec_demo__first"]}}
+        return {"type": "assistant.operation.error", "error_code": error}
+    sent = _wire(monkeypatch, reply)
+    assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new", "--request-id", "caller-id"]) == 1
+    assert len(sent) == 2 and sent[-1]["request_id"] == "caller-id"
+    assert json.loads(capsys.readouterr().out)["error_code"] == error
+
+
+def test_add_member_repeat_uses_unique_members_and_stable_request(monkeypatch, capsys):
+    def reply(payload):
+        if payload["type"] == "work_lanes.show":
+            return {"type": "work_lanes.show.ok", "lane": {"version": 8, "members": ["spec_demo__new"]}}
+        assert payload["payload"]["members"] == ["spec_demo__new"]
+        return {"type": "assistant.operation.error", "error_code": "work_lane_members_unchanged"}
+    sent = _wire(monkeypatch, reply)
+    for _ in range(2):
+        assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new"]) == 1
+    assert sent[1]["request_id"] == sent[3]["request_id"]
+
+
+def test_add_member_show_failure_never_writes(monkeypatch):
+    sent = _wire(monkeypatch, {"type": "work_lanes.show.error", "error_code": "work_lane_not_found"})
+    assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new"]) == 1
+    assert len(sent) == 1
+
+
+def test_add_member_explicit_request_id_survives_conflict(monkeypatch):
+    reads = 0
+    def reply(payload):
+        nonlocal reads
+        if payload["type"] == "work_lanes.show":
+            reads += 1
+            return {"type": "work_lanes.show.ok", "lane": {"version": reads, "members": []}}
+        assert payload["request_id"] == "caller-id"
+        if reads == 1:
+            return {"type": "assistant.operation.error", "error_code": "assistant_lane_version_conflict"}
+        return {"type": "assistant.operation.ok"}
+    sent = _wire(monkeypatch, reply)
+    assert _run(["work-lane", "add-member", "wl-1", "spec_demo__new", "--request-id", "caller-id"]) == 0
+    assert len(sent) == 4

@@ -197,6 +197,9 @@ def test_typed_wire_error_and_unchanged_value_error_mapping():
         await sessions.refresh()
         server = Server(store=env.store, sessions=sessions, local_host="fixture-root")
         server.assistant_composite = env.composite
+        # These transport-error fixtures use catalog-resolved members.
+        from types import SimpleNamespace
+        server.work_lanes = SimpleNamespace(specs=SimpleNamespace(resolution_for=lambda _: "resolved"))
         message = {"type": "assistant.operation", "request_id": "wire-conflict", "composite_stream_id": ASSISTANT,
                    "dispatch_id": "none", "operation": "work_lane.set_members", "lane_id": target["lane_id"],
                    "expected_lane_version": 1, "payload": {"members": [A]},

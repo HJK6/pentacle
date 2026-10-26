@@ -134,7 +134,17 @@ Use `work-lane set-members <lane> --member spec_demo__bridge [--member ...]
 --expected-version N --request-id ID` for ordered full replacement. Only the
 authenticated current FD binding can write it. IDs are canonical, unique
 `spec_...` values; 1–32 members are allowed. Empty membership requires
-`--no-spec-reason` (at most 280 characters). Unknown IDs appear missing.
+`--no-spec-reason` (at most 280 characters). The daemon refuses newly added
+unresolved IDs with `work_lane_member_unresolved`; existing members are not
+rechecked, so a missing historical member can remain while another is added.
+
+For one addition, use `agent-orch work-lane add-member <lane_id> <spec_id>
+[--request-id ID]`. It reads the ordered members and version, appends the spec
+only if absent, and sends the existing `set_members` operation. One version
+conflict triggers a fresh read and one retry, preserving concurrent additions.
+Other refusals pass through, including `work_lane_members_unchanged` on a repeat.
+The default request ID hashes the lane ID, spec ID and version read; an explicit
+request ID is reused across the bounded retry.
 New adoption supplies members or a reason; legacy lanes retain their lifecycle
 behavior. `adopt --preview --epic <id>` expands catalog members once, filters
 to specs and deduplicates. The FD edits and confirms the list. Qualified lead
@@ -552,7 +562,7 @@ DB. Review the concrete rollback artifact before activation.
   - Store startup backfills open single-spec rows idempotently.
 - **New commissions.** A spawn from a token-verified agent stream that is not a handoff, resume, daemon fire or ruled release is a new commission. Seat operator elevation does not exempt it. Message text is never inspected.
   - It resolves its assignment from the first `--spec-id`, else from the source seat's effective assignment. Otherwise it is refused with `work_assignment_required`.
-  - The assignment must be a member of a non-done product lane. Otherwise it is refused with `work_lane_assignment_unlinked`, before any reservation or pane. The refusal prints the exact `set-members` repair, filled in when the caller's own assignment has exactly one lane.
+  - The assignment must be a member of a non-done product lane. Otherwise it is refused with `work_lane_assignment_unlinked`, before any reservation or pane. The refusal prints the `agent-orch work-lane add-member <lane_id> <spec_id>` repair, with the lane filled in when the caller's own assignment has exactly one lane.
   - An admitted idempotent retry replays.
   - Operator-authenticated callers without a seat token are exempt, as are anonymous loopback spawns (a known local bypass), daemon fires, host transfer and recovery.
   - `schedule.insert` checks a non-handoff seat schedule at insert and stores its assignment first among the spec ids. A lane-ruling spawn is checked when its ruling request is admitted, not at release.

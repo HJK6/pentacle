@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 import json
 from pathlib import PurePath
 
-from store_specs import effective_assignment, normalize_spec_ids, _hydrate_spec_row, _row
+from store_specs import (effective_assignment, normalize_spec_ids, normalize_spec_binding_provenance,
+                         _hydrate_spec_row, _row)
 from store_work_index import _state_conn, _observed_record, members_conn
 
 LABEL = "in_progress with no assigned implementation lead"
@@ -14,14 +15,19 @@ REVIEW = "Review the report outcome and current item before selecting a disposit
 
 
 def assigned_owners_conn(conn, *, exclude: str | None = None) -> dict[str, list[str]]:
-    """Authority tags never substitute for a current implementation assignment."""
+    """Current assignments and explicit grants attend work; inherited tags do not."""
     owners: dict[str, list[str]] = {}
     for raw in conn.execute("SELECT * FROM sessions WHERE status='open' AND role IN ('lead','nexus')"):
         row = dict(raw)
         stream = f"{row['host']}:{row['session_name']}"
-        assigned = effective_assignment(row)
-        if assigned and stream != exclude and not row.get("presumed_dead_at"):
-            owners.setdefault(assigned, []).append(stream)
+        if stream == exclude or row.get("presumed_dead_at"):
+            continue
+        attended = {effective_assignment(row)} - {None}
+        attended.update(binding["spec_id"] for binding in normalize_spec_binding_provenance(
+            row.get("spec_binding_provenance"), spec_ids=row.get("spec_ids"))
+            if binding["provenance"] in {"spawn_explicit", "operator_v2"})
+        for identity in attended:
+            owners.setdefault(identity, []).append(stream)
     return {identity: sorted(streams) for identity, streams in owners.items()}
 
 

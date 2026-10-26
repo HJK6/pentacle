@@ -641,13 +641,10 @@ class SpawnCtl:
         home = await self.store.open_lanes_for_spec(effective_assignment(caller)) if effective_assignment(caller) else []
         if len(home) == 1:
             lane = home[0]
-            members = " ".join(f"--member {member}" for member in [*lane["members"], spec_id])
-            repair = (f"agent-orch work-lane set-members {lane['lane_id']} {members} "
-                      f"--expected-version {lane['version']} --request-id <new id>")
+            repair = f"agent-orch work-lane add-member {lane['lane_id']} {spec_id}"
         else:
-            repair = ("agent-orch work-lane list; agent-orch work-lane show <lane_id> --members; then "
-                      f"agent-orch work-lane set-members <lane_id> <current --member ...> --member {spec_id} "
-                      "--expected-version <N> --request-id <new id>")
+            repair = ("agent-orch work-lane list; then "
+                      f"agent-orch work-lane add-member <lane_id> {spec_id}")
         return VerbError("work_lane_assignment_unlinked",
                          f"{spec_id} is not a member of any open product lane; the FD adds it first: {repair}",
                          spec_id=spec_id)
