@@ -87,9 +87,8 @@ async def test_unlinked_explicit_commission_is_refused_before_any_pane(env):
     caller = await seat(env.store, "caller", home, assigned=home)
     err = await refused(ctl, agent(caller, spec=target))
     assert err.code == "work_lane_assignment_unlinked"
-    # The repair names the caller's lane with its current members and version filled in.
-    assert (f"agent-orch work-lane set-members wl-home --member {home} --member {target} "
-            "--expected-version 4") in str(err)
+    # The repair names the caller's home lane and only the new member.
+    assert f"agent-orch work-lane add-member wl-home {target}" in str(err)
     assert tmux.created == 0 and await env.store.fetch_session(HOST, "child") is None
 
 

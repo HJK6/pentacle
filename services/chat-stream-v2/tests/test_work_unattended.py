@@ -265,3 +265,29 @@ def test_observation_clock_no_churn_and_disabled_digest(monkeypatch):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("role", ["lead", "nexus"])
+@pytest.mark.parametrize("inactive", ["closed", "presumed_dead"])
+def test_explicit_attachments_attend_but_inherited_tags_do_not(role, inactive):
+    async def run():
+        store = Store(); store.start()
+        try:
+            await cached(store, count=5)
+            ids = [f"spec_demo__item_{i:02}" for i in range(5)]
+            provenance = [
+                {"spec_id": identity, "provenance": kind, "granting_principal": "operator",
+                 "granted_at": "2026-10-26T00:00:00Z"}
+                for identity, kind in zip(ids, ["spawn_explicit", "operator_v2", "spawn_explicit",
+                                                 "parent_inherited", "handoff_inherited"])]
+            await store.open_session("host-a", "owner", role=role, assigned_spec_id=ids[0],
+                                     spec_ids=ids, spec_binding_provenance=provenance)
+            assert [i["spec_id"] for i in (await store.work_unattended())["items"]] == ids[3:]
+            from work_unattended import assigned_owners_conn
+            assert await store.submit(lambda c: assigned_owners_conn(c, exclude="host-a:owner")) == {}
+            fields = {"status": "closed"} if inactive == "closed" else {"presumed_dead_at": "2026-10-26T00:01:00Z"}
+            await store.update_session("host-a", "owner", **fields)
+            assert [i["spec_id"] for i in (await store.work_unattended())["items"]] == ids
+        finally:
+            store.stop()
+    asyncio.run(run())

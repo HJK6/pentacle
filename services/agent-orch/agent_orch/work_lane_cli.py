@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -225,6 +226,33 @@ def cmd_set_members(args: argparse.Namespace) -> int:
     return _operation(args, "set_members", payload)
 
 
+def cmd_add_member(args: argparse.Namespace) -> int:
+    try:
+        for attempt in range(2):
+            shown = _call(args, {"type": "work_lanes.show", "lane_id": args.lane_id})
+            if shown.get("type") != "work_lanes.show.ok":
+                return _finish(shown)
+            lane = shown["lane"]
+            version = lane["version"]
+            members = list(lane["members"])
+            if args.spec_id not in members:
+                members.append(args.spec_id)
+            request_id = args.request_id or "add-member:" + hashlib.sha256(
+                json.dumps([args.lane_id, args.spec_id, version], separators=(",", ":")).encode()).hexdigest()
+            response = _call(args, {
+                "type": "assistant.operation", "request_id": request_id,
+                "composite_stream_id": args.composite_stream_id, "dispatch_id": "none",
+                "operation": "work_lane.set_members", "lane_id": args.lane_id,
+                "expected_lane_version": version, "payload": {"members": members},
+            })
+            if attempt == 0 and response.get("error_code") == "assistant_lane_version_conflict":
+                continue
+            return _finish(response)
+    except Exception as exc:  # noqa: BLE001
+        print(f"agent-orch work-lane add-member: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_set_owner(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"to": args.to}
     if args.reason:
@@ -437,6 +465,13 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--title")
     p.add_argument("--summary")
     p.set_defaults(func=cmd_set_text)
+
+    p = sub.add_parser("add-member", help="FD: append one resolved spec, retrying one version conflict")
+    p.add_argument("lane_id")
+    p.add_argument("spec_id")
+    p.add_argument("--request-id", help="stable id (default: hash of lane, spec and current version)")
+    common(p)
+    p.set_defaults(func=cmd_add_member)
 
     p = mutator("set-members", "FD: replace ordered lane membership")
     p.add_argument("--member", action="append", help="canonical spec id; repeat in membership order")

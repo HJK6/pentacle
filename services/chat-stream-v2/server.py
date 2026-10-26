@@ -4684,6 +4684,19 @@ class Server:
         if self.lane_rulings is not None:
             composite.ruling_hook = self.lane_rulings.request_composite
         try:
+            if msg.get("operation") == "work_lane.set_members":
+                shown = await self.store.get_work_lane(str(msg.get("lane_id") or ""))
+                # Let the store handle stale CAS and replay before catalog checks.
+                if (shown and shown["lane"]["version"] == msg.get("expected_lane_version")
+                        and isinstance(msg.get("payload"), dict)):
+                    from work_lane_members import validate_members
+                    payload = msg["payload"]
+                    members, _ = validate_members(payload.get("members"), payload.get("no_spec_reason"))
+                    existing = set(shown["lane"]["members"])
+                    specs = self.work_lanes.specs if self.work_lanes is not None else None
+                    for identity in members:
+                        if identity not in existing and (specs is None or specs.resolution_for(identity) != "resolved"):
+                            raise VerbError("work_lane_member_unresolved", f"{identity} is not a resolved spec")
             return await composite.operation(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
         except (WorkLaneMemberConflict, WorkLaneMemberInUse) as exc:
             raise VerbError(exc.code, str(exc)) from exc
