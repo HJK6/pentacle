@@ -785,11 +785,11 @@ class AssistantLaneRulings:
         return None
 
     async def _check_authority_loss(self) -> None:
-        """Tell the front desk once when the bound ruling authority is lost.
+        """Expire pending rulings and tell the desk once on authority loss.
 
         Reads the liveness the reconciler already recorded; it runs with no
-        request pending. It never rebinds and does not change what an
-        unavailable authority means for a request. One notice per continuous
+        request pending. It never rebinds; pending requests use the same
+        unavailable-authority expiry as new requests. One notice per continuous
         loss of one (stream, generation); a verified recovery or a rebind
         rearms it. The record is durable, so a daemon restart does not repeat it.
         """
@@ -814,6 +814,13 @@ class AssistantLaneRulings:
         evidence = self._authority_loss_evidence(await self.store.fetch_session(host, name))
         if evidence is None:
             return
+        pending = await self.store.submit(lambda conn: [row[0] for row in conn.execute(
+            "SELECT ruling_request_id FROM v2_assistant_lane_rulings "
+            "WHERE state='pending' AND authority_stream_id=? AND authority_generation=?",
+            (stream_id, generation),
+        )])
+        for request_id in pending:
+            await self._expire(request_id, "authority_unavailable")
         if told.get("open") and told.get("stream_id") == stream_id and told.get("generation") == generation:
             return
         epoch = int(told.get("epoch") or 0) + 1
