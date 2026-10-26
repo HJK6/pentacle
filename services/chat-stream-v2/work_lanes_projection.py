@@ -322,6 +322,10 @@ class WorkLanesInventory:
                                                       name="work-index-watcher-start")
         async def periodic() -> None:
             while True:
+                # The due timestamp is recorded after the scan. Align the
+                # interval with that drain so the next tick cannot skip it.
+                if self._task is not None:
+                    await asyncio.shield(self._task)
                 await asyncio.sleep(min(interval_s, self.sweep_interval_s))
                 self.refresh()
         if self._periodic is None:
