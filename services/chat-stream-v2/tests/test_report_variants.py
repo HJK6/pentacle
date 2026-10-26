@@ -436,6 +436,28 @@ def test_conforming_qa_grade_report_round_trips_full_target_sha(
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("status", ("aborted", "error"))
+def test_qa_aborted_or_error_report_needs_no_verdict_or_target(status: str) -> None:
+    # Fleet audit 2026-09-26: a QA seat that stops without reviewing has no verdict to give.
+    async def go() -> None:
+        store = Store(":memory:")
+        store.start()
+        sessions = Sessions(store, local_host="alpha")
+        await sessions.open("alpha", "qa-stop", visibility="hidden", role="qa")
+        try:
+            reply = await Ledger(store, sessions=sessions).report(_qa_grade_report(
+                f"qa-{status}", "alpha:qa-stop", status=status, reason="candidate withdrawn",
+            ))
+            stored = await store.get_report(f"qa-{status}")
+            assert reply["report_id"] == f"qa-{status}"
+            assert stored is not None and stored["status"] == status
+            assert stored["qa_verdict"] is None and stored["target_sha"] is None
+        finally:
+            store.stop()
+
+    asyncio.run(go())
+
+
 def test_qa_progress_and_non_qa_terminal_reports_do_not_require_target_binding() -> None:
     async def go() -> None:
         store = Store(":memory:")
