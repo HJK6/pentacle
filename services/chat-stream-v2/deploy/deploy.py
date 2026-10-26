@@ -5,6 +5,7 @@ import argparse
 from xml.sax.saxutils import escape
 import hashlib
 import json
+import math
 import os
 import plistlib
 import pwd
@@ -293,6 +294,10 @@ def _new_restart_activation(
 GATE_REQUIRED_TIER = "merge"
 GATE_REQUIRED_EXECUTABLES = ("git", "tmux")
 GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+# The inline gate runs under `env -i`, so run_gate.py would fall back to 900 s per
+# tier. Use the qualified v2-merge-capacity tier bounds (scripts/gate-env.json);
+# a caller's own V2_<TIER>_TIMEOUT_S still wins.
+DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "1200", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def _effective_home() -> Path:
@@ -303,6 +308,18 @@ def _effective_home() -> Path:
 def _gate_path(repo: Path, service: ServiceConfig | None = None) -> str:
     paths = [str(_venv_python(repo, service).parent), *GATE_SYSTEM_PATHS]
     return os.pathsep.join(dict.fromkeys(paths))
+
+
+def _gate_tier_timeouts() -> dict[str, str]:
+    bounds = {name: os.environ.get(name, default) for name, default in DEPLOY_GATE_TIER_TIMEOUTS.items()}
+    for name, value in bounds.items():
+        try:
+            seconds = float(value)
+        except ValueError:
+            seconds = math.nan
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise DeployError(f"gate_timeout_invalid: {name}={value!r} must be a finite positive number of seconds")
+    return bounds
 
 
 def _gate_environment(repo: Path, service: ServiceConfig | None = None) -> dict[str, str]:
@@ -319,6 +336,7 @@ def _gate_environment(repo: Path, service: ServiceConfig | None = None) -> dict[
         "PATH": path,
         "PYTHON": str(python),
         "PYTHONNOUSERSITE": "1",
+        **_gate_tier_timeouts(),
     }
 
 
