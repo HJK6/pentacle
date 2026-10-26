@@ -15,7 +15,7 @@ there is no automatic deployment retry.
   duplicate pass, an unavailable row, or a contradictory command exit 0. A smoke
   command failure other than its documented UNTESTED exit 2 also fails.
 - Exit **9**, `untested`: local evidence is incomplete/unavailable, any cell is
-  quota-limited or otherwise untested, or configuration/evidence is missing or
+  quota-limited, provider-throttled or otherwise untested, or configuration/evidence is missing or
   invalid. This retains the existing quota/UNTESTED non-success contract.
 - Exit **10**, `partial`: every local cell passed and one or more remote cells
   are explicitly unreachable; all other cells passed. The operator line names
@@ -58,9 +58,40 @@ verdict. An empty setting remains invalid rather than resolving to a directory.
 - If several hosts have the local marker, all of them must pass. If none does,
   the local identity is unproven and neither full nor partial acceptance is given.
 - Only explicit `host_unavailable`/`unreachable` evidence qualifies for partial.
-  Unknown causes, omitted cells, and quota exhaustion retain exit 9.
+  Omitted cells, quota exhaustion and typed provider throttling retain exit 9.
 - Smoke exit 2 is the producer's UNTESTED code; other nonzero smoke exits fail.
   Malformed/unconfigured rows remain preserved and cannot establish acceptance.
+
+## Terminal provider failures
+
+The smoke stops its reply wait as soon as it consumes a structured
+`provider-turn-error` ERROR for its cell. It never retries the turn or waits for
+the reply deadline after that terminal event. A typed Codex
+`response_too_many_failed_attempts` with integer `http_status_code: 429` normalizes
+to `provider_throttled`: `class=untested`, smoke exit 2, deploy exit 9. The
+existing general UNTESTED merger preserves this reason without another evidence
+channel. It cannot become PASS or remote-unreachable partial acceptance.
+
+Unknown terminal provider errors remain `provider_error` failures (smoke exit 1,
+deploy exit 6). The generic ERROR emitted by an older satellite therefore fails
+fast, while rolling out the shared normalizer enables the named 429 class.
+Daemon and satellite releases must both carry the normalizer change. Arbitrary
+provider error messages are never copied into normalized errors or smoke details.
+
+No-reply details name `send_accepted`, `input_accepted`, `transcript_bound`, and
+`reply_seen`. A durable accepted send receipt proves the first; a matching
+structured USER proves input and transcript ingest; a structured terminal ERROR
+also proves transcript ingest. Missing observations are `unknown`. The reply
+predicate still requires an assistant event containing this cell's unique marker.
+
+## Deploy checkout changes
+
+The running deploy process loads its repository-local scanner and managed-log
+dependencies before it changes the checkout. Direct-script execution establishes
+the service import path first. This preserves one tool version across forward
+deploys and rollbacks; post-switch imports cannot mix scanner APIs from releases.
+Target-tree smoke subprocesses and plist/data reads intentionally use the target
+version. They are distinct from imports in the already-running deploy process.
 
 ## Synthetic validation and fixture manifest
 
