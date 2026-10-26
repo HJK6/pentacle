@@ -2299,7 +2299,7 @@ class Server:
             if handler is None:
                 return [self._unsupported(verb, request_id, caller=caller)]
             if not self._is_loopback_client(websocket) and verb not in {
-                "ping", "hello", "enroll", "event.push", "host.stats",
+                "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
                 auth = dispatch_msg["_auth_context"]
                 code = None

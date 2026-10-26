@@ -476,3 +476,26 @@ is fenced to the parent generation. Late proof retains `failure_code` and
 `delivery_failed_at`, adds `delivered_late_at`, and records
 `late_first_user_event`; `adopted_after_restart` requires evidence of a different
 daemon instance. Reuse the existing spawn handle for recovery.
+
+## Screen leases
+
+Desktop automation cooperatively acquires the whole screen for a registered
+host. The daemon serves `screen.lease.acquire`, `screen.lease.renew`,
+`screen.lease.release` and the public read `screen.lease.status`, exposed by
+`agent-orch screen acquire|renew|release|status`. Host names are trimmed and
+lowercased; unknown hosts are refused. A lease defaults to 900 seconds and
+accepts an integer TTL from 1 through 3600 seconds.
+
+Acquire on a free host creates a lease; re-acquiring by its holder refreshes the
+same lease. Another seat receives `screen_held`, and the current front desk gets
+one durable `screen_lease_contended` notice per lease and requester. The front
+desk prioritises in chat. Renew and release require the holder; the verified
+front desk alone may force release, which sends `screen_lease_revoked` to the
+former holder. A second release returns `screen_lease_not_found`.
+
+Status reports every registered host, or the selected host, as `free` or `held`.
+Expired leases appear free immediately and are finalized by a mutation. Active
+leases survive daemon restarts in the session database and release atomically
+when their holder closes, including presumed-dead closes. There is no input
+locking or presence detection. Consumers must acquire before visible actions
+and release their acquired lease IDs in a `finally` block.
