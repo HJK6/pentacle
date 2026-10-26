@@ -5228,6 +5228,15 @@ class Server:
         return {"type": "reconcile.status.ok", **payload}
 
     async def _on_close(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if "progeny_stream_id" in msg:
+            log.info("close refused subsystem=sessions "
+                     "bug_ref=spec_pentacle__remote_self_close_progeny_2026_09 "
+                     "reason=close_progeny_unsupported")
+            raise VerbError(
+                "close_progeny_unsupported",
+                "close --progeny is unsupported; use spawn --handoff for succession. "
+                "The session has not been closed.",
+            )
         host, name = await self.sessions.resolve(msg)
         target_stream_id = f"{host}:{name}"
         raw_expected_generation = msg.get("expected_generation")

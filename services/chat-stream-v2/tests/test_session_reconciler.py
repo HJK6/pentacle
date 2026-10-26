@@ -685,6 +685,40 @@ class _ClosedSurvivorHosts(_FakeHosts):
         return True
 
 
+@pytest.mark.parametrize("probe_rc", [0, 127])
+def test_reap_inventory_falls_back_on_failed_sid_query(probe_rc):
+    """Even a failed ps with plausible stdout cannot prove a process died."""
+    async def run():
+        table = "100 1 501 100 7 Mon Jan 1 00:00:00 2026 owned\n"
+        tmux = _FakeTmux((0, "target\t100\t%1\t/dev/ttys001\t/tmp/fixture/default\n"))
+        calls = []
+        class Hosts(_ClosedSurvivorHosts):
+            async def run_command(self, host, *args, **kwargs):
+                calls.append((host, args, kwargs))
+                if args[:2] == ("ps", "-eo"):
+                    return 1, table
+                if args[:2] == ("python3", "-c"):
+                    assert args[2] == prockill.SESSION_ID_PROBE
+                    return probe_rc, table
+                return await super().run_command(host, *args, **kwargs)
+        store = Store(":memory:")
+        store.start()
+        try:
+            sessions = Sessions(store, tmux=tmux, local_host="hosta")
+            reaper = SessionReconciler(sessions, Hosts(tmux, table))
+            inventory = await reaper._reap_inventory("hostb")
+            assert all(host == "hostb" and kw["timeout"] == reaper.cfg.reap_timeout_s
+                       for host, _, kw in calls)
+            assert [args[0] for _, args, _ in calls][:2] == ["ps", "python3"]
+            if probe_rc:
+                assert inventory is None
+            else:
+                assert inventory is not None and inventory[1][100]["sid"] == 7
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def _proof(
     *, pid: int, session: str, pane: str, tty: str, socket: str,
     command: str, start_id: str,

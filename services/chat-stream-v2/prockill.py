@@ -17,8 +17,35 @@ import asyncio
 import hashlib
 import os
 import signal
+import sys
 import time
 from typing import Any
+
+
+# Darwin ps has no numeric sid column (sess is not an equivalent). This
+# standalone probe also runs on peers without importing the daemon package.
+# Keep the ordinary Linux ps path; use this only after that query fails.
+SESSION_ID_PROBE = """\
+import os
+import subprocess
+
+table = subprocess.run(
+    ['ps', '-ww', '-eo', 'pid=,ppid=,uid=,pgid=,lstart=,command='],
+    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    text=True, check=True, timeout=5,
+).stdout
+rows = []
+for line in table.splitlines():
+    fields = line.strip().split(None, 9)
+    if len(fields) < 9:
+        continue
+    try:
+        sid = os.getsid(int(fields[0]))
+    except ProcessLookupError:
+        continue
+    rows.append(' '.join(fields[:4] + [str(sid)] + fields[4:]))
+print('\\n'.join(rows))
+"""
 
 
 async def terminate_and_reap(proc: object) -> None:
@@ -115,7 +142,10 @@ async def process_records() -> dict[int, dict[str, Any]]:
 
     ``lstart`` is a printed start value, not a portable process-birth token;
     the reconciler additionally binds the record to boot id and tmux pane proof.
+    The SID fallback reads getsid after ps; the existing birth comparison on
+    the fresh pre-signal inventory remains mandatory for PID-reuse fencing.
     """
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "ps", "-eo", "pid=,ppid=,uid=,pgid=,sid=,lstart=,command=",
@@ -123,7 +153,21 @@ async def process_records() -> dict[int, dict[str, Any]]:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        if proc.returncode != 0:
+            # Darwin still prints a partial table on failure. Never parse it.
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", SESSION_ID_PROBE,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            if proc.returncode != 0:
+                return {}
+    except asyncio.CancelledError:
+        await terminate_and_reap(proc)
+        raise
     except (asyncio.TimeoutError, OSError):
+        await terminate_and_reap(proc)
         return {}
     records: dict[int, dict[str, Any]] = {}
     for line in (out or b"").decode("utf-8", "replace").splitlines():

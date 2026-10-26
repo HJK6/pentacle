@@ -13,6 +13,14 @@ lane tracking remain available, but spawning does not require lane membership
 and completion does not parse spec Markdown or fence source-file fingerprints.
 See [retained WIP and lifecycle controls](../../docs/completion-admission-guards.md).
 
+Close/reap process identity uses numeric kernel session IDs. On hosts whose
+`ps` lacks `sid` (macOS), a bounded Python probe combines supported `ps` fields
+with `os.getsid`; peer reaping requires `python3` on the peer's command path.
+An unavailable probe leaves cleanup unverified. Birth, boot, user, process group,
+session and tmux ownership checks still apply before survivor signals.
+`close` requests carrying `progeny_stream_id` are refused before teardown with
+`close_progeny_unsupported`; use `spawn --handoff` for succession.
+
 Use the complete [local startup recipe](../../README.md#local-setup) first. It aligns the desktop and daemon host identity (`local`), native transcript directory, loopback endpoint and desktop credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
 ## Work index polling
