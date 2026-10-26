@@ -6636,19 +6636,26 @@ function catalogTuple(provider, preferred = null) {
   const models = Object.keys(entries);
   if (!Array.isArray(defaults) || !models.length) return null;
   const remembered = preferred || spawnPreferences().byProvider?.[provider];
-  const model = remembered?.model && entries[remembered.model]
-    ? remembered.model : (entries[defaults[0]] ? defaults[0] : models[0]);
+  const candidateModel = remembered ? remembered.model : defaults[0];
+  const recoveringModel = !entries[candidateModel];
+  const model = recoveringModel ? models[0] : candidateModel;
   const efforts = entries[model]?.efforts || [];
-  const effort = remembered?.effort && efforts.includes(remembered.effort)
-    ? remembered.effort : (efforts.includes(defaults[1]) ? defaults[1] : efforts[0]);
+  const effort = !recoveringModel && remembered?.effort && efforts.includes(remembered.effort)
+    ? remembered.effort : (!remembered && !recoveringModel && efforts.includes(defaults[1]) ? defaults[1] : efforts[0]);
   return model && effort ? { provider, model, effort } : null;
 }
 
 function selectionForProvider(provider, preferred = null) {
   const providers = catalogProviders(newSessionCatalog);
   const visibleProvider = providers.includes(provider) ? provider : providers[0];
-  return catalogTuple(visibleProvider, visibleProvider === provider
-    ? (preferred || (newSessionSelection?.provider === provider ? newSessionSelection : null)) : null);
+  const remembered = preferred || (newSessionSelection?.provider === provider ? newSessionSelection : null)
+    || spawnPreferences().byProvider?.[provider];
+  const entries = newSessionCatalog?.models?.[visibleProvider] || {};
+  if (visibleProvider !== provider || (remembered && !entries[remembered.model]?.efforts?.includes(remembered.effort))) {
+    const [model, definition] = Object.entries(entries)[0] || [];
+    return catalogTuple(visibleProvider, { model, effort: definition?.efforts?.[0] });
+  }
+  return catalogTuple(provider, remembered);
 }
 
 function catalogProviders(catalog) {

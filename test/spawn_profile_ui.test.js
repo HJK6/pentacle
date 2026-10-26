@@ -175,6 +175,21 @@ test('hidden default model and invalid effort fall back within the visible provi
     { provider: 'claude', model: 'claude-visible', effort: 'low' });
 });
 
+test('hidden provider and stale model recover to the first advertised model and effort', () => {
+  const picker = visibilityPicker({ claude: {
+    'claude-visible': { efforts: ['low', 'high'] },
+    'claude-default': { efforts: ['high', 'low'] },
+  } });
+  const first = { provider: 'claude', model: 'claude-visible', effort: 'low' };
+  assert.deepEqual(picker.selectionForProvider('codex'), first);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'removed-model', effort: 'high' }), first);
+  assert.deepEqual(picker.selectionForProvider('claude', { model: 'claude-default', effort: 'removed-effort' }), first);
+  assert.deepEqual(picker.catalogTuple('claude', { model: 'claude-default', effort: 'low' }),
+    { provider: 'claude', model: 'claude-default', effort: 'low' });
+  assert.deepEqual(picker.catalogTuple('claude'),
+    { provider: 'claude', model: 'claude-default', effort: 'high' });
+});
+
 test('visible saved choices survive, and an empty projection never restores full models', () => {
   const picker = visibilityPicker({ claude: { 'claude-visible': { efforts: ['low', 'high'] } } });
   assert.deepEqual(picker.selectionForProvider('claude', { model: 'claude-visible', effort: 'high' }),
