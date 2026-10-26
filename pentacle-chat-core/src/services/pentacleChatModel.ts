@@ -24,6 +24,7 @@ import {
   isTransientTranscriptNoise,
   normalizeWorkingLabel,
   normalizedEventText,
+  stripClaudeExpandHint,
   type PentacleDisplayRule,
   type PentacleDisclosurePresentation,
   type PentacleInterpretedEvent,
@@ -1880,7 +1881,7 @@ function buildSessionTranscriptRows(
   const remainingInWindow = Math.max(0, dedupedEvents.length - visibleEvents.length);
   const remainingCount = remainingInWindow;
   const fallbackSegments = splitProvenancedNotificationAnswerSummaryText(session);
-  const fallbackText = normalizedEventText(fallbackSegments?.answerText ?? session.last_text ?? '');
+  const fallbackText = fallbackSegments?.answerText ?? session.last_text ?? '';
   const fallbackKind = session.last_kind || 'ASSIST';
   const fallbackEvent = {
     daemon_seq: -1,
@@ -1894,7 +1895,15 @@ function buildSessionTranscriptRows(
     text: fallbackText,
   };
   const fallbackInterpretation = interpretPentacleEvent(fallbackEvent, resolveHostTitle(session.host));
-  const fallbackDisplayText = (fallbackInterpretation.text || fallbackText).trim();
+  // Ordinary prose keeps its original Markdown, including fenced code. Parsed
+  // question/peer/tool presentations still use the interpreter's display text.
+  const fallbackDisplayText = (
+    fallbackInterpretation.caseId === 'assistant-message' ||
+    fallbackInterpretation.caseId === 'user-message' ||
+    fallbackInterpretation.caseId === 'unknown'
+      ? stripClaudeExpandHint(fallbackText)
+      : fallbackInterpretation.text || fallbackText
+  ).trim();
   const fallbackCompareText = normalizedEventText(fallbackDisplayText || fallbackText);
   const fallbackMatchesReturnedToPrompt = String(fallbackKind || '').toUpperCase() === 'USER' &&
     (
@@ -1909,8 +1918,9 @@ function buildSessionTranscriptRows(
         normalizedEventText(event.text) === fallbackCompareText
       ))
     );
-  const fallbackAt = Date.parse(String(session.last_event_at || ''));
-  const fallbackMatchesHeldEvent = Number.isFinite(fallbackAt) && baseEvents.some((event) => {
+  // last_event_at also advances on tools/status. It cannot identify last_text
+  // or justify rendering another copy of a message already held locally.
+  const fallbackMatchesHeldEvent = baseEvents.some((event) => {
     if (event.stream_id !== streamId) return false;
     if (isReturnedToPromptUserEvent(event)) return false;
     if (event.kind !== fallbackKind) return false;
@@ -1921,8 +1931,7 @@ function buildSessionTranscriptRows(
         return false;
       }
     }
-    const eventAt = eventTimestampMs(event);
-    return Number.isFinite(eventAt) && eventAt >= fallbackAt;
+    return true;
   });
   const fallbackAlreadyRendered = dedupedEvents.some((item) => {
     if (isReturnedToPromptUserEvent(item.event)) return false;
@@ -1936,16 +1945,6 @@ function buildSessionTranscriptRows(
     if (item.event.kind !== fallbackKind) return false;
     if (!includeTools && isToolActionRow(item) && !isToolActionRow(fallbackInterpretation)) {
       return false;
-    }
-    if (isToolActionRow(fallbackInterpretation) && renderedText.startsWith(fallbackCompareText)) {
-      return true;
-    }
-    if (item.event.client_origin === true && item.event.optimistic_id) {
-      return true;
-    }
-    const eventAt = eventTimestampMs(item.event);
-    if (Number.isFinite(fallbackAt) && Number.isFinite(eventAt)) {
-      return eventAt >= fallbackAt;
     }
     return true;
   });
@@ -2035,7 +2034,7 @@ function buildSessionTranscriptRows(
       tone: fallbackInterpretation.tone,
       provider: String(session.provider || ''),
       source: '',
-      text: collapseCodeBlocks(fallbackDisplayText || fallbackText),
+      text: fallbackDisplayText || fallbackText,
       kind: fallbackKind,
       isUser: fallbackInterpretation.tone === 'user',
       eventCase: fallbackInterpretation.caseId,

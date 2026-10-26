@@ -21,6 +21,7 @@ const { branding } = require('./branding_scenario');
 const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_scenario');
 const { scheduledSection } = require('./scheduled_section_scenario');
 const { providerVisibility } = require('./provider_visibility_scenario');
+const { summaryFallbackFormatting } = require('./summary_fallback_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
 // page (window.cc over the websocket) and a chat-stream-v2 daemon. web_gate.js
@@ -505,6 +506,7 @@ const SCENARIOS = [
   ['coloured-host-glyphs', colouredHostGlyphs],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
+  ['summary-fallback-formatting', summaryFallbackFormatting],
   ['chat-file-delivery', chatFileDelivery],
   ['web-chat-voice', webVoice],
   ['public-chat-renderer-contracts', publicChatRendererContracts],

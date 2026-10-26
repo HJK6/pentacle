@@ -61,6 +61,21 @@ waiting for another provider event. Empty chats, and chats whose latest visible
 message lies beyond that bounded scan, omit the preview fields. Summary clients
 receive those fields without a transcript fetch; list polling stays in memory.
 
+The shared chat model uses the summary as a temporary bubble only when matching
+transcript content is unavailable locally. It preserves the original Markdown,
+line breaks and fenced code for display. Matching uses kind and normalized text,
+without comparing the message timestamp to `last_event_at`: later tool or status
+activity does not make the preview a new message. A held matching event suppresses
+the fallback even outside the visible page. A genuinely repeated message gains
+its own row when its transcript event arrives. Returned-to-prompt, optimistic,
+image-wrapper, working-state and tool suppression rules still apply.
+
+The captured synthetic provider-ingestion fixture is
+`pentacle-chat-core/tests/fixtures/summary-fallback-frames.json`. Core tests replay
+it before and after backfill; the `summary-fallback-formatting` web gate scenario
+also records DOM mutations across idle/working inventory updates, checking both
+Markdown structure and the absence of a transient duplicate bubble.
+
 ## Authentication boundaries
 
 Authentication is optional for a loopback fixture daemon. A deployment that enables operator proof supplies a challenge nonce and expects an HMAC proof bound to that nonce, the credential id, and the client kind. Use placeholders in tests; never commit a proof key or an enrollment value.

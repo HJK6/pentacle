@@ -331,7 +331,7 @@ test('session detail places uncorrelated optimistic rows by timestamp without lo
   assert.equal(items?.[1].optimisticId, 'optimistic_host_a_ordering_1');
 });
 
-test('session detail keeps a newer same-text session fallback when the matching event is older', () => {
+test('session detail does not infer a repeated message from a newer activity timestamp', () => {
   const state = buildState({
     sessions: [session({
       last_event_at: '2026-06-30T12:00:05.000Z',
@@ -356,8 +356,8 @@ test('session detail keeps a newer same-text session fallback when the matching 
 
   const items = selectSessionDetail(state, STREAM_ID, { visibleCount: 'all' })?.transcriptItems;
 
-  assert.deepEqual(items?.map((item) => item.text), ['repeat', 'next', 'repeat']);
-  assert.equal(items?.at(-1)?.id, `fallback:${STREAM_ID}`);
+  assert.deepEqual(items?.map((item) => item.text), ['repeat', 'next']);
+  assert.ok(items?.every((item) => item.id !== `fallback:${STREAM_ID}`));
 });
 
 test('session detail hides structured tool fallback by default while preserving a neighboring assistant row', () => {
