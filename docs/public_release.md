@@ -45,6 +45,21 @@ retired and refuses before any external command; merging a PR does not deploy. F
 `services/chat-stream-v2/tests/test_deploy_log_guard.py`; the local release gate is
 `python services/chat-stream-v2/tools/run_gate.py merge`.
 
+FD is the release owner for the deploy gate-evidence choice. When a fresh,
+accepted local v2-merge receipt names the exact public candidate SHA, clean
+source before and after, and passing unit and smoke tiers, FD may pass
+`--gate-evidence /path/to/public-release-merge-gate.json` to `deploy.py`
+instead of rerunning the inline merge gate. As with the
+[satellite pin step](../services/chat-stream-v2/deploy/satellite/README.md#serialized-deploy-window-pin-step),
+generate evidence on the actual public candidate; never relabel private-candidate
+evidence. FD must prove the candidate artifact/source, tested harness, executable
+interpreter/toolchain, environment/configuration, and tested path/cell scope are
+unchanged using the release packet and actual readbacks. A matching SHA label or
+successful CI alone is insufficient. If any input is unknown or changed, omit
+`--gate-evidence` and run the inline gate in the authorized serialized window.
+Reusing evidence grants no restart authority and preserves the deploy transaction,
+rollback, and runtime readback requirements above.
+
 Release notes are the root `CHANGELOG.md`. A PR with a user-visible change adds
 a bullet under `## Unreleased`. Before the release candidate's `Public checks`
 run, the release owner cuts the UTC dated section on that branch and adds a
