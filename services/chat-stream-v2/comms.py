@@ -1793,6 +1793,10 @@ class Comms:
             "receipt_id": receipt_id, "delivery": delivery,
             "submission_confirmed": submission_confirmed,
         }
+        if delivery == COMMITTED_PENDING_PROOF:
+            # Installed clients recognize accepted state while retaining the
+            # canonical delivery's pending-proof and do-not-resubmit semantics.
+            result["state"] = state
         if submission_confirmed and attempts is not None:
             result["attempt"] = attempts
         elif attempts is not None:
@@ -2020,6 +2024,8 @@ class Comms:
                 "reconcile with the existing request_id. DO NOT RESUBMIT."
             ),
         }
+        if winner_delivery == COMMITTED_PENDING_PROOF:
+            result["state"] = winner_state
         if winner_confirmed and winner_attempts is not None:
             result["attempt"] = winner_attempts
         if winner_queued:
