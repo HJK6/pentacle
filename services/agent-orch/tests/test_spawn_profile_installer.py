@@ -1441,3 +1441,76 @@ def test_archive_rebuild_is_identical_and_resume_preserves_immutable_release(tmp
         installer.stage(target, altered[0], commit, altered[1], dry_run=False, runner=local_only)
     assert installer._sha256(installed_archive) == before
     assert (root / "active").resolve() == root / commit
+
+
+def test_archive_is_portable_across_installed_dependency_wheels(tmp_path, monkeypatch):
+    """Exercise the release builder with real dependency files, varying only
+    native wheel/install artifacts; retained source/version still binds identity.
+    """
+    from types import SimpleNamespace
+
+    distribution = installer.importlib.metadata.distribution("websockets")
+    source = Path(distribution.locate_file(""))
+    metadata = next(source.glob("websockets-*.dist-info"))
+    repo = SCRIPT.parents[3]
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    artifacts = []
+    for index, platform in enumerate(("linux", "darwin", "windows", "source-change", "version-change")):
+        site = tmp_path / platform / "site-packages"
+        shutil.copytree(source / "websockets", site / "websockets")
+        info = site / metadata.name
+        shutil.copytree(metadata, info)
+        package = site / "websockets"
+        native = {"linux": "speedups.cpython-313-x86_64-linux-gnu.so",
+                  "darwin": "speedups.cpython-313-darwin.so",
+                  "windows": "speedups.cp313-win_amd64.pyd"}.get(platform, "speedups.so")
+        (package / native).write_bytes(f"native {platform}".encode())
+        (package / "orphan.pyc").write_bytes(f"bytecode {platform}".encode())
+        for filename in ("WHEEL", "RECORD", "INSTALLER", "REQUESTED", "direct_url.json"):
+            (info / filename).write_text(f"wheel/install {platform}\n")
+        version = distribution.version
+        if platform == "source-change":
+            with (package / "__init__.py").open("a") as handle:
+                handle.write("\n# changed portable source\n")
+        if platform == "version-change":
+            version += ".post1"
+            original_info = info
+            info = info.with_name(f"websockets-{version}.dist-info")
+            original_info.rename(info)
+            text = (info / "METADATA").read_text()
+            (info / "METADATA").write_text(text.replace(f"Version: {distribution.version}\n", f"Version: {version}\n"))
+        monkeypatch.setattr(installer.importlib.metadata, "distribution",
+                            lambda _name, root=site, value=version:
+                            SimpleNamespace(version=value, locate_file=lambda _path: root))
+        destination = tmp_path / f"archive-{index}"
+        destination.mkdir()
+        manifest = installer._archive(repo, commit, destination)
+        artifacts.append((destination, manifest))
+
+    first = artifacts[0]
+    for destination, manifest in artifacts[1:3]:
+        assert manifest == first[1]
+        assert (destination / "pentacle.tar").read_bytes() == (first[0] / "pentacle.tar").read_bytes()
+    for _destination, manifest in artifacts[3:]:
+        assert manifest["runtime_package"]["dependencies"] != first[1]["runtime_package"]["dependencies"]
+        assert manifest["archive_sha256"] != first[1]["archive_sha256"]
+    portable = first[0] / "runtime-deps" / "websockets"
+    retained = [path.relative_to(portable).as_posix() for path in portable.rglob("*") if path.is_file()]
+    assert any(path.endswith("/METADATA") for path in retained)
+    assert any("LICENSE" in path for path in retained)
+    assert any(path.endswith("/entry_points.txt") for path in retained)
+    assert not any(path.endswith((".so", ".pyd", ".dll", ".dylib", ".pyc", ".pyo")) for path in retained)
+    assert not any(Path(path).name in {"WHEEL", "RECORD", "INSTALLER", "REQUESTED", "direct_url.json"}
+                   for path in retained)
+    # Import/function proof uses the built portable tree in a fresh isolated
+    # interpreter, so an ambient native accelerator cannot satisfy the test.
+    subprocess.run([sys.executable, "-I", "-c", """
+import importlib.metadata, importlib.util, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import websockets
+from websockets.utils import apply_mask
+assert pathlib.Path(websockets.__file__).is_relative_to(pathlib.Path(sys.argv[1]))
+assert importlib.metadata.version('websockets') == sys.argv[2]
+assert importlib.util.find_spec('websockets.speedups') is None
+assert apply_mask(b'hello', b'1234') == bytes(a ^ b'1234'[i % 4] for i, a in enumerate(b'hello'))
+""", str(portable), distribution.version], check=True)

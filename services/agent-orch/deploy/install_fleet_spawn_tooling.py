@@ -165,8 +165,18 @@ def _runtime_dependency_bundle(destination: Path) -> tuple[Path, dict[str, str]]
     if not package.is_dir() or len(dist_info) != 1:
         raise ValueError("runtime_dependency_missing")
     bundle = destination / "runtime-deps" / "websockets"
-    shutil.copytree(package, bundle / "websockets")
-    shutil.copytree(dist_info[0], bundle / dist_info[0].name)
+    # websockets has a pure-Python fallback for its optional speedups. Shipping
+    # the build host's accelerator or bytecode makes this fleet bundle depend on
+    # OS/architecture/Python ABI, even when the dependency source is identical.
+    shutil.copytree(package, bundle / "websockets", ignore=shutil.ignore_patterns(
+        "__pycache__", "*.pyc", "*.pyo", "*.so", "*.so.*", "*.pyd", "*.dll", "*.dylib",
+    ))
+    # Wheel tags, installed-file hashes and installer provenance describe the
+    # source installation, not this portable copy. Preserve upstream metadata,
+    # entry points and licenses; bind identity only to the bytes we ship.
+    shutil.copytree(dist_info[0], bundle / dist_info[0].name, ignore=shutil.ignore_patterns(
+        "WHEEL", "RECORD", "INSTALLER", "REQUESTED", "direct_url.json",
+    ))
     return bundle, {"version": distribution.version, "sha256": _tree_sha256(bundle)}
 
 
