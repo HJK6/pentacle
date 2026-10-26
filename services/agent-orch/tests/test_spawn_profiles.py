@@ -215,7 +215,7 @@ def test_explicit_claude_and_codex_efforts_are_canonical() -> None:
     assert resolve_spawn(provider="codex", model="sol", effort="xhigh")["model"] == "gpt-6.1-sol"
     terra = resolve_spawn(provider="codex", model="terra", effort="high")
     assert (terra["model"], terra["effort"], terra["resolution_source"]) == (
-        "gpt-5.6-terra", "high", "explicit_override",
+        "gpt-6.1-terra", "high", "explicit_override",
     )
 
 
@@ -363,12 +363,49 @@ def test_supported_handoff_source_is_preserved() -> None:
     assert resolution.spawn["resolution_source"] == "handoff_warn_and_proceed"
 
 
+def test_terra61_catalog_aliases_and_retained_56_terra() -> None:
+    # Operator request 2026-10-26: gpt-6.1-terra is spawnable at the efforts the
+    # catalog offers every Codex model; the bare "terra" alias follows the newest
+    # Terra (the "sol" precedent) while gpt-5.6-terra stays launchable by full id.
+    assert catalog()["models"]["codex"]["gpt-6.1-terra"] == {
+        "aliases": ("gpt-6.1-terra", "terra-6.1", "terra"),
+        "efforts": ("low", "medium", "high", "xhigh", "max"),
+    }
+    for alias in ("gpt-6.1-terra", "terra-6.1", "terra"):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            request = resolve_spawn(provider="codex", model=alias, effort=effort)
+            assert (request["model"], request["effort"]) == ("gpt-6.1-terra", effort)
+            assert validate_v2(
+                provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
+                model="gpt-6.1-terra", effort=effort, catalog_version="spawn-catalog-v2",
+                resolution_source="explicit_override",
+            )["model"] == "gpt-6.1-terra"
+    for bad in ("ultra", "banana"):
+        for attempt in (
+            lambda: resolve_spawn(provider="codex", model="gpt-6.1-terra", effort=bad),
+            lambda: validate_v2(provider="codex", spawn_profile="agent_orch", schema="SpawnRequestV2",
+                                model="gpt-6.1-terra", effort=bad, catalog_version="spawn-catalog-v2",
+                                resolution_source="explicit_override"),
+        ):
+            try:
+                attempt()
+            except SpawnProfileError as exc:
+                assert exc.code == "spawn_effort_unsupported"
+            else:
+                raise AssertionError(f"unsupported effort {bad} was accepted")
+    assert catalog()["models"]["codex"]["gpt-5.6-terra"]["aliases"] == ("gpt-5.6-terra",)
+    assert resolve_spawn(provider="codex", model="gpt-5.6-terra")["model"] == "gpt-5.6-terra"
+    # No 6.1 Luna exists for our accounts (FD probe: model_not_found), so 6 Luna stays.
+    assert "gpt-6.1-luna" not in spawn_profiles.MODELS["codex"]
+    assert resolve_spawn(provider="codex", model="luna")["model"] == "gpt-6-luna"
+
+
 def test_gpt6_aliases_and_retained_56_models_across_efforts() -> None:
     aliases = {
         "sol": "gpt-6.1-sol", "luna": "gpt-6-luna",
         "gpt-6-sol": "gpt-6-sol", "gpt-6-luna": "gpt-6-luna",
         "gpt-5.6-sol": "gpt-5.6-sol", "gpt-5.6-luna": "gpt-5.6-luna",
-        "gpt-5.6-terra": "gpt-5.6-terra", "terra": "gpt-5.6-terra",
+        "gpt-5.6-terra": "gpt-5.6-terra", "terra": "gpt-6.1-terra",
     }
     for alias, model in aliases.items():
         for effort in ("low", "medium", "high", "xhigh", "max"):
@@ -468,6 +505,25 @@ def test_available_models_preserves_config_list_order(monkeypatch, tmp_path) -> 
         assert list(available["claude"]) == ["claude-opus-4-8", "claude-opus-5-5", "claude-fable-5-1"]
         # Discriminating guard: this is the config order, not the MODELS order.
         assert list(available["codex"]) != [m for m in spawn_profiles.MODELS["codex"] if m in available["codex"]]
+    finally:
+        spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_available_models_fleet_list_with_terra61_keeps_6_luna(monkeypatch, tmp_path) -> None:
+    # The deployment-local available_models list is the 6.0-vs-6.1 rule: a 6.1
+    # model is listed (and its 6.0 twin dropped) only once it is launchable.
+    fleet = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]
+    config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    config["available_models"] = {"codex": fleet}
+    config_path = tmp_path / "spawn_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", config_path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    try:
+        available = catalog()["available_models"]
+        assert list(available["codex"]) == fleet
+        assert available["codex"]["gpt-6.1-terra"]["efforts"] == ("low", "medium", "high", "xhigh", "max")
+        assert "gpt-6-sol" not in available["codex"]
     finally:
         spawn_profiles.load_spawn_config.cache_clear()
 

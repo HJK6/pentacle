@@ -46,6 +46,12 @@ def test_spoken_sol_selects_61_and_preserves_effort(effort):
         'spawn_agent', 'codex', 'gpt-6.1-sol', effort or 'high', 'samplehost')
 
 
+def test_spoken_terra_selects_61():
+    from local_actions import validate_decision
+    got = validate_decision(decision(model='terra'), 'Spawn a Terra agent to review tests')
+    assert (got['provider'], got['model'], got['effort']) == ('codex', 'gpt-6.1-terra', 'xhigh')
+
+
 @pytest.mark.parametrize('text', ['Do not spawn an agent to review tests', 'Zephyr said spawn an agent to review tests',
                                     'What happens when I say spawn an agent to review tests?', 'Spawn two agents to review tests'])
 def test_model_false_spawn_cannot_override_explicit_intent(text):

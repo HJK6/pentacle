@@ -151,6 +151,11 @@ and is git-ignored):
   full id, aliases, handoffs and the configured spawn defaults all keep working
   against models you have hidden — so hiding a model never breaks a running seat
   or a spawn default.
+- **Newer generations replace their twins here.** When a newer model (say
+  `gpt-6.1-terra`) is launchable on your accounts, list it and drop its older
+  twin; keep the older one (as `gpt-6-luna` today) until its successor answers.
+  Deploy the code whose catalog knows the new id before listing it, since an
+  unknown id fails the config closed.
 - **Omit the key for the default.** With no `available_models` (the shipped
   state), the full catalog is offered.
 - **Applies after a daemon restart.** The daemon caches the policy for its
