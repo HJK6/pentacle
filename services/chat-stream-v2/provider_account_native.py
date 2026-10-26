@@ -59,7 +59,7 @@ def native_run(argv, *, input=None, capture_output=True, text=True, timeout=90, 
 class CodexRPC:
     def __init__(self, binding: Binding, *, timeout=60, popen=subprocess.Popen):
         self.timeout, self.pending, self.sequence = timeout, bytearray(), 0
-        self.account_read_complete = False
+        self.account_status = None
         self.process = popen([binding.executable, "-c", 'cli_auth_credentials_store="file"',
                              "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"', "app-server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -111,12 +111,14 @@ class CodexRPC:
             if value.get("method") == "account/updated":
                 if method not in {"initialize", "account/login/start"}:
                     status = value.get("params")
-                    # Native startup can announce status before the first
-                    # account reply. That reply must confirm the same plan.
-                    if (method != "account/read" or self.account_read_complete
+                    # Announcements may arrive before or after the first read.
+                    # Only that authoritative read establishes the status;
+                    # announcements never establish the quota identity.
+                    if ((self.account_status is None and method != "account/read")
                             or not isinstance(status, dict) or set(status) != {"authMode", "planType"}
                             or status["authMode"] != "chatgpt"
                             or not isinstance(status["planType"], str) or not status["planType"]
+                            or (self.account_status is not None and status != self.account_status)
                             or (startup_status is not None and status != startup_status)):
                         raise AccountError("provider_identity_changed")
                     startup_status = status
@@ -125,12 +127,15 @@ class CodexRPC:
                 result = value.get("result")
                 if not isinstance(result, dict): raise AccountError("provider_response_invalid")
                 if method == "account/read":
-                    self.account_read_complete = True
                     account = result.get("account")
                     if startup_status is not None and (not isinstance(account, dict)
                             or account.get("type") != startup_status["authMode"]
                             or account.get("planType") != startup_status["planType"]):
                         raise AccountError("provider_identity_changed")
+                    if (self.account_status is None and isinstance(account, dict)
+                            and account.get("type") == "chatgpt"
+                            and isinstance(account.get("planType"), str) and account["planType"]):
+                        self.account_status = {"authMode": account["type"], "planType": account["planType"]}
                 return result
 
 

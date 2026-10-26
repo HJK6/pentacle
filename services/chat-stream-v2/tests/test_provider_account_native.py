@@ -236,6 +236,7 @@ for line in sys.stdin:
     method = request['method']
     if 'id' not in request:
         continue
+    point = 'quota' if method == 'account/rateLimits/read' else 'second_read' if reads else 'first_read'
     if method == 'initialize':
         result = {'userAgent': 'fixture'}
     elif method == 'account/read':
@@ -246,20 +247,34 @@ for line in sys.stdin:
                 'environmentId': None, 'installationId': None, 'serverName': None, 'status': 'disabled'}}), flush=True)
             for status in scenario.get('startup', []):
                 print(json.dumps({'method': 'account/updated', 'params': status}), flush=True)
+            if scenario.get('error') and scenario.get('fail_at', 'first_read') == point:
+                print(json.dumps({'id': request['id'], 'error': {'message': 'rate_limit'}}), flush=True)
+                continue
+            if scenario.get('timeout') and scenario.get('fail_at', 'first_read') == point:
+                time.sleep(10)
+                continue
+        if reads == 2 and scenario.get('notify_at') == 'second_read':
+            for status in scenario.get('delayed', [{'authMode': 'chatgpt', 'planType': 'pro'}]):
+                print(json.dumps({'method': 'account/updated', 'params': status}), flush=True)
             if scenario.get('error'):
                 print(json.dumps({'id': request['id'], 'error': {'message': 'rate_limit'}}), flush=True)
                 continue
             if scenario.get('timeout'):
                 time.sleep(10)
                 continue
-        if reads == 2 and scenario.get('notify_at') == 'second_read':
-            print(json.dumps({'method': 'account/updated', 'params': {'authMode': 'chatgpt', 'planType': 'pro'}}), flush=True)
         result = {'account': dict({'type': 'chatgpt', 'planType': 'pro', 'id': 'identity-a',
                                   'email': 'person@example.test'}, **(scenario.get('after', {}) if reads == 2 else scenario.get('first', {})))}
     elif method == 'account/rateLimits/read':
         if scenario.get('notify_at') == 'quota':
-            print(json.dumps({'method': 'account/updated', 'params': {'authMode': 'chatgpt', 'planType': 'pro'}}), flush=True)
-        result = {'accountId': 'identity-a', 'rateLimits': {'primary': {
+            for status in scenario.get('delayed', [{'authMode': 'chatgpt', 'planType': 'pro'}]):
+                print(json.dumps({'method': 'account/updated', 'params': status}), flush=True)
+            if scenario.get('error'):
+                print(json.dumps({'id': request['id'], 'error': {'message': 'rate_limit'}}), flush=True)
+                continue
+            if scenario.get('timeout'):
+                time.sleep(10)
+                continue
+        result = {'accountId': scenario.get('quota_identity', 'identity-a'), 'rateLimits': {'primary': {
             'usedPercent': 15, 'resetsAt': 2000, 'windowDurationMins': 300}}}
     else:
         result = {}
@@ -318,15 +333,63 @@ def test_codex_conflicting_initial_statuses_refuse(tmp_path, native_rpc):
 
 
 @pytest.mark.parametrize('notify_at', ['quota', 'second_read'])
-def test_codex_status_after_first_account_reply_always_refuses(tmp_path, native_rpc, notify_at):
-    with pytest.raises(AccountError, match='provider_identity_changed'):
-        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'notify_at': notify_at}))
+@pytest.mark.parametrize('early', [False, True])
+def test_codex_delayed_matching_status_keeps_authoritative_identity(tmp_path, native_rpc, notify_at, early):
+    # Replaces the regression test that formerly required every delayed status to refuse.
+    scenario = {'notify_at': notify_at, 'delayed': [{'authMode': 'chatgpt', 'planType': 'pro'}] * 2}
+    if early:
+        scenario['startup'] = [{'authMode': 'chatgpt', 'planType': 'pro'}]
+    row = codex_observation(binding(tmp_path), rpc_factory=native_rpc(scenario))
+    assert row['provider_id'] == row['pool_id'] == 'identity-a'
+    assert row['windows']['codex:300']['pct'] == 15
+    assert row['email_verified'] is False
 
 
-@pytest.mark.parametrize('after', [{'id': 'identity-b'}, {'email': 'other@example.test'}, {'planType': 'team'}])
-def test_codex_before_after_identity_mismatch_refuses(tmp_path, native_rpc, after):
+@pytest.mark.parametrize('notify_at', ['quota', 'second_read'])
+@pytest.mark.parametrize('status', [
+    {'authMode': 'chatgpt', 'planType': 'team'},
+    {'authMode': 'apiKey', 'planType': 'pro'},
+    {'authMode': 'chatgpt', 'planType': 'unknown'},
+    {'authMode': 'chatgpt', 'planType': 'pro', 'accountId': 'foreign'},
+    {'authMode': 'chatgpt', 'planType': 'pro', 'email': 'other@example.test'},
+    {'authMode': 'chatgpt', 'planType': None},
+    {'authMode': 'chatgpt', 'planType': ''},
+    {'authMode': 'chatgpt', 'planType': 1},
+    {'authMode': 'chatgpt'}, {}, None, [],
+])
+def test_codex_delayed_conflicting_or_malformed_status_refuses(tmp_path, native_rpc, notify_at, status):
     with pytest.raises(AccountError, match='provider_identity_changed'):
-        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'after': after}))
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+            'notify_at': notify_at, 'delayed': [{'authMode': 'chatgpt', 'planType': 'pro'}, status]}))
+
+
+@pytest.mark.parametrize('plan', ['unknown', 'free', 'self_serve_business_usage_based', 'enterprise_cbp_usage_based'])
+def test_codex_matching_status_does_not_verify_non_subscription_plan(tmp_path, native_rpc, plan):
+    with pytest.raises(AccountError, match='subscription_identity_unverified'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+            'startup': [{'authMode': 'chatgpt', 'planType': plan}], 'first': {'planType': plan}}))
+
+
+@pytest.mark.parametrize('identity', [None, '', 123])
+def test_codex_delayed_matching_status_cannot_supply_missing_quota_identity(tmp_path, native_rpc, identity):
+    with pytest.raises(AccountError, match='provider_identity_unavailable'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+            'notify_at': 'quota', 'quota_identity': identity}))
+
+
+@pytest.mark.parametrize('first', [{'type': 'apiKey'}, {'planType': None}, {'planType': ''}, {'planType': 1}])
+def test_codex_invalid_first_status_cannot_authorize_a_later_announcement(tmp_path, native_rpc, first):
+    with native_rpc({'first': first, 'notify_at': 'quota'})(binding(tmp_path)) as rpc:
+        rpc.call('account/read', {'refreshToken': False})
+        with pytest.raises(AccountError, match='provider_identity_changed'):
+            rpc.call('account/rateLimits/read')
+
+
+@pytest.mark.parametrize('after', [{'id': 'identity-b'}, {'email': 'other@example.test'}, {'planType': 'team'}, {'type': 'apiKey'}])
+@pytest.mark.parametrize('notify_at', [None, 'quota', 'second_read'])
+def test_codex_before_after_identity_mismatch_refuses(tmp_path, native_rpc, after, notify_at):
+    with pytest.raises(AccountError, match='provider_identity_changed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'after': after, 'notify_at': notify_at}))
 
 
 @pytest.mark.parametrize('scenario,code', [({'error': True}, 'provider_quota_blocked'),
@@ -337,8 +400,102 @@ def test_codex_initial_status_does_not_swallow_error_or_timeout(tmp_path, native
             startup=[{'authMode': 'chatgpt', 'planType': 'pro'}])))
 
 
+@pytest.mark.parametrize('notify_at', ['quota', 'second_read'])
+@pytest.mark.parametrize('failure,code', [('error', 'provider_quota_blocked'), ('timeout', 'provider_timeout')])
+def test_codex_delayed_matching_status_does_not_swallow_error_or_timeout(tmp_path, native_rpc, notify_at, failure, code):
+    with pytest.raises(AccountError, match=code):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+            'notify_at': notify_at, 'fail_at': notify_at, failure: True}))
+
+
 def test_codex_interrupted_initial_read_reaps_native_process(tmp_path, native_rpc):
     rpc = native_rpc({})(binding(tmp_path))
     with pytest.raises(KeyboardInterrupt):
         with rpc:
             raise KeyboardInterrupt()
+
+
+@pytest.mark.parametrize('failure', ['wrong-quota-identity', 'conflicting-plan', 'conflicting-type'])
+def test_codex_delayed_status_executor_ledger_health_and_attribution(tmp_path, native_rpc, monkeypatch, failure):
+    import asyncio
+    from functools import partial
+    from account_executor import AccountExecutor
+    from account_runtime import AccountRuntime
+    import provider_account_host
+    from provider_account_host import NativeHost
+    from sessions import Sessions
+    from store import Store
+
+    # Only the native process and version command are counterparts. The host,
+    # executor, runtime and persistent ledger run their real observation paths.
+    private = tmp_path / 'private'; private.mkdir(mode=0o700)
+    scenario = {'notify_at': 'quota'}
+    monkeypatch.setattr(provider_account_host, 'codex_observation', partial(codex_observation,
+        rpc_factory=lambda account: native_rpc(dict(scenario))(account), now=lambda: 1000))
+    host = NativeHost({'host': 'host-a', 'registry': str(private / 'registry.json'),
+        'root': str(private / 'homes'), 'cells': {'codex:primary': {
+            'enabled': True, 'expected_provider_id': 'identity-a', 'profile_ref': 'fixture-profile',
+            'version': 'fixture-1', 'executable_sha256': 'fixture-pin'}}},
+        run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout='fixture-1'))
+    draft = host.registry.prepare(provider='codex', alias='primary', host='host-a', generation='fixture-one',
+        profile_ref='fixture-profile', executable='/bin/echo', version='fixture-1', platform='macos')
+    fake_auth = Path(draft.home) / 'auth.json'; fake_auth.write_text('fake-only'); fake_auth.chmod(0o600)
+    account = host.registry.activate(draft, {'provider_id': 'identity-a', 'pool_id': 'identity-a',
+        'auth_mode': 'subscription', 'store': 'file', 'minimal_turn': True, 'independent_login': True},
+        expected_provider_id='identity-a')
+
+    async def journey():
+        store = Store(str(tmp_path / 'state.db')); store.start()
+        runtime = AccountRuntime(store, Sessions(store, local_host='host-a'),
+            policy={'enabled': True}, clock=lambda: 1000)
+        calls = []
+        async def execute(selected, action, operation_id, generation=None):
+            calls.append(action)
+            assert selected == account and action == 'observe' and generation is None
+            try:
+                return host.handle(action, provider=selected.provider, alias=selected.alias,
+                    expected_generation=selected.generation, operation_id=operation_id)
+            except AccountError as exc:
+                # The native host CLI reports safe errors across the real transport boundary.
+                return {'outcome': str(exc)}
+        executor = AccountExecutor(runtime, None, execute=execute)
+        try:
+            await runtime.run(lambda ledger: ledger.register(account))
+            await executor.collect_all()
+            assert await runtime.run(lambda ledger: ledger.ensure_available(account.key)) == account
+            healthy = (await runtime.run(lambda ledger: ledger.readback(now=1000)))['accounts'][0]
+            assert healthy['health'] == 'healthy' and healthy['health_revision'] == 0
+            assert healthy['observation']['collection'] == 'ok'
+            session = await store.open_session('host-a', 'fixture-seat', provider='codex',
+                session_generation='fixture-session', account_binding=account.public())
+            await runtime.bind_launch(session)
+
+            if failure == 'wrong-quota-identity':
+                # Same plan/type and stable account reads cannot override the actual quota owner.
+                scenario['quota_identity'] = 'foreign-identity'
+            else:
+                scenario['delayed'] = [{'authMode': 'apiKey' if failure == 'conflicting-type' else 'chatgpt',
+                                        'planType': 'team' if failure == 'conflicting-plan' else 'pro'}]
+            result = await executor.observe(account)
+            assert result['outcome'] == ('ok' if failure == 'wrong-quota-identity' else 'provider_identity_changed')
+            conflicted = (await runtime.run(lambda ledger: ledger.readback(now=1000)))['accounts'][0]
+            assert conflicted['health'] == 'identity_conflict' and conflicted['health_revision'] == 1
+            assert conflicted['observation']['collection'] == ('identity_conflict' if failure == 'wrong-quota-identity' else 'failed')
+            with pytest.raises(AccountError, match='account_unavailable'):
+                await runtime.run(lambda ledger: ledger.ensure_available(account.key))
+
+            scenario.clear(); scenario.update(notify_at='second_read')
+            await executor.collect_all()
+            sticky = (await runtime.run(lambda ledger: ledger.readback(now=1000)))['accounts'][0]
+            assert sticky['observation']['collection'] == 'ok'
+            assert sticky['health'] == 'identity_conflict' and sticky['health_revision'] == 1
+            with pytest.raises(AccountError, match='account_unavailable'):
+                await runtime.run(lambda ledger: ledger.ensure_available(account.key))
+            assert await runtime.run(lambda ledger: ledger.bound(account.key)) == account
+            assert (await store.fetch_session('host-a', 'fixture-seat'))['account_binding'] == account.public()
+            assert await runtime.run(lambda ledger: json.loads(ledger.conn.execute(
+                'SELECT data FROM v2_account_session_bindings').fetchone()[0])) == account.public()
+            assert calls == ['observe'] * 3
+        finally:
+            store.stop()
+    asyncio.run(journey())
