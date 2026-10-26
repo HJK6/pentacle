@@ -607,7 +607,8 @@ def test_stale_reap_live_group_requires_terminal_absence(tmp_path: Path) -> None
 
 
 @pytest.mark.requires("tmux usable", "process start identity readable")
-def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path) -> None:
+@pytest.mark.parametrize("already_exited", [False, True])
+def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path, already_exited: bool) -> None:
     """An exited but uncollected original server is not a live resource."""
     from tests.soak.harness import TmuxNamespace
     from tools import gate_owner_manifest as owner
@@ -640,9 +641,17 @@ def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path) -> N
             )
             with _server_exit_watch(server.pid) as exited:
                 assert not exited()
+                if already_exited:
+                    server.kill()  # leave the bound socket and uncollected child in place
+                    deadline = time.monotonic() + 5
+                    while not exited():
+                        assert time.monotonic() < deadline, "owned server exit not observed"
+                        time.sleep(.01)
+                    assert namespace.socket_path.is_socket() and namespace.root.exists()
                 owner._reap_socket(namespace.socket, namespace.socket_owner,
                                    time.monotonic() + 5, namespace.real_tmux)
-                assert exited(), "first cleanup returned before kernel exit"
+                # The already-exited branch consumed the one-shot kqueue event.
+                assert already_exited or exited(), "first cleanup returned before kernel exit"
             assert not namespace.socket_path.exists()
             assert not namespace.root.exists()
             # poll()/wait() would collect the child and hide the Linux ordering.
@@ -665,3 +674,35 @@ def test_bound_socket_reentry_after_exit_before_parent_reap(tmp_path: Path) -> N
             server.wait(timeout=5)
             if namespace.socket_path.exists() or namespace.root.exists():
                 namespace.kill_server()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native Darwin ESRCH registration")
+@pytest.mark.requires("process start identity readable")
+def test_owned_group_exit_between_identity_check_and_registration(tmp_path: Path, monkeypatch) -> None:
+    """Schedule the native race without replacing the kernel witness or reaper."""
+    from tools import gate_owner_manifest as owner
+    victim = _sleeper()
+    original_event = owner._ExitEvent
+    manifest = tmp_path / "registration-race.json"
+    try:
+        pgid = owner.leader_pgid(victim.pid)
+        owner.initialize_manifest(manifest, "run-under-test")
+        owner.record(manifest, pgid, None, leader_pid=victim.pid)
+        owner.mark_owner_stopping(manifest)
+        def exit_before_registration(pid):
+            assert pid == victim.pid
+            with _server_exit_watch(pid) as exited:
+                victim.kill()
+                deadline = time.monotonic() + 5
+                while not exited():
+                    assert time.monotonic() < deadline
+                    time.sleep(.01)
+            victim.wait(timeout=5)
+            return original_event(pid)
+        monkeypatch.setattr(owner, "_ExitEvent", exit_before_registration)
+        owner.reap_manifest(manifest, "run-under-test")
+        assert not manifest.exists()
+        assert not owner._group_exists(pgid)
+    finally:
+        if victim.poll() is None: victim.kill()
+        victim.wait(timeout=5)

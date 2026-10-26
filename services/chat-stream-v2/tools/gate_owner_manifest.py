@@ -204,9 +204,12 @@ class _ExitEvent:
 
     def _events(self, events: list[Any]) -> bool:
         for event in events:
+            matching = event.ident == self.pid and getattr(event, "filter", None) == select.KQ_FILTER_PROC
             if event.flags & select.KQ_EV_ERROR:
+                if matching and event.data == errno.ESRCH:
+                    return True
                 raise ManifestError(f"exit-event registration failed: {event.data}")
-            if event.ident == self.pid and event.fflags & select.KQ_NOTE_EXIT:
+            if matching and event.fflags & select.KQ_NOTE_EXIT:
                 return True
         return False
 
@@ -252,7 +255,9 @@ def _reap_group(pgid: int, *, leader_pid: int, identity: str, deadline: float) -
         raise ManifestError("refusing to reap the caller's own process group")
     event = _ExitEvent(leader_pid)
     try:
-        if _matching_leader(pgid, leader_pid, identity):
+        # The entry reaper has already checked ownership. A terminal witness
+        # permits only the final absence check, never another group signal.
+        if not event.terminal and _matching_leader(pgid, leader_pid, identity):
             try:
                 os.killpg(pgid, signal.SIGTERM)
             except ProcessLookupError:
@@ -425,19 +430,20 @@ def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
                 raise ManifestError("tmux identity changed after event registration")
             check, _ = _socket_objects(socket, binding)
             os.close(check)
-            guard = "#{&&:#{==:#{pid}," + str(pid) + "},#{==:#{@v2_gate_nonce}," + binding["nonce"] + "}}"
-            process = _REAL_POPEN([tmux, "-N", "-S", socket, "if-shell", "-F", guard,
-                                   "kill-server", "run-shell 'exit 1'"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            try:
-                stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired as exc:
-                process.kill()
-                stdout, stderr = process.communicate()
-                raise ManifestError(f"tmux shutdown transport timed out: {stderr!r}") from exc
-            if process.returncode:
-                raise ManifestError(f"tmux shutdown refused ({process.returncode}): {stdout!r} {stderr!r}")
-            event.wait(deadline)
+            if not event.terminal:
+                guard = "#{&&:#{==:#{pid}," + str(pid) + "},#{==:#{@v2_gate_nonce}," + binding["nonce"] + "}}"
+                process = _REAL_POPEN([tmux, "-N", "-S", socket, "if-shell", "-F", guard,
+                                       "kill-server", "run-shell 'exit 1'"],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired as exc:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    raise ManifestError(f"tmux shutdown transport timed out: {stderr!r}") from exc
+                if process.returncode:
+                    raise ManifestError(f"tmux shutdown refused ({process.returncode}): {stdout!r} {stderr!r}")
+                event.wait(deadline)
         # Never infer terminal completion from the tmux client's return code.
         # When already absent, the initial ESRCH itself is the terminal proof.
         checked, present = _socket_objects(socket, binding)

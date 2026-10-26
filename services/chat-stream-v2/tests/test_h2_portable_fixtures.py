@@ -261,7 +261,7 @@ def test_owner_signal_cleanup_sequence_with_injected_resources(monkeypatch, tmp_
     assert printed[0]["daemon_pgid"] == 42420
 
 
-@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor"])
+@pytest.mark.parametrize("outcome", ["complete", "kill-complete", "delayed", "denied", "unknown", "identity-lost", "dead-with-survivor", "terminal-complete", "terminal-survivor"])
 def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     """Frozen OS/event boundary exercises the real group and entry reapers."""
     import signal
@@ -285,11 +285,14 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
                 state.update(live=False, group=False)
             elif outcome == "identity-lost": state["live"] = False
     class Event:
+        terminal = False
         def __init__(self, pid):
             assert pid == 42420
             state["registered"] = True
+            self.terminal = outcome.startswith("terminal-")
+            if outcome == "terminal-complete": state.update(live=False, group=False)
         def wait(self, deadline):
-            if state["live"]: raise owner.ManifestError("synthetic delayed exit")
+            if state["live"] and not self.terminal: raise owner.ManifestError("synthetic delayed exit")
         def close(self): state["registered"] = False
     def clock():
         state["clock"] += .1
@@ -303,7 +306,7 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     entry = dict(pgid=42420, leader_pid=42420, leader_start_identity="recorded-start",
                  socket="/synthetic/bound/socket", socket_owner={"synthetic": True}, run_id="run")
     data = {"entries": [entry]}
-    complete = outcome in ("complete", "kill-complete")
+    complete = outcome in ("complete", "kill-complete", "terminal-complete")
     if complete:
         owner._reap_entries(data, "run")
     else:
@@ -311,7 +314,7 @@ def test_recorded_live_group_requires_terminal_absence(monkeypatch, outcome):
     assert state["socket"], "group failure must not strand an independently bound socket"
     assert data["entries"] == ([] if complete else [entry])
     assert not state["registered"]
-    if outcome == "dead-with-survivor": assert not signals
+    if outcome in ("dead-with-survivor", "terminal-complete", "terminal-survivor"): assert not signals
     else: assert signals[0] == signal.SIGTERM
     if outcome == "identity-lost": assert signals == [signal.SIGTERM]
     if complete: assert observations[-1] is False
@@ -329,7 +332,7 @@ def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, pla
     def control(changes, count, timeout):
         calls.append(("control", changes, count, timeout))
         if outcome == "denied": raise PermissionError("synthetic kqueue denial")
-        return [SimpleNamespace(ident=42420, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
+        return [SimpleNamespace(ident=42420, filter=-5, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
     def wait(read, write, error, timeout):
         calls.append(("select", read, timeout))
         return (read if outcome == "complete" else [], [], [])
@@ -353,7 +356,7 @@ def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, pla
         assert len([x for x in calls if x[0] == ("select" if platform == "linux" else "control")]) == (1 if platform == "linux" else 2)
 
 
-@pytest.mark.parametrize("outcome", ["complete", "false-guard", "client-error", "event-timeout", "denied-event", "replacement", "cancellation", "recycled-server", "root-mode", "replacement-at-exit", "root-replacement-at-exit"])
+@pytest.mark.parametrize("outcome", ["complete", "false-guard", "client-error", "event-timeout", "denied-event", "replacement", "cancellation", "recycled-server", "root-mode", "replacement-at-exit", "root-replacement-at-exit", "terminal", "terminal-recycled", "terminal-replacement", "terminal-root-replacement"])
 def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_path, outcome):
     import shutil
     import socket
@@ -367,10 +370,17 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
                    root_dev=rs.st_dev, root_ino=rs.st_ino, socket_dev=ss.st_dev, socket_ino=ss.st_ino)
     state, clients, events = {"live": True}, [], []
     class Event:
+        terminal = False
         def __init__(self, pid):
             events.append("register")
+            state["registered"] = True
+            self.terminal = outcome.startswith("terminal")
+            if outcome == "terminal-root-replacement":
+                root.rename(str(root) + "-original")
+                root.mkdir(mode=0o700)
+                address.write_text("foreign root replacement")
             if outcome == "denied-event": raise owner.ManifestError("synthetic event denied")
-            if outcome == "replacement":
+            if outcome in ("replacement", "terminal-replacement"):
                 address.unlink()
                 address.write_text("foreign replacement")
         def wait(self, deadline):
@@ -392,6 +402,7 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
             assert 0 <= timeout <= 5
             return b"", b"synthetic refused" if self.returncode else b""
     def popen(argv, **kwargs):
+        assert not outcome.startswith("terminal"), "terminal server must never be contacted"
         clients.append(argv)
         assert argv[:4] == ["tmux", "-N", "-S", str(address)]
         assert argv[4:6] == ["if-shell", "-F"]
@@ -400,24 +411,25 @@ def test_bound_socket_controls_preserve_unresolved_identity(monkeypatch, tmp_pat
         assert events[0] == "register"
         return Client()
     monkeypatch.setattr(owner, "_exists", lambda pid: state["live"])
-    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start" if outcome == "recycled-server" else "server-start")
+    monkeypatch.setattr(owner, "process_start_identity", lambda pid: "foreign-start" if outcome == "recycled-server" or (outcome == "terminal-recycled" and state.get("registered")) else "server-start")
     monkeypatch.setattr(owner, "_ExitEvent", Event)
     monkeypatch.setattr(owner, "_REAL_POPEN", popen)
     if outcome == "root-mode": root.chmod(0o755)
     try:
-        if outcome == "complete":
+        if outcome in ("complete", "terminal"):
             owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
             assert not address.exists() and not root.exists()
-            assert events == ["register", "wait", "close"]
+            assert events == (["register", "close"] if outcome == "terminal" else ["register", "wait", "close"])
+            if outcome == "terminal": assert not clients
         else:
             expected = KeyboardInterrupt if outcome == "cancellation" else owner.ManifestError
             with pytest.raises(expected):
                 owner._reap_socket(str(address), binding, owner.time.monotonic() + 5)
             assert address.exists() and root.exists()
-            if outcome == "replacement":
+            if outcome in ("replacement", "terminal-replacement"):
                 assert address.read_text() == "foreign replacement"
                 assert not clients
-            if outcome in ("denied-event", "recycled-server", "root-mode"): assert not clients
+            if outcome in ("denied-event", "recycled-server", "root-mode") or outcome.startswith("terminal"): assert not clients
             if outcome == "replacement-at-exit": assert address.read_text() == "foreign replacement after exit"
             if outcome == "root-replacement-at-exit": assert address.read_text() == "foreign root replacement"
     finally:
@@ -492,6 +504,7 @@ def test_absent_bound_root_requires_same_instance_kernel_exit(monkeypatch, tmp_p
             return None
         return "server-start"
     class Event:
+        terminal = False
         def __init__(self, pid):
             events.append("register")
             if outcome == "denied-event":
@@ -581,3 +594,35 @@ def test_absent_bound_root_darwin_registration_witness(monkeypatch, outcome):
         with pytest.raises(owner.ManifestError):
             owner._reap_socket("/tmp/v2s-synthetic-absent/s", binding, 105.0)
     assert calls == ([] if outcome == "recycled-before" else ["register", "close"])
+
+
+@pytest.mark.parametrize("outcome", ["esrch", "wrong-pid", "wrong-filter", "wrong-error",
+    "denied", "note-exit", "note-wrong-filter", "missing-filter"])
+def test_darwin_exit_registration_requires_matching_terminal_event(monkeypatch, outcome):
+    from tools import gate_owner_manifest as owner
+    closed = []
+    def control(changes, count, timeout):
+        if outcome == "denied": raise PermissionError("synthetic denial")
+        fields = dict(ident=42421 if outcome == "wrong-pid" else 42420,
+            filter=-1 if outcome in ("wrong-filter", "note-wrong-filter") else -5,
+            flags=0 if outcome.startswith("note-") or outcome == "missing-filter" else 32,
+            fflags=16, data=1 if outcome == "wrong-error" else owner.errno.ESRCH)
+        if outcome == "missing-filter": fields.pop("filter")
+        return [SimpleNamespace(**fields)]
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(
+        kqueue=lambda: SimpleNamespace(control=control, close=lambda: closed.append(True)),
+        kevent=lambda pid, **kwargs: (pid, kwargs), KQ_FILTER_PROC=-5, KQ_EV_ADD=1,
+        KQ_EV_ENABLE=4, KQ_NOTE_EXIT=16, KQ_EV_ERROR=32))
+    if outcome in ("esrch", "note-exit"):
+        event = owner._ExitEvent(42420)
+        try:
+            assert event.terminal
+            event.wait(owner.time.monotonic())
+        finally: event.close()
+    else:
+        with pytest.raises(owner.ManifestError):
+            event = owner._ExitEvent(42420)
+            try: event.wait(owner.time.monotonic())
+            finally: event.close()
+    assert closed == [True]
