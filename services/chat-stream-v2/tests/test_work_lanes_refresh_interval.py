@@ -202,3 +202,80 @@ def test_zero_interval_keeps_back_to_back_passes(monkeypatch):
         await inv._task
         assert len(passes) == 2
     run(body)
+
+
+def test_work_index_sweep_defaults_and_override(monkeypatch):
+    monkeypatch.delenv("WORK_INDEX_SWEEP_S", raising=False)
+    monkeypatch.delenv("WORK_INDEX_SETTLE_S", raising=False)
+    inv = WorkLanesInventory(None, NO_SESSIONS, None)
+    assert inv.sweep_interval_s == 60
+    assert inv.settle_s == 300
+    monkeypatch.setenv("WORK_INDEX_SWEEP_S", "123")
+    assert WorkLanesInventory(None, NO_SESSIONS, None).sweep_interval_s == 123
+    assert WorkLanesInventory(None, NO_SESSIONS, None, sweep_interval_s=7).sweep_interval_s == 7
+
+
+def test_periodic_sweep_observes_edit_without_skipping_next_tick(tmp_path, monkeypatch):
+    """A nonzero scan duration must not turn a 60-second interval into 120."""
+    from test_work_index_persistence import write_item
+    import work_lanes_projection as projection
+    spec_path = write_item(tmp_path) / "spec.md"
+    spec_id = "spec_demo__span"
+    clock = [0.0]
+    deadlines, observations = [], []
+    ticks = asyncio.Queue()
+    sleeping = asyncio.Event()
+    real_asyncio = asyncio
+
+    async def periodic_sleep(delay):
+        deadlines.append(clock[0] + delay)
+        sleeping.set()
+        await ticks.get()
+
+    class AsyncProxy:
+        sleep = staticmethod(periodic_sleep)
+        def __getattr__(self, name):
+            return getattr(real_asyncio, name)
+
+    monkeypatch.setattr(projection, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(projection, "asyncio", AsyncProxy())
+    monkeypatch.delenv("WORK_INDEX_SWEEP_S", raising=False)
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(tmp_path))
+    specs = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    original = specs.scan_work_observations
+
+    def scan():
+        result = original()
+        clock[0] += 0.2  # Representative real-tree warm sweep duration.
+        return result
+
+    specs.scan_work_observations = scan
+    specs.start = lambda: None  # Production polling mode without watcher callbacks.
+
+    async def reconcile(result, **kwargs):
+        observations.append(result["candidates"][spec_id][0]["facts"]["ac_checked"])
+
+    async def noop(*args, **kwargs):
+        pass
+
+    async def go():
+        store = SimpleNamespace(reconcile_work_observations=reconcile, reconcile_work_lane_episodes=noop)
+        inv = WorkLanesInventory(store, NO_SESSIONS, noop, specs=specs)
+        inv.emit_if_changed = noop
+        try:
+            inv.start()
+            await inv._task
+            await real_asyncio.wait_for(sleeping.wait(), 2)
+            before = observations[-1]
+            replacement = spec_path.with_suffix(".tmp")
+            replacement.write_text(spec_path.read_text().replace("[ ]", "[x]"))
+            replacement.replace(spec_path)
+            clock[0] = deadlines[0]
+            ticks.put_nowait(None)
+            await real_asyncio.sleep(0.01)
+            await inv._task
+            assert observations[-1] == before + 1
+            assert clock[0] <= 61
+        finally:
+            await inv.stop()
+    asyncio.run(go())

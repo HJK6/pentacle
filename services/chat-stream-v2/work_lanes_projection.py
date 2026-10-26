@@ -207,7 +207,7 @@ class WorkLanesInventory:
         self.specs = specs
         self.episode_sink = episode_sink
         self.sweep_interval_s = float(sweep_interval_s if sweep_interval_s is not None else
-                                      os.environ.get("WORK_INDEX_SWEEP_S", "300"))
+                                      os.environ.get("WORK_INDEX_SWEEP_S", "60"))
         self.settle_s = float(settle_s if settle_s is not None else os.environ.get("WORK_INDEX_SETTLE_S", "300"))
         if (not math.isfinite(self.sweep_interval_s) or not math.isfinite(self.settle_s)
                 or self.sweep_interval_s <= 0 or self.settle_s < 0):
@@ -322,6 +322,10 @@ class WorkLanesInventory:
                                                       name="work-index-watcher-start")
         async def periodic() -> None:
             while True:
+                # The due timestamp is recorded after the scan. Align the
+                # interval with that drain so the next tick cannot skip it.
+                if self._task is not None:
+                    await asyncio.shield(self._task)
                 await asyncio.sleep(min(interval_s, self.sweep_interval_s))
                 self.refresh()
         if self._periodic is None:

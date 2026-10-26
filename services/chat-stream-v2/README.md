@@ -15,6 +15,15 @@ See [retained WIP and lifecycle controls](../../docs/completion-admission-guards
 
 Use the complete [local startup recipe](../../README.md#local-setup) first. It aligns the desktop and daemon host identity (`local`), native transcript directory, loopback endpoint and desktop credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
+## Work index polling
+
+Work observations sweep every 60 seconds by default (`WORK_INDEX_SWEEP_S` overrides
+the interval). Unchanged folders reuse fresh candidates keyed by the identity,
+size, mtime and ctime of `spec.md` and `summary.md`; conflict markers are checked
+each scan, and removed folders leave the cache. Missing/ambiguous observations
+retain the existing 300-second settle default (`WORK_INDEX_SETTLE_S`). Sweep
+duration is logged as `work index phase=worktree_sweep duration_s=...`.
+
 ## Private configuration
 
 `PENTACLE_MACHINES_FILE` selects a private machine JSON file; `PENTACLE_MACHINES_JSON` supplies the same shape inline. [machines.example.json](machines.example.json) demonstrates a single local machine. Set executable locations and working directories for your machine. `projects_root` must point to the actual Claude `.claude/projects` directory. A daemon's `--local-host` must match its machine name and the host used by clients.
