@@ -18,7 +18,7 @@ def test_direct_script_scanner_refuses_unattributed_window(tmp_path, abnormal_cl
         + (_u2_line(close_code=1011, close_sent_code=1011) + "\n" if abnormal_close else "")
     )
     probe = """
-import json, runpy, sys
+import json, runpy, subprocess, sys
 from pathlib import Path
 script, log = map(Path, sys.argv[1:])
 # Direct script execution puts deploy/ before the service root. A fresh process
@@ -28,7 +28,8 @@ module = runpy.run_path(str(script), run_name='deploy_import_probe')
 scan = module['_scan_slow_consumer_window']
 scan.__globals__['_daemon_log_paths'] = lambda _: (log,)
 scan.__globals__['_launchd_environment'] = lambda _: {}
-result = scan(module['SERVICES']['chat-streamd-v2'], 0)
+result = scan(module['SERVICES']['chat-streamd-v2'], 0,
+              runner=lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', ''))
 result['scanner_module'] = sys.modules['deploy.packet.log_scan'].__file__
 print(json.dumps(result))
 """
