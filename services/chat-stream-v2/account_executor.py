@@ -191,4 +191,5 @@ class AccountExecutor:
     async def collect_all(self):
         cells = await self.runtime.run(lambda accounts: [Binding(**json.loads(row[0])) for row in accounts.conn.execute(
             "SELECT data FROM v2_account_bindings WHERE active=1")])
-        await asyncio.gather(*(self.observe(account) for account in cells if account.enabled and self.runtime.manages(account.host)))
+        await asyncio.gather(*(self.observe(account) for account in cells
+            if account.enabled and self.runtime.manages(account.host,account.provider)))

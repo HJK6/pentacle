@@ -10,7 +10,7 @@ import hashlib
 import json
 
 from account_store import number, transaction
-from provider_accounts import AccountError, Binding, _component
+from provider_accounts import AccountError, Binding, _component, policy_manages
 
 
 def _digest(value):
@@ -46,8 +46,7 @@ def _existing(ledger, operation_id, payload_hash):
 
 def _eligible(ledger, payload):
     host=payload["host"]
-    if (ledger.policy.get("enabled") is not True or
-            ("managed_hosts" in ledger.policy and host not in ledger.policy["managed_hosts"])):
+    if not policy_manages(ledger.policy,host,payload["provider"]):
         raise AccountError("account_feature_off")
     row=ledger._cell(host,payload["provider"],payload["account"])
     if row is None: raise AccountError("account_generation_unknown")

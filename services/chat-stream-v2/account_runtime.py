@@ -11,7 +11,7 @@ import uuid
 
 from account_store import AccountStore
 from account_revalidation import interrupt_pending
-from provider_accounts import AccountError, Binding, _component
+from provider_accounts import AccountError, Binding, _component, policy_manages, validate_policy_scope
 from sessions import VerbError
 from error_adapters import ErrorFact
 
@@ -24,14 +24,15 @@ def load_policy(path=None):
     if path!=path.resolve() or info.st_uid!=os.getuid() or info.st_mode&0o777!=0o600:
         raise AccountError("account_policy_insecure")
     value=json.loads(path.read_text())
-    if not isinstance(value,dict) or type(value.get("enabled")) is not bool: raise AccountError("account_policy_invalid")
+    validate_policy_scope(value)
     return value
 
 
 class AccountRuntime:
     def __init__(self,store,sessions,*,policy=None,clock=time.time,executor=None):
         self.store,self.sessions=store,sessions
-        self.policy,self.clock,self.executor=policy or {"enabled":False},clock,executor
+        self.policy,self.clock,self.executor={"enabled":False} if policy is None else policy,clock,executor
+        validate_policy_scope(self.policy)
         self.server=self.spawnctl=self.comms=None
         self._next_probe=0; self._collector_task=None; self._stopping=False
         self._health_epoch=uuid.uuid4().hex; self._health_started=False
@@ -54,6 +55,7 @@ class AccountRuntime:
         # Private verified enrollment receipts only. Never login on startup.
         for entry in self.policy.get("bindings",[]):
             binding=Binding.from_public(entry)
+            if not self.manages(binding.host,binding.provider): continue
             present=await self.run(lambda accounts:accounts.bound(binding.key))
             if present is None:
                 current=await self.run(lambda accounts:accounts._cell(binding.host,binding.provider,binding.alias))
@@ -70,13 +72,12 @@ class AccountRuntime:
             _component(message["account"])
             await self._front_desk(message.get("_auth_context") or {})
 
-    def manages(self,host):
-        return (self.policy.get("enabled") is True and
-                ("managed_hosts" not in self.policy or host in self.policy["managed_hosts"]))
+    def manages(self,host,provider=None):
+        return policy_manages(self.policy,host,provider)
 
     async def choose_launch(self,*,host,provider,model,effort,message):
         await self.authorize_choice(message)
-        if not self.manages(host):
+        if not self.manages(host,provider):
             if "account" in message or message.get("_account_resume_binding"):
                 raise AccountError("account_feature_off")
             # OFF restores legacy admissions; retained rows remain for draining.
@@ -175,9 +176,9 @@ class AccountRuntime:
             return {"type":"account.ok",**result}
         if self.policy.get("enabled") is not True: raise AccountError("account_feature_off")
         host,provider,alias=message.get("host"),message.get("provider"),message.get("account")
-        if not self.manages(host): raise AccountError("account_feature_off")
         _component(host); _component(alias)
         if provider not in {"codex","claude"}: raise AccountError("account_request_invalid")
+        if not self.manages(host,provider): raise AccountError("account_feature_off")
         if action=="revalidate-health":
             if not self.executor: raise AccountError("account_executor_unavailable")
             result=await self.executor.revalidate_health(message,auth)

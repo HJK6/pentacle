@@ -116,6 +116,34 @@ invented accounts; configured but unenrolled entries appear as unconfigured.
 Defaults live in the daemon's transactional store, survive restart and carry a
 revision. Selection reads a complete account/default revision once before launch.
 
+To manage only selected providers on a host, add an explicit provider scope:
+
+```json
+{
+  "enabled": true,
+  "managed_hosts": ["host-a"],
+  "managed_providers": {"host-a": ["codex"]}
+}
+```
+
+This is a scope fragment; enrollment receipts, cells and executors still need
+their normal configuration. Omitting `managed_providers` keeps the existing
+host-wide behavior. When present, its keys must exactly match an explicit
+`managed_hosts` list, and each value must be a list containing only `codex`
+and/or `claude`, without duplicates. Empty lists are allowed. Invalid scope
+configuration refuses startup rather than guessing which provider is managed.
+
+An ordinary new launch of a never-managed provider outside scope keeps its
+legacy path. Explicit account choices and bound named-home resumes outside
+scope refuse. Removing a previously managed host/provider also refuses new
+legacy launches there while its retained account bindings exist. Missing cells,
+missing defaults and failed enrollment never select a legacy or alternate
+account. Existing bound seats keep their homes and attribution. Account
+mutations, automatic probes, health revalidation and startup receipt imports
+respect the same provider scope; read-only status preserves historical rows.
+Raw command launches still refuse whenever any provider on the target host is
+managed. Provider-less admissions also refuse while retained account rows exist.
+
 Each enrolled host has a private mode-0700 directory containing its mode-0600
 `~/.config/pentacle/provider-account-host.json`. Its configuration contains:
 

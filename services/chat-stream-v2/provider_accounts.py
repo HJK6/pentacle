@@ -43,6 +43,38 @@ def _component(value: str) -> str:
     return value
 
 
+def validate_policy_scope(policy: dict) -> None:
+    """An explicit provider scope must name its complete host/provider matrix."""
+    if not isinstance(policy, dict) or type(policy.get("enabled")) is not bool:
+        raise AccountError("account_policy_invalid")
+    hosts = policy.get("managed_hosts")
+    if "managed_hosts" in policy:
+        if not isinstance(hosts, list): raise AccountError("account_policy_invalid")
+        try:
+            for host in hosts: _component(host)
+        except AccountError: raise AccountError("account_policy_invalid") from None
+        if len(set(hosts)) != len(hosts): raise AccountError("account_policy_invalid")
+    if "managed_providers" not in policy: return
+    scopes = policy["managed_providers"]
+    if not isinstance(hosts, list) or not isinstance(scopes, dict) or set(scopes) != set(hosts):
+        raise AccountError("account_policy_invalid")
+    for providers in scopes.values():
+        if (not isinstance(providers, list)
+                or any(not isinstance(provider, str) or provider not in {"codex", "claude"} for provider in providers)
+                or len(set(providers)) != len(providers)):
+            raise AccountError("account_policy_invalid")
+
+
+def policy_manages(policy: dict, host: str, provider: str | None = None) -> bool:
+    """None asks whether any provider is managed, for raw-command admission."""
+    validate_policy_scope(policy)
+    if policy["enabled"] is not True: return False
+    if "managed_hosts" in policy and host not in policy["managed_hosts"]: return False
+    if "managed_providers" not in policy: return True
+    providers = policy["managed_providers"].get(host, [])
+    return bool(providers) if provider is None else provider in providers
+
+
 def _private(path: Path, *, directory: bool) -> None:
     try:
         info = path.lstat()
