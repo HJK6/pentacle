@@ -1,6 +1,9 @@
 """Synthetic discovery, settled quality, and monotonic material revisions."""
 import os
+import time
 from pathlib import Path
+
+import pytest
 
 from _shared.specs_service import SpecsSubsystem
 from _shared.work_observations import advance_observation
@@ -218,3 +221,65 @@ def test_explicit_scanner_never_resolves_environment_root(tmp_path, monkeypatch)
     (root / "work" / "statuses.json").write_text('{"statuses":[{"name":"../../escape","order":1}]}')
     result = service.scan_work_observations()
     assert not result["available"] and not result["candidates"]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_work_scan_reuses_unchanged_and_invalidates_one_folder(tmp_path, monkeypatch, explicit):
+    from _shared import specs_service
+    first = write_item(tmp_path)
+    second = write_item(tmp_path, slug="demo__other")
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    reads = []
+    original = specs_service.read_work_candidate
+    def counted(folder, *args, **kwargs):
+        reads.append(str(folder))
+        return original(folder, *args, **kwargs)
+    monkeypatch.setattr(specs_service, "read_work_candidate", counted)
+    before = service.scan_work_observations()["candidates"]
+    assert len(reads) == 2
+    reads.clear()
+    assert service.scan_work_observations()["candidates"] == before
+    assert reads == []
+    # Change content with the same size and restored mtime: ctime must invalidate.
+    path = first / "spec.md"
+    old = path.stat()
+    # Linux can assign the same ctime to writes within one clock tick.
+    time.sleep(0.02)
+    path.write_text(path.read_text().replace("[ ]", "[x]"))
+    os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert path.stat().st_ctime_ns != old.st_ctime_ns
+    changed = service.scan_work_observations()["candidates"]
+    assert reads == [str(first)]
+    assert sorted(c["facts"]["ac_checked"] for c in changed[ID]) == [0, 1]
+    # Returned facts cannot mutate the cached value.
+    changed[ID][0]["facts"]["ac_checked"] = 99
+    reads.clear()
+    assert sorted(c["facts"]["ac_checked"] for c in service.scan_work_observations()["candidates"][ID]) == [0, 1]
+    assert reads == []
+    second.rename(tmp_path / "removed")
+    assert len(service.scan_work_observations()["candidates"][ID]) == 1
+    assert second not in service._work_observation_cache
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_work_scan_cache_checks_summary_conflicts_and_quiet_window(tmp_path, monkeypatch, explicit):
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    service.debounce_s = 5
+    now = max((folder / name).stat().st_mtime for name in ("spec.md", "summary.md"))
+    assert service.scan_work_observations(now=now)["candidates"][ID][0]["quality"] == "stale"
+    assert service.scan_work_observations(now=now + 6)["candidates"][ID][0]["quality"] == "fresh"
+    conflict = folder / "spec.sync-conflict-fixture.md"
+    conflict.write_text("unread")
+    assert service.scan_work_observations(now=now + 6)["candidates"][ID][0]["error"] == "work_sync_conflict"
+    conflict.unlink()
+    assert service.scan_work_observations(now=now + 6)["candidates"][ID][0]["quality"] == "fresh"
+    (folder / "summary.md").write_text("**Next action** — A different next step.\n")
+    result = service.scan_work_observations(now=now + 6)
+    assert result["candidates"][ID][0]["facts"]["next_action_text"] == "A different next step."
+    (folder / "summary.md").unlink()
+    result = service.scan_work_observations(now=now + 6)
+    assert ID not in result["candidates"]
+    assert result["errors"][str(folder)]["quality"] == "missing"

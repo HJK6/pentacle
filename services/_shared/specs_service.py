@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -279,6 +280,7 @@ class SpecsSubsystem:
         self._status_card_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._identity_lock = threading.RLock()
         self._identity_cache = {}
+        self._work_observation_cache = {}
         self._capture_lock = threading.Lock()
         self._capture_future = None
         self._capture_waiters = 0
@@ -377,6 +379,8 @@ class SpecsSubsystem:
         self._invalidate_presentation_cache()
         now = time.time() if now is None else now
         root = self.memory_root
+        prior_cache, self._work_observation_cache = self._work_observation_cache, {}
+        cache = self._work_observation_cache
         if self._explicit_root:
             try:
                 with _bounded_directory(root / "work"):
@@ -423,12 +427,16 @@ class SpecsSubsystem:
                             with _bounded_directory(folder) as fd:
                                 conflicts = any(_is_spec_sync_conflict(name) and name.startswith(("spec.", "summary."))
                                                 for name in os.listdir(fd))
-                                candidate = read_work_candidate(_BoundedFolder(folder, fd), directory.name,
-                                                                now=now, quiet_s=self.debounce_s)
+                                fingerprint, candidate = self._cached_work_candidate(
+                                    folder, directory.name, now, prior_cache, directory_fd=fd)
                         else:
                             conflicts = any(_is_spec_sync_conflict(p.name) and p.name.startswith(("spec.", "summary."))
                                             for p in folder.iterdir())
-                            candidate = read_work_candidate(folder, directory.name, now=now, quiet_s=self.debounce_s)
+                            fingerprint, candidate = self._cached_work_candidate(folder, directory.name, now, prior_cache)
+                        # Only coherent, fresh facts are reusable. Conflict state is
+                        # checked on every walk and never contaminates those facts.
+                        if candidate["quality"] == "fresh":
+                            cache[folder] = (fingerprint, copy.deepcopy(candidate))
                         if conflicts:
                             candidate.update(quality="stale", error="work_sync_conflict")
                         candidates.setdefault(candidate["spec_id"], []).append(candidate)
@@ -451,6 +459,19 @@ class SpecsSubsystem:
                     "error": "work_scan_error:" + type(exc).__name__, "candidates": {}, "errors": {}, "scanned_at": now}
         return {"available": True, "root_configured": True, "error": None,
                 "candidates": candidates, "errors": errors, "scanned_at": now}
+
+    def _cached_work_candidate(self, folder, status, now, prior_cache, *, directory_fd=None):
+        paths = (folder / "spec.md", folder / "summary.md")
+        fingerprint = tuple(self._identity_fingerprint(path, directory_fd=directory_fd) for path in paths)
+        cached = prior_cache.get(folder)
+        if (cached is not None and cached[0] == fingerprint
+                and all(value is not None and now - value[-2] / 1e9 >= self.debounce_s for value in fingerprint)):
+            return fingerprint, copy.deepcopy(cached[1])
+        source = folder if directory_fd is None else _BoundedFolder(folder, directory_fd)
+        candidate = read_work_candidate(source, status, now=now, quiet_s=self.debounce_s)
+        if fingerprint != tuple(self._identity_fingerprint(path, directory_fd=directory_fd) for path in paths):
+            raise WorkFilesUnsettled("work_files_unsettled")
+        return fingerprint, candidate
 
     def _spawn_work_dirs(self) -> list[Path]:
         """Configured status buckets used by authoritative spawn resolution.

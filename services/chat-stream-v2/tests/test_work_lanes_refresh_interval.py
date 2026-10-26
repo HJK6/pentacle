@@ -202,3 +202,14 @@ def test_zero_interval_keeps_back_to_back_passes(monkeypatch):
         await inv._task
         assert len(passes) == 2
     run(body)
+
+
+def test_work_index_sweep_defaults_and_override(monkeypatch):
+    monkeypatch.delenv("WORK_INDEX_SWEEP_S", raising=False)
+    monkeypatch.delenv("WORK_INDEX_SETTLE_S", raising=False)
+    inv = WorkLanesInventory(None, NO_SESSIONS, None)
+    assert inv.sweep_interval_s == 60
+    assert inv.settle_s == 300
+    monkeypatch.setenv("WORK_INDEX_SWEEP_S", "123")
+    assert WorkLanesInventory(None, NO_SESSIONS, None).sweep_interval_s == 123
+    assert WorkLanesInventory(None, NO_SESSIONS, None, sweep_interval_s=7).sweep_interval_s == 7

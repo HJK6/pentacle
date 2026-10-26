@@ -207,7 +207,7 @@ class WorkLanesInventory:
         self.specs = specs
         self.episode_sink = episode_sink
         self.sweep_interval_s = float(sweep_interval_s if sweep_interval_s is not None else
-                                      os.environ.get("WORK_INDEX_SWEEP_S", "300"))
+                                      os.environ.get("WORK_INDEX_SWEEP_S", "60"))
         self.settle_s = float(settle_s if settle_s is not None else os.environ.get("WORK_INDEX_SETTLE_S", "300"))
         if (not math.isfinite(self.sweep_interval_s) or not math.isfinite(self.settle_s)
                 or self.sweep_interval_s <= 0 or self.settle_s < 0):
