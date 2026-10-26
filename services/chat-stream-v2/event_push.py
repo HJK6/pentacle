@@ -684,10 +684,6 @@ class EventPush:
             lifecycle = entry["lifecycle"]
             if seq is None:
                 continue
-            if self.sessions is not None:
-                self.sessions.apply_genuine_activity_event(
-                    entry["stream_id"], entry["event"],
-                )
             if lifecycle is None:
                 continue
             if self.presence is not None:
@@ -727,6 +723,12 @@ class EventPush:
             projected_index = 0
             for entry, seq in zip(entries, sequences):
                 if seq is not None:
+                    if self.sessions is not None:
+                        lifecycle = entry["lifecycle"]
+                        self.sessions.apply_genuine_activity_event(
+                            entry["stream_id"], projected[projected_index],
+                            expected_generation=lifecycle["generation"] if lifecycle else None,
+                        )
                     await self.broadcast({
                         "type": "chat.event",
                         "event": projected[projected_index],
