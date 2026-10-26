@@ -149,13 +149,16 @@ class Binding:
             "transcript_root": self.transcript_root}
 
 
-def validate_home(binding: Binding, root: Path, adopted: frozenset = frozenset()) -> None:
+def validate_home(binding: Binding, root: Path, adopted: Mapping[str, str] | None = None) -> None:
     for value in (binding.alias, binding.host, binding.generation):
         _component(value)
     if binding.provider not in {"codex", "claude"} or binding.platform not in {"macos", "wsl"}:
         raise AccountError("unsupported_account_provider_platform")
-    if binding.home in adopted:
+    if binding.home in (adopted or {}):
         # A host-configured, already signed-in dedicated home registered in place.
+        if binding.provider != "codex": raise AccountError("account_adopt_unsupported")
+        if adopted[binding.home] != f"{binding.provider}:{binding.alias}":
+            raise AccountError("account_home_owner_conflict")
         _private(Path(binding.home), directory=True)
     else:
         expected = root / binding.host / binding.provider / binding.alias / binding.generation
@@ -261,10 +264,22 @@ def transcript_allowed(path: str, provider: str, binding: Mapping | None = None)
         return False
 
 
+def _codex_config(content: str) -> dict:
+    # Reuse the bootstrap policy for retained config; no credential/endpoint overrides.
+    keys = {"model", "model_reasoning_effort", "sandbox_mode", "approval_policy",
+            "developer_instructions", "check_for_update_on_startup", "cli_auth_credentials_store",
+            "sandbox_workspace_write", "projects", "features"}
+    try: config = tomllib.loads(content)
+    except ValueError: raise AccountError("account_config_not_allowlisted") from None
+    if set(config) - keys or config.get("cli_auth_credentials_store", "file") != "file":
+        raise AccountError("account_config_not_allowlisted")
+    return config
+
+
 class Registry:
-    def __init__(self, path: Path, root: Path, adopted=()):
+    def __init__(self, path: Path, root: Path, adopted: Mapping[str, str] | None = None):
         self.path, self.root = Path(path), Path(root)
-        self.adopted = frozenset(str(home) for home in adopted)
+        self.adopted = dict(adopted or {})
         if any(not Path(home).is_absolute() for home in self.adopted):
             raise AccountError("account_path_not_absolute")
         self._lock_guard = threading.RLock()
@@ -313,6 +328,15 @@ class Registry:
     def _save(self, data: dict) -> None:
         write_private_json(self.path, data)
 
+    def _validate_home(self, binding: Binding) -> None:
+        validate_home(binding, self.root, self.adopted)
+        if binding.home in self.adopted:
+            owner = (binding.host, binding.provider, binding.alias)
+            # Historical generations retain ownership across config edits/restarts.
+            for row in self._load()["generations"].values():
+                if row["home"] == binding.home and (row["host"], row["provider"], row["alias"]) != owner:
+                    raise AccountError("account_home_owner_conflict")
+
     @_serialized
     def prepare(self, *, provider: str, alias: str, host: str, generation: str,
                 profile_ref: str, executable: str, version: str, platform: str, observer_executable: str | None = None,
@@ -324,6 +348,7 @@ class Registry:
             raise AccountError("unsupported_account_provider_platform")
         if home is not None:
             # Adoption never creates or renames a home; it must be configured and already private.
+            home = str(Path(home))
             if home not in self.adopted: raise AccountError("account_home_outside_registry")
             home = Path(home); _private(home, directory=True)
         else:
@@ -340,17 +365,21 @@ class Registry:
             try: digest = hashlib.sha256(Path(observer_executable).read_bytes()).hexdigest()
             except OSError: raise AccountError("account_executable_unpinned") from None
             result = replace(result, observer_executable=observer_executable, observer_executable_sha256=digest)
-        validate_home(result, self.root, self.adopted)
+        self._validate_home(result)
         return result
 
     @_serialized
     def provision(self, draft: Binding, manifest: Mapping[str, str]) -> None:
-        validate_home(draft, self.root, self.adopted)
+        self._validate_home(draft)
+        if draft.home in self.adopted:
+            retained = Path(draft.home) / "config.toml"
+            if retained.exists() or retained.is_symlink():
+                _private(retained, directory=False)
+                try: _codex_config(retained.read_text(encoding="utf8"))
+                except (OSError, UnicodeError):
+                    raise AccountError("account_config_not_allowlisted") from None
         # Config keys are a positive allowlist; custom providers, API helpers,
         # hooks, OAuth overrides and alternate endpoints are never imported.
-        codex_keys = {"model", "model_reasoning_effort", "sandbox_mode", "approval_policy",
-                      "developer_instructions", "check_for_update_on_startup", "cli_auth_credentials_store",
-                      "sandbox_workspace_write", "projects", "features"}
         claude_keys = {"permissions", "model", "language", "outputStyle", "forceLoginMethod"}
         prepared = {}
         for name, content in manifest.items():
@@ -362,9 +391,7 @@ class Registry:
             if path.name in {"auth.json", ".credentials.json", "credentials.json"}:
                 raise AccountError("account_bootstrap_not_allowlisted")
             if name == "config.toml":
-                config = tomllib.loads(content)
-                if set(config) - codex_keys or config.get("cli_auth_credentials_store", "file") != "file":
-                    raise AccountError("account_config_not_allowlisted")
+                config = _codex_config(content)
                 if "cli_auth_credentials_store" not in config:
                     content += '\ncli_auth_credentials_store = "file"\n'
             if name == "settings.json":
@@ -388,7 +415,7 @@ class Registry:
 
     @_serialized
     def activate(self, draft: Binding, receipt: Mapping, *, expected_provider_id: str) -> Binding:
-        validate_home(draft, self.root, self.adopted)
+        self._validate_home(draft)
         store = "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file"
         if (receipt.get("outcome", "ok") != "ok" or receipt.get("auth_mode") != "subscription"
                 or receipt.get("provider_id") != expected_provider_id or not expected_provider_id
@@ -417,13 +444,13 @@ class Registry:
         key = state["active"].get(f"{host}:{provider}:{alias}")
         if not key: return None
         binding = Binding(**state["generations"][key])
-        validate_home(binding, self.root, self.adopted)
+        self._validate_home(binding)
         return binding
 
     def bindings(self) -> list[Binding]:
         state = self._load()
         result = [Binding(**state["generations"][key]) for key in state["active"].values()]
-        for binding in result: validate_home(binding, self.root, self.adopted)
+        for binding in result: self._validate_home(binding)
         return result
 
 

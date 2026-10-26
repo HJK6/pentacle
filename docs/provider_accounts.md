@@ -278,6 +278,12 @@ login, never creates, copies, moves or renames credential files, and writes only
 absent bootstrap files. Activation still needs the pinned binary, the expected
 subscription identity, a minimal turn and an unchanged identity reread. The
 registry accepts only the configured adopted homes outside the generation layout.
+Retained `config.toml` must pass the same key allowlist and file-store policy as
+bootstrap configuration; adoption refuses invalid contents before native execution
+and preserves accepted files. Each home belongs to one `provider:alias` cell;
+duplicate configuration and reassignment of a registered home are refused, including
+after a host executor restart. The same cell may adopt a new generation in place.
+The minimal turn must return exactly `OK` after surrounding whitespace is stripped.
 
 ## Usage, availability and re-login
 

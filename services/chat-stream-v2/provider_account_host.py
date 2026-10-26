@@ -72,8 +72,12 @@ class OperatorBrowser:
 class NativeHost:
     def __init__(self, config, *, run=subprocess.run, login=native_login, observation=None, operator_browser=None):
         self.config, self.run, self.login = config, native_run if run is subprocess.run else run, login
-        adopted = [cell["adopt_home"] for cell in config.get("cells", {}).values()
-                   if isinstance(cell, dict) and cell.get("adopt_home")]
+        adopted = {}
+        for owner, cell in config.get("cells", {}).items():
+            if not isinstance(cell, dict) or not cell.get("adopt_home"): continue
+            home = str(Path(cell["adopt_home"]))
+            if home in adopted: raise AccountError("account_home_owner_conflict")
+            adopted[home] = owner
         self.registry = Registry(Path(config["registry"]), Path(config["root"]), adopted)
         self.journal = self.registry.path.parent / "account-operations"
         self.observation = observation or self._observation
