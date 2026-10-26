@@ -133,3 +133,33 @@ importing the module as a second containment boundary. Scratch plist paths alone
 do not isolate `launchctl` service labels. Never invoke the CLI entrypoint as an
 offline proof, and never use `--skip-kickstart` as a substitute for containment: it
 still permits checkout and stamp changes.
+
+### Deploy smoke process attribution
+
+The daemon binds plain and optional TLS listeners in a paused state, writes the
+`chat_streamd_v2 listening on` record to both managed streams with identical
+PID, canonical process start and boot UUID, then starts accepting. Plain clients
+may receive connection refusal during TLS socket setup and can reconnect after
+startup. An optional TLS start failure leaves the plain listener available.
+
+The deploy scanner requires both matching markers, a stable activated PID/start,
+and a distinct outgoing process whose recorded PID/start has exited. It scans
+only bytes after each matching marker. `old_generation.inputs` retains the exact
+pre-marker ranges: the outgoing tail plus incoming startup logs. Its classifier
+is separate evidence, not a verdict on the activated process. Existing 1011,
+4000, overflow and peer-liveness failure rules are unchanged.
+
+Missing, conflicting, duplicated, truncated, expired or unproven identity emits
+`attribution.outcome=attribution_ambiguous`, keeps the gate failed (exit 8), and
+retains input range pointers. A timestamp, connection age or cancellation reason
+cannot recover a pass. A process-start probe failure is bounded and non-fatal to
+startup; its incomplete marker still fails attribution.
+
+`deploy/packet/full-window.py` uses the same paired-marker byte selector. Supply
+its final optional `GENERATION_PROOF` argument with the deploy stamp (or its
+`slow_consumer` object); use `-` for an absent watchdog proof. It requires the
+attributed writer-lifetime receipt and the same exact marker boundaries. Offset
+rows may include `backups` with `device` to traverse retained managed generations.
+A missing or mismatched receipt fails as `attribution_ambiguous`. Retained
+pre-marker failures stay in the packet receipt and do not clear or condemn the
+new generation. Runtime rollback remains an explicit deployment-owner action.

@@ -994,8 +994,9 @@ class Server:
 
     # -- lifecycle ---------------------------------------------------------
 
-    async def bind(self) -> int:
-        """Bind every interface in `self.binds` on one port and start accepting.
+    async def bind(self, *, start_serving: bool = True) -> int:
+        """Bind every interface in `self.binds` on one port.
+        Main pauses accepting until its paired boot markers are flushed.
         Returns the bound port. Call FIRST (spec constraint 1). A list host binds
         all given interfaces on the same port (v1 dual-bind parity: Tailscale IP +
         127.0.0.1); a single bind keeps the plain-string form unchanged."""
@@ -1003,6 +1004,7 @@ class Server:
         try:
             self._ws_server = await serve(
                 self._handle_client, target, self.port, max_size=WS_MAX_SIZE,
+                start_serving=start_serving,
             )
         except OSError as exc:
             bind_errno = exc.errno or errno.EADDRNOTAVAIL
@@ -1048,10 +1050,24 @@ class Server:
             self.port = sock.getsockname()[1]
             break
         log.info("v2 bound host=%s port=%s", ",".join(self.binds), self.port)
-        await self._bind_tls_listener()
+        await self._bind_tls_listener(start_serving=start_serving)
         return self.port
 
-    async def _bind_tls_listener(self) -> None:
+    async def start_serving(self) -> None:
+        """Start paused listeners after the process identity is in both sinks."""
+        assert self._ws_server is not None, "bind() must precede start_serving()"
+        await self._ws_server.start_serving()
+        if self._tls_ws_server is not None:
+            try:
+                await self._tls_ws_server.start_serving()
+            except OSError as exc:
+                # TLS remains optional, including a late listen() failure.
+                log.error("v2 tls start failed errno=%s", exc.errno)
+                self._tls_ws_server.close()
+                await self._tls_ws_server.wait_closed()
+                self._tls_ws_server = None
+
+    async def _bind_tls_listener(self, *, start_serving: bool = True) -> None:
         """Bind the optional daemon-terminated TLS (wss) listener for external
         scoped principals. Enablement hinges on a configured cert+key; the port
         may be 0 to pick a free one (tests) while production pins a fixed port. A
@@ -1066,7 +1082,7 @@ class Server:
         try:
             self._tls_ws_server = await serve(
                 self._handle_tls_client, target, self.dot_tls_port,
-                ssl=ssl_context, max_size=WS_MAX_SIZE,
+                ssl=ssl_context, max_size=WS_MAX_SIZE, start_serving=start_serving,
             )
         except OSError as exc:
             # A failed TLS bind must not take the plain listener down; the daemon

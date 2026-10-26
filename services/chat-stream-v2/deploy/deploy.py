@@ -1247,12 +1247,36 @@ class _ManagedAppendedLogScanner:
 
 
 
+def _process_start(pid: int | None, runner: Runner) -> str | None:
+    if type(pid) is not int or pid <= 0:
+        return None
+    result = runner(("ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
+    value = " ".join((result.stdout or "").split())
+    return value if result.returncode == 0 and value else None
+
+
+def _prior_writer_exited(pid: int, start: str, runner: Runner) -> bool:
+    result = runner(("ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
+    value = " ".join((result.stdout or "").split())
+    # ps uses rc=1 with empty output for an absent PID. Tooling errors and
+    # blank successful answers cannot establish a writer's exit.
+    if result.returncode == 1 and not value and not (result.stderr or "").strip():
+        return True
+    return result.returncode == 0 and bool(value) and value != start
+
+
 def _scan_slow_consumer_window(
     service: ServiceConfig,
     previous_size: LogOffsets | None,
+    *,
+    expected_pid: int | None = None,
+    expected_start: str | None = None,
+    prior_pid: int | None = None,
+    prior_start: str | None = None,
+    runner: Runner = _run,
 ) -> dict[str, object]:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from deploy.packet.log_scan import lines_many
+    from deploy.packet.log_scan import AttributionAmbiguous, generation_ranges, lines_many
     paths = _daemon_log_paths(service)
     inputs = []
     groups = []
@@ -1263,31 +1287,46 @@ def _scan_slow_consumer_window(
             groups.append(group)
             inputs.extend(group)
         boot_marker_seen = any(V2_BOOT_LINE in line for group in groups for line in lines_many(group))
-        def selected():
-            for group in groups:
-                seen = False
-                # stderr has no boot marker; pre-restart offsets delimit it.
-                has_boot = any(V2_BOOT_LINE in line for line in lines_many(group))
-                for line in lines_many(group):
-                    seen |= V2_BOOT_LINE in line
-                    if boot_marker_seen and (seen or not has_boot):
-                        yield line
-        scan = classify_slow_consumer_lines(selected(), boot_marker_seen=boot_marker_seen, max_examples=100)
-        # A bare listening prefix identifies neither the process nor its boot.
-        # Stage-one diagnosis is deliberately fail-closed even when both sinks
-        # contain that legacy prefix. Preserve observed failures as evidence.
-        scan["outcome"] = SLOW_CONSUMER_FAILED
-        scan["attribution"] = {
-            "outcome": "attribution_ambiguous",
-            "reasons": ["managed logs lack activated process generation proof"],
-        }
-        return {**scan, "scan_complete": True, "inputs": inputs,
+        attribution = {"outcome": "attribution_ambiguous", "reasons": []}
+        selected, preceding, markers = [], [], []
+        try:
+            if (type(prior_pid) is not int or prior_pid <= 0
+                    or prior_pid == expected_pid or not prior_start
+                    or not _prior_writer_exited(prior_pid, prior_start, runner)):
+                raise AttributionAmbiguous("outgoing writer lifetime is unproven")
+            if not expected_start or _process_start(expected_pid, runner) != expected_start:
+                raise AttributionAmbiguous("activated PID/start identity is missing or changed")
+            selected, preceding, markers = generation_ranges(groups, expected_pid, expected_start)
+            attribution.update(outcome="attributed", generation=markers[0]["identity"],
+                               markers=markers, prior_pid=prior_pid, prior_start=prior_start,
+                               prior_writer_exited=True)
+        except AttributionAmbiguous as error:
+            attribution["reasons"].append(str(error))
+        # Ambiguous records remain inspectable and can never produce a pass.
+        observed = selected if attribution["outcome"] == "attributed" else groups
+        scan = classify_slow_consumer_lines(
+            (line for group in observed for line in lines_many(group)),
+            boot_marker_seen=boot_marker_seen, max_examples=100,
+        )
+        if attribution["outcome"] == "attributed" and _process_start(expected_pid, runner) != expected_start:
+            attribution.update(outcome="attribution_ambiguous", reasons=["activated PID/start changed during scan"])
+        if attribution["outcome"] != "attributed":
+            scan["outcome"] = SLOW_CONSUMER_FAILED
+        prior_scan = classify_slow_consumer_lines(
+            (line for group in preceding for line in lines_many(group)), max_examples=100,
+        )
+        return {**scan, "attribution": attribution, "scan_complete": True, "inputs": inputs,
+                "selected_inputs": [item for group in selected for item in group],
+                "old_generation": {"basis": "pre-marker range: outgoing tail plus incoming boot logs",
+                                   "inputs": [item for group in preceding for item in group],
+                                   "classifier": prior_scan},
                 "bytes_read": sum(i["bytes_read"] for i in inputs),
                 "log_paths": [str(path) for path in paths]}
     except (OSError, ValueError, DeployError) as error:
         return {"class": "slow_consumer", "outcome": SLOW_CONSUMER_FAILED,
                 "scan_complete": False, "incomplete_reason": str(error),
-                "boot_marker_seen": False, "failures": [],
+                "attribution": {"outcome": "attribution_ambiguous", "reasons": [str(error)]},
+                "boot_marker_seen": False, "failures": [], "inputs": inputs,
                 "log_paths": [str(path) for path in paths]}
 
 
@@ -1482,6 +1521,7 @@ def _apply_post_activation(
     this returns. Boot/runtime readbacks are injectable so the classification is unit-testable
     without a real daemon or socket."""
     try:
+        prior_start = _process_start(prior_pid, runner)
         if reload_launchd:
             _reload_launchd(service.launchd_label, runner)
         else:
@@ -1509,6 +1549,7 @@ def _apply_post_activation(
                 **last_observed,
             }
             if runtime_confirmed:
+                active_start = _process_start(readback.pid, runner)
                 # Full smoke follows installed configuration, independent of caller overrides.
                 machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
                 if machines_file:
@@ -1529,7 +1570,11 @@ def _apply_post_activation(
                     ),
                     repo,
                 )
-                stamp["slow_consumer"] = _scan_slow_consumer_window(service, prior_log_size)
+                stamp["slow_consumer"] = _scan_slow_consumer_window(
+                    service, prior_log_size, expected_pid=readback.pid,
+                    expected_start=active_start, prior_pid=prior_pid,
+                    prior_start=prior_start, runner=runner,
+                )
                 stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file)
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED:
                     _install_fleet_smoke_schedule(repo, runner)
@@ -1928,6 +1973,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_RUNTIME_SHA_NOT_CONFIRMED
     slow_consumer = stamp.get("slow_consumer") or {}
     if slow_consumer.get("outcome") == SLOW_CONSUMER_FAILED:
+        attribution = slow_consumer.get("attribution") or {}
+        if attribution.get("outcome") == "attribution_ambiguous":
+            print("deploy applied; slow_consumer attribution_ambiguous: " +
+                  json.dumps(attribution.get("reasons") or [], sort_keys=True), file=sys.stderr)
+            print("Generation provenance is unproven; investigate the retained ranges and do NOT retry the deploy.",
+                  file=sys.stderr)
+            return EXIT_SLOW_CONSUMER_FAILED
         failures = slow_consumer.get("failures") or []
         clients = sorted({
             str(row.get("client") or "unknown")

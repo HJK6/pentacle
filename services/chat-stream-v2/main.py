@@ -26,6 +26,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 import socket
 from pathlib import Path
@@ -854,8 +855,21 @@ async def run(args: argparse.Namespace) -> int:
     server.bootstrap_ready.clear()
 
     # 1. BIND FIRST. Nothing above this line may block on I/O.
-    port = await server.bind()
-    print(f"chat_streamd_v2 listening on {binds[0]}:{port}", flush=True)
+    port = await server.bind(start_serving=False)
+    # One synchronously flushed identity in both managed sinks. Keep the
+    # listening prefix for existing boot consumers; never yield between writes.
+    try:
+        process_start = " ".join(subprocess.check_output(
+            ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True,
+            timeout=5,
+        ).split())
+    except (OSError, subprocess.SubprocessError):
+        process_start = ""  # The deploy selector will refuse unproven identity.
+    generation = json.dumps({"pid": os.getpid(), "start": process_start,
+                             "boot_uuid": str(uuid.uuid4())}, separators=(",", ":"))
+    boot_line = f"chat_streamd_v2 listening on {binds[0]}:{port} generation={generation}"
+    print(boot_line, file=sys.stdout, flush=True)
+    print(boot_line, file=sys.stderr, flush=True)
     # Install the shutdown handler immediately after bind, BEFORE the blocking
     # init below. A SIGTERM during boot must trigger the graceful path (set the
     # stop future), not the default disposition that kills the process (rc=-15);
@@ -871,6 +885,8 @@ async def run(args: argparse.Namespace) -> int:
             asyncio.get_running_loop().add_signal_handler(sig, _request_stop)
         except NotImplementedError:  # pragma: no cover - non-POSIX
             signal.signal(sig, _request_stop)
+
+    await server.start_serving()
 
     # 2. Init that may block goes after the accept loop is live. The lifted CRUD
     #    stores open their own DBs (PRAGMA integrity_check, WAL) + blob dirs off

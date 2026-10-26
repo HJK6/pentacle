@@ -11,7 +11,7 @@ from .test_deploy_script import DEPLOY_PATH, _u2_line, deploy_mod
 
 
 @pytest.mark.parametrize("abnormal_close", [False, True])
-def test_direct_script_scanner_preserves_window_verdict(tmp_path, abnormal_close):
+def test_direct_script_scanner_refuses_unattributed_window(tmp_path, abnormal_close):
     log = tmp_path / "daemon.log"
     log.write_text(
         deploy_mod.V2_BOOT_LINE + "\n"
@@ -40,6 +40,7 @@ print(json.dumps(result))
     assert result["scan_complete"] and result["boot_marker_seen"]
     assert result["bytes_read"] == log.stat().st_size
     assert Path(result["scanner_module"]).resolve() == DEPLOY_PATH.parent / "packet" / "log_scan.py"
-    assert result["outcome"] == ("failed" if abnormal_close else "passed")
+    assert result["outcome"] == "failed"
+    assert result["attribution"]["outcome"] == "attribution_ambiguous"
     assert result["failure_count"] == int(abnormal_close)
     assert [item["kind"] for item in result["failures"]] == (["1011_close"] if abnormal_close else [])
