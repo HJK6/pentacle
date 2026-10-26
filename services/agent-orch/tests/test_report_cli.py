@@ -62,6 +62,81 @@ def test_explicit_commission_requires_review_evidence_and_result_file_preserves_
     assert payload["extras"]["qa_review"]["commission_msg_id"] == 7
 
 
+@pytest.mark.parametrize("source", ["flags", "inline", "file"])
+@pytest.mark.parametrize("verdict", ["accept", "reject"])
+def test_qa_terminate_requires_explicit_message_before_network(monkeypatch, capsys, tmp_path, source, verdict):
+    def unexpected(*args, **kwargs):
+        pytest.fail("missing QA message identity must refuse before config/network/close")
+
+    monkeypatch.setattr(cli, "load_config", unexpected)
+    body = {"summary": "re-read", "findings": [], "next_action": "lead_proceed"}
+    overrides = {"msg_id": None, "terminate": True}
+    if source == "flags":
+        overrides["qa_verdict"] = verdict
+    else:
+        body["qa_verdict"] = verdict
+    if source == "file":
+        path = tmp_path / "review.json"
+        path.write_text(json.dumps(body))
+        overrides.update(result=None, result_file=str(path), target_sha="a" * 40)
+    else:
+        overrides["result"] = json.dumps(body)
+
+    assert cli.report(_args(**overrides)) == 2
+    assert "QA reports require an explicit --msg-id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("terminate", [False, True])
+@pytest.mark.parametrize("reuse_transport_zero", [False, True])
+def test_initial_and_two_rereads_keep_explicit_commission_identity(
+    monkeypatch, capsys, tmp_path, terminate, reuse_transport_zero,
+):
+    requests = []
+
+    async def counterpart(_config, request, timeout):
+        requests.append(request.copy())
+        return {
+            **request, "type": "report.ok", "ledger_row_id": len(requests),
+            "durability_ack": True, "closed": terminate,
+            "to_stream_id": "hostb:leader",
+            "notice_delivery": {
+                "delivery_status": "delivered", "tell_id": "notice-" + request["report_id"],
+                "ledger_row_id": len(requests), "to_stream_id": "hostb:leader",
+            },
+        }
+
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostb:codex-x")
+    monkeypatch.setattr(cli, "report_once", counterpart)
+    monkeypatch.setattr(cli, "fetch_snapshot", lambda *_args, **_kwargs: {"sessions": [{
+        "stream_id": "hostb:codex-x", "self_close_on_completion": True,
+        "online": True, "parent_stream_id": "hostb:leader",
+    }]})
+    body = {"summary": "scoped review", "findings": [{
+        "severity": "major", "where": "fixture", "issue": "scoped defect",
+        "suggested_fix": "repair fixture",
+    }], "next_action": "repair"}
+    for commission in (0, 1, 2):
+        transport_id = 0 if reuse_transport_zero else commission
+        argv = [
+            "report", "--msg-id", str(transport_id), "--status", "done",
+            "--report-id", f"review-{commission}", "--result", json.dumps(body),
+            "--qa-verdict", "reject", "--target-sha", "a" * 40,
+            "--qa-reviewed-scope", "admission", "--qa-gate-evidence-digest", "b" * 64,
+            "--qa-commission-msg-id", str(commission),
+        ]
+        if terminate:
+            argv.append("--terminate")
+        assert cli.report(cli.build_parser().parse_args(argv)) == 0
+        sent = requests[-1]
+        assert sent["msg_id"] == transport_id
+        assert sent["extras"]["qa_review"]["commission_msg_id"] == commission
+        assert sent["qa_verdict"] == "reject"
+        for key, value in body.items():
+            assert sent[key] == value
+    assert [r["report_id"] for r in requests] == ["review-0", "review-1", "review-2"]
+
+
 def test_durable_notice_authority_does_not_depend_on_advisory_ack_fields() -> None:
     receipt = {
         "delivery_status": "delivered",

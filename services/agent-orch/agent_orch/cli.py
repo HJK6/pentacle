@@ -4543,10 +4543,11 @@ def report(args: argparse.Namespace) -> int:
     if getattr(args, "terminate", False) and args.status == "progress":
         print("agent-orch report: validation failed: report: --terminate is incompatible with --status=progress", file=sys.stderr)
         return 2
-    # Only self-closing, tell-driven workers may omit --msg-id.  For an open
+    # Only non-QA self-closing, tell-driven workers may omit --msg-id. For an open
     # seat, silently choosing 0 can make a commissioned report durable but
     # invisible to the leader awaiting its actual inbox msg_id.
-    if args.msg_id is None:
+    msg_id_omitted = args.msg_id is None
+    if msg_id_omitted:
         if not getattr(args, "terminate", False):
             print(
                 "agent-orch report: validation failed: --msg-id is required unless --terminate is used; "
@@ -4579,6 +4580,16 @@ def report(args: argparse.Namespace) -> int:
         message = _format_report_payload_validation_failure(exc, args.status, msg_id=args.msg_id)
         print(f"agent-orch report: validation failed:\n{message}", file=sys.stderr)
         _best_effort_record_report_rejection(args.status, args.msg_id)
+        return 2
+
+    # Check the composed payload so flags, inline JSON and result files follow
+    # the same rule. Termination must not silently file a QA re-read at msg 0.
+    if msg_id_omitted and payload.get("qa_verdict") is not None:
+        print(
+            "agent-orch report: validation failed: QA reports require an explicit --msg-id "
+            "even with --terminate; use the numeric message id of the current commission",
+            file=sys.stderr,
+        )
         return 2
 
     config = load_config()
@@ -6406,7 +6417,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--msg-id",
         type=int,
         default=None,
-        help="Inbox msg_id this report answers. Required unless --terminate is used; use 0 explicitly for a proactive non-terminating report.",
+        help="Inbox msg_id this report answers. Required for QA reports, including with --terminate; other reports may omit it only with --terminate (defaults to 0). Use 0 explicitly for a proactive report.",
     )
     report_parser.add_argument("--status", choices=["done", "progress", "error", "aborted"], required=True)
     report_parser.add_argument("--reason")
