@@ -632,11 +632,14 @@ class Comms:
                         },
                     })
                     reply["ledger_row_id"] = ledger_row_id
+                    await self._stamp_milestone_status(msg, body)
                     outcome = ("ok", reply)
                     return reply
             async with self._pane_input_lock(str(route["final_target"])):
                 await self._validate_assistant_request_target(msg, route)
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
+            if reply.get("delivery_status") == "delivered":
+                await self._stamp_milestone_status(msg, body)
             outcome = ("ok", reply)
             return reply
         except Exception as exc:
@@ -650,6 +653,24 @@ class Comms:
             self._inflight.pop(tell_id, None)
             if not fut.done():
                 fut.set_result(outcome)
+
+    async def _stamp_milestone_status(self, msg: dict[str, Any], body: str) -> None:
+        """Best-effort card update after a new tell is delivered or persisted."""
+        try:
+            text = strip_peer_delivery_envelope(body)
+            text = re.sub(r"^\[from [^\]\r\n]+\]\s*", "", text, count=1)
+            if not re.match(r"^(START|GATE|BLOCKER|END)\b", text):
+                return
+            sender = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "")
+            if not sender:
+                return
+            host, name = self.sessions.split(sender)
+            row = await self.store.fetch_session(host, name)
+            if row is None or row.get("status") != "open" or row.get("role") not in {"lead", "nexus"}:
+                return
+            await self.sessions.set_status_card(host, name, {"update": text[:300]})
+        except Exception:
+            log.exception("subsystem=comms bug_ref=milestone_tells status card stamp failed")
 
     async def deliver_capacity_continue(self, target, state, attempt_id):
         """One plain continuation; caller owns the original lifecycle lock.

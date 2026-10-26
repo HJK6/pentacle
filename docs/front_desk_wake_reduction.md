@@ -11,7 +11,10 @@ sent once per continuous loss of that seat generation, also with no request
 pending, and again only after the authority was seen ready or was rebound. A
 seat whose state is merely unknown, as right after a daemon start, is not
 reported. The daemon does not rebind the authority; requests keep being
-released without a ruling until you rebind or replace it. The chat line and the
+released without a ruling until you rebind or replace it. Pending requests for
+the lost authority stream and generation expire on the next worker tick as
+`authority_unavailable`, using the same release and operator mirror as a new
+request made while the authority is unavailable. The chat line and the
 deadline notice for a request that went unruled state what the release did:
 `admitted unruled`, or `not released, blocked (<code>)` when nothing launched. The
 requester's structured result notice still follows. Successful unchanged-scope spawn
@@ -29,6 +32,12 @@ one `lane_digest` notice through the existing outbound queue. No empty digest is
 sent. Wake inputs arrive alone and do not flush held items. The queue's normal
 five-second sweep bounds scheduling precision; its existing transport and proof
 recovery govern the resulting notice. Held inputs survive daemon restarts.
+
+Delivered and persisted-suppressed START/GATE/BLOCKER/END tells from an open
+lead or nexus also update the sender's status card with the first 300 characters
+of the milestone body, after any peer header. Other tells leave it untouched;
+card-update failures are logged without changing the tell outcome. Replaying a
+tell id does not stamp the card again.
 
 Internally queued lane digests, including fleet snapshots, bypass holding using
 the existing private digest token. The token survives both notice and tell ingress

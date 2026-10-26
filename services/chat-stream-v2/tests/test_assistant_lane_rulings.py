@@ -776,6 +776,42 @@ async def _set_seat(store, name, **fields):
     await store.submit(op)
 
 
+@pytest.mark.parametrize("loss", [{"pane_status": "pane_dead"}, {"status": "closed"}])
+def test_pending_rulings_expire_on_authority_loss_without_waiting_for_deadline(loss):
+    async def go():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root, advisor, server, spawned = await _rulings_rig(store)
+            requests = [await server._on_spawn(_spawn_msg(root, key)) for key in ("pending-one", "pending-two")]
+            # Unrelated generations/streams must remain pending on this loss.
+            for key, column in (("other-generation", "authority_generation"), ("other-authority", "authority_stream_id")):
+                reply = await server._on_spawn(_spawn_msg(root, key))
+                await store.submit(lambda conn, rid=reply["ruling_request_id"], col=column: conn.execute(
+                    f"UPDATE v2_assistant_lane_rulings SET {col}='unrelated' WHERE ruling_request_id=?", (rid,)))
+                requests.append(reply)
+            assert spawned.calls == []
+            await _set_seat(store, "astra", **loss)
+            await server.lane_rulings.tick()
+            await server.lane_rulings.tick()
+            for reply in requests[:2]:
+                row = await server.lane_rulings._fetch(reply["ruling_request_id"])
+                assert row["state"] == "done" and row["ruling"] is None
+                assert row["reason"] == "authority_unavailable"
+                assert row["authority_generation"] == advisor["session_generation"]
+            for reply in requests[2:]:
+                assert (await server.lane_rulings._fetch(reply["ruling_request_id"]))["state"] == "pending"
+            assert len(spawned.calls) == 2
+            lines = await _chat_lines(store)
+            assert len(lines) == 2 and all("admitted unruled" in line and "authority_unavailable" in line for line in lines)
+            assert len(await _loss_notices(store)) == 1
+            await server.lane_rulings.tick()
+            assert len(spawned.calls) == 2 and len(await _chat_lines(store)) == 2
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
 def test_unruled_release_that_is_blocked_is_not_reported_as_proceeded():
     async def go():
         store = Store(":memory:")
