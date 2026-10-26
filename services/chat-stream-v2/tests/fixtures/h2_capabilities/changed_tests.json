@@ -70,6 +70,7 @@
     "test_ssh_control_master_reset.py::test_present_wedged_master_answers_check_but_hangs_sessions_is_killed",
     "test_h2_portable_fixtures.py::test_darwin_exit_registration_requires_matching_terminal_event",
     "test_h2_portable_fixtures.py::test_terminal_bound_socket_preserves_ownership_without_contact",
-    "test_harness_reaping.py::test_owned_group_exit_between_identity_check_and_registration"
+    "test_harness_reaping.py::test_owned_group_exit_between_identity_check_and_registration",
+    "test_h2_portable_fixtures.py::test_linux_pidfd_registration_observes_terminal_readiness"
   ]
 }

@@ -187,6 +187,8 @@ class _ExitEvent:
         try:
             if sys.platform.startswith("linux"):
                 self.fd = os.pidfd_open(pid, 0)
+                # pidfd_open succeeds for an exited, uncollected process.
+                self.terminal = bool(select.select([self.fd], [], [], 0)[0])
             elif sys.platform == "darwin":
                 self.kq = select.kqueue()
                 self.terminal = self._events(self.kq.control([select.kevent(

@@ -334,6 +334,10 @@ def test_recorded_kernel_exit_events_are_finite_and_fail_closed(monkeypatch, pla
         if outcome == "denied": raise PermissionError("synthetic kqueue denial")
         return [SimpleNamespace(ident=42420, filter=-5, flags=0, fflags=16)] if changes is None and outcome == "complete" else []
     def wait(read, write, error, timeout):
+        if timeout == 0:
+            # These existing cases start live; completion arrives during wait.
+            calls.append(("probe", read, timeout))
+            return [], [], []
         calls.append(("select", read, timeout))
         return (read if outcome == "complete" else [], [], [])
     monkeypatch.setattr(owner, "sys", SimpleNamespace(platform=platform))
@@ -673,3 +677,35 @@ def test_terminal_bound_socket_preserves_ownership_without_contact(monkeypatch, 
         if original.exists():
             (original / "s").unlink()
             original.rmdir()
+
+
+@pytest.mark.parametrize("outcome", ["exited", "live-then-exit", "live", "denied-probe"])
+def test_linux_pidfd_registration_observes_terminal_readiness(monkeypatch, outcome):
+    from tools import gate_owner_manifest as owner
+    polls, closed = [], []
+    def poll(read, write, error, timeout):
+        assert read == [42421] and write == error == []
+        polls.append(timeout)
+        if outcome == "denied-probe": raise PermissionError("synthetic readiness denial")
+        ready = outcome == "exited" or (outcome == "live-then-exit" and len(polls) == 2)
+        return read if ready else [], [], []
+    monkeypatch.setattr(owner, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(owner, "os", SimpleNamespace(pidfd_open=lambda pid, flags: 42421, close=closed.append))
+    monkeypatch.setattr(owner, "select", SimpleNamespace(select=poll))
+    monkeypatch.setattr(owner, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    if outcome == "denied-probe":
+        with pytest.raises(owner.ManifestError, match="register"):
+            owner._ExitEvent(42420)
+    else:
+        event = owner._ExitEvent(42420)
+        try:
+            assert event.terminal == (outcome == "exited")
+            if outcome == "live":
+                with pytest.raises(owner.ManifestError, match="not observed"):
+                    event.wait(105.0)
+            else:
+                event.wait(105.0)
+                assert event.terminal
+        finally: event.close()
+    assert polls == ([0] if outcome in ("exited", "denied-probe") else [0, 5.0])
+    assert closed == [42421]
