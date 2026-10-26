@@ -470,7 +470,7 @@ class SpecsSubsystem:
         source = folder if directory_fd is None else _BoundedFolder(folder, directory_fd)
         candidate = read_work_candidate(source, status, now=now, quiet_s=self.debounce_s)
         if fingerprint != tuple(self._identity_fingerprint(path, directory_fd=directory_fd) for path in paths):
-            raise WorkFilesUnsettled("work_files_unsettled")
+            candidate.update(quality="stale", error="work_files_unsettled")
         return fingerprint, candidate
 
     def _spawn_work_dirs(self) -> list[Path]:
