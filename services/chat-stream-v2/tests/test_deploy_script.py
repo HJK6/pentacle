@@ -976,7 +976,7 @@ def test_u2_scan_empty_defaults(tmp_path, monkeypatch, logs):
     elif logs == "empty":
         stdout.touch()
         stderr.touch()
-    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0, runner=_u2_generation()['runner'])
     assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_FAILED
     assert scan["boot_marker_seen"] is False
     assert scan["failures"] == []

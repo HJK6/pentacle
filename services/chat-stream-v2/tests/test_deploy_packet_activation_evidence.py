@@ -180,10 +180,11 @@ def test_deploy_guard_reads_late_failure_and_detects_rotation(tmp_path, monkeypa
     offsets=deploy_mod._capture_log_offsets((log,))
     with log.open('a') as output:
         output.write(BOOT+('INFO '+('x'*1000)+'\n')*4300+diag('close',close_code=1011))
-    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets)
+    runner = lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', '')
+    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets,runner=runner)
     assert result['scan_complete'] and result['failure_count']==1 and result['outcome']=='failed'
     log.rename(tmp_path/'prior');log.write_text('old\n'+BOOT)
-    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets)
+    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets,runner=runner)
     assert not result['scan_complete'] and result['outcome']=='failed'
 
 

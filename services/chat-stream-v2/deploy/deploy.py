@@ -1273,7 +1273,7 @@ def _scan_slow_consumer_window(
     expected_start: str | None = None,
     prior_pid: int | None = None,
     prior_start: str | None = None,
-    runner: Runner = _run,
+    runner: Runner,
 ) -> dict[str, object]:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from deploy.packet.log_scan import AttributionAmbiguous, generation_ranges, lines_many

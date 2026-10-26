@@ -267,6 +267,7 @@ def _managed_window(module, tmp_path, monkeypatch, stdout, stderr, *, mutate=Non
             stream.write(content)
     if mutate:
         mutate(config)
+    kwargs.setdefault('runner', lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', ''))
     return module._scan_slow_consumer_window(module.SERVICES['chat-streamd-v2'], offsets, **kwargs)
 
 

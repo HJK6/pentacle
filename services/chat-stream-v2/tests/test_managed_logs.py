@@ -228,7 +228,7 @@ def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_pa
         items = [freeze(p) for p in paths]
         assert ''.join(lines_many(items)).startswith(deploy_mod.V2_BOOT_LINE)
         stdout.write('Z' * 1000 + '\n')
-        result = deploy_mod._scan_slow_consumer_window(V2_SERVICE, before)
+        result = deploy_mod._scan_slow_consumer_window(V2_SERVICE, before, runner=runner)
         assert not result['scan_complete'] and result['outcome'] == deploy_mod.SLOW_CONSUMER_FAILED
         assert 'expired' in result['incomplete_reason']
     finally:
