@@ -1,13 +1,13 @@
 """Scan frozen boot-to-end logs without a byte cap or abnormal-close exclusions.
 
-Usage: full-window.py SOURCE OFFSETS END_UTC ATTEMPTS WINDOW_OUT RECEIPT_OUT [WATCHDOG_PROOF]
+Usage: full-window.py SOURCE OFFSETS END_UTC ATTEMPTS WINDOW_OUT RECEIPT_OUT [WATCHDOG_PROOF|-] [GENERATION_PROOF]
 Offsets name path, inode, size, captured_utc and optionally device.
 """
 import hashlib, importlib.util, json, re, sys
 from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from deploy.packet.log_scan import freeze, lines
+from deploy.packet.log_scan import AttributionAmbiguous, freeze, generation_ranges, lines, lines_many
 
 def dt(value):
     result = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -19,14 +19,17 @@ def stamp(line):
     match = re.match(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d))\s', line)
     return dt(match[1]) if match else None
 
-def timed(item):
-    previous = dt(item['captured_utc'])
-    for line in lines(item):
+def timed_group(group):
+    if not group:
+        return
+    previous = dt(group[0]['captured_utc'])
+    for line in lines_many(group):
         previous = stamp(line) or previous
         if line.strip():
             yield previous, line
 
-def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://127.0.0.1:7791', watchdog_proof=None):
+
+def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://127.0.0.1:7791', watchdog_proof=None, generation_proof=None):
     sys.path.insert(0, str(source/'services/chat-stream-v2'))
     from deploy import deploy
     inputs = []
@@ -34,15 +37,53 @@ def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://12
                'bind_expected': False, 'scan_complete': False, 'excluded_records': 0}
     try:
         end = dt(end)
+        groups = []
         for row in json.loads(offsets.read_text()):
-            item = freeze(row['path'], row['size'], row['inode'], row.get('device'))
-            item['captured_utc'] = row['captured_utc']
-            inputs.append(item)
-        boots = [time for item in inputs for time, line in timed(item)
-                 if deploy.V2_BOOT_LINE in line and time <= end]
-        if len(boots) != 1:
-            raise ValueError('missing or multiple boot markers')
-        boot = boots[0]
+            from managed_logs import retained_paths
+            paths = (retained_paths(Path(row['path']), row['inode'], row['device'], row['backups'])
+                     if 'backups' in row else [Path(row['path'])])
+            group = []
+            for index, path in enumerate(paths):
+                item = freeze(path, row['size'] if index == 0 else 0,
+                              row['inode'] if index == 0 else None, row.get('device') if index == 0 else None)
+                item['captured_utc'] = row['captured_utc']
+                group.append(item)
+            groups.append(group)
+            inputs.extend(group)
+        if generation_proof is None:
+            raise AttributionAmbiguous('missing attributed deployment generation receipt')
+        proof = json.loads(Path(generation_proof).read_text())
+        if not isinstance(proof, dict):
+            raise AttributionAmbiguous('invalid deployment generation receipt')
+        proof = proof.get('slow_consumer', proof)
+        if not isinstance(proof, dict) or not isinstance(proof.get('attribution'), dict):
+            raise AttributionAmbiguous('invalid deployment attribution proof')
+        attribution = proof['attribution']
+        identity = attribution.get('generation', {})
+        if not isinstance(identity, dict):
+            raise AttributionAmbiguous('invalid deployment process identity')
+        if (proof.get('scan_complete') is not True or attribution.get('outcome') != 'attributed'
+                or attribution.get('prior_writer_exited') is not True
+                or type(attribution.get('prior_pid')) is not int
+                or attribution['prior_pid'] <= 0
+                or attribution['prior_pid'] == identity.get('pid') or not attribution.get('prior_start')):
+            raise AttributionAmbiguous('deployment receipt lacks activated generation/writer proof')
+        selected, preceding, markers = generation_ranges(groups, identity.get('pid'), identity.get('start'))
+        def boundaries(rows):
+            return [[(item['device'], item['inode'], item['start_offset'], item['end_offset'])
+                     for item in marker['inputs']] for marker in rows]
+        if (identity != markers[0]['identity']
+                or boundaries(attribution.get('markers', [])) != boundaries(markers)):
+            raise AttributionAmbiguous('deployment receipt and selected boot boundaries differ')
+        # Boot time is consistency evidence for probe joins only. Byte markers,
+        # not timestamp ordering, select the generation in each sink.
+        boot = min(time for marker in markers for time, _line in timed_group(marker['inputs']))
+        receipt.update(generation=identity, generation_proof_sha256=hashlib.sha256(Path(generation_proof).read_bytes()).hexdigest(),
+                       generation_attribution='attributed', selected_inputs=[item for group in selected for item in group],
+                       old_generation={'basis': 'pre-marker range: outgoing tail plus incoming boot logs',
+                                       'inputs': [item for group in preceding for item in group],
+                                       'classifier': deploy.classify_slow_consumer_lines(
+                                           (line for group in preceding for line in lines_many(group)), max_examples=100)})
         records = []
         warning_count = 0
         warning_dispositions = []
@@ -60,9 +101,9 @@ def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://12
         exact = "WARNING _shared.specs_service specs watcher attach failed; falling back to polling: No module named 'watchdog'"
         window.parent.mkdir(parents=True, exist_ok=True)
         with window.open('w', encoding='utf-8') as output:
-            for item in inputs:
-                for time, line in timed(item):
-                    if not boot <= time <= end:
+            for group in selected:
+                for time, line in timed_group(group):
+                    if time > end:
                         continue
                     output.write(line)
                     if re.search(r'\b(?:WARNING|ERROR|CRITICAL)\b', line):
@@ -142,7 +183,8 @@ def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://12
                        unexpected_warning_count=unexpected_warnings, watcher_warning_dispositions=warning_dispositions,
                        watchdog_proof_sha256=ae.digest(watchdog_proof) if watchdog_proof else None,
                        scan_complete=True, bind_expected=accepted, outcome='passed' if accepted else 'failed')
-    except (OSError, ValueError, KeyError, AssertionError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AssertionError) as error:
+        receipt['generation_attribution'] = 'attribution_ambiguous'
         receipt['incomplete_reason'] = str(error)
         receipt['inputs'] = inputs
     out.write_text(json.dumps(receipt, indent=2)+'\n')
@@ -150,6 +192,7 @@ def scan(source, offsets, end, attempts, window, out, expected_endpoint='ws://12
 
 if __name__ == '__main__':
     source, offsets, end, attempts, window, out = sys.argv[1:7]
-    result = scan(Path(source).resolve(), Path(offsets), end, Path(attempts), Path(window), Path(out), watchdog_proof=sys.argv[7] if len(sys.argv)>7 else None)
+    result = scan(Path(source).resolve(), Path(offsets), end, Path(attempts), Path(window), Path(out), watchdog_proof=sys.argv[7] if len(sys.argv)>7 and sys.argv[7]!='-' else None,
+                  generation_proof=sys.argv[8] if len(sys.argv)>8 else None)
     print(json.dumps({k: result[k] for k in ('outcome', 'scan_complete', 'bind_expected')}))
     raise SystemExit(0 if result['bind_expected'] else 8)

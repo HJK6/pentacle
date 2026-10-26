@@ -47,8 +47,8 @@ def launch_daemon(source, root):
         if a and str(a[0]) == str(root/'sessions.db'): owned['store']=self
     Store.__init__=store_init
     original_bind=Server.bind
-    async def bind(self):
-        port=await original_bind(self); owned['server']=self; owned['loop']=asyncio.get_running_loop()
+    async def bind(self, **kwargs):
+        port=await original_bind(self, **kwargs); owned['server']=self; owned['loop']=asyncio.get_running_loop()
         event('bound', port=port, pid=os.getpid())
         return port
     Server.bind=bind

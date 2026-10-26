@@ -11,14 +11,14 @@ from .test_deploy_script import DEPLOY_PATH, _u2_line, deploy_mod
 
 
 @pytest.mark.parametrize("abnormal_close", [False, True])
-def test_direct_script_scanner_preserves_window_verdict(tmp_path, abnormal_close):
+def test_direct_script_scanner_refuses_unattributed_window(tmp_path, abnormal_close):
     log = tmp_path / "daemon.log"
     log.write_text(
         deploy_mod.V2_BOOT_LINE + "\n"
         + (_u2_line(close_code=1011, close_sent_code=1011) + "\n" if abnormal_close else "")
     )
     probe = """
-import json, runpy, sys
+import json, runpy, subprocess, sys
 from pathlib import Path
 script, log = map(Path, sys.argv[1:])
 # Direct script execution puts deploy/ before the service root. A fresh process
@@ -28,7 +28,8 @@ module = runpy.run_path(str(script), run_name='deploy_import_probe')
 scan = module['_scan_slow_consumer_window']
 scan.__globals__['_daemon_log_paths'] = lambda _: (log,)
 scan.__globals__['_launchd_environment'] = lambda _: {}
-result = scan(module['SERVICES']['chat-streamd-v2'], 0)
+result = scan(module['SERVICES']['chat-streamd-v2'], 0,
+              runner=lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', ''))
 result['scanner_module'] = sys.modules['deploy.packet.log_scan'].__file__
 print(json.dumps(result))
 """
@@ -40,6 +41,7 @@ print(json.dumps(result))
     assert result["scan_complete"] and result["boot_marker_seen"]
     assert result["bytes_read"] == log.stat().st_size
     assert Path(result["scanner_module"]).resolve() == DEPLOY_PATH.parent / "packet" / "log_scan.py"
-    assert result["outcome"] == ("failed" if abnormal_close else "passed")
+    assert result["outcome"] == "failed"
+    assert result["attribution"]["outcome"] == "attribution_ambiguous"
     assert result["failure_count"] == int(abnormal_close)
     assert [item["kind"] for item in result["failures"]] == (["1011_close"] if abnormal_close else [])

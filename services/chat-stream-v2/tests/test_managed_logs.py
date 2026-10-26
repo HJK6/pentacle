@@ -201,9 +201,23 @@ def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_pa
     stderr = ManagedStream(cfg.stderr, cfg, emergency, emergency)
     try:
         stdout.write(deploy_mod.V2_BOOT_LINE + ' fixture:0\n')
+        before = deploy_mod._capture_log_offsets((cfg.stdout, cfg.stderr))
+        start = 'Mon Jan 1 12:00:00 2024'
+        marker = 'generation=' + json.dumps({
+            'pid': 222, 'start': start,
+            'boot_uuid': '9d530b43-e74b-46e4-a7f8-e597f7440ef8',
+        }) + ' ' + deploy_mod.V2_BOOT_LINE + ' fixture:0\n'
+        stdout.write(marker)
+        stderr.write(marker)
         stdout.write('x' * 90 + '\n')
         stderr.write('ordinary warning\n')
-        result = deploy_mod._scan_slow_consumer_window(V2_SERVICE, before)
+        def runner(argv, cwd):
+            active = argv[2] == '222'
+            return subprocess.CompletedProcess(argv, 0 if active else 1,
+                                               start if active else '', '')
+        result = deploy_mod._scan_slow_consumer_window(
+            V2_SERVICE, before, expected_pid=222, expected_start=start,
+            prior_pid=111, prior_start='Mon Jan 1 11:00:00 2024', runner=runner)
         assert result['scan_complete'] and result['boot_marker_seen'], result
         assert result['outcome'] == deploy_mod.SLOW_CONSUMER_PASSED
         reader = deploy_mod._ManagedAppendedLogScanner(cfg.stdout, before, cfg)
@@ -214,7 +228,7 @@ def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_pa
         items = [freeze(p) for p in paths]
         assert ''.join(lines_many(items)).startswith(deploy_mod.V2_BOOT_LINE)
         stdout.write('Z' * 1000 + '\n')
-        result = deploy_mod._scan_slow_consumer_window(V2_SERVICE, before)
+        result = deploy_mod._scan_slow_consumer_window(V2_SERVICE, before, runner=runner)
         assert not result['scan_complete'] and result['outcome'] == deploy_mod.SLOW_CONSUMER_FAILED
         assert 'expired' in result['incomplete_reason']
     finally:
@@ -286,8 +300,8 @@ registry=server.operator_auth.OperatorCredentialRegistry(); registry.initialize(
 original_initialize=local_admin.initialize
 local_admin.initialize=lambda: original_initialize(root/'auth'/'local-admin.token')
 original_bind=main.Server.bind
-async def bind(self):
- port=await original_bind(self)
+async def bind(self, **kwargs):
+ port=await original_bind(self, **kwargs)
  (root/'ready.json').write_text(json.dumps({'port':port,'pid':os.getpid()}))
  return port
 main.Server.bind=bind

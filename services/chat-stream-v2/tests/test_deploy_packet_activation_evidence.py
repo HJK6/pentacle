@@ -29,15 +29,36 @@ def diag(event, conn=CONN, **extra):
     return STAMP + ' INFO conn_diag ' + json.dumps(dict(schema=1,event=event,conn_id=conn,transport='loopback',**extra)) + '\n'
 
 def scan(tmp_path, content, attempts=None, proof=None):
-    log = tmp_path/'source.log';log.write_text(content)
-    offsets = tmp_path/'offsets.json';offsets.write_text(json.dumps([dict(path=str(log),size=0,inode=log.stat().st_ino,captured_utc=STAMP)]))
+    offsets, generation_proof = packet_inputs(tmp_path, content, STAMP)
     runs = tmp_path/'attempts.json';runs.write_text(json.dumps(dict(attempts=attempts or [])))
-    return fw.scan(ROOT,offsets,END,runs,tmp_path/'window.log',tmp_path/'receipt.json',watchdog_proof=proof)
+    return fw.scan(ROOT,offsets,END,runs,tmp_path/'window.log',tmp_path/'receipt.json',
+                   watchdog_proof=proof, generation_proof=generation_proof)
 
 def attempt(**changes):
     return dict(connected=True,endpoint='ws://127.0.0.1:7791',start=STAMP,end='2026-01-01T12:00:00.500Z',close_sent_code=1000,close_received_code=1000,**changes)
 
 BOOT = 'chat_streamd_v2 listening on private\n'
+
+
+def packet_inputs(tmp_path, content, captured_utc):
+    from deploy.packet.log_scan import generation_ranges
+    identity = dict(pid=222, start='Mon Jan 1 12:00:00 2024',
+                    boot_uuid='9d530b43-e74b-46e4-a7f8-e597f7440ef8')
+    boot = 'generation=' + json.dumps(identity) + ' chat_streamd_v2 listening on fixture:1234\n'
+    stdout, stderr = tmp_path/'source.out', tmp_path/'source.err'
+    stdout.write_text(boot)
+    stderr.write_text(content.replace(BOOT, boot))
+    rows = [dict(path=str(path),size=0,inode=path.stat().st_ino,device=path.stat().st_dev,
+                 captured_utc=captured_utc) for path in (stdout,stderr)]
+    offsets = tmp_path/'offsets.json';offsets.write_text(json.dumps(rows))
+    groups = [[freeze(path)] for path in (stdout,stderr)]
+    _, _, markers = generation_ranges(groups, identity['pid'], identity['start'])
+    # Offline parser fixtures model the independently collected deploy receipt.
+    proof = tmp_path/'generation-proof.json'
+    proof.write_text(json.dumps(dict(scan_complete=True, attribution=dict(
+        outcome='attributed', generation=identity, markers=markers, prior_pid=111,
+        prior_start='old', prior_writer_exited=True))))
+    return offsets, proof
 
 def test_same_millisecond_clean_closes_need_no_attribution(tmp_path):
     content = BOOT+diag('connect')+diag('connect', 'b'*32)+diag('close',close_sent_code=1000,close_received_code=1000)
@@ -159,10 +180,11 @@ def test_deploy_guard_reads_late_failure_and_detects_rotation(tmp_path, monkeypa
     offsets=deploy_mod._capture_log_offsets((log,))
     with log.open('a') as output:
         output.write(BOOT+('INFO '+('x'*1000)+'\n')*4300+diag('close',close_code=1011))
-    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets)
+    runner = lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', '')
+    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets,runner=runner)
     assert result['scan_complete'] and result['failure_count']==1 and result['outcome']=='failed'
     log.rename(tmp_path/'prior');log.write_text('old\n'+BOOT)
-    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets)
+    result=deploy_mod._scan_slow_consumer_window(deploy_mod.SERVICES['chat-streamd-v2'],offsets,runner=runner)
     assert not result['scan_complete'] and result['outcome']=='failed'
 
 
@@ -210,13 +232,36 @@ async def test_actual_server_retry_inventory_store_and_complete_window(tmp_path)
         assert result['runtime_sha']==sha and sum(row['failed'] for row in probe.ATTEMPTS)>=2
         assert all(row['close_sent_code']==row['close_received_code']==1000 for row in probe.ATTEMPTS)
         end=datetime.now(timezone.utc).isoformat()
-        log=tmp_path/'boot.log';log.write_text(BOOT+buffer.getvalue())
-        offsets=tmp_path/'offsets.json';offsets.write_text(json.dumps([dict(path=str(log),inode=log.stat().st_ino,size=0,captured_utc=start)]))
+        offsets, generation_proof = packet_inputs(tmp_path, BOOT+buffer.getvalue(), start)
         attempts=tmp_path/'attempts.json';attempts.write_text(json.dumps({'attempts':probe.ATTEMPTS}))
-        result=fw.scan(ROOT,offsets,end,attempts,tmp_path/'selected.log',tmp_path/'receipt.json',expected_endpoint=url)
+        result=fw.scan(ROOT,offsets,end,attempts,tmp_path/'selected.log',tmp_path/'receipt.json',expected_endpoint=url, generation_proof=generation_proof)
         assert result['scan_complete'] and result['bind_expected'] and result['excluded_records']==0
     finally:
         if release and not release.done():release.cancel();await asyncio.gather(release,return_exceptions=True)
         if server:await server.close()
         logger.removeHandler(handler);logger.setLevel(level)
     assert server._ws_server is None
+
+
+@pytest.mark.parametrize('fault', ['missing','ambiguous','wrong_generation','wrong_boundaries','writer_unproven'])
+def test_packet_requires_same_deploy_generation_contract(tmp_path, fault):
+    offsets, proof = packet_inputs(tmp_path, BOOT, STAMP)
+    runs=tmp_path/'attempts.json';runs.write_text(json.dumps(dict(attempts=[])))
+    value=json.loads(proof.read_text())
+    if fault=='ambiguous':value['attribution']['outcome']='attribution_ambiguous'
+    elif fault=='wrong_generation':value['attribution']['generation']['start']='reused'
+    elif fault=='wrong_boundaries':value['attribution']['markers'][0]['inputs'][0]['start_offset']+=1
+    elif fault=='writer_unproven':value['attribution']['prior_writer_exited']=False
+    proof.write_text(json.dumps(value))
+    result=fw.scan(ROOT, offsets, END, runs, tmp_path/'window.log', tmp_path/'receipt.json',
+                   generation_proof=None if fault=='missing' else proof)
+    assert result['outcome']=='failed' and not result['bind_expected']
+    assert result['generation_attribution']=='attribution_ambiguous'
+
+
+def test_packet_retains_pre_marker_failure_without_condemning_proven_new_generation(tmp_path):
+    offsets, proof=packet_inputs(tmp_path,diag('close',conn='old',close_code=1011)+BOOT,STAMP)
+    runs=tmp_path/'attempts.json';runs.write_text(json.dumps(dict(attempts=[])))
+    result=fw.scan(ROOT,offsets,END,runs,tmp_path/'window.log',tmp_path/'receipt.json',generation_proof=proof)
+    assert result['bind_expected'] and result['classifier']['failure_count']==0
+    assert result['old_generation']['classifier']['failure_count']==1

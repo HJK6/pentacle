@@ -77,11 +77,20 @@ def _boot_observed(*_a, **_k):
 def _synthetic_boot_log(tmp_path, monkeypatch):
     # Stamp/schedule tests exercise the real scanner against owned boot evidence,
     # never the execution host's installed plist or accumulated daemon logs.
-    log = tmp_path / "synthetic-daemon.log"
-    log.write_text(deploy_mod.V2_BOOT_LINE + " synthetic\n")
+    stdout, stderr = tmp_path / "synthetic.out", tmp_path / "synthetic.err"
+    for path in (stdout, stderr):
+        path.write_text(_u2_boot())
     monkeypatch.setattr(deploy_mod, "_launchd_plist", lambda _label: {
-        "StandardOutPath": str(log),
+        "StandardOutPath": str(stdout), "StandardErrorPath": str(stderr),
     })
+    outgoing_samples = []
+    def process_start(pid, _runner):
+        if pid == 111:
+            outgoing_samples.append(pid)
+            return "old-start" if len(outgoing_samples) == 1 else None
+        return _U2_START
+    monkeypatch.setattr(deploy_mod, "_process_start", process_start)
+    monkeypatch.setattr(deploy_mod, "_prior_writer_exited", lambda *_a: True)
 
 
 def test_v2_service_config_has_no_v1_requirements_reference() -> None:
@@ -527,7 +536,7 @@ def test_post_activation_smoke_uses_installed_machine_file(
     monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _label: installed_plist)
     monkeypatch.setattr(deploy_mod, "_venv_python", lambda *_args: Path(sys.executable))
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_args: None)
-    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_args: {"outcome": deploy_mod.SLOW_CONSUMER_PASSED})
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_args, **_kwargs: {"outcome": deploy_mod.SLOW_CONSUMER_PASSED})
     writes = []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(dict(stamp)))
     calls = []
@@ -943,6 +952,22 @@ def test_u2_first_marker_preserves_window_and_ignores_preboot():
     assert scan["queue_depth_warnings"] == 2
 
 
+_U2_START = "Mon Jan 1 12:00:00 2024"
+
+
+def _u2_boot():
+    return 'generation=' + json.dumps(dict(
+        pid=999, start=_U2_START, boot_uuid='9d530b43-e74b-46e4-a7f8-e597f7440ef8')) + ' ' + deploy_mod.V2_BOOT_LINE + ' fixture:1234\n'
+
+
+def _u2_generation():
+    def runner(argv, cwd):
+        return subprocess.CompletedProcess(argv, 0 if argv[2]=='999' else 1,
+                                           _U2_START if argv[2]=='999' else '', '')
+    return dict(expected_pid=999, expected_start=_U2_START, prior_pid=111,
+                prior_start='old-start', runner=runner)
+
+
 @pytest.mark.parametrize("logs", ["none", "missing", "empty"])
 def test_u2_scan_empty_defaults(tmp_path, monkeypatch, logs):
     stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
@@ -951,7 +976,7 @@ def test_u2_scan_empty_defaults(tmp_path, monkeypatch, logs):
     elif logs == "empty":
         stdout.touch()
         stderr.touch()
-    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0, runner=_u2_generation()['runner'])
     assert scan["outcome"] == deploy_mod.SLOW_CONSUMER_FAILED
     assert scan["boot_marker_seen"] is False
     assert scan["failures"] == []
@@ -967,14 +992,15 @@ def test_u2_scan_handoff_offsets_and_telemetry(tmp_path, monkeypatch, marker):
     stderr.write_text(old)
     offsets = deploy_mod._capture_log_offsets((stdout, stderr))
     with stdout.open("a") as stream:
-        stream.write((deploy_mod.V2_BOOT_LINE if marker else "no boot yet") + "\n")
+        stream.write(_u2_boot() if marker else "no boot yet\n")
         stream.write(_u2_peer_close(conn_id=_U2_CONN_B) + "\nconn_diag {\n")
     with stderr.open("a") as stream:
-        stream.write("websocket close 4000 client=legacy\n" + _u2_peer_close() + "\nconn_diag {\n")
-    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, offsets)
+        stream.write((_u2_boot() if marker else "") + "websocket close 4000 client=legacy\n" + _u2_peer_close() + "\nconn_diag {\n")
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, offsets, **_u2_generation())
     assert scan["boot_marker_seen"] is marker
-    assert [row["kind"] for row in scan["failures"]] == (["4000_close"] if marker else [])
-    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == (2 if marker else 0)
+    assert scan['attribution']['outcome'] == ('attributed' if marker else 'attribution_ambiguous')
+    assert [row["kind"] for row in scan["failures"]] == ["4000_close"]
+    assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == 2
     assert scan["overflow_drops"] == 0
     assert scan["log_paths"] == [str(stdout), str(stderr)]
 
@@ -988,9 +1014,9 @@ def test_u2_scan_deduplicates_across_sinks(tmp_path, monkeypatch, reverse, force
     second = [_u2_line(close_received_code=1011), _u2_peer_close(), _u2_line("slow_consumer")]
     if reverse:
         first, second = second, first
-    stdout.write_text("\n".join([deploy_mod.V2_BOOT_LINE, *first, "conn_diag {", ""]))
-    stderr.write_text("\n".join([*second, ""]))
-    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    stdout.write_text(_u2_boot() + "\n".join([*first, "conn_diag {", ""]))
+    stderr.write_text(_u2_boot() + "\n".join([*second, ""]))
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0, **_u2_generation())
     assert scan["failures"] == [{"kind": force_kind, "client": _U2_CONN_A,
                                   "transport": "loopback", "line": force}]
     assert scan["overflow_drops"] == int(force_kind == "overflow")
@@ -1000,10 +1026,10 @@ def test_u2_scan_deduplicates_across_sinks(tmp_path, monkeypatch, reverse, force
 
 def test_u2_each_sink_keeps_its_own_first_marker_selection(tmp_path, monkeypatch):
     stdout, stderr = _u2_log_paths(tmp_path, monkeypatch)
-    stdout.write_text("\n".join([_u2_line("force_close"), deploy_mod.V2_BOOT_LINE, _u2_peer_close(), ""]))
-    stderr.write_text("\n".join(["slow_consumer overflow", "conn_diag {", deploy_mod.V2_BOOT_LINE,
-                                "slow_consumer queue depth=1", _u2_line("slow_consumer"), ""]))
-    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0)
+    stdout.write_text(_u2_line("force_close") + "\n" + _u2_boot() + _u2_peer_close() + "\n")
+    stderr.write_text("slow_consumer overflow\nconn_diag {\n" + _u2_boot() +
+                      "slow_consumer queue depth=1\n" + _u2_line("slow_consumer") + "\n")
+    scan = deploy_mod._scan_slow_consumer_window(V2_SERVICE, 0, **_u2_generation())
     assert scan["failures"] == []
     assert scan["peer_4000_other"] == 1
     assert scan["queue_depth_warnings"] == 2
@@ -1026,9 +1052,10 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     stderr.write_text(old)
     offsets = deploy_mod._capture_log_offsets((stdout, stderr))
     with stdout.open("a") as stream:
-        stream.write(deploy_mod.V2_BOOT_LINE + "\n")
+        stream.write(_u2_boot())
         stream.write(_u2_peer_close() + "\n")
     with stderr.open("a") as stream:
+        stream.write(_u2_boot())
         stream.write('WARNING conn_diag {"close":1011,"text":"slow_consumer overflow 4000"\n')
         if with_failure:
             stream.write(_u2_line("force_close", conn_id=_U2_CONN_B) + "\n")
@@ -1042,6 +1069,14 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _: {
         "PENTACLE_MACHINES_FILE": str(machines),
     })
+    old_samples = []
+    def process_start(pid, _runner):
+        if pid == 111:
+            old_samples.append(pid)
+            return 'old-start' if len(old_samples) == 1 else None
+        return _U2_START
+    monkeypatch.setattr(deploy_mod, '_process_start', process_start)
+    monkeypatch.setattr(deploy_mod, '_prior_writer_exited', lambda *_a: True)
     schedules = []
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
     if fleet_state == "passed":

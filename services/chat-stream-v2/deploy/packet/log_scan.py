@@ -59,3 +59,77 @@ def lines_many(items):
         current = path.stat()
         if (current.st_ino, current.st_dev) != (item['inode'], item['device']) or current.st_size < item['end_offset']:
             raise IncompleteScan('log rotated/truncated during read')
+
+
+BOOT_PREFIX = 'chat_streamd_v2 listening on'
+
+
+class AttributionAmbiguous(ValueError):
+    """Complete bytes can still have unproven process provenance."""
+
+
+def _slice_ranges(items, begin, end):
+    """Retain exact inode-bound slices, including a record split by rotation."""
+    result = []
+    position = 0
+    for item in items:
+        size = item['bytes_read']
+        left, right = max(begin, position), min(end, position + size)
+        if right > left:
+            start = item['start_offset'] + left - position
+            result.append({**item, 'start_offset': start,
+                           'end_offset': start + right - left, 'bytes_read': right - left})
+        position += size
+    return result
+
+
+def generation_ranges(groups, expected_pid, expected_start):
+    """Select only bytes after one matching, paired process-generation marker.
+
+    Lifecycle ordering must be qualified separately on the target service
+    manager. Timestamps and connection age never establish this boundary.
+    """
+    import json
+    import uuid
+    if type(expected_pid) is not int or expected_pid <= 0 or not isinstance(expected_start, str) or not expected_start.strip():
+        raise AttributionAmbiguous('missing activated PID/start identity')
+    expected_start = ' '.join(expected_start.split())
+    if len(groups) != 2:
+        raise AttributionAmbiguous('both stdout and stderr generation proofs are required')
+    selected, preceding, markers = [], [], []
+    for group in groups:
+        position = 0
+        matching = []
+        boot_after = False
+        for line in lines_many(group):
+            size = len(line.encode('utf-8'))
+            if BOOT_PREFIX in line:
+                if matching:
+                    boot_after = True
+                try:
+                    if not line.startswith('generation='):
+                        raise ValueError('missing generation prefix')
+                    identity, end = json.JSONDecoder().raw_decode(line[len('generation='):])
+                    if not line[len('generation=') + end:].startswith(' ' + BOOT_PREFIX + ' '):
+                        raise ValueError('invalid listening record')
+                    if (not isinstance(identity, dict) or type(identity.get('pid')) is not int
+                            or not isinstance(identity.get('start'), str)
+                            or not identity['start'].strip()
+                            or str(uuid.UUID(identity['boot_uuid'])) != identity['boot_uuid']):
+                        raise ValueError('invalid generation identity')
+                except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError) as exc:
+                    raise AttributionAmbiguous('boot marker lacks valid PID/start/UUID proof') from exc
+                if identity['pid'] == expected_pid:
+                    if ' '.join(identity['start'].split()) != expected_start:
+                        raise AttributionAmbiguous('boot marker PID/start mismatch')
+                    matching.append((position, position + size, identity))
+            position += size
+        if len(matching) != 1 or boot_after:
+            raise AttributionAmbiguous('missing, duplicate or out-of-order activated boot marker')
+        begin, end, identity = matching[0]
+        preceding.append(_slice_ranges(group, 0, begin))
+        selected.append(_slice_ranges(group, end, position))
+        markers.append({'identity': identity, 'inputs': _slice_ranges(group, begin, end)})
+    if markers[0]['identity'] != markers[1]['identity']:
+        raise AttributionAmbiguous('stdout/stderr generation identities conflict')
+    return selected, preceding, markers

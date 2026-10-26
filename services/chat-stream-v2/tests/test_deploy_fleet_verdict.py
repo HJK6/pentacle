@@ -32,7 +32,7 @@ def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None):
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _label: {
         "PENTACLE_MACHINES_FILE": str(machines_file),
     })
-    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_: {})
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {})
     writes, schedules = [], []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(json.loads(json.dumps(stamp))))
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
@@ -259,7 +259,7 @@ def test_relative_installed_machine_file_uses_smoke_cwd_for_local_identity(tmp_p
     ]))
     monkeypatch.chdir(caller)
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _: {"PENTACLE_MACHINES_FILE": name})
-    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_: {})
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {})
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda *_: None)
     schedules = []
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
