@@ -272,14 +272,47 @@ import logging
 from store_routing import _routing_iso_now
 
 
+def test_literal_key_markdown_variant_is_suppressed_and_logged(caplog):
+    """Literal-key correlation suppresses a Markdown variant and logs the positive skip."""
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+
+    async def _go():
+        store, composite, generation = await _landed_composite()
+        try:
+            publication = await composite.publish(
+                _proactive(generation, "publish:markdown-variant", "Domain **bought**."), actor_stream_id=ROOT)
+            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed", identity="md-u")
+            await _tool_use_event(store, command="agent-orch assistant publish --request-id publish:markdown-variant --proactive",
+                                  identity="md-t")
+            final_event_id = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
+                                                          text="Domain bought.", identity="md-f", final=True)
+            rows = await _answer_rows(store)
+            assert [r["text"] for r in rows] == ["Domain **bought**."]
+            assert rows[0]["daemon_seq"] == publication["event_id"]
+            skips = [r for r in caplog.records if r.getMessage().startswith(
+                "assistant mirror skipped proactive-published turn ")]
+            assert len(skips) == 1
+            assert skips[0].getMessage() == (
+                f"assistant mirror skipped proactive-published turn source_event_id={final_event_id} "
+                "publication_key=publish:markdown-variant")
+            assert skips[0].subsystem == "assistant_mirror"
+            assert skips[0].bug_ref == "spec_pentacle__assistant_duplicate_reply_sources_2026_10"
+        finally:
+            await composite.stop()
+            store.stop()
+
+    asyncio.run(_go())
+
+
 async def _landed_member_pair(sends=None):
     store, composite, generation = await _landed_composite(sends)
     head = await _accept(composite, store, "in-a", "first")
     return store, composite, generation, head
 
 
-def test_question_answer_gets_no_batch_membership():
-    """Rule 1 control: an answer to an operator question keeps its own explicit route, unbatched."""
+@pytest.mark.parametrize("dead_window", [False, True], ids=["live", "dead-window"])
+def test_question_answer_gets_no_batch_membership(dead_window):
+    """Question answers stay unbatched, including queued dead-window replay through _classify_one."""
 
     async def _go():
         sends = []
@@ -297,14 +330,30 @@ def test_question_answer_gets_no_batch_membership():
             async def _answered(question_id, body, msg):
                 return {"ok": True}
             composite.question_answer = _answered
+            if dead_window:
+                await store.update_session("fixture-root", "visible", status="closed",
+                                           closed_at=_routing_iso_now(), pane_status="pane_dead")
             await composite.accept_input({"message": "yes", "msg_id": "in-q", "request_id": "in-q",
                                           "reply_to_question_id": "q-1"}, operator_principal="operator:fixture")
+            if dead_window:
+                # The real worker requeues the admitted answer without sending to the dead target.
+                await composite._worker
+                queued = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="in-q")
+                assert queued["routing_state"] == "queued" and not queued["dispatch_id"], queued
+                assert queued["reply_to_question_id"] == "q-1"
+                assert [s["input"] for s in sends] == ["in-a"]
+                # Restore the same bound generation so the head is still an eligible open dispatch.
+                await store.update_session("fixture-root", "visible", status="open",
+                                           closed_at=None, pane_status="pane_alive")
+                composite.wake_route_worker()
             for _ in range(200):
                 answer = await store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity="in-q")
                 if answer and answer["delivery_state"] == "landed":
                     break
                 await asyncio.sleep(0.01)
-            assert answer["dispatch_id"] and not answer.get("batched_into_dispatch_id"), answer
+            assert answer["delivery_state"] == "landed" and answer["dispatch_id"], answer
+            assert not answer.get("batched_into_dispatch_id"), answer
+            assert [s["input"] for s in sends] == ["in-a", "in-q"]
             assert "<assistant-dispatch-batch-json>" not in sends[-1]["wire_body"]
             assert (await _publication(store, head["dispatch_id"])) is None  # the head is still open
             await composite.stop()
