@@ -151,7 +151,10 @@ def test_host_alarm_observe_180_others_unchanged(tmp_path,monkeypatch):
     config=tmp_path/'.config/pentacle/provider-account-host.json';config.write_text('{}');config.chmod(0o600)
     monkeypatch.setattr(host_module.Path,'home',lambda:tmp_path)
     alarms=[];monkeypatch.setattr(host_module.signal,'alarm',alarms.append);monkeypatch.setattr(host_module.signal,'signal',lambda *_:None)
-    monkeypatch.setattr(host_module,'NativeHost',lambda _:SimpleNamespace(handle=lambda *a,**k:{'outcome':'ok'}))
+    def native_host(_, *, operator_browser=None):
+        assert operator_browser is None  # ordinary actions retain the existing browser path
+        return SimpleNamespace(handle=lambda *a,**k:{'outcome':'ok'})
+    monkeypatch.setattr(host_module,'NativeHost',native_host)
     for action,expected in [('observe',180),('status',90),('enroll',300)]:
         alarms.clear();assert host_module.main([action,'--provider','claude','--account','primary','--login-generation','login-a','--operation-id','fixture'])==0
         assert alarms==[expected,0]
