@@ -57,6 +57,9 @@ interpreter/toolchain, environment/configuration, and tested path/cell scope are
 unchanged using the release packet and actual readbacks. A matching SHA label or
 successful CI alone is insufficient. If any input is unknown or changed, omit
 `--gate-evidence` and run the inline gate in the authorized serialized window.
+The inline gate runs with the qualified `v2-merge-capacity` tier bounds (unit
+1,200 s, smoke 900 s); a `V2_UNIT_TIMEOUT_S` or `V2_SMOKE_TIMEOUT_S` set in the
+`deploy.py` environment replaces that bound and must be a finite positive number.
 Reusing evidence grants no restart authority and preserves the deploy transaction,
 rollback, and runtime readback requirements above.
 
