@@ -326,6 +326,8 @@ dispatch with its own closing row (`publication_key=publish:<dispatch>`,
 one canonical event and one reply push. An input the publication does not list
 stays open. The seat answers it under its own dispatch id, and newer inputs
 batch into it. Never publish the same body twice.
+Publishing a member already closed by a batch under its own dispatch id returns
+`assistant_publication_idempotency_conflict`.
 
 ## Direct-primary questions
 
