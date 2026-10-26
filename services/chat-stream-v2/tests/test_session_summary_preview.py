@@ -188,7 +188,8 @@ def test_startup_tail_bound_and_same_name_reopen(tmp_path):
     asyncio.run(run())
 
 
-def test_summary_wire_list_inventory_and_restart(tmp_path):
+@pytest.mark.parametrize("events_mode", ["summary", "full"])
+def test_summary_wire_list_inventory_and_restart(tmp_path, events_mode):
     import websockets
     from inventory import InventoryEmitter
     from server import Server
@@ -221,20 +222,24 @@ def test_summary_wire_list_inventory_and_restart(tmp_path):
                 emitter = InventoryEmitter(sessions, server.broadcast, min_interval_s=0)
                 async with websockets.connect(f"ws://127.0.0.1:{port}") as socket:
                     await socket.send(json.dumps({"type": "hello", "client": "summary-preview-test",
-                        "subscribe": {"all": True, "include_subagents": True, "events_mode": "summary"}}))
+                        "subscribe": {"all": True, "include_subagents": True, "events_mode": events_mode}}))
                     snapshot = await receive(socket, "snapshot")
                     rows = {row["stream_id"]: row for row in snapshot["sessions"]}
-                    assert not snapshot.get("events")
+                    if events_mode == "summary":
+                        assert not snapshot.get("events")
+                    assert all(not key.startswith("_last_message") for row in rows.values() for key in row)
                     assert rows["fixture:chat"]["last_text"] == ("Updated" if restart else "Initial")
                     assert "last_text" not in rows["fixture:empty"]
                     await socket.send(json.dumps({"type": "list_sessions", "request_id": "list"}))
                     listed = await receive(socket, "list_sessions.ok")
+                    assert all(not key.startswith("_last_message") for row in listed["active"] for key in row)
                     assert next(row for row in listed["active"] if row["stream_id"] == "fixture:chat")["last_text"] == rows["fixture:chat"]["last_text"]
                     if not restart:
                         await append_ingested_event(store, server.broadcast,
                             event("Updated", seq=2, timestamp="2026-10-26T01:00:01Z"), recent_limit=500, sessions=sessions)
                         await emitter.emit_if_changed(immediate=True)
                         inventory = await receive(socket, "session.inventory")
+                        assert all(not key.startswith("_last_message") for row in inventory["sessions"] for key in row)
                         assert next(row for row in inventory["sessions"] if row["stream_id"] == "fixture:chat")["last_text"] == "Updated"
             finally:
                 if emitter and emitter._flush_task is not None:
@@ -274,3 +279,17 @@ def test_remote_push_projects_live_preview_before_inventory_and_restart():
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_generation_rotation_keeps_incoming_event_time_but_drops_inherited_time():
+    sessions = registry()
+    sessions.apply_genuine_activity_event("fixture:chat", event())
+    incoming = {"stream_id": "fixture:chat", "host": "fixture", "session_name": "chat",
+                "created_at": CREATED, "session_generation": "generation-b", "last_event_at": "2026-10-26T02:00:00Z"}
+    sessions._cache(incoming)
+    assert sessions.get("fixture:chat")["last_event_at"] == incoming["last_event_at"]
+    assert "last_text" not in sessions.get("fixture:chat")
+    incoming.pop("last_event_at")
+    incoming["session_generation"] = "generation-c"
+    sessions._cache(incoming)
+    assert "last_event_at" not in sessions.get("fixture:chat")

@@ -47,7 +47,7 @@ The optional subscription controls visibility and event detail. Invalid event mo
 `list_sessions`, summary-mode hello snapshots and `session.inventory` carry
 `last_text` and `last_kind` for the latest nonempty conversation message.
 Normalized `USER`, `ASSIST_TEXT`, `ASSIST` and `TELL` events qualify; tool,
-status, system and sidechain events do not replace it. Registered message
+status, system and sidechain events do not replace it. Registered USER message
 envelopes reuse their render policy: only `chat_prose` qualifies. Notice cards
 remain in the transcript. `last_event_at` still advances for other durable
 activity, so its timestamp can be newer than the preview message.

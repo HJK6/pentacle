@@ -195,6 +195,8 @@ def with_bootstrap_state(
     """Project whether a newly-opened seat produced any normalized event."""
     result = dict(row)
     internal_seen = bool(result.pop("_bootstrap_event_seen", False))
+    for key in MESSAGE_SUMMARY_FIELDS - {"last_text", "last_kind"}:
+        result.pop(key, None)
     seen = internal_seen if event_seen is None else event_seen
     if str(result.get("status") or "open") != "open":
         return result
@@ -757,8 +759,10 @@ class Sessions:
             changed_generation = previous and self._inventory_generation(previous) != self._inventory_generation(row)
             merged = {**previous, **row, **overlay}
             if changed_generation:
-                for key in MESSAGE_SUMMARY_FIELDS | {"last_event_at"}:
+                for key in MESSAGE_SUMMARY_FIELDS:
                     merged.pop(key, None)
+                if "last_event_at" not in row and "last_event_at" not in overlay:
+                    merged.pop("last_event_at", None)
             if str(merged.get("status") or "open") == "open":
                 self._set_inventory_row_locked(sid, merged)
             else:
