@@ -230,6 +230,7 @@ async def append_ingested_event(
     recent_limit: int,
     routing_integrity: Any = None,
     lifecycle: dict[str, Any] | None = None,
+    sessions: Any = None,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
     stream_id = str(payload.get("stream_id") or "")
@@ -257,6 +258,11 @@ async def append_ingested_event(
         projected = await store.project_session_events([
             {**corrected, "daemon_seq": seq},
         ])
+        if sessions is not None:
+            sessions.apply_genuine_activity_event(
+                stream_id, projected[0],
+                expected_generation=lifecycle["generation"] if lifecycle else None,
+            )
         await broadcast({"type": "chat.event", "event": projected[0]})
         await broadcast_assistant_mirror(store, broadcast, seq)
     return seq
@@ -812,7 +818,9 @@ class Ingest:
                 projected_index = 0
                 for entry, seq in zip(entries, sequences):
                     if seq is not None:
-                        self.sessions.apply_genuine_activity_event(sid, entry["event"])
+                        self.sessions.apply_genuine_activity_event(
+                            sid, projected[projected_index], expected_generation=lifecycle["generation"],
+                        )
                         await self.broadcast({
                             "type": "chat.event",
                             "event": projected[projected_index],
@@ -858,9 +866,9 @@ class Ingest:
                 recent_limit=self.recent_limit,
                 routing_integrity=self.routing_integrity,
                 lifecycle=lifecycle,
+                sessions=self.sessions,
             )
             if seq is not None:
-                self.sessions.apply_genuine_activity_event(sid, payload)
                 appended += 1
         if not capped:
             st.offset = new_offset

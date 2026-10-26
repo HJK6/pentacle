@@ -1,0 +1,67 @@
+{
+  "session": {
+    "stream_id": "local:summary-fallback-probe",
+    "host": "local",
+    "provider": "claude",
+    "session_name": "summary-fallback-probe",
+    "last_event_at": "2026-10-26T01:00:01Z",
+    "last_text": "## Summary fallback probe\n\nA paragraph before the list.\n\n- First item\n- Second item\n\n```ts\nconst first = 1;\n  const second = 2;\n```\n\nA final paragraph.",
+    "last_kind": "ASSIST_TEXT",
+    "working": false,
+    "created_at": "2026-10-26T00:00:00Z",
+    "online": true,
+    "draft": "",
+    "pending": false
+  },
+  "events": [
+    {
+      "host": "local",
+      "kind": "ASSIST_TEXT",
+      "provider": "claude",
+      "raw": {
+        "host": "local",
+        "is_sidechain": false,
+        "jsonl_event_index": 0,
+        "jsonl_record_uuid": "summary-fallback-0",
+        "provider": "claude",
+        "session_name": "summary-fallback-probe",
+        "source": "structured",
+        "source_session_identity": "synthetic-fallback-session",
+        "transport": "claude-jsonl",
+        "uuid": "summary-fallback-0"
+      },
+      "session_id": "synthetic-fallback-session",
+      "session_name": "summary-fallback-probe",
+      "stream_id": "local:summary-fallback-probe",
+      "text": "## Summary fallback probe\n\nA paragraph before the list.\n\n- First item\n- Second item\n\n```ts\nconst first = 1;\n  const second = 2;\n```\n\nA final paragraph.",
+      "timestamp": "2026-10-26T01:00:00Z",
+      "daemon_seq": 1
+    },
+    {
+      "host": "local",
+      "kind": "TOOL_RESULT",
+      "provider": "claude",
+      "raw": {
+        "host": "local",
+        "is_error": false,
+        "is_sidechain": false,
+        "jsonl_event_index": 0,
+        "jsonl_record_uuid": "summary-fallback-1",
+        "provider": "claude",
+        "session_name": "summary-fallback-probe",
+        "source": "structured",
+        "source_session_identity": "synthetic-fallback-session",
+        "tool_content": "Synthetic tool completed",
+        "tool_use_id": "synthetic-tool",
+        "transport": "claude-jsonl",
+        "uuid": "summary-fallback-1"
+      },
+      "session_id": "synthetic-fallback-session",
+      "session_name": "summary-fallback-probe",
+      "stream_id": "local:summary-fallback-probe",
+      "text": "Synthetic tool completed",
+      "timestamp": "2026-10-26T01:00:01Z",
+      "daemon_seq": 2
+    }
+  ]
+}
