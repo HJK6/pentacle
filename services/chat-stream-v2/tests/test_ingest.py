@@ -316,7 +316,7 @@ class _StubSessions:
         return None
 
     @staticmethod
-    def apply_genuine_activity_event(_stream_id: str, _event: dict, **_fields) -> None:
+    def apply_genuine_activity_event(_stream_id: str, _event: dict) -> None:
         return None
 
 
