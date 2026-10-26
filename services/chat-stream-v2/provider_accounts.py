@@ -149,19 +149,23 @@ class Binding:
             "transcript_root": self.transcript_root}
 
 
-def validate_home(binding: Binding, root: Path) -> None:
+def validate_home(binding: Binding, root: Path, adopted: frozenset = frozenset()) -> None:
     for value in (binding.alias, binding.host, binding.generation):
         _component(value)
     if binding.provider not in {"codex", "claude"} or binding.platform not in {"macos", "wsl"}:
         raise AccountError("unsupported_account_provider_platform")
-    expected = root / binding.host / binding.provider / binding.alias / binding.generation
-    if not root.is_absolute() or Path(binding.home) != expected:
-        raise AccountError("account_home_outside_registry")
-    current = root
-    _private(current, directory=True)
-    for component in expected.relative_to(root).parts:
-        current /= component
+    if binding.home in adopted:
+        # A host-configured, already signed-in dedicated home registered in place.
+        _private(Path(binding.home), directory=True)
+    else:
+        expected = root / binding.host / binding.provider / binding.alias / binding.generation
+        if not root.is_absolute() or Path(binding.home) != expected:
+            raise AccountError("account_home_outside_registry")
+        current = root
         _private(current, directory=True)
+        for component in expected.relative_to(root).parts:
+            current /= component
+            _private(current, directory=True)
     if not Path(binding.executable).is_absolute() or not binding.version:
         raise AccountError("account_executable_unpinned")
 
@@ -258,8 +262,11 @@ def transcript_allowed(path: str, provider: str, binding: Mapping | None = None)
 
 
 class Registry:
-    def __init__(self, path: Path, root: Path):
+    def __init__(self, path: Path, root: Path, adopted=()):
         self.path, self.root = Path(path), Path(root)
+        self.adopted = frozenset(str(home) for home in adopted)
+        if any(not Path(home).is_absolute() for home in self.adopted):
+            raise AccountError("account_path_not_absolute")
         self._lock_guard = threading.RLock()
         self._lock_fd = None
         if not self.path.is_absolute() or not self.root.is_absolute():
@@ -308,16 +315,22 @@ class Registry:
 
     @_serialized
     def prepare(self, *, provider: str, alias: str, host: str, generation: str,
-                profile_ref: str, executable: str, version: str, platform: str, observer_executable: str | None = None) -> Binding:
+                profile_ref: str, executable: str, version: str, platform: str, observer_executable: str | None = None,
+                home: str | None = None) -> Binding:
         for value in (provider, alias, host, generation): _component(value)
         if not isinstance(profile_ref, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", profile_ref):
             raise AccountError("account_profile_invalid")
         if provider not in {"codex", "claude"} or platform not in {"macos", "wsl"}:
             raise AccountError("unsupported_account_provider_platform")
-        home = self.root / host / provider / alias / generation
-        if home.exists() or home.is_symlink():
-            raise AccountError("account_generation_exists")
-        _mkdir(home)
+        if home is not None:
+            # Adoption never creates or renames a home; it must be configured and already private.
+            if home not in self.adopted: raise AccountError("account_home_outside_registry")
+            home = Path(home); _private(home, directory=True)
+        else:
+            home = self.root / host / provider / alias / generation
+            if home.exists() or home.is_symlink():
+                raise AccountError("account_generation_exists")
+            _mkdir(home)
         result = Binding(provider, alias, host, str(home), generation, profile_ref, executable, version, platform)
         from dataclasses import replace
         try: result = replace(result, executable_sha256=hashlib.sha256(Path(executable).read_bytes()).hexdigest())
@@ -327,12 +340,12 @@ class Registry:
             try: digest = hashlib.sha256(Path(observer_executable).read_bytes()).hexdigest()
             except OSError: raise AccountError("account_executable_unpinned") from None
             result = replace(result, observer_executable=observer_executable, observer_executable_sha256=digest)
-        validate_home(result, self.root)
+        validate_home(result, self.root, self.adopted)
         return result
 
     @_serialized
     def provision(self, draft: Binding, manifest: Mapping[str, str]) -> None:
-        validate_home(draft, self.root)
+        validate_home(draft, self.root, self.adopted)
         # Config keys are a positive allowlist; custom providers, API helpers,
         # hooks, OAuth overrides and alternate endpoints are never imported.
         codex_keys = {"model", "model_reasoning_effort", "sandbox_mode", "approval_policy",
@@ -367,19 +380,21 @@ class Registry:
         for name, content in prepared.items():
             path = Path(draft.home) / name
             _mkdir(path.parent)
-            if path.exists() or path.is_symlink(): _private(path, directory=False)
+            if path.exists() or path.is_symlink():
+                _private(path, directory=False)
+                if draft.home in self.adopted: continue  # adopted homes keep existing files
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w") as stream: stream.write(content)
 
     @_serialized
     def activate(self, draft: Binding, receipt: Mapping, *, expected_provider_id: str) -> Binding:
-        validate_home(draft, self.root)
+        validate_home(draft, self.root, self.adopted)
         store = "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file"
         if (receipt.get("outcome", "ok") != "ok" or receipt.get("auth_mode") != "subscription"
                 or receipt.get("provider_id") != expected_provider_id or not expected_provider_id
                 or not isinstance(receipt.get("pool_id"), str) or not receipt["pool_id"]
                 or receipt.get("store") != store or receipt.get("minimal_turn") is not True
-                or receipt.get("independent_login") is not True):
+                or receipt.get("adopted_home" if draft.home in self.adopted else "independent_login") is not True):
             raise AccountError("account_enrollment_unverified")
         if store == "file":
             _private(Path(draft.home) / ("auth.json" if draft.provider == "codex" else ".credentials.json"), directory=False)
@@ -402,13 +417,13 @@ class Registry:
         key = state["active"].get(f"{host}:{provider}:{alias}")
         if not key: return None
         binding = Binding(**state["generations"][key])
-        validate_home(binding, self.root)
+        validate_home(binding, self.root, self.adopted)
         return binding
 
     def bindings(self) -> list[Binding]:
         state = self._load()
         result = [Binding(**state["generations"][key]) for key in state["active"].values()]
-        for binding in result: validate_home(binding, self.root)
+        for binding in result: validate_home(binding, self.root, self.adopted)
         return result
 
 

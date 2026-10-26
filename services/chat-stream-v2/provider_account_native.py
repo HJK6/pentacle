@@ -409,3 +409,29 @@ def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_autho
                 "minimal_turn": True, "independent_login": True}, expected_provider_id=intended_id)
         except AccountError: raise
         except Exception: raise AccountError("provider_login_failed") from None
+
+
+def adopt(registry, draft: Binding, *, expected_provider_id: str, identity, model: str, effort: str, cwd: str,
+          manifest=None, run=subprocess.run):
+    """Register a host-configured, already signed-in Codex home in place.
+
+    No login runs and no credential file is created, copied, moved or renamed;
+    provisioning writes only absent bootstrap files. Activation requires the
+    expected subscription identity, a real minimal turn and an unchanged reread.
+    """
+    if draft.provider != "codex" or draft.home not in registry.adopted:
+        raise AccountError("account_adopt_unsupported")
+    with registry.lock():
+        verify_binary(draft, run=run)
+        registry.provision(draft, manifest or {})
+        try:
+            receipt = identity(draft)
+            if (not expected_provider_id or receipt.get("provider_id") != expected_provider_id
+                    or receipt.get("auth_mode") != "subscription"):
+                raise AccountError("account_enrollment_unverified")
+            minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run)
+            if identity(draft) != receipt: raise AccountError("provider_identity_changed")
+            return registry.activate(draft, receipt | {"store": "file", "minimal_turn": True, "adopted_home": True},
+                expected_provider_id=expected_provider_id)
+        except AccountError: raise
+        except Exception: raise AccountError("account_enrollment_unverified") from None
