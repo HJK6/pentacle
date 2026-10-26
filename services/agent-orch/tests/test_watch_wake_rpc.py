@@ -79,12 +79,24 @@ def test_unrelated_coordination_reply_is_preserved(monkeypatch, tmp_path, verb):
     assert socket.closed
 
 
+@pytest.mark.parametrize("first_attempt_lag", [0.0, 0.035])
 @pytest.mark.parametrize("family", ["watch", "wake"])
-def test_lost_reply_retry_keeps_registration_identity(monkeypatch, tmp_path, family):
+def test_lost_reply_retry_keeps_registration_identity(monkeypatch, tmp_path, family, first_attempt_lag):
     expected = {"type": family + ".register.ok", "request_id": "same-registration",
                 "id": "same-trigger"}
     sockets = [ReplySocket([]), ReplySocket([expected])]
     config, connected = configure(monkeypatch, tmp_path, sockets, attempts=2)
+    configured_connect = wsclient._connect_rpc_ready
+
+    async def lagging_connect(config, **kwargs):
+        if not connected:
+            await asyncio.sleep(first_attempt_lag)  # a slow CI runner (run 40317380819)
+        return await configured_connect(config, **kwargs)
+
+    monkeypatch.setattr(wsclient, "_connect_rpc_ready", lagging_connect)
+    # The default total budget is call timeout x attempts (0.06 s), which runner
+    # latency alone can exhaust; a lost reply needs its own retry deadline.
+    monkeypatch.setenv("AGENT_ORCH_RPC_RETRY_DEADLINE_S", "5")
     result = asyncio.run(wsclient.coordination_once(
         config, {"type": family + ".register", "request_id": "same-registration",
                  "from_stream_id": "test:owner"}, timeout=0.03))

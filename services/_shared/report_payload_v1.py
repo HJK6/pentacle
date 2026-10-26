@@ -275,7 +275,8 @@ def validate(
         or FULL_GIT_SHA.fullmatch(payload["target_sha"]) is None
     ):
         violations.append(_violation("target_sha", "invalid_value", "target_sha must be a full 40-hex git SHA"))
-    if qa_grade and terminal:
+    # Only a finished review owes a verdict; an aborted or failed QA seat has none to give.
+    if qa_grade and status == "done":
         if "qa_verdict" not in payload:
             violations.append(_violation("qa_verdict", "missing_field", "missing field: qa_verdict", missing=True))
         elif payload.get("qa_verdict") is None:

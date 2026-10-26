@@ -211,6 +211,10 @@ def _run_process(command: list[str], *, env: dict[str, str], log_path: Path, tim
     reader.start()
     timed_out = False
     try:
+        # A signal handled inside an at-fork hook (the Linux preexec_fn launch) is reported as
+        # unraisable and never reaches this frame; its handler has still recorded the request.
+        if _TERMINATION_REQUESTED:
+            raise KeyboardInterrupt
         code = proc.wait(timeout=timeout)
     except KeyboardInterrupt:
         _mark_active()
