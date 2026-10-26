@@ -996,7 +996,7 @@ class Server:
 
     async def bind(self, *, start_serving: bool = True) -> int:
         """Bind every interface in `self.binds` on one port.
-        Main pauses accepting until its paired boot markers are flushed.
+        Main binds paused, then starts listeners before its paired boot markers.
         Returns the bound port. Call FIRST (spec constraint 1). A list host binds
         all given interfaces on the same port (v1 dual-bind parity: Tailscale IP +
         127.0.0.1); a single bind keeps the plain-string form unchanged."""
@@ -1054,7 +1054,7 @@ class Server:
         return self.port
 
     async def start_serving(self) -> None:
-        """Start paused listeners after the process identity is in both sinks."""
+        """Start every paused listener before main announces readiness."""
         assert self._ws_server is not None, "bind() must precede start_serving()"
         await self._ws_server.start_serving()
         if self._tls_ws_server is not None:

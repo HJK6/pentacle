@@ -136,13 +136,14 @@ still permits checkout and stamp changes.
 
 ### Deploy smoke process attribution
 
-The daemon binds plain and optional TLS listeners in a paused state, writes the
+The daemon binds plain and optional TLS listeners in a paused state, starts
+every successfully bound listener, then synchronously writes the
 `chat_streamd_v2 listening on` record to both managed streams with identical
-PID, canonical process start and boot UUID, then starts accepting. The structured
+PID, canonical process start and boot UUID. The structured
 identity precedes the original listening text, keeping its terminal `host:port`
-for existing port readers. Plain clients
-may receive connection refusal during TLS socket setup and can reconnect after
-startup. An optional TLS start failure leaves the plain listener available.
+for existing port readers. The announced port accepts immediate connections;
+both records flush without an intervening await before client handlers run.
+An optional TLS start failure leaves the plain listener available.
 
 The deploy scanner requires both matching markers, a stable activated PID/start,
 and a distinct outgoing process whose recorded PID/start has exited. It scans

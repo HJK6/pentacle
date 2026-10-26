@@ -873,7 +873,6 @@ async def run(args: argparse.Namespace) -> int:
 
     # 1. BIND FIRST. Nothing above this line may block on I/O.
     port = await server.bind(start_serving=False)
-    _emit_boot_marker(binds[0], port)
     # Install the shutdown handler immediately after bind, BEFORE the blocking
     # init below. A SIGTERM during boot must trigger the graceful path (set the
     # stop future), not the default disposition that kills the process (rc=-15);
@@ -891,6 +890,9 @@ async def run(args: argparse.Namespace) -> int:
             signal.signal(sig, _request_stop)
 
     await server.start_serving()
+    # Every listener must accept connections before announcing readiness.
+    # Flush both generation records before yielding to client handlers.
+    _emit_boot_marker(binds[0], port)
 
     # 2. Init that may block goes after the accept loop is live. The lifted CRUD
     #    stores open their own DBs (PRAGMA integrity_check, WAL) + blob dirs off
