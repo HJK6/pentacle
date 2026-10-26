@@ -171,6 +171,81 @@ script through the existing authenticated host transport. `bindings` imports
 verified non-secret host enrollment receipts. Profile references stay host-local.
 A stale startup receipt never reactivates an older generation.
 
+### Explicit bound-executable upgrade
+
+A healthy generation can be independently enrolled with an alongside, pinned
+native executable and then imported with `agent-orch account upgrade`. Ordinary
+`relogin` still requires a native authentication failure. Upgrade never starts
+login, retries authorization, changes the saved default or rewrites existing
+session bindings. The current authenticated front desk must own the operation.
+
+The deployment owner freezes admission for the exact host before enrollment,
+records the hold's reason/set_at/held_until tuple and retains all generations and
+journals. Keep the native vendor subtree intact, pin its native hash/version in
+the host cell and preserve the predecessor executable/home. Before login, the
+operator must be ready in a browser with a tested localhost callback route.
+
+The reviewed receiver checkout supplies the one private URL relay:
+
+```sh
+python services/chat-stream-v2/tools/provider_account_operator_login.py \
+  --policy /absolute/private-policy.json --host host-a --provider codex --account primary \
+  --login-generation login-one --new-generation login-two --operation-id upgrade-one
+```
+
+This command verifies the live assistant binding and calling seat token, reads
+the host executor paths from the owner-controlled policy, and invokes the host
+helper over configured SSH. The policy may be OFF during enrollment. It emits
+exactly one validated HTTPS authorization URL to the authenticated binding's
+private composite, then creates a separate Done / Not yet action prompt. Only
+publication/prompt IDs and the safe native outcome reach stdout. Done is not
+login proof: native completion, subscription identity and the minimal turn must
+all succeed. No automated browser broker is used in this mode.
+
+The host CLI option `--operator-browser-fd 3` is Codex-enroll-only. It accepts an
+inherited open write pipe/socket >=3, closes it after one bounded URL, and makes
+it non-inheritable by native children. Do not redirect it to a file, terminal,
+stdout or stderr. The relay owns its SSH child and has a 320-second deadline,
+beyond the host's 300-second enrollment alarm. Never log URLs, codes or tokens.
+
+On success, enable the managed Codex policy while retaining the same live hold:
+
+```sh
+agent-orch account upgrade --host host-a --provider codex --account primary \
+  --login-generation login-one --new-generation login-two --operation-id upgrade-one \
+  --expected-version 'codex-cli PINNED_VERSION' --expected-executable-sha256 "$NATIVE_SHA256" \
+  --reason approved_bound_executable_upgrade --timeout 210
+```
+
+The receiver hashes the operation ID exactly as the relay does for host journal
+lookup. It reads only the completed enrollment receipt and observes the new
+active host generation. Provider/subscription/pool, cell, home, native pin and
+coherent usage must agree. It compares the old active generation/health revision,
+saved default and unexpired unchanged hold immediately before atomically writing
+the new binding, observation and successful receipt. It refuses workers,
+watchers, OFF policy, unmanaged providers, stale generations and split evidence.
+The default deadline is 210 seconds.
+
+Use the same arguments and operation ID to inspect an uncertain import. Pending
+retry repeats only status/observe; startup never completes it. A completed replay
+still requires FD authentication and enabled managed policy, but no surviving
+hold or old active generation. It returns historical evidence, not current
+headroom. Changed arguments under the same ID refuse. A failed import leaves the
+old receiver selection intact even if the host has activated the new generation.
+
+Before releasing only the unchanged owned hold, prove host/receiver agreement,
+unchanged default and immutable existing-session attribution. A deployment owner
+must separately authorize installation, helper/CLI rollout, receiver activation
+and actual launch qualification. Source tests are not activation proof.
+
+Rollback is OFF safe parking. Before host activation, restore only non-secret
+config/policy preimages. After activation, keep admissions frozen and disable
+policy; verify legacy admission and explicit named/bound-resume refusal before
+releasing the owned hold. Preserve all generations/journals for a supported
+same-operation import or separately authorized fresh login. Never restore token
+bytes, a database snapshot or an old registry pointer. Existing bound seats may
+drain with immutable attribution.
+
 Enrollment is an explicit rollout step, not a startup side effect. Use the host
 helper on the selected host only under the deployment owner's live grant:
 

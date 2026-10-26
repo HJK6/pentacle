@@ -1,5 +1,39 @@
 import json
+import pytest
 from agent_orch import cli
+
+
+def upgrade_args():
+    return ["account", "upgrade", "--host", "host-target", "--provider", "codex", "--account", "ours",
+        "--login-generation", "old", "--new-generation", "new", "--operation-id", "upgrade-one",
+        "--expected-version", "fixture-new", "--expected-executable-sha256", "a"*64, "--reason", "approved_upgrade"]
+
+
+def test_upgrade_sends_exact_artifact_contract_with_bounded_default_deadline(monkeypatch):
+    from agent_orch import config, stream_id, wsclient
+    monkeypatch.setattr(config, "load_config", lambda: object())
+    monkeypatch.setattr(stream_id, "discover_leader_stream_id_short", lambda _: "host-a:front-desk")
+    seen = []
+    async def rpc(config, payload, **kwargs):
+        seen.append((payload, kwargs)); return {"type":"account.ok", "result":{"outcome":"upgraded"}}
+    monkeypatch.setattr(wsclient, "account_once", rpc)
+    args = cli.build_parser().parse_args(upgrade_args())
+    assert args.func(args) == 0
+    payload, options = seen[0]
+    assert options == {"timeout":210}
+    assert payload["action"] == "upgrade" and payload["login_generation"] == "old" and payload["new_generation"] == "new"
+    assert payload["expected_version"] == "fixture-new" and payload["expected_executable_sha256"] == "a"*64
+    assert not ({"home", "executable", "profile", "binding"} & payload.keys())
+
+
+@pytest.mark.parametrize("flag,value", [("--login-generation", "active"), ("--new-generation", "old"),
+    ("--provider", "claude"), ("--expected-executable-sha256", "invalid"), ("--reason", "")])
+def test_upgrade_invalid_payload_is_rejected_before_transport(monkeypatch, flag, value):
+    from agent_orch import config
+    monkeypatch.setattr(config, "load_config", lambda: pytest.fail("invalid request reached config/transport"))
+    argv = upgrade_args(); argv[argv.index(flag)+1] = value
+    args = cli.build_parser().parse_args(argv)
+    assert args.func(args) == 2
 
 
 def test_account_default_payload_has_no_home_or_profile_overrides(monkeypatch, capsys):

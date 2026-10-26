@@ -18,6 +18,17 @@ LEAD_STREAM = "fixture-host-lead:lead"
 ROUTER_ENDPOINT = "ssh://fixture-router/assistant-router-v1"
 
 
+def test_binding_readback_names_its_own_composite_for_private_publication():
+    async def run():
+        store = Store(":memory:"); store.start()
+        try:
+            composite = AssistantComposite(store, config=AssistantCompositeConfig(
+                enabled=True, stream_id=COMPOSITE_STREAM, router_endpoint=ROUTER_ENDPOINT))
+            assert (await composite.binding())["composite_stream_id"] == COMPOSITE_STREAM
+        finally: store.stop()
+    asyncio.run(run())
+
+
 async def _open_backend(store, stream_id: str):
     host, name = stream_id.split(":", 1)
     return await store.open_session(host, name, provider="codex")

@@ -6,7 +6,7 @@ import uuid
 
 def register(subparsers):
     parser = subparsers.add_parser("account", help="daemon-owned provider account controls")
-    parser.add_argument("action", choices=("default", "status", "relogin", "probe", "revalidate-health", "report-failure", "observe-failure"))
+    parser.add_argument("action", choices=("default", "status", "relogin", "upgrade", "probe", "revalidate-health", "report-failure", "observe-failure"))
     parser.add_argument("--provider", choices=("codex", "claude"))
     parser.add_argument("--account")
     parser.add_argument("default_action", nargs="?", choices=("set",))
@@ -15,10 +15,13 @@ def register(subparsers):
     parser.add_argument("--kind", choices=("auth", "quota", "capacity", "network", "permission"))
     parser.add_argument("--login-generation")
     parser.add_argument("--operation-id")
+    parser.add_argument("--new-generation")
+    parser.add_argument("--expected-version")
+    parser.add_argument("--expected-executable-sha256")
     parser.add_argument("--expected-revision", type=int)
     parser.add_argument("--from", dest="from_stream_id")
     parser.add_argument("--timeout", type=float, default=None,
-                        help="RPC deadline seconds (probe/revalidate-health: 210; other actions: 30)")
+                        help="RPC deadline seconds (probe/revalidate-health/upgrade: 210; other actions: 30)")
     parser.set_defaults(func=execute)
 
 
@@ -27,6 +30,13 @@ def execute(args):
     from .stream_id import discover_leader_stream_id_short
     from .wsclient import account_once
     from .cli import _print_response, _direct_rpc_transport_error
+    if args.action == "upgrade":
+        import re
+        if (not args.host or args.provider != "codex"
+                or not all((args.account, args.login_generation, args.new_generation, args.operation_id, args.expected_version, args.reason))
+                or args.login_generation == "active" or args.new_generation in {"active", args.login_generation}
+                or not re.fullmatch(r"[a-f0-9]{64}", args.expected_executable_sha256 or "")):
+            _print_response({"type": "account.error", "error_code": "account_request_invalid"}); return 2
     if args.action == "revalidate-health" and (
             type(args.expected_revision) is not int or args.expected_revision < 0
             or not all((args.host, args.provider, args.account, args.operation_id, args.reason, args.login_generation))
@@ -36,7 +46,8 @@ def execute(args):
     actor = args.from_stream_id or discover_leader_stream_id_short(config)
     payload = {"type": "account", "action": "default-set" if args.action == "default" else args.action, "from_stream_id": actor,
                "request_id": "account-" + uuid.uuid4().hex}
-    for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id", "expected_revision"):
+    for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id", "expected_revision",
+                  "new_generation", "expected_version", "expected_executable_sha256"):
         value = getattr(args, field, None)
         if value is not None: payload[field] = value
     if (args.action == "default") != (args.default_action == "set"):
@@ -44,7 +55,7 @@ def execute(args):
     if args.action != "status":
         payload.setdefault("login_generation", "active")
     try:
-        timeout = args.timeout if args.timeout is not None else (210 if args.action in {"probe", "revalidate-health"} else 30)
+        timeout = args.timeout if args.timeout is not None else (210 if args.action in {"probe", "revalidate-health", "upgrade"} else 30)
         reply = asyncio.run(account_once(config, payload, timeout=timeout))
     except Exception as exc:
         reply, code, _ = _direct_rpc_transport_error("account", payload["request_id"], exc)
