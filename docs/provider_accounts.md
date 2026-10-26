@@ -288,13 +288,14 @@ The readback includes timestamps, freshness, reset, original identity, conflict
 and configured cap. Missing/stale/incomplete usage is visibly unknown, never zero.
 Freshness is informational; there is no new fixed-age launch admission gate.
 
-Codex may emit an `account/updated` startup status before its first
+Codex may emit an `account/updated` status before or after its first
 `account/read` reply. Only an exact `authMode`/`planType` status for ChatGPT is
-accepted there, and its plan must match that authoritative reply. Identity
-comes from the account read. Identity-bearing or malformed notifications,
-conflicting startup plans, and every notification after the first account
-reply still refuse the observation with `provider_identity_changed`. The
-account reads before and after quota collection must also agree.
+accepted, and its plan must match the first authoritative account reply.
+Announcements never verify identity. Identity-bearing, malformed or conflicting
+notifications refuse the observation with `provider_identity_changed`. The
+account reads before and after quota collection must agree, and the quota
+provider and pool identity must match the bound account. A successful ordinary
+observation never clears sticky account health.
 
 Claude's native cache writer throttles updates for 60 seconds. Bound observations
 wait, when needed, for cache-write eligibility under the existing host slot,
