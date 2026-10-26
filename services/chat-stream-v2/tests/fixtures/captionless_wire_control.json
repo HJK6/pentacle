@@ -1,0 +1,298 @@
+{
+  "schema": "captionless-wire-only-fixture.v1",
+  "evidence_kind": "Sanitized retained text/block topology plus DERIVED counterfactual single-text control echoes. Not captured new provider output or phone frames.",
+  "cases": [
+    {
+      "id": "captionless-1",
+      "request_id": "send-wire-1",
+      "optimistic_id": "optimistic-wire-1",
+      "paths": [
+        "/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg",
+        "/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg",
+        "/fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg"
+      ],
+      "attachments": [
+        {
+          "key": "8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58",
+          "mime": "image/jpeg"
+        }
+      ],
+      "expected_wire": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, then respond to the user's message.",
+      "derived_record": {
+        "type": "user",
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "promptSource": "typed",
+        "turnOrigin": "human",
+        "uuid": "derived-control-0",
+        "timestamp": "2026-09-11T12:00:01.000Z",
+        "sessionId": "fixture-native",
+        "message": {
+          "role": "user",
+          "content": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, then respond to the user's message."
+        }
+      }
+    },
+    {
+      "id": "captionless-2",
+      "request_id": "send-wire-2",
+      "optimistic_id": "optimistic-wire-2",
+      "paths": [
+        "/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg",
+        "/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg",
+        "/fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg",
+        "/fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg"
+      ],
+      "attachments": [
+        {
+          "key": "8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852",
+          "mime": "image/jpeg"
+        }
+      ],
+      "expected_wire": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg, then respond to the user's message.",
+      "derived_record": {
+        "type": "user",
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "promptSource": "typed",
+        "turnOrigin": "human",
+        "uuid": "derived-control-1",
+        "timestamp": "2026-09-11T12:00:01.000Z",
+        "sessionId": "fixture-native",
+        "message": {
+          "role": "user",
+          "content": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg, then respond to the user's message."
+        }
+      }
+    },
+    {
+      "id": "captionless-3",
+      "request_id": "send-wire-3",
+      "optimistic_id": "optimistic-wire-3",
+      "paths": [
+        "/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg",
+        "/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg",
+        "/fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg",
+        "/fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg"
+      ],
+      "attachments": [
+        {
+          "key": "8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58",
+          "mime": "image/jpeg"
+        },
+        {
+          "key": "c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852",
+          "mime": "image/jpeg"
+        }
+      ],
+      "expected_wire": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg, then respond to the user's message.",
+      "derived_record": {
+        "type": "user",
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "promptSource": "typed",
+        "turnOrigin": "human",
+        "uuid": "derived-control-2",
+        "timestamp": "2026-09-11T12:00:01.000Z",
+        "sessionId": "fixture-native",
+        "message": {
+          "role": "user",
+          "content": "Look at the image files at /fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg, /fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg, /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg, /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg, then respond to the user's message."
+        }
+      }
+    }
+  ],
+  "historical_rows": [
+    {
+      "type": "user",
+      "isSidechain": false,
+      "origin": {
+        "kind": "human"
+      },
+      "promptSource": "typed",
+      "turnOrigin": "human",
+      "uuid": "historical-0",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image #1]Images at\n/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg,\n/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg,"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/jpeg",
+              "data": "FIXTURE_NOT_IMAGE_BYTES"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "isSidechain": false,
+      "isMeta": true,
+      "turnCompanion": true,
+      "uuid": "historical-1",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image: source: /fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg]"
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "isSidechain": false,
+      "origin": {
+        "kind": "human"
+      },
+      "promptSource": "typed",
+      "turnOrigin": "human",
+      "uuid": "historical-2",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image #2]\n\n<pasted_content id=\"abcd\">\nImages at\n/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg,\n/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg,\n/fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg,\n</pasted_content id=\"abcd\">\n"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/jpeg",
+              "data": "FIXTURE_NOT_IMAGE_BYTES"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "isSidechain": false,
+      "isMeta": true,
+      "turnCompanion": true,
+      "uuid": "historical-3",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image: source: /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg]"
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "isSidechain": false,
+      "origin": {
+        "kind": "human"
+      },
+      "promptSource": "typed",
+      "turnOrigin": "human",
+      "uuid": "historical-4",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image #4]\n\n<pasted_content id=\"abcd\">\nImages at\n/fixture/attachments/8868968e1a10ebc5ccd5f4e3311e09dd8da4c0875a6d91e3f56cb3401a36d423.jpg,\n/fixture/attachments/99951fd2ad6e304965829a271b191ef2a9c4f991e84db5a4c3102002652be922.jpg,\n/fixture/attachments/4120985ee50f1f3a79eab3c6acb4841d0c1217ffac2d796921788390fa609f58.jpg,\n</pasted_content id=\"abcd\">\n"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/jpeg",
+              "data": "FIXTURE_NOT_IMAGE_BYTES"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "isSidechain": false,
+      "isMeta": true,
+      "turnCompanion": true,
+      "uuid": "historical-5",
+      "timestamp": "2026-09-11T12:00:01.000Z",
+      "sessionId": "fixture-native",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Image: source: /fixture/attachments/c7a00ad9d88546711ecf4ba5dd228094e178bab8fb1eebb4f1d3735b21df6852.jpg]"
+          }
+        ]
+      }
+    }
+  ],
+  "captioned_control": {
+    "type": "user",
+    "isSidechain": false,
+    "origin": {
+      "kind": "human"
+    },
+    "promptSource": "typed",
+    "turnOrigin": "human",
+    "uuid": "captioned-control",
+    "timestamp": "2026-09-11T12:00:01.000Z",
+    "sessionId": "fixture-native",
+    "message": {
+      "role": "user",
+      "content": "Look at the image files at /fixture/attachments/042f722236191e68b6a8f7880914983d8439392a5bf5033667565d3ee3708a69.jpg, /fixture/attachments/356249c3b95ac15a673b226e530cc638b88a08216e7ed3c769e4558c0083d2f2.jpg, /fixture/attachments/48302035fd1eb0caea95de08546e6f6b03658158cb8b6e9f73780caf33cbdca1.jpg, /fixture/attachments/a23648fb1cf9672c5002cb6726087c41f109430046ee74db608511dbb1058ae0.jpg, then respond to the user's message: photo caption"
+    }
+  }
+}
