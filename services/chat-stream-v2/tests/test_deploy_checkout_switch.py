@@ -17,6 +17,9 @@ def test_new_deploy_scans_after_checkout_switch_to_old_tree(tmp_path, skewed_mod
     service.mkdir(parents=True)
     shutil.copytree(DEPLOY_PATH.parent, service / "deploy", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(DEPLOY_PATH.parents[1] / "managed_logs.py", service / "managed_logs.py")
+    library = repo / "scripts/lib"
+    library.mkdir(parents=True)
+    shutil.copy2(DEPLOY_PATH.parents[3] / "scripts/lib/instruction_snapshot.py", library)
 
     def git(*args):
         return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
