@@ -165,6 +165,8 @@ export type PentacleTranscriptItem = {
   // client holding the same answer as a resolved-notification projection can render one of them
   // rather than both.
   notificationId?: string;
+  /** Exact validated notification answer, including literal LF and whitespace. */
+  notificationAnswerText?: string;
   // Image attachments for a client-origin USER bubble (spec ## Attachment
   // model). Copied from the underlying PentacleEvent so every view (desktop +
   // mobile) renders the media bubble from the same transcript shape. FIFO order.
@@ -1829,6 +1831,7 @@ function buildSessionTranscriptRows(
       ...(event.publish_kind ? { publishKind: event.publish_kind } : {}),
       ...laneUpdateField(event),
       ...(item.notificationId ? { notificationId: item.notificationId } : {}),
+      ...(item.notificationAnswerText !== undefined ? { notificationAnswerText: item.notificationAnswerText } : {}),
     };
     if (event.attachments && event.attachments.length > 0) {
       nextItem.attachments = event.attachments;

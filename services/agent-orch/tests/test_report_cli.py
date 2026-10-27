@@ -694,6 +694,67 @@ def test_qa_review_flags_do_not_infer_verdict(result):
     assert any(item["field"] == "qa_verdict" for item in exc_info.value.violations)
 
 
+@pytest.mark.parametrize("status", ["done", "aborted", "error"])
+@pytest.mark.parametrize("verdict", ["absent", "null", "accept", "reject"])
+@pytest.mark.parametrize("file_backed", [False, True])
+def test_qa_review_verdict_requirement_matches_status(
+    monkeypatch, tmp_path, capsys, status, verdict, file_backed,
+):
+    body = {"summary": "review state", "findings": [], "next_action": "lead_proceed"}
+    if status in {"aborted", "error"}:
+        body["reason"] = "Review interrupted"
+    if verdict == "null":
+        body["qa_verdict"] = None
+    argv = [
+        "report", "--msg-id", "0", "--status", status,
+        "--target-sha", "a" * 40, "--qa-reviewed-scope", "admission",
+        "--qa-gate-evidence-digest", "b" * 64,
+    ]
+    if verdict in {"accept", "reject"}:
+        argv += ["--qa-verdict", verdict]
+    if file_backed:
+        result_file = tmp_path / "review.json"
+        result_file.write_text(json.dumps(body))
+        argv += ["--result-file", str(result_file)]
+    else:
+        argv += ["--result", json.dumps(body)]
+    requests = []
+
+    async def counterpart(_config, request, timeout):
+        requests.append(request)
+        return {**request, "type": "report.ok", "ledger_row_id": 1, "durability_ack": True}
+
+    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://test", "tok", "hostb", tmp_path))
+    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hostb:codex-x")
+    monkeypatch.setattr(cli, "report_once", counterpart)
+    # Schema-rejection telemetry is separate from the report submission below.
+    monkeypatch.setattr(cli, "_best_effort_record_report_rejection", lambda *_args: None)
+    rc = cli.report(cli.build_parser().parse_args(argv))
+    if status == "done" and verdict in {"absent", "null"}:
+        assert rc == 2
+        assert requests == []
+        assert "qa_verdict" in capsys.readouterr().err
+        return
+    assert rc == 0
+    assert len(requests) == 1
+    sent = requests[0]
+    assert sent["status"] == status
+    assert sent["msg_id"] == 0
+    assert sent["target_sha"] == "a" * 40
+    assert sent["extras"]["qa_review"] == {
+        "candidate_identity": "a" * 40,
+        "reviewed_scope": "admission",
+        "gate_evidence_digest": "b" * 64,
+    }
+    if verdict == "absent":
+        assert "qa_verdict" not in sent
+    else:
+        assert sent["qa_verdict"] == (None if verdict == "null" else verdict)
+    for key, value in body.items():
+        assert sent[key] == value
+    assert "result_blob_sha" not in sent
+
+
 def test_report_result_file_qa_flags_send_inline_without_blob_upload(monkeypatch, tmp_path):
     result_file = tmp_path / "report.json"
     result_file.write_text(json.dumps({

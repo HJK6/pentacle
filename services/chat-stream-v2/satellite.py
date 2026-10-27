@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""satellite.py — stateless per-host chat-ingest push agent with auto-update.
+"""satellite.py — per-host transcript push agent with pinned auto-update.
 
 Runs supervised on a remote fleet host (systemd-user on linux-workstation/WSL, launchd
 on workstation). Tails that host's LOCAL provider transcripts, normalizes each new
 turn with the provider-specific wire-stable normalizer, and pushes batches over
 one outbound WebSocket to coordinator's `event.push` verb. coordinator owns the durable store
-and exactly-once dedupe; the satellite holds NO local DB and only in-memory byte
-offsets — a restart rescans from offset 0 and the store dedupes the replay.
+and exactly-once dedupe. The satellite atomically retains byte cursors and
+original native-source bindings, never a payload queue or local event database.
+Restart replays a fixed retained range through the existing transcript sink.
 
 Why this exists (`spec_example_2026_01`): remote-host
 session chat had no live path to coordinator's `session_event_tail` (mobile only saw
@@ -66,6 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import websockets
+import chat_recovery
 
 from claude_jsonl_norm import normalize_claude_jsonl_records_grouped
 from codex_rollout_norm import codex_is_guardian_review, codex_session_identity, normalize_codex_rollout_records_grouped
@@ -145,6 +147,7 @@ DEFAULT_BACKOFF_MAX_S = 30.0
 #: On first bind, replay at most this many trailing bytes of a transcript (see
 #: SatelliteConfig.history_bytes). ~1 MiB is many recent turns without dragging a
 #: multi-MB backlog ahead of current activity.
+DEFAULT_CHAT_CHECKPOINT_PATH = "~/.local/state/pentacle/satellite_chat.json"
 DEFAULT_HISTORY_BYTES = 1024 * 1024
 #: WS frame ceiling — matches the server's WS_MAX_SIZE (4 MiB) so a large batch
 #: is bounded the same both ways.
@@ -195,6 +198,8 @@ class SatelliteConfig:
     update_min_interval_s: float = DEFAULT_UPDATE_MIN_INTERVAL_S
     ack_timeout_s: float = 30.0
     held_span_path: str = DEFAULT_HELD_SPAN_PATH
+    chat_checkpoint_path: str = ""
+    update_origin: str = "https://github.com/HJK6/pentacle.git"
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "SatelliteConfig":
@@ -231,13 +236,14 @@ class SatelliteConfig:
             no_autoupdate=flag("NO_AUTOUPDATE"),
             update_min_interval_s=num("UPDATE_MIN_INTERVAL_S", DEFAULT_UPDATE_MIN_INTERVAL_S, float),
             held_span_path=e.get(ENV_PREFIX + "HELD_SPAN_PATH") or DEFAULT_HELD_SPAN_PATH,
+            chat_checkpoint_path=e.get(ENV_PREFIX + "CHAT_CHECKPOINT_PATH") or "",
+            update_origin=e.get(ENV_PREFIX + "UPDATE_ORIGIN") or "https://github.com/HJK6/pentacle.git",
         )
 
 
 @dataclass
 class _StreamTail:
-    """Per-session tail state — never persisted; rebuilt on restart, the store's
-    durable identity makes the replay-from-0 exactly-once."""
+    """Native-source tail state; checkpoints omit transient provenance context."""
 
     session_name: str
     path: str = ""
@@ -248,6 +254,14 @@ class _StreamTail:
     primed: bool = False                # first-bind history-horizon seek applied?
     #: Cross-span provenance context (Codex identity, turn models); reset on rebind.
     provenance_state: dict = field(default_factory=dict)
+    binding: dict = field(default_factory=dict)
+    observed_size: int = 0
+    observed_digest: str = ""
+    recovery_range: dict | None = None
+    recovery_range_id: str = ''
+    recovery_parent: dict = field(default_factory=dict)
+    recovery_gap: str = ""
+    partial_tail_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -486,6 +500,7 @@ class Satellite:
         self.config = config or SatelliteConfig.from_env()
         self.sha = self._read_sha()
         self._tails: dict[str, _StreamTail] = {}
+        self._load_chat_checkpoint()
         self._req = 0
         self._last_update_attempt = 0.0
         self._update_failures = 0
@@ -869,6 +884,191 @@ class Satellite:
             # then lost exactly as before the held-span path existed.
             log.error("held-span write failed stream=%s records=%d: %s", stream_id, len(records), exc)
 
+    @staticmethod
+    def _prefix_digest(path, length):
+        digest = hashlib.sha256()
+        with open(path, 'rb') as f:
+            remaining = length
+            while remaining:
+                part = f.read(min(remaining, 1024 * 1024))
+                if not part:
+                    raise ValueError('transcript truncated')
+                remaining -= len(part)
+                digest.update(part)
+        return digest.hexdigest()
+
+    def _load_chat_checkpoint(self):
+        path = Path(os.path.expanduser(self.config.chat_checkpoint_path or DEFAULT_CHAT_CHECKPOINT_PATH))
+        self._chat_checkpoint_path = path
+        self._recovering = {}
+        self._chat_gap = ''
+        self._pass_recovery = []
+        self._pass_sources = []
+        self._pass_chat_gaps = []
+        try:
+            if path.stat().st_size > WS_MAX_SIZE:
+                raise ValueError('oversized metadata checkpoint')
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict) or data.get('version') != 1 or data.get('host') != self.config.host:
+                raise ValueError('checkpoint version/host mismatch')
+            if not isinstance(data.get('sources'), list) or len(data['sources']) > chat_recovery.MAX_SOURCES:
+                raise ValueError('invalid source checkpoint list')
+            for item in data['sources']:
+                tail = _StreamTail(**item)
+                if (type(tail.offset) is not int or tail.offset < 0
+                        or type(tail.observed_size) is not int or tail.observed_size < tail.offset
+                        or not isinstance(tail.binding, dict)
+                        or not isinstance(tail.path, str) or not isinstance(tail.session_name, str)):
+                    raise ValueError('malformed source checkpoint')
+                if tail.binding and (not chat_recovery.source_valid(tail.binding, self.config.host)
+                        or not isinstance(tail.binding.get('checkpoint_id'), str)):
+                    raise ValueError('malformed original binding')
+                fixed = tail.recovery_range
+                if (not isinstance(tail.recovery_parent, dict)
+                        or (tail.recovery_parent and (set(tail.recovery_parent) != {'range_id', 'end', 'digest'}
+                            or not isinstance(tail.recovery_parent['range_id'], str)
+                            or chat_recovery.HEX32.fullmatch(tail.recovery_parent['range_id']) is None
+                            or not chat_recovery.offset(tail.recovery_parent['end'])
+                            or tail.recovery_parent['end'] > tail.offset
+                            or not isinstance(tail.recovery_parent['digest'], str)
+                            or chat_recovery.HEX64.fullmatch(tail.recovery_parent['digest']) is None))
+                        or (fixed is None and tail.recovery_range_id)
+                        or (fixed is not None and (not isinstance(tail.recovery_range_id, str)
+                            or chat_recovery.HEX32.fullmatch(tail.recovery_range_id) is None))):
+                    raise ValueError('malformed recovery range identity')
+                if fixed is not None and (not isinstance(fixed, dict) or set(fixed) != {'start', 'end', 'digest'}
+                        or not chat_recovery.offset(fixed.get('start')) or not chat_recovery.offset(fixed.get('end'))
+                        or not fixed['start'] <= tail.offset <= fixed['end']
+                        or not isinstance(fixed.get('digest'), str)
+                        or chat_recovery.HEX64.fullmatch(fixed['digest']) is None):
+                    raise ValueError('malformed fixed range')
+                key = (tail.binding or {}).get('checkpoint_id') or tail.session_name
+                self._recovering[key] = tail
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            # Preserve the unreadable preimage; never cold-seek past its data.
+            self._chat_gap = 'checkpoint_corrupt'
+            log.error('chat recovery gap: %s (%s)', self._chat_gap, type(exc).__name__)
+
+    def _save_chat_checkpoint(self):
+        if getattr(self, '_chat_gap', ''):
+            return
+        from dataclasses import asdict
+        sources = []
+        for tail in [*self._recovering.values(), *self._tails.values()]:
+            if not tail.path:
+                continue
+            item = asdict(tail)
+            item['provenance_state'] = {}
+            sources.append(item)
+        data = {'version': 1, 'host': self.config.host, 'sources': sources}
+        path = self._chat_checkpoint_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + '.tmp')
+        with temporary.open('w') as f:
+            os.chmod(temporary, 0o600)
+            json.dump(data, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _capture_chat_source(self, tail):
+        """Keep an integrity anchor for the retained bytes before sending."""
+        if tail.binding and self._source_file_identity_digest(tail.path) != tail.binding['file_digest']:
+            tail.recovery_gap = 'source_file_replaced'
+            return
+        size = os.path.getsize(tail.path)
+        if tail.observed_size and (size < tail.observed_size or
+                self._prefix_digest(tail.path, tail.observed_size) != tail.observed_digest):
+            tail.recovery_gap = 'source_truncated_or_changed'
+            return
+        if size != tail.observed_size or not tail.observed_digest:
+            tail.observed_size = size
+            tail.observed_digest = self._prefix_digest(tail.path, size)
+
+    def _collect_chat_recovery(self, budget, events, high_water):
+        for tail in self._recovering.values():
+            if tail.recovery_gap:
+                continue
+            if not tail.binding:
+                tail.recovery_gap = 'original_identity_unproven'
+                continue
+            try:
+                self._capture_chat_source(tail)
+                if tail.recovery_gap:
+                    continue
+                if tail.recovery_range is None:
+                    if tail.recovery_parent:
+                        # Live ACKs may have moved farther ahead; replay that
+                        # bridge through the shared dedupe sink for exact range continuity.
+                        tail.offset = tail.recovery_parent['end']
+                        if self._prefix_digest(tail.path, tail.offset) != tail.recovery_parent['digest']:
+                            tail.recovery_gap = 'recovery_prefix_changed'
+                            continue
+                    # Capture complete-record EOF once. Incomplete trailing bytes
+                    # stay explicit/non-green and are never silently acknowledged.
+                    size = os.path.getsize(tail.path)
+                    with open(tail.path, 'rb') as f:
+                        f.seek(max(0, size - self.config.max_read_bytes))
+                        suffix = f.read()
+                    end = size - len(suffix) + suffix.rfind(b'\n') + 1
+                    if end < tail.offset:
+                        tail.recovery_gap = 'incomplete_source_record'
+                        continue
+                    tail.partial_tail_bytes = size - end
+                    if end == tail.offset and tail.recovery_parent:
+                        continue  # retained identity at EOF; no empty range loop
+                    tail.recovery_range_id = os.urandom(16).hex()
+                    tail.recovery_range = {'start': tail.offset, 'end': end,
+                        'digest': self._prefix_digest(tail.path, end)}
+                    # Fixed range and original binding reach disk before wire.
+                    self._save_chat_checkpoint()
+                fixed = tail.recovery_range
+                if self._prefix_digest(tail.path, fixed['end']) != fixed['digest']:
+                    tail.recovery_gap = 'recovery_range_changed'
+                    continue
+                if tail.offset >= fixed['end']:
+                    # Empty ranges and lost final ACKs still need their durable
+                    # handoff response. Never discard proof before that receipt.
+                    self._pass_recovery.append({**tail.binding, 'range_id': tail.recovery_range_id,
+                        'predecessor': tail.recovery_parent, 'range': fixed,
+                        'from_offset': tail.offset, 'next_offset': tail.offset})
+                    continue
+                before = len(events)
+                pending, _ = self._collect_stream(tail, budget, events)
+                budget -= len(events) - before
+                self._pass_recovery.append({**tail.binding, 'range_id': tail.recovery_range_id,
+                        'predecessor': tail.recovery_parent, 'range': fixed,
+                    'from_offset': tail.offset, 'next_offset': pending})
+                if pending != tail.offset:
+                    high_water[tail.path] = pending
+            except (OSError, ValueError) as exc:
+                tail.recovery_gap = 'source_unavailable'
+                log.error('chat recovery gap stream=%s: %s', tail.session_name, exc)
+            if budget <= 0:
+                break
+        return budget
+
+    def _chat_source(self, tail, next_offset):
+        fence = self._usage_fences.get(f'{self.config.host}:{tail.session_name}') or {}
+        if (not tail.provider_session_id or tail.recovery_gap
+                or str(fence.get('source_pane_pid') or '') != tail.source_pane_pid
+                or fence.get('provider') != tail.provider
+                or not fence.get('session_created_at') or not fence.get('session_generation')):
+            return None
+        return {'stream_id': f'{self.config.host}:{tail.session_name}', 'provider': tail.provider,
+                'native_session_id': tail.provider_session_id,
+                'file_digest': self._source_file_identity_digest(tail.path),
+                'pane_pid': tail.source_pane_pid, 'generation': fence['session_generation'],
+                'session_created_at': fence['session_created_at'],
+                'start_offset': tail.offset, 'next_offset': next_offset}
+
     def _collect(
         self,
         discovered: dict[str, _DiscoveredPane | str] | None = None,
@@ -902,15 +1102,41 @@ class Satellite:
             )
             for name, pane in discovered.items()
         }
-        # Forget tails whose session closed (no filesystem scan; O(open)).
-        for name in list(self._tails):
+        for key, tail in list(self._recovering.items()):
+            if tail.recovery_range is not None:
+                continue
+            pane = discovered.get(tail.session_name)
+            fence = self._usage_fences.get(f'{self.config.host}:{tail.session_name}') or {}
+            if (pane is not None and pane.transcript_path == tail.path
+                    and tail.recovery_parent
+                    and not tail.partial_tail_bytes
+                    and fence.get('session_generation') == tail.binding.get('generation')
+                    and str(pane.pane_pid or '') == tail.source_pane_pid):
+                self._tails[tail.session_name] = tail
+                self._recovering.pop(key)
+        # Retain only already-discovered native sources. A closed name never
+        # creates a new binding; the daemon-issued checkpoint is the authority.
+        for name, tail in list(self._tails.items()):
             if name not in discovered:
+                if tail.binding:
+                    self._recovering[tail.binding['checkpoint_id']] = tail
                 self._tails.pop(name, None)
 
         budget = cfg.max_events_per_pass
         events: list[dict] = []
         high_water: dict[str, int] = {}
         capped = False
+        self._pass_recovery = []
+        self._pass_sources = []
+        self._pass_chat_gaps = []
+        budget = self._collect_chat_recovery(budget, events, high_water)
+        recovering_names = {
+            tail.session_name for tail in self._recovering.values()
+            if (discovered.get(tail.session_name) is None or
+                (discovered[tail.session_name].transcript_path == tail.path and
+                 (self._usage_fences.get(f'{self.config.host}:{tail.session_name}') or {}).get(
+                     'session_generation', tail.binding.get('generation')) == tail.binding.get('generation')))
+        }
         # Newest-active session first: its current turns reach mobile ahead of a
         # quieter session's, and ahead of any session's older backlog.
         for name, pane in sorted(
@@ -921,6 +1147,8 @@ class Satellite:
             if budget <= 0:
                 capped = True
                 break
+            if name in recovering_names:
+                continue
             path = pane.transcript_path
             if not path:
                 continue
@@ -929,6 +1157,19 @@ class Satellite:
                 from provider_accounts import transcript_allowed
                 if not transcript_allowed(path, pane.provider, account): continue
             st = self._tails.setdefault(name, _StreamTail(session_name=name))
+            fence = self._usage_fences.get(f'{self.config.host}:{name}') or {}
+            if st.binding and (st.path != path or st.source_pane_pid != str(pane.pane_pid or '')
+                    or (fence.get('session_generation') and
+                        fence['session_generation'] != st.binding['generation'])):
+                self._recovering[st.binding['checkpoint_id']] = st
+                if st.path == path:
+                    st = self._tails[name] = _StreamTail(session_name=name, path=path,
+                        offset=st.offset, provider_session_id=st.provider_session_id,
+                        provider=st.provider, source_pane_pid=str(pane.pane_pid or ''), primed=True)
+                else:
+                    st = self._tails[name] = _StreamTail(session_name=name)
+            if self._chat_gap:
+                st.primed = True  # preserve corrupt preimage; no unproved cold-tail skip
             provider = "codex" if pane.provider == "codex" or _is_codex_rollout_path(path) else pane.provider
             if st.path != path:
                 # A Claude fork handoff replays its new transcript from head;
@@ -938,6 +1179,10 @@ class Satellite:
                     path, 0, "", "", "", fork_rebind
                 )
                 st.provenance_state = {}
+                st.binding = {}
+                st.observed_size, st.observed_digest = 0, ""
+                st.recovery_gap, st.recovery_range = "", None
+                st.recovery_range_id, st.recovery_parent = "", {}
             if st.source_pane_pid == f"!{pane.pane_pid}":
                 continue
             st.provider = provider
@@ -956,11 +1201,20 @@ class Satellite:
                 st.provider_session_id = source_identity
             n_before = len(events)
             try:
+                self._capture_chat_source(st)
+                if st.recovery_gap:
+                    continue
                 pending, stream_capped = self._collect_stream(st, budget, events)
             except Exception as exc:  # noqa: BLE001 - one sick stream never kills the pass
                 del events[n_before:]  # drop any partial contribution
                 log.warning("stream %s collect failed: %s; skipping this pass", name, exc)
                 continue
+            source = self._chat_source(st, pending)
+            if source:
+                self._pass_sources.append(source)
+            elif self.config.host_secret and st.path:
+                self._pass_chat_gaps.append({'stream_id': f'{self.config.host}:{name}',
+                                             'reason': 'live_checkpoint_unproven'})
             budget -= (len(events) - n_before)
             if stream_capped:
                 capped = True          # this stream hit the per-pass cap
@@ -977,6 +1231,7 @@ class Satellite:
                 # offset may advance exactly as before without losing usage.
                 self._hold_pass(f"{self.config.host}:{name}")
                 self._queue_provenance(self._pass_provenance.get(f"{self.config.host}:{name}") or ())
+        self._save_chat_checkpoint()
         return events, high_water, capped
 
     def _collect_stream(self, st: _StreamTail, budget: int, out: list[dict]) -> tuple[int, bool]:
@@ -991,6 +1246,8 @@ class Satellite:
         except OSError:
             st.path = ""           # gone/rotated — rediscover next pass
             return st.offset, False
+        if st.recovery_range is not None:
+            size = min(size, st.recovery_range['end'])
         if not st.primed:
             # History horizon: on first read of this bind, start near EOF so a
             # long backlog never precedes current turns. A partial leading line
@@ -1045,7 +1302,10 @@ class Satellite:
                 if not st.provider_session_id:
                     st.provider_session_id = rec_sid
                 elif rec_sid != st.provider_session_id:
-                    # Foreign record → bound path is wrong; unbind and rediscover.
+                    # Never discard retained proof or acknowledge a foreign native source.
+                    if st.binding or st.recovery_range is not None:
+                        st.recovery_gap = 'native_source_changed'
+                        return st.offset, False
                     st.path, st.offset, st.provider_session_id, st.provider = "", 0, "", ""
                     return 0, False
             records.append(record)
@@ -1085,11 +1345,17 @@ class Satellite:
             if group and (len(out) - start) + len(group) > budget:
                 capped = True
                 break
+            for payload in group:
+                payload['transcript_offset'] = end_offset
+                if st.recovery_range is not None:
+                    payload['recovery_id'] = st.binding['checkpoint_id']
             out.extend(group)
             consumed_to = end_offset
         if not capped:
             # Whole span consumed, including any trailing non-record bytes.
             consumed_to = new_offset
+        if st.recovery_range is not None:
+            return consumed_to, capped
         candidate = self._usage_candidate(
             st, provider, records, record_end_offsets, consumed_to,
         )
@@ -1368,6 +1634,23 @@ class Satellite:
             "high_water": high_water,
             "satellite_incarnation": getattr(self, "_incarnation", ""),
         }
+        if self.config.host_secret:
+            frame['chat_sources'] = getattr(self, '_pass_sources', [])
+            frame['chat_recovery'] = getattr(self, '_pass_recovery', [])
+            frame['chat_recovery_pending'] = sum(
+                (tail.offset < tail.observed_size if tail.recovery_range is None
+                 else tail.offset < tail.recovery_range['end'])
+                for tail in self._recovering.values()
+            )
+            frame['chat_recovery_gaps'] = [
+                {'stream_id': f'{self.config.host}:{tail.session_name}',
+                 'reason': tail.recovery_gap or 'incomplete_source_record'}
+                for tail in [*self._tails.values(), *self._recovering.values()]
+                if tail.recovery_gap or tail.partial_tail_bytes
+            ]
+            frame['chat_recovery_gaps'].extend(getattr(self, '_pass_chat_gaps', []))
+            if self._chat_gap:
+                frame['chat_recovery_gaps'].append({'reason': self._chat_gap})
         if inventory is not None:
             frame["inventory"] = inventory
         frozen_streams = sorted(
@@ -1461,8 +1744,14 @@ class Satellite:
                 if stream_id not in usage_rejected_streams:
                     pending_usage.pop(stream_id, None)
         dropped_streams: set[str] = set()
+        refused_recovery_tokens: set[str] = set()
+        refused_recovery_streams: set[str] = set()
         for item in ack.get("dropped") or ():
             if isinstance(item, dict):
+                if item.get('checkpoint_id') is not None:
+                    refused_recovery_tokens.add(str(item['checkpoint_id']))
+                    refused_recovery_streams.add(str(item.get('stream_id') or ''))
+                    continue  # historical refusal never freezes a later live generation
                 stream_id = str(item.get("stream_id") or "")
                 if stream_id.startswith(f"{self.config.host}:"):
                     tail = self._tails.get(stream_id.removeprefix(f"{self.config.host}:"))
@@ -1490,6 +1779,35 @@ class Satellite:
                 and st.path in high_water
             ):
                 st.offset = high_water[st.path]
+        for binding in ack.get('chat_bindings') or ():
+            if not isinstance(binding, dict):
+                continue
+            if binding.get('status') != 'bound':
+                log.error('chat checkpoint refused stream=%s reason=%s',
+                          binding.get('stream_id'), binding.get('status'))
+                continue
+            name = binding['stream_id'].removeprefix(f'{self.config.host}:')
+            tail = self._tails.get(name)
+            if tail is not None and binding.get('native_session_id') == tail.provider_session_id:
+                tail.binding = {key: value for key, value in binding.items() if key != 'status'}
+        for result in ack.get('chat_recovery') or ():
+            if (result.get('checkpoint_id') in refused_recovery_tokens
+                    or result.get('stream_id') in refused_recovery_streams):
+                continue
+            tail = self._recovering.get(result.get('checkpoint_id'))
+            if (tail is not None and tail.recovery_range is not None
+                    and result.get('range_id') == tail.recovery_range_id
+                    and result.get('status') in {'pending', 'drained'}):
+                through = result.get('through')
+                if type(through) is int and tail.offset <= through <= tail.recovery_range['end']:
+                    tail.offset = through
+                    if result.get('status') == 'drained' and through == tail.recovery_range['end']:
+                        tail.recovery_parent = {'range_id': tail.recovery_range_id,
+                            'end': through, 'digest': tail.recovery_range['digest']}
+                        tail.recovery_range, tail.recovery_range_id = None, ''
+                        # Keep the original live-issued identity even when the
+                        # source is closed. Later bytes get a new immutable range.
+        self._save_chat_checkpoint()
         version = ack.get("version") if isinstance(ack.get("version"), dict) else {}
         if version.get("status") == "update_required":
             return str(version.get("target_sha") or "") or None
@@ -1497,44 +1815,99 @@ class Satellite:
 
     # -- auto-update ----------------------------------------------------------
 
+    def _update_environment(self):
+        root = Path(self.config.checkout).resolve()
+        if root != Path(_repo_root()).resolve() or root.stat().st_uid != os.getuid():
+            raise RuntimeError('executed source and owned checkout must agree')
+        if not (root / '.git').is_dir():
+            raise RuntimeError('a dedicated clone is required')
+        if (root / '.venv').is_symlink() or Path(sys.prefix).resolve() != (root / '.venv').resolve():
+            raise RuntimeError('the dedicated checkout service venv is required')
+        checks = [
+            (('rev-parse', '--show-toplevel'), str(root)),
+            (('remote', 'get-url', 'origin'), self.config.update_origin),
+            (('status', '--porcelain'), ''),
+            (('rev-parse', 'HEAD'), self.sha),
+        ]
+        for args, expected in checks:
+            result = _git(str(root), *args, timeout=10)
+            if result.returncode or result.stdout.strip() != expected:
+                raise RuntimeError('checkout preflight failed: ' + args[0])
+        if _git(str(root), 'symbolic-ref', '-q', 'HEAD', timeout=10).returncode != 1:
+            raise RuntimeError('the satellite checkout must be detached')
+        return root
+
+    def _preflight_candidate(self, root):
+        # Imports run in a disposable process with the actual service interpreter.
+        # No Satellite instance, connection, discovery or dependency installation.
+        program = (
+            'import sys,runpy,importlib.metadata,re; from pathlib import Path; '
+            'root=Path(sys.argv[1]); source=root/"services/chat-stream-v2"; '
+            'sys.path.insert(0,str(source)); '
+            'req=(source/"requirements.txt").read_text(); '
+            'pin=re.search(r"(?m)^websockets==([^\\s]+)$",req); '
+            'assert pin and importlib.metadata.version("websockets")==pin[1], "websockets dependency pin"; '
+            'runpy.run_path(str(source/"satellite.py"),run_name="satellite_preflight")'
+        )
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', program, str(root)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError('candidate dependency/import preflight failed')
+
     def _maybe_update(self, target_sha: str) -> None:
-        """git fetch/checkout the target and exec-restart. No-op guards + a hard
-        rate limit + a kill switch keep this from ever spinning. On failure: back
-        off and return — the caller keeps pushing flagged-stale."""
-        # `startswith` also absorbs a truncated (short-SHA) pin, so a manual short
-        # pin can't wedge us in perpetual failed-update retries (post-checkout
-        # HEAD is the full 40-char SHA and would never == a short target).
-        if not target_sha or self.sha.startswith(target_sha):
+        """Bounded exact-pin update of the dedicated clone; restore on pre-exec failure."""
+        if not isinstance(target_sha, str) or re.fullmatch(r'[0-9a-f]{40}', target_sha) is None:
             return
-        if self.config.no_autoupdate:
-            log.error("update_required -> %s but autoupdate disabled; staying stale", target_sha[:12])
+        if target_sha == self.sha or self.config.no_autoupdate:
             return
         now = time.monotonic()
-        backoff = min(self.config.backoff_max_s,
-                      self.config.update_min_interval_s * (2 ** self._update_failures))
+        floor = max(0.0, self.config.update_min_interval_s)
+        backoff = min(max(floor, self.config.backoff_max_s),
+                      floor * 2 ** min(self._update_failures, 10))
         if now - self._last_update_attempt < backoff:
-            return             # inside the (possibly backed-off) update window
+            return
         self._last_update_attempt = now
-        log.warning("update_required: %s -> %s; fetch+checkout", (self.sha or "?")[:12], target_sha[:12])
+        previous = self.sha
+        checkout_started = False
         try:
-            fetch = _git(self.config.checkout, "fetch", "origin", timeout=120.0)
-            if fetch.returncode != 0:
-                raise RuntimeError(f"git fetch failed: {fetch.stderr.strip()[:200]}")
-            co = _git(self.config.checkout, "checkout", "--detach", target_sha, timeout=60.0)
-            if co.returncode != 0:
-                raise RuntimeError(f"git checkout failed: {co.stderr.strip()[:200]}")
-        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            root = self._update_environment()
+            if self._chat_gap or any(t.recovery_gap for t in [*self._tails.values(), *self._recovering.values()]):
+                raise RuntimeError('unresolved transcript recovery gap')
+            self._save_chat_checkpoint()
+            preimage = self._chat_checkpoint_path.with_name(f'update-{previous}-{target_sha}.json')
+            if not preimage.exists():
+                # Immutable per-transition receipt; retry cannot replace rollback evidence.
+                with preimage.open('x') as f:
+                    json.dump({'previous': previous, 'target': target_sha,
+                               'checkout': str(root), 'interpreter': sys.executable,
+                               'python': sys.version, 'created_at': time.time()}, f, sort_keys=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+            fetch = _git(str(root), 'fetch', '--no-tags', 'origin', target_sha, timeout=120)
+            if fetch.returncode:
+                raise RuntimeError('target fetch failed')
+            checkout_started = True
+            co = _git(str(root), 'checkout', '--detach', target_sha, timeout=60)
+            if co.returncode or self._read_sha() != target_sha:
+                raise RuntimeError('exact target checkout failed')
+            self._preflight_candidate(root)
+            self._update_outcome = 'exec_pending'
+            self._exec_restart()
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
             self._update_failures += 1
-            log.error("self-update to %s failed (%d): %s; keep pushing flagged-stale",
-                      target_sha[:12], self._update_failures, exc)
-            return
-        head = self._read_sha()
-        if head != target_sha:
-            self._update_failures += 1
-            log.error("post-checkout HEAD %s != target %s; staying", head[:12], target_sha[:12])
-            return
-        log.warning("self-update OK -> %s; exec-restart", target_sha[:12])
-        self._exec_restart()
+            self._update_outcome = 'preflight_failed'
+            if checkout_started:
+                try:
+                    restored = _git(self.config.checkout, 'checkout', '--detach', previous, timeout=60)
+                    restored_ok = restored.returncode == 0 and self._read_sha() == previous
+                except (OSError, subprocess.SubprocessError):
+                    restored_ok = False
+                if not restored_ok:
+                    self._update_outcome = 'source_restore_failed'
+                    log.error('satellite source restoration failed; supervisor/SSH recovery required')
+                else:
+                    self._update_outcome = 'source_restored'
+            log.error('satellite update refused outcome=%s reason=%s', self._update_outcome, exc)
 
     def _exec_restart(self) -> None:  # pragma: no cover - replaces the process
         sys.stdout.flush()

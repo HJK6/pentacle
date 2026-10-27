@@ -149,6 +149,7 @@ test('tagged notification answer keeps its compact answer row', () => {
   assert.equal(interpreted.displayRule, 'activity:question');
   assert.equal(interpreted.text, item.expected_display);
   assert.equal(interpreted.notificationId, 'notification-fixture');
+  assert.equal(interpreted.notificationAnswerText, undefined, 'legacy one-line rendering stays unchanged');
 });
 
 test('unregistered marker-prefixed USER text is fail-closed and never raw prose', () => {
@@ -318,4 +319,25 @@ test('fresh snapshot reconciles a one-LF FIFO batch without mutating frozen even
     })),
     ids.map((id, index) => ({ id, text: texts[index], pending: false })),
   );
+});
+
+test('multiline notification answer renders authenticated decoded fields with original LF', () => {
+  const item = JSON.parse(readFileSync(new URL('./fixtures/notification-answer-multiline.json', import.meta.url), 'utf8'));
+  assert.equal(bytesToHex(sha256(utf8ToBytes(item.wire_text))), item.wire_sha256);
+  const rendered = interpretPentacleEvent(event({ text: item.wire_text, message_envelope: item.message_envelope }));
+  assert.equal(rendered.caseId, 'agent-question-answer');
+  assert.equal(rendered.displayRule, 'activity:question');
+  assert.equal(rendered.hidden, false);
+  assert.equal(rendered.text, item.expected_display);
+  assert.equal(rendered.notificationId, 'notification-fixture');
+});
+
+test('decoded multiline answer preserves field priority over raw fallback fields and whitespace', () => {
+  const answer = '\nline one\nline two\n';
+  const rendered = interpretPentacleEvent(event({
+    text: '[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\nanswer_json="\\nline one\\nline two\\n"\ntext=lower priority\nby=operator',
+    message_envelope: { kind: 'notification_answer', id: 'notification-answer-fixture', schema_version: 1,
+      notification_id: 'notification-fixture', answer, text: 'lower priority', by: 'operator' },
+  }));
+  assert.equal(rendered.text, `Operator answered: ${answer}`);
 });

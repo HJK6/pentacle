@@ -28,7 +28,7 @@ WorkingDirectory=__CHECKOUT__/services/chat-stream-v2
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PENTACLE_SATELLITE_CHECKOUT=__CHECKOUT__
 EnvironmentFile=%h/.config/pentacle/satellite.env
-ExecStart=/usr/bin/python3 __CHECKOUT__/services/chat-stream-v2/satellite.py
+ExecStart=__CHECKOUT__/.venv/bin/python __CHECKOUT__/services/chat-stream-v2/satellite.py
 Restart=always
 RestartSec=3
 # The satellite exec-restarts itself on an approved update; Restart=always also

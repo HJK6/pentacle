@@ -44,6 +44,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 try:
     from websockets.asyncio.server import serve
@@ -742,6 +743,9 @@ class Server:
         self._client_send_queues: dict[Any, asyncio.Queue] = {}
         self._client_writer_tasks: dict[Any, asyncio.Task] = {}
         self._client_send_locks: dict[Any, asyncio.Lock] = {}
+        # Only active keyed backend decisions retain locks. Keep the policy and
+        # forwarded send in one decision so a racing wake cannot pass a hold.
+        self._backend_send_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
         #: spec_example_2026_01:
         #: an accepted `send`'s injection must survive the SUBMITTING connection
         #: closing. Per-connection request tasks are cancelled on disconnect
@@ -4372,6 +4376,18 @@ class Server:
             (c for c in self._composites().values()
              if c is not None and c.is_backend_stream(stream_id)), None,
         )
+        request_key = str(direct_msg.get("request_id") or "").strip()
+        if backend_composite is not None and request_key:
+            lock = self._backend_send_locks.setdefault((stream_id, request_key), asyncio.Lock())
+            async with lock:
+                return await self._send_to_resolved_session(
+                    direct_msg, host, name, stream_id, backend_composite)
+        return await self._send_to_resolved_session(direct_msg, host, name, stream_id, backend_composite)
+
+    async def _send_to_resolved_session(
+        self, direct_msg: dict[str, Any], host: str, name: str, stream_id: str,
+        backend_composite: Any,
+    ) -> dict[str, Any]:
         if backend_composite is not None:
             suppressed = await backend_composite.suppress_routine_backend_ingress(
                 target_stream_id=stream_id, body=str(direct_msg.get("text") or direct_msg.get("message") or ""),
@@ -5021,11 +5037,22 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if auth.get("scoped_principal") and stream_id != auth.get("scope_stream"):
             raise VerbError(SCOPE_DENIED_CODE, "scoped credential may read only its own stream")
+        history_generation = msg.get("generation")
+        recovered_history = False
+        if history_generation is not None:
+            if (not isinstance(history_generation, str) or not history_generation
+                    or not auth.get("operator_authenticated") or auth.get("scoped_principal")
+                    or auth.get("dot_principal")
+                    or self._scoped_stream_for(msg.get("_client_websocket")) is not None):
+                raise VerbError(SCOPE_DENIED_CODE, "original transcript history requires operator authentication")
+            recovered_history = await self.store.chat_history_readable(stream_id, history_generation)
+            if not recovered_history and not await self._work_lane_history_readable(msg, stream_id, auth):
+                raise VerbError("unknown_session", "Unknown transcript generation")
         include_subagents, opened_by_host_ids, _excluded, _events_mode = self._subscription_for_message(msg)
         if not self._stream_is_visible_to_client(
             stream_id, include_subagents, opened_by_host_ids,
             self._assistant_composite_capable_for_message(msg),
-        ) and not await self._work_lane_history_readable(msg, stream_id, auth):
+        ) and not recovered_history and not await self._work_lane_history_readable(msg, stream_id, auth):
             raise VerbError("unknown_session", "Unknown or inactive session")
         raw_limit = msg.get("limit")
         try:
@@ -5058,6 +5085,7 @@ class Server:
             limit=effective_limit,
             before_daemon_seq=before_daemon_seq,
             page_size=page_size,
+            **({"generation": history_generation} if recovered_history else {}),
         )
 
     async def _work_lane_history_readable(self, msg: dict[str, Any], stream_id: str,
@@ -5085,6 +5113,7 @@ class Server:
         limit: int,
         before_daemon_seq: int | None,
         page_size: int,
+        generation: str | None = None,
     ) -> Any:
         """Walk a bounded cursor page at a time, yielding wire-ready frames."""
         remaining = limit
@@ -5098,6 +5127,7 @@ class Server:
                     stream_id,
                     before_daemon_seq=cursor,
                     limit=query_limit,
+                    **({"generation": generation} if generation is not None else {}),
                 )
                 has_more = remaining > page_size and len(rows) > page_size
                 page = rows[-page_size:] if has_more else rows[:page_size]
