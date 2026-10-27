@@ -19,13 +19,15 @@ function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', 
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 32);
+  assert.equal(SCENARIOS.length, 33);
   const names = SCENARIOS.map(([name]) => name);
   assert.ok(names.indexOf('provider-visibility') > names.indexOf('branding'));
   assert.ok(names.indexOf('provider-visibility') < names.indexOf('closed-chat-slot'));
   assert.ok(names.includes('cross-origin-boundary'));
   assert.ok(names.indexOf('summary-fallback-formatting') > names.indexOf('chat-transcript-paint'));
   assert.ok(names.indexOf('summary-fallback-formatting') < names.indexOf('closed-chat-slot'));
+  assert.ok(names.indexOf('installed-client-seam') > names.indexOf('summary-fallback-formatting'));
+  assert.ok(names.indexOf('installed-client-seam') < names.indexOf('closed-chat-slot'));
   assert.ok(names.indexOf('sidebar-preview-plain-text') > names.indexOf('sidebar-from-inventory'));
   assert.ok(names.indexOf('sidebar-preview-plain-text') < names.indexOf('closed-chat-slot'));
   assert.equal(names[0], 'default-pane-assistant');

@@ -38,6 +38,51 @@ database without changing product synchronization or crash tests.
 
 ## Unit and protocol checks
 
+### Installed client seam
+
+`installed-client-seam` extends the existing web gate's isolated seeder and
+candidate daemon. It receives real summary snapshot/list, durable history,
+live ingested update/inventory and reconnect/replay frames through the web
+transport and renderer. Its MutationObserver checks intermediate DOM for
+duplicate preview flicker; missing/malformed/legacy optional-summary controls
+are explicitly synthetic model checks. It does not certify native rendering.
+
+Run the named scope through the supported entry:
+
+```bash
+PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam \
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target web-gate --pass-env PENTACLE_WEB_GATE_SCENARIOS \
+  --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+```
+
+The comma-separated filter accepts registered names only. Unknown names fail;
+omitting it retains the full default web, interrupt and subsidiary gates.
+`node test/e2e/web_gate.js --scenario installed-client-seam` is the underlying
+focused browser entry. The supported wrapper also retains interrupt cleanup
+checks when filtering scenarios.
+
+To qualify an installed web version, additionally set
+`PENTACLE_WEB_GATE_CONSUMER_ROOT` to an isolated checkout at its evidence-backed
+source revision and pass `--pass-env PENTACLE_WEB_GATE_CONSUMER_ROOT`. Provision
+that checkout's locked dependencies and copy its exact deployed
+`renderer/dist/web` artifacts there; never rebuild a newer source and call it
+installed coverage. The candidate daemon stays in the invoking checkout.
+No configured root means candidate-only web coverage. Record actual deployment
+and mobile build/source receipts before selecting the finite support set;
+missing identities remain UNTESTED, not a main-branch substitution.
+
+Each scenario retains `client-seam-wire.json` with raw synthetic application
+frames, producer source hashes, producer/consumer Git SHAs and web asset hashes,
+plus browser DOM observations and PNGs. Authentication handshakes are excluded.
+The capture can feed the mobile repository's explicit Jest seam entry using
+its capture path, SHA256 and producer pin; bind both receipts in the same
+acceptance run. Mobile transport/model proof does not establish native UI
+behavior. Pin installed and candidate consumers separately, deduplicating only
+identical sources. A verified producer whitespace-flattening mutation must fail
+the before-history rendering assertion; retain mutation/preimage hashes, raw
+exit, failed predicate, restored-source identity and subsequent GREEN.
+
 Run the repository's normal unit gate first, through the supported entry above (`--target v2-unit`). The underlying tier runner is:
 
 ```bash
@@ -307,8 +352,8 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 
 #### Full aggregate and evidence boundaries
 
-The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**29 named scenarios**:
+The [scenario registry](../test/e2e/lib/web_scenarios.js) is authoritative for
+the default gate, including the installed-client seam above. Core journeys include:
 
 1. `default-pane-assistant`
 2. `transport-and-config`
