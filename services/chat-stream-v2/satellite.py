@@ -1714,9 +1714,13 @@ class Satellite:
                 if stream_id not in usage_rejected_streams:
                     pending_usage.pop(stream_id, None)
         dropped_streams: set[str] = set()
+        refused_recovery_tokens: set[str] = set()
+        refused_recovery_streams: set[str] = set()
         for item in ack.get("dropped") or ():
             if isinstance(item, dict):
                 if item.get('checkpoint_id') is not None:
+                    refused_recovery_tokens.add(str(item['checkpoint_id']))
+                    refused_recovery_streams.add(str(item.get('stream_id') or ''))
                     continue  # historical refusal never freezes a later live generation
                 stream_id = str(item.get("stream_id") or "")
                 if stream_id.startswith(f"{self.config.host}:"):
@@ -1757,6 +1761,9 @@ class Satellite:
             if tail is not None and binding.get('native_session_id') == tail.provider_session_id:
                 tail.binding = {key: value for key, value in binding.items() if key != 'status'}
         for result in ack.get('chat_recovery') or ():
+            if (result.get('checkpoint_id') in refused_recovery_tokens
+                    or result.get('stream_id') in refused_recovery_streams):
+                continue
             tail = self._recovering.get(result.get('checkpoint_id'))
             if tail is not None and result.get('status') in {'pending', 'drained'}:
                 through = result.get('through')

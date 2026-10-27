@@ -137,6 +137,9 @@ def append_recovery_conn(conn, host, batches, insert):
             result = {'checkpoint_id': batch.get('checkpoint_id'),
                       'stream_id': batch.get('stream_id'), 'status': 'recovery_identity_unproven'}
             results.append(result)
+            if batch.get('_envelope_invalid'):
+                result['status'] = 'recovery_envelope_invalid'
+                continue
             if not source_valid(batch, host):
                 continue
             if not isinstance(batch.get('checkpoint_id'), str):

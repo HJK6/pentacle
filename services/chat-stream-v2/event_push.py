@@ -587,7 +587,13 @@ class EventPush:
                 new_drops.add(key)
                 log.warning("event.push dropped stream=%s reason=%s", stream_id, reason)
 
+        invalid_recovery_tokens: set[str] = set()
+        invalid_recovery_streams: set[str] = set()
+
         def drop_historical(stream_id, reason, token):
+            if isinstance(token, str):
+                invalid_recovery_tokens.add(token)
+            invalid_recovery_streams.add(stream_id)
             dropped.append({'stream_id': stream_id, 'reason': reason,
                             'checkpoint_id': token if isinstance(token, str) else 'unproven'})
 
@@ -608,6 +614,10 @@ class EventPush:
             if recovery_id is not None:
                 if not isinstance(recovery_id, str):
                     drop_historical(stream_id, "recovery_identity_unproven", recovery_id)
+                    continue
+                if (not isinstance(payload.get('kind'), str) or not payload['kind']
+                        or not isinstance(payload.get('text'), str)):
+                    drop_historical(stream_id, "recovery_envelope_invalid", recovery_id)
                     continue
                 wire_payload.pop("source_pane_pid", None)
                 historical_events.setdefault(recovery_id, []).append({
@@ -785,6 +795,14 @@ class EventPush:
         for token in historical_events.keys() - seen_recovery:
             for entry in historical_events[token]:
                 drop_historical(entry["event"]["stream_id"], "recovery_identity_unproven", token)
+        # A rejected envelope is not an empty transcript span. Refuse its
+        # entire source batch before any range/cursor writes, including when
+        # every event was rejected or its token was malformed.
+        for batch in recovery_batches:
+            batch['_envelope_invalid'] = (
+                batch['checkpoint_id'] in invalid_recovery_tokens
+                or batch.get('stream_id') in invalid_recovery_streams
+            )
         recovery_results = await self.store.append_chat_recovery(authenticated_source_host, recovery_batches)
         for result in recovery_results:
             if result["status"] not in {"pending", "drained"}:

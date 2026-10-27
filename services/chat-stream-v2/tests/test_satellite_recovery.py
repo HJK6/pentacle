@@ -430,3 +430,52 @@ def test_bad_original_token_never_freezes_new_same_name_source(tmp_path, monkeyp
         finally:
             store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('fault', ['provider', 'kind', 'recovery_id'])
+def test_first_malformed_recovery_envelope_never_advances_either_cursor(tmp_path, monkeypatch, fault):
+    async def run():
+        store, sat, sink, casts, original = await _interrupted(tmp_path, monkeypatch)
+        try:
+            events, hw, _ = sat._collect({})
+            token, tail = next(iter(sat._recovering.items()))
+            before_offset = tail.offset
+            def checkpoint(conn):
+                return tuple(conn.execute('SELECT recovery_range,recovery_cursor,ack_offset '
+                    'FROM v2_chat_checkpoints WHERE checkpoint_id=?', (token,)).fetchone())
+            before_daemon = await store.submit(checkpoint)
+            assert before_daemon[:2] == (None, None)  # no good recovery push before this test
+            await store.open_session(HOST, 'live', provider='claude', pane_pid='8001')
+            class MalformedWire(_Wire):
+                async def send(self, raw):
+                    frame = json.loads(raw)
+                    for event in frame['events']:
+                        event[fault] = {'provider': 'invalid-provider', 'kind': None,
+                                        'recovery_id': 'unissued'}[fault]
+                    frame['events'].append({'stream_id': 'worker:live', 'provider': 'claude',
+                        'kind': 'USER', 'text': 'unrelated-live', 'raw': {'jsonl_record_uuid': 'live'}})
+                    await super().send(json.dumps(frame))
+            ack = await sat._push(MalformedWire(sink), events, hw)
+            sat._apply_ack(ack, hw)
+            after_daemon = await store.submit(checkpoint)
+            assert (after_daemon, tail.offset) == (before_daemon, before_offset), {
+                'daemon_before': before_daemon, 'daemon_after': after_daemon,
+                'satellite_before': before_offset, 'satellite_after': tail.offset, 'ack': ack}
+            assert ack['inserted'] == 1 and ack['chat_recovery'][0]['status'] not in {'pending', 'drained'}, ack
+            # Even a contradictory peer ACK cannot discard explicitly refused
+            # historical rows. It must not affect the unrelated live source.
+            contradictory = {**ack, 'chat_recovery': [{**ack['chat_recovery'][0],
+                'status': 'drained', 'through': tail.recovery_range['end']}]}
+            sat._apply_ack(contradictory, hw)
+            assert tail.offset == before_offset
+            assert [e['text'] for e in await store.fetch_session_event_tail('worker:seat', limit=50)] == ['initial']
+            assert [e['text'] for e in await store.fetch_session_event_tail('worker:live', limit=50)] == ['unrelated-live']
+            # Retry the retained, unmodified source range; no message was lost.
+            good = await sat._push(_Wire(sink), events, hw)
+            assert good['inserted'] == 2, good
+            sat._apply_ack(good, hw)
+            assert [e['text'] for e in await store.fetch_session_event_tail('worker:seat', limit=50)] == [
+                'initial', 'buffered-one', 'buffered-two']
+        finally:
+            store.stop()
+    asyncio.run(run())
