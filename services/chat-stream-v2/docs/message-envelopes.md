@@ -65,7 +65,9 @@ three fields. It rejects malformed JSON, empty/non-string values, duplicate
 logical fields (including plain/encoded aliases), raw multiline continuations,
 a missing terminal nonempty `by=`, and mismatched notification/marker ids.
 Other envelope grammars are unchanged. The existing answer-back length limit
-still applies; a truncated envelope fails closed.
+still applies. Encoded truncation ends with a separate `[answer truncated]`
+line, so even a cut inside the actor field fails closed after provider whitespace
+trimming. Historical one-line truncation bytes and behavior are unchanged.
 
 When encoded fields occur, the matcher returns all validated answer fields and
 the annotator carries those fields plus the notification id into the tag.

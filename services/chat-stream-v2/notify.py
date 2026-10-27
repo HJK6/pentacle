@@ -2173,10 +2173,14 @@ def _answer_back_text(answer: dict) -> str:
     """A readable pane message carrying the operator's answer to the asking
     agent (v2's one-injection-path replacement for v1's peer-queue
     `notification.answer` payload)."""
+    encoded = False
+
     def answer_field(key: str, value: str) -> str:
+        nonlocal encoded
         # An explicit spelling avoids interpreting legacy literal backslashes
         # as escapes and keeps every existing one-line wire byte unchanged.
         if "\n" in value or "\r" in value:
+            encoded = True
             return key + "_json=" + json.dumps(value, ensure_ascii=False)
         return key + "=" + value
 
@@ -2192,7 +2196,10 @@ def _answer_back_text(answer: dict) -> str:
     parts.append(f"by={answer.get('by')}")
     text = "\n".join(parts)
     if len(text) > ANSWER_BACK_MAX_CHARS:
-        text = text[: ANSWER_BACK_MAX_CHARS - 3] + "..."
+        # A cut inside by= must not authenticate a partial actor. Keep the
+        # legacy one-line bytes, but make encoded truncation unregistrable.
+        suffix = "\n[answer truncated]" if encoded else "..."
+        text = text[: ANSWER_BACK_MAX_CHARS - len(suffix)] + suffix
     return text
 
 

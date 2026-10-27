@@ -127,7 +127,7 @@ def test_truncated_multiline_answer_stays_unregistered():
     body = _answer_back_text({'notification_id': 'notification-fixture',
                              'custom_text': 'line\n' * ANSWER_BACK_MAX_CHARS, 'by': 'operator'})
     assert len(body) == ANSWER_BACK_MAX_CHARS
-    assert body.endswith('...')
+    assert body.endswith('\n[answer truncated]')
     assert match_message_envelope(build_message_envelope('notification_answer',
         notice_id='notification-answer-fixture', body=body)) is None
 
@@ -143,3 +143,11 @@ def test_multiline_tag_survives_authenticated_provider_wrapper():
     assert event['message_envelope']['schema_version'] == 1
     assert event['provider_wrapper'] == wrapper
     assert event['raw']['envelope_source'] == source
+
+
+@pytest.mark.parametrize('padding', [708, 712])
+def test_encoded_answer_cutoff_inside_actor_fails_closed(padding):
+    wire = _wire(custom_text='a' * padding + '\nx')
+    assert wire.endswith('\n[answer truncated]')
+    assert match_message_envelope(wire) is None, repr(wire[-35:])
+    assert match_message_envelope(wire.strip()) is None, 'provider whitespace trimming stays fail-closed'
