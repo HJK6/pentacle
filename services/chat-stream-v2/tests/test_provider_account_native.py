@@ -237,7 +237,11 @@ for line in sys.stdin:
     if 'id' not in request:
         continue
     point = 'quota' if method == 'account/rateLimits/read' else 'second_read' if reads else 'first_read'
+    if scenario.get('exit_at') == ('initialize' if method == 'initialize' else point):
+        sys.exit(7)
     if method == 'initialize':
+        for status in scenario.get('initialize', []):
+            print(json.dumps({'method': 'account/updated', 'params': status}), flush=True)
         result = {'userAgent': 'fixture'}
     elif method == 'account/read':
         assert request['params'] == {'refreshToken': False}
@@ -291,6 +295,23 @@ for line in sys.stdin:
     yield factory
     assert processes and all(process.poll() is not None for process in processes)
     assert all(stream.closed for process in processes for stream in (process.stdin, process.stdout) if stream)
+
+
+def test_codex_provisional_initialize_chatter_does_not_establish_identity(tmp_path, native_rpc):
+    # Initialize announcements are not authoritative. Null at account/read is
+    # separately rejected by test_codex_initial_identity_change_or_malformed_status_refuses.
+    row = codex_observation(binding(tmp_path), rpc_factory=native_rpc({
+        'initialize': [None, {'authMode': None, 'planType': None}],
+        'startup': [{'authMode': 'chatgpt', 'planType': 'pro'}],
+    }), expected_email='person@example.test')
+    assert row['provider_id'] == row['pool_id'] == 'identity-a'
+    assert row['email_verified'] is True
+
+
+@pytest.mark.parametrize('exit_at', ['initialize', 'first_read', 'quota', 'second_read'])
+def test_codex_native_exit_never_qualifies_and_reaps_child(tmp_path, native_rpc, exit_at):
+    with pytest.raises(AccountError, match='provider_transport_failed'):
+        codex_observation(binding(tmp_path), rpc_factory=native_rpc({'exit_at': exit_at}))
 
 
 @pytest.mark.parametrize('startup', [[], [{'authMode': 'chatgpt', 'planType': 'pro'}],

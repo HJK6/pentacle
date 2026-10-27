@@ -198,6 +198,7 @@ def run_cell(
     inject_stage: str | None = None,
     capture_pane=None,
     validate_session=None,
+    provider_probe=None,
 ) -> dict[str, object]:
     """Run one matrix cell; a created stream is always closed and verified."""
     stream_id = ""
@@ -211,6 +212,8 @@ def run_cell(
         if catalog.get("type") != "spawn_catalog_get.ok":
             raise RuntimeError(str(catalog))
         model, effort = catalog["profiles"]["desktop_manual"][provider]
+        if provider_probe is not None:
+            model, effort = provider_probe.model, provider_probe.effort
         stage = "spawn"
         if inject_stage == stage:
             raise RuntimeError("forced failure")
@@ -247,6 +250,9 @@ def run_cell(
         if register_owned is None:
             raise RuntimeError("spawn: live-window ownership adapter is required")
         register_owned(spawn, result)
+        if provider_probe is not None:
+            stage = "identity"
+            provider_probe.verify_spawn(result)
 
         stage = "readiness"
         if inject_stage == stage:
@@ -275,6 +281,8 @@ def run_cell(
                 )
             stage = "event"
         wait_event(stream_id, marker)
+        if provider_probe is not None:
+            provider_probe.verify_inputs()
         if validate_session is not None:
             session_metrics = validate_session(stream_id, marker)
             for gate_name in ("event", "recovery", "convergence", "control_plane", "disconnect", "terminal_idle"):
@@ -831,11 +839,14 @@ def run_matrix(
     *,
     evidence: list[dict[str, object]] | None = None,
     allow_legacy_close: bool = False,
+    provider_probe=None,
 ) -> list[dict[str, object]]:
     if cells is None:
         cells = smoke_plan()["cells"]
     if not cells:
         raise ValueError("no smoke host cells configured")
+    if provider_probe is not None and cells != ((provider_probe.binding.host, "codex", "promptless"),):
+        raise ValueError("provider tuple requires exactly its local Codex promptless cell")
     failures: list[dict[str, str]] = []
     for host, provider, prompt_mode in cells:
         state_path = Path(tempfile.gettempdir()) / f"pentacle-live-window-{uuid.uuid4().hex}.json"
@@ -856,6 +867,7 @@ def run_matrix(
                         prepare_owned_spawn=getattr(register_owned, "prepare_owned_spawn", None),
                         rescue_teardown=rescue_cell_teardown,
                         validate_session=getattr(close_owned, "validate", None),
+                        **({"provider_probe": provider_probe} if provider_probe is not None else {}),
                     )
                     if evidence is not None and isinstance(result, dict):
                         evidence.append({"outcome": "passed", **result})
@@ -960,12 +972,18 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="print the resolved full matrix without opening a connection or spawning",
     )
+    parser.add_argument("--token-path", type=Path, default=None,
+                        help="operator credential for the explicitly selected endpoint")
+    parser.add_argument("--provider-tuple", type=Path, default=None,
+                        help="private pinned local Codex binding/config input; requires URL and HOST")
     parser.add_argument(
         "host", nargs="?", default=None,
         help="with URL, run only the post-deploy canary cell (<host>, codex, "
              "promptless); the full matrix runs only when NO arguments are given",
     )
     args = parser.parse_args(argv)
+    if (args.provider_tuple is not None or args.token_path is not None) and (args.url is None or args.host is None or args.dry_run):
+        parser.error("--provider-tuple and --token-path require explicit URL and HOST, without --dry-run")
     if args.dry_run and args.url is not None:
         parser.error("--dry-run accepts no URL or HOST")
     optional_hosts = ()
@@ -992,10 +1010,28 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         url, cells = DEFAULT_URL, plan["cells"]
         optional_hosts = plan["optional_hosts"]
+    provider_probe = None
+    native_identity = None
+    if args.provider_tuple is not None:
+        from tools.provider_startup_probe import ProviderStartupProbe
+        try:
+            provider_probe = ProviderStartupProbe(args.provider_tuple, args.host)
+        except (ValueError, OSError):
+            parser.error("invalid provider tuple; use one pinned, provisioned local Codex binding")
+        try:
+            native_identity = provider_probe.observe()
+        except Exception as exc:
+            # Native output stays inside the existing safe account adapter.
+            from provider_accounts import AccountError
+            code = str(exc) if isinstance(exc, AccountError) else "provider_probe_unavailable"
+            print(json.dumps({"ok": False, "status": "UNTESTED", "native_identity": {
+                "outcome": "UNTESTED", "reason": code}, "cells": []}, sort_keys=True))
+            return EXIT_UNTESTED
     evidence: list[dict[str, object]] = []
     results = run_matrix(
-        url, DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
+        url, args.token_path or DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         allow_legacy_close=args.allow_legacy_close,
+        **({"provider_probe": provider_probe} if provider_probe is not None else {}),
     )
     # A successful verdict requires actual evidence for every planned cell.
     # run_matrix returns nongreen rows and appends completed passes to evidence.
@@ -1023,6 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
             "untested": untested,
             "skipped": skipped,
             "cells": evidence,
+            **({"native_identity": native_identity} if native_identity is not None else {}),
         },
         sort_keys=True,
     ))
