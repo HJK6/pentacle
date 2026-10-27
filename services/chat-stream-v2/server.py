@@ -44,6 +44,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 try:
     from websockets.asyncio.server import serve
@@ -742,6 +743,9 @@ class Server:
         self._client_send_queues: dict[Any, asyncio.Queue] = {}
         self._client_writer_tasks: dict[Any, asyncio.Task] = {}
         self._client_send_locks: dict[Any, asyncio.Lock] = {}
+        # Only active keyed backend decisions retain locks. Keep the policy and
+        # forwarded send in one decision so a racing wake cannot pass a hold.
+        self._backend_send_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
         #: spec_example_2026_01:
         #: an accepted `send`'s injection must survive the SUBMITTING connection
         #: closing. Per-connection request tasks are cancelled on disconnect
@@ -4372,6 +4376,18 @@ class Server:
             (c for c in self._composites().values()
              if c is not None and c.is_backend_stream(stream_id)), None,
         )
+        request_key = str(direct_msg.get("request_id") or "").strip()
+        if backend_composite is not None and request_key:
+            lock = self._backend_send_locks.setdefault((stream_id, request_key), asyncio.Lock())
+            async with lock:
+                return await self._send_to_resolved_session(
+                    direct_msg, host, name, stream_id, backend_composite)
+        return await self._send_to_resolved_session(direct_msg, host, name, stream_id, backend_composite)
+
+    async def _send_to_resolved_session(
+        self, direct_msg: dict[str, Any], host: str, name: str, stream_id: str,
+        backend_composite: Any,
+    ) -> dict[str, Any]:
         if backend_composite is not None:
             suppressed = await backend_composite.suppress_routine_backend_ingress(
                 target_stream_id=stream_id, body=str(direct_msg.get("text") or direct_msg.get("message") or ""),

@@ -6195,13 +6195,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def tell_event_identity(
         self, stream_id: str, identity: str, event: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Probe, and when `event` is given atomically append, one backend-tell
+        """Probe, and when `event` is given atomically append, one backend
         routine event by its retained `(stream_id, session_created_at, identity)`.
 
         Returns `{"state": "existing"|"absent"|"inserted", "event": ...}`. An
         existing row is returned untouched so the caller can compare it with the
-        retried payload; nothing is ever overwritten. Tell-only: the original
-        `append_session_event` stays the writer for every other verb."""
+        retried payload; nothing is ever overwritten. Used by keyed tell/send
+        routine ingress; other event writers use `append_session_event`."""
         event_json = (
             json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
             if event is not None else None

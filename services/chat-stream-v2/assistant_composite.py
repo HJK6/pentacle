@@ -517,7 +517,7 @@ class AssistantComposite:
             return None
         # A caller-keyed tell's retained event identity is probed BEFORE any wake
         # exemption or forward classification: an exemption cannot waive an
-        # identity this backend already retained. Send and notice skip this.
+        # identity this backend already retained. Notice skips this.
         tell_key = str(msg.get("tell_id") or "").strip() if verb == "tell" else ""
         if tell_key:
             retained = await self.store.tell_event_identity(
@@ -527,6 +527,13 @@ class AssistantComposite:
                 return self._tell_event_recovered(retained["event"], target_stream_id, body, msg, tell_key)
         if msg.get("_assistant_composite_backend_dispatch") is True:
             return None
+        send_key = str(msg.get("request_id") or "").strip() if verb == "send" else ""
+        if send_key:
+            retained = await self.store.tell_event_identity(
+                target_stream_id, f"assistant-ingress:send:{send_key}",
+            )
+            if retained["state"] == "existing":
+                return self._send_event_recovered(retained["event"], body, msg)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         if auth.get("operator_authenticated") is True or msg.get("_assistant_operator_authenticated") is True:
             return None
@@ -543,7 +550,7 @@ class AssistantComposite:
         )
         if forward:
             return None
-        identity = str(msg.get("tell_id") or msg.get("request_id") or "").strip()
+        identity = send_key or str(msg.get("tell_id") or msg.get("request_id") or "").strip()
         if not identity:
             identity = hashlib.sha256(
                 (target_stream_id + "\x00" + verb + "\x00" + text).encode("utf-8"),
@@ -574,6 +581,13 @@ class AssistantComposite:
             )
             if appended["state"] == "existing":
                 return self._tell_event_recovered(appended["event"], target_stream_id, body, msg, tell_key)
+        elif send_key:
+            event["raw"]["send_payload_digest"] = self._send_ingress_digest(body, msg)
+            appended = await self.store.tell_event_identity(
+                target_stream_id, f"assistant-ingress:send:{send_key}", event,
+            )
+            if appended["state"] == "existing":
+                return self._send_event_recovered(appended["event"], body, msg)
         else:
             await self.store.append_session_event(
                 target_stream_id, event, identity=f"assistant-ingress:{verb}:{identity}", limit=2000,
@@ -583,6 +597,41 @@ class AssistantComposite:
             "delivery_status": "persisted",
             "submission_confirmed": False,
             "action_committed": True,
+            "assistant_backend_ingress": "persisted_suppressed",
+        }
+
+    @staticmethod
+    def _send_ingress_digest(body: str, msg: dict[str, Any]) -> str:
+        auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+        payload = {
+            "body": str(body or ""),
+            "attachments": msg.get("attachments") or [],
+            "from_stream_id": str(msg.get("from_stream_id") or ""),
+            "actor_stream_id": str(auth.get("stream_id") or auth.get("operator_principal") or ""),
+        }
+        return hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _send_event_recovered(cls, retained: dict[str, Any], body: str, msg: dict[str, Any]) -> dict[str, Any]:
+        raw = retained.get("raw") if isinstance(retained.get("raw"), dict) else {}
+        digest = raw.get("send_payload_digest")
+        if digest is not None:
+            same = digest == cls._send_ingress_digest(body, msg)
+        else:
+            # Upgrade-era rows retained only display text and claimed source.
+            # They cannot establish attachment identity or leading whitespace.
+            same = (retained.get("text") == str(body or "").lstrip()
+                    and raw.get("from_stream_id") == str(msg.get("from_stream_id") or "")
+                    and not msg.get("attachments"))
+        if not same:
+            from sessions import VerbError
+            log.info("subsystem=assistant_backend_ingress bug_ref=held_send_payload_identity action=conflict")
+            raise VerbError("send_request_conflict", "request_id already retained with a different send payload")
+        return {
+            "type": "send.ok", "delivery_status": "persisted",
+            "submission_confirmed": False, "action_committed": True,
             "assistant_backend_ingress": "persisted_suppressed",
         }
 
