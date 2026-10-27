@@ -392,10 +392,17 @@ export class ChatStoreController {
       if (Number.isFinite(seq) && seq >= 0) voices.set(`${streamId}:${seq}`, voice);
       if (event.optimistic_id) voices.set(`${streamId}:optimistic:${event.optimistic_id}`, voice);
     }
-    if (!voices.size) return detail;
+    const interrupt = this.getInterruptState(streamId);
+    if (!voices.size && interrupt?.intent !== 'send_now') return detail;
     return { ...detail, transcriptItems: detail.transcriptItems.map(item => {
       const voice = voices.get(item.eventKey || '');
-      return voice && (item.isUser || item.displayRule === 'bubble:user') ? { ...item, voice } : item;
+      const sendingNow = item.providerQueued && interrupt?.intent === 'send_now'
+        && !interrupt.error && item.optimisticId === interrupt.optimisticId;
+      if (!voice && !sendingNow) return item;
+      return { ...item,
+        ...(voice && (item.isUser || item.displayRule === 'bubble:user') ? { voice } : {}),
+        ...(sendingNow ? { providerQueued: false, receiptCaption: 'sending' as const } : {}),
+      };
     }) };
   }
 
@@ -856,20 +863,19 @@ export class ChatStoreController {
     const budget = this.reserveQueueEscape(streamId, generation);
     const request: ChatInterruptState = {
       intent: 'send_now', streamId, turnId, expectedSessionGeneration: generation, optimisticId,
-      pending: true, retryable: false, message: 'Sending queued message now…', requestedAt: Date.now(),
+      pending: true, retryable: false, message: '', requestedAt: Date.now(),
     };
+    this.setComposerNotice(streamId, '');
     this.setInterruptState(streamId, request);
-    this.setComposerNotice(streamId, request.message, !turn);
     const finish = (error?: string, confirm?: ChatInterruptConfirm) => {
       if (this.interruptStates[streamId] !== request) return;
       if (error) this.releaseQueueEscape(streamId, budget);
-      const message = error ? 'Could not send now. Message remains queued.'
-        : 'Send now requested. Waiting for the queued message to start.';
+      const message = error ? 'Could not send now. Message remains queued.' : '';
+      this.setComposerNotice(streamId, message, !this.getTurnState(streamId));
       this.setInterruptState(streamId, {
         ...request, pending: false, retryable: !!error, message, resolvedAt: Date.now(),
         ...(confirm ? { confirm } : {}), ...(error ? { error } : {}),
       });
-      this.setComposerNotice(streamId, message, !this.getTurnState(streamId));
     };
     Promise.resolve().then(() => this.cancelBridge!({ streamId, expectedSessionGeneration: generation }))
       .then(result => {
