@@ -1,306 +1,37 @@
-name: Public checks
-'on':
-  push:
-    branches:
-    - main
+name: Disposable merge control
+on:
   pull_request:
+    branches: [combined-control-1793099576-base]
 permissions:
   contents: read
 jobs:
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: npm
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: System packages
-      timeout-minutes: 10
-      run: |
-        # Stalls have been slow package-pool downloads from one mirror while its index stays fast,
-        # so attempt 2 switches mirror. Worst case fits the step: 2 x (60+10 update, 180+10 install)
-        # + (60+10 dpkg repair) + 5 sleep = 595 s < 600 s.
-        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        for attempt in 1 2; do
-          if [ "$attempt" = 2 ]; then
-            echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          echo "apt attempt $attempt mirror: $(head -n 1 /etc/apt/apt-mirrors.txt 2>/dev/null || echo image-default)"
-          if sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update \
-            && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends tmux lsof zsh ffmpeg; then
-            exit 0
-          fi
-          echo "apt attempt $attempt failed or timed out"
-          if [ "$attempt" = 1 ]; then
-            sudo timeout -k 10 60 dpkg --configure -a || true
-            sleep 5
-          fi
-        done
-        exit 1
-    - name: Source integrity after setup
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-    - name: Supported npm tests
-      run: python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir
-        "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/npm" --target npm-test --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-npm"
-        --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - run: python3 scripts/test_check_public_residue.py
-    - run: python3 scripts/check_public_residue.py
-    - name: Bounded dashboard dependency
-      working-directory: vendor/dashboard-library
-      run: |
-        npm run build
-        npm run check:dist
-        npm test
-    - name: Required CI controls
-      run: |
-        python3 -m pip install PyYAML==6.0.3
-        python3 scripts/test_ci_required_aggregate.py
-    - name: Source integrity at gate end
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-      if: ${{ always() }}
-    - name: Retain gate summaries
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: gate-summaries-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: |
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
-    - name: Retain failed gate evidence
-      if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: supported-gates-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: npm
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: System packages
-      timeout-minutes: 10
-      run: |
-        # Stalls have been slow package-pool downloads from one mirror while its index stays fast,
-        # so attempt 2 switches mirror. Worst case fits the step: 2 x (60+10 update, 180+10 install)
-        # + (60+10 dpkg repair) + 5 sleep = 595 s < 600 s.
-        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        for attempt in 1 2; do
-          if [ "$attempt" = 2 ]; then
-            echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          echo "apt attempt $attempt mirror: $(head -n 1 /etc/apt/apt-mirrors.txt 2>/dev/null || echo image-default)"
-          if sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update \
-            && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends tmux lsof zsh ffmpeg; then
-            exit 0
-          fi
-          echo "apt attempt $attempt failed or timed out"
-          if [ "$attempt" = 1 ]; then
-            sudo timeout -k 10 60 dpkg --configure -a || true
-            sleep 5
-          fi
-        done
-        exit 1
-    - name: Source integrity after setup
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-    - name: Install Chrome for the web E2E gate
-      timeout-minutes: 5
-      run: |
-        wget -q -O "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-        sudo apt-get install -y "${RUNNER_TEMP:-/tmp}/google-chrome-stable_current_amd64.deb"
-    - name: Source integrity after Chrome install
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-    - name: Web mode E2E gate
-      run: python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir
-        "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/web" --target web-gate --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-web"
-        --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - name: Source integrity at gate end
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-      if: ${{ always() }}
-    - name: Retain gate summaries
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: gate-summaries-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: |
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
-    - name: Retain failed gate evidence
-      if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: supported-gates-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
-  daemon:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: npm
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: System packages
-      timeout-minutes: 10
-      run: |
-        # Stalls have been slow package-pool downloads from one mirror while its index stays fast,
-        # so attempt 2 switches mirror. Worst case fits the step: 2 x (60+10 update, 180+10 install)
-        # + (60+10 dpkg repair) + 5 sleep = 595 s < 600 s.
-        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        for attempt in 1 2; do
-          if [ "$attempt" = 2 ]; then
-            echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          echo "apt attempt $attempt mirror: $(head -n 1 /etc/apt/apt-mirrors.txt 2>/dev/null || echo image-default)"
-          if sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update \
-            && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends tmux lsof zsh ffmpeg; then
-            exit 0
-          fi
-          echo "apt attempt $attempt failed or timed out"
-          if [ "$attempt" = 1 ]; then
-            sudo timeout -k 10 60 dpkg --configure -a || true
-            sleep 5
-          fi
-        done
-        exit 1
-    - name: Source integrity after setup
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-    - name: Daemon merge checks
-      run: |
-        umask 077
-        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/daemon" --target v2-merge-ci --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-daemon" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - name: Source integrity at gate end
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-      if: ${{ always() }}
-    - name: Retain gate summaries
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: gate-summaries-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: |
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
-    - name: Retain failed gate evidence
-      if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: supported-gates-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
-  contracts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-        cache: npm
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: System packages
-      timeout-minutes: 10
-      run: |
-        # Stalls have been slow package-pool downloads from one mirror while its index stays fast,
-        # so attempt 2 switches mirror. Worst case fits the step: 2 x (60+10 update, 180+10 install)
-        # + (60+10 dpkg repair) + 5 sleep = 595 s < 600 s.
-        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        for attempt in 1 2; do
-          if [ "$attempt" = 2 ]; then
-            echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          echo "apt attempt $attempt mirror: $(head -n 1 /etc/apt/apt-mirrors.txt 2>/dev/null || echo image-default)"
-          if sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update \
-            && sudo timeout -k 10 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends tmux lsof zsh ffmpeg; then
-            exit 0
-          fi
-          echo "apt attempt $attempt failed or timed out"
-          if [ "$attempt" = 1 ]; then
-            sudo timeout -k 10 60 dpkg --configure -a || true
-            sleep 5
-          fi
-        done
-        exit 1
-    - name: Source integrity after setup
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-    - name: Portable microphone contracts
-      run: |
-        python3 -m pip install pytest==8.4.2 numpy==2.5.3 scipy==1.18.1
-        PYTHONPATH=mic-server python3 -m pytest mic-server/test
-    - name: CLI checks
-      run: |
-        umask 077
-        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/cli" --target cli-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-cli" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - name: Shared checks
-      run: |
-        umask 077
-        python3 scripts/gate_env.py run --profile pentacle --workspace "${RUNNER_TEMP}/gate-env/${GITHUB_JOB}" --evidence-dir "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/shared" --target shared-pytest --select tests --spec ci-public-checks --series "ci-${GITHUB_RUN_ID}-shared" --purpose acceptance --attempt-manifest "${RUNNER_TEMP}/gate-evidence/${GITHUB_JOB}/attempt-manifest.json"
-    - name: Source integrity at gate end
-      run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
-      if: ${{ always() }}
-    - name: Retain gate summaries
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: gate-summaries-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: |
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
-          ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
-    - name: Retain failed gate evidence
-      if: ${{ failure() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: supported-gates-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        retention-days: 7
-        if-no-files-found: warn
-        path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
-  checks:
-    needs:
-    - frontend
-    - web
-    - daemon
-    - contracts
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: Require every partition to succeed
-      env:
+    - run: |
+        mode=$(cat .merge-control-mode)
+        if [ "$mode" = red ]; then exit 1; fi
+        if [ "$mode" = wait ]; then sleep 180; fi
+  web:
+    runs-on: ubuntu-latest
+    steps:
+    - run: 'true'
+  daemon:
+    runs-on: ubuntu-latest
+    steps:
+    - run: 'true'
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+    - run: 'true'
+  checks:
+    needs: [frontend, web, daemon, contracts]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - env:
         CI_REQUIRED_NEEDS: ${{ toJSON(needs) }}
       run: python3 scripts/ci_required_aggregate.py
