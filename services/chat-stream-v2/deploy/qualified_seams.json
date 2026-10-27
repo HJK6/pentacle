@@ -1,6 +1,6 @@
 {
   "client_wire_render": {
-    "source_ref": "ea4c9b9ca7694fd8fb813091c7b0b49aad969d3a",
+    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
     "source_paths": [
       "main.js",
       "preload.js",
@@ -32,10 +32,10 @@
       "No mobile authentication or real network reconnect timing.",
       "No arbitrary historical client-version matrix or assertions outside the finite accepted source/build/config set."
     ],
-    "qa_report": "c383c726-ebcc-44fb-bbb8-0403d9c824e5",
-    "qa_review_sha256": "156a5d8b3ec7f72f4c0585b6f48b5a47e84fea0d0977bc91bf21d8feb998a03b",
-    "evidence_sha256": "c003ef5860cd37eefdab2718b01713b92e0665c64617f3da64cca96ec2b5f54d",
-    "scope_sha256": "0078fef58dc4cc99676c32a2aba4827b0e7988266d82ec18795e160af688fd1d"
+    "qa_report": "e11a14d8-891b-4172-8880-0cb0f99569d4",
+    "qa_review_sha256": "9ebac1cd5501f003d2a9bf41b43f6bf681c0b09781fb00226126afe27b276fc3",
+    "evidence_sha256": "a7de416bb3c2233fd1217098f4fa9b52ef6507113733f08b508dc5119a01f5ef",
+    "scope_sha256": "63281060d4c284e903112e4ebe8266e51a34bbd4722293893df7c2ddf03f92b6"
   },
   "provider_startup": {
     "source_ref": "1dbeb442db2418502529ca07d1fe583d8a18e98e",
