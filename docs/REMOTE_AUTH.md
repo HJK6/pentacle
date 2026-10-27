@@ -1,10 +1,25 @@
 # Daemon network access
 
 The daemon defaults to loopback. Connections whose actual peer is IPv4 or IPv6
-loopback can use local CLI bootstrap, including the initial spawn and one-time
-seat token grant. This is a single-user local trust boundary: other processes
-on that computer can use the local daemon. A claimed client name, host, or
-sender field does not establish local access.
+loopback can use ordinary local CLI bootstrap, including the initial spawn.
+The privileged `grant_token`, `spawn_freeze` and `spawn_unfreeze` methods require
+an authenticated operator or actual native loopback plus the daemon-user
+local-admin credential, even on the local machine. Anonymous local callers
+receive `operator_auth_required` before any token or spawn-admission change.
+A claimed client name, host, sender or authorization context establishes no
+authority. Browser Origin requests do not qualify as native loopback.
+
+For an operator shell without a seat identity, the CLI loads the existing
+owned, nonsymlink, mode-0600 `~/.config/pentacle-stream/local-admin.token` file
+when sending those three methods to a loopback URL. It never prints that
+credential or sends it to a remote endpoint. Missing or unsafe proof fails
+closed. Seat, service and ambiguous identities do not automatically borrow
+this credential; use their sanctioned authority or an operator shell.
+To mint a token for an existing untokened session, run
+`agent-orch grant-self-token --stream node:session` from a fresh operator shell
+on the daemon host. The old token-less env-seat bootstrap is refused; a claimed
+`AGENT_ORCH_STREAM_ID` alone grants no privilege. Normal launches already
+provision seat credentials.
 
 Before exposing the daemon on a LAN or VPN for mobile, provision a separate
 operator credential for each UI client with `services/chat-stream-v2/tools/operator_auth_cli.py`.
@@ -19,9 +34,10 @@ After a verified hello, the socket may omit repeated tokens; the daemon retains
 only the token hash and owner and revalidates the open seat on each RPC. Closed
 or replaced tokens fail. An explicitly invalid token cannot fall back to an
 earlier valid identity. Existing self/parent authorization checks still apply.
-By default a verified seat credential **cannot** remotely grant tokens, set
+By default a verified seat credential **cannot** grant tokens, set
 `role=nexus`, or freeze/unfreeze spawning — those privileged operator RPCs
-still require real operator/service authentication or the session's parent.
+require operator authority (or, for the three methods above, verified local-admin
+proof). Setting `role=nexus` retains its separate parent/operator authorization.
 
 A headless/CLI installation, where agents are the only operator interface, may
 opt into **seat operator authority** by setting

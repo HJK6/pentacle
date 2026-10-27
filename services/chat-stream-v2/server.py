@@ -2397,26 +2397,31 @@ class Server:
                     )]
             if handler is None:
                 return [self._unsupported(verb, request_id, caller=caller)]
+            auth = dispatch_msg["_auth_context"]
+            code = None
             if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
-                auth = dispatch_msg["_auth_context"]
-                code = None
                 if not any(auth.get(key) for key in (
                     "operator_authenticated", "token_verified", "service_authenticated",
                     "scoped_principal",
                 )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
-                elif verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
-                    auth.get("operator_authenticated") or auth.get("service_authenticated")
-                ):
-                    code = "operator_auth_required"
-                if code:
-                    self._diag_auth_failure(websocket, code)
-                    denied = {"type": f"{verb}.error", "error_code": code}
-                    if request_id is not None:
-                        denied["request_id"] = request_id
-                    return [denied]
+            # Local bootstrap is retained for ordinary RPCs. Minting a seat
+            # credential or changing spawn admission always requires proof,
+            # even from a native loopback peer. Restricted producer and scoped
+            # connection checks still apply before the handler is reached.
+            if code is None and verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
+                auth.get("operator_authenticated")
+                or (auth.get("peer_loopback") and auth.get("local_admin_verified"))
+            ):
+                code = "operator_auth_required"
+            if code:
+                self._diag_auth_failure(websocket, code)
+                denied = {"type": f"{verb}.error", "error_code": code}
+                if request_id is not None:
+                    denied["request_id"] = request_id
+                return [denied]
             # External scoped ("Dot") connection enforcement. Keyed on the STICKY
             # connection marker (not the per-RPC dot_principal flag) and run for
             # EVERY verb incl. base-exempt ping/hello and even loopback — so a
