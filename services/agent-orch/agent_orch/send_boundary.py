@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from collections.abc import Mapping as MappingABC
 
-from .config import Config
+from .config import Config, is_loopback_endpoint, local_admin_token
 
 FIXED_SERVICE_IDENTITIES = {
     "altum-bot-cd": ("file", "AGENT_ORCH_STREAM_TOKEN_FILE"),
@@ -305,6 +305,17 @@ def _ordinary_frame(frame: Frame, identity: OutboundIdentity, config: Config,
                 if not argument or "stream_token" not in wire:
                     fields["stream_token"] = token
                 wire = _insert(wire, before, fields)
+    # An operator shell can bootstrap without a seat. Load proof only at
+    # egress, only for these privileged methods, and never for another caller
+    # identity or a remote endpoint. Missing proof is refused by the daemon.
+    if (identity.kind == "operator"
+            and wire.get("type") in {"grant_token", "spawn_freeze", "spawn_unfreeze"}
+            and "local_admin_token" not in wire
+            and is_loopback_endpoint(config.ws_url)):
+        try:
+            wire["local_admin_token"] = local_admin_token(config)
+        except FileNotFoundError:
+            pass
     return wire
 
 

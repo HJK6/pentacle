@@ -717,7 +717,8 @@ class RpcClient:
     reads until the correlated reply arrives, discarding any broadcast frames in
     between. Latency is recorded on the shared stats object."""
 
-    def __init__(self, url: str, stats: LatencyStats, tag: str, *, spawn_cwd: Path | None = None) -> None:
+    def __init__(self, url: str, stats: LatencyStats, tag: str, *, spawn_cwd: Path | None = None,
+                 local_admin_token: str | None = None) -> None:
         # A strict full soak can legitimately produce a list_sessions reply
         # larger than websockets' 1 MiB client default after sustained churn.
         self._ws = connect(url, open_timeout=BIND_DEADLINE_S, max_size=None)
@@ -731,8 +732,13 @@ class RpcClient:
         self._instance = uuid.uuid4().hex[:8]
         self._seq = 0
         self._spawn_cwd = spawn_cwd
+        # Supplied by the isolated daemon owner; never read a host credential
+        # implicitly when bootstrapping an explicit-command fixture.
+        self._local_admin_token = local_admin_token
 
     def call(self, payload: dict, *, timeout: float = 5.0, record: bool = True) -> dict:
+        if payload.get("type") in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and self._local_admin_token is not None:
+            payload = {**payload, "local_admin_token": self._local_admin_token}
         if payload.get("type") == "close":
             if self._spawn_cwd is None:
                 raise AssertionError("soak close requires isolated fixture credentials")

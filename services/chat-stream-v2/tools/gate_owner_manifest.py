@@ -94,7 +94,10 @@ def _exists(pid: int) -> bool:
 
 
 def process_start_identity(pid: int) -> str | None:
-    """Return a PID-reuse-resistant identity without test Popen patches."""
+    """Return a PID-reuse-resistant identity without test Popen patches.
+
+    Keep ps timestamps stable across the owner's and hermetic child's TZ/locale.
+    """
     if pid <= 0:
         return None
     if sys.platform.startswith("linux"):
@@ -105,7 +108,8 @@ def process_start_identity(pid: int) -> str | None:
             return None
     try:
         process = _REAL_POPEN(["/bin/ps", "-p", str(pid), "-o", "lstart="],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              env=dict(os.environ, TZ="UTC0", LC_ALL="C"))
         stdout, _ = process.communicate(timeout=2)
         return stdout.strip() or None
     except (OSError, subprocess.SubprocessError):

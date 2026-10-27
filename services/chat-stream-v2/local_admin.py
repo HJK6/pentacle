@@ -1,4 +1,4 @@
-"""Daemon-user token for loopback-only reducing-authority recovery."""
+"""Daemon-user proof for native-loopback bootstrap and authority recovery."""
 from __future__ import annotations
 import hmac
 import os

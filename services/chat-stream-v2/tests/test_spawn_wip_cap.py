@@ -347,3 +347,57 @@ def test_ordered_override_text_matches_policy_parser(tmp_path,monkeypatch,prefix
     actual=api.check_lead_spawn(tmp_path,spec_id)
     assert {key:actual[key] for key in row['expected']}==row['expected']
     test_real_spawn_cells(tmp_path,monkeypatch,row,True)
+
+
+@pytest.mark.parametrize('which', ['candidate', 'peer'])
+@pytest.mark.parametrize('failure', [OSError, ValueError])
+def test_spec_read_failure_refuses_spawn_with_cause(tmp_path, monkeypatch, which, failure):
+    """A read race is not a malformed override and cannot create a seat."""
+    row = deepcopy(next(row for row in ROWS if row['id'] == 'at_cap'))
+    spec_id = materialize(tmp_path, row)
+    failing_spec = spec_id if which == 'candidate' else 'spec_' + row['in_progress'][0]
+    monkeypatch.setenv('PENTACLE_MEMORY_ROOT', str(tmp_path))
+    api = importlib.import_module('_shared.wip_cap')
+    original = api.SpecReader
+
+    class FailingReader(original):
+        def read(self, requested):
+            if requested == failing_spec:
+                raise failure('synthetic read race')
+            return super().read(requested)
+
+    monkeypatch.setattr(api, 'SpecReader', FailingReader)
+    expected = f'wip_spec_unreadable: spec={failing_spec} exception={failure.__name__}'
+    decision = api.check_lead_spawn(tmp_path, spec_id)
+    assert decision['error_code'] == 'wip_spec_unreadable'
+    assert decision['message'] == expected
+    assert decision['E_R'] is None
+
+    async def go():
+        store = Store(':memory:'); store.start()
+        ctl, sessions, tmux = await setup(tmp_path, store, monkeypatch)
+        try:
+            with pytest.raises(VerbError) as exc:
+                await ctl.spawn(message(spec_id), HOST)
+            assert exc.value.code == 'wip_spec_unreadable'
+            assert str(exc.value) == expected
+            assert await store.reservations(include_expired=True) == []
+            assert await store.list_sessions('open') == []
+            assert tmux.created == 0
+        finally:
+            try:
+                await cleanup(store, sessions, tmux)
+            finally:
+                store.stop()
+    asyncio.run(go())
+
+
+def test_malformed_peer_override_still_refuses_spawn(tmp_path, monkeypatch):
+    row = deepcopy(next(row for row in ROWS if row['id'] == 'at_cap'))
+    peer = row['in_progress'][0]
+    row['overrides'][peer] = '- wip_override: invalid'
+    row['expected'] = {
+        'E_R': None, 'error_code': 'wip_override_malformed',
+        'message': f'wip_override_malformed: spec=spec_{peer}', 'warnings': [],
+    }
+    test_real_spawn_cells(tmp_path, monkeypatch, row, True)

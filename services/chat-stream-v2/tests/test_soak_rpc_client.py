@@ -78,7 +78,8 @@ def test_fixture_token_grant_error_carries_the_daemon_error_code(monkeypatch: An
     replies = {"grant_token": {"type": "grant_token.error", "error": "token_already_set"}}
     monkeypatch.setattr(harness, "connect", lambda url, **_: _ScriptedWebSocket(sent, replies))
     monkeypatch.setattr(harness, "_seat_token_path", lambda _cwd, sid: tmp_path / sid.replace(":", "_"))
-    client = RpcClient("ws://soak.test", LatencyStats(), "churn", spawn_cwd=tmp_path)
+    client = RpcClient("ws://soak.test", LatencyStats(), "churn", spawn_cwd=tmp_path,
+                       local_admin_token="synthetic-scratch-proof")
 
     try:
         client.call({"type": "close", "stream_id": "soakhost:soak-churn-0-1"}, record=False)
@@ -89,3 +90,4 @@ def test_fixture_token_grant_error_carries_the_daemon_error_code(monkeypatch: An
     else:
         raise AssertionError("a refused grant must raise FixtureTokenGrantError")
     assert [frame["type"] for frame in sent] == ["grant_token"]
+    assert sent[0]["local_admin_token"] == "synthetic-scratch-proof"

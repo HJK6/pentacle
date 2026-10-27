@@ -498,6 +498,30 @@ class DeadlineEnvelope(Tmp):
         self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
+class ProcessStartIdentity(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ps start-time identity")
+    def test_real_pid_identity_is_independent_of_timezone_and_locale(self):
+        path = HERE.parent / "services" / "chat-stream-v2" / "tools" / "gate_owner_manifest.py"
+        spec = importlib.util.spec_from_file_location("owner_identity_test", path)
+        owner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(owner)
+        expected = subprocess.run(
+            ["/bin/ps", "-p", str(os.getpid()), "-o", "lstart="],
+            env=dict(os.environ, TZ="UTC0", LC_ALL="C"),
+            capture_output=True, text=True, check=True, timeout=2,
+        ).stdout.strip()
+        self.assertTrue(expected)
+        for tz in ("", None, "UTC0", "CST6CDT", "JST-9"):
+            with self.subTest(TZ=tz), mock.patch.dict(os.environ, LC_ALL="en_US.UTF-8"):
+                if tz is None:
+                    os.environ.pop("TZ", None)
+                else:
+                    os.environ["TZ"] = tz
+                before = dict(os.environ)
+                self.assertEqual(owner.process_start_identity(os.getpid()), expected)
+                self.assertEqual(dict(os.environ), before)
+
+
 class EntrypointReceipts(Tmp):
     """End-to-end through main(): the started receipt precedes everything."""
 
@@ -596,7 +620,8 @@ class EntrypointReceipts(Tmp):
         script = ("import os,subprocess,sys,time,importlib.util as u;"
                   "m=u.spec_from_file_location('g',sys.argv[1]);g=u.module_from_spec(m);m.loader.exec_module(g);"
                   "c=subprocess.Popen(['sleep','300'],start_new_session=True);"
-                  "g.record(os.environ['V2_GATE_OWNER_MANIFEST'],c.pid,None,c.pid);"
+                  "\ntry: g.record(os.environ['V2_GATE_OWNER_MANIFEST'],c.pid,None,c.pid)\n"
+                  "except BaseException:\n c.kill();c.wait();raise\n"
                   "open(sys.argv[2],'w').write(str(c.pid));time.sleep(300)")
         argv = [sys.executable, "-c", script, str(tools / "gate_owner_manifest.py"), str(pidfile)]
 
@@ -607,7 +632,9 @@ class EntrypointReceipts(Tmp):
             os.kill(os.getpid(), signal.SIGTERM)
         import threading
         threading.Thread(target=fire, daemon=True).start()
-        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
+        # The parent formerly recorded UTC for TZ="", while the hermetic child
+        # (TZ unset) observed local time and rejected the same live owner.
+        with mock.patch.dict(os.environ, {"TZ": ""}), mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({"python": tool, "tmux": tool}, []), pick_locale=lambda *a, **k: ("en_US.UTF-8", None),
                                  ensure_python_env=lambda *a, **k: (self.tmp / "venv", {"reused": True}, []), check_scratch=lambda *a, **k: [],
                                  check_node_npm=lambda *a, **k: [], check_dependencies=lambda *a, **k: [], check_capabilities=lambda *a, **k: [],
                                  build_command=lambda *a, **k: (argv, {"cwd": self.tmp, "wall_s": 120, "classify": lambda rc, to: ("pass", None, {})}),

@@ -522,6 +522,81 @@ def _event_frame_parts(
     return encoded[:prefix_end], b"]" + encoded[suffix_start:]
 
 
+def _oversized_event_preview(event: dict[str, Any], max_bytes: int) -> bytes:
+    """Bound a wire-only copy, retaining replay identity and visibility metadata."""
+    preview = dict(event)
+    if isinstance(event.get("raw"), dict):
+        preview["raw"] = dict(event["raw"])
+    raw = preview.get("raw")
+    peer_body = (
+        str(event.get("kind", "")).upper() == "TELL"
+        and isinstance(raw, dict)
+        and isinstance(raw.get("peer_payload"), str)
+        and bool(raw["peer_payload"])
+    )
+    text = raw["peer_payload"] if peer_body else str(event.get("text") or "")
+    suffix = "\n\n[Event truncated for backfill; original retained by daemon.]"
+
+    def encode(prefix: str) -> bytes:
+        preview["text"] = prefix + suffix
+        if peer_body:
+            # TELL renders peer_payload instead of text in existing clients.
+            raw["peer_payload"] = preview["text"]
+        return _json_bytes(preview)
+
+    encoded = encode("")
+    if len(encoded) > max_bytes:
+        # Remove payload members individually, never the raw identity container.
+        # Provenance tags must survive: losing them can change visibility/trust.
+        protected = {
+            "raw", "text", "daemon_seq", "stream_id", "kind", "timestamp",
+            "host", "provider", "session_id", "session_name", "event_id", "message_id",
+            "reply_to_message_id", "reply_to_question_id", "request_id", "receipt_id",
+            "optimistic_id", "correlatedDaemonSeq", "jsonl_record_uuid",
+            "jsonl_resolution_for_record_uuid", "client_origin", "lane_id", "publish_kind",
+            "routing_state", "accepted_sequence", "queue_sequence", "action_committed",
+            "message_envelope", "provider_wrapper",
+        }
+        protected_raw = {
+            "jsonl_record_uuid", "jsonl_event_index", "uuid", "jsonl_resolution_for_record_uuid",
+            "source", "transport", "sender", "tool_use_id", "tool_call_id", "parent_tool_use_id",
+            "tool_name", "is_sidechain", "is_error", "working", "subtype", "displayRule", "display_rule",
+            "parent_uuid", "optimistic_id", "request_id", "receipt_id", "client_origin",
+            "returned_to_prompt", "user_delivery_state", "daemon_notice",
+        }
+        if peer_body:
+            protected_raw.add("peer_payload")
+        candidates = [
+            (len(_json_bytes(value)), preview, key)
+            for key, value in preview.items() if key not in protected
+        ]
+        if isinstance(raw, dict):
+            candidates.extend(
+                (len(_json_bytes(value)), raw, key)
+                for key, value in raw.items() if key not in protected_raw
+            )
+        for _size, container, key in sorted(candidates, key=lambda item: item[0], reverse=True):
+            del container[key]
+            encoded = _json_bytes(preview)
+            if len(encoded) <= max_bytes:
+                break
+        if len(encoded) > max_bytes:
+            raise ValueError("request_stream_events event identity exceeds its frame byte budget")
+
+    # Search characters but measure full escaped UTF-8 JSON, including both TELL
+    # bodies. Slicing Python text cannot cut a multibyte character or JSON escape.
+    low, high = 0, min(len(text), max_bytes - len(encoded))
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = encode(text[:middle])
+        if len(candidate) <= max_bytes:
+            low, encoded = middle, candidate
+        else:
+            high = middle - 1
+    log.warning("subsystem=backfill bug_ref=oversized_single_event preview_bytes=%d", len(encoded))
+    return encoded
+
+
 def _assemble_event_frames(
     events: list[dict[str, Any]],
     *,
@@ -531,9 +606,9 @@ def _assemble_event_frames(
 ) -> list[_EncodedFrame]:
     """Encode one bounded page in one pass and return wire-ready frames.
 
-    Events are encoded once each. When the page is chunked, the newest chunk is
-    emitted first and each chunk itself remains oldest-first. The client can
-    therefore persist the minimum `daemon_seq` from any delivered chunk and
+    Ordinary events are encoded once each; oversized singletons get an explicit
+    bounded preview. The newest chunk is emitted first, each oldest-first. The
+    client can persist the minimum `daemon_seq` from any delivered chunk and
     resume with `before_daemon_seq` after a disconnect.
     """
     event_json = [_json_bytes(event) for event in events]
@@ -573,7 +648,11 @@ def _assemble_event_frames(
             raise RuntimeError("request_stream_events chunk exceeded its byte budget")
         frames.append(_EncodedFrame(chunk_type, payload.decode("utf-8")))
 
-    for encoded_event in reversed(event_json):
+    for event, encoded_event in zip(reversed(events), reversed(event_json)):
+        if base_size + len(encoded_event) > STREAM_EVENTS_FRAME_BUDGET_BYTES:
+            encoded_event = _oversized_event_preview(
+                event, STREAM_EVENTS_FRAME_BUDGET_BYTES - base_size,
+            )
         candidate_size = pending_size + len(encoded_event) + (1 if pending_newest_first else 0)
         if pending_newest_first and candidate_size > STREAM_EVENTS_FRAME_BUDGET_BYTES:
             emit_pending()
@@ -2318,26 +2397,31 @@ class Server:
                     )]
             if handler is None:
                 return [self._unsupported(verb, request_id, caller=caller)]
+            auth = dispatch_msg["_auth_context"]
+            code = None
             if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
-                auth = dispatch_msg["_auth_context"]
-                code = None
                 if not any(auth.get(key) for key in (
                     "operator_authenticated", "token_verified", "service_authenticated",
                     "scoped_principal",
                 )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
-                elif verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
-                    auth.get("operator_authenticated") or auth.get("service_authenticated")
-                ):
-                    code = "operator_auth_required"
-                if code:
-                    self._diag_auth_failure(websocket, code)
-                    denied = {"type": f"{verb}.error", "error_code": code}
-                    if request_id is not None:
-                        denied["request_id"] = request_id
-                    return [denied]
+            # Local bootstrap is retained for ordinary RPCs. Minting a seat
+            # credential or changing spawn admission always requires proof,
+            # even from a native loopback peer. Restricted producer and scoped
+            # connection checks still apply before the handler is reached.
+            if code is None and verb in {"grant_token", "spawn_freeze", "spawn_unfreeze"} and not (
+                auth.get("operator_authenticated")
+                or (auth.get("peer_loopback") and auth.get("local_admin_verified"))
+            ):
+                code = "operator_auth_required"
+            if code:
+                self._diag_auth_failure(websocket, code)
+                denied = {"type": f"{verb}.error", "error_code": code}
+                if request_id is not None:
+                    denied["request_id"] = request_id
+                return [denied]
             # External scoped ("Dot") connection enforcement. Keyed on the STICKY
             # connection marker (not the per-RPC dot_principal flag) and run for
             # EVERY verb incl. base-exempt ping/hello and even loopback — so a

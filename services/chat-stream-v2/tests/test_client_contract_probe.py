@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 
@@ -543,6 +546,118 @@ def test_probe_receives_all_oversized_history_as_bounded_chunks(tmp_path: Path, 
         assert "bootstrap_peak_bytes" in output
     finally:
         terminate_process_group(proc)
+
+
+@pytest.mark.parametrize("events_mode", ["summary", "full"])
+@pytest.mark.parametrize("oversized_field", ["text", "raw", "attachments", "peer_payload", "peer_payload_large"])
+def test_single_oversized_event_backfills_without_blocking_history(
+    tmp_path: Path, events_mode: str, oversized_field: str,
+) -> None:
+    db = str(tmp_path / "single-oversized.db")
+    stream_id = "testhost:v2-single-oversized"
+    # JSON escapes and multibyte characters must count as wire bytes, not chars.
+    large = ('雪😀\n"\\' * (STREAM_EVENTS_FRAME_BUDGET_BYTES // 8))
+
+    async def seed_or_read(seed: bool) -> list[dict]:
+        store = Store(db)
+        store.start()
+        try:
+            if seed:
+                await store.open_session("testhost", "v2-single-oversized", visibility="visible")
+                for i in range(11):
+                    event = _ev(f"u{i}", f"m{i}", stream_id=stream_id)
+                    if i == 5:
+                        event["raw"].update(source="structured", transport="codex-rollout", sender="testhost:peer")
+                        if oversized_field == "text":
+                            event["text"] = large
+                        elif oversized_field == "raw":
+                            event["raw"]["tool_output"] = {"content": large}
+                        elif oversized_field == "attachments":
+                            event["attachments"] = [{"key": large, "mime": "image/png"}]
+                        elif oversized_field == "peer_payload":
+                            event.update(kind="TELL", text=large)
+                            event["raw"]["peer_payload"] = "m5 peer body"
+                        else:
+                            event["kind"] = "TELL"
+                            event["raw"]["peer_payload"] = large
+                    await store.append_session_event(stream_id, event, identity=_identity_key(event), limit=500)
+            return await store.fetch_session_event_tail(stream_id, limit=11)
+        finally:
+            store.stop()
+
+    original = asyncio.run(seed_or_read(True))
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env.setdefault("EXAMPLE_MACHINES_JSON", '{"machines":[{"name":"testhost"}]}')
+    proc = subprocess.Popen(
+        [sys.executable, "main.py", "--port", "0", "--db", db, "--local-host", "testhost",
+         "--notifications-db", str(tmp_path / "n.db"), "--blob-root", str(tmp_path / "b"),
+         "--assets-db", str(tmp_path / "a.db")],
+        cwd=str(SERVICE_DIR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        **_process_group_popen_kwargs(),
+    )
+    try:
+        port = None
+        deadline = time.monotonic() + 5.0
+        assert proc.stdout is not None
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if "listening on" in line:
+                port = int(line.rsplit(":", 1)[1].strip())
+                break
+        assert port, f"daemon did not bind (exit={proc.poll()})"
+        for before in (None, original[6]["daemon_seq"]):
+            # This fixture already has an independent durable source above.
+            # The general probe also fetches inspect_stream, whose unsplit raw
+            # events intentionally exceed its client ceiling in these cases.
+            events, sizes = [], []
+            with probe.connect(f"ws://localhost:{port}", open_timeout=5.0) as ws:
+                ws.send(json.dumps({
+                    "type": "hello", "request_id": "oversized-hello",
+                    "subscribe": {"include_subagents": True, "events_mode": events_mode},
+                }))
+                assert probe._recv_reply(ws, timeout=5.0)["type"] == "hello"
+                assert probe._recv_reply(ws, timeout=5.0)["type"] == "snapshot"
+                ws.send(json.dumps({
+                    "type": "request_stream_events", "request_id": "oversized-events",
+                    "stream_id": stream_id, "limit": 11, "before_daemon_seq": before,
+                }))
+                while True:
+                    wire = ws.recv(timeout=5.0)
+                    reply = json.loads(wire)
+                    if reply.get("type") in probe._PUSH_TYPES:
+                        continue
+                    assert reply["request_id"] == "oversized-events"
+                    assert reply["type"] in {"request_stream_events.chunk", "request_stream_events.ok"}, reply
+                    sizes.append(len(wire.encode("utf-8")))
+                    events.extend(reply["events"])
+                    if reply["type"] == "request_stream_events.ok":
+                        break
+            events.sort(key=lambda e: e["daemon_seq"])
+            expected = [e for e in original if before is None or e["daemon_seq"] < before]
+            assert reply["complete"] is True
+            assert max(sizes) <= STREAM_EVENTS_FRAME_BUDGET_BYTES
+            assert [e["daemon_seq"] for e in events] == [e["daemon_seq"] for e in expected]
+            assert probe.assert_client_consumable(events, min_events=1) == []
+            for event, source in zip(events, expected):
+                if source["daemon_seq"] == original[5]["daemon_seq"]:
+                    assert "[Event truncated for backfill" in event["text"]
+                    for key in ("daemon_seq", "stream_id", "kind", "timestamp"):
+                        assert event[key] == source[key]
+                    for key in ("jsonl_record_uuid", "jsonl_event_index", "source", "transport", "sender"):
+                        assert event["raw"][key] == source["raw"][key]
+                    if oversized_field in {"text", "peer_payload_large"}:
+                        assert event["text"].startswith('雪😀\n"\\')
+                    else:
+                        assert event["text"].startswith("m5")
+                    if oversized_field in {"peer_payload", "peer_payload_large"}:
+                        assert event["raw"]["peer_payload"] == event["text"]
+                else:
+                    assert event == source
+    finally:
+        terminate_process_group(proc)
+    assert asyncio.run(seed_or_read(False)) == original
 
 
 def test_restore_status_broadcast_is_a_push_not_a_reply():
