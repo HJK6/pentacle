@@ -15,6 +15,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Added
 
+- Opt-in release seam admission unions installed baselines, rejects stale or incomplete proof, and keeps affected canary invocation and verdict scopes aligned. Live surfaces remain unqualified until accepted evidence is registered.
 - Advisory change-to-test reports name affected boundaries, existing test targets and coverage gaps without changing required gates.
 - Installations can hide whole providers from advertised New Chat choices with empty `available_models` lists; web respects visibility and saved-choice fallbacks while explicit launches stay compatible. Legacy mobile UI support requires a later app release.
 - Daemon stats show current admission usage and held verbs with opaque holder ids; diagnostic reads have isolated bounded capacity that cannot consume ping credits.
