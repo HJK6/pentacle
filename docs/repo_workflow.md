@@ -33,6 +33,10 @@ Public writes go through the designated release relay. Keep the applicable local
 gates, independent review and public-content checks before publishing the exact
 candidate branch and opening its pull request. The required GitHub Actions
 context remains `checks` (app ID `15368`); branch protection must not be relaxed.
+Require branches to be up to date before merging (`strict: true`) and enforce
+the protection for administrators. Read back both classic protection and any
+effective branch rules before an integration window; a successful settings
+request alone does not establish the effective configuration.
 
 The release owner records the reviewed PR head SHA, the hosted run's matching
 head SHA, and the actual checkout SHA/tree. `Public checks` runs on pull requests
@@ -42,6 +46,15 @@ fails unless every expected partition succeeds; a green label from an unrelated
 head or incomplete run is insufficient. Retain the per-job summaries and review
 failure/cancellation evidence before retrying.
 
+Serialize the relay's integration window. Read back the current base SHA and
+reviewed PR head, and record the passing run's actual checkout parents and tree.
+Use the relay's `land` entry with the frozen reviewed SHA. Do not use its
+`land_upd` retry wrapper on this protected path: it refreshes the head and updates
+the branch automatically. A refusal returns changed inputs for review before a
+new merge attempt.
+The checked combination must include current `main` and the reviewed head. If
+the branch is behind, update it through the relay and wait for fresh required
+checks before admission. Do not reuse an old green run after the base advances.
 Merge only that reviewed head through the protected PR route, using the existing
 expected-head guard, for example:
 
@@ -54,6 +67,12 @@ PR's head, merged state and `merge_commit_sha`, then remote `main` and its requi
 checks. Record the reviewed head and actual merged SHA separately when a merge
 commit differs. Check source/tree identity when GitHub tests a synthetic PR merge.
 Preserve accepted evidence only for unchanged source, harness and configuration.
+GitHub's strict protection checks currency at the merge operation; the head
+guard alone does not pin the base. If the base advances during admission, stop,
+read back the new combination and wait for its checks. Do not use an admin
+bypass, automatic merge request or direct main push to work around a refusal.
+Different synthetic and final merge SHAs require proved tree equality when
+reusing combined-code evidence; matching PR head labels alone are insufficient.
 Local release gates, changelog review, deployment windows, installed readbacks and
 rollback remain the release owner's obligations; a source merge does not deploy.
 
@@ -62,6 +81,24 @@ It is not an alternate landing route. The retained `verify-tag` command verifies
 existing legacy tags; creating a new promotion tag is not a prerequisite for the
 protected PR route. Private exception projections retain their source-to-public
 mapping receipts.
+
+### Failed checks and evidence reuse
+
+Treat a failed, missing, skipped or cancelled required partition as incomplete
+admission; the fail-closed aggregate must succeed with all four partitions.
+Inspect the first failed predicate and distinguish a product regression from a
+test harness or cleanup failure before changing code or retrying. Preserve the
+failed run and its input identities. A test-oracle failure proves neither a
+product regression nor a passing product.
+
+Focused local checks remain the development loop, followed by one applicable
+final-candidate gate. For example, unchanged daemon source, harness and runtime
+configuration can retain their accepted local evidence after a documentation
+edit; hosted required checks still govern the current combined candidate.
+Adding a web scenario changes the scenario registry and its count/order oracle,
+so evidence for the previous registry cannot certify their new combination.
+Record focused-check time, total local-gate time and hosted waiting time
+separately. Post-merge checks are a backstop, not pre-merge admission evidence.
 
 ### Release notes
 
