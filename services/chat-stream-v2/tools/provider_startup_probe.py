@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from machines import configured_local_host
-from provider_accounts import AccountError, Binding, _codex_config
+from provider_accounts import AccountError, Binding
 from provider_account_native import codex_observation, verify_binary
 
 
@@ -40,7 +40,8 @@ class ProviderStartupProbe:
         content = config.read_bytes()
         if hashlib.sha256(content).hexdigest() != self.config_sha256:
             raise AccountError("provider_config_changed")
-        _codex_config(content.decode("utf-8"))
+        # Observe the owner's frozen, already provisioned config. Native UI
+        # sections are valid here; bootstrap policy belongs to enrollment.
 
     def observe(self):
         self.verify_inputs()

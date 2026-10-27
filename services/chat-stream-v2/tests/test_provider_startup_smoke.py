@@ -44,6 +44,17 @@ def test_native_observation_uses_pinned_binding_and_compares_owner(pinned, monke
         probe.observe()
 
 
+def test_frozen_native_tui_config_is_valid_probe_input(pinned, monkeypatch):
+    path, value, binding = pinned
+    config = Path(binding.home) / 'config.toml'
+    config.write_text('cli_auth_credentials_store = "file"\n[tui]\nnotifications = false\n')
+    value['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
+    path.write_text(json.dumps(value))
+    monkeypatch.setattr(probe_module, 'codex_observation', lambda _: {
+        'provider_id': binding.provider_id, 'pool_id': binding.pool_id})
+    assert probe_module.ProviderStartupProbe(path, binding.host).observe()['native_identity'] == 'matched'
+
+
 @pytest.mark.parametrize('drift,code', [
     ('binary', 'provider_executable_changed'), ('version', 'provider_version_changed'),
     ('config', 'provider_config_changed'),
