@@ -116,7 +116,7 @@
     "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
     "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
     "evidence_sha256": "a8269af6308254a9dd6524c8d7075be2b0ab883527612ab4f43f8227857c389c",
-    "scope_sha256": "9beab14dab5f2678f584ac8bc4e778f7d6615a450de78ef1f4b45c30b2a68be7",
+    "scope_sha256": "dd49e0cd877236e3c63a4af4f420b3beec6bca72587fecf8fbe892ed5b6d3a00",
     "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
   },
   "deploy_invocation": {
