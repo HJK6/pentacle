@@ -47,7 +47,7 @@ def test_every_network_dispatch_translates_only_service_error(monkeypatch, tmp_p
     runtime.mkdir()
     admin = tmp_path / ".config/pentacle-stream/local-admin.token"
     admin.parent.mkdir(parents=True)
-    admin.write_text("ADMIN-sentinel")
+    admin.write_text("ADMIN-sentinel".ljust(64, "0"))
     admin.chmod(0o600)
     item = tmp_path / "work/backlog/fixture__triage"
     item.mkdir(parents=True)
