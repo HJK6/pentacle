@@ -762,6 +762,8 @@ def prune_generation_history_conn(conn, now: float) -> int:
                          "FROM v2_session_generation_history h WHERE h.host=v2_chat_checkpoints.host "
                          "AND h.session_name=v2_chat_checkpoints.session_name "
                          "AND h.generation=v2_chat_checkpoints.generation)")
+            conn.execute("DELETE FROM v2_chat_recovery_ranges WHERE NOT EXISTS (SELECT 1 "
+                         "FROM v2_chat_checkpoints c WHERE c.checkpoint_id=v2_chat_recovery_ranges.checkpoint_id)")
     return cur.rowcount or 0
 
 

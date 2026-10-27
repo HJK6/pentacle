@@ -135,11 +135,15 @@ Retries cannot widen the range. Incomplete trailing bytes stay unacknowledged
 and non-green. Reusing one native file across generations cannot prove which
 generation owns an undrained tail and is refused.
 
-When a range drains while its original lifecycle is still live, the same
-transaction issues and links replacement source proof. ACK retries return that
-existing proof even after closure; they never issue closed-time proof. The
-satellite atomically replaces its retained binding only after receipt, keeping
-the predecessor's range immutable through crash, lost ACK and live resumption.
+The original live-issued source proof remains stable through closure and live
+resumption. Each recovery range has its own immutable ID, bounds and prefix
+digest. Only after its predecessor completes may the next range begin, exactly
+at that predecessor's durable end, after revalidating the retained native/file
+identity and prefix. Recording another bounded range after closure does not
+issue a new identity. ACK retries keep the old range exact; the satellite
+atomically records completion before starting the next range. Live bytes beyond
+a completed range replay through the existing dedupe sink when needed to keep
+that sequence contiguous, including across crashes and lost ACKs.
 
 Historical append changes only the original conversation history and recovery
 metadata. It cannot reopen a seat, refresh activity/working, change provider/account

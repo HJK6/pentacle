@@ -258,6 +258,8 @@ class _StreamTail:
     observed_size: int = 0
     observed_digest: str = ""
     recovery_range: dict | None = None
+    recovery_range_id: str = ''
+    recovery_parent: dict = field(default_factory=dict)
     recovery_gap: str = ""
     partial_tail_bytes: int = 0
 
@@ -922,6 +924,18 @@ class Satellite:
                         or not isinstance(tail.binding.get('checkpoint_id'), str)):
                     raise ValueError('malformed original binding')
                 fixed = tail.recovery_range
+                if (not isinstance(tail.recovery_parent, dict)
+                        or (tail.recovery_parent and (set(tail.recovery_parent) != {'range_id', 'end', 'digest'}
+                            or not isinstance(tail.recovery_parent['range_id'], str)
+                            or chat_recovery.HEX32.fullmatch(tail.recovery_parent['range_id']) is None
+                            or not chat_recovery.offset(tail.recovery_parent['end'])
+                            or tail.recovery_parent['end'] > tail.offset
+                            or not isinstance(tail.recovery_parent['digest'], str)
+                            or chat_recovery.HEX64.fullmatch(tail.recovery_parent['digest']) is None))
+                        or (fixed is None and tail.recovery_range_id)
+                        or (fixed is not None and (not isinstance(tail.recovery_range_id, str)
+                            or chat_recovery.HEX32.fullmatch(tail.recovery_range_id) is None))):
+                    raise ValueError('malformed recovery range identity')
                 if fixed is not None and (not isinstance(fixed, dict) or set(fixed) != {'start', 'end', 'digest'}
                         or not chat_recovery.offset(fixed.get('start')) or not chat_recovery.offset(fixed.get('end'))
                         or not fixed['start'] <= tail.offset <= fixed['end']
@@ -990,6 +1004,13 @@ class Satellite:
                 if tail.recovery_gap:
                     continue
                 if tail.recovery_range is None:
+                    if tail.recovery_parent:
+                        # Live ACKs may have moved farther ahead; replay that
+                        # bridge through the shared dedupe sink for exact range continuity.
+                        tail.offset = tail.recovery_parent['end']
+                        if self._prefix_digest(tail.path, tail.offset) != tail.recovery_parent['digest']:
+                            tail.recovery_gap = 'recovery_prefix_changed'
+                            continue
                     # Capture complete-record EOF once. Incomplete trailing bytes
                     # stay explicit/non-green and are never silently acknowledged.
                     size = os.path.getsize(tail.path)
@@ -1001,8 +1022,9 @@ class Satellite:
                         tail.recovery_gap = 'incomplete_source_record'
                         continue
                     tail.partial_tail_bytes = size - end
-                    if (end == tail.offset and tail.binding.get('predecessor_checkpoint_id')):
-                        continue  # retain unused successor proof; no empty rotation loop
+                    if end == tail.offset and tail.recovery_parent:
+                        continue  # retained identity at EOF; no empty range loop
+                    tail.recovery_range_id = os.urandom(16).hex()
                     tail.recovery_range = {'start': tail.offset, 'end': end,
                         'digest': self._prefix_digest(tail.path, end)}
                     # Fixed range and original binding reach disk before wire.
@@ -1014,13 +1036,15 @@ class Satellite:
                 if tail.offset >= fixed['end']:
                     # Empty ranges and lost final ACKs still need their durable
                     # handoff response. Never discard proof before that receipt.
-                    self._pass_recovery.append({**tail.binding, 'range': fixed,
+                    self._pass_recovery.append({**tail.binding, 'range_id': tail.recovery_range_id,
+                        'predecessor': tail.recovery_parent, 'range': fixed,
                         'from_offset': tail.offset, 'next_offset': tail.offset})
                     continue
                 before = len(events)
                 pending, _ = self._collect_stream(tail, budget, events)
                 budget -= len(events) - before
-                self._pass_recovery.append({**tail.binding, 'range': fixed,
+                self._pass_recovery.append({**tail.binding, 'range_id': tail.recovery_range_id,
+                        'predecessor': tail.recovery_parent, 'range': fixed,
                     'from_offset': tail.offset, 'next_offset': pending})
                 if pending != tail.offset:
                     high_water[tail.path] = pending
@@ -1084,7 +1108,7 @@ class Satellite:
             pane = discovered.get(tail.session_name)
             fence = self._usage_fences.get(f'{self.config.host}:{tail.session_name}') or {}
             if (pane is not None and pane.transcript_path == tail.path
-                    and tail.binding.get('predecessor_checkpoint_id')
+                    and tail.recovery_parent
                     and not tail.partial_tail_bytes
                     and fence.get('session_generation') == tail.binding.get('generation')
                     and str(pane.pane_pid or '') == tail.source_pane_pid):
@@ -1158,6 +1182,7 @@ class Satellite:
                 st.binding = {}
                 st.observed_size, st.observed_digest = 0, ""
                 st.recovery_gap, st.recovery_range = "", None
+                st.recovery_range_id, st.recovery_parent = "", {}
             if st.source_pane_pid == f"!{pane.pane_pid}":
                 continue
             st.provider = provider
@@ -1770,43 +1795,18 @@ class Satellite:
                     or result.get('stream_id') in refused_recovery_streams):
                 continue
             tail = self._recovering.get(result.get('checkpoint_id'))
-            if tail is not None and result.get('status') in {'pending', 'drained'}:
+            if (tail is not None and tail.recovery_range is not None
+                    and result.get('range_id') == tail.recovery_range_id
+                    and result.get('status') in {'pending', 'drained'}):
                 through = result.get('through')
                 if type(through) is int and tail.offset <= through <= tail.recovery_range['end']:
                     tail.offset = through
-                    if result.get('status') != 'drained' or through != tail.recovery_range['end']:
-                        continue
-                    successor = result.get('successor')
-                    if isinstance(successor, dict):
-                        binding = successor.get('binding')
-                        if (not chat_recovery.source_valid(binding, self.config.host)
-                                or not isinstance(binding.get('checkpoint_id'), str)
-                                or binding['checkpoint_id'] == tail.binding['checkpoint_id']
-                                or binding.get('predecessor_checkpoint_id') != tail.binding['checkpoint_id']
-                                or any(binding[k] != tail.binding[k] for k in chat_recovery.SOURCE_FIELDS)
-                                or successor.get('origin_offset') != through):
-                            continue
-                        fixed, cursor = successor.get('range'), successor.get('through')
-                        if fixed is not None and (not isinstance(fixed, dict)
-                                or set(fixed) != set(chat_recovery.RANGE_FIELDS)
-                                or not chat_recovery.offset(fixed['start'])
-                                or not chat_recovery.offset(fixed['end'])
-                                or not isinstance(fixed['digest'], str)
-                                or chat_recovery.HEX64.fullmatch(fixed['digest']) is None):
-                            continue
-                        if (not chat_recovery.offset(cursor) or (fixed is None and cursor != through)
-                                or (fixed is not None and not through <= fixed['start'] <= cursor <= fixed['end'])):
-                            continue
-                        self._recovering.pop(tail.binding['checkpoint_id'])
-                        tail.binding, tail.recovery_range, tail.offset = binding, fixed, cursor
-                        self._recovering[binding['checkpoint_id']] = tail
-                    elif successor is None and 'successor' in result and not tail.partial_tail_bytes:
-                        # Explicit terminal response after closure, with no live
-                        # successor ever issued. Keep any out-of-range bytes as a gap.
-                        if tail.observed_size > through:
-                            tail.recovery_gap = 'recovery_successor_unproven'
-                        else:
-                            self._recovering.pop(tail.binding['checkpoint_id'])
+                    if result.get('status') == 'drained' and through == tail.recovery_range['end']:
+                        tail.recovery_parent = {'range_id': tail.recovery_range_id,
+                            'end': through, 'digest': tail.recovery_range['digest']}
+                        tail.recovery_range, tail.recovery_range_id = None, ''
+                        # Keep the original live-issued identity even when the
+                        # source is closed. Later bytes get a new immutable range.
         self._save_chat_checkpoint()
         version = ack.get("version") if isinstance(ack.get("version"), dict) else {}
         if version.get("status") == "update_required":
