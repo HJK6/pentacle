@@ -150,17 +150,21 @@
       "Revalidation failure after a real isolated plist mutation invokes the existing preimage rollback; collector counterpart is separate from daemon.",
       "Actual provider-counterpart subprocess receives only URL/HOST and installed machine file, strips ambient host overrides; affected required-cell verdict agrees and other seven cells are UNTESTED without full-fleet acceptance.",
       "Quota/missing/cleanup results remain non-green while healthy applied source/stamp persists.",
-      "Rollback entry refuses stale candidate proof; fresh actual recorded-prior source receipt permits isolated rollback and records both source identities."
+      "Rollback entry refuses stale candidate proof; fresh actual recorded-prior source receipt permits isolated rollback and records both source identities.",
+      "Current database identity uses APFS volume UUID plus canonical path, inode and mode; persistent device numbers are excluded. Applied identity controls refuse wrong volume, inode, path substitution and mode."
     ],
     "remaining_coverage": [
       "Installed fixture observations/qualification/results and launchd/restart/boot/runtime/slow-consumer/provider counterparts remain synthetic; actual native startup and satellite convergence belong to separate proof.",
       "Actual managed service/interpreter/config input projection maps only to finite admission/invocation/preimage controls, with unchanged requirements and no reinstall.",
-      "Final source/data input affirmation, canonical gate, actual boot/useful/readback and representative release or conditional preimage restoration remain separate."
+      "Final source/data input affirmation, canonical gate, actual boot/useful/readback and representative release or conditional preimage restoration remain separate.",
+      "Current volume identity does not establish historical volume continuity; live capture, guard, activation and restoration remain separately required."
     ],
-    "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
-    "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
-    "evidence_sha256": "7c49c0b9c3fc1571734e2c32eb75e040193adab5b885b53a6ba77590671aeeff",
-    "scope_sha256": "fbbed62e0333296bfda2b66f3d4c6d0553b30bb8d526fbb4d66e9061e01b4b90",
-    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
+    "qa_report": "a09e120a-7503-43e2-adcf-bd9e84761263",
+    "qa_review_sha256": "e67c1e7d48e3e91f20c1a1bcb17a654728a35a581c337f6a54581849b1d05c78",
+    "evidence_sha256": "165067fa27e7be067917534cad814a994f6e8fd4c7bfa942e1692f370748a77f",
+    "scope_sha256": "29eba631ff4c864a1ddd670b25fa2f19c4c37496b559d01c94555ad65b22cb53",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9",
+    "historical_assertion_qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
+    "historical_assertion_qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5"
   }
 }
