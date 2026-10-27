@@ -42,7 +42,8 @@ const { startFakeCosmo } = require('./lib/fake_cosmo_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
 const CONSUMER_ROOT = process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT
   ? fs.realpathSync(process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT) : path.join(__dirname, '..', '..');
-const { main: startHost } = require(path.join(CONSUMER_ROOT, 'server'));
+const { main: startHost } = process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT
+  ? require(path.join(CONSUMER_ROOT, 'server')) : require('../../server');
 
 const ROOT = path.join(__dirname, '..', '..');
 const CHROME_CANDIDATES = [

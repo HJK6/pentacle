@@ -348,8 +348,8 @@ cancellation, captured destination, room-mic isolation and Retry metadata.
 
 #### Full aggregate and evidence boundaries
 
-The current [scenario registry](../test/e2e/lib/web_scenarios.js) contains
-**29 named scenarios**:
+The [scenario registry](../test/e2e/lib/web_scenarios.js) is authoritative for
+the default gate, including the installed-client seam above. Core journeys include:
 
 1. `default-pane-assistant`
 2. `transport-and-config`
