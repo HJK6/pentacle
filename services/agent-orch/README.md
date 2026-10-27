@@ -1145,10 +1145,11 @@ and discarded. Put workflow-specific structured evidence under `extras` (for
 example `extras.qa_envelope_v1`) or narrative evidence under `details`.
 
 Terminal reports from a session whose daemon-owned `role` or `phase` is `qa`
-(case-insensitive) are QA-grade. Filing requires both
+(case-insensitive) are QA-grade. A `done` QA report requires both
 `qa_verdict:"accept"|"reject"` and `target_sha` as one full 40-hex Git SHA;
-missing or malformed fields are rejected before insertion. QA progress and
-non-QA reports are unchanged. `completion_kind` accepts only
+missing or malformed fields are rejected before insertion. An `aborted` or
+`error` QA report may omit both fields, though typed review-evidence flags
+still require `--target-sha`. QA progress and non-QA reports are unchanged. `completion_kind` accepts only
 `implementation_ready` (a batch-readiness claim) or `tracked` (a durable
 tracked-branch disposition), and either requires `status:"done"`. An
 implementation lead claiming batch readiness sets
