@@ -206,7 +206,6 @@ export class ChatStoreController {
   // `__reconnect` frame's next_generation. Optimistic sends are stamped with
   // the current generation so onReconnect re-arms only the right ones.
   private socketGeneration = 0;
-  private optimisticCounter = 0;
   private voiceMetas = new Map<string, VoiceMeta>();
   private sendSessionGenerations = new Map<string, string>();
   private sendBridge: ChatSendBridge | null = null;
@@ -617,19 +616,15 @@ export class ChatStoreController {
     }
   }
 
-  private nextOptimisticId(streamId: string, composite = false): string {
+  private nextOptimisticId(streamId: string): string {
     const short = String(streamId || 'stream').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'stream';
-    this.optimisticCounter += 1;
-    if (composite) {
-      // Composite input IDs are durable across tabs, clients and reloads.
-      // getRandomValues also works on the supported HTTP web hosts, where
-      // secure-context-only randomUUID may be unavailable. Retries reuse the
-      // stored optimistic ID and do not call this allocator again.
-      const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)),
-        word => word.toString(16).padStart(8, '0')).join('');
-      return `optimistic_${short}_${nonce}`;
-    }
-    return `optimistic_${short}_${this.optimisticCounter}`;
+    // All input IDs must remain distinct across tabs, clients and reloads: a
+    // delayed echo can settle a same-stream send by ID alone. getRandomValues
+    // also works on HTTP hosts where randomUUID may be unavailable. Retries
+    // and reconnect replays reuse the stored ID rather than allocating again.
+    const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)),
+      word => word.toString(16).padStart(8, '0')).join('');
+    return `optimistic_${short}_${nonce}`;
   }
 
   private nextRequestId(prefix: string): string {
@@ -697,7 +692,7 @@ export class ChatStoreController {
     const sendAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && item.key && item.mime) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
 
-    const optimisticId = this.nextOptimisticId(streamId, composite);
+    const optimisticId = this.nextOptimisticId(streamId);
     const requestId = this.nextRequestId('send');
     const now = Date.now();
     const generation = this.socketGeneration;

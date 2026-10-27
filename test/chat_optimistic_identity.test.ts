@@ -1,0 +1,101 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ChatStoreController, type ChatSendBridge } from '../renderer/src/chat_store_controller';
+
+const STREAM = 'peer:ordinary-chat';
+const COMPOSITE = 'peer:assistant';
+const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+function store(t: { after: (fn: () => void) => void }) {
+  const controller = new ChatStoreController();
+  controller.applyFrame({ type: 'snapshot', connected: true, events: [], sessions: [
+    { stream_id: STREAM, host: 'peer', session_name: 'ordinary-chat', provider: 'claude' },
+    { stream_id: COMPOSITE, host: 'peer', session_name: 'assistant', provider: 'composite', session_kind: 'assistant_composite' },
+  ] });
+  t.after(() => controller.dispose());
+  return controller;
+}
+function echo(optimisticId: string, text: string, daemon_seq: number) {
+  return { host: 'peer', provider: 'claude', stream_id: STREAM, session_name: 'ordinary-chat',
+    daemon_seq, timestamp: new Date().toISOString(), kind: 'USER', text, optimistic_id: optimisticId,
+    raw: { receipt_state: 'landed', receipt_delivery: 'landed' } };
+}
+
+test('new ordinary and composite sends are distinct across controllers with a frozen clock and no randomUUID', t => {
+  t.mock.method(Date, 'now', () => 1789840000000);
+  // getRandomValues is available on supported HTTP hosts; randomUUID need not be.
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, 'randomUUID');
+  Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, value: undefined });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(globalThis.crypto, 'randomUUID', descriptor);
+    else delete (globalThis.crypto as { randomUUID?: unknown }).randomUUID;
+  });
+  const ids = [store(t), store(t), store(t)].flatMap(controller => [
+    controller.sendTurn(STREAM, 'identical input'),
+    controller.sendTurn(STREAM, 'identical input'),
+    controller.sendTurn(COMPOSITE, 'identical input'),
+  ]);
+  assert.equal(new Set(ids).size, ids.length, 'independent clients and reloads cannot reuse input identities');
+  assert.ok(ids.every(id => typeof id === 'string' && id.length > 0));
+});
+
+for (const sameText of [false, true]) {
+  test(`a stale pre-reload echo cannot settle a new ${sameText ? 'identical' : 'different'} message`, t => {
+    const before = store(t);
+    const oldText = 'the previous submission';
+    const oldId = before.sendTurn(STREAM, oldText);
+    const reloaded = store(t);
+    const newText = sameText ? oldText : 'a different new submission';
+    const newId = reloaded.sendTurn(STREAM, newText);
+    const oldEcho = echo(oldId, oldText, 101);
+    reloaded.applyFrame({ type: 'chat.event', event: oldEcho });
+    assert.ok(reloaded.getState().optimisticSends?.[newId], 'old echo leaves the new send pending');
+    let rows = reloaded.selectSessionDetail(STREAM).transcriptItems.filter(row => row.isUser);
+    assert.equal(rows.filter(row => row.optimisticId === newId && row.text === newText).length, 1);
+    assert.notEqual(newId, oldId);
+    reloaded.applyFrame({ type: 'chat.event', event: echo(newId, newText, 102) });
+    assert.equal(reloaded.getState().optimisticSends?.[newId], undefined, 'own echo settles the new send');
+    rows = reloaded.selectSessionDetail(STREAM).transcriptItems.filter(row => row.isUser);
+    assert.equal(rows.length, 2, 'each distinct submission remains visible exactly once');
+    assert.equal(rows.filter(row => row.optimisticId === newId && row.text === newText).length, 1);
+    assert.equal(rows.filter(row => row.optimisticId === oldId && row.text === oldText).length, 1);
+  });
+}
+
+test('replayed snapshot with an old ID cannot consume a new same-text optimistic row', t => {
+  const oldId = store(t).sendTurn(STREAM, 'repeat');
+  const reloaded = store(t);
+  const newId = reloaded.sendTurn(STREAM, 'repeat');
+  reloaded.applyFrame({ type: 'snapshot', sessions: reloaded.getState().sessions, events: [echo(oldId, 'repeat', 103)] });
+  assert.ok(reloaded.getState().optimisticSends?.[newId], 'history replay leaves the new submission pending');
+  assert.equal(reloaded.selectSessionDetail(STREAM).transcriptItems.filter(row => row.isUser).length, 2,
+    JSON.stringify({ events: reloaded.getState().events, rows: reloaded.selectSessionDetail(STREAM).transcriptItems }));
+});
+
+test('ordinary retry and reconnect keep the input identity while old RPC receipts stay isolated', async t => {
+  const controller = store(t);
+  const sends: Parameters<ChatSendBridge>[0][] = [];
+  controller.setSendBridge(async args => { sends.push(args); return { ok: false, error: 'unavailable' }; });
+  const id = controller.sendTurn(STREAM, 'retry this');
+  await flush();
+  assert.equal(controller.retryOptimisticSend(id), true);
+  await flush();
+  assert.equal(sends.length, 2);
+  assert.equal(sends[0].optimisticId, id);
+  assert.equal(sends[1].optimisticId, id);
+  assert.notEqual(sends[0].requestId, sends[1].requestId);
+  const reloaded = store(t);
+  const freshId = reloaded.sendTurn(STREAM, 'new message');
+  reloaded.applyFrame({ type: 'send.result', request_id: sends[0].requestId, delivery: 'landed' });
+  assert.equal(reloaded.getState().optimisticSends?.[freshId]?.status, 'queued');
+  const reconnecting = store(t);
+  const replay: Parameters<ChatSendBridge>[0][] = [];
+  reconnecting.setSendBridge(async args => { replay.push(args); return { ok: true }; });
+  const replayId = reconnecting.sendTurn(STREAM, 'replay this after disconnect');
+  await flush();
+  const requestId = replay[0].requestId;
+  reconnecting.applyFrame({ type: '__reconnect', generation: 0, next_generation: 1 });
+  await flush();
+  assert.equal(replay.length, 2, 'eligible reconnect replay is dispatched');
+  assert.equal(replay[1].optimisticId, replayId);
+  assert.equal(replay[1].requestId, requestId, 'reconnect preserves the current request identity');
+});
