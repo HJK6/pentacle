@@ -3945,7 +3945,7 @@ def await_command(args: argparse.Namespace) -> int:
     return 0 if response.get("ok") else 1
 
 
-def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Namespace) -> None:
+def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Namespace) -> bool:
     completion_kind = getattr(args, "completion_kind", None)
     qa_verdict = getattr(args, "qa_verdict", None)
     target_sha = getattr(args, "target_sha", None)
@@ -4022,11 +4022,6 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
                 "field": "extras.qa_review", "code": "flag_payload_conflict",
                 "detail": "QA review flags conflict with extras.qa_review in --result or --result-file",
             })
-        if qa_verdict is None and payload.get("qa_verdict") is None:
-            violations.append({
-                "field": "qa_verdict", "code": "missing_field",
-                "detail": "QA review evidence requires an explicit --qa-verdict or payload qa_verdict",
-            })
     if attestation_stream_id is not None and "qa_attestation" in payload:
         violations.append({
             "field": "qa_attestation",
@@ -4056,6 +4051,8 @@ def _merge_report_structured_flags(payload: dict[str, object], args: argparse.Na
             "stream_id": attestation_stream_id,
             "report_id": attestation_report_id,
         }
+    # Let the shared validator apply the status-dependent QA verdict rule.
+    return qa_review_requested
 
 
 def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, object], bytes | None]:
@@ -4068,8 +4065,8 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
             raise ValueError("schema_error: --result must be a JSON object")
         if args.reason is not None:
             payload["reason"] = args.reason
-        _merge_report_structured_flags(payload, args)
-        validate_report_payload(payload, args.status, enforce_inline_caps=True)
+        qa_grade = _merge_report_structured_flags(payload, args)
+        validate_report_payload(payload, args.status, enforce_inline_caps=True, qa_grade=qa_grade)
         return payload, None
     if args.result_file is not None:
         path = Path(args.result_file).expanduser()
@@ -4091,7 +4088,7 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
             raise ValueError(f"schema_error: {exc}") from exc
         if not isinstance(payload, dict):
             raise ValueError("schema_error: result file must be a JSON object")
-        _merge_report_structured_flags(payload, args)
+        qa_grade = _merge_report_structured_flags(payload, args)
         if any(getattr(args, field, None) is not None for field in (
             "completion_kind", "qa_attestation_stream_id",
         )):
@@ -4107,15 +4104,15 @@ def _report_payload_from_args(args: argparse.Namespace) -> tuple[dict[str, objec
         if any(getattr(args, field, None) is not None for field in (
             "qa_verdict", "target_sha", "qa_reviewed_scope", "qa_gate_evidence_digest", "qa_commission_msg_id",
         )):
-            validate_report_payload(payload, args.status, enforce_inline_caps=True)
+            validate_report_payload(payload, args.status, enforce_inline_caps=True, qa_grade=qa_grade)
             return payload, None
         validate_report_payload(payload, args.status, enforce_inline_caps=False)
         return {}, data
     payload: dict[str, object] = {}
     if args.reason is not None:
         payload["reason"] = args.reason
-    _merge_report_structured_flags(payload, args)
-    validate_report_payload(payload, args.status, enforce_inline_caps=True)
+    qa_grade = _merge_report_structured_flags(payload, args)
+    validate_report_payload(payload, args.status, enforce_inline_caps=True, qa_grade=qa_grade)
     return payload, None
 
 

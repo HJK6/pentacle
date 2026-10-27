@@ -1179,7 +1179,10 @@ the inline report.
 
 For commissioned QA report construction, use `--qa-reviewed-scope` and
 `--qa-gate-evidence-digest` with an explicit full `--target-sha` and
-`--qa-verdict`. Always pass the numeric `--msg-id` of the current commission,
+`--qa-verdict` for a `done` report. An `aborted` or `error` report may omit
+`--qa-verdict`; it still requires a reason and complete typed review evidence
+when those flags are used. No verdict is inferred. Always pass the numeric
+`--msg-id` of the current commission,
 including with `--terminate`: use `0` for the spawn commission and the numeric
 send message id for each re-read. A send request UUID is not a message id. If
 the commission id is unavailable, obtain it from the commissioning lead before
@@ -1408,8 +1411,8 @@ The CLI and daemon validate the inbox before sending and refuse with `inbox_inva
 | `details` | string \| object \| array \| null | Optional. Returned only with `--include-details`; blob-backed values are fetched through `fetch_blob`. Inline serialized cap 256 KiB. |
 | `extras` | object \| null | Optional. Returned only with `--include-extras`; blob-backed values are fetched through `fetch_blob`. Inline serialized cap 256 KiB. |
 | `reason` | string | Required for `status:"error"` and `status:"aborted"`. Inline cap 512 bytes. |
-| `qa_verdict` | string | Closed `accept`/`reject` enum; required for terminal QA-grade filings. |
-| `target_sha` | string | Full 40-hex Git SHA; required for terminal QA-grade filings and echoed from the durable row. |
+| `qa_verdict` | string | Closed `accept`/`reject` enum; required for done QA-grade filings. |
+| `target_sha` | string | Full 40-hex Git SHA; required for done QA-grade filings and whenever typed review evidence flags are used; echoed from the durable row. |
 
 `agent-orch await` returns `{ok, msg_id, status, report_id, ledger_row_id, summary, findings, next_action}` by default. For `error` and `aborted`, it also includes `error` and `reason`. Missing required `reason` is rejected as `missing_reason`; other required-field, type, and inline-size violations are rejected as `schema_error`. Historical/internal terminal rows with an invalid core add the degradation fields described above without changing status-based exit codes.
 
