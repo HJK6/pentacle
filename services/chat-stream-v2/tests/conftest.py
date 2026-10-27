@@ -101,3 +101,9 @@ def isolated_tmux_env(tmp_path):
         finally:
             subprocess.run([wrapper, "kill-server"], check=False, capture_output=True, timeout=5)
             socket.unlink(missing_ok=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_chat_checkpoint(tmp_path, monkeypatch):
+    import satellite
+    monkeypatch.setattr(satellite, "DEFAULT_CHAT_CHECKPOINT_PATH", str(tmp_path / "satellite-chat.json"))

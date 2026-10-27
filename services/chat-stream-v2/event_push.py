@@ -38,6 +38,8 @@ its offsets so nothing is lost while ingest is off.
 """
 from __future__ import annotations
 
+import chat_recovery
+
 import asyncio
 import hashlib
 import hmac
@@ -298,6 +300,7 @@ class EventPush:
                 "session_generation": str(row.get("session_generation") or ""),
                 "provider": str(row.get("provider") or ""),
                 "source_pane_pid": str(row.get("pane_pid") or ""),
+                "session_created_at": str(row.get("created_at") or ""),
                 **({"account_binding": row["account_binding"]} if row.get("account_binding") else {}),
             })
         return [fence for fence in fences if all(fence.values())]
@@ -516,7 +519,9 @@ class EventPush:
         # event-only callers remain compatible until they send a usage item;
         # a supplied proof is never optional or ignored.
         source_proof_required = (
-            "usage" in msg or "usage_provenance" in msg
+            "chat_sources" in msg or "chat_recovery" in msg
+            or "chat_recovery_pending" in msg or "chat_recovery_gaps" in msg
+            or "usage" in msg or "usage_provenance" in msg
             or "usage_unfenced" in msg or "usage_unfenced_losses" in msg
             or msg.get("source_host_proof") is not None
         )
@@ -541,18 +546,20 @@ class EventPush:
         if frozen_streams is False:
             return err("bad_frozen_streams")
 
+        for field in ("chat_sources", "chat_recovery"):
+            block = msg.get(field, [])
+            if (not isinstance(block, list) or len(block) > chat_recovery.MAX_SOURCES
+                    or any(not isinstance(item, dict) for item in block)):
+                return err("bad_" + field)
+
         satellite_sha = str(msg.get("satellite_sha") or "")
         version = await self._version_verdict(host, satellite_sha)
         stale = version["status"] != "ok"
         satellite_pid = msg.get("satellite_pid")
-        await self.store.put(
-            f"event_push.runtime.{host}",
-            json.dumps({
-                "sha": satellite_sha,
-                "pid": satellite_pid if type(satellite_pid) is int and satellite_pid > 0 else None,
-                "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "observed_at_epoch": time.time(),
-            }, sort_keys=True),
+        incarnation = msg.get("satellite_incarnation")
+        incarnation = incarnation if isinstance(incarnation, str) and 0 < len(incarnation) <= 128 else ""
+        await self.store.record_satellite_runtime(
+            host, satellite_sha, satellite_pid, incarnation, admitted=False,
         )
         if stale:
             return err("satellite_version_mismatch", version=version)
@@ -580,14 +587,44 @@ class EventPush:
                 new_drops.add(key)
                 log.warning("event.push dropped stream=%s reason=%s", stream_id, reason)
 
+        invalid_recovery_tokens: set[str] = set()
+        invalid_recovery_streams: set[str] = set()
+
+        def drop_historical(stream_id, reason, token):
+            if isinstance(token, str):
+                invalid_recovery_tokens.add(token)
+            invalid_recovery_streams.add(stream_id)
+            dropped.append({'stream_id': stream_id, 'reason': reason,
+                            'checkpoint_id': token if isinstance(token, str) else 'unproven'})
+
+        historical_events: dict[str, list[dict]] = {}
         for payload in events:
             invalid = validate_event_payload(payload, host)
             if invalid is not None:
+                if isinstance(payload, dict) and "recovery_id" in payload:
+                    drop_historical(str(payload.get("stream_id") or ""), invalid, payload.get('recovery_id'))
+                    continue
                 return err(invalid)
             assert isinstance(payload, dict)  # narrowed by _validate_event_payload
             stream_id = str(payload["stream_id"])
             provider = str(payload["provider"])
             wire_payload = dict(payload)
+            recovery_id = wire_payload.pop("recovery_id", None)
+            transcript_offset = wire_payload.pop("transcript_offset", None)
+            if "recovery_id" in payload:
+                if not isinstance(recovery_id, str):
+                    drop_historical(stream_id, "recovery_identity_unproven", recovery_id)
+                    continue
+                if (not isinstance(payload.get('kind'), str) or not payload['kind']
+                        or not isinstance(payload.get('text'), str)):
+                    drop_historical(stream_id, "recovery_envelope_invalid", recovery_id)
+                    continue
+                wire_payload.pop("source_pane_pid", None)
+                historical_events.setdefault(recovery_id, []).append({
+                    "event": wire_payload, "identity": _identity_key(payload),
+                    "offset": transcript_offset,
+                })
+                continue
             raw = payload.get("raw")
             binding = payload.get("session_id") if provider == "claude" and isinstance(raw, dict) and payload.get("session_id") == raw.get("source_session_identity") else None
             if provider == "codex":
@@ -746,6 +783,36 @@ class EventPush:
                 log.warning("event.push inventory broadcast failed host=%s: %s", host, exc)
                 return err("ingest_failed")
 
+        recovery_batches = []
+        seen_recovery = set()
+        for batch in msg.get("chat_recovery", []):
+            token = batch.get("checkpoint_id")
+            if not isinstance(token, str) or token in seen_recovery:
+                drop_historical(str(batch.get("stream_id") or ""), "recovery_identity_unproven", token)
+                continue
+            seen_recovery.add(token)
+            recovery_batches.append({**batch, "entries": historical_events.get(token, [])})
+        for token in historical_events.keys() - seen_recovery:
+            for entry in historical_events[token]:
+                drop_historical(entry["event"]["stream_id"], "recovery_identity_unproven", token)
+        # A rejected envelope is not an empty transcript span. Refuse its
+        # entire source batch before any range/cursor writes, including when
+        # every event was rejected or its token was malformed.
+        for batch in recovery_batches:
+            batch['_envelope_invalid'] = (
+                batch['checkpoint_id'] in invalid_recovery_tokens
+                or batch.get('stream_id') in invalid_recovery_streams
+            )
+        recovery_results = await self.store.append_chat_recovery(authenticated_source_host, recovery_batches)
+        for result in recovery_results:
+            if result["status"] not in {"pending", "drained"}:
+                drop_historical(str(result.get('stream_id') or ''), result['status'], result.get('checkpoint_id'))
+        dropped_ids = {item["stream_id"] for item in dropped if 'checkpoint_id' not in item}
+        source_results = await self.store.bind_chat_checkpoints(authenticated_source_host, [
+            source for source in msg.get("chat_sources", [])
+            if source.get("stream_id") not in dropped_ids
+        ])
+
         usage_recorded = usage_replayed = 0
         usage_rejected: list[dict[str, str]] = []
         if "usage" in msg:
@@ -786,6 +853,22 @@ class EventPush:
                     log.warning("event.push provenance failed host=%s: %s", host, exc)
                     provenance_ack = {"error": "provenance_failed"}
 
+        pending = msg.get("chat_recovery_pending")
+        gaps = msg.get("chat_recovery_gaps")
+        recovery_measured = (type(pending) is int and pending >= 0 and isinstance(gaps, list))
+        await self.store.record_satellite_runtime(
+            host, satellite_sha, satellite_pid, incarnation, admitted=True,
+            useful=inserted + sum(result.get("inserted", 0) for result in recovery_results),
+            recovery_pending=max(pending, sum(result['status'] != 'drained' for result in recovery_results))
+                if recovery_measured else None,
+            recovery_gaps=[*gaps, *[
+                {'stream_id': result.get('stream_id'), 'reason': result['status']}
+                for result in [*recovery_results, *source_results]
+                if result['status'] not in {'bound', 'drained', 'pending'}
+            ], *[{'stream_id': item['stream_id'], 'reason': item['reason']}
+                 for item in dropped if 'checkpoint_id' in item]] if recovery_measured else None,
+        )
+
         # High-water marks: echo the per-file offsets this batch reached so the
         # satellite advances its in-memory offset ONLY after a durable accept.
         # A dropped ack tells the satellite to stop its stale stream tail; failed
@@ -798,7 +881,9 @@ class EventPush:
             "accepted": len(entries),
             "dropped": dropped,
             "reopened": reopened,
-            "inserted": inserted,
+            "inserted": inserted + sum(result.get("inserted", 0) for result in recovery_results),
+            "chat_bindings": source_results,
+            "chat_recovery": recovery_results,
             "high_water": high_water,
             "version": version,
             "wire_version": WIRE_VERSION,

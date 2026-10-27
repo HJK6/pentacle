@@ -434,3 +434,142 @@ def test_held_contention_retains_data_and_backoff_until_real_recovery(tmp_path, 
         finally:
             rig.stop()
     asyncio.run(run())
+
+
+def _update_checkout(tmp_path, monkeypatch, *, broken=False):
+    """Disposable host-shaped origin, dedicated detached clone and prepared venv."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    origin = tmp_path / 'origin'
+    origin.mkdir()
+    def git(root, *args):
+        return subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
+    git(origin, 'init')
+    git(origin, 'config', 'user.name', 'Pentacle Agent')
+    git(origin, 'config', 'user.email', 'agent@users.noreply.github.com')
+    (origin / '.gitignore').write_text('.venv\n__pycache__/\n')
+    service = origin / 'services/chat-stream-v2'
+    service.mkdir(parents=True)
+    import importlib.metadata
+    (service / 'requirements.txt').write_text('websockets==' + importlib.metadata.version('websockets') + '\n')
+    (service / 'satellite.py').write_text('import websockets\n')
+    git(origin, 'add', '.')
+    git(origin, 'commit', '-m', 'Known good satellite fixture')
+    old = git(origin, 'rev-parse', 'HEAD')
+    (service / 'satellite.py').write_text('import dependency_not_prepared\n' if broken else 'import websockets\n# candidate\n')
+    git(origin, 'add', '.')
+    git(origin, 'commit', '-m', 'Candidate satellite fixture')
+    target = git(origin, 'rev-parse', 'HEAD')
+    checkout = tmp_path / 'satellite'
+    subprocess.run(['git', 'clone', str(origin), str(checkout)], check=True, capture_output=True)
+    git(checkout, 'checkout', '--detach', old)
+    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(checkout / '.venv')],
+                   check=True, capture_output=True, timeout=30)
+    import shutil
+    import websockets
+    packages = checkout / '.venv/lib' / ('python' + '.'.join(map(str, sys.version_info[:2]))) / 'site-packages'
+    installed = Path(websockets.__file__).parent
+    shutil.copytree(installed, packages / 'websockets')
+    for metadata in installed.parent.glob('websockets-*.dist-info'):
+        shutil.copytree(metadata, packages / metadata.name)
+    monkeypatch.setattr(sys, 'prefix', str(checkout / '.venv'))
+    monkeypatch.setattr(sys, 'executable', str(checkout / '.venv/bin/python'))
+    # The fixture supplies the execution-host source identity, not updater behavior.
+    monkeypatch.setattr(satellite, '_repo_root', lambda: str(checkout))
+    sat = satellite.Satellite(satellite.SatelliteConfig(host='fixture', checkout=str(checkout),
+        update_origin=str(origin), chat_checkpoint_path=str(tmp_path / 'chat.json')))
+    assert sat.sha == old
+    return sat, old, target, git
+
+
+@pytest.mark.parametrize('failure', ['exec', 'import', 'checkout', 'fetch', 'restore'])
+def test_updater_restores_known_good_after_real_checkout_failure(tmp_path, monkeypatch, failure):
+    import subprocess
+    sat, old, target, git = _update_checkout(tmp_path, monkeypatch, broken=failure == 'import')
+    restarted = []
+    def exec_fail():
+        restarted.append(True)
+        raise OSError('injected exec failure')
+    monkeypatch.setattr(sat, '_exec_restart', exec_fail)
+    original_git = satellite._git
+    def failing_git(checkout, *args, **kwargs):
+        if failure == 'fetch' and args[0] == 'fetch':
+            return subprocess.CompletedProcess(args, 1, '', 'injected fetch failure')
+        if failure == 'checkout' and args[:2] == ('checkout', '--detach') and args[2] == target:
+            # Simulate interrupted checkout after it actually changed disk.
+            original_git(checkout, *args, **kwargs)
+            return subprocess.CompletedProcess(args, 1, '', 'injected interrupted checkout')
+        if failure == 'restore' and args[:2] == ('checkout', '--detach') and args[2] == old:
+            return subprocess.CompletedProcess(args, 1, '', 'injected restoration failure')
+        return original_git(checkout, *args, **kwargs)
+    monkeypatch.setattr(satellite, '_git', failing_git)
+    sat._maybe_update(target)
+    assert sat.sha == old  # old process identity never pretends to be candidate
+    assert git(sat.config.checkout, 'rev-parse', 'HEAD') == (target if failure == 'restore' else old)
+    assert sat._update_outcome == ('source_restore_failed' if failure == 'restore' else
+                                    'preflight_failed' if failure == 'fetch' else 'source_restored')
+    assert bool(restarted) == (failure in {'exec', 'restore'})
+    preimages = list(tmp_path.glob('update-*.json'))
+    assert len(preimages) == 1
+    before = preimages[0].read_bytes()
+    sat._last_update_attempt = 0
+    sat._maybe_update(target)
+    assert preimages[0].read_bytes() == before
+
+
+@pytest.mark.parametrize('bad', ['dirty', 'wrong_origin', 'wrong_source', 'attached', 'wrong_venv', 'short_sha'])
+def test_updater_preflight_refuses_before_mutating_checkout(tmp_path, monkeypatch, bad):
+    import sys
+    sat, old, target, git = _update_checkout(tmp_path, monkeypatch)
+    if bad == 'dirty':
+        from pathlib import Path
+        (Path(sat.config.checkout) / 'unowned.txt').write_text('preserve')
+    if bad == 'wrong_origin': sat.config.update_origin = 'wrong-authority'
+    if bad == 'wrong_source': monkeypatch.setattr(satellite, '_repo_root', lambda: str(tmp_path / 'other'))
+    if bad == 'attached': git(sat.config.checkout, 'switch', '-c', 'unowned-branch')
+    if bad == 'wrong_venv': monkeypatch.setattr(sys, 'prefix', str(tmp_path / 'other-venv'))
+    if bad == 'short_sha': target = target[:12]
+    calls = []
+    monkeypatch.setattr(sat, '_exec_restart', lambda: calls.append('exec'))
+    sat._maybe_update(target)
+    assert git(sat.config.checkout, 'rev-parse', 'HEAD') == old
+    assert calls == [] and list(tmp_path.glob('update-*.json')) == []
+
+
+def test_updater_honors_minimum_and_full_pin_downgrade(tmp_path, monkeypatch):
+    sat, old, target, git = _update_checkout(tmp_path, monkeypatch)
+    sat.config.update_min_interval_s = 60
+    sat.config.backoff_max_s = 30
+    sat._last_update_attempt = 100
+    monkeypatch.setattr(satellite.time, 'monotonic', lambda: 131)
+    sat._maybe_update(target)
+    assert git(sat.config.checkout, 'rev-parse', 'HEAD') == old
+    assert list(tmp_path.glob('update-*.json')) == []
+    monkeypatch.setattr(satellite.time, 'monotonic', lambda: 161)
+    executed = []
+    monkeypatch.setattr(sat, '_exec_restart', lambda: executed.append(git(sat.config.checkout, 'rev-parse', 'HEAD')))
+    sat._maybe_update(target)
+    assert executed == [target]
+    # A supervised candidate can return to the approved original full SHA.
+    sat.sha = target
+    sat._last_update_attempt = 0
+    sat._maybe_update(old)
+    assert executed == [target, old]
+
+
+def test_failed_boot_is_restored_by_independent_supervisor_command(tmp_path, monkeypatch):
+    """The broken process cannot receive a pin; restoration runs outside it."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    sat, old, target, git = _update_checkout(tmp_path, monkeypatch, broken=True)
+    git(sat.config.checkout, 'checkout', '--detach', target)
+    command = [sys.executable, '-B', str(Path(sat.config.checkout) / 'services/chat-stream-v2/satellite.py')]
+    broken = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert broken.returncode != 0 and 'dependency_not_prepared' in broken.stderr
+    # Disposable analogue of FD SSH checkout + supervisor restart using the
+    # retained interpreter/checkout preimage; no production service commands.
+    git(sat.config.checkout, 'checkout', '--detach', old)
+    restored = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert restored.returncode == 0 and git(sat.config.checkout, 'rev-parse', 'HEAD') == old
