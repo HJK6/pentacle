@@ -75,10 +75,10 @@ def check_lead_spawn(root: str | Path | None, spec_id: str) -> dict[str, Any]:
     try:
         reader = SpecReader(root)
         _, candidate_folder, identity, candidate_text = reader.read(spec_id)
-    except SOURCE_READ_ERRORS:
-        # The existing spawn resolver usually catches this first; a fresh read
-        # can still race an edit. Never authorize an unreadable candidate.
-        return dict(result, error_code='wip_override_malformed', message=f'wip_override_malformed: spec={spec_id}')
+    except SOURCE_READ_ERRORS as exc:
+        # The resolver can race an edit; an unreadable candidate must fail closed.
+        return dict(result, error_code='wip_spec_unreadable',
+                    message=f'wip_spec_unreadable: spec={spec_id} exception={type(exc).__name__}')
     stem = candidate_folder.name
     repo = stem.split('__', 1)[0]
     active = {folder.name: (folder, canonical) for folder, (canonical, _) in reader.index.identities.items()
@@ -91,6 +91,11 @@ def check_lead_spawn(root: str | Path | None, spec_id: str) -> dict[str, Any]:
     for item_stem, (folder, canonical) in sorted(active.items()):
         try:
             text = candidate_text if item_stem == stem else reader.read(canonical)[3]
+        except SOURCE_READ_ERRORS as exc:
+            return dict(result, error_code='wip_spec_unreadable',
+                        message=f'wip_spec_unreadable: spec={canonical} exception={type(exc).__name__}',
+                        warnings=warnings)
+        try:
             if parse_override(text):
                 overrides.add(item_stem)
         except SOURCE_READ_ERRORS:

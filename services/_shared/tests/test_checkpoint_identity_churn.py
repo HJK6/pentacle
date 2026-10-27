@@ -92,7 +92,7 @@ def test_default_reader_and_wip_still_seal_unrelated_bytes(board, monkeypatch, c
         with pytest.raises(ValueError, match="spec_identity_changed"):
             SpecReader(root)
     else:
-        assert check_lead_spawn(root, TARGET_ID)["error_code"] == "wip_override_malformed"
+        assert check_lead_spawn(root, TARGET_ID)["error_code"] == "wip_spec_unreadable"
     assert applied == [True]
 
 
