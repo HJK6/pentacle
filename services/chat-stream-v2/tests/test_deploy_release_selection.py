@@ -85,7 +85,7 @@ def admitted_transaction(isolated_release, tmp_path, monkeypatch):
     """Real admission/transaction/subprocesses; synthetic source, receipts and OS/provider peers."""
     import copy
     from functools import partial
-    from .test_release_selection import SHA, _write, _execution_runner
+    from .test_release_selection import SHA, _write, _execution_runner, _matching_web_tuple
     module, service, repo, prior, target, before, calls, activate = isolated_release
     s = module.release_selection
     machines = tmp_path / 'machines.json'
@@ -111,6 +111,8 @@ def admitted_transaction(isolated_release, tmp_path, monkeypatch):
             value['files'] += [{'path': str(p), 'sha256': s.digest(p.read_bytes())} for p in (machines, plist)]
         inputs['external_inputs'][label] = {'installed': copy.deepcopy(value), 'candidate': copy.deepcopy(value)}
     inputs['external_inputs']['deploy_config']['candidate']['identity']['revision'] = 'fixture-change'
+    _matching_web_tuple(inputs, tmp_path)
+    inputs['external_inputs']['client_versions']['candidate'] = copy.deepcopy(inputs['external_inputs']['client_versions']['installed'])
     input_path = tmp_path / 'actual-inputs.json'
     python = str(module._venv_python(repo, service))
     subprocess_runner = module._run
@@ -298,8 +300,10 @@ def test_rollback_needs_fresh_receipts_and_uses_actual_recorded_preimage(admitte
     for row in t['inputs']['installed']:
         if row['role'] != 'mobile':
             row['sha'] = t['target']
-            row['receipt'] = _write(Path(row['receipt']['path']),
-                {**{k: row[k] for k in ('component', 'repository', 'sha')}, 'observed': True})
+            observed = ({'installed_web': t['inputs']['external_inputs']['client_versions']['installed']['identity']['web']}
+                        if row['role'] == 'web' else
+                        {**{k: row[k] for k in ('component', 'repository', 'sha')}, 'observed': True})
+            row['receipt'] = _write(Path(row['receipt']['path']), observed)
     t['freeze']()
     t['module']._checked(('git', 'checkout', '--detach', t['target']), t['repo'], t['module']._run)
     rolled = t['activate'](rollback=True)

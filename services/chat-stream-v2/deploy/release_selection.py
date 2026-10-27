@@ -120,6 +120,27 @@ def installed_receipt(row, candidate):
                 and receipt.get("observed") is True, "installed baseline receipt mismatch")
 
 
+def observed_web_consumer(identity):
+    rows = [row for row in identity["installed"] if row["role"] == "web"]
+    require(len(rows) == 1, "unsupported installed web consumer set")
+    row = rows[0]
+    external = identity["external_inputs"]["client_versions"]["installed"]
+    consumer = external["identity"].get("web")
+    require(isinstance(consumer, dict) and consumer.get("source") == row["sha"], "consumer source mismatch")
+    require(row.get("receipt_format") == "client_inventory", "missing installed web artifact observation")
+    observed = read(file_binding(row["receipt"])["path"]).get("installed_web")
+    require(observed == consumer, "consumer observation mismatch")
+    artifacts = consumer.get("files")
+    require(type(consumer.get("active_pid")) is int and consumer["active_pid"] > 0
+            and isinstance(artifacts, dict) and artifacts
+            and all(isinstance(name, str) and name and isinstance(sha, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", sha) for name, sha in artifacts.items()),
+            "missing installed web artifact observation")
+    require(set(artifacts.values()) <= {b["sha256"] for b in external["files"]},
+            "missing installed web artifact binding")
+    return observed
+
+
 def prepare(repo, sha, input_path, python, runner):
     """Union actual installed receipts, not the last PR or runtime_manifest."""
     inputs = read(input_path)
@@ -167,6 +188,7 @@ def prepare(repo, sha, input_path, python, runner):
     mobile = sorted(row["sha"] for row in installed if row["role"] == "mobile")
     require(external["client_versions"]["installed"]["identity"].get("mobile_source_shas") == mobile,
             "consumer source mismatch")
+    observed_web_consumer({"installed": installed, "external_inputs": external})
     candidate_mobile = external["client_versions"]["candidate"]["identity"].get("mobile_source_shas")
     require(isinstance(candidate_mobile, list) and candidate_mobile and all(full_sha(v) for v in candidate_mobile),
             "missing candidate consumer source")
@@ -277,6 +299,8 @@ def qualification_context(repo, plan, name, proof, runner):
                      for side, value in identity["external_inputs"][label].items()} for label in labels}
     return {"source_reference_sha256": reference, "source_sha256": current,
             "tuple_sha256": digest(key(tuples).encode()),
+            **({"installed_web_sha256": digest(key(observed_web_consumer(identity)).encode())}
+               if name == "client_wire_render" else {}),
             "toolchain_sha256": digest(key(identity["toolchain"]).encode()),
             **{k: identity[k] for k in ("selector_sha256", "map_sha256", "gate_config_sha256", "gate_env_sha256")},
             "missing_coverage_sha256": digest(key(boundary["missing_coverage"]).encode())}

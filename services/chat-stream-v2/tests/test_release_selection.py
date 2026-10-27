@@ -121,6 +121,8 @@ def release(tmp_path, monkeypatch):
     inputs = {"schema": "pentacle.release-inputs.v1", "candidate": head,
               "installed": installed, "external_inputs": external,
               "activation": {"url": "ws://127.0.0.1:12345", "host": "primary"}}
+    _matching_web_tuple(inputs, tmp_path)
+    external["client_versions"]["candidate"] = copy.deepcopy(external["client_versions"]["installed"])
     input_path = tmp_path / "release-inputs.json"
     def prepare():
         _write(input_path, inputs)
@@ -285,7 +287,7 @@ def test_changed_source_or_harness_invalidates_result(release, tmp_path, monkeyp
 
 def test_existing_client_census_fields_are_consumed_without_rewriting_receipt(release, tmp_path):
     _, inputs, prepare, *_ = release
-    census = {"installed_web": {"source": inputs["installed"][1]["sha"], "active_pid": 123, "files": {"bundle.js": "f" * 64}},
+    census = {"installed_web": inputs["external_inputs"]["client_versions"]["installed"]["identity"]["web"],
               "installed_mobile": {"source": SHA, "build": "123"},
               "receipts": {"artifact": _write(tmp_path / "artifact.json", {"fixture": True})}}
     binding = _write(tmp_path / "inventory.json", census)
@@ -323,6 +325,8 @@ def test_docs_only_is_empty_only_when_all_actual_baselines_agree(release):
             row["sha"] = inputs["candidate"]
             row["receipt"] = _write(Path(row["receipt"]["path"]),
                 {"component": row["component"], "repository": row["repository"], "sha": row["sha"], "observed": True})
+    _matching_web_tuple(inputs, Path(inputs["installed"][1]["receipt"]["path"]).parent)
+    inputs["external_inputs"]["client_versions"]["candidate"] = copy.deepcopy(inputs["external_inputs"]["client_versions"]["installed"])
     plan = prepare()
     assert plan["classification"] == "docs_only" and plan["targets"] == []
     selection.require_qualification(plan)
@@ -336,6 +340,8 @@ def test_same_candidate_tuple_drift_runs_affected_provider_target(release, tmp_p
             row["sha"] = inputs["candidate"]
             row["receipt"] = _write(Path(row["receipt"]["path"]),
                 {"component": row["component"], "repository": row["repository"], "sha": row["sha"], "observed": True})
+    _matching_web_tuple(inputs, tmp_path)
+    inputs["external_inputs"]["client_versions"]["candidate"] = copy.deepcopy(inputs["external_inputs"]["client_versions"]["installed"])
     inputs["external_inputs"]["provider_config"]["candidate"]["identity"]["revision"] = "changed"
     plan = prepare()
     _qualify(monkeypatch, plan)
@@ -461,3 +467,84 @@ def test_browser_scenario_evidence_cannot_be_substituted(release, tmp_path, monk
     row["evidence"]["terminal"] = _write(terminal_path, terminal)
     with pytest.raises(selection.Invalid, match="scenario"):
         selection.validate_results(plan, section)
+
+
+def _matching_web_tuple(inputs, tmp_path):
+    row = next(r for r in inputs['installed'] if r['role'] == 'web')
+    artifact = _write(tmp_path / 'installed-web-bundle.json', {'synthetic': 'accepted web artifact'})
+    consumer = {'source': row['sha'], 'active_pid': 123, 'files': {'bundle.js': artifact['sha256']}}
+    inputs['external_inputs']['client_versions']['installed']['identity']['web'] = copy.deepcopy(consumer)
+    if artifact not in inputs['external_inputs']['client_versions']['installed']['files']:
+        inputs['external_inputs']['client_versions']['installed']['files'].append(artifact)
+    row.update(receipt_format='client_inventory',
+               receipt=_write(tmp_path / 'web-inventory.json', {'installed_web': consumer}))
+    return row, consumer
+
+
+def test_other_observed_web_source_cannot_reuse_unchanged_consumer_proof(release, tmp_path, monkeypatch):
+    repo, inputs, prepare, _, commit, runner, input_path = release
+    row, _ = _matching_web_tuple(inputs, tmp_path)
+    original = prepare()
+    proof = {'source_ref': inputs['candidate'], 'source_paths': ['renderer/'], 'input_labels': ['client_versions'],
+             'assertion_scope': ['synthetic client control'], 'remaining_coverage': ['synthetic external counterparts'],
+             'qa_report': 'synthetic-only', 'evidence_sha256': 'f' * 64}
+    context = selection.qualification_context(repo, original, 'client_wire_render', proof, runner)
+    proof['scope_sha256'] = selection.digest(selection.key(context).encode())
+    monkeypatch.setattr(selection, 'QUALIFIED_SEAMS', {'client_wire_render': proof})
+    # Match the independent real-Git control: same candidate and external proof,
+    # materially different independently observed installed consumer.
+    (repo / 'renderer/other-installed.js').write_text('// another installed web tree\n')
+    row['sha'] = commit('different installed web source')
+    assert runner(('git', 'checkout', '--detach', inputs['candidate']), repo).returncode == 0
+    row['receipt'] = _write(Path(row['receipt']['path']),
+        {**{k: row[k] for k in ('component', 'repository', 'sha')}, 'observed': True})
+    row['receipt_format'] = 'observed_component'
+    with pytest.raises(selection.Invalid, match='consumer source mismatch'):
+        changed = prepare()
+        selection.require_qualification(changed)
+        section = selection.run_selected(changed, repo, sys.executable, _execution_runner(changed, []),
+                                         tmp_path / 'work', tmp_path / 'proof')
+        selection.admit(repo, inputs['candidate'], input_path, {'seam_results': section}, sys.executable, runner)
+
+
+def test_observed_web_artifact_cannot_contradict_unchanged_consumer_tuple(release, tmp_path):
+    _, inputs, prepare, *_ = release
+    row, consumer = _matching_web_tuple(inputs, tmp_path)
+    changed = copy.deepcopy(consumer)
+    changed['files']['bundle.js'] = _write(tmp_path / 'other-bundle.json', {'different': 'actual artifact'})['sha256']
+    row.update(receipt_format='client_inventory',
+               receipt=_write(tmp_path / 'different-inventory.json', {'installed_web': changed}))
+    with pytest.raises(selection.Invalid, match='consumer observation mismatch'):
+        prepare()
+
+
+@pytest.mark.parametrize('corruption', ['metadata_only', 'multiple_web', 'unbound_artifact'])
+def test_unsupported_web_observation_fails_closed(release, corruption):
+    _, inputs, prepare, *_ = release
+    row = next(r for r in inputs['installed'] if r['role'] == 'web')
+    if corruption == 'metadata_only':
+        row['receipt_format'] = 'observed_component'
+        row['receipt'] = _write(Path(row['receipt']['path']),
+            {**{k: row[k] for k in ('component', 'repository', 'sha')}, 'observed': True})
+        reason = 'missing installed web artifact observation'
+    elif corruption == 'multiple_web':
+        another = copy.deepcopy(row)
+        another['component'] = 'another-web'
+        inputs['installed'].append(another)
+        reason = 'unsupported installed web consumer set'
+    else:
+        value = inputs['external_inputs']['client_versions']['installed']
+        artifact_hashes = set(value['identity']['web']['files'].values())
+        value['files'] = [b for b in value['files'] if b['sha256'] not in artifact_hashes]
+        reason = 'missing installed web artifact binding'
+    with pytest.raises(selection.Invalid, match=reason):
+        prepare()
+
+
+def test_exact_observed_web_inventory_is_bound_in_client_qualification(release):
+    repo, inputs, prepare, _, _, runner, _ = release
+    plan = prepare()
+    proof = {'source_ref': inputs['candidate'], 'source_paths': ['renderer/'], 'input_labels': ['client_versions']}
+    context = selection.qualification_context(repo, plan, 'client_wire_render', proof, runner)
+    observed = selection.read(next(row for row in inputs['installed'] if row['role'] == 'web')['receipt']['path'])['installed_web']
+    assert context['installed_web_sha256'] == selection.digest(selection.key(observed).encode())

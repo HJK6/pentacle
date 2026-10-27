@@ -28,7 +28,11 @@ The release owner supplies private `pentacle.release-inputs.v1` JSON with:
 | `activation` | `{ "url": "ws://127.0.0.1:7791", "host": "primary" }`, using the installed local machine name and existing Codex promptless canary. Other scopes require their own proved runner contract. |
 
 Installed rows are `{component, role, repository, sha, receipt}` with optional
-`receipt_format`. File/receipt bindings are `{path, sha256}` with absolute paths.
+`receipt_format`. The finite client tuple supports exactly one observed web
+consumer: its `client_inventory` source and complete artifact manifest must match
+`client_versions.installed.identity.web`, and every artifact hash must have a bound
+file. Metadata-only web observations, contradictions and multiple-web shapes refuse.
+File/receipt bindings are `{path, sha256}` with absolute paths.
 Repositories are `https://github.com/HJK6/pentacle.git`, except mobile uses
 `https://github.com/HJK6/pentacle-mobile.git`. Mobile source is an external input,
 never a Pentacle Git baseline. All required same-repository commits must exist
@@ -47,7 +51,7 @@ locally. Reuse existing receipts:
   non-green.
 - `observed_component` (default): matching `component`, `repository`, `sha` and
   `observed: true` from an actual bounded installed readback where no existing
-  format applies.
+  format applies. Web consumers require the inventory format above.
 
 External tuples are `{identity: {...nonsecret exact tuple...}, files: [...]}`.
 Bind actual executable/config/client artifacts and retained readback manifests;
