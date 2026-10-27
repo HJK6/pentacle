@@ -26,3 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - run: 'true'
+  checks:
+    needs: [frontend, web, daemon, contracts]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - env:
+        CI_REQUIRED_NEEDS: ${{ toJSON(needs) }}
+      run: python3 scripts/ci_required_aggregate.py
