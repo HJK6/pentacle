@@ -54,7 +54,7 @@ def test_legacy_mode_never_claims_selective_qualification(isolated_release):
     assert activate()["selective_qualification"] == "not_enabled"
 
 
-@pytest.mark.parametrize("mismatch", [None, "endpoint", "host", "configuration"])
+@pytest.mark.parametrize("mismatch", [None, "endpoint", "host", "configuration", "missing_baseline"])
 def test_activation_floor_is_bound_to_actual_local_runtime_config(tmp_path, monkeypatch, mismatch):
     from .test_deploy_script import deploy_mod, V2_SERVICE
     machines = tmp_path / "machines.json"
@@ -63,6 +63,7 @@ def test_activation_floor_is_bound_to_actual_local_runtime_config(tmp_path, monk
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _: {"PENTACLE_MACHINES_FILE": str(machines)})
     binding = {"path": str(machines), "sha256": hashlib.sha256(machines.read_bytes()).hexdigest()}
     plan = {"identity": {"activation": {"url": "ws://127.0.0.1:7791", "host": "primary"},
+                         "installed": [{"component": "secondary", "role": "satellite"}],
                          "external_inputs": {"deploy_config": {"candidate": {"files": [binding]}}}}}
     if mismatch == "endpoint":
         plan["identity"]["activation"]["url"] = "ws://127.0.0.1:12345"
@@ -70,6 +71,8 @@ def test_activation_floor_is_bound_to_actual_local_runtime_config(tmp_path, monk
         plan["identity"]["activation"]["host"] = "secondary"
     elif mismatch == "configuration":
         binding["sha256"] = "0" * 64
+    elif mismatch == "missing_baseline":
+        plan["identity"]["installed"] = []
     if mismatch:
         with pytest.raises(deploy_mod.DeployError, match="release selection"):
             deploy_mod._validate_selected_activation(plan, tmp_path, V2_SERVICE)

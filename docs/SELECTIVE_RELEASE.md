@@ -52,6 +52,8 @@ candidate identities describe their distinct sources and accounts. Client
 `identity.mobile_source_shas` is a sorted installed source list, matching mobile
 rows; the candidate tuple separately names proposed consumer sources.
 `deploy_config.candidate.files` includes the actual installed machine file.
+Deploy checks that every configured remote host has its satellite baseline;
+omitting an older configured participant cannot yield a safe empty selection.
 Unsupported or absent identities refuse. Keep credentials out of inputs.
 
 The owner establishes a complete, current installed census with process/artifact

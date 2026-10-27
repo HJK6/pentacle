@@ -523,9 +523,12 @@ def _validate_selected_activation(plan: dict, repo: Path, service: ServiceConfig
     if not path.is_absolute():
         path = repo / path
     try:
-        _, local_hosts, _ = _fleet_smoke_hosts(str(path))
+        hosts, local_hosts, _ = _fleet_smoke_hosts(str(path))
         if activation["host"] not in local_hosts:
             raise ValueError("affected canary is not an installed local host")
+        supplied_satellites = {row["component"] for row in identity["installed"] if row["role"] == "satellite"}
+        if supplied_satellites != set(hosts) - set(local_hosts):
+            raise ValueError("missing or extra configured satellite baseline")
         bindings = identity["external_inputs"]["deploy_config"]["candidate"]["files"]
         if not any(Path(b["path"]).resolve() == path.resolve() and b["sha256"] == _sha256(path) for b in bindings):
             raise ValueError("installed machine configuration is not bound to selected inputs")
