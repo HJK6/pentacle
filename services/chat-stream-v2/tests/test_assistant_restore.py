@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from types import SimpleNamespace
@@ -225,7 +226,25 @@ async def _degrade_for_notice(rig):
 
 async def _recovery_cards(notify):
     rows = await notify._db.call("list_notifications", limit=1000)
-    return [row for row in rows if row.get("title") == "Bart recovery stopped"]
+    return [row for row in rows if row.get("producer") == ar.NOTICE_FROM and str(row.get("title") or "").endswith(ar.DEGRADED_NOTICE_SUFFIX)]
+
+
+@pytest.mark.parametrize("title", ["Zephyr", "Aster"])
+def test_degraded_notice_uses_the_configured_assistant_display_name(tmp_path, monkeypatch, title):
+    async def body(rig):
+        await rig.start()
+        rig.composite.config = replace(rig.composite.config, title=title)
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        rig.restore._notify = notify
+        try:
+            await _degrade_for_notice(rig)
+            cards = await _recovery_cards(notify)
+            assert len(cards) == 1
+            assert cards[0]["title"] == f"{title} recovery stopped"
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
 
 
 @pytest.mark.parametrize("terminal", ["resolved", "expired"])

@@ -44,8 +44,8 @@ UNRESOLVED_LIMIT_S = 600.0
 PS_TIMEOUT_S = 5.0
 SERVICE_ACTOR = "daemon:scheduler"
 NOTICE_FROM = "daemon:assistant-restore"
-DEGRADED_NOTICE_TITLE = "Bart recovery stopped"
-DIAGNOSTIC_TAGS = {"subsystem": "assistant_restore", "bug_ref": "bart_fd_auto_restore_closed_parent_2026_10"}
+DEGRADED_NOTICE_SUFFIX = " recovery stopped"
+DIAGNOSTIC_TAGS = {"subsystem": "assistant_restore", "bug_ref": "assistant_restore_closed_parent_2026_10"}
 
 _GENERATION_RE = re.compile(r"[0-9a-f]{32}\Z")
 _FAILED_OUTCOME_STATES = frozenset({"failed", "cancelled"})
@@ -289,7 +289,8 @@ class AssistantRestore:
             )
             if record is None:
                 record = await self._notify.create_internal_notification(
-                    producer=NOTICE_FROM, title=DEGRADED_NOTICE_TITLE, severity="warning", dedup_key=dedup_key,
+                    producer=NOTICE_FROM, title=self.composite.config.title + DEGRADED_NOTICE_SUFFIX,
+                    severity="warning", dedup_key=dedup_key,
                     body=(f"Recovery stopped at {episode['updated_at']}. "
                           f"Attempts: {episode['budget_used']}/{MAX_ATTEMPTS}. "
                           f"Reason: {str(episode.get('reason') or 'unknown')[:120]}. Recovery needs attention."),
@@ -299,7 +300,7 @@ class AssistantRestore:
                     producer=NOTICE_FROM, dedup_key=dedup_key,
                 )
             if (not record or not record.get("notification_id") or record.get("actions")
-                    or record.get("title") != DEGRADED_NOTICE_TITLE):
+                    or not str(record.get("title") or "").endswith(DEGRADED_NOTICE_SUFFIX)):
                 raise ValueError("degraded notification not confirmed message-only")
             await self._hook("after_degraded_notice")
             await self.store.restore_record_degraded_notice(

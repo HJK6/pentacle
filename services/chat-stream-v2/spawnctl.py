@@ -2291,7 +2291,7 @@ class SpawnCtl:
             if parent_normalization:
                 log.info("assistant restore normalized preserved parent stream=%s parent=%s reason=%s",
                          f"{host}:{name}", parent_id, parent_normalization["reason"],
-                         extra={"subsystem": "assistant_restore", "bug_ref": "bart_fd_auto_restore_closed_parent_2026_10"})
+                         extra={"subsystem": "assistant_restore", "bug_ref": "assistant_restore_closed_parent_2026_10"})
             total_attempts = (
                 1 if native_initial_prompt
                 else (PROMPT_SPAWN_RETRY_ATTEMPTS if full_brief else 1)

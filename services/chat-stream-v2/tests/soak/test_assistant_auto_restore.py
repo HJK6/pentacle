@@ -583,7 +583,7 @@ def test_budget_survives_restarts_then_one_retry_restores(tmp_path, evidence):
         generations = [json.loads(r["detail_json"])["attempt_generation"] for r in started]
         episode = (j.episodes() or [{}])[-1]
         cards = j.fd.op({"type": "notification.list", "limit": 100}).get("notifications") or []
-        stopped = [card for card in cards if card.get("title") == "Bart recovery stopped"]
+        stopped = [card for card in cards if card.get("title") == "Zephyr recovery stopped"]
         rec["degraded_cards"] = stopped
         notices = j.audit("degraded_notice_published")
         r5 = {
@@ -1015,7 +1015,7 @@ def test_pane_before_generation_admission_is_bounded_and_visible(tmp_path, evide
         # within the existing unresolved-attempt bound, without a second pane.
         terminal = j.wait_state("degraded", "restored", timeout=600 + 30)
         cards = j.fd.op({"type": "notification.list", "limit": 100}).get("notifications") or []
-        warnings = [card for card in cards if card.get("title") == "Bart recovery stopped"]
+        warnings = [card for card in cards if card.get("title") == "Zephyr recovery stopped"]
         rec["checks"] = {
             "exact_early_checkpoint": bool(reached) and prior_generation != episode.get("attempt_generation"),
             "bounded_recovery_or_degradation": terminal.get("state") in {"degraded", "restored"},
@@ -1046,7 +1046,7 @@ def test_generation_admitted_bootstrap_starting_is_bounded_and_visible(tmp_path,
             cell.daemon.start()
         terminal = j.wait_state("degraded", "restored", timeout=600 + 30)
         cards = j.fd.op({"type": "notification.list", "limit": 100}).get("notifications") or []
-        warnings = [card for card in cards if card.get("title") == "Bart recovery stopped"]
+        warnings = [card for card in cards if card.get("title") == "Zephyr recovery stopped"]
         rec["checks"] = {
             "exact_starting_checkpoint": bool(reached),
             "bounded_recovery_or_degradation": terminal.get("state") in {"degraded", "restored"},
