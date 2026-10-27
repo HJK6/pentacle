@@ -25,7 +25,7 @@ def test_missing_installed_baselines_refuses(tmp_path):
 
 
 def test_real_qualification_never_claims_other_surfaces():
-    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render", "provider_startup", "deploy_invocation"}
+    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render", "provider_startup", "satellite_transition", "deploy_invocation"}
 
 
 def test_required_seam_cannot_be_cured_by_a_green_broad_gate(monkeypatch):
