@@ -39,7 +39,7 @@
     "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
   },
   "provider_startup": {
-    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
     "source_paths": [
       "services/chat-stream-v2/*.py",
       "services/chat-stream-v2/tools/",
@@ -68,11 +68,11 @@
     "qa_report": "b256fb88-c457-403f-a201-9ffaccc4f829",
     "qa_review_sha256": "b0bf9c2fed5db3624b40f93438b206832cfc18f4d4e181d8ad415abce666af04",
     "evidence_sha256": "c599f977855b4a6736d6f75ad45e094d0c737fd7a5ca6c2a0303efca6e0b6581",
-    "scope_sha256": "9cc421cdd17376e04650647179cc9237a91db2ecd98293cc7b45e8a2caddd54d",
-    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
+    "scope_sha256": "d31d83a8a61e1eca0be241362e7ec35a516ed67add479f9774fd1118f7a7c599",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
   },
   "satellite_transition": {
-    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
     "source_paths": [
       "services/chat-stream-v2/chat_recovery.py",
       "services/chat-stream-v2/deploy/satellite/README.md",
@@ -116,11 +116,11 @@
     "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
     "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
     "evidence_sha256": "a8269af6308254a9dd6524c8d7075be2b0ab883527612ab4f43f8227857c389c",
-    "scope_sha256": "caa67433dafc3629746b5642e32b82a2f97c4069e9f84c0bfae420a7c50180a4",
-    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
+    "scope_sha256": "9beab14dab5f2678f584ac8bc4e778f7d6615a450de78ef1f4b45c30b2a68be7",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
   },
   "deploy_invocation": {
-    "source_ref": "aa12c2db24c511ffdfc02ed587b2aae661815c28",
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
     "source_paths": [
       "services/chat-stream-v2/deploy/deploy.py",
       "services/chat-stream-v2/deploy/release_selection.py",
@@ -160,7 +160,7 @@
     "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
     "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
     "evidence_sha256": "7c49c0b9c3fc1571734e2c32eb75e040193adab5b885b53a6ba77590671aeeff",
-    "scope_sha256": "aef460b80b395d74a463c953ad02440673ed076a24b5bc729529db31eaa21c12",
-    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
+    "scope_sha256": "fbbed62e0333296bfda2b66f3d4c6d0553b30bb8d526fbb4d66e9061e01b4b90",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
   }
 }
