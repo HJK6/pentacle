@@ -2249,11 +2249,20 @@ class SpawnCtl:
             # Graph admission ends before boot. A winning parent close makes
             # this request refuse before a pane; a winning intent blocks close.
             async with self.sessions._graph_lock:
+                parent_normalization = None
                 parent_id = str(open_flds.get("parent_stream_id") or "")
                 if parent_id:
                     parent = await self.store.fetch_session(*self.sessions.split(parent_id))
                     if parent is None or parent.get("status") != "open":
-                        raise VerbError("spawn_parent_closed", f"{parent_id} is not an open parent")
+                        if not (restore_generation and resume_prior_row is not None):
+                            raise VerbError("spawn_parent_closed", f"{parent_id} is not an open parent")
+                        parent_normalization = {
+                            "previous_parent": parent_id, "reason": "missing" if parent is None else "closed",
+                            "stream_id": f"{host}:{name}", "spawn_key": request_id,
+                            "previous_generation": resume_prior_row.get("session_generation"),
+                            "new_generation": spawn_generation, "actor": assistant_restore.SERVICE_ACTOR,
+                        }
+                        open_flds["parent_stream_id"] = None
                 recorded = await self.store.record_spawn_intent(
                     host, name,
                     {
@@ -2265,6 +2274,7 @@ class SpawnCtl:
                             and not open_flds.get("handoff_from_stream_id")
                             and bool((msg.get("_auth_context") or {}).get("operator_authenticated"))
                         ),
+                        **({"parent_closed_resume_top_level": parent_normalization} if parent_normalization else {}),
                     }, request_id=request_id, nonce=nonce,
                     expected_spec_sources=(
                         *getattr(spec_binding, "source_checks", ()),
@@ -2278,6 +2288,10 @@ class SpawnCtl:
             # recovery handle a mid-spawn crash or cancellation is settled from
             # (INV-3). It must never be blind-released on a teardown.
             intent_recorded = True
+            if parent_normalization:
+                log.info("assistant restore normalized preserved parent stream=%s parent=%s reason=%s",
+                         f"{host}:{name}", parent_id, parent_normalization["reason"],
+                         extra={"subsystem": "assistant_restore", "bug_ref": "assistant_restore_closed_parent_2026_10"})
             total_attempts = (
                 1 if native_initial_prompt
                 else (PROMPT_SPAWN_RETRY_ATTEMPTS if full_brief else 1)

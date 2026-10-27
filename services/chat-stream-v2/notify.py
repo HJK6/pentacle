@@ -790,6 +790,11 @@ class Notify:
             await self._broadcast({"type": "notification", "notification": client_record})
         return client_record or {}
 
+    async def get_internal_notification_by_dedup(self, *, producer: str, dedup_key: str) -> dict | None:
+        """Reconcile daemon publication across open and historical rows."""
+        await self._await_ready()
+        return await self._db.call("get_latest_by_dedup", producer=producer, dedup_key=dedup_key)
+
     # -- prompt.* dispatch (lifted) ---------------------------------------
 
     async def prompt(self, msg: dict[str, Any]) -> dict[str, Any]:

@@ -370,6 +370,98 @@ def test_retained_row_resume_reuses_identity_and_descriptive_metadata(tmp_path: 
     assert "--session-id" not in commands[0]
 
 
+@pytest.mark.parametrize("parent_state", ["closed", "missing", "open"])
+@pytest.mark.parametrize("actor", ["restore", "manual", "manual_top_level", "forged_actor", "forged_generation"])
+def test_only_internal_restore_normalizes_a_preserved_unavailable_parent(tmp_path, parent_state, actor):
+    async def run():
+        machine = _machine(tmp_path)
+        path = _write_transcript(machine)
+        store = Store(":memory:")
+        store.start()
+        try:
+            prior = await _closed_prior(store, path)
+            parent_sid = "localhost:historical-parent"
+            if parent_state != "missing":
+                parent = await store.open_session("localhost", "historical-parent", pane_status="pane_alive")
+                if parent_state == "closed":
+                    await store.mark_closed("localhost", "historical-parent", closed_at="2026-10-08T00:00:00Z",
+                                            pane_status="pane_dead", expected_generation=parent["session_generation"])
+            def seed(conn):
+                conn.execute("UPDATE sessions SET parent_stream_id=?,visibility='hidden' "
+                             "WHERE host='localhost' AND session_name='v2-original-fable'", (parent_sid,))
+                conn.commit()
+            await store.submit(seed)
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+            commands = _install_successful_spawn(ctl, sessions, tmux)
+            msg = dict(provider="claude", model="claude-fable-5-1", effort="high",
+                       resume_session_id=RESUME_ID, request_id="parent-resume")
+            if actor in {"restore", "forged_actor", "forged_generation"}:
+                msg.update(_auth_context={"service_authenticated": True, "service_actor": "daemon:scheduler"},
+                           _session_generation="f" * 32)
+                if actor == "forged_actor":
+                    msg["_auth_context"]["service_actor"] = "operator"
+                if actor == "forged_generation":
+                    msg["_session_generation"] = "not-a-generation"
+            if actor == "manual_top_level":
+                msg["parent_stream_id"] = None
+            success = parent_state == "open" or actor == "restore"
+            if not success:
+                with pytest.raises(VerbError, match="not an open parent") as caught:
+                    await ctl.spawn(msg, "localhost")
+                assert caught.value.code == "spawn_parent_closed"
+                assert not commands
+                assert await store.restore_audit_rows() == []
+                return
+            await ctl.spawn(msg, "localhost")
+            row = await store.fetch_session("localhost", "v2-original-fable")
+            assert row["parent_stream_id"] == (parent_sid if parent_state == "open" else None)
+            assert row["visibility"] == "hidden"
+            assert row["claude_session_id"] == RESUME_ID
+            assert len(commands) == 1
+            audits = [a for a in await store.restore_audit_rows() if a["event"] == "parent_closed_resume_top_level"]
+            assert len(audits) == int(parent_state != "open")
+            if audits:
+                detail = json.loads(audits[0]["detail_json"])
+                assert detail["previous_parent"] == parent_sid
+                assert detail["reason"] == parent_state
+                assert detail["previous_generation"] == prior["session_generation"]
+                assert detail["new_generation"] == "f" * 32
+                assert detail["stream_id"] == "localhost:v2-original-fable"
+                assert detail["actor"] == "daemon:scheduler"
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_service_generation_without_resume_cannot_promote_a_new_child(tmp_path):
+    async def run():
+        machine = _machine(tmp_path)
+        store = Store(":memory:")
+        store.start()
+        try:
+            parent = await store.open_session("localhost", "historical-parent", pane_status="pane_alive")
+            await store.mark_closed("localhost", "historical-parent", closed_at="2026-10-08T00:00:00Z",
+                                    pane_status="pane_dead", expected_generation=parent["session_generation"])
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+            commands = _install_successful_spawn(ctl, sessions, tmux)
+            with pytest.raises(VerbError) as caught:
+                await ctl.spawn({"provider": "claude", "model": "claude-fable-5-1", "effort": "high",
+                                 "session_name": "new-child", "parent_stream_id": "localhost:historical-parent",
+                                 "request_id": "new-child-service", "_session_generation": "a" * 32,
+                                 "_auth_context": {"service_authenticated": True, "service_actor": "daemon:scheduler"}},
+                                "localhost")
+            assert caught.value.code == "spawn_parent_closed"
+            assert not commands
+            assert not await store.restore_audit_rows()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_purged_row_fallback_uses_normal_lifecycle_and_surfaces_history(tmp_path: Path) -> None:
     async def _go() -> tuple[str, dict, str]:
         machine = _machine(tmp_path)

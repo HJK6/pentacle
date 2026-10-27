@@ -41,6 +41,124 @@ def _request(request_id, revision, target=None, *, clear=False):
             "expected_revision": revision, "target_stream_id": target, "clear": clear}
 
 
+async def _persist_recovery_claim(store, stream_id, qualified, provenance):
+    """Seed raw retained rows: the writer sanitizes malformed/legacy vectors."""
+    def write(conn):
+        conn.execute("UPDATE sessions SET qualified_spec_ids=?,spec_binding_provenance=? "
+                     "WHERE host=? AND session_name=?",
+                     (json.dumps(qualified), json.dumps(provenance), *stream_id.split(":", 1)))
+        conn.commit()
+    await store.submit(write)
+
+
+@pytest.mark.parametrize("provenance", ["spawn_explicit", "drive_explicit", "handoff_inherited"])
+def test_hidden_same_stream_recovery_uses_qualified_provenance_and_replays(provenance):
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            old = await _seat(store, A)
+            resumed = await store.open_session(
+                *A.split(":", 1), provider="claude", visibility="hidden", pane_status="pane_alive",
+                effective_model="claude-opus-5-5", effective_effort="high",
+                spec_id=RECOVERY_SPEC, spec_ids=[RECOVERY_SPEC],
+                qualified_spec_ids=[RECOVERY_SPEC],
+                spec_binding_provenance=[{"spec_id": RECOVERY_SPEC, "provenance": provenance,
+                                          "granting_principal": "operator", "granted_at": "2026-10-08T00:00:00Z"}],
+            )
+            await _persist_recovery_claim(store, A, [RECOVERY_SPEC], [{
+                "spec_id": RECOVERY_SPEC, "provenance": provenance,
+                "granting_principal": "operator", "granted_at": "2026-10-08T00:00:00Z",
+            }])
+            kw = dict(env_binding={"stream_id": A, "generation": old["session_generation"]},
+                      actor_stream_id=A, actor_generation=resumed["session_generation"],
+                      target_stream_id=A, target_generation=resumed["session_generation"],
+                      request_id="hidden-self", expected_revision=0,
+                      authorized_spec_ids=frozenset({RECOVERY_SPEC}))
+            receipt = await store.rebind_assistant(**kw)
+            assert receipt["new_binding"]["revision"] == 1
+            assert receipt["new_binding"]["generation"] == resumed["session_generation"]
+            assert (await store.rebind_assistant(**kw))["duplicate"] is True
+            assert len(await store.submit(lambda c: c.execute(
+                "SELECT * FROM v2_assistant_rebind_audit").fetchall())) == 1
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", [
+    "wrong_actor", "target_other", "clear", "parented", "absent_spec", "wrong_spec",
+    "not_configured", "not_qualified", "malformed_qualified", "malformed_provenance",
+    "blank_principal", "operator_v2", "parent_inherited", "stale_actor", "stale_target",
+    "missing_target_generation", "stale_revision", "daff", "dead_actor", "tuple_mismatch",
+])
+def test_hidden_recovery_exception_refuses_every_broader_authority(case):
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            old = await _seat(store, A)
+            other = await _seat(store, B)
+            actor_sid = B if case == "wrong_actor" else A
+            fields = dict(provider="claude", visibility="hidden", pane_status="pane_alive",
+                          effective_model="claude-opus-5-5", effective_effort="high",
+                          spec_id=RECOVERY_SPEC, spec_ids=[RECOVERY_SPEC],
+                          qualified_spec_ids=[RECOVERY_SPEC],
+                          spec_binding_provenance=[{"spec_id": RECOVERY_SPEC, "provenance": "spawn_explicit",
+                                                    "granting_principal": "operator", "granted_at": "2026-10-08T00:00:00Z"}])
+            if case == "parented":
+                fields["parent_stream_id"] = B
+            if case in {"absent_spec", "not_qualified"}:
+                fields["qualified_spec_ids"] = []
+            if case == "absent_spec":
+                fields["spec_id"] = None
+                fields["spec_ids"] = []
+                fields["spec_binding_provenance"] = []
+            if case == "wrong_spec":
+                fields["qualified_spec_ids"] = ["spec_other"]
+            if case == "malformed_qualified":
+                fields["qualified_spec_ids"] = {"unexpected": RECOVERY_SPEC}
+            if case == "malformed_provenance":
+                fields["spec_binding_provenance"] = {"unexpected": "spawn_explicit"}
+            if case in {"operator_v2", "parent_inherited"}:
+                fields["spec_binding_provenance"][0]["provenance"] = case
+            if case == "blank_principal":
+                fields["spec_binding_provenance"][0]["granting_principal"] = "  "
+            if case == "dead_actor":
+                fields["pane_status"] = "pane_dead"
+            if case == "tuple_mismatch":
+                fields["routing_integrity"] = "mismatch"
+            actor = await store.open_session(*actor_sid.split(":", 1), **fields)
+            await _persist_recovery_claim(store, actor_sid, fields["qualified_spec_ids"], fields["spec_binding_provenance"])
+            generation = actor["session_generation"]
+            kw = dict(env_binding={"stream_id": A, "generation": old["session_generation"]},
+                      actor_stream_id=actor_sid, actor_generation=generation,
+                      target_stream_id=actor_sid, target_generation=generation,
+                      request_id="refuse-" + case, expected_revision=0,
+                      authorized_spec_ids=frozenset() if case == "not_configured" else frozenset({RECOVERY_SPEC}))
+            if case == "target_other":
+                kw.update(target_stream_id=B, target_generation=other["session_generation"])
+            if case == "clear":
+                kw["clear"] = True
+            if case == "stale_actor":
+                kw["actor_generation"] = old["session_generation"]
+            if case == "stale_target":
+                kw["target_generation"] = old["session_generation"]
+            if case == "missing_target_generation":
+                kw["target_generation"] = None
+            if case == "stale_revision":
+                kw["expected_revision"] = 99
+            if case == "daff":
+                kw["name"] = "daff"
+            with pytest.raises(ValueError):
+                await store.rebind_assistant(**kw)
+            bindings = await store.submit(lambda c: c.execute("SELECT * FROM v2_assistant_direct_binding").fetchall())
+            assert bindings == []
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 async def _resolved(store, input_id):
     for _ in range(100):
         route = await store.get_assistant_composite_route(
