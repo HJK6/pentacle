@@ -7,7 +7,7 @@ import json
 import pytest
 
 from tools import event_push_pin
-from pin_fixtures import preflight, runtime
+from pin_fixtures import pin_wall_clock, preflight, runtime
 from store import (
     EVENT_PUSH_TARGET_SHA_KEY,
     EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY,

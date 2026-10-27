@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from pin_fixtures import preflight, runtime
+from pin_fixtures import pin_wall_clock, preflight, runtime
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("event_push_pin", SERVICE_DIR / "tools" / "event_push_pin.py")

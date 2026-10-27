@@ -432,7 +432,7 @@ def test_bad_original_token_never_freezes_new_same_name_source(tmp_path, monkeyp
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('fault', ['provider', 'kind', 'recovery_id'])
+@pytest.mark.parametrize('fault', ['provider', 'kind', 'recovery_id', 'null_recovery_id'])
 def test_first_malformed_recovery_envelope_never_advances_either_cursor(tmp_path, monkeypatch, fault):
     async def run():
         store, sat, sink, casts, original = await _interrupted(tmp_path, monkeypatch)
@@ -450,8 +450,9 @@ def test_first_malformed_recovery_envelope_never_advances_either_cursor(tmp_path
                 async def send(self, raw):
                     frame = json.loads(raw)
                     for event in frame['events']:
-                        event[fault] = {'provider': 'invalid-provider', 'kind': None,
-                                        'recovery_id': 'unissued'}[fault]
+                        event['recovery_id' if fault == 'null_recovery_id' else fault] = {
+                            'provider': 'invalid-provider', 'kind': None,
+                            'recovery_id': 'unissued', 'null_recovery_id': None}[fault]
                     frame['events'].append({'stream_id': 'worker:live', 'provider': 'claude',
                         'kind': 'USER', 'text': 'unrelated-live', 'raw': {'jsonl_record_uuid': 'live'}})
                     await super().send(json.dumps(frame))

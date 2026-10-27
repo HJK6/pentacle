@@ -611,7 +611,7 @@ class EventPush:
             wire_payload = dict(payload)
             recovery_id = wire_payload.pop("recovery_id", None)
             transcript_offset = wire_payload.pop("transcript_offset", None)
-            if recovery_id is not None:
+            if "recovery_id" in payload:
                 if not isinstance(recovery_id, str):
                     drop_historical(stream_id, "recovery_identity_unproven", recovery_id)
                     continue

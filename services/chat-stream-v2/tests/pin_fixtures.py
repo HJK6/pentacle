@@ -2,6 +2,17 @@
 import json
 import time
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def pin_wall_clock(monkeypatch):
+    # These fixtures seed counterpart telemetry before invoking the pin writer.
+    # Freeze wall time so store setup cannot make that synthetic row stale.
+    # Activation deadlines still use the real event-loop monotonic clock.
+    now = time.time()
+    monkeypatch.setattr(time, 'time', lambda: now)
+
 
 def preflight(root, candidate, hosts=('workstation',), optional=()):
     rows = []
