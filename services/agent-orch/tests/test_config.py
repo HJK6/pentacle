@@ -9,6 +9,12 @@ from agent_orch.config import load_config
 from agent_orch.send_boundary import resolve_operator_token
 
 
+@pytest.fixture(autouse=True)
+def _isolate_memory_configuration(monkeypatch):
+    """These unit cases supply their own memory config independently of the gate."""
+    monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
+
+
 def test_config_precedence(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()

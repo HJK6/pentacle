@@ -116,7 +116,8 @@ def test_load_role_baseline_returns_none_without_memory_repo(monkeypatch, tmp_pa
     assert load_role_baseline(_config(), "qa") is None
 
 
-def test_load_role_baseline_returns_none_when_role_file_missing(tmp_path: Path) -> None:
+def test_load_role_baseline_returns_none_when_role_file_missing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
     memory_repo = tmp_path / "memory"
     (memory_repo / "agents").mkdir(parents=True)
 
