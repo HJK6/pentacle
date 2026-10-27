@@ -27,6 +27,7 @@ def admission(observations, stop_pct=64):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--host", required=True)
     p.add_argument("--tasks", required=True)
     p.add_argument("--sha256", required=True)
     p.add_argument("--bundle", required=True)
@@ -42,7 +43,7 @@ def main():
         if not arms:
             continue
         assert hashlib.sha256(Path(args.tasks).read_bytes()).hexdigest() == args.sha256
-        probe = subprocess.run(["agent-orch", "usage", "--host", "amaterasu", "--json",
+        probe = subprocess.run(["agent-orch", "usage", "--host", args.host, "--json",
                                 "--max-age-seconds", "600"], check=True, capture_output=True, text=True)
         observations = json.loads(probe.stdout)
         (bundle / ("usage-before-" + task["id"] + ".json")).write_text(probe.stdout)
