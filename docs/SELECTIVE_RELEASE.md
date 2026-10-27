@@ -50,7 +50,12 @@ locally. Reuse existing receipts:
   matches the component. Require actual running `installed_source_sha` plus
   dependency, consumer payload, configuration and installed CLI digests. Helper
   SHA or checkout HEAD cannot substitute for emitter source; offline stays
-  non-green.
+  non-green. `installed_helpers_sha256` is the exact retained per-host helper
+  manifest byte digest, with a matching `installed_helpers_manifest` file
+  binding. Manifest and referenced immutable files must also be bound in both
+  satellite external-input file sets. The legacy 40-character helper source is
+  historical metadata only. Configured mixed roots/releases/absence and unknown
+  loaded-module limits remain explicit; a digest does not qualify recovery.
 - `observed_component` (default): matching `component`, `repository`, `sha` and
   `observed: true` from an actual bounded installed readback where no existing
   format applies. Web consumers require the inventory format above.

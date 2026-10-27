@@ -91,6 +91,30 @@ def full_sha(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) is not None
 
 
+def helper_manifest(peer):
+    """Configured helper disk/invocation identity; never loaded-runtime proof."""
+    sha = peer.get("installed_helpers_sha256")
+    require(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha), "missing helper manifest SHA256")
+    binding = peer.get("installed_helpers_manifest")
+    require(isinstance(binding, dict) and binding.get("sha256") == sha, "helper manifest digest mismatch")
+    data = read(file_binding(binding)["path"])
+    require(isinstance(data, dict) and set(data) == {"host", "configured_helpers", "files", "limits"}
+            and data["host"] == peer.get("host") and isinstance(data["limits"], list) and data["limits"],
+            "malformed helper identity manifest")
+    identity, files = data["configured_helpers"], data["files"]
+    require(isinstance(identity, dict) and identity.get("host") == data["host"]
+            and isinstance(identity.get("invocations"), list) and identity["invocations"]
+            and isinstance(identity.get("closures"), list) and identity["closures"]
+            and isinstance(identity.get("interpreters"), dict) and identity["interpreters"]
+            and isinstance(identity.get("loaded_module_provenance"), dict) and identity["loaded_module_provenance"]
+            and isinstance(files, list) and files, "incomplete configured helper identity")
+    for item in [binding, *files]:
+        file_binding(item)
+        path = Path(item["path"])
+        require(not path.is_symlink() and not path.stat().st_mode & 0o222, "helper identity must be retained read-only")
+    return [binding, *files]
+
+
 def installed_receipt(row, candidate):
     receipt = read(file_binding(row["receipt"])["path"])
     require(isinstance(receipt, dict), "invalid installed baseline receipt")
@@ -120,6 +144,7 @@ def installed_receipt(row, candidate):
         require(all(isinstance(peer.get(k), str) and re.fullmatch(r"[0-9a-f]{64}", peer[k])
                     for k in ("dependency_digest", "consumer_payload_sha256", "configuration_sha256", "installed_cli_sha256")),
                 "missing satellite tuple identity")
+        helper_manifest(peer)
     else:
         require(kind == "observed_component" and isinstance(receipt, dict)
                 and all(receipt.get(name) == row[name] for name in ("component", "repository", "sha"))
@@ -190,6 +215,12 @@ def prepare(repo, sha, input_path, python, runner):
                 file_binding(binding)
         if pair["installed"] != pair["candidate"]:
             changed.append(name)
+    for row in installed:
+        if row.get("receipt_format") == "satellite_participants":
+            peer = next(p for p in read(row["receipt"]["path"])["participants"] if p["host"] == row["component"])
+            bindings = helper_manifest(peer)
+            require(all(b in external["satellite_config"][side]["files"] for side in ("installed", "candidate") for b in bindings),
+                    "unbound configured helper identity")
     # Mobile belongs to a different repository; never pass its SHA to Pentacle Git.
     mobile = sorted(row["sha"] for row in installed if row["role"] == "mobile")
     require(external["client_versions"]["installed"]["identity"].get("mobile_source_shas") == mobile,

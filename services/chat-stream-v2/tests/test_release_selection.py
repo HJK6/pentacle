@@ -363,7 +363,9 @@ def test_existing_client_census_fields_are_consumed_without_rewriting_receipt(re
 
 def test_satellite_receipt_uses_running_source_and_fresh_tuple(tmp_path):
     import time
+    from pin_fixtures import helper_identity
     peer = {"host": "secondary", "online": True, "installed_source_sha": BASE,
+            **helper_identity(tmp_path, "secondary"),
             **{k: "f" * 64 for k in ("dependency_digest", "consumer_payload_sha256", "configuration_sha256", "installed_cli_sha256")}}
     payload = {"candidate": SHA, "observed_at_epoch": time.time(), "participants": [peer]}
     path = tmp_path / "participants.json"

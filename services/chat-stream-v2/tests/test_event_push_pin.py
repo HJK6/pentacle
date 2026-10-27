@@ -259,7 +259,9 @@ def test_optional_offline_stays_partial_and_canary_is_only_affected_codex(tmp_pa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('bad', ['missing', 'candidate', 'stale', 'dependencies', 'interpreter', 'compatibility', 'omitted_host', 'running_source', 'config_identity', 'cli_identity'])
+@pytest.mark.parametrize('bad', ['missing', 'candidate', 'stale', 'dependencies', 'interpreter', 'compatibility', 'omitted_host', 'running_source', 'config_identity', 'cli_identity',
+                               'helper_missing', 'helper_legacy', 'helper_malformed', 'helper_digest', 'helper_manifest_missing', 'helper_tamper', 'helper_provenance',
+                               'helper_null', 'helper_json', 'helper_shape', 'helper_host'])
 def test_preflight_refuses_before_stage(tmp_path, monkeypatch, bad):
     monkeypatch.setattr(event_push_pin, 'SATELLITE_HOSTS', ('workstation',))
     monkeypatch.setattr(event_push_pin, '_load_gate_evidence', lambda *_: {})
@@ -274,17 +276,98 @@ def test_preflight_refuses_before_stage(tmp_path, monkeypatch, bad):
     if bad == 'running_source': payload['participants'][0]['installed_source_sha'] = 'checkout-head-only'
     if bad == 'config_identity': payload['participants'][0].pop('configuration_sha256')
     if bad == 'cli_identity': payload['participants'][0].pop('installed_cli_sha256')
+    peer = payload['participants'][0] if payload['participants'] else {}
+    if bad == 'helper_missing': peer.pop('installed_helpers_sha256')
+    if bad == 'helper_null': peer['installed_helpers_sha256'] = None
+    if bad == 'helper_legacy':
+        peer.pop('installed_helpers_sha256')
+        peer['installed_helpers_sha'] = 'e' * 40
+    if bad == 'helper_malformed':
+        peer['installed_helpers_sha256'] = 'e' * 40
+        peer['installed_helpers_sha'] = 'e' * 40
+    if bad == 'helper_digest': peer['installed_helpers_sha256'] = '0' * 64
+    if bad == 'helper_manifest_missing': peer.pop('installed_helpers_manifest')
+    if bad in ('helper_tamper', 'helper_provenance'):
+        from pathlib import Path
+        path = Path(peer['installed_helpers_manifest']['path'])
+        if bad == 'helper_provenance': path = Path(json.loads(path.read_text())['files'][0]['path'])
+        path.chmod(0o644)
+        path.write_text('tampered retained identity')
+        path.chmod(0o444)
+    if bad in ('helper_json', 'helper_shape', 'helper_host'):
+        import hashlib
+        from pathlib import Path
+        path = Path(peer['installed_helpers_manifest']['path'])
+        data = json.loads(path.read_text())
+        if bad == 'helper_shape': data['configured_helpers'].pop('closures')
+        if bad == 'helper_host': data['host'] = 'different-host'
+        path.chmod(0o644)
+        path.write_text('{' if bad == 'helper_json' else json.dumps(data))
+        path.chmod(0o444)
+        peer['installed_helpers_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        peer['installed_helpers_manifest']['sha256'] = peer['installed_helpers_sha256']
     receipt.write_text(json.dumps(payload))
     async def run():
         db = str(tmp_path / 'sessions.db')
+        seeded = Store(db)
+        seeded.start()
+        await seeded.put(EVENT_PUSH_TARGET_SHA_KEY, PREVIOUS)
+        await seeded.put(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY, 'c' * 40)
+        seeded.stop()
+        writes = []
+        async def forbidden_writer(*args, **kwargs):
+            writes.append(True)
+            pytest.fail('pin writer reached with invalid helper/preflight identity')
+        monkeypatch.setattr(Store, 'stage_event_push_target_sha', forbidden_writer)
+        monkeypatch.setattr(Store, 'rollback_event_push_target_sha', forbidden_writer)
         with pytest.raises(ValueError):
             await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / 'gate.json',
                                      satellite_preflight=None if bad == 'missing' else receipt)
         store = Store(db)
         store.start()
         try:
-            assert await store.get(EVENT_PUSH_TARGET_SHA_KEY) is None
-            assert await store.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY) is None
+            assert writes == []
+            assert await store.get(EVENT_PUSH_TARGET_SHA_KEY) == PREVIOUS
+            assert await store.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY) == 'c' * 40
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_helper_manifest_late_drift_refuses_before_pin_writer(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(event_push_pin, 'SATELLITE_HOSTS', ('workstation',))
+    monkeypatch.setattr(event_push_pin, '_load_gate_evidence', lambda *_: {})
+    receipt = preflight(tmp_path, TARGET)
+    original = event_push_pin._preflight_participants
+    def late_drift(*args):
+        rows = original(*args)
+        path = Path(rows[0]['installed_helpers_manifest']['path'])
+        path.chmod(0o644)
+        path.write_text('late configured identity drift')
+        path.chmod(0o444)
+        return rows
+    monkeypatch.setattr(event_push_pin, '_preflight_participants', late_drift)
+    async def run():
+        db = str(tmp_path / 'sessions.db')
+        store = Store(db)
+        store.start()
+        await store.put(EVENT_PUSH_TARGET_SHA_KEY, PREVIOUS)
+        await store.put(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY, 'c' * 40)
+        store.stop()
+        writes = []
+        async def forbidden(*args):
+            writes.append(True)
+            pytest.fail('late drift reached pin writer')
+        monkeypatch.setattr(Store, 'stage_event_push_target_sha', forbidden)
+        with pytest.raises(ValueError, match='changed bound file'):
+            await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / 'gate.json', satellite_preflight=receipt)
+        store = Store(db)
+        store.start()
+        try:
+            assert writes == []
+            assert await store.get(EVENT_PUSH_TARGET_SHA_KEY) == PREVIOUS
+            assert await store.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY) == 'c' * 40
         finally:
             store.stop()
     asyncio.run(run())
