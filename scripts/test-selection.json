@@ -166,28 +166,36 @@
         "services/chat-stream-v2/account_*.py",
         "services/chat-stream-v2/tests/test_provider_*.py",
         "services/chat-stream-v2/tests/test_account_*.py",
-        "services/agent-orch/agent_orch/*"
+        "services/agent-orch/agent_orch/*",
+        "services/chat-stream-v2/tests/test_provider_startup_smoke.py"
       ],
       "targets": [
         {
           "target": "v2-pytest",
           "select": [
             "tests/test_provider_account_native.py",
-            "tests/test_account_launch_environment.py"
+            "tests/test_account_launch_environment.py",
+            "tests/test_provider_startup_smoke.py",
+            "tests/test_fleet_smoke_provider_errors.py"
           ],
           "files": [
             "services/chat-stream-v2/tests/test_provider_account_native.py",
-            "services/chat-stream-v2/tests/test_account_launch_environment.py"
+            "services/chat-stream-v2/tests/test_account_launch_environment.py",
+            "services/chat-stream-v2/tests/test_provider_startup_smoke.py",
+            "services/chat-stream-v2/tests/test_fleet_smoke_provider_errors.py"
           ]
         }
       ],
       "covered_behavior": [
         "Native-account fixtures verify startup status/identity matching and login completion refusal cases.",
-        "Launch-environment tests use stand-in executables under the shell launch envelope to check tuple preservation, authentication override clearing and named-home binding."
+        "Launch-environment tests use stand-in executables under the shell launch envelope to check tuple preservation, authentication override clearing and named-home binding.",
+        "Native RPC subprocess replay checks initialize-phase provisional null versus authoritative status refusal, delayed/repeated/conflicting identity, timeout, process exit and owned child/stream cleanup.",
+        "Startup bridge controls refuse executable/config drift, unknown tuple inputs and native/spawn identity mismatch before sending; existing smoke controls retain missing-reply, throttling and cleanup failure as non-green."
       ],
       "missing_coverage": [
         "No real provider authentication, installed SDK/version matrix, subscription or live quota journey is exercised by selection.",
-        "Provider account/startup tests do not cover every CLI consumer or fleet enrollment transition."
+        "Provider account/startup tests do not cover every CLI consumer or fleet enrollment transition.",
+        "Installed Codex native plus candidate spawn/send/reply requires a separately authorized isolated provisioned home and candidate endpoint: see docs/PROVIDER_STARTUP_SEAM.md and the explicit spawn_fleet_smoke.py URL HOST --provider-tuple PATH --token-path PATH command. This deterministic target does not execute or qualify that live tuple. No live gate target exists in this selector schema."
       ]
     },
     "satellite_transition": {
@@ -197,28 +205,42 @@
         "services/chat-stream-v2/deploy/satellite/*",
         "services/chat-stream-v2/tests/test_satellite*.py",
         "services/chat-stream-v2/tests/test_event_push*.py",
-        "services/chat-stream-v2/tests/test_account_satellite_roots.py"
+        "services/chat-stream-v2/tests/test_account_satellite_roots.py",
+        "services/chat-stream-v2/chat_recovery.py",
+        "services/chat-stream-v2/tools/event_push_pin.py",
+        "services/chat-stream-v2/tests/pin_fixtures.py"
       ],
       "targets": [
         {
           "target": "v2-pytest",
           "select": [
             "tests/test_satellite_ack_backoff.py",
-            "tests/test_event_push.py"
+            "tests/test_event_push.py",
+            "tests/test_satellite_recovery.py",
+            "tests/test_event_push_pin.py",
+            "tests/test_event_push_pin_cli.py"
           ],
           "files": [
             "services/chat-stream-v2/tests/test_satellite_ack_backoff.py",
-            "services/chat-stream-v2/tests/test_event_push.py"
+            "services/chat-stream-v2/tests/test_event_push.py",
+            "services/chat-stream-v2/tests/test_satellite_recovery.py",
+            "services/chat-stream-v2/tests/test_event_push_pin.py",
+            "services/chat-stream-v2/tests/test_event_push_pin_cli.py"
           ]
         }
       ],
       "covered_behavior": [
         "Three-peer retry tests exercise lost acknowledgements, backoff and recovery without duplicate delivery using controlled peers.",
-        "Event-push tests check exact pin admission, authentication, deduplication and event/inventory projection."
+        "Event-push tests check exact pin admission, authentication, deduplication and event/inventory projection.",
+        "Stable original live-issued native-source proof with immutable sequential per-pass ranges, five closed ranges through Store/satellite restarts, EOF growth before close, lost ACK/checkpoint interruption, original-generation dedupe, predecessor/prefix/stale replay refusal, malformed envelope containment and reopen isolation; zero historical live side effects.",
+        "Dedicated checkout/venv exact-pin updater preflight, real disposable fetch/checkout/import/exec restoration, retry minimum, downgrade and failed-boot external restoration fixture.",
+        "Pin preimage retained once, explicit required/optional participants, incarnation/admitted useful event/drain readiness, exact fresh dependency/configuration/installed-consumer receipt, affected single-host Codex canary invocation and partial/offline/quota outcomes."
       ],
       "missing_coverage": [
         "No installed fleet update/restart/rollback journey or real transport outage is certified.",
-        "Pin rejection plus retry recovery does not establish convergence of every deployed satellite version."
+        "Pin rejection plus retry recovery does not establish convergence of every deployed satellite version.",
+        "Source fixtures do not certify real host enablement, installed service/helper/CLI tuples or actual cross-host rollback.",
+        "FD two-stage bootstrap with auto-update OFF, live bindings, real closed-tail/restart/send-reply/cleanup and verified recovery-capable rollback baseline remain mandatory before enabling updates."
       ]
     },
     "deploy_invocation": {
