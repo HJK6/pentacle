@@ -950,3 +950,20 @@ test('composite published prose preserves markdown in one assistant card', () =>
   assert.equal(container.querySelector('li')?.textContent, 'A list item');
   assert.equal(container.querySelector('code')?.textContent, 'code');
 });
+
+test('tagged multiline notification answer keeps every line in the answer element', () => {
+  const answer = 'line one\n\nNote: this is answer text\n<script>plain text</script>\n';
+  const controller = controllerWithEvents([makeEvent({
+    daemon_seq: 130, kind: 'USER',
+    text: '[pentacle-notice:notification-answer-fixture]\n[notification.answer]\nnotification_id=notification-fixture\ncustom_text_json="encoded"\nby=operator',
+    message_envelope: { kind: 'notification_answer', id: 'notification-answer-fixture',
+      schema_version: 1, notification_id: 'notification-fixture', custom_text: answer },
+  })]);
+  const { container } = newDom();
+  renderStreamTranscript(STREAM, container, { store: controller as never, chrome: CHROME });
+  const entry = container.querySelector('.slot-chat-v3-answer-entry');
+  assert.ok(entry);
+  assert.equal(entry.querySelector('div')?.textContent, answer);
+  assert.equal(entry.querySelector('p'), null, 'answer continuation is not a note');
+  assert.equal(entry.querySelector('script'), null, 'answer remains escaped plain text');
+});

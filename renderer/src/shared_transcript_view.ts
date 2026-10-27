@@ -657,6 +657,9 @@ function renderSubagents(items: PentacleTranscriptItem[], options: TranscriptRen
 function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRenderOptions): string {
   const answers = items.flatMap(item => {
     const raw = item.text || '';
+    if (item.notificationAnswerText !== undefined) {
+      return [{ item, answer: item.notificationAnswerText, note: '', header: '' }];
+    }
     const structured = parsePentacleQuestionAnswerText(raw);
     if (structured?.items?.length) return structured.items.map(part => ({
       item, answer: part.selectedLabels?.join(', ') || part.text || part.header,
@@ -670,7 +673,7 @@ function renderAnswers(items: PentacleTranscriptItem[], options: TranscriptRende
     <summary title="${escapeHtml(items[items.length - 1].timestamp || '')}" aria-label="Show ${answers.length} answered question${answers.length === 1 ? '' : 's'}">
       <span class="slot-chat-v3-answer-check" aria-hidden="true">✓</span><span>You answered ${answers.length} question${answers.length === 1 ? '' : 's'}</span>
       <span class="slot-chat-v3-chevron" aria-hidden="true">›</span>
-    </summary><div class="slot-chat-v3-answer-body">${answers.map(({ item, answer, note, header }) => `<div class="slot-chat-v3-answer-entry" title="${escapeHtml(item.timestamp || '')}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">${header ? `<b>${escapeHtml(header)}</b>` : ''}<div>${escapeHtml(answer)}</div>${note ? `<p>${escapeHtml(note)}</p>` : ''}${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</div>`).join('')}</div>
+    </summary><div class="slot-chat-v3-answer-body">${answers.map(({ item, answer, note, header }) => `<div class="slot-chat-v3-answer-entry" title="${escapeHtml(item.timestamp || '')}" data-transcript-key="${escapeHtml(JSON.stringify([options.streamId || '', item.id]))}">${header ? `<b>${escapeHtml(header)}</b>` : ''}<div${item.notificationAnswerText !== undefined ? ' class="slot-chat-v3-answer-text"' : ''}>${escapeHtml(answer)}</div>${note ? `<p>${escapeHtml(note)}</p>` : ''}${renderCopyButton(item.text, 'Copy message', 'slot-chat-message-copy')}</div>`).join('')}</div>
   </details>`;
 }
 

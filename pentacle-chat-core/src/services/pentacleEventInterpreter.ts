@@ -94,6 +94,8 @@ export type PentacleInterpretedEvent = {
    * notification it echoes and render only one representation of the same answer.
    */
   notificationId?: string;
+  /** Exact validated answer text; continuation lines are not notes. */
+  notificationAnswerText?: string;
 };
 
 export type PentacleInterpretOptions = {
@@ -535,18 +537,15 @@ function interpretTaggedMessageEnvelope(
     case 'notification_answer': {
       const choice = typeof envelope.choice === 'boolean' ? (envelope.choice ? 'Yes' : 'No') : '';
       const display: AgentQuestionAnswerDisplay = {
-        answer: messageEnvelopeField(text, 'answer') ||
-          messageEnvelopeField(text, 'text') ||
-          messageEnvelopeField(text, 'custom_text') ||
-          messageEnvelopeField(text, 'choice') ||
-          stringValue(envelope.answer) ||
-          stringValue(envelope.text) ||
-          stringValue(envelope.custom_text) ||
-          choice,
+        answer: ['answer', 'text', 'custom_text', 'choice']
+          .map((key) => typeof envelope[key] === 'string' ? envelope[key] as string : messageEnvelopeField(text, key))
+          .find((value) => value.length > 0) || choice,
         notificationId: stringValue(envelope.notification_id) || messageEnvelopeField(text, 'notification_id'),
       };
       const answerRow = interpreted(event, 'agent-question-answer', 'activity:question', 'system', 'Question', formatNotificationAnswer(display), false, 'Daemon message-envelope tag selects the compact notification-answer row.');
-      return display.notificationId ? { ...answerRow, notificationId: display.notificationId } : answerRow;
+      return { ...answerRow,
+        ...(/[\r\n]/.test(display.answer || '') ? { notificationAnswerText: display.answer } : {}),
+        ...(display.notificationId ? { notificationId: display.notificationId } : {}) };
     }
     case 'child_session_closed': {
       const child = stringValue(envelope.child_stream_id) || messageEnvelopeField(text, 'child_stream_id') || 'unknown';

@@ -51,3 +51,33 @@ TypeScript tests. `pentacleEventInterpreter.ts` renders registered tags and
 fails closed for an unregistered marker-prefixed `USER` event; its legacy
 inactivity/report parsers remain compatibility fallbacks for historical,
 untagged rows.
+
+## Multiline notification answers
+
+The notification-answer producer keeps historical one-line fields unchanged.
+For `answer` (joined selections), `text`, or `custom_text` containing LF or CR,
+it emits `<field>_json=<JSON string>` on one physical wire line. For example,
+`custom_text_json="line one\nline two"` represents an actual LF in the answer.
+Ordinary `custom_text=literal\ntext` remains literal backslash-n text.
+
+The anchored notification-answer matcher accepts JSON strings only for these
+three fields. It rejects malformed JSON, empty/non-string values, duplicate
+logical fields (including plain/encoded aliases), raw multiline continuations,
+a missing terminal nonempty `by=`, and mismatched notification/marker ids.
+Other envelope grammars are unchanged. The existing answer-back length limit
+still applies; a truncated envelope fails closed.
+
+When encoded fields occur, the matcher returns all validated answer fields and
+the annotator carries those fields plus the notification id into the tag.
+Historical one-line tags keep their minimal shape. The shared interpreter
+prefers the validated tag value over the raw fallback for each field, retaining
+`answer`, `text`, `custom_text`, `choice` priority and exact decoded whitespace.
+Its `notificationAnswerText` presentation field passes through the transcript
+model so the web/desktop answer element preserves LF and escapes markup without
+treating a continuation such as `Note:` as a separate note. Structured question
+notes keep their existing rendering.
+
+`tests/test_notification_answer_multiline.py` and the shared multiline fixture
+cover producer, matcher, annotation and ingest. Core and transcript-view tests
+assert exact LF text; the hermetic web scenario `multiline-notification-answer`
+checks the real compact answer row after scratch-daemon ingest and transport.
