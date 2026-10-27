@@ -102,7 +102,9 @@ again before activation. Missing/stale seam proof refuses; a green merge alone
 cannot replace it. There is no arbitrary command execution or new cache.
 For mapped client changes, the existing web runner receives the named
 `PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam` filter through its supported
-`--pass-env` mechanism. Broad fallback runs the default full web target. This
+`--pass-env` mechanism. Admission also requires that exact scenario in the
+hash-bound browser log and binds its printed PASS verdict, assertions and cleanup;
+the environment name alone is insufficient. Broad fallback runs the default full web target. This
 does not remove any ordinary mandatory web/CI checks. Installed web/mobile
 proof is separately reused only within the registered exact source/input bounds;
 the named candidate-web scenario alone cannot establish installed/mobile proof.

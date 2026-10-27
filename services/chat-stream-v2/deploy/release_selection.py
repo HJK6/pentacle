@@ -311,6 +311,35 @@ def execution_scope(plan, target):
         and any(b["id"] == "client_wire_render" for b in plan.get("boundaries", []))) else "default"
 
 
+def scenario_verdict(terminal, scope):
+    """Bind the scenario actually executed, using the existing browser artifacts."""
+    logs = [b for b in terminal.get("evidence", []) if Path(b["path"]).name == "web-browser.log"]
+    require(len(logs) == 1, "missing/duplicate browser scenario log")
+    log = Path(file_binding({k: logs[0][k] for k in ("path", "sha256")})["path"])
+    lines = log.read_text().splitlines()
+    require([line[2:] for line in lines if line.startswith("▸ ")] == [scope]
+            and [line for line in lines if line.startswith("◀ web_gate:")] == ["◀ web_gate: PASS"],
+            "browser scenario mismatch/non-green")
+    artifacts = [line.removeprefix("  artifacts: ") for line in lines if line.startswith("  artifacts: ")]
+    require(len(artifacts) == 1, "missing/duplicate browser scenario verdict")
+    directory = Path(artifacts[0])
+    require(directory.is_absolute() and directory.resolve().is_relative_to(log.parent.resolve()),
+            "browser scenario verdict outside execution evidence")
+    path = directory / "verdict.json"
+    verdict = read(path)
+    require(verdict.get("scenario") == "web_gate" and verdict.get("status") == "PASS"
+            and type(verdict.get("failedScenarios")) is int and verdict["failedScenarios"] == 0
+            and isinstance(verdict.get("steps"), list) and verdict["steps"]
+            and all(isinstance(step, dict) and step.get("ok") is True for step in verdict["steps"]),
+            "non-green browser scenario verdict")
+    auth, daemon = verdict.get("fixture_auth_cleanup", {}), verdict.get("daemon_cleanup", {})
+    require(type(auth.get("remaining_credential_count")) is int and auth["remaining_credential_count"] == 0
+            and auth.get("registry_removed") is True and auth.get("token_removed") is True
+            and daemon.get("exited") is True and daemon.get("forced") is False,
+            "non-green browser scenario cleanup")
+    return {"path": str(path), "sha256": digest(path.read_bytes())}
+
+
 def validate_results(plan, section):
     require(isinstance(section, dict) and set(section) == {"identity", "results"}
             and section.get("identity") == plan["identity"], "stale seam identity")
@@ -357,6 +386,9 @@ def validate_results(plan, section):
         require(terminal.get("evidence"), "missing subject evidence")
         for binding in terminal["evidence"]:
             file_binding({k: binding[k] for k in ("path", "sha256")})
+        if scope != "default":
+            require(row.get("scenario_verdict") == scenario_verdict(terminal, scope),
+                    "changed/missing browser scenario verdict binding")
     require(seen == expected, "missing required seam result")
     require_qualification(plan)
     return section
@@ -413,6 +445,8 @@ def run_selected(plan, repo, python, runner, workspace, evidence_dir):
                      "execution_scope": scope,
                      "outcome": terminal.get("outcome"), "evidence": bound,
                      "counts": terminal.get("secondary", {}).get("counts", {"failures": 0, "errors": 0, "skipped": 0})})
+        if scope != "default":
+            rows[-1]["scenario_verdict"] = scenario_verdict(terminal, scope)
     section = {"identity": plan["identity"], "results": rows}
     validate_results(plan, section)
     return section

@@ -201,13 +201,21 @@ def test_dirty_source_refuses_instead_of_reusing_commit_label(release):
         prepare()
 
 
-def _execution_runner(plan, calls):
+def _execution_runner(plan, calls, web_scenario="installed-client-seam"):
     def runner(cmd, cwd):
         calls.append(tuple(cmd))
         out = Path(cmd[cmd.index("--evidence-dir") + 1])
         target = cmd[cmd.index("--target") + 1]
         selects = [cmd[n + 1] for n, p in enumerate(cmd) if p == "--select"]
         proof = _write(out / "subject.json", {"synthetic": True})
+        if target == "web-gate":
+            _write(out / "browser/web_gate/verdict.json", {"scenario": "web_gate", "status": "PASS", "failedScenarios": 0,
+                "steps": [{"name": web_scenario, "ok": True}],
+                "fixture_auth_cleanup": {"remaining_credential_count": 0, "registry_removed": True, "token_removed": True},
+                "daemon_cleanup": {"exited": True, "forced": False}})
+            log = out / "web-browser.log"
+            log.write_text(f"▸ {web_scenario}\n◀ web_gate: PASS\n  artifacts: {out / 'browser/web_gate'}\n")
+            proof = {"path": str(log), "sha256": selection.digest(log.read_bytes())}
         _write(out / "attempts/owned/0001-started.json", {
             "schema": "pentacle.test-attempt-event.v1", "state": "started", "attempt_id": "owned", "target": target,
             "selected": {"select": selects, "pass_env_names": [cmd[n + 1] for n, p in enumerate(cmd) if p == "--pass-env"]},
@@ -396,3 +404,55 @@ def test_source_scope_includes_git_paths_with_embedded_newlines(release):
     (repo / "renderer/new\nmodule.js").write_text("// source with a Git-valid path\n")
     changed = commit("add source with newline path")
     assert selection.source_scope(repo, changed, ["renderer/"], runner) != before
+
+
+def test_valid_same_source_receipt_from_another_named_scenario_refuses(release, tmp_path, monkeypatch):
+    repo, _, prepare, *_ = release
+    plan = prepare()
+    _qualify(monkeypatch, plan)
+    # Target, clean SHA, toolchain, pass_env_names and pass outcome all match;
+    # only the actual browser scenario differs from the required seam.
+    with pytest.raises(selection.Invalid, match="scenario"):
+        selection.run_selected(plan, repo, sys.executable, _execution_runner(plan, [], "another-valid-scenario"),
+                               tmp_path / "work", tmp_path / "proof")
+
+
+@pytest.mark.parametrize("corruption", ["missing_log", "extra_scenario", "no_pass", "no_artifacts",
+                                       "status", "step", "cleanup", "missing_binding", "changed_verdict"])
+def test_browser_scenario_evidence_cannot_be_substituted(release, tmp_path, monkeypatch, corruption):
+    repo, _, prepare, *_ = release
+    plan = prepare()
+    _qualify(monkeypatch, plan)
+    section = selection.run_selected(plan, repo, sys.executable, _execution_runner(plan, []),
+                                     tmp_path / "work", tmp_path / "proof")
+    row = next(r for r in section["results"] if r["target"]["target"] == "web-gate")
+    terminal_path = Path(row["evidence"]["terminal"]["path"])
+    terminal = json.loads(terminal_path.read_text())
+    log = Path(terminal["evidence"][0]["path"])
+    verdict_path = Path(row["scenario_verdict"]["path"])
+    verdict = json.loads(verdict_path.read_text())
+    if corruption == "missing_log":
+        terminal["evidence"] = [_write(log.with_name("other.log"), {"passed": True})]
+    elif corruption in {"extra_scenario", "no_pass", "no_artifacts"}:
+        text = log.read_text()
+        text = (text + "▸ another-valid-scenario\n" if corruption == "extra_scenario" else
+                text.replace("◀ web_gate: PASS", "◀ web_gate: FAIL") if corruption == "no_pass" else
+                "\n".join(line for line in text.splitlines() if not line.startswith("  artifacts:")))
+        log.write_text(text)
+        terminal["evidence"][0]["sha256"] = selection.digest(log.read_bytes())
+    elif corruption == "missing_binding":
+        row.pop("scenario_verdict")
+    else:
+        if corruption == "status":
+            verdict["status"] = "FAIL"
+        elif corruption == "step":
+            verdict["steps"][0]["ok"] = False
+        elif corruption == "cleanup":
+            verdict["daemon_cleanup"]["forced"] = True
+        else:
+            verdict["changed_after_receipt"] = True
+        # Retain the original section binding: even a later green verdict differs.
+        _write(verdict_path, verdict)
+    row["evidence"]["terminal"] = _write(terminal_path, terminal)
+    with pytest.raises(selection.Invalid, match="scenario"):
+        selection.validate_results(plan, section)
