@@ -47,6 +47,10 @@ The override date must be real, its authority token nonempty, and its reason
 nonempty. Authority references are parsed, not externally verified. Duplicate
 or malformed declarations refuse with
 `wip_override_malformed: spec=<canonical-spec-id>` and no computed count.
+A spec read or identity scan failure refuses with
+`wip_spec_unreadable: spec=<spec-id> exception=<exception-class>` and no
+computed count. The exception class is reported without its message. A scan
+failure names the candidate; a peer read failure names that peer.
 Grandfather/override overlap is exempt once and can never make E_R negative.
 Stale grandfather stems produce the structured `grandfather_stale` warning and
 do not lower the count. Other repositories do not contribute to R's count.
