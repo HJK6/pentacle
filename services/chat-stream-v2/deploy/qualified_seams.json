@@ -1,6 +1,6 @@
 {
   "client_wire_render": {
-    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
+    "source_ref": "aa12c2db24c511ffdfc02ed587b2aae661815c28",
     "source_paths": [
       "main.js",
       "preload.js",
@@ -35,7 +35,8 @@
     "qa_report": "e11a14d8-891b-4172-8880-0cb0f99569d4",
     "qa_review_sha256": "9ebac1cd5501f003d2a9bf41b43f6bf681c0b09781fb00226126afe27b276fc3",
     "evidence_sha256": "a7de416bb3c2233fd1217098f4fa9b52ef6507113733f08b508dc5119a01f5ef",
-    "scope_sha256": "63281060d4c284e903112e4ebe8266e51a34bbd4722293893df7c2ddf03f92b6"
+    "scope_sha256": "37cc572a5413035023a65f6174ba4ade7201e37c034ad832497d0ca9c768ed0d",
+    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
   },
   "provider_startup": {
     "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
@@ -67,7 +68,8 @@
     "qa_report": "b256fb88-c457-403f-a201-9ffaccc4f829",
     "qa_review_sha256": "b0bf9c2fed5db3624b40f93438b206832cfc18f4d4e181d8ad415abce666af04",
     "evidence_sha256": "c599f977855b4a6736d6f75ad45e094d0c737fd7a5ca6c2a0303efca6e0b6581",
-    "scope_sha256": "506974b102ec061f1acd23d1336217c9d53af10933dbc0748f80fd8fd2b69749"
+    "scope_sha256": "9cc421cdd17376e04650647179cc9237a91db2ecd98293cc7b45e8a2caddd54d",
+    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
   },
   "satellite_transition": {
     "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
@@ -114,10 +116,11 @@
     "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
     "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
     "evidence_sha256": "a8269af6308254a9dd6524c8d7075be2b0ab883527612ab4f43f8227857c389c",
-    "scope_sha256": "6cd3bc1f215ad9e5e01518cc909c9470c4ab7b93cf60fa2a585c39ad0d2e9f2a"
+    "scope_sha256": "caa67433dafc3629746b5642e32b82a2f97c4069e9f84c0bfae420a7c50180a4",
+    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
   },
   "deploy_invocation": {
-    "source_ref": "8be1ee0003f839dd0f703660baca9fc1d6930aa0",
+    "source_ref": "aa12c2db24c511ffdfc02ed587b2aae661815c28",
     "source_paths": [
       "services/chat-stream-v2/deploy/deploy.py",
       "services/chat-stream-v2/deploy/release_selection.py",
@@ -157,6 +160,7 @@
     "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
     "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
     "evidence_sha256": "7c49c0b9c3fc1571734e2c32eb75e040193adab5b885b53a6ba77590671aeeff",
-    "scope_sha256": "841068c1202def6412616db9e03846a4c1114f0145a8bf43154cfa8bddb2dcfb"
+    "scope_sha256": "aef460b80b395d74a463c953ad02440673ed076a24b5bc729529db31eaa21c12",
+    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
   }
 }
