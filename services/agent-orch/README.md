@@ -580,9 +580,13 @@ verification and does not require a forward preflight receipt or dependency
 bundle; retain its original interpreter, host mapping and rollback stamp.
 
 Dependency tar entries use canonical timestamps, ownership and modes and omit
-`__pycache__` subtrees already excluded from the dependency hash. Rebuilding the
-same source and dependency bytes under the pinned toolchain yields the same
-archive and manifest. Old releases built with nondeterministic metadata still
+`__pycache__` subtrees. The bundled `websockets` uses its pure-Python implementation:
+native accelerators and bytecode are excluded, along with install-specific
+`WHEEL`, `RECORD`, `INSTALLER`, `REQUESTED` and `direct_url.json` metadata. Upstream
+source, package metadata, entry points and licenses are retained. Dependency
+hashes cover these retained bytes, so the same source/version produces the same
+archive and manifest across host wheels; changed retained bytes or versions
+still change release identity. Old releases built with host-specific bytes still
 require their retained exact bundle or a distinct reviewed release SHA; never
 replace an existing immutable release to make a rebuilt archive fit.
 
