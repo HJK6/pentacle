@@ -19,7 +19,7 @@
       "path": "tests/test_deploy_fleet_verdict.py",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "f47232a4d7fef4334c9ae4ccde58f8741e080b0d9580c8c8745d2784edf75848",
+      "sha256": "1f5d64ef2c2723d9ffd179d9753ab42b688e3f6f4197b05c93b9b4957c733af8",
       "purpose": "Authored synthetic ops evidence; checkout log is source-derived, not captured traffic"
     }
   ],
