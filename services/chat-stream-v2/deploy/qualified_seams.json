@@ -1,1 +1,40 @@
-{}
+{
+  "client_wire_render": {
+    "source_ref": "c5d9d7bca860112be946e98ddd11924da149647a",
+    "source_paths": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "package-lock.json",
+      "renderer/",
+      "web/",
+      "server/",
+      "pentacle-chat-core/",
+      "services/chat-stream-v2/*.py",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "test/",
+      "scripts/gate_env.py",
+      "scripts/lib/",
+      "scripts/gate_web.py",
+      "scripts/gate-env.json",
+      "scripts/run-tests.js"
+    ],
+    "input_labels": [
+      "client_versions"
+    ],
+    "assertion_scope": [
+      "Real producer summary/list/history/update/inventory and reconnect/replay through pinned installed and candidate web transport/model/DOM.",
+      "Multiline Markdown, committed identity/order, duplicate delivery and preview/history flicker; same captured wire replayed through pinned installed and candidate mobile transport/model."
+    ],
+    "remaining_coverage": [
+      "No native mobile rendering or physical-device journey.",
+      "No mobile authentication or real network reconnect timing.",
+      "No arbitrary historical client-version matrix or assertions outside the finite accepted source/build/config set."
+    ],
+    "qa_report": "1b2ec8bc-6bd2-4647-ae9c-3069fc51ef37",
+    "qa_review_sha256": "076440c47cded78581afac8743703da5281a1beb571205883a5d9bce5f873f37",
+    "evidence_sha256": "8134361aa6f17b381dfb25b7521353af025b62cf0902992d4af58d26688567bf",
+    "scope_sha256": "8736a866d69f077331bfca9f25fa6407b0e55f89ad31c74d2cb3fe71000a4e97"
+  }
+}

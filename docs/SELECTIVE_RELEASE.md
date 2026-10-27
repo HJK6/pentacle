@@ -5,12 +5,16 @@ merge gate still runs once per qualifying final candidate; deploy reuses its
 passing `--gate-evidence` or runs the existing inline fallback. CI, hooks and
 activation readbacks remain required.
 
-**Initial qualification: none.** `deploy/qualified_seams.json`
-is intentionally empty. Synthetic tests exercise admission without certifying
-live tuples. A larger suite cannot cure a known coverage gap. Legacy deployment
+**Qualified scope:** `deploy/qualified_seams.json` records one finite accepted
+client producer-wire/web-render/mobile-model tuple. Its source reference,
+dependency/harness scope, installed build/configuration inputs, independent QA
+and evidence are pinned by digests. Provider, satellite and deploy surfaces
+remain unqualified. Synthetic tests exercise admission separately. A larger
+suite cannot cure a known coverage gap. Legacy deployment
 reports `selective_qualification: not_enabled`; it cannot certify selective
-acceptance or waive required gaps. Real qualification, final QA and an authorized
-representative component release remain prerequisites to activation.
+acceptance or waive required gaps. Final integration QA and an authorized
+representative component release remain prerequisites to activation. If the
+complete baseline union selects any other unqualified boundary, it still blocks.
 
 ## Actual inputs
 
@@ -96,10 +100,16 @@ required merge target. Duplicate, skipped, failed, untested, contradictory,
 dirty-source or stale identity rows refuse. Admission and bindings are checked
 again before activation. Missing/stale seam proof refuses; a green merge alone
 cannot replace it. There is no arbitrary command execution or new cache.
+For mapped client changes, the existing web runner receives the named
+`PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam` filter through its supported
+`--pass-env` mechanism. Broad fallback runs the default full web target. This
+does not remove any ordinary mandatory web/CI checks. Installed web/mobile
+proof is separately reused only within the registered exact source/input bounds;
+the named candidate-web scenario alone cannot establish installed/mobile proof.
 
 | Concrete case | Selection and initial disposition |
 | --- | --- |
-| Client-only renderer/producer change | Union all installed web/daemon baselines and external mobile versions; client seams selected. Refuse until exact consumer coverage is qualified. |
+| Client-only renderer/producer change | Union all installed web/daemon baselines and external mobile versions; client seams selected. The exact registered source/tuple can qualify; another tuple or any other selected unqualified boundary refuses. |
 | Same candidate, provider config/executable/account drift | Select provider startup; old external-tuple evidence is stale. Run required checks or refuse. Native-only or installed-old evidence cannot certify changed candidate send/reply. |
 | Satellite source/config drift | Actual emitter baseline and config select satellite transition and affected client wire checks. Missing source/config/dependency/recovery proof refuses. |
 | Docs-only from every actual baseline, unchanged external tuples | No new seam targets; mandatory merge and local activation floor remain. Latest-PR docs-only does not erase older installed changes. |
@@ -107,13 +117,19 @@ cannot replace it. There is no arbitrary command execution or new cache.
 
 ## Qualification and runtime boundaries
 
-Qualification entries are reviewed code, never caller input. They bind tested
-source/input/toolchain scope, exact resolved map gaps, accepted evidence digest
-and independent QA report. Only the qualification data file is excluded from
-the source-tree qualification pin to avoid circular pins; admission code stays
-included and result receipts bind registry bytes. Real entries require the surface owner's accepted evidence
+Qualification entries are reviewed data, never caller input. Public data holds
+only scope digests, immutable source reference/patterns, finite assertions,
+remaining omissions and QA/evidence references; private tuples and paths stay
+in release inputs. Source equivalence compares actual Git bytes for the entire
+declared producer/harness/dependency scope with the tested source reference.
+Changed bytes or tuples invalidate this reuse instead of relabelling a capture
+as a later candidate. Result receipts separately bind the entire candidate,
+admission code and registry. Real entries require the surface owner's accepted evidence
 and actual map/test files at final HEAD. One provider/account or model/transport
 result never certifies other tuples, native rendering or changed startup code.
+The client entry retains native rendering, mobile authentication/network timing
+and arbitrary historical-version omissions. The private release packet records
+the exact accepted client input fragment and its retained artifact bindings.
 
 Qualified deploy invokes `spawn_fleet_smoke.py URL HOST` and requires exactly
 `(HOST, codex, promptless)`. Stamps label other cells `not_selected: UNTESTED`,

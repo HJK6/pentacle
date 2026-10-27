@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -24,8 +24,8 @@ BOUNDARY_INPUT = {"client_wire_render": ("client_versions", "satellite_config"),
                   "provider_startup": ("provider_config",),
                   "satellite_transition": ("satellite_config",),
                   "deploy_invocation": ("deploy_config",)}
-# No client/provider/satellite live tuple has final accepted proof yet. A larger
-# suite cannot resolve these known gaps. Never populate this from a release file.
+# Only independently accepted finite scopes belong here. A larger suite cannot
+# resolve a known gap. Never populate this registry from a release caller.
 QUALIFICATION_PATH = Path(__file__).with_name("qualified_seams.json")
 QUALIFIED_SEAMS: dict[str, dict] = json.loads(QUALIFICATION_PATH.read_bytes())
 LOADED_QUALIFICATION_SHA256 = hashlib.sha256(QUALIFICATION_PATH.read_bytes()).hexdigest()
@@ -236,10 +236,48 @@ def prepare(repo, sha, input_path, python, runner):
                                  for t in targets.values()},
                 "installed": installed, "external_inputs": external, "activation": activation,
                 "required_cells": required_cells}
-    return {"identity": identity, "reports": reports, "boundaries": [boundaries[k] for k in sorted(boundaries)],
+    plan = {"identity": identity, "reports": reports, "boundaries": [boundaries[k] for k in sorted(boundaries)],
             "targets": [targets[k] for k in sorted(targets)],
             "classification": "broad_fallback" if any(r["classification"] == "broad_fallback" for r in reports)
             else "mapped" if boundaries else "docs_only"}
+    plan["qualification_contexts"] = {
+        name: qualification_context(repo, plan, name, proof, runner)
+        for name, proof in QUALIFIED_SEAMS.items() if name in boundaries}
+    return plan
+
+
+def source_scope(repo, revision, paths, runner):
+    require(full_sha(revision) and isinstance(paths, list) and paths, "invalid qualification source scope")
+    require(all(isinstance(p, str) and p and not p.startswith("/") and ".." not in PurePosixPath(p).parts for p in paths),
+            "invalid qualification source path")
+    result = runner(("git", "ls-tree", "-r", "--full-tree", revision), repo)
+    require(result.returncode == 0, "qualification source reference unavailable")
+    records = []
+    for line in result.stdout.splitlines():
+        path = line.split("\t", 1)[1]
+        if any(path.startswith(p) if p.endswith("/") else PurePosixPath(path).match(p) for p in paths):
+            records.append(line)
+    require(records, "empty qualification source scope")
+    return digest("\n".join(records).encode())
+
+
+def qualification_context(repo, plan, name, proof, runner):
+    """One digest predicate per accepted boundary; no deployment filtering."""
+    identity = plan["identity"]
+    reference = source_scope(repo, proof["source_ref"], proof["source_paths"], runner)
+    current = source_scope(repo, identity["candidate"], proof["source_paths"], runner)
+    boundary = next(b for b in plan["boundaries"] if b["id"] == name)
+    labels = proof["input_labels"]
+    require(isinstance(labels, list) and labels and set(labels) <= EXTERNAL, "invalid qualification input scope")
+    # File locations remain private; bytes and the exact nonsecret identities
+    # determine the finite tested tuple. All files are checked by prepare().
+    tuples = {label: {side: {"identity": value["identity"], "file_sha256": sorted(b["sha256"] for b in value["files"])}
+                     for side, value in identity["external_inputs"][label].items()} for label in labels}
+    return {"source_reference_sha256": reference, "source_sha256": current,
+            "tuple_sha256": digest(key(tuples).encode()),
+            "toolchain_sha256": digest(key(identity["toolchain"]).encode()),
+            **{k: identity[k] for k in ("selector_sha256", "map_sha256", "gate_config_sha256", "gate_env_sha256")},
+            "missing_coverage_sha256": digest(key(boundary["missing_coverage"]).encode())}
 
 
 def require_qualification(plan):
@@ -249,9 +287,10 @@ def require_qualification(plan):
         require(isinstance(proof, dict), "unqualified required seam " + name)
         # Registry entries are code-reviewed exact source/input scopes, not a
         # caller assertion that a broad passing suite filled a coverage hole.
-        scope = {k: v for k, v in plan["identity"].items()
-                 if k not in {"candidate", "inputs_sha256", "qualification_sha256"}}
-        require(proof.get("scope") == scope and proof.get("resolved_missing_coverage") == boundary["missing_coverage"]
+        context = plan.get("qualification_contexts", {}).get(name, {})
+        require(context and context.get("source_sha256") == context.get("source_reference_sha256")
+                and proof.get("scope_sha256") == digest(key(context).encode())
+                and proof.get("assertion_scope") and proof.get("remaining_coverage")
                 and proof.get("qa_report") and proof.get("evidence_sha256"), "unqualified source/tuple " + name)
 
 
@@ -262,6 +301,12 @@ def check_result(row):
     counts = row.get("counts")
     require(isinstance(counts, dict) and all(type(counts.get(k)) is int and counts[k] == 0
             for k in ("failures", "errors", "skipped")), "non-green seam counts")
+
+
+def execution_scope(plan, target):
+    return "installed-client-seam" if (target["target"] == "web-gate"
+        and plan.get("classification") == "mapped"
+        and any(b["id"] == "client_wire_render" for b in plan.get("boundaries", []))) else "default"
 
 
 def validate_results(plan, section):
@@ -279,6 +324,8 @@ def validate_results(plan, section):
         seen.add(target)
         require(target in expected, "unexpected seam target")
         check_result(row)
+        scope = execution_scope(plan, row["target"])
+        require(row.get("execution_scope") == scope, "seam execution scope mismatch")
         evidence = row.get("evidence")
         require(isinstance(evidence, dict) and set(evidence) == {"started", "prepared", "terminal"}, "missing seam execution evidence")
         started, prepared, terminal = (read(file_binding(evidence[k])["path"]) for k in ("started", "prepared", "terminal"))
@@ -288,6 +335,8 @@ def validate_results(plan, section):
                 and prepared.get("attempt_id") == terminal.get("attempt_id")
                 and started.get("target") == row["target"]["target"]
                 and started.get("selected", {}).get("select") == row["target"]["select"]
+                and started.get("selected", {}).get("pass_env_names", []) ==
+                    (["PENTACLE_WEB_GATE_SCENARIOS"] if scope != "default" else [])
                 and started.get("identities", {}).get("source") == {"sha": plan["identity"]["candidate"], "dirty": False},
                 "seam execution source/selection mismatch")
         require(terminal.get("outcome") == "pass" and terminal.get("first_failure") is None
@@ -346,6 +395,10 @@ def run_selected(plan, repo, python, runner, workspace, evidence_dir):
                    "--purpose", "acceptance"]
         for item in target["select"]:
             command.extend(("--select", item))
+        scope = execution_scope(plan, target)
+        if scope != "default":
+            command.extend(("--pass-env", "PENTACLE_WEB_GATE_SCENARIOS"))
+            command = ["/usr/bin/env", "PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam", *command]
         result = runner(command, repo)
         require(result.returncode == 0, "non-green selected target " + target["target"])
         bound = {}
@@ -355,6 +408,7 @@ def run_selected(plan, repo, python, runner, workspace, evidence_dir):
             bound[state] = {"path": str(paths[0]), "sha256": digest(paths[0].read_bytes())}
         terminal = read(bound["terminal"]["path"])
         rows.append({"target": target, "passed": True, "returncode": result.returncode,
+                     "execution_scope": scope,
                      "outcome": terminal.get("outcome"), "evidence": bound,
                      "counts": terminal.get("secondary", {}).get("counts", {"failures": 0, "errors": 0, "skipped": 0})})
     section = {"identity": plan["identity"], "results": rows}

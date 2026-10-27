@@ -24,8 +24,8 @@ def test_missing_installed_baselines_refuses(tmp_path):
         selection.prepare(Path(__file__).parents[3], SHA, inputs, sys.executable, lambda *_: None)
 
 
-def test_initial_real_qualification_is_empty():
-    assert selection.QUALIFIED_SEAMS == {}
+def test_real_qualification_never_claims_other_surfaces():
+    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render"}
 
 
 def test_required_seam_cannot_be_cured_by_a_green_broad_gate():
@@ -60,7 +60,8 @@ def _write(path, payload):
 
 
 @pytest.fixture
-def release(tmp_path):
+def release(tmp_path, monkeypatch):
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {})
     repo = tmp_path / "repo"
     repo.mkdir()
     source = Path(__file__).resolve().parents[3]
@@ -123,10 +124,12 @@ def release(tmp_path):
 
 
 def _qualify(monkeypatch, plan):
-    scope = {k: v for k, v in plan["identity"].items()
-             if k not in {"candidate", "inputs_sha256", "qualification_sha256"}}
+    # Synthetic proof for admission mechanics; never inserted into public data.
+    context = {"source_sha256": "f" * 64, "source_reference_sha256": "f" * 64}
+    plan["qualification_contexts"] = {b["id"]: context for b in plan["boundaries"]}
     monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {
-        b["id"]: {"scope": scope, "resolved_missing_coverage": b["missing_coverage"],
+        b["id"]: {"scope_sha256": selection.digest(selection.key(context).encode()),
+                  "assertion_scope": ["synthetic"], "remaining_coverage": ["synthetic"],
                   "qa_report": "synthetic-only", "evidence_sha256": "f" * 64}
         for b in plan["boundaries"]})
 
@@ -206,7 +209,8 @@ def _execution_runner(plan, calls):
         selects = [cmd[n + 1] for n, p in enumerate(cmd) if p == "--select"]
         proof = _write(out / "subject.json", {"synthetic": True})
         _write(out / "attempts/owned/0001-started.json", {
-            "schema": "pentacle.test-attempt-event.v1", "state": "started", "attempt_id": "owned", "target": target, "selected": {"select": selects},
+            "schema": "pentacle.test-attempt-event.v1", "state": "started", "attempt_id": "owned", "target": target,
+            "selected": {"select": selects, "pass_env_names": [cmd[n + 1] for n, p in enumerate(cmd) if p == "--pass-env"]},
             "identities": {"source": {"sha": plan["identity"]["candidate"], "dirty": False}}})
         _write(out / "attempts/owned/0002-prepared.json", {
             "schema": "pentacle.test-attempt-event.v1", "state": "prepared", "attempt_id": "owned",
@@ -229,6 +233,8 @@ def test_qualified_selection_executes_exact_targets_and_reuses_result(release, t
     assert len(calls) == len(plan["targets"]) == 3
     assert all("run_gate.py" not in " ".join(c) and "v2-merge" not in c for c in calls)
     assert {c[c.index("--target") + 1] for c in calls} == {"v2-pytest", "npm-test", "web-gate"}
+    web = next(c for c in calls if c[c.index("--target") + 1] == "web-gate")
+    assert web[:2] == ("/usr/bin/env", "PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam")
     assert selection.validate_results(plan, receipt) == receipt
     assert len(calls) == 3
     # Same candidate SHA, different external config: old result cannot qualify it.
@@ -347,3 +353,38 @@ def test_execution_artifact_drift_cannot_hide_behind_a_passing_result(release, t
     evidence[state] = _write(path, event)
     with pytest.raises(selection.Invalid):
         selection.validate_results(plan, section)
+
+
+def test_boundary_qualification_is_digest_only_and_unrelated_missing_proof_still_blocks(release, monkeypatch):
+    repo, _, prepare, _, _, runner, _ = release
+    plan = prepare()
+    proof = {"source_ref": plan["identity"]["candidate"], "source_paths": ["renderer/"],
+             "input_labels": ["client_versions"], "assertion_scope": ["synthetic client fixture"],
+             "remaining_coverage": ["native untested"], "qa_report": "synthetic-only", "evidence_sha256": "f" * 64}
+    context = selection.qualification_context(repo, plan, "client_wire_render", proof, runner)
+    proof["scope_sha256"] = selection.digest(selection.key(context).encode())
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {"client_wire_render": proof})
+    plan["qualification_contexts"] = {"client_wire_render": context}
+    selection.require_qualification(plan)
+    changed = copy.deepcopy(plan)
+    changed["identity"]["external_inputs"]["provider_config"]["candidate"]["identity"]["revision"] = "changed"
+    assert selection.qualification_context(repo, changed, "client_wire_render", proof, runner) == context
+    changed["boundaries"].append({"id": "provider_startup", "missing_coverage": ["live reply"]})
+    with pytest.raises(selection.Invalid, match="unqualified required seam provider_startup"):
+        selection.require_qualification(changed)
+
+
+def test_accepted_source_reference_is_not_relabelled_after_product_change(release, monkeypatch):
+    repo, inputs, prepare, _, commit, runner, _ = release
+    plan = prepare()
+    proof = {"source_ref": plan["identity"]["candidate"], "source_paths": ["renderer/"],
+             "input_labels": ["client_versions"], "assertion_scope": ["synthetic fixture"],
+             "remaining_coverage": ["native untested"], "qa_report": "synthetic-only", "evidence_sha256": "f" * 64}
+    context = selection.qualification_context(repo, plan, "client_wire_render", proof, runner)
+    proof["scope_sha256"] = selection.digest(selection.key(context).encode())
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {"client_wire_render": proof})
+    (repo / "renderer/fixture.js").write_text("// changed after accepted source\n")
+    inputs["candidate"] = commit("product source changed")
+    changed = prepare()
+    with pytest.raises(selection.Invalid, match="unqualified source/tuple"):
+        selection.require_qualification(changed)

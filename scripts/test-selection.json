@@ -142,16 +142,20 @@
           "files": [
             "scripts/gate_web.py",
             "test/e2e/web_gate.js",
-            "test/e2e/web_gate_interrupt.test.js"
+            "test/e2e/web_gate_interrupt.test.js",
+            "test/e2e/lib/installed_client_seam_scenario.js",
+            "test/e2e/lib/seed_web_gate.py",
+            "test/e2e/lib/web_gate_daemon.py"
           ]
         }
       ],
       "covered_behavior": [
         "Client contract probe checks wire sequence/content completeness, replay and inventory shape using fixtures and a disposable daemon.",
-        "Root consumer tests exercise reconnect/replay and chat-core drift; web-gate runs the existing browser journey and interrupt contract."
+        "Root consumer tests exercise reconnect/replay and chat-core drift; web-gate runs the existing browser journey and interrupt contract.",
+        "The default web-gate installed-client-seam scenario feeds real candidate Store/ingest summary/list/history/update/inventory and reconnect/replay through the browser transport/model/DOM; multiline Markdown, committed identity/order, duplicate delivery and preview/history flicker are asserted."
       ],
       "missing_coverage": [
-        "No installed native/mobile version matrix or cross-version replay certification.",
+        "Installed versions require evidence-backed build/source inventory, isolated pinned web assets via PENTACLE_WEB_GATE_CONSUMER_ROOT and explicit same-run mobile transport/model replay receipts. The default selection covers candidate web only; no native rendering, mobile auth/timing or arbitrary historical-version matrix is certified.",
         "Root npm-test does not run pentacle-chat-core/tests or its standalone test/typecheck scripts; no gate-env target for that standalone suite is declared here.",
         "Selected tests do not establish every changed renderer assertion or every producer/consumer combination."
       ]
