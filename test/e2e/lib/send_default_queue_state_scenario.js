@@ -65,10 +65,11 @@ async function agentChatSendDefaultQueueState(ctx) {
       sends: window.__normalSends.length, interrupts: window.__queueInterrupts,
       draft: document.querySelector('#cell-0 .slot-chat-compose-input').value,
       queued: document.querySelectorAll('#cell-0 .slot-chat-send-status.is-queued').length,
+      selectedStatus: [...document.querySelectorAll('#cell-0 .slot-chat-row')].find(el => el.textContent.includes('second queued message'))?.querySelector('.slot-chat-send-status')?.textContent,
       notice: document.querySelector('#cell-0 .slot-chat-compose-notice').textContent,
     }))()`);
     report.ok('Send now coalesces with other controls, preserves the draft, and never resends', released.sends === 3 && released.interrupts.length === 1 && released.draft === 'keep this unsent draft', released);
-    report.ok('an unconfirmed interrupt leaves both rows Queued and shows waiting', released.queued === 2 && /Waiting/.test(released.notice), released);
+    report.ok('Send now shows the selected row sending with no composer notice', released.queued === 1 && released.selectedStatus === 'sending…' && released.notice === '', released);
     report.ok('the interrupt carries the selected session generation', typeof released.interrupts[0]?.expectedSessionGeneration === 'string' && released.interrupts[0].expectedSessionGeneration.length > 0, released.interrupts[0]);
     await session.eval(`(() => {
       window.__normalSends.slice(1).forEach((args, index) => window.PentacleChatStore.applyFrame({ type: 'chat.event', event: {

@@ -65,6 +65,30 @@ test('a provider-queued row exposes a stream-bound Send now and Sent removes it'
   assert.equal(status({ receiptCaption: 'queued', providerQueued: true }, { allowQueuedSendNow: false }).querySelector('.slot-chat-send-now'), null);
 });
 
+test('Send now shows the ordinary sending row without a composer notice', async () => {
+  const { controller } = setup();
+  const id = controller.sendTurn(STREAM, 'display after send now');
+  await settle();
+  assert.equal(sendNow(controller, STREAM, id), true);
+  assert.equal(controller.getComposerNotice(STREAM), '');
+  const pending = controller.selectSessionDetail(STREAM, { visibleCount: 'all' })!.transcriptItems.find(row => row.optimisticId === id)!;
+  assert.equal(pending.receiptCaption, 'sending');
+  await settle();
+  const item = controller.selectSessionDetail(STREAM, { visibleCount: 'all' })!.transcriptItems.find(row => row.optimisticId === id)!;
+  const doc = new JSDOM(renderTranscriptItemHtml(item, undefined, { streamId: STREAM, allowQueuedSendNow: true })).window.document;
+  assert.equal(controller.getComposerNotice(STREAM), '');
+  assert.equal(doc.querySelector('.slot-chat-send-status')?.textContent, 'sending…');
+  assert.equal(doc.querySelector('.slot-chat-send-now'), null);
+  const send = controller.getState().optimisticSends?.[id]!;
+  controller.applyFrame({ type: 'chat.event', event: { daemon_seq: 55, host: 'peer', provider: 'claude',
+    stream_id: STREAM, session_name: 'queue-seat', timestamp: new Date().toISOString(), kind: 'USER',
+    text: send.text, optimistic_id: id, request_id: send.request_id,
+    raw: { receipt_state: 'landed', receipt_delivery: 'landed' } } });
+  const sent = controller.selectSessionDetail(STREAM, { visibleCount: 'all' })!.transcriptItems.find(row => row.optimisticId === id)!;
+  assert.equal(sent.receiptCaption, 'sent');
+  controller.dispose();
+});
+
 test('Send now interrupts exactly once without resending text, attachments, or changing IDs', async () => {
   const { controller, sends, interrupts } = setup();
   const attachments = [{ key: 'blob-key', mime: 'image/png' }];
@@ -79,7 +103,7 @@ test('Send now interrupts exactly once without resending text, attachments, or c
   assert.deepEqual(interrupts, [{ streamId: STREAM, expectedSessionGeneration: 'generation-1' }]);
   assert.deepEqual(controller.getState().optimisticSends?.[id], before);
   assert.equal(controller.getTurnPhase(STREAM), 'working');
-  assert.match(controller.getComposerNotice(STREAM), /[Ww]ait|requested/);
+  assert.equal(controller.getComposerNotice(STREAM), '');
   controller.dispose();
 });
 
@@ -143,7 +167,11 @@ test('an explicit interrupt failure leaves the message queued and allows one use
   assert.equal(sendNow(controller, STREAM, id), true);
   await settle();
   assert.equal(controller.getState().optimisticSends?.[id]?.provider_queued, true);
-  assert.match(controller.getComposerNotice(STREAM), /[Ff]ail|[Cc]ould not|did not take/);
+  const row = controller.selectSessionDetail(STREAM, { visibleCount: 'all' })!.transcriptItems.find(item => item.optimisticId === id)!;
+  const doc = new JSDOM(renderTranscriptItemHtml(row, undefined, { streamId: STREAM, allowQueuedSendNow: true })).window.document;
+  assert.match(doc.querySelector('.slot-chat-send-status')?.textContent || '', /^Queued/);
+  assert.ok(doc.querySelector('.slot-chat-send-now'));
+  assert.equal(controller.getComposerNotice(STREAM), 'Could not send now. Message remains queued.');
   setInterrupt({ ok: true, confirm: 'interrupt_unconfirmed' });
   assert.equal(sendNow(controller, STREAM, id), true);
   await settle();
