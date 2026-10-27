@@ -50,6 +50,7 @@ import attachment_locks
 import store_exchange
 import store_attachments
 import store_usage
+import chat_recovery
 import store_capacity_retry
 import store_qa
 import store_lifecycle_authority as lifecycle_authority
@@ -1655,6 +1656,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(VOICE_OPERATIONS_DDL)
             for ddl in store_attachments.DDL:
                 conn.execute(ddl)
+            conn.execute(chat_recovery.DDL)
             for ddl in store_usage.DDL:
                 conn.execute(ddl)
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:
@@ -2586,6 +2588,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         """
         target = self._require_full_git_sha(target_sha, label="target_sha")
         previous = await self.get(EVENT_PUSH_TARGET_SHA_KEY)
+        if previous == target:
+            # Resume observation without destroying the original rollback pin.
+            captured = await self.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY)
+            return captured or None
         if previous:
             self._require_full_git_sha(previous, label="existing event.push target")
 
@@ -5343,6 +5349,55 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return True
         return False
 
+    @staticmethod
+    def _insert_session_event_conn(conn, stream_id, session_created_at, event, identity):
+        """The shared insert/dedupe floor for live and retained transcript reads."""
+        event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO session_event_tail "
+            "(stream_id,session_created_at,event_key,event_json,event_ts,recorded_at,identity) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (stream_id, session_created_at, hashlib.sha256(event_json.encode("utf-8")).hexdigest(),
+             event_json, event.get("timestamp"), time.time(), identity),
+        )
+        return int(cur.lastrowid) if cur.rowcount > 0 else None
+
+    async def record_satellite_runtime(self, host, sha, pid, incarnation, *, admitted,
+                                       useful=0, recovery_pending=None, recovery_gaps=None):
+        def operation(conn):
+            key = f"event_push.runtime.{host}"
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+                try:
+                    previous = json.loads(row[0]) if row else {}
+                except (TypeError, ValueError):
+                    previous = {}
+                same = previous.get("sha") == sha and previous.get("incarnation") == incarnation
+                runtime = {"sha": sha, "pid": pid if type(pid) is int and pid > 0 else None,
+                    "incarnation": incarnation, "observed_at": iso_now(), "observed_at_epoch": time.time(),
+                    "admitted": admitted, "useful_events": (previous.get("useful_events", 0) if same else 0) + useful,
+                    "useful_observed_at_epoch": time.time() if useful else
+                        previous.get("useful_observed_at_epoch") if same else None,
+                    "recovery_pending": recovery_pending, "recovery_gaps": recovery_gaps}
+                conn.execute("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                             (key, json.dumps(runtime, sort_keys=True)))
+        await self.submit(operation)
+
+    async def bind_chat_checkpoints(self, host, sources):
+        if not sources:
+            return []
+        return await self.submit(lambda conn: chat_recovery.bind_live_conn(conn, host, sources))
+
+    async def append_chat_recovery(self, host, batches):
+        if not batches:
+            return []
+        # Historical append deliberately stops at the common durable insert.
+        # No mirror, capacity observation, rebind or session mutation runs.
+        return await self.submit(lambda conn: chat_recovery.append_recovery_conn(
+            conn, host, batches, self._insert_session_event_conn,
+        ))
+
     async def append_session_events_lifecycle_cas(
         self,
         entries: list[dict[str, Any]],
@@ -5457,19 +5512,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                             "UPDATE sessions SET claude_session_id=?, claude_session_lineage=? WHERE host=? AND session_name=?",
                             (*rebind, host, session_name),
                         )
-                    cur = conn.execute(
-                        """
-                        INSERT OR IGNORE INTO session_event_tail(
-                            stream_id, session_created_at, event_key, event_json, event_ts,
-                            recorded_at, identity
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            stream_id, session_created_at, event_key, event_json,
-                            json.loads(event_json).get("timestamp"), recorded_at, identity,
-                        ),
+                    source_id = self._insert_session_event_conn(
+                        conn, stream_id, session_created_at, json.loads(event_json), identity,
                     )
-                    source_id = int(cur.lastrowid) if cur.rowcount > 0 else None
                     if source_id is not None and self._recorded_by_other_lifecycle_conn(
                             conn, stream_id, session_created_at, identity, source_id):
                         # Re-read history of a resumed seat: the row stays for this
@@ -6245,12 +6290,21 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
         return await self.submit(_op)
 
+    async def chat_history_readable(self, stream_id, generation):
+        host, _, name = stream_id.partition(":")
+        return await self.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_chat_checkpoints c JOIN v2_session_generation_history h "
+            "USING(host,session_name,generation) WHERE c.host=? AND c.session_name=? "
+            "AND c.generation=? LIMIT 1", (host, name, generation),
+        ).fetchone() is not None)
+
     async def fetch_session_event_page(
         self,
         stream_id: str,
         *,
         before_daemon_seq: int | None,
         limit: int,
+        generation: str | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch one newest-first cursor page, returned oldest-first.
 
@@ -6268,14 +6322,26 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             where = "t.stream_id = ? AND t.session_created_at = s.created_at"
             params: list[Any] = [host, session_name, stream_id]
+            if generation is not None:
+                proof = conn.execute(
+                    "SELECT c.session_created_at FROM v2_chat_checkpoints c "
+                    "JOIN v2_session_generation_history h USING(host,session_name,generation) "
+                    "WHERE c.host=? AND c.session_name=? AND c.generation=? LIMIT 1",
+                    (host, session_name, generation),
+                ).fetchone()
+                if proof is None:
+                    return []
+                where = "t.stream_id = ? AND t.session_created_at = ?"
+                params = [stream_id, proof[0]]
             if before_daemon_seq is not None:
                 where += " AND t.event_id < ?"
                 params.append(int(before_daemon_seq))
             params.append(int(limit))
+            join = "JOIN sessions s ON s.host=? AND s.session_name=?" if generation is None else ""
             rows = conn.execute(
                 f"""
                 SELECT t.event_id, t.event_json FROM session_event_tail t
-                JOIN sessions s ON s.host=? AND s.session_name=?
+                {join}
                 WHERE {where}
                 ORDER BY t.event_id DESC
                 LIMIT ?
@@ -6299,10 +6365,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
         return await self.submit(_op)
 
-    async def fetch_session_event_tail(self, stream_id: str, *, limit: int) -> list[dict[str, Any]]:
+    async def fetch_session_event_tail(self, stream_id: str, *, limit: int, generation: str | None = None) -> list[dict[str, Any]]:
         """The newest `limit` events for a stream, returned oldest-first."""
         return await self.fetch_session_event_page(
-            stream_id, before_daemon_seq=None, limit=limit,
+            stream_id, before_daemon_seq=None, limit=limit, generation=generation,
         )
 
     async def list_open_sessions_with_event_summary(self) -> list[dict[str, Any]]:

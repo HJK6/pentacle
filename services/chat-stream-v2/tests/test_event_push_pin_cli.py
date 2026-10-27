@@ -12,6 +12,8 @@ import time
 
 import pytest
 
+from pin_fixtures import preflight, runtime
+
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("event_push_pin", SERVICE_DIR / "tools" / "event_push_pin.py")
 assert SPEC and SPEC.loader
@@ -37,10 +39,7 @@ def seed(db, *, previous=PREVIOUS, stage=False):
             if stage:
                 await store.stage_event_push_target_sha(TARGET)
             for host in event_push_pin.SATELLITE_HOSTS:
-                await store.put(f"event_push.runtime.{host}", json.dumps({
-                    "sha": TARGET, "pid": 4321, "observed_at": "2030-01-01T00:00:00Z",
-                    "observed_at_epoch": time.time() + 60,
-                }))
+                await store.put(f"event_push.runtime.{host}", json.dumps(runtime(PREVIOUS if stage else TARGET)))
         finally:
             store.stop()
     asyncio.run(go())
@@ -66,7 +65,8 @@ def test_stage_uses_local_evidence_and_never_queries_remote_tags(tmp_path, monke
         }), "")
 
     monkeypatch.setattr(event_push_pin.subprocess, "run", smoke_only)
-    assert event_push_pin.main(["--db", str(db), "--stage", TARGET, "--gate-evidence", str(gate)]) == 0
+    assert event_push_pin.main(["--db", str(db), "--stage", TARGET, "--gate-evidence", str(gate),
+                                "--satellite-preflight", str(preflight(tmp_path, TARGET))]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["previous"] == PREVIOUS and result["readback"] == TARGET
     assert pins(db) == {"event_push.target_sha": TARGET, "event_push.target_sha.previous": PREVIOUS}
@@ -98,12 +98,16 @@ def test_invalid_evidence_refuses_before_pin_mutation(tmp_path, monkeypatch, bad
     assert pins(db) == before
 
 
-def test_nonempty_rollback_requires_evidence_for_captured_previous_sha(tmp_path, capsys):
+def test_nonempty_rollback_requires_evidence_for_captured_previous_sha(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(event_push_pin, "SATELLITE_HOSTS", ("workstation",))
+    monkeypatch.setattr(event_push_pin.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, json.dumps({
+        "ok": True, "status": "PASS", "failures": [], "untested": []}), ""))
     db = tmp_path / "sessions.db"
     seed(db, stage=True)
     gate = tmp_path / "previous-gate.json"
     gate.write_text(json.dumps(evidence(PREVIOUS)))
-    assert event_push_pin.main(["--db", str(db), "--rollback", "--gate-evidence", str(gate)]) == 0
+    assert event_push_pin.main(["--db", str(db), "--rollback", "--gate-evidence", str(gate),
+                                "--satellite-preflight", str(preflight(tmp_path, PREVIOUS))]) == 0
     assert json.loads(capsys.readouterr().out)["readback"] == PREVIOUS
     assert pins(db)["event_push.target_sha"] == PREVIOUS
 

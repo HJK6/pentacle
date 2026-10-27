@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tools import event_push_pin
+from pin_fixtures import preflight, runtime
 from store import (
     EVENT_PUSH_TARGET_SHA_KEY,
     EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY,
@@ -121,7 +122,7 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
     monkeypatch.setattr(spawn_fleet_smoke, "run_matrix", complete_matrix)
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        code = spawn_fleet_smoke.main([])
+        code = spawn_fleet_smoke.main(['ws://fixture', 'workstation'])
     smoke = subprocess.CompletedProcess([], code, output.getvalue(), "")
     monkeypatch.setattr(event_push_pin.subprocess, "run", lambda *a, **k: smoke)
 
@@ -130,17 +131,16 @@ def test_stage_consumes_actual_smoke_exit_and_json_contract(tmp_path, monkeypatc
         store = Store(db)
         store.start()
         try:
-            await store.put("event_push.runtime.workstation", json.dumps({
-                "sha": TARGET, "pid": 4321, "observed_at": "2030-01-01T00:00:00Z",
-                "observed_at_epoch": 9_999_999_999,
-            }))
+            await store.put("event_push.runtime.workstation", json.dumps(runtime(TARGET)))
         finally:
             store.stop()
         if not accepted:
             with pytest.raises(RuntimeError):
-                await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
+                await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json",
+                                          satellite_preflight=preflight(tmp_path, TARGET))
             return
-        result = await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
+        result = await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json",
+                                          satellite_preflight=preflight(tmp_path, TARGET))
         assert result["action"] == "stage" and result["readback"] == TARGET
         assert result["quota_exhausted"] == rows
 
@@ -175,7 +175,8 @@ def test_stage_fails_closed_with_last_stale_runtime_state(
 
         monkeypatch.setattr(event_push_pin, "SATELLITE_READBACK_DEADLINE_SECONDS", 0.01)
         with pytest.raises(RuntimeError) as raised:
-            await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json")
+            await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / "gate.json",
+                                          satellite_preflight=preflight(tmp_path, TARGET))
         message = str(raised.value)
         assert TARGET in message
         assert PREVIOUS in message
@@ -195,3 +196,95 @@ def test_smoke_malformed_or_contradictory_results_fail_closed(returncode, output
     import subprocess
     with pytest.raises(RuntimeError, match="post-deploy spawn smoke failed"):
         event_push_pin._smoke_quota_note(subprocess.CompletedProcess([], returncode, output, ""))
+
+
+def test_restage_preserves_original_rollback_pin():
+    async def run():
+        store = Store(':memory:')
+        store.start()
+        try:
+            await store.put(EVENT_PUSH_TARGET_SHA_KEY, PREVIOUS)
+            assert await store.stage_event_push_target_sha(TARGET) == PREVIOUS
+            assert await store.stage_event_push_target_sha(TARGET) == PREVIOUS
+            assert await store.rollback_event_push_target_sha() == PREVIOUS
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('missing', ['incarnation', 'admitted', 'useful_events', 'recovery_pending', 'recovery_gaps'])
+def test_boot_telemetry_cannot_substitute_for_useful_drained_delivery(tmp_path, monkeypatch, missing):
+    async def run():
+        store = Store(':memory:')
+        store.start()
+        try:
+            row = runtime(TARGET)
+            row[missing] = {'incarnation': 'prior-boot', 'admitted': False, 'useful_events': 0,
+                            'recovery_pending': 1, 'recovery_gaps': [{'reason': 'missing-source'}]}[missing]
+            await store.put('event_push.runtime.workstation', json.dumps(row))
+            participants = json.loads(preflight(tmp_path, TARGET).read_text())['participants']
+            with pytest.raises(RuntimeError, match='activation deadline'):
+                await event_push_pin._observe(store, participants, TARGET, 0,
+                    asyncio.get_running_loop().time() + 0.001, useful=True)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_optional_offline_stays_partial_and_canary_is_only_affected_codex(tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(event_push_pin, 'SATELLITE_HOSTS', ('workstation', 'optional'))
+    monkeypatch.setattr(event_push_pin, 'OPTIONAL_SATELLITE_HOSTS', ('optional',))
+    monkeypatch.setattr(event_push_pin, '_load_gate_evidence', lambda *_: {})
+    commands = []
+    def smoke(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps({
+            'ok': True, 'status': 'PASS', 'failures': [], 'untested': []}), '')
+    monkeypatch.setattr(event_push_pin.subprocess, 'run', smoke)
+    async def run():
+        db = str(tmp_path / 'sessions.db')
+        store = Store(db)
+        store.start()
+        try:
+            await store.put('event_push.target_sha', PREVIOUS)
+            await store.put('event_push.runtime.workstation', json.dumps(runtime(TARGET)))
+        finally:
+            store.stop()
+        receipt = preflight(tmp_path, TARGET, hosts=('workstation', 'optional'), optional=('optional',))
+        result = await event_push_pin._run(db, stage=TARGET, rollback=False,
+            gate_evidence=tmp_path / 'gate.json', satellite_preflight=receipt, url='ws://owned-fixture')
+        assert result['status'] == 'PARTIAL' and result['pending'] == ['optional']
+        assert len(commands) == 1 and commands[0][2:] == ['ws://owned-fixture', 'workstation']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('bad', ['missing', 'candidate', 'stale', 'dependencies', 'interpreter', 'compatibility', 'omitted_host', 'running_source', 'config_identity', 'cli_identity'])
+def test_preflight_refuses_before_stage(tmp_path, monkeypatch, bad):
+    monkeypatch.setattr(event_push_pin, 'SATELLITE_HOSTS', ('workstation',))
+    monkeypatch.setattr(event_push_pin, '_load_gate_evidence', lambda *_: {})
+    receipt = preflight(tmp_path, TARGET)
+    payload = json.loads(receipt.read_text())
+    if bad == 'candidate': payload['candidate'] = PREVIOUS
+    if bad == 'stale': payload['observed_at_epoch'] = 1
+    if bad == 'dependencies': payload['participants'][0]['imports_passed'] = False
+    if bad == 'interpreter': payload['participants'][0]['interpreter'] = '/global/python'
+    if bad == 'compatibility': payload['participants'][0]['compatibility_passed'] = False
+    if bad == 'omitted_host': payload['participants'] = []
+    if bad == 'running_source': payload['participants'][0]['installed_source_sha'] = 'checkout-head-only'
+    if bad == 'config_identity': payload['participants'][0].pop('configuration_sha256')
+    if bad == 'cli_identity': payload['participants'][0].pop('installed_cli_sha256')
+    receipt.write_text(json.dumps(payload))
+    async def run():
+        db = str(tmp_path / 'sessions.db')
+        with pytest.raises(ValueError):
+            await event_push_pin._run(db, stage=TARGET, rollback=False, gate_evidence=tmp_path / 'gate.json',
+                                     satellite_preflight=None if bad == 'missing' else receipt)
+        store = Store(db)
+        store.start()
+        try:
+            assert await store.get(EVENT_PUSH_TARGET_SHA_KEY) is None
+            assert await store.get(EVENT_PUSH_TARGET_SHA_PREVIOUS_KEY) is None
+        finally:
+            store.stop()
+    asyncio.run(run())
