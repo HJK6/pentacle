@@ -1657,6 +1657,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             for ddl in store_attachments.DDL:
                 conn.execute(ddl)
             conn.execute(chat_recovery.DDL)
+            if 'successor_checkpoint_id' not in {r[1] for r in conn.execute('PRAGMA table_info(v2_chat_checkpoints)')}:
+                conn.execute('ALTER TABLE v2_chat_checkpoints ADD COLUMN successor_checkpoint_id TEXT')
             for ddl in store_usage.DDL:
                 conn.execute(ddl)
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}:

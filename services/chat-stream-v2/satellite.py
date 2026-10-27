@@ -1001,6 +1001,8 @@ class Satellite:
                         tail.recovery_gap = 'incomplete_source_record'
                         continue
                     tail.partial_tail_bytes = size - end
+                    if (end == tail.offset and tail.binding.get('predecessor_checkpoint_id')):
+                        continue  # retain unused successor proof; no empty rotation loop
                     tail.recovery_range = {'start': tail.offset, 'end': end,
                         'digest': self._prefix_digest(tail.path, end)}
                     # Fixed range and original binding reach disk before wire.
@@ -1010,6 +1012,10 @@ class Satellite:
                     tail.recovery_gap = 'recovery_range_changed'
                     continue
                 if tail.offset >= fixed['end']:
+                    # Empty ranges and lost final ACKs still need their durable
+                    # handoff response. Never discard proof before that receipt.
+                    self._pass_recovery.append({**tail.binding, 'range': fixed,
+                        'from_offset': tail.offset, 'next_offset': tail.offset})
                     continue
                 before = len(events)
                 pending, _ = self._collect_stream(tail, budget, events)
@@ -1073,18 +1079,16 @@ class Satellite:
             for name, pane in discovered.items()
         }
         for key, tail in list(self._recovering.items()):
-            if tail.recovery_range is None or tail.offset < tail.recovery_range['end']:
+            if tail.recovery_range is not None:
                 continue
             pane = discovered.get(tail.session_name)
             fence = self._usage_fences.get(f'{self.config.host}:{tail.session_name}') or {}
             if (pane is not None and pane.transcript_path == tail.path
+                    and tail.binding.get('predecessor_checkpoint_id')
+                    and not tail.partial_tail_bytes
                     and fence.get('session_generation') == tail.binding.get('generation')
                     and str(pane.pane_pid or '') == tail.source_pane_pid):
-                tail.recovery_range, tail.binding = None, {}
-                tail.partial_tail_bytes = 0
                 self._tails[tail.session_name] = tail
-                self._recovering.pop(key)
-            elif not tail.partial_tail_bytes and (pane is None or pane.transcript_path != tail.path):
                 self._recovering.pop(key)
         # Retain only already-discovered native sources. A closed name never
         # creates a new binding; the daemon-issued checkpoint is the authority.
@@ -1609,7 +1613,8 @@ class Satellite:
             frame['chat_sources'] = getattr(self, '_pass_sources', [])
             frame['chat_recovery'] = getattr(self, '_pass_recovery', [])
             frame['chat_recovery_pending'] = sum(
-                tail.recovery_range is None or tail.offset < tail.recovery_range['end']
+                (tail.offset < tail.observed_size if tail.recovery_range is None
+                 else tail.offset < tail.recovery_range['end'])
                 for tail in self._recovering.values()
             )
             frame['chat_recovery_gaps'] = [
@@ -1769,6 +1774,39 @@ class Satellite:
                 through = result.get('through')
                 if type(through) is int and tail.offset <= through <= tail.recovery_range['end']:
                     tail.offset = through
+                    if result.get('status') != 'drained' or through != tail.recovery_range['end']:
+                        continue
+                    successor = result.get('successor')
+                    if isinstance(successor, dict):
+                        binding = successor.get('binding')
+                        if (not chat_recovery.source_valid(binding, self.config.host)
+                                or not isinstance(binding.get('checkpoint_id'), str)
+                                or binding['checkpoint_id'] == tail.binding['checkpoint_id']
+                                or binding.get('predecessor_checkpoint_id') != tail.binding['checkpoint_id']
+                                or any(binding[k] != tail.binding[k] for k in chat_recovery.SOURCE_FIELDS)
+                                or successor.get('origin_offset') != through):
+                            continue
+                        fixed, cursor = successor.get('range'), successor.get('through')
+                        if fixed is not None and (not isinstance(fixed, dict)
+                                or set(fixed) != set(chat_recovery.RANGE_FIELDS)
+                                or not chat_recovery.offset(fixed['start'])
+                                or not chat_recovery.offset(fixed['end'])
+                                or not isinstance(fixed['digest'], str)
+                                or chat_recovery.HEX64.fullmatch(fixed['digest']) is None):
+                            continue
+                        if (not chat_recovery.offset(cursor) or (fixed is None and cursor != through)
+                                or (fixed is not None and not through <= fixed['start'] <= cursor <= fixed['end'])):
+                            continue
+                        self._recovering.pop(tail.binding['checkpoint_id'])
+                        tail.binding, tail.recovery_range, tail.offset = binding, fixed, cursor
+                        self._recovering[binding['checkpoint_id']] = tail
+                    elif successor is None and 'successor' in result and not tail.partial_tail_bytes:
+                        # Explicit terminal response after closure, with no live
+                        # successor ever issued. Keep any out-of-range bytes as a gap.
+                        if tail.observed_size > through:
+                            tail.recovery_gap = 'recovery_successor_unproven'
+                        else:
+                            self._recovering.pop(tail.binding['checkpoint_id'])
         self._save_chat_checkpoint()
         version = ack.get("version") if isinstance(ack.get("version"), dict) else {}
         if version.get("status") == "update_required":

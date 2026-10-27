@@ -19,7 +19,8 @@ DDL = '''CREATE TABLE IF NOT EXISTS v2_chat_checkpoints (
     generation TEXT NOT NULL, session_created_at TEXT NOT NULL, provider TEXT NOT NULL,
     pane_pid TEXT NOT NULL, native_session_id TEXT NOT NULL, file_digest TEXT NOT NULL,
     origin_offset INTEGER NOT NULL, ack_offset INTEGER NOT NULL,
-    recovery_range TEXT, recovery_cursor INTEGER, recorded_at REAL NOT NULL)'''
+    recovery_range TEXT, recovery_cursor INTEGER, recorded_at REAL NOT NULL,
+    successor_checkpoint_id TEXT)'''
 SOURCE_FIELDS = ('stream_id', 'provider', 'generation', 'session_created_at',
                  'pane_pid', 'native_session_id', 'file_digest')
 RANGE_FIELDS = ('start', 'end', 'digest')
@@ -36,6 +37,45 @@ def source_valid(source, host):
             and source['provider'] in {'claude', 'codex'}
             and HEX64.fullmatch(source['file_digest']) is not None
             and source['pane_pid'].isdigit())
+
+
+def successor_conn(conn, row, end):
+    """Link replacement proof only while the exact original lifecycle is live.
+
+    A lost ACK can retrieve that same recorded link after closure. Neither its
+    identity nor the predecessor's immutable range is reconstructed or widened.
+    """
+    token = row['successor_checkpoint_id']
+    if token is None:
+        live = conn.execute('''SELECT 1 FROM sessions s
+            JOIN v2_session_generations g USING(host,session_name)
+            JOIN v2_session_generation_history h USING(host,session_name,generation)
+            WHERE s.host=? AND s.session_name=? AND s.status='open'
+              AND s.created_at=? AND g.generation=? AND h.closed_at IS NULL
+              AND s.provider=? AND CAST(s.pane_pid AS TEXT)=?''',
+            (row['host'], row['session_name'], row['session_created_at'], row['generation'],
+             row['provider'], row['pane_pid'])).fetchone()
+        if live is None:
+            return None
+        token = uuid.uuid4().hex
+        conn.execute('''INSERT INTO v2_chat_checkpoints
+            (checkpoint_id,host,session_name,generation,session_created_at,provider,pane_pid,
+             native_session_id,file_digest,origin_offset,ack_offset,recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''', (token, row['host'], row['session_name'],
+            row['generation'], row['session_created_at'], row['provider'], row['pane_pid'],
+            row['native_session_id'], row['file_digest'], end, end, time.time()))
+        conn.execute('UPDATE v2_chat_checkpoints SET successor_checkpoint_id=? WHERE checkpoint_id=?',
+                     (token, row['checkpoint_id']))
+    next_row = conn.execute('SELECT * FROM v2_chat_checkpoints WHERE checkpoint_id=?', (token,)).fetchone()
+    if (next_row is None or token == row['checkpoint_id'] or next_row['origin_offset'] != end
+            or any(next_row[k] != row[k] for k in ('host', 'session_name', *SOURCE_FIELDS[1:]))):
+        return {'error': 'recovery_successor_invalid'}
+    return {'binding': {'checkpoint_id': token, 'stream_id': f"{row['host']}:{row['session_name']}",
+                       **{k: next_row[k] for k in SOURCE_FIELDS if k != 'stream_id'},
+                       'predecessor_checkpoint_id': row['checkpoint_id']},
+            'origin_offset': next_row['origin_offset'],
+            'range': json.loads(next_row['recovery_range']) if next_row['recovery_range'] else None,
+            'through': next_row['recovery_cursor'] if next_row['recovery_range'] else next_row['origin_offset']}
 
 
 def bind_live_conn(conn, host, sources):
@@ -96,7 +136,7 @@ def bind_live_conn(conn, host, sources):
                 continue
             prior = conn.execute('''SELECT * FROM v2_chat_checkpoints WHERE host=?
                 AND session_name=? AND generation=? AND native_session_id=? AND file_digest=?
-                ORDER BY recorded_at DESC LIMIT 1''', (host, name, source['generation'],
+                ORDER BY recorded_at DESC,rowid DESC LIMIT 1''', (host, name, source['generation'],
                 source['native_session_id'], source['file_digest'])).fetchone()
             if prior is not None and prior['recovery_range'] is not None:
                 fixed = json.loads(prior['recovery_range'])
@@ -199,6 +239,10 @@ def append_recovery_conn(conn, host, batches, insert):
                 last = end
             if not valid:
                 continue
+            successor = successor_conn(conn, row, fixed['end']) if max(cursor, hi) == fixed['end'] else None
+            if successor and successor.get('error'):
+                result['status'] = successor['error']
+                continue
             inserted = 0
             for entry in entries:
                 inserted += insert(conn, batch['stream_id'], row['session_created_at'],
@@ -208,4 +252,6 @@ def append_recovery_conn(conn, host, batches, insert):
                          (encoded, cursor, row['checkpoint_id']))
             result.update(status='drained' if cursor == fixed['end'] else 'pending',
                           through=cursor, inserted=inserted)
+            if cursor == fixed['end']:
+                result['successor'] = successor
     return results

@@ -117,6 +117,9 @@ def test_closed_source_reconstructs_and_drains_exact_history(tmp_path, monkeypat
             wire = _Wire(sink)
             ack = await sat._push(wire, events, hw)
             assert ack['type'] == 'event.push.ok' and ack['inserted'] == 2, ack
+            assert ack['chat_recovery'][0]['successor'] is None
+            assert await store.submit(lambda c: c.execute('SELECT COUNT(*) FROM v2_chat_checkpoints '
+                'WHERE generation=?', (original['session_generation'],)).fetchone()[0]) == 1
             sat._apply_ack(ack, hw)
             replay = await sat._push(wire, events, hw)
             assert replay['inserted'] == 0, replay
@@ -145,6 +148,82 @@ def test_closed_source_reconstructs_and_drains_exact_history(tmp_path, monkeypat
             assert await store.fetch_session(HOST, 'seat') == before
             assert casts == []
             assert sat._collect({})[0] == []
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('interruption', ['lost_ack', 'checkpoint_write'])
+@pytest.mark.parametrize('reopen', [False, True])
+def test_lost_successor_receipt_retrieves_only_preissued_original_proof(tmp_path, monkeypatch, interruption, reopen):
+    monkeypatch.setattr(satellite, 'DEFAULT_CHAT_CHECKPOINT_PATH', str(tmp_path / 'chat.json'))
+    async def run():
+        path = tmp_path / 'transcript.jsonl'
+        _append(path, {'type': 'session_meta', 'payload': {'id': NATIVE}})
+        _append(path, _record('initial', 'codex'))
+        panes = {'seat': satellite._DiscoveredPane('seat', 'codex', str(path), pane_pid=7001)}
+        store = Store(str(tmp_path / 'sessions.db'))
+        store.start()
+        try:
+            await store.put('event_push.target_sha', TARGET)
+            original = await store.open_session(HOST, 'seat', provider='codex', pane_pid='7001')
+            sink = _sink(store, [])
+            fences = {'worker:seat': (await sink._usage_fences(HOST))[0]}
+            sat = _producer(tmp_path, TARGET)
+            sat._usage_fences = fences
+            events, hw, _ = sat._collect(panes)
+            sat._apply_ack(await sat._push(_Wire(sink), events, hw), hw)
+            prior_token = sat._tails['seat'].binding['checkpoint_id']
+            sat = _producer(tmp_path, TARGET)
+            sat._usage_fences = fences
+            events, hw, _ = sat._collect(panes)
+            receipt = await sat._push(_Wire(sink), events, hw)
+            next_token = receipt['chat_recovery'][0]['successor']['binding']['checkpoint_id']
+            if interruption == 'checkpoint_write':
+                def fail_save():
+                    raise OSError('injected successor receipt persistence interruption')
+                monkeypatch.setattr(sat, '_save_chat_checkpoint', fail_save)
+                with pytest.raises(OSError):
+                    sat._apply_ack(receipt, hw)
+            retained = json.loads((tmp_path / 'chat.json').read_text())
+            assert retained['sources'][0]['binding']['checkpoint_id'] == prior_token
+            def rows(conn):
+                return [dict(r) for r in conn.execute('SELECT * FROM v2_chat_checkpoints '
+                    'WHERE generation=? ORDER BY rowid', (original['session_generation'],))]
+            before = await store.submit(rows)
+            assert len(before) == 2 and before[0]['successor_checkpoint_id'] == next_token
+            _append(path, _record('after-lost-successor-ack', 'codex'))
+            await store.mark_closed(HOST, 'seat', closed_at='2026-10-27T02:00:00Z',
+                pane_status='pane_dead', expected_generation=original['session_generation'])
+            discovered = {}
+            if reopen:
+                new_path = tmp_path / 'new.jsonl'
+                record = _record('new-live', 'claude')
+                record['sessionId'] = '33333333-3333-4333-8333-333333333333'
+                _append(new_path, record)
+                await store.open_session(HOST, 'seat', provider='claude', pane_pid='7001')
+                discovered['seat'] = satellite._DiscoveredPane('seat', 'claude', str(new_path), pane_pid=7001)
+            sat = _producer(tmp_path, TARGET)
+            sat._usage_fences = {row['stream_id']: row for row in await sink._usage_fences(HOST)}
+            events, hw, _ = sat._collect(discovered)
+            retry = await sat._push(_Wire(sink), events, hw)
+            assert retry['chat_recovery'][0]['successor']['binding']['checkpoint_id'] == next_token
+            assert await store.submit(rows) == before  # retry only reads the live-issued link
+            sat._apply_ack(retry, hw)
+            events, hw, _ = sat._collect(discovered)
+            final = await sat._push(_Wire(sink), events, hw)
+            assert final['chat_recovery'][0]['checkpoint_id'] == next_token
+            assert final['chat_recovery'][0]['successor'] is None
+            sat._apply_ack(final, hw)
+            keys = set(sat._recovering)
+            sat._apply_ack(retry, hw)  # delayed duplicate must not resurrect the predecessor
+            assert set(sat._recovering) == keys
+            assert len(await store.submit(rows)) == 2
+            history = await store.fetch_session_event_tail('worker:seat', limit=50,
+                generation=original['session_generation'])
+            assert [e['text'] for e in history] == ['initial', 'after-lost-successor-ack']
+            if reopen:
+                assert [e['text'] for e in await store.fetch_session_event_tail('worker:seat', limit=50)] == ['new-live']
         finally:
             store.stop()
     asyncio.run(run())
@@ -477,6 +556,107 @@ def test_first_malformed_recovery_envelope_never_advances_either_cursor(tmp_path
             sat._apply_ack(good, hw)
             assert [e['text'] for e in await store.fetch_session_event_tail('worker:seat', limit=50)] == [
                 'initial', 'buffered-one', 'buffered-two']
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('provider', ['codex', 'claude'])
+@pytest.mark.parametrize('interruption', ['before_push', 'lost_ack', 'checkpoint_write'])
+@pytest.mark.parametrize('reopen', [False, True])
+def test_recovery_to_live_rotation_preserves_original_proof_across_close(
+    tmp_path, monkeypatch, provider, interruption, reopen,
+):
+    monkeypatch.setattr(satellite, 'DEFAULT_CHAT_CHECKPOINT_PATH', str(tmp_path / 'chat.json'))
+    async def run():
+        path = tmp_path / 'transcript.jsonl'
+        if provider == 'codex':
+            _append(path, {'type': 'session_meta', 'payload': {'id': NATIVE}})
+        _append(path, _record('initial', provider))
+        panes = {'seat': satellite._DiscoveredPane('seat', provider, str(path), pane_pid=7001)}
+        store = Store(str(tmp_path / 'sessions.db'))
+        store.start()
+        casts = []
+        try:
+            await store.put('event_push.target_sha', TARGET)
+            original = await store.open_session(HOST, 'seat', provider=provider, pane_pid='7001')
+            sink = _sink(store, casts)
+            fences = {'worker:seat': (await sink._usage_fences(HOST))[0]}
+            sat = _producer(tmp_path, TARGET)
+            sat._usage_fences = fences
+            events, hw, _ = sat._collect(panes)
+            sat._apply_ack(await sat._push(_Wire(sink), events, hw), hw)
+            initial_token = sat._tails['seat'].binding['checkpoint_id']  # proof issued live
+
+            sat = _producer(tmp_path, TARGET)  # restart while original remains open
+            sat._usage_fences = fences
+            events, hw, _ = sat._collect(panes)
+            drained = await sat._push(_Wire(sink), events, hw)
+            sat._apply_ack(drained, hw)
+            successor = drained['chat_recovery'][0]['successor']['binding']['checkpoint_id']
+            assert successor != initial_token
+            retained = json.loads((tmp_path / 'chat.json').read_text())
+            assert retained['sources'][0]['binding']['checkpoint_id'] == successor
+            sat._apply_ack(drained, hw)  # duplicate predecessor ACK never rotates backward
+            assert next(iter(sat._recovering.values())).binding['checkpoint_id'] == successor
+            def original_checkpoints(conn):
+                return [dict(r) for r in conn.execute('SELECT * FROM v2_chat_checkpoints '
+                    'WHERE generation=? ORDER BY rowid', (original['session_generation'],))]
+            bound_rows = await store.submit(original_checkpoints)
+            assert len(bound_rows) == 2 and bound_rows[0]['successor_checkpoint_id'] == successor
+            _append(path, _record('live-after-rotation', provider))
+            events, hw, _ = sat._collect(panes)  # recovery-to-live transition, before ACK
+            if interruption != 'before_push':
+                ack = await sat._push(_Wire(sink), events, hw)
+                assert ack['chat_bindings'][0]['checkpoint_id'] == successor
+                if interruption == 'checkpoint_write':
+                    def fail_save():
+                        raise OSError('injected checkpoint persistence interruption')
+                    monkeypatch.setattr(sat, '_save_chat_checkpoint', fail_save)
+                    with pytest.raises(OSError):
+                        sat._apply_ack(ack, hw)
+                # lost_ack intentionally discards the serialized server response
+            _append(path, _record('buffered-after-rotation', provider))
+            await store.mark_closed(HOST, 'seat', closed_at='2026-10-27T02:00:00Z',
+                pane_status='pane_dead', expected_generation=original['session_generation'])
+            closed = await store.fetch_session(HOST, 'seat')
+            await store.open_session(HOST, 'live', provider='claude', pane_pid='8001')
+            discovered = {}
+            if reopen:
+                new_path = tmp_path / 'new-source.jsonl'
+                record = _record('new-generation-live', 'claude')
+                record['sessionId'] = '33333333-3333-4333-8333-333333333333'
+                _append(new_path, record)
+                await store.open_session(HOST, 'seat', provider='claude', pane_pid='7001')
+                discovered['seat'] = satellite._DiscoveredPane('seat', 'claude', str(new_path), pane_pid=7001)
+            casts.clear()
+            sat = _producer(tmp_path, TARGET)  # crash, then restart after original closes
+            sat._usage_fences = {row['stream_id']: row for row in await sink._usage_fences(HOST)}
+            events, hw, _ = sat._collect(discovered)
+            class WithLiveWire(_Wire):
+                async def send(self, raw):
+                    frame = json.loads(raw)
+                    frame['events'].append({'stream_id': 'worker:live', 'provider': 'claude',
+                        'kind': 'USER', 'text': 'unrelated-live', 'raw': {'jsonl_record_uuid': 'live'}})
+                    await super().send(json.dumps(frame))
+            wire = WithLiveWire(sink)
+            ack = await sat._push(wire, events, hw)
+            sat._apply_ack(ack, hw)
+            history = await store.fetch_session_event_tail('worker:seat', limit=50,
+                generation=original['session_generation'])
+            assert [e['text'] for e in history] == ['initial', 'live-after-rotation', 'buffered-after-rotation'], ack
+            after_rows = await store.submit(original_checkpoints)
+            assert len(after_rows) == 2  # no proof issued after original close/reopen
+            assert after_rows[0] == bound_rows[0]  # predecessor range/link never widens
+            assert ack['chat_recovery'][0]['successor'] is None
+            if reopen:
+                assert [e['text'] for e in await store.fetch_session_event_tail('worker:seat', limit=50)] == ['new-generation-live']
+            else:
+                assert await store.fetch_session(HOST, 'seat') == closed
+            assert [e['text'] for e in await store.fetch_session_event_tail('worker:live', limit=50)] == ['unrelated-live']
+            assert sorted(frame['event']['text'] for frame in casts) == (
+                ['new-generation-live', 'unrelated-live'] if reopen else ['unrelated-live'])
+            assert not wire.frames[-1]['chat_recovery_gaps'], ack
         finally:
             store.stop()
     asyncio.run(run())

@@ -135,8 +135,14 @@ Retries cannot widen the range. Incomplete trailing bytes stay unacknowledged
 and non-green. Reusing one native file across generations cannot prove which
 generation owns an undrained tail and is refused.
 
+When a range drains while its original lifecycle is still live, the same
+transaction issues and links replacement source proof. ACK retries return that
+existing proof even after closure; they never issue closed-time proof. The
+satellite atomically replaces its retained binding only after receipt, keeping
+the predecessor's range immutable through crash, lost ACK and live resumption.
+
 Historical append changes only the original conversation history and recovery
-cursor. It cannot reopen a seat, refresh activity/working, change provider/account
+metadata. It cannot reopen a seat, refresh activity/working, change provider/account
 or routing state, affect capacity retry, mirror an assistant turn, or broadcast
 a new live turn. Normal late live output retains its lifecycle fences. The
 existing `request_stream_events` default reads the current lifecycle; an
