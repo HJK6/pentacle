@@ -40,7 +40,9 @@ const catalogFixtures = require('./lib/dashboard_catalog_fixture');
 const { startHostedModelerFixture } = require('./lib/hosted_modeler_fixture');
 const { startFakeCosmo } = require('./lib/fake_cosmo_server');
 const { withRuntimeDirectory, execWithRuntimeDirectory } = require('./lib/runtime_directory');
-const { main: startHost } = require('../../server');
+const CONSUMER_ROOT = process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT
+  ? fs.realpathSync(process.env.PENTACLE_WEB_GATE_CONSUMER_ROOT) : path.join(__dirname, '..', '..');
+const { main: startHost } = require(path.join(CONSUMER_ROOT, 'server'));
 
 const ROOT = path.join(__dirname, '..', '..');
 const CHROME_CANDIDATES = [
@@ -68,7 +70,7 @@ const FIXTURE = {
 };
 
 function parseArgs(argv) {
-  const args = { profile: null, cdpPort: 0, keep: false, timeoutMs: 30000, python: process.env.PENTACLE_PYTHON || 'python3' };
+  const args = { profile: null, cdpPort: 0, keep: false, timeoutMs: 30000, python: process.env.PENTACLE_PYTHON || 'python3', scenarios: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') args.profile = argv[++i];
@@ -76,6 +78,11 @@ function parseArgs(argv) {
     else if (a === '--timeout') args.timeoutMs = Number(argv[++i]);
     else if (a === '--python') args.python = argv[++i];
     else if (a === '--keep') args.keep = true;
+    else if (a === '--scenario') {
+      const name = argv[++i];
+      if (!scenarios.SCENARIOS.some(([known]) => known === name)) throw new Error(`unknown scenario: ${name}`);
+      if (!args.scenarios.includes(name)) args.scenarios.push(name);
+    }
     else throw new Error(`unknown argument: ${a}`);
   }
   return args;
@@ -262,10 +269,12 @@ async function startDaemon(args, scratch, runtime, fixtures = [
   FIXTURE,
   { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' },
   { host: 'local2', sessionName: 'web-gate-second-host', streamId: 'local2:web-gate-second-host' },
+  { host: 'local', sessionName: 'web-gate-seam', streamId: 'local:web-gate-seam' },
 ]) {
   const db = path.join(scratch, 'sessions.db');
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
   runtime.fixtureOperatorTokenPath = path.join(scratch, 'operator-auth', 'token');
+  runtime.fixtureScratch = scratch;
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
   runtime.fixtureTokens = {};
   const seed = fixtures.map(fixture => {
@@ -460,7 +469,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       for (let i = 0; i < 40; i++) {
         assertNotStopping(runtime);
         const hostLog = fs.openSync(path.join(scratch, 'host.log'), 'a');
-        const proc = spawn(process.execPath, [path.join(ROOT, 'server'), '--profile', profile, '--port', String(hostPort), ...hostAuthArgs],
+        const proc = spawn(process.execPath, [path.join(CONSUMER_ROOT, 'server'), '--profile', profile, '--port', String(hostPort), ...hostAuthArgs],
           { cwd: ROOT, stdio: ['ignore', hostLog, hostLog], env: { ...process.env, PENTACLE_RUNTIME_DIR: runtimeDir } });
         runtime.hostProc = proc;
         let dead = false;
@@ -610,7 +619,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     const ctx = { session, report, cdp, cdpPort, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
-    for (const [name, fn] of scenarios.SCENARIOS) {
+    for (const [name, fn] of scenarios.SCENARIOS.filter(([name]) => !args.scenarios?.length || args.scenarios.includes(name))) {
       if (runtime.stopping) break;
       console.log(`\n▸ ${name}`);
       try { await fn(ctx); } catch (e) { failed += 1; report.note(`scenario ${name} FAILED: ${e && e.message}`); }
@@ -648,7 +657,7 @@ function allocateReportDir(now = () => new Date(), root = process.env.PENTACLE_W
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
   run(args).then(async code => {
-    if (code === 0 && !args.profile) {
+    if (code === 0 && !args.profile && !args.scenarios.length) {
       try {
         // The retention gate starts its own host: it runs in its own owned runtime directory.
         await execWithRuntimeDirectory(execFileSync, process.execPath, [path.join(__dirname, 'web_chat_history_retention_gate.cjs'),

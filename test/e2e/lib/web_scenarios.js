@@ -22,6 +22,7 @@ const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_s
 const { scheduledSection } = require('./scheduled_section_scenario');
 const { providerVisibility } = require('./provider_visibility_scenario');
 const { summaryFallbackFormatting } = require('./summary_fallback_scenario');
+const { installedClientSeam } = require('./installed_client_seam_scenario');
 const { sidebarPreviewPlainText } = require('./sidebar_preview_scenario');
 
 // Named web-mode E2E scenario functions, driven over CDP against the served
@@ -509,6 +510,7 @@ const SCENARIOS = [
   ['chat-transcript-paint', chatTranscriptPaint],
   ['sidebar-preview-plain-text', sidebarPreviewPlainText],
   ['summary-fallback-formatting', summaryFallbackFormatting],
+  ['installed-client-seam', installedClientSeam],
   ['chat-file-delivery', chatFileDelivery],
   ['web-chat-voice', webVoice],
   ['public-chat-renderer-contracts', publicChatRendererContracts],
