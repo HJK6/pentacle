@@ -4,6 +4,10 @@ The public harness is provider-free and uses a disposable local daemon. It valid
 
 ## Supported entry: `scripts/gate_env.py`
 
+[Advisory test selection](TEST_SELECTION.md) reports affected boundaries and
+coverage gaps for an exact baseline and proposed head. It runs no tests and
+does not change required gates.
+
 QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
 
 ```bash

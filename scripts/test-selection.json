@@ -1,0 +1,252 @@
+{
+  "schema": "pentacle.test-selection.v1",
+  "docs_only": [
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs/*.md",
+    "process/docs/*.md"
+  ],
+  "broad_paths": [
+    "scripts/*",
+    "tools/*",
+    ".github/*",
+    "services/_shared/*",
+    "services/chat-stream-v2/tools/*",
+    "services/chat-stream-v2/harness/*",
+    "services/chat-stream-v2/conftest.py",
+    ".gitignore",
+    ".gitmodules",
+    "Makefile",
+    "*package.json",
+    "*package-lock.json",
+    "*requirements*",
+    "*pyproject.toml",
+    "*poetry.lock",
+    "*uv.lock",
+    "*yarn.lock",
+    "*pnpm-lock.yaml",
+    "*conftest.py",
+    "*pytest.ini",
+    "*tsconfig*.json"
+  ],
+  "external_inputs": {
+    "client_versions": [
+      "client_wire_render"
+    ],
+    "provider_config": [
+      "provider_startup"
+    ],
+    "satellite_config": [
+      "satellite_transition",
+      "client_wire_render"
+    ],
+    "deploy_config": [
+      "deploy_invocation"
+    ]
+  },
+  "full_gates": [
+    {
+      "target": "v2-merge",
+      "select": [],
+      "files": [
+        "services/chat-stream-v2/tools/run_gate.py"
+      ]
+    },
+    {
+      "target": "cli-pytest",
+      "select": [
+        "tests"
+      ],
+      "files": [
+        "services/agent-orch/tests"
+      ]
+    },
+    {
+      "target": "shared-pytest",
+      "select": [
+        "tests"
+      ],
+      "files": [
+        "services/_shared/tests"
+      ]
+    },
+    {
+      "target": "npm-test",
+      "select": [],
+      "files": [
+        "scripts/run-tests.js",
+        "package.json"
+      ]
+    },
+    {
+      "target": "web-gate",
+      "select": [],
+      "files": [
+        "scripts/gate_web.py",
+        "test/e2e/web_gate.js",
+        "test/e2e/web_gate_interrupt.test.js"
+      ]
+    }
+  ],
+  "boundaries": {
+    "client_wire_render": {
+      "paths": [
+        "main.js",
+        "preload.js",
+        "renderer/*",
+        "web/*",
+        "server/*",
+        "pentacle-chat-core/*",
+        "test/*",
+        "services/chat-stream-v2/ingest.py",
+        "services/chat-stream-v2/event_push.py",
+        "services/chat-stream-v2/sessions.py",
+        "services/chat-stream-v2/session_summary.py",
+        "services/chat-stream-v2/store.py",
+        "services/chat-stream-v2/store_*.py",
+        "services/chat-stream-v2/chat_streamd.py",
+        "services/chat-stream-v2/tests/test_client_contract_probe.py",
+        "services/chat-stream-v2/tests/test_ingest*.py",
+        "services/chat-stream-v2/tests/test_event_push*.py",
+        "services/chat-stream-v2/tests/test_session*.py",
+        "services/chat-stream-v2/tests/test_store*.py",
+        "services/chat-stream-v2/satellite.py"
+      ],
+      "targets": [
+        {
+          "target": "v2-pytest",
+          "select": [
+            "tests/test_client_contract_probe.py",
+            "tests/test_event_push.py"
+          ],
+          "files": [
+            "services/chat-stream-v2/tests/test_client_contract_probe.py",
+            "services/chat-stream-v2/tests/test_event_push.py"
+          ]
+        },
+        {
+          "target": "npm-test",
+          "select": [
+            "test/chat_reconnect_replay.test.ts",
+            "test/chat_core_drift_guard.test.js"
+          ],
+          "files": [
+            "test/chat_reconnect_replay.test.ts",
+            "test/chat_core_drift_guard.test.js"
+          ]
+        },
+        {
+          "target": "web-gate",
+          "select": [],
+          "files": [
+            "scripts/gate_web.py",
+            "test/e2e/web_gate.js",
+            "test/e2e/web_gate_interrupt.test.js"
+          ]
+        }
+      ],
+      "covered_behavior": [
+        "Client contract probe checks wire sequence/content completeness, replay and inventory shape using fixtures and a disposable daemon.",
+        "Root consumer tests exercise reconnect/replay and chat-core drift; web-gate runs the existing browser journey and interrupt contract."
+      ],
+      "missing_coverage": [
+        "No installed native/mobile version matrix or cross-version replay certification.",
+        "Root npm-test does not run pentacle-chat-core/tests or its standalone test/typecheck scripts; no gate-env target for that standalone suite is declared here.",
+        "Selected tests do not establish every changed renderer assertion or every producer/consumer combination."
+      ]
+    },
+    "provider_startup": {
+      "paths": [
+        "services/chat-stream-v2/provider_*.py",
+        "services/chat-stream-v2/account_*.py",
+        "services/chat-stream-v2/tests/test_provider_*.py",
+        "services/chat-stream-v2/tests/test_account_*.py",
+        "services/agent-orch/agent_orch/*"
+      ],
+      "targets": [
+        {
+          "target": "v2-pytest",
+          "select": [
+            "tests/test_provider_account_native.py",
+            "tests/test_account_launch_environment.py"
+          ],
+          "files": [
+            "services/chat-stream-v2/tests/test_provider_account_native.py",
+            "services/chat-stream-v2/tests/test_account_launch_environment.py"
+          ]
+        }
+      ],
+      "covered_behavior": [
+        "Native-account fixtures verify startup status/identity matching and login completion refusal cases.",
+        "Launch-environment tests use stand-in executables under the shell launch envelope to check tuple preservation, authentication override clearing and named-home binding."
+      ],
+      "missing_coverage": [
+        "No real provider authentication, installed SDK/version matrix, subscription or live quota journey is exercised by selection.",
+        "Provider account/startup tests do not cover every CLI consumer or fleet enrollment transition."
+      ]
+    },
+    "satellite_transition": {
+      "paths": [
+        "services/chat-stream-v2/satellite.py",
+        "services/chat-stream-v2/event_push.py",
+        "services/chat-stream-v2/deploy/satellite/*",
+        "services/chat-stream-v2/tests/test_satellite*.py",
+        "services/chat-stream-v2/tests/test_event_push*.py",
+        "services/chat-stream-v2/tests/test_account_satellite_roots.py"
+      ],
+      "targets": [
+        {
+          "target": "v2-pytest",
+          "select": [
+            "tests/test_satellite_ack_backoff.py",
+            "tests/test_event_push.py"
+          ],
+          "files": [
+            "services/chat-stream-v2/tests/test_satellite_ack_backoff.py",
+            "services/chat-stream-v2/tests/test_event_push.py"
+          ]
+        }
+      ],
+      "covered_behavior": [
+        "Three-peer retry tests exercise lost acknowledgements, backoff and recovery without duplicate delivery using controlled peers.",
+        "Event-push tests check exact pin admission, authentication, deduplication and event/inventory projection."
+      ],
+      "missing_coverage": [
+        "No installed fleet update/restart/rollback journey or real transport outage is certified.",
+        "Pin rejection plus retry recovery does not establish convergence of every deployed satellite version."
+      ]
+    },
+    "deploy_invocation": {
+      "paths": [
+        "services/chat-stream-v2/deploy/*",
+        "services/chat-stream-v2/tests/test_deploy*.py",
+        "services/chat-stream-v2/tests/test_usage*deploy*.py",
+        "services/chat-stream-v2/tests/test_usage*install*.py"
+      ],
+      "targets": [
+        {
+          "target": "v2-pytest",
+          "select": [
+            "tests/test_deploy_gate_bounds.py",
+            "tests/test_deploy_gate_evidence.py",
+            "tests/test_deploy_direct_script.py"
+          ],
+          "files": [
+            "services/chat-stream-v2/tests/test_deploy_gate_bounds.py",
+            "services/chat-stream-v2/tests/test_deploy_gate_evidence.py",
+            "services/chat-stream-v2/tests/test_deploy_direct_script.py"
+          ]
+        }
+      ],
+      "covered_behavior": [
+        "Gate-bound tests verify deploy invocation/environment forwarding, timeouts and failure refusal, including a real subprocess.",
+        "Evidence tests accept valid saved gate metadata and refuse contradictory/malformed evidence; direct-script tests verify the existing invocation entry."
+      ],
+      "missing_coverage": [
+        "No production deployment, service restart, host rollout or installed artifact readback is performed.",
+        "Evidence acceptance does not prove product health on a deployment host."
+      ]
+    }
+  }
+}
