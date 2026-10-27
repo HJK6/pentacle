@@ -25,7 +25,7 @@ def test_missing_installed_baselines_refuses(tmp_path):
 
 
 def test_real_qualification_never_claims_other_surfaces():
-    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render"}
+    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render", "deploy_invocation"}
 
 
 def test_required_seam_cannot_be_cured_by_a_green_broad_gate():
@@ -59,11 +59,8 @@ def _write(path, payload):
     return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-@pytest.fixture
-def release(tmp_path, monkeypatch):
-    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {})
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def _seed_selector_files(repo):
+    """Existing selector bytes with explicitly synthetic target bodies."""
     source = Path(__file__).resolve().parents[3]
     for name in ("select_tests.py", "test-selection.json", "gate-env.json", "gate_env.py"):
         target = repo / "scripts" / name
@@ -80,6 +77,14 @@ def release(tmp_path, monkeypatch):
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# synthetic target\n")
+
+
+@pytest.fixture
+def release(tmp_path, monkeypatch):
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {})
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_selector_files(repo)
     calls = []
     def runner(cmd, cwd):
         calls.append(tuple(str(p) for p in cmd))
