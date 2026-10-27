@@ -42,6 +42,23 @@ The client then sends `hello`:
 
 The optional subscription controls visibility and event detail. Invalid event modes fall back to `full`; `snapshot: false` requests RPC-only mode. A successful handshake returns a typed `hello` result and, when requested, a snapshot of the caller's visible sessions.
 
+## Event backfill
+
+`request_stream_events` returns existing `request_stream_events.chunk` frames
+followed by a terminal `request_stream_events.ok`, or one terminal reply for a
+small page. Events retain their durable `daemon_seq`; `before_daemon_seq` resumes
+older history. Each UTF-8 JSON frame stays within 900 KiB, including its envelope.
+
+An event too large to fit alone becomes a wire-only text preview ending with
+`[Event truncated for backfill; original retained by daemon.]`. Optional payload
+members are omitted only when needed to fit; replay identities, routing and
+visibility/provenance metadata remain. A peer `TELL` preview uses its authoritative
+`raw.peer_payload` and marks both that field and `text`, so existing clients show
+the signal. Hidden-event rules still apply. The stored event remains complete;
+ordinary events and cursor ordering are unchanged. This bound covers backfill,
+not live pushes or `inspect_stream` replies, and assumes valid bounded identity
+and request-envelope fields.
+
 ## Session message previews
 
 `list_sessions`, summary-mode hello snapshots and `session.inventory` carry

@@ -1,0 +1,19 @@
+{
+  "daemon_seq": 7,
+  "host": "testhost",
+  "provider": "codex",
+  "session_id": "session-7",
+  "session_name": "session",
+  "stream_id": "testhost:session",
+  "timestamp": "2026-10-27T00:00:00Z",
+  "kind": "TELL",
+  "text": "short peer body\n\n[Event truncated for backfill; original retained by daemon.]",
+  "raw": {
+    "source": "structured",
+    "transport": "codex-rollout",
+    "sender": "testhost:peer",
+    "jsonl_record_uuid": "record-7",
+    "jsonl_event_index": 0,
+    "peer_payload": "short peer body\n\n[Event truncated for backfill; original retained by daemon.]"
+  }
+}
