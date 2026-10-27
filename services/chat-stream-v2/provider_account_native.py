@@ -378,7 +378,8 @@ def minimal_turn(binding: Binding, *, model: str, effort: str, cwd: str, run=sub
                if binding.provider == "codex" else
                [binding.executable, "--setting-sources", "user", "--settings", '{"forceLoginMethod":"claudeai","apiKeyHelper":""}',
                 "-p", "Reply exactly OK", "--model", model, "--effort", effort, "--tools", ""])
-    _run(command, binding=binding, run=run, cwd=cwd)
+    if _run(command, binding=binding, run=run, cwd=cwd).strip() != "OK":
+        raise AccountError("provider_minimal_turn_failed")
 
 
 def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_authorize,
@@ -427,8 +428,8 @@ def adopt(registry, draft: Binding, *, expected_provider_id: str, identity, mode
     if draft.provider != "codex" or draft.home not in registry.adopted:
         raise AccountError("account_adopt_unsupported")
     with registry.lock():
-        verify_binary(draft, run=run)
         registry.provision(draft, manifest or {})
+        verify_binary(draft, run=run)
         try:
             receipt = identity(draft)
             if (not expected_provider_id or receipt.get("provider_id") != expected_provider_id
