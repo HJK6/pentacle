@@ -299,6 +299,8 @@ def qualification_context(repo, plan, name, proof, runner):
                      for side, value in identity["external_inputs"][label].items()} for label in labels}
     return {"source_reference_sha256": reference, "source_sha256": current,
             "tuple_sha256": digest(key(tuples).encode()),
+            **({"activation_sha256": digest(key(identity["activation"]).encode())}
+               if name == "provider_startup" else {}),
             **({"installed_web_sha256": digest(key(observed_web_consumer(identity)).encode())}
                if name == "client_wire_render" else {}),
             "toolchain_sha256": digest(key(identity["toolchain"]).encode()),

@@ -25,10 +25,11 @@ def test_missing_installed_baselines_refuses(tmp_path):
 
 
 def test_real_qualification_never_claims_other_surfaces():
-    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render", "deploy_invocation"}
+    assert set(selection.QUALIFIED_SEAMS) <= {"client_wire_render", "provider_startup", "deploy_invocation"}
 
 
-def test_required_seam_cannot_be_cured_by_a_green_broad_gate():
+def test_required_seam_cannot_be_cured_by_a_green_broad_gate(monkeypatch):
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {})
     plan = {"boundaries": [{"id": "provider_startup", "missing_coverage": ["live reply"]}],
             "classification": "broad_fallback"}
     with pytest.raises(selection.Invalid, match="unqualified.*provider_startup"):
@@ -390,6 +391,33 @@ def test_boundary_qualification_is_digest_only_and_unrelated_missing_proof_still
     assert selection.qualification_context(repo, changed, "client_wire_render", proof, runner) == context
     changed["boundaries"].append({"id": "provider_startup", "missing_coverage": ["live reply"]})
     with pytest.raises(selection.Invalid, match="unqualified required seam provider_startup"):
+        selection.require_qualification(changed)
+
+
+@pytest.mark.parametrize("activation", [
+    {"url": "ws://127.0.0.1:12345", "host": "another-host"},
+    {"url": "ws://127.0.0.1:54321", "host": "primary"},
+])
+def test_provider_qualification_is_bound_to_actual_activation(release, monkeypatch, activation):
+    repo, inputs, prepare, _, _, runner, _ = release
+    inputs["external_inputs"]["provider_config"]["candidate"]["identity"]["revision"] = "changed"
+    plan = prepare()
+    plan["boundaries"] = [b for b in plan["boundaries"] if b["id"] == "provider_startup"]
+    proof = {"source_ref": inputs["candidate"],
+             "source_paths": ["services/chat-stream-v2/tests/test_provider_account_native.py"],
+             "input_labels": ["provider_config"], "assertion_scope": ["synthetic one-cell fixture"],
+             "remaining_coverage": ["other hosts/endpoints untested"],
+             "qa_report": "synthetic-only", "evidence_sha256": "f" * 64}
+    context = selection.qualification_context(repo, plan, "provider_startup", proof, runner)
+    proof["scope_sha256"] = selection.digest(selection.key(context).encode())
+    monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {"provider_startup": proof})
+    plan["qualification_contexts"] = {"provider_startup": context}
+    selection.require_qualification(plan)
+    changed = copy.deepcopy(plan)
+    changed["identity"]["activation"] = activation
+    changed["qualification_contexts"]["provider_startup"] = selection.qualification_context(
+        repo, changed, "provider_startup", proof, runner)
+    with pytest.raises(selection.Invalid, match="unqualified source/tuple provider_startup"):
         selection.require_qualification(changed)
 
 
