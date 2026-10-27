@@ -176,3 +176,188 @@ def test_config_drift_during_native_read_cannot_qualify(pinned, monkeypatch):
     monkeypatch.setattr(probe_module, 'codex_observation', observe)
     with pytest.raises(AccountError, match='provider_config_changed'):
         probe_module.ProviderStartupProbe(path, binding.host).observe()
+
+
+def nux_probe(pinned, monkeypatch):
+    path, value, binding = pinned
+    content = ('model = "fixture-model"\ncli_auth_credentials_store = "file"\nunchanged = 1\n'
+               '[tui]\nstatus_line = ["model-name"]\n[tui.model_availability_nux]\n'
+               '"gpt-6.1-sol" = 2\n"other-model" = 2\n'
+               '[projects."/fixture/trusted"]\ntrust_level = "trusted"\n')
+    config = Path(binding.home) / 'config.toml'
+    config.write_text(content)
+    value['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
+    path.write_text(json.dumps(value))
+    monkeypatch.setattr(probe_module, 'codex_observation', lambda _: {
+        'provider_id': binding.provider_id, 'pool_id': binding.pool_id})
+    return probe_module.ProviderStartupProbe(path, binding.host), config, content
+
+
+def test_selected_native_nux_counter_can_increment_after_exact_initial_pin(pinned, monkeypatch):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    receipt = probe.observe()
+    assert receipt['native_identity'] == 'matched'
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    probe.verify_inputs()
+    # Rechecking unchanged bytes is valid; a later increase is also valid.
+    probe.verify_inputs()
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 5'))
+    probe.verify_inputs()
+    comparison = receipt['config_comparison']
+    assert comparison['matched'] and comparison['comparison'] == 'allowed_native_nux_increase'
+    assert comparison['raw_before_sha256'] != comparison['raw_after_sha256']
+    assert comparison['effective_before_sha256'] == comparison['effective_after_sha256']
+    assert comparison['allowed_field'] == 'tui.model_availability_nux.gpt-6.1-sol'
+    assert 'trust_level' not in json.dumps(receipt)
+
+
+def test_native_nux_counter_does_not_relax_initial_raw_config_pin(pinned, monkeypatch):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    with pytest.raises(AccountError, match='provider_config_changed'):
+        probe.observe()
+
+
+@pytest.mark.parametrize('old,new', [
+    ('"fixture-model"', '"different-model"'),
+    ('"model-name"', '"different-status"'),
+    ('"other-model" = 2', '"other-model" = 3'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = -1'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 1'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = true'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3.0'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = "3"'),
+    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = [3]'),
+    ('"gpt-6.1-sol" = 2\n', ''),
+    ('"other-model" = 2', '"other-model" = 2\n"new-model" = 3'),
+    ('unchanged = 1', 'unchanged = true'),
+    ('trust_level = "trusted"', 'trust_level = "untrusted"'),
+    ('trust_level = "trusted"', 'trust_level = "trusted"\nnew_key = true'),
+])
+def test_nux_exception_cannot_hide_sibling_or_malformed_config(pinned, monkeypatch, old, new):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    config.write_text(content.replace(old, new))
+    with pytest.raises(AccountError, match='provider_config_'):
+        probe.verify_inputs()
+
+
+def test_nux_exception_cannot_hide_provider_config_change(pinned, monkeypatch):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    config.write_text('model_provider = "foreign"\n' + content)
+    with pytest.raises(AccountError, match='provider_config_'):
+        probe.verify_inputs()
+
+
+def test_pinned_malformed_toml_cannot_qualify(pinned, monkeypatch):
+    path, value, binding = pinned
+    config = Path(binding.home) / 'config.toml'
+    config.write_text('[invalid\n')
+    value['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
+    path.write_text(json.dumps(value))
+    monkeypatch.setattr(probe_module, 'codex_observation', lambda _: {
+        'provider_id': binding.provider_id, 'pool_id': binding.pool_id})
+    with pytest.raises(AccountError, match='provider_config_'):
+        probe_module.ProviderStartupProbe(path, binding.host).observe()
+
+
+@pytest.mark.parametrize('change', ['provider', 'trust', 'sibling', 'type', 'format-only', 'malformed'])
+def test_nux_increment_cannot_hide_other_drift(pinned, monkeypatch, change):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    changed = content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3')
+    if change == 'provider': changed = 'model_provider = "foreign"\n' + changed
+    elif change == 'trust': changed = changed.replace('"trusted"', '"untrusted"')
+    elif change == 'sibling': changed = changed.replace('"other-model" = 2', '"other-model" = 3')
+    elif change == 'type': changed = changed.replace('unchanged = 1', 'unchanged = true')
+    elif change == 'format-only': changed = '# formatting-only drift\n' + content
+    else: changed += '[malformed\n'
+    config.write_text(changed)
+    with pytest.raises(AccountError, match='provider_config_'):
+        probe.verify_inputs()
+    assert not probe.config_comparison['matched']
+
+
+@pytest.mark.parametrize('counter', ['true', '-1', '3.0', '"3"', '[3]'])
+def test_invalid_initial_nux_counter_never_reaches_native(pinned, monkeypatch, counter):
+    path, value, binding = pinned
+    config = Path(binding.home) / 'config.toml'
+    config.write_text('[tui.model_availability_nux]\n"gpt-6.1-sol" = ' + counter + '\n')
+    value['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
+    path.write_text(json.dumps(value))
+    monkeypatch.setattr(probe_module, 'verify_binary', lambda _: pytest.fail('invalid config before native process'))
+    with pytest.raises(AccountError, match='provider_config_invalid'):
+        probe_module.ProviderStartupProbe(path, binding.host).observe()
+
+
+def test_allowed_nux_rewrite_invalidates_stale_future_pin(pinned, monkeypatch):
+    path, _, binding = pinned
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    probe.verify_inputs()
+    monkeypatch.setattr(probe_module, 'verify_binary', lambda _: pytest.fail('raw mismatch before any native process'))
+    with pytest.raises(AccountError, match='provider_config_changed'):
+        probe_module.ProviderStartupProbe(path, binding.host).observe()
+    with pytest.raises(AccountError, match='provider_config_changed'):
+        probe.observe()
+
+
+def test_nux_counter_cannot_decrease_after_an_accepted_increase(pinned, monkeypatch):
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 5'))
+    probe.verify_inputs()
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 4'))
+    with pytest.raises(AccountError, match='provider_config_changed'):
+        probe.verify_inputs()
+
+
+def test_new_nux_leaf_cannot_become_an_exception(pinned, monkeypatch):
+    path, _, binding = pinned
+    probe = probe_module.ProviderStartupProbe(path, binding.host)
+    monkeypatch.setattr(probe_module, 'codex_observation', lambda _: {
+        'provider_id': binding.provider_id, 'pool_id': binding.pool_id})
+    probe.observe()
+    (Path(binding.home) / 'config.toml').write_text(
+        'cli_auth_credentials_store = "file"\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 3\n')
+    with pytest.raises(AccountError, match='provider_config_changed'):
+        probe.verify_inputs()
+
+
+@pytest.mark.parametrize('drift', ['binary', 'account'])
+def test_nux_exception_preserves_independent_binding_guards(pinned, monkeypatch, drift):
+    _, _, binding = pinned
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    probe.observe()
+    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    if drift == 'binary':
+        Path(binding.executable).write_text('#!/bin/sh\nexit 0\n')
+        with pytest.raises(AccountError, match='provider_executable_changed'):
+            probe.verify_inputs()
+    else:
+        account = dict(binding.public(), alias='foreign')
+        with pytest.raises(AccountError, match='provider_launch_binding_mismatch'):
+            probe.verify_spawn({'session': {'account_binding': account,
+                'effective_model': probe.model, 'effective_effort': probe.effort}})
+
+
+def test_nux_rewrite_during_native_observation_retains_metadata_only_receipt(pinned, monkeypatch):
+    _, _, binding = pinned
+    probe, config, content = nux_probe(pinned, monkeypatch)
+    def observe(_):
+        config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+        return {'provider_id': binding.provider_id, 'pool_id': binding.pool_id}
+    monkeypatch.setattr(probe_module, 'codex_observation', observe)
+    receipt = probe.observe()
+    assert receipt['native_identity'] == 'matched'
+    assert receipt['config_comparison']['comparison'] == 'allowed_native_nux_increase'
+
+
+def test_unreadable_config_never_reaches_native(pinned, monkeypatch):
+    path, _, binding = pinned
+    (Path(binding.home) / 'config.toml').unlink()
+    monkeypatch.setattr(probe_module, 'verify_binary', lambda _: pytest.fail('missing config before any native process'))
+    with pytest.raises(AccountError, match='provider_config_unavailable'):
+        probe_module.ProviderStartupProbe(path, binding.host).observe()

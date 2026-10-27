@@ -38,8 +38,8 @@ rejects incomplete/ambiguous selection before opening a connection and runs
 only that host's Codex promptless cell. No-argument invocation retains the
 scheduled full-fleet behavior; it is unsuitable for this bounded check.
 
-Before invocation, the resource owner must provide an already provisioned,
-isolated account home/config and an owned candidate daemon. Reuse the scratch
+Before invocation, the resource owner must provide an already provisioned
+account home/config under an explicit exclusive window and an owned candidate daemon. Reuse the scratch
 auth/store/port/tmux launch pattern in `tools/public_desktop_smoke.py`, replacing
 its provider fixture with the provisioned binding. Configure only the tested
 Codex binding in the scratch account policy and set its scratch default through
@@ -55,6 +55,22 @@ only that installed runtime. Use private tmux/socket/database paths and retain
 the existing generation-fenced ownership checkpoint. Keep bootstrap/config
 fingerprints with the caller's evidence; the runner checks `config.toml` and
 the pinned executable/version before and after observation and the send/reply.
+
+Every invocation requires the exact raw config SHA before any native process;
+malformed or unreadable TOML refuses. Within that invocation only, native Codex
+may increase the existing nonnegative integer at
+`tui.model_availability_nux.<exact selected model>`. Unchanged bytes also pass.
+All other parsed keys, values and types must remain identical. A missing/new
+leaf, bool, decrement, trust/provider/sibling change, or formatting-only rewrite
+refuses. A counter increase cannot hide another substantive change. This fixed
+comparison does not change enrollment policy or authorize config writes.
+
+The native identity JSON retains a `config_comparison` receipt with raw
+before/after hashes, the exact allowed field, effective before/after identities
+and comparison outcome. It contains no config values. A permitted in-run
+rewrite still invalidates reuse of that raw tuple: the next invocation needs
+a fresh exact pin. A failed earlier journey remains non-green; this exception
+does not supply missing reply, convergence, idle or cleanup evidence.
 
 The same invocation first runs native account/read, rate-limit owner read and
 account reread, comparing owner IDs to the binding. It then drives catalog,
@@ -76,5 +92,6 @@ executable, config and model/effort. Input drift invalidates it even at an
 unchanged repository SHA. Record other providers/hosts as UNTESTED and reuse a
 result only under the existing exact-input gate-evidence contract. This runner
 does not provision accounts, launch daemons, authorize resource windows or
-certify an all-provider matrix. If no isolated provisioned home is available,
-retain that live acceptance prerequisite; deterministic green cannot waive it.
+certify an all-provider matrix. Without an explicitly authorized account window
+and isolated candidate resources, retain that live acceptance prerequisite;
+deterministic green cannot waive it.
