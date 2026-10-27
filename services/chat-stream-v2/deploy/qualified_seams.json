@@ -1,0 +1,166 @@
+{
+  "client_wire_render": {
+    "source_ref": "aa12c2db24c511ffdfc02ed587b2aae661815c28",
+    "source_paths": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "package-lock.json",
+      "renderer/",
+      "web/",
+      "server/",
+      "pentacle-chat-core/",
+      "services/chat-stream-v2/*.py",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "test/",
+      "scripts/gate_env.py",
+      "scripts/lib/",
+      "scripts/gate_web.py",
+      "scripts/gate-env.json",
+      "scripts/run-tests.js"
+    ],
+    "input_labels": [
+      "client_versions"
+    ],
+    "assertion_scope": [
+      "Real producer summary/list/history/update/inventory and reconnect/replay through pinned installed and candidate web transport/model/DOM.",
+      "Multiline Markdown, committed identity/order, duplicate delivery and preview/history flicker; same captured wire replayed through pinned installed and candidate mobile transport/model."
+    ],
+    "remaining_coverage": [
+      "No native mobile rendering or physical-device journey.",
+      "No mobile authentication or real network reconnect timing.",
+      "No arbitrary historical client-version matrix or assertions outside the finite accepted source/build/config set."
+    ],
+    "qa_report": "e11a14d8-891b-4172-8880-0cb0f99569d4",
+    "qa_review_sha256": "9ebac1cd5501f003d2a9bf41b43f6bf681c0b09781fb00226126afe27b276fc3",
+    "evidence_sha256": "a7de416bb3c2233fd1217098f4fa9b52ef6507113733f08b508dc5119a01f5ef",
+    "scope_sha256": "37cc572a5413035023a65f6174ba4ade7201e37c034ad832497d0ca9c768ed0d",
+    "source_equivalence_sha256": "08e5a06b9b971dabf512bd1d13b74b5dc87dc16d8ca4057b96ced3133d8e8ce0"
+  },
+  "provider_startup": {
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
+    "source_paths": [
+      "services/chat-stream-v2/*.py",
+      "services/chat-stream-v2/tools/",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "services/chat-stream-v2/requirements.txt",
+      "services/agent-orch/pyproject.toml",
+      "services/chat-stream-v2/tests/conftest.py",
+      "services/chat-stream-v2/tests/test_provider_account_native.py",
+      "services/chat-stream-v2/tests/test_account_launch_environment.py",
+      "services/chat-stream-v2/tests/test_provider_startup_smoke.py",
+      "services/chat-stream-v2/tests/test_fleet_smoke_provider_errors.py"
+    ],
+    "input_labels": [
+      "provider_config"
+    ],
+    "assertion_scope": [
+      "One recorded local Codex promptless native-owner/startup/send/exact-reply/audit/fenced-closed-cell tuple at the exercised source, with explicit intended deployment endpoint mapping.",
+      "Original adapter cleanup failure/raw nonzero exit is retained; separately completed physical cleanup is accepted only as the recorded lower-trust composite."
+    ],
+    "remaining_coverage": [
+      "No all-host, all-account, all-provider, arbitrary model/effort/config or actual deployed-runtime qualification.",
+      "Scratch endpoint/store/policy/credentials/physical interpreter remain distinct; reuse requires exact accepted target/source/dependency/config predicates.",
+      "Cleanup adapter and supplemental script need bounded repair before reuse; selected native configuration-counter additions remain refused."
+    ],
+    "qa_report": "b256fb88-c457-403f-a201-9ffaccc4f829",
+    "qa_review_sha256": "b0bf9c2fed5db3624b40f93438b206832cfc18f4d4e181d8ad415abce666af04",
+    "evidence_sha256": "c599f977855b4a6736d6f75ad45e094d0c737fd7a5ca6c2a0303efca6e0b6581",
+    "scope_sha256": "d31d83a8a61e1eca0be241362e7ec35a516ed67add479f9774fd1118f7a7c599",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
+  },
+  "satellite_transition": {
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
+    "source_paths": [
+      "services/chat-stream-v2/chat_recovery.py",
+      "services/chat-stream-v2/deploy/satellite/README.md",
+      "services/chat-stream-v2/deploy/satellite/com.pentacle.satellite.plist",
+      "services/chat-stream-v2/deploy/satellite/pentacle-satellite.service",
+      "services/chat-stream-v2/event_push.py",
+      "services/chat-stream-v2/satellite.py",
+      "services/chat-stream-v2/server.py",
+      "services/chat-stream-v2/store.py",
+      "services/chat-stream-v2/store_usage.py",
+      "services/chat-stream-v2/tests/conftest.py",
+      "services/chat-stream-v2/tests/pin_fixtures.py",
+      "services/chat-stream-v2/tests/test_event_push_pin.py",
+      "services/chat-stream-v2/tests/test_event_push_pin_cli.py",
+      "services/chat-stream-v2/tests/test_satellite_ack_backoff.py",
+      "services/chat-stream-v2/tests/test_satellite_recovery.py",
+      "services/chat-stream-v2/tools/event_push_pin.py",
+      "services/chat-stream-v2/*.py",
+      "services/chat-stream-v2/tools/",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "services/chat-stream-v2/requirements.txt",
+      "services/agent-orch/pyproject.toml",
+      "services/chat-stream-v2/tests/test_provider_account_native.py",
+      "services/chat-stream-v2/tests/test_account_launch_environment.py",
+      "services/chat-stream-v2/tests/test_provider_startup_smoke.py",
+      "services/chat-stream-v2/tests/test_fleet_smoke_provider_errors.py"
+    ],
+    "input_labels": [
+      "satellite_config"
+    ],
+    "assertion_scope": [
+      "Recorded installed and candidate collector payloads authenticated against the candidate EventPush component on two recorded service/interpreter/dependency/config/consumer tuples, with exact old-pin acceptance, new-pin old-source refusal/no insertion, new-source acceptance and cleanup.",
+      "Finite compatibility composes with recorded prior-source live recovery, restoration and updater-enabled useful/drained evidence plus accepted named upstream controls; original composite trust limits remain."
+    ],
+    "remaining_coverage": [
+      "No new live candidate-daemon recovery, production ingress, operational source transition or downgrade is claimed by component replay.",
+      "Loaded-helper runtime attestation is absent and current incarnation is unexposed in component inventory; fresh complete participant evidence within900seconds is separately required.",
+      "Forward/compatible pin-only downgrade/restoration and final return remain actual release predicates; no arbitrary host/dependency/configuration matrix."
+    ],
+    "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
+    "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
+    "evidence_sha256": "a8269af6308254a9dd6524c8d7075be2b0ab883527612ab4f43f8227857c389c",
+    "scope_sha256": "dd49e0cd877236e3c63a4af4f420b3beec6bca72587fecf8fbe892ed5b6d3a00",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
+  },
+  "deploy_invocation": {
+    "source_ref": "93dc8f64be9c49552b9b419f28e78bb743aa2471",
+    "source_paths": [
+      "services/chat-stream-v2/deploy/deploy.py",
+      "services/chat-stream-v2/deploy/release_selection.py",
+      "services/chat-stream-v2/deploy/packet/log_scan.py",
+      "services/chat-stream-v2/managed_logs.py",
+      "services/chat-stream-v2/requirements.txt",
+      "services/chat-stream-v2/tools/spawn_fleet_smoke.py",
+      "services/chat-stream-v2/tests/test_deploy_gate_bounds.py",
+      "services/chat-stream-v2/tests/test_deploy_gate_evidence.py",
+      "services/chat-stream-v2/tests/test_deploy_direct_script.py",
+      "services/chat-stream-v2/tests/test_deploy_release_selection.py",
+      "services/chat-stream-v2/tests/test_deploy_log_guard.py",
+      "services/chat-stream-v2/tests/test_deploy_fleet_verdict.py",
+      "services/chat-stream-v2/tests/test_release_selection.py",
+      "services/chat-stream-v2/tests/test_deploy_script.py",
+      "scripts/select_tests.py",
+      "scripts/gate_env.py",
+      "scripts/gate-env.json",
+      "scripts/lib/"
+    ],
+    "input_labels": [
+      "deploy_config"
+    ],
+    "assertion_scope": [
+      "Saved merge loader and actual seam admission/selection/revalidation execute; no duplicate mandatory merge process.",
+      "Complete fixture baseline union selects client plus deploy; changed/missing actual receipt/config/scenario proof refuses before daemon activation and restores real Git/stamp/plist bytes.",
+      "Revalidation failure after a real isolated plist mutation invokes the existing preimage rollback; collector counterpart is separate from daemon.",
+      "Actual provider-counterpart subprocess receives only URL/HOST and installed machine file, strips ambient host overrides; affected required-cell verdict agrees and other seven cells are UNTESTED without full-fleet acceptance.",
+      "Quota/missing/cleanup results remain non-green while healthy applied source/stamp persists.",
+      "Rollback entry refuses stale candidate proof; fresh actual recorded-prior source receipt permits isolated rollback and records both source identities."
+    ],
+    "remaining_coverage": [
+      "Installed fixture observations/qualification/results and launchd/restart/boot/runtime/slow-consumer/provider counterparts remain synthetic; actual native startup and satellite convergence belong to separate proof.",
+      "Actual managed service/interpreter/config input projection maps only to finite admission/invocation/preimage controls, with unchanged requirements and no reinstall.",
+      "Final source/data input affirmation, canonical gate, actual boot/useful/readback and representative release or conditional preimage restoration remain separate."
+    ],
+    "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
+    "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
+    "evidence_sha256": "7c49c0b9c3fc1571734e2c32eb75e040193adab5b885b53a6ba77590671aeeff",
+    "scope_sha256": "fbbed62e0333296bfda2b66f3d4c6d0553b30bb8d526fbb4d66e9061e01b4b90",
+    "source_equivalence_sha256": "49b5cdc10a5c14f57b4304e1a015b761dc09c89e1688c231e3af29ee537f69b9"
+  }
+}

@@ -29,6 +29,7 @@ _SERVICE_DIR = str(Path(__file__).resolve().parent.parent)
 if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 from deploy.packet.log_scan import AttributionAmbiguous, freeze, generation_ranges, lines_many
+from deploy import release_selection
 from managed_logs import Config, retained_paths
 
 
@@ -395,6 +396,7 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
 
 def _fleet_smoke_verdict(
     result: subprocess.CompletedProcess[str], machines_file: str,
+    required_cells: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     """Combine every smoke evidence channel; missing cells can never turn green.
 
@@ -413,11 +415,20 @@ def _fleet_smoke_verdict(
         issues.append("installed_local_host_not_identified")
     # This is the full deployed smoke matrix, matching spawn_fleet_smoke's
     # PROVIDERS/PROMPT_MODES. Exclusions never prove full-fleet acceptance.
-    expected = {
+    full_expected = {
         (host, provider, mode)
         for host in hosts for provider in ("claude", "codex")
         for mode in ("prompted", "promptless")
     }
+    expected = full_expected
+    if required_cells is not None:
+        try:
+            keys = [tuple(row[field] for field in ("host", "provider", "prompt_mode")) for row in required_cells]
+            if not keys or len(set(keys)) != len(keys) or not set(keys) <= full_expected:
+                raise ValueError("required cells must be unique configured cells")
+            expected = set(keys)
+        except (TypeError, KeyError, ValueError) as exc:
+            issues.append("invalid_required_cells: " + str(exc))
     cells: dict[tuple[str, str, str], dict[str, object]] = {}
     severity = {"passed": 0, "unreachable": 1, "untested": 2, "failed": 3}
     for source in ("cells", "untested", "quota_exhausted", "failures"):
@@ -489,11 +500,40 @@ def _fleet_smoke_verdict(
         outcome = FLEET_SMOKE_PASSED
     return {
         "outcome": outcome, "cells": reports, "local_hosts": list(local_hosts),
+        "scope": "qualified_affected" if required_cells is not None else "full_matrix",
+        "full_fleet_acceptance": outcome == FLEET_SMOKE_PASSED and expected == full_expected,
+        "not_selected": [{"host": h, "provider": p, "prompt_mode": m, "outcome": "UNTESTED",
+                          "reason": "outside_qualified_scope"} for h, p, m in sorted(full_expected - expected)],
         "unreachable_hosts": unreachable_hosts, "untested": untested, "skipped": skipped,
         "evidence": payload, "issues": issues, "returncode": result.returncode,
         "detail": _terminal_command_detail(result),
         **({"raw_stdout": result.stdout, "raw_stderr": result.stderr} if not payload else {}),
     }
+
+
+def _validate_selected_activation(plan: dict, repo: Path, service: ServiceConfig) -> None:
+    identity = plan["identity"]
+    activation = identity["activation"]
+    # The deploy readback itself is for this local endpoint. A successful canary
+    # against another daemon cannot establish the newly activated source.
+    if activation["url"] != "ws://127.0.0.1:7791":
+        raise DeployError("release selection: activation endpoint does not match runtime readback")
+    configured = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = repo / path
+    try:
+        hosts, local_hosts, _ = _fleet_smoke_hosts(str(path))
+        if activation["host"] not in local_hosts:
+            raise ValueError("affected canary is not an installed local host")
+        supplied_satellites = {row["component"] for row in identity["installed"] if row["role"] == "satellite"}
+        if supplied_satellites != set(hosts) - set(local_hosts):
+            raise ValueError("missing or extra configured satellite baseline")
+        bindings = identity["external_inputs"]["deploy_config"]["candidate"]["files"]
+        if not any(Path(b["path"]).resolve() == path.resolve() and b["sha256"] == _sha256(path) for b in bindings):
+            raise ValueError("installed machine configuration is not bound to selected inputs")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise DeployError(f"release selection: invalid activation configuration: {exc}") from exc
 
 
 def run_gate_and_write_evidence(
@@ -1564,7 +1604,7 @@ def _apply_post_activation(
             }
             if runtime_confirmed:
                 active_start = _process_start(readback.pid, runner)
-                # Full smoke follows installed configuration, independent of caller overrides.
+                # Invocation and verdict share the same admitted affected scope.
                 machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
                 if machines_file:
                     # The child runs in repo, not the caller's working directory. Resolve
@@ -1573,6 +1613,14 @@ def _apply_post_activation(
                     if not machines_path.is_absolute():
                         machines_path = repo / machines_path
                     machines_file = str(machines_path.resolve())
+                selection = stamp.get("release_selection")
+                required_cells = None
+                smoke_args = ()
+                if selection is not None:
+                    identity = selection["identity"]
+                    activation = identity["activation"]
+                    required_cells = identity["required_cells"]
+                    smoke_args = (activation["url"], activation["host"])
                 smoke = runner(
                     (
                         "/usr/bin/env",
@@ -1581,6 +1629,7 @@ def _apply_post_activation(
                         f"PENTACLE_MACHINES_FILE={machines_file}",
                         str(_venv_python(repo, service)),
                         str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
+                        *smoke_args,
                     ),
                     repo,
                 )
@@ -1589,8 +1638,8 @@ def _apply_post_activation(
                     expected_start=active_start, prior_pid=prior_pid,
                     prior_start=prior_start, runner=runner,
                 )
-                stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file)
-                if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED:
+                stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file, required_cells)
+                if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
                     _install_fleet_smoke_schedule(repo, runner)
         # Persist the classified record inside the same never-raising boundary. A stamp-write
         # failure after activation must not escape as a refusal either — record it and make one
@@ -1736,6 +1785,7 @@ def deploy(
     ref: str,
     rollback: bool = False,
     gate_evidence: Path | None = None,
+    release_inputs: Path | None = None,
     deployer_stream_id: str | None = None,
     skip_kickstart: bool = False,
     log_guard_dir: str | Path | None = None,
@@ -1781,6 +1831,16 @@ def deploy(
             "generated_at": evidence.get("generated_at"),
             "evidence_source": evidence_source,
         }
+        selection = None
+        if release_inputs is not None:
+            try:
+                selection = release_selection.admit(repo, sha, release_inputs, evidence,
+                                                     str(_venv_python(repo, service)), runner)
+                _validate_selected_activation(selection, repo, service)
+            except (release_selection.Invalid, OSError, ValueError, TypeError, KeyError) as exc:
+                raise DeployError(str(exc)) from exc
+        elif "seam_results" in evidence:
+            raise DeployError("release selection: seam evidence requires actual release inputs")
 
         log_paths = _daemon_log_paths(service)
         log_path = log_paths[0] if log_paths else None
@@ -1799,7 +1859,11 @@ def deploy(
             "requirements_hash": requirements_hash,
             "asset_store": _asset_store_identity(service),
             "gates": gates,
+            "selective_qualification": "admitted" if selection is not None else "not_enabled",
         }
+        if selection is not None:
+            stamp["release_selection"] = selection
+            stamp["gates"]["seam_results"] = evidence["seam_results"]
         activation_runtime_manifest = runtime_manifest(repo, service, runner)
         stamp["activation_runtime_manifest"] = activation_runtime_manifest
         if not skip_kickstart:
@@ -1870,6 +1934,14 @@ def deploy(
                 target_sha=sha,
                 deployer_stream_id=deployer_stream_id,
             )
+        if selection is not None:
+            try:
+                release_selection.revalidate(selection, release_inputs)
+                if _dirty_entries(repo, runner) or _git(repo, "rev-parse", "HEAD", runner=runner) != sha:
+                    raise DeployError("release selection: changed candidate source before activation")
+                _validate_selected_activation(selection, repo, service)
+            except (release_selection.Invalid, OSError, ValueError, KeyError, TypeError) as exc:
+                raise DeployError(str(exc)) from exc
         _write_stamp(repo, service, stamp)
         transaction.commit()
     if not skip_kickstart:
@@ -1902,6 +1974,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--gate-evidence", type=Path)
+    parser.add_argument("--release-inputs", type=Path, help="Observed installed baselines and external tuples for qualified seam admission.")
     parser.add_argument("--deployer-stream-id", default=None)
     parser.add_argument("--log-guard-dir", default=None, help="Override the service log guard directory checked before deploy.")
     parser.add_argument("--skip-kickstart", action="store_true", help="Test/dev only: do not kick launchd after stamping.")
@@ -1945,6 +2018,7 @@ def main(argv: list[str] | None = None) -> int:
             ref=args.ref,
             rollback=args.rollback,
             gate_evidence=args.gate_evidence,
+            release_inputs=args.release_inputs,
             deployer_stream_id=args.deployer_stream_id,
             skip_kickstart=args.skip_kickstart,
             log_guard_dir=args.log_guard_dir,

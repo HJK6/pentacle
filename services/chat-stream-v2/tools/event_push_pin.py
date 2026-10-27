@@ -25,6 +25,7 @@ if str(SERVICE_DIR) not in sys.path:
 from store import Store  # noqa: E402
 from machines import configured_host_names, load_machines  # noqa: E402
 from deploy.deploy import DeployError, _load_gate_evidence  # noqa: E402
+from deploy.release_selection import helper_manifest  # noqa: E402
 
 
 SATELLITE_HOSTS = configured_host_names("PENTACLE_SATELLITE_HOSTS", remote_only=True)
@@ -109,12 +110,13 @@ def _preflight_participants(path: Path | None, candidate: str) -> list[dict]:
                        for key in ('configuration_sha256', 'installed_cli_sha256'))
                 or not isinstance(row.get('dependency_digest'), str)
                 or re.fullmatch('[0-9a-f]{64}', row['dependency_digest']) is None
-                or not isinstance(row.get('installed_helpers_sha'), str)
-                or re.fullmatch('[0-9a-f]{40}', row['installed_helpers_sha']) is None
+                or not isinstance(row.get('installed_helpers_sha256'), str)
+                or re.fullmatch('[0-9a-f]{64}', row['installed_helpers_sha256']) is None
                 or not isinstance(row.get('consumer_payload_sha256'), str)
                 or re.fullmatch('[0-9a-f]{64}', row['consumer_payload_sha256']) is None
                 or not row.get('installed_cli_version')):
             raise ValueError('incomplete dedicated checkout/dependency/consumer preflight for ' + row['host'])
+        helper_manifest(row)
     if not any(row['required'] for row in rows):
         raise ValueError('at least one required participant is required')
     return rows
@@ -169,6 +171,10 @@ async def _run(
         elif not rollback:
             raise ValueError('a nonempty exact target is required')
         since = time.time()
+        if target:
+            for participant in participants:
+                if participant['online']:
+                    helper_manifest(participant)  # recheck retained bytes at the existing pin-writer boundary
         if rollback:
             restored = await store.rollback_event_push_target_sha()
             if not target:

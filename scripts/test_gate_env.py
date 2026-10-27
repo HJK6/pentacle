@@ -170,6 +170,77 @@ class ConfigFailsClosed(Tmp):
             ge.load_config(self.tmp / "missing.json")
 
 
+class CLIInstructionInput(Tmp):
+    def snapshot(self):
+        root = self.tmp / "instructions"
+        names = ["AGENTS.md", "docs/config/agent_orchestration.md"] + ["agents/" + name for name in
+            ("qa_baseline.md", "documentation_baseline.md", "doc_qa_baseline.md", "nexus_baseline.md", "lead_baseline.md", "evaluator_baseline.md")]
+        rows = []
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("synthetic snapshot\n")
+            rows.append({"path": name, "sha256": ge.file_digest(path)})
+        (root / "instruction-manifest.json").write_text(json.dumps({"files": rows, "provenance": {
+            "source_root": str(self.tmp), "source_git_head": "a" * 40, "observed_at": "synthetic", "scope": "synthetic-only"}}))
+        for path in [*root.rglob("*"), root]:
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        def writable():
+            for path in [root, *root.rglob("*")]:
+                path.chmod(0o755 if path.is_dir() else 0o644)
+        self.addCleanup(writable)
+        return root
+
+    def test_only_cli_declares_input_and_values_are_not_ambient(self):
+        profile = REAL_CONFIG["profiles"]["pentacle"]
+        self.assertEqual([name for name, target in profile["targets"].items() if ge.ENV_NAME in target.get("pass_env", [])], ["cli-pytest"])
+        root = self.snapshot()
+        identity = ge.instruction_snapshot(str(root))
+        self.assertEqual(len(identity["files"]), 8)
+        self.assertEqual(identity, ge.instruction_snapshot(str(root)))
+        env = ge.build_env(REAL_CONFIG, profile, profile["targets"]["cli-pytest"], checkout=self.tmp, toolchain={},
+            venv=None, home=self.tmp / "home", tmp=self.tmp / "tmp", locale_name="C.UTF-8", evidence=self.tmp,
+            attempt_id="input", pass_env={ge.ENV_NAME: str(root)}, ambient={ge.ENV_NAME: "/untrusted"})
+        self.assertEqual(env[ge.ENV_NAME], str(root))
+
+    def test_absent_malformed_writable_and_content_drift_refuse(self):
+        for value in (None, "relative", str(self.tmp / "absent")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ge.instruction_snapshot(value)
+        root = self.snapshot()
+        path = root / "AGENTS.md"
+        path.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "writable"):
+            ge.instruction_snapshot(str(root))
+        path.write_text("changed\n")
+        path.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, "content drift"):
+            ge.instruction_snapshot(str(root))
+
+    def test_extra_baseline_symlink_and_malformed_manifest_refuse(self):
+        root = self.snapshot()
+        (root / "agents").chmod(0o755)
+        extra = root / "agents/extra_baseline.md"
+        extra.write_text("unexpected\n")
+        extra.chmod(0o444)
+        (root / "agents").chmod(0o555)
+        with self.assertRaisesRegex(ValueError, "membership"):
+            ge.instruction_snapshot(str(root))
+        (root / "agents").chmod(0o755)
+        extra.unlink()
+        extra.symlink_to(root / "AGENTS.md")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            ge.instruction_snapshot(str(root))
+        extra.unlink()
+        (root / "agents").chmod(0o555)
+        manifest = root / "instruction-manifest.json"
+        manifest.chmod(0o644)
+        manifest.write_text("{")
+        manifest.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            ge.instruction_snapshot(str(root))
+
+
 class ToolchainResolution(Tmp):
     def config(self):
         cfg = json.loads(json.dumps(REAL_CONFIG))
@@ -709,12 +780,14 @@ class PythonChromePolicy(unittest.TestCase):
 
 class ScratchRetention(Tmp):
     """Drive the real main/finally with isolated process/preflight counterparts."""
-    def run_case(self, mode, outcome="product_failure", target="v2-pytest"):
+    def run_case(self, mode, outcome="product_failure", target="v2-pytest", instruction=None):
         co = self.tmp / "co"
         service = co / "services/chat-stream-v2"
         (service / "tests").mkdir(parents=True)
         (service / "tests/test_x.py").write_text("")
         (service / "requirements.txt").write_text("websockets==17.0.1\n")
+        if target == "cli-pytest":
+            (co / "services/agent-orch/tests").mkdir(parents=True)
         short = Path(tempfile.mkdtemp(prefix="gr-", dir="/tmp"))
         self.addCleanup(lambda: __import__("shutil").rmtree(short, ignore_errors=True))
         home, tmp = self.tmp / "r/home", short / "t"
@@ -761,6 +834,8 @@ class ScratchRetention(Tmp):
                 "--evidence-dir", str(evidence), "--checkout", str(co), "--tmp-root", str(self.tmp / "short"),
                 "--target", target, "--spec", "synthetic", "--series", "retention", "--purpose", "negative_control"]
         if target == "v2-pytest": argv += ["--select", "tests/test_x.py"]
+        if target == "cli-pytest": argv += ["--select", "tests"]
+        if instruction is not None: argv += ["--pass-env", ge.ENV_NAME]
         with mock.patch.multiple(ge, **patches), mock.patch.object(ge.subprocess, "Popen", return_value=Process()):
             code = ge.main(argv)
         attempts = ga.build_index(evidence)["attempts"]
@@ -770,6 +845,31 @@ class ScratchRetention(Tmp):
         self.assertEqual([e["state"] for e in events], ["started", "prepared", "subject_started", "terminal"], msg=json.dumps(events[-1], sort_keys=True))
         self.assertEqual(len([e for e in events if e["state"] == "terminal"]), 1)
         return code, attempt, events[-1], home.parent, tmp, basetemp
+
+    def test_ordinary_cli_without_declared_input_retains_existing_entry(self):
+        with mock.patch.object(ge, "instruction_snapshot", side_effect=AssertionError("undeclared input was inspected")):
+            code, attempt, terminal, *_ = self.run_case("clean", outcome="pass", target="cli-pytest")
+        self.assertEqual(code, 0)
+        self.assertEqual(attempt["primary_outcome"], "pass")
+        self.assertNotIn("passed_environment", terminal["secondary"])
+
+    def test_supplied_cli_input_is_bound_before_and_after_subject(self):
+        identity = {"root": "/synthetic/read-only", "manifest": {"path": "/synthetic/manifest", "sha256": "a" * 64}, "files": []}
+        with mock.patch.dict(os.environ, {ge.ENV_NAME: identity["root"]}), mock.patch.object(ge, "instruction_snapshot", return_value=identity) as observe:
+            code, _, terminal, *_ = self.run_case("clean", outcome="pass", target="cli-pytest", instruction=identity)
+        self.assertEqual(code, 0)
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(terminal["secondary"]["passed_environment"], {ge.ENV_NAME: identity})
+        prepared = next((self.tmp / "evidence").glob("attempts/*/*-prepared.json"))
+        self.assertEqual(json.loads(prepared.read_text())["passed_environment"], {ge.ENV_NAME: identity})
+
+    def test_cli_post_subject_input_drift_is_non_green(self):
+        identity = {"root": "/synthetic/read-only", "manifest": {}, "files": []}
+        with mock.patch.dict(os.environ, {ge.ENV_NAME: identity["root"]}), mock.patch.object(ge, "instruction_snapshot", side_effect=[identity, ValueError("content drift")]):
+            code, attempt, terminal, *_ = self.run_case("clean", outcome="pass", target="cli-pytest", instruction=identity)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(attempt["primary_outcome"], "harness_failure")
+        self.assertEqual(terminal["first_failure"]["code"], "instruction_input_drift")
 
     def check_retained(self, result, primary, reason):
         code, attempt, terminal, run_dir, tmp, basetemp = result

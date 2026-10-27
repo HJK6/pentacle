@@ -18,6 +18,12 @@ from agent_orch import schema
 from agent_orch.config import Config
 
 
+@pytest.fixture(autouse=True)
+def _isolate_memory_configuration(monkeypatch):
+    """These unit cases supply their own memory config independently of the gate."""
+    monkeypatch.delenv("AGENT_ORCH_MEMORY_REPO", raising=False)
+
+
 def _cli_subprocess_env() -> dict[str, str]:
     """Env forcing a child interpreter to import the same `agent_orch` this test imported.
 

@@ -234,8 +234,17 @@ Each online/required participant's receipt records:
 - `installed_source_sha`: actual running satellite/emitter source commit bound
   to process/incarnation/import readback, rather than checkout HEAD.
 - `previous_incarnation`: original boot identity captured before candidate boot.
-- `installed_helpers_sha`, `installed_cli_version`, and `installed_cli_sha256`:
-  actual helper source and a digest of the installed CLI release identity receipt.
+- `installed_helpers_sha256`: SHA256 of the exact retained per-host configured
+  helper identity manifest bytes. `installed_helpers_manifest` binds its absolute
+  path and matching SHA256. The manifest retains actual mixed Git roots/commits,
+  immutable releases, configured absence, invocation/import/config/dependency
+  identities, local immutable provenance bindings and explicit unresolved limits.
+  It identifies configured disk/invocation scope; missing loaded-module provenance
+  remains missing. The former 40-character `installed_helpers_sha` is historical
+  metadata only and never satisfies strict preflight. Bind the manifest and all
+  referenced files in both installed/candidate satellite external-input file sets.
+- `installed_cli_version` and `installed_cli_sha256`: exact installed CLI release
+  and digest of its retained identity receipt.
 - `dependency_digest`, `configuration_sha256`, `consumer_payload_sha256`: SHA256
   of retained interpreter/dependency inventory, canonical service/configuration
   identity manifest, and frozen authenticated installed-consumer replay evidence.

@@ -23,7 +23,7 @@ def _rows(host: str, outcome: str = "passed", reason: str | None = None) -> list
     ]
 
 
-def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None):
+def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None, selection=None):
     machines_file = tmp_path / "synthetic-machines.json"
     machines_file.write_text(json.dumps(machines if machines is not None else [
         {"name": "primary", "ssh_target": None},
@@ -38,6 +38,8 @@ def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None):
     monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
     runner = _ScriptedRunner({"spawn_fleet_smoke.py": (rc, json.dumps(payload), "")})
     stamp = {"sha": TARGET_SHA}
+    if selection is not None:
+        stamp["release_selection"] = selection
     deploy_mod._apply_post_activation(
         V2_SERVICE, Path("/synthetic-release"), TARGET_SHA, stamp,
         prior_log_size=0, prior_pid=111, reload_launchd=False, runner=runner,
@@ -48,7 +50,42 @@ def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None):
     assert writes[-1] == stamp
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     assert len([call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call)]) == 1
+    if selection is not None:
+        smoke_call = next(call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call))
+        assert smoke_call[-2:] == ("ws://127.0.0.1:12345", "primary")
     return stamp, schedules
+
+
+def _qualified_scope():
+    return {"identity": {"activation": {"url": "ws://127.0.0.1:12345", "host": "primary"},
+                         "required_cells": [{"host": "primary", "provider": "codex", "prompt_mode": "promptless"}]}}
+
+
+def test_qualified_canary_narrows_invocation_and_verdict_without_full_matrix_claim(tmp_path, monkeypatch):
+    cell = {"host": "primary", "provider": "codex", "prompt_mode": "promptless", "outcome": "passed"}
+    stamp, schedules = _apply(tmp_path, monkeypatch, {"ok": True, "status": "PASS", "cells": [cell]},
+                              selection=_qualified_scope())
+    assert stamp["fleet_smoke"]["outcome"] == "passed"
+    assert stamp["fleet_smoke"]["scope"] == "qualified_affected"
+    assert stamp["fleet_smoke"]["full_fleet_acceptance"] is False
+    assert len(stamp["fleet_smoke"]["not_selected"]) == 7
+    assert {c["outcome"] for c in stamp["fleet_smoke"]["not_selected"]} == {"UNTESTED"}
+    assert schedules == []  # scheduled full matrix retains its separate policy
+
+
+@pytest.mark.parametrize("state", ["missing", "quota", "failed", "cleanup"])
+def test_qualified_scope_missing_or_non_green_cell_never_passes(tmp_path, monkeypatch, state):
+    cells = [] if state == "missing" else [{"host": "primary", "provider": "codex", "prompt_mode": "promptless",
+             "outcome": "untested" if state == "quota" else "failed", "reason": state}]
+    stamp, schedules = _apply(tmp_path, monkeypatch, {"cells": cells}, selection=_qualified_scope())
+    assert stamp["fleet_smoke"]["outcome"] in {"untested", "failed"}
+    assert schedules == []
+
+
+def test_qualified_scope_rejects_unexpected_cell_instead_of_silently_broadening(tmp_path, monkeypatch):
+    stamp, _ = _apply(tmp_path, monkeypatch, {"cells": _rows("primary")}, selection=_qualified_scope())
+    assert stamp["fleet_smoke"]["outcome"] == "untested"
+    assert any("unconfigured_or_invalid_cell" in issue for issue in stamp["fleet_smoke"]["issues"])
 
 
 def _partial_payload():

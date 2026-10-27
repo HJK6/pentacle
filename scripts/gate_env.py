@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import gate_attempts as ga  # noqa: E402
+from instruction_snapshot import ENV_NAME, instruction_snapshot  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -610,7 +611,7 @@ UNKNOWN = ga.UNKNOWN
 
 def harness_identity() -> str:
     h = hashlib.sha256()
-    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", CONFIG_PATH):
+    for p in (Path(__file__), HERE / "lib" / "gate_attempts.py", HERE / "lib" / "instruction_snapshot.py", CONFIG_PATH):
         h.update(p.read_bytes())
     return h.hexdigest()
 
@@ -747,6 +748,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     owner: Optional[OwnedProcesses] = None
     target: Optional[Dict[str, Any]] = None
     resolved_selection: Optional[List[str]] = None
+    instruction_input = None
     try:
         if args.history_complete and (missing_identity or args.prior_attempt):
             raise SetupFailure([fail("identity_args", "--history-complete requires full identity and no prior attempt")])
@@ -782,6 +784,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             if name not in os.environ:
                 raise SetupFailure([fail("selection", "pass-env %s is not set in the caller's environment" % name)])
             pass_env[name] = os.environ[name]
+
+        if args.target == "cli-pytest" and ENV_NAME in pass_env:
+            try:
+                instruction_input = instruction_snapshot(pass_env.get(ENV_NAME))
+            except ValueError as exc:
+                raise SetupFailure([fail("dependencies", str(exc), "supply the frozen read-only CLI instruction snapshot")]) from exc
 
         failures: List[Dict[str, str]] = []
         for d in (home, basetemp, tmp, tmp_root):
@@ -837,6 +845,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
                     effective_selection=selection,
+                    **({"passed_environment": {ENV_NAME: instruction_input}} if instruction_input else {}),
                     env_names=sorted(env), capabilities_checked=config["capability_sets"].get(target.get("capabilities") or "", []))
         log("preflight ok")
 
@@ -924,6 +933,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     state["secondary"]["cleanup"] = "failed"
         if state["secondary"].get("cleanup") == "failed" and state["outcome"] == "pass":
             state["outcome"] = "cleanup_failure"
+        if instruction_input is not None:
+            try:
+                if instruction_snapshot(instruction_input["root"]) != instruction_input:
+                    raise ValueError("instruction snapshot identity changed")
+                state["secondary"]["passed_environment"] = {ENV_NAME: instruction_input}
+            except ValueError as exc:
+                state.update(outcome="harness_failure", first_failure={"stage": "cleanup", "code": "instruction_input_drift"})
+                state["secondary"]["instruction_input_error"] = str(exc)
         if not writer.terminal:
             try:
                 writer.emit("terminal", outcome=state["outcome"], first_failure=state["first_failure"], secondary=state["secondary"],

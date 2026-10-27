@@ -1,8 +1,32 @@
 """Synthetic counterpart receipts for the pin operation; no host/SSH/provider calls."""
 import json
+import hashlib
 import time
 
 import pytest
+
+
+def helper_identity(root, host):
+    """Explicitly synthetic mixed helper/configured-absence identity."""
+    proof = root / (host + '-helper-proof.json')
+    if not proof.exists():
+        proof.write_text(json.dumps({'synthetic': True}))
+    proof.chmod(0o444)
+    path = root / (host + '-helper-manifest.json')
+    payload = json.dumps({'host': host, 'configured_helpers': {
+        'host': host, 'invocations': [{'role': 'configured_account_executor', 'status': 'not configured'}],
+        'closures': [{'root': '/synthetic/usage', 'actual_checkout_head': 'a' * 40}],
+        'interpreters': {'/synthetic/python': {'version': 'synthetic'}},
+        'loaded_module_provenance': {'status': 'not_attested'}},
+        'files': [{'path': str(proof), 'sha256': hashlib.sha256(proof.read_bytes()).hexdigest()}],
+        'limits': ['Synthetic fixture only; no loaded/native/runtime proof.']})
+    if not path.exists():
+        path.write_text(payload)
+    else:
+        assert path.read_text() == payload
+    path.chmod(0o444)
+    binding = {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+    return {'installed_helpers_sha256': binding['sha256'], 'installed_helpers_manifest': binding}
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +47,7 @@ def preflight(root, candidate, hosts=('workstation',), optional=()):
                      'interpreter': checkout + '/.venv/bin/python', 'python_version': '3.13.2',
                      'imports_passed': True, 'compatibility_passed': True, 'recovery_ready': True,
                      'previous_incarnation': 'prior-boot', 'dependency_digest': 'd' * 64,
-                     'installed_helpers_sha': 'e' * 40, 'consumer_payload_sha256': 'f' * 64,
+                     **helper_identity(root, host), 'consumer_payload_sha256': 'f' * 64,
                      'installed_cli_version': 'fixture-cli', 'installed_source_sha': 'a' * 40,
                      'configuration_sha256': 'c' * 64, 'installed_cli_sha256': 'b' * 64})
     path = root / ('preflight-' + candidate + '.json')

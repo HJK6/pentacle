@@ -12,10 +12,18 @@ import subprocess
 import sys
 import tarfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 DEPLOY = Path(__file__).parents[1] / "deploy"
+
+
+@pytest.fixture(autouse=True)
+def _restore_wrapper_environment():
+    """The process-entry wrapper scrubs its environment; contain in-process calls."""
+    with patch.dict(os.environ):
+        yield
 
 
 def load(name):

@@ -1,5 +1,8 @@
 # Advisory test selection
 
+[Qualified release integration](SELECTIVE_RELEASE.md) consumes the advisory
+selector separately; the selector itself never certifies a release.
+
 From the repository root, give the actual installed component baseline and the
 proposed release as full immutable commit SHAs:
 
