@@ -3832,6 +3832,23 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 "UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
                 (json.dumps(prior_intent, separators=(",", ":")), host, session_name),
             )
+            normalization = prior_intent.get("parent_closed_resume_top_level")
+            if cursor.rowcount == 1 and isinstance(normalization, dict):
+                # The admission decision and recoverable intent commit together;
+                # interruption before pane creation cannot lose or repeat it.
+                episode = conn.execute(
+                    "SELECT episode_id,attempt_seq FROM v2_assistant_restore_episode "
+                    "WHERE spawn_key=? AND stream_id=? AND attempt_generation=?",
+                    (normalization["spawn_key"], normalization["stream_id"], normalization["new_generation"]),
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO v2_assistant_restore_audit"
+                    "(episode_id,attempt_seq,event,outcome,detail_json,request_id,created_at) "
+                    "VALUES(?,?,'parent_closed_resume_top_level',?,?,?,?)",
+                    (episode["episode_id"] if episode else None, episode["attempt_seq"] if episode else 0,
+                     normalization["reason"], json.dumps(normalization),
+                     "restore-parent:" + normalization["spawn_key"], iso_now()),
+                )
             conn.commit()
             return cursor.rowcount == 1
 

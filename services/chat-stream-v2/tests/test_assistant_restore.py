@@ -19,6 +19,7 @@ from assistant_restore import AssistantRestore
 from server import Server
 from sessions import Sessions, VerbError
 from store import Store
+from notify import Notify
 
 LOCAL = "fixture-host"
 SEAT = f"{LOCAL}:fd"
@@ -211,6 +212,211 @@ def run(tmp_path, monkeypatch, body, **rig_kwargs):
         finally:
             rig.store.stop()
     asyncio.run(_go())
+
+
+async def _degrade_for_notice(rig):
+    rig.spawnctl.mode = "error"
+    await rig.kill()
+    for _ in range(ar.MAX_ATTEMPTS):
+        await rig.restore.advance()
+        rig.clock.advance(3600)
+    assert (await rig.restore.status())["state"] == "degraded"
+
+
+async def _recovery_cards(notify):
+    rows = await notify._db.call("list_notifications", limit=1000)
+    return [row for row in rows if row.get("title") == "Bart recovery stopped"]
+
+
+@pytest.mark.parametrize("terminal", ["resolved", "expired"])
+def test_degraded_notice_is_historical_once_per_epoch_across_restart(tmp_path, monkeypatch, terminal):
+    async def body(rig):
+        await rig.start()
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        rig.restore._notify = notify
+        try:
+            await _degrade_for_notice(rig)
+            cards = await _recovery_cards(notify)
+            assert len(cards) == 1
+            card = cards[0]
+            assert not card.get("actions") and "4" in card["body"]
+            receipts = await rig.audit("degraded_notice_published")
+            assert len(receipts) == 1
+            assert json.loads(receipts[0]["detail_json"])["notification_id"] == card["notification_id"]
+            # Use the store's ordinary resolution/expiry APIs; no status-table edits.
+            if terminal == "expired":
+                await notify._db.call("expire_due", now="2099-01-01T00:00:00Z")
+            else:
+                await notify._db.call("resolve_notification", card["notification_id"],
+                                      action_kind="resolved", by="operator:fixture")
+            sent = len(rig.spawnctl.sent)
+            for _ in range(3):
+                rig.restore = rig.owner()
+                rig.restore._notify = notify
+                await rig.restore.advance()
+            assert len(await _recovery_cards(notify)) == 1
+            assert len(await rig.audit("degraded_notice_published")) == 1
+            assert len(rig.spawnctl.sent) == sent == 4
+            # The existing authenticated retry path owns a new epoch.
+            assert not (await rig.restore.manual("retry", "notice-new-budget")).get("error_code")
+            await rig.restore.drain()
+            for _ in range(4):
+                rig.clock.advance(3600)
+                await rig.restore.advance()
+            assert len(await _recovery_cards(notify)) == 2
+            assert len(await rig.audit("degraded_notice_published")) == 2
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
+
+
+@pytest.mark.parametrize("failure", ["lookup", "before_create", "after_insert", "before_receipt"])
+@pytest.mark.parametrize("terminal", ["open", "resolved", "expired"])
+def test_degraded_notice_reconciles_uncertainty_without_spawning(tmp_path, monkeypatch, failure, terminal):
+    async def body(rig):
+        await rig.start()
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        rig.restore._notify = notify
+        real_create, real_call = notify.create_internal_notification, notify._db.call
+        active = True
+
+        async def create(**kw):
+            if active and failure == "before_create":
+                raise RuntimeError("publication unavailable")
+            result = await real_create(**kw)
+            if active and failure == "after_insert":
+                raise RuntimeError("publication result lost")
+            return result
+
+        async def call(method, *args, **kw):
+            if active and failure == "lookup" and method == "get_latest_by_dedup":
+                raise RuntimeError("notification read unavailable")
+            return await real_call(method, *args, **kw)
+
+        async def fault(point):
+            if active and failure == "before_receipt" and point == "after_degraded_notice":
+                raise RuntimeError("receipt write interrupted")
+
+        monkeypatch.setattr(notify, "create_internal_notification", create)
+        monkeypatch.setattr(notify._db, "call", call)
+        rig.restore._fault = fault
+        try:
+            await _degrade_for_notice(rig)
+            before = await _recovery_cards(notify)
+            assert len(before) == int(failure in {"after_insert", "before_receipt"})
+            assert await rig.audit("degraded_notice_published") == []
+            if before and terminal != "open":
+                if terminal == "expired":
+                    await real_call("expire_due", now="2099-01-01T00:00:00Z")
+                else:
+                    await real_call("resolve_notification", before[0]["notification_id"],
+                                    action_kind="resolved", by="operator:fixture")
+            active = False
+            sent = len(rig.spawnctl.sent)
+            # A new owner baselines an unchanged degraded status on its first tick.
+            rig.restore = rig.owner()
+            rig.restore._notify = notify
+            for _ in range(3):
+                await rig.restore.advance()
+            cards = await _recovery_cards(notify)
+            assert len(cards) == 1
+            if before:
+                assert cards[0]["notification_id"] == before[0]["notification_id"]
+                assert cards[0]["firing_count"] == before[0]["firing_count"]
+            assert len(await rig.audit("degraded_notice_published")) == 1
+            assert len(rig.spawnctl.sent) == sent == 4
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
+
+
+@pytest.mark.parametrize("enabled_on_boot", [True, False])
+def test_already_degraded_on_boot_publishes_without_an_extra_attempt(tmp_path, monkeypatch, enabled_on_boot):
+    async def body(rig):
+        await rig.start()
+        # No notifier in the first process: publication is pending, budget exhausted.
+        await _degrade_for_notice(rig)
+        sent = len(rig.spawnctl.sent)
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        try:
+            rig.auto = enabled_on_boot
+            rig.restore = rig.owner()
+            rig.restore._notify = notify
+            await rig.restore.tick()
+            await rig.restore.drain()
+            assert len(await _recovery_cards(notify)) == 1
+            assert len(rig.spawnctl.sent) == sent == 4
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
+
+
+def test_unresolved_attempt_warns_once_without_starting_an_overlap(tmp_path, monkeypatch):
+    async def body(rig):
+        await rig.start()
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        rig.restore._notify = notify
+        try:
+            rig.spawnctl.mode = "lost"
+            await rig.kill()
+            await rig.restore.advance()
+            rig.clock.advance(ar.UNRESOLVED_LIMIT_S + 1)
+            for _ in range(3):
+                await rig.restore.advance()
+            assert (await rig.restore.status())["reason"] == "attempt_unresolved"
+            assert len(await _recovery_cards(notify)) == 1
+            assert len(await rig.audit("degraded_notice_published")) == 1
+            assert len(rig.spawnctl.sent) == 1
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
+
+
+def test_failed_adoption_with_a_live_unregistered_pane_cannot_wait_silently(tmp_path, monkeypatch):
+    """Reproduce the real pane-before-generation post-restart snapshot."""
+    async def body(rig):
+        await rig.start()
+        notify = Notify(db_path=str(tmp_path / "notifications.db"))
+        await notify.start()
+        rig.restore._notify = notify
+        try:
+            rig.spawnctl.mode = "lost"
+            await rig.kill()
+            await rig.restore.advance()
+            episode = (await rig.episodes())[-1]
+            # Generic adoption refuses against the retained prior generation,
+            # preserves the pane, and terminalizes its spawn handle.
+            rig.spawnctl.reservations = []
+            rig.spawnctl.outcomes = [{"idempotency_key": episode["spawn_key"], "state": "failed",
+                                      "reason": "spawn_generation_changed"}]
+            rig.tmux.states["fd"] = "alive"
+            await rig.restore.advance()
+            assert (await rig.restore.status())["state"] == "pending"
+            rig.clock.advance(ar.UNRESOLVED_LIMIT_S - 1)
+            await rig.restore.advance()
+            assert (await rig.restore.status())["state"] == "pending"
+            assert await _recovery_cards(notify) == []
+            # Restart must retain the original attempt clock, not grant
+            # another ten minutes or start a second pane.
+            rig.restore = rig.owner()
+            rig.restore._notify = notify
+            rig.clock.advance(2)
+            for _ in range(3):
+                await rig.restore.advance()
+            status = await rig.restore.status()
+            assert status["state"] == "degraded"
+            assert status["reason"] == "attempt_unresolved"
+            assert len(await _recovery_cards(notify)) == 1
+            assert len(await rig.audit("degraded_notice_published")) == 1
+            assert len(rig.spawnctl.sent) == 1
+            assert (await rig.composite.binding())["generation"] == G0
+        finally:
+            await notify.stop()
+    run(tmp_path, monkeypatch, body)
 
 
 # -- pure helpers ------------------------------------------------------------- #

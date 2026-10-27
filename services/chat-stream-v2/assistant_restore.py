@@ -44,6 +44,8 @@ UNRESOLVED_LIMIT_S = 600.0
 PS_TIMEOUT_S = 5.0
 SERVICE_ACTOR = "daemon:scheduler"
 NOTICE_FROM = "daemon:assistant-restore"
+DEGRADED_NOTICE_TITLE = "Bart recovery stopped"
+DIAGNOSTIC_TAGS = {"subsystem": "assistant_restore", "bug_ref": "bart_fd_auto_restore_closed_parent_2026_10"}
 
 _GENERATION_RE = re.compile(r"[0-9a-f]{32}\Z")
 _FAILED_OUTCOME_STATES = frozenset({"failed", "cancelled"})
@@ -185,6 +187,7 @@ class AssistantRestore:
         ps_runner: Callable[[str], Awaitable[tuple[int, str, str]]] | None = None,
         clock: Callable[[], datetime] = _now,
         fault: Callable[[str], Awaitable[None]] | None = None,
+        notify: Any | None = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
@@ -199,6 +202,7 @@ class AssistantRestore:
         self._ps = ps_runner or run_ps
         self._clock = clock
         self._fault = fault
+        self._notify = notify
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         # Last death-proof finding with no episode: (state, reason).
@@ -232,8 +236,11 @@ class AssistantRestore:
         if self._task is not None and not self._task.done():
             return
         if not self.auto_enabled and await self.store.restore_active_episode(name=self.name) is None:
-            # Automatic trigger off and nothing admitted: one read, no work.
-            return
+            # A pending degradation warning survives an operator disabling
+            # new automatic restores, as well as a daemon restart.
+            episode = await self._episode_for_current_binding()
+            if episode is None or episode["state"] != "degraded":
+                return
         self._task = asyncio.create_task(self._run("auto"), name="assistant-restore")
 
     async def _run(self, trigger: str) -> None:
@@ -256,7 +263,50 @@ class AssistantRestore:
                     break
                 # One event per persisted change, not one per pass.
                 await self._emit()
-            return await self._emit()
+            status = await self._emit()
+            if status["state"] == "degraded":
+                await self._publish_degraded_notice()
+            return status
+
+    async def _publish_degraded_notice(self) -> None:
+        """Retry only publication, never the exhausted spawn budget."""
+        if self._notify is None:
+            return
+        try:
+            episode = await self._episode_for_current_binding()
+            if episode is None or episode["state"] != "degraded":
+                return
+            episode_id, epoch = int(episode["episode_id"]), int(episode["budget_epoch"])
+            audits = await self.store.restore_audit_rows(episode_id=episode_id)
+            if any(a["event"] == "degraded_notice_published"
+                   and json.loads(a.get("detail_json") or "{}").get("budget_epoch") == epoch for a in audits):
+                return
+            dedup_key = f"assistant-restore-degraded:{self.name}:{episode_id}:{epoch}"
+            # A failed read is uncertainty, not permission to create. Historical
+            # rows count too, including expiry between insertion and receipt.
+            record = await self._notify.get_internal_notification_by_dedup(
+                producer=NOTICE_FROM, dedup_key=dedup_key,
+            )
+            if record is None:
+                record = await self._notify.create_internal_notification(
+                    producer=NOTICE_FROM, title=DEGRADED_NOTICE_TITLE, severity="warning", dedup_key=dedup_key,
+                    body=(f"Recovery stopped at {episode['updated_at']}. "
+                          f"Attempts: {episode['budget_used']}/{MAX_ATTEMPTS}. "
+                          f"Reason: {str(episode.get('reason') or 'unknown')[:120]}. Recovery needs attention."),
+                )
+                # Creation may have committed even when fan-out/reply failed.
+                record = await self._notify.get_internal_notification_by_dedup(
+                    producer=NOTICE_FROM, dedup_key=dedup_key,
+                )
+            if (not record or not record.get("notification_id") or record.get("actions")
+                    or record.get("title") != DEGRADED_NOTICE_TITLE):
+                raise ValueError("degraded notification not confirmed message-only")
+            await self._hook("after_degraded_notice")
+            await self.store.restore_record_degraded_notice(
+                episode_id=episode_id, budget_epoch=epoch, notification_id=record["notification_id"],
+            )
+        except Exception:  # noqa: BLE001 - leave publication pending for a later tick
+            log.exception("assistant restore degradation notice pending name=%s", self.name, extra=DIAGNOSTIC_TAGS)
 
     # -- status ---------------------------------------------------------------
 
@@ -506,6 +556,11 @@ class AssistantRestore:
             str(episode["stream_id"]), str(episode["last_generation"]), episode,
         )
         if not proven:
+            if episode.get("reason") == "spawn_generation_changed":
+                # Adoption can fail before the new generation is durable and
+                # leave its pane alive. Preserve the death fence, but bound
+                # this attempt from its original start rather than wait forever.
+                return await self._unresolved(episode, expect_state="pending")
             return False
         binding = await self._binding()
         if (binding is None or binding.get("stream_id") != episode["stream_id"]
@@ -659,15 +714,16 @@ class AssistantRestore:
             last_generation=str(episode["attempt_generation"]) if opened else None,
         )
 
-    async def _unresolved(self, episode: dict[str, Any]) -> bool:
-        await self.store.restore_note_uncertain(
-            episode_id=episode["episode_id"], attempt_seq=episode["attempt_seq"],
-        )
+    async def _unresolved(self, episode: dict[str, Any], *, expect_state: str = "spawning") -> bool:
+        if expect_state == "spawning":
+            await self.store.restore_note_uncertain(
+                episode_id=episode["episode_id"], attempt_seq=episode["attempt_seq"],
+            )
         started = _parse_iso(episode.get("attempt_started_at"))
         if started is not None and (self._clock() - started).total_seconds() >= UNRESOLVED_LIMIT_S:
             # Never start another attempt on top of one whose outcome is unknown.
             ended = await self.store.restore_transition(
-                episode_id=episode["episode_id"], expect_state="spawning",
+                episode_id=episode["episode_id"], expect_state=expect_state,
                 expect_attempt_seq=episode["attempt_seq"],
                 fields={"state": "degraded", "reason": "attempt_unresolved"},
                 audits=[("attempt_outcome", "attempt_unresolved", {})],

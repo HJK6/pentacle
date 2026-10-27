@@ -849,6 +849,7 @@ async def run(args: argparse.Namespace) -> int:
             flush_composite_tells=server._flush_composite_tells,
             deliver_notice=_deliver_restore_notice, broadcast=server.broadcast,
             ps_runner=_restore_ps, fault=_restore_fault,
+            notify=notify,
         )
         assistant_composite.input_death_proof = server.assistant_restore.input_death_proof
 
