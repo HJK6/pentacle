@@ -62,6 +62,15 @@ candidate identities describe their distinct sources and accounts. Client
 `identity.mobile_source_shas` is a sorted installed source list, matching mobile
 rows; the candidate tuple separately names proposed consumer sources.
 `deploy_config.candidate.files` includes the actual installed machine file.
+When the union selects `cli-pytest`, it also binds the frozen instruction
+snapshot manifest and every manifest file. Set `AGENT_ORCH_MEMORY_REPO` to that
+read-only snapshot and declare it with the existing `--pass-env` option for the
+CLI target. The snapshot contains the complete `agents/*_baseline.md` membership,
+`AGENTS.md`, and `docs/config/agent_orchestration.md`, with original provenance
+and content hashes. Symlinks, writable inputs, missing files and drift refuse.
+Canonical prepared/terminal evidence binds the actual path and contents;
+environment names alone cannot establish this input. Ordinary CLI checks may
+omit the input; selected release admission requires it and zero skipped tests.
 Deploy checks that every configured remote host has its satellite baseline;
 omitting an older configured participant cannot yield a safe empty selection.
 Unsupported or absent identities refuse. Keep credentials out of inputs.

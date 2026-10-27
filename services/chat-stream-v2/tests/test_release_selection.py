@@ -69,6 +69,7 @@ def _seed_selector_files(repo):
         shutil.copyfile(source / "scripts" / name, target)
     (repo / "scripts/lib").mkdir()
     shutil.copyfile(source / "scripts/lib/gate_attempts.py", repo / "scripts/lib/gate_attempts.py")
+    shutil.copyfile(source / "scripts/lib/instruction_snapshot.py", repo / "scripts/lib/instruction_snapshot.py")
     mapping = json.loads((repo / "scripts/test-selection.json").read_text())
     for target in mapping["full_gates"] + [t for b in mapping["boundaries"].values() for t in b["targets"]]:
         for filename in target["files"]:
@@ -81,7 +82,28 @@ def _seed_selector_files(repo):
 
 
 @pytest.fixture
-def release(tmp_path, monkeypatch):
+def instruction_input(tmp_path, monkeypatch):
+    root = tmp_path / "instruction-input"
+    names = ["AGENTS.md", "docs/config/agent_orchestration.md"] + ["agents/" + name for name in
+        ("qa_baseline.md", "documentation_baseline.md", "doc_qa_baseline.md", "nexus_baseline.md", "lead_baseline.md", "evaluator_baseline.md")]
+    rows = []
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic instruction fixture\n")
+        rows.append({"path": name, "sha256": selection.digest(path.read_bytes())})
+    _write(root / "instruction-manifest.json", {"files": rows, "provenance": {
+        "source_root": str(tmp_path), "source_git_head": SHA, "observed_at": "synthetic", "scope": "synthetic-only"}})
+    for path in [*root.rglob("*"), root]:
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    monkeypatch.setenv(selection.ENV_NAME, str(root))
+    yield selection.instruction_snapshot(str(root))
+    for path in [root, *root.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+
+
+@pytest.fixture
+def release(tmp_path, monkeypatch, instruction_input):
     monkeypatch.setattr(selection, "QUALIFIED_SEAMS", {})
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -119,6 +141,8 @@ def release(tmp_path, monkeypatch):
         if label == "client_versions":
             value["identity"]["mobile_source_shas"] = [SHA]
         external[label] = {"installed": copy.deepcopy(value), "candidate": copy.deepcopy(value)}
+    for side in ("installed", "candidate"):
+        external["deploy_config"][side]["files"].extend([instruction_input["manifest"], *instruction_input["files"]])
     inputs = {"schema": "pentacle.release-inputs.v1", "candidate": head,
               "installed": installed, "external_inputs": external,
               "activation": {"url": "ws://127.0.0.1:12345", "host": "primary"}}
@@ -230,10 +254,12 @@ def _execution_runner(plan, calls, web_scenario="installed-client-seam"):
             "identities": {"source": {"sha": plan["identity"]["candidate"], "dirty": False}}})
         _write(out / "attempts/owned/0002-prepared.json", {
             "schema": "pentacle.test-attempt-event.v1", "state": "prepared", "attempt_id": "owned",
-            "toolchain": {k: plan["identity"]["toolchain"][k] for k in plan["identity"]["target_needs"][target]}})
+            "toolchain": {k: plan["identity"]["toolchain"][k] for k in plan["identity"]["target_needs"][target]},
+            **({"passed_environment": {selection.ENV_NAME: plan["identity"]["cli_instruction_snapshot"]}} if target == "cli-pytest" else {})})
         _write(out / "attempts/owned/0004-terminal.json", {
             "schema": "pentacle.test-attempt-event.v1", "state": "terminal", "attempt_id": "owned", "outcome": "pass", "first_failure": None,
-            "secondary": {"counts": {"failures": 0, "errors": 0, "skipped": 0}},
+            "secondary": {"counts": {"failures": 0, "errors": 0, "skipped": 0},
+                **({"passed_environment": {selection.ENV_NAME: plan["identity"]["cli_instruction_snapshot"]}} if target == "cli-pytest" else {})},
             "detail": {"returncode": 0}, "evidence": [proof]})
         return subprocess.CompletedProcess(cmd, 0, "", "")
     return runner
@@ -271,6 +297,42 @@ def test_broad_with_exact_complete_synthetic_proof_is_distinct_from_gap(release,
                                      tmp_path / "work", tmp_path / "proof")
     assert len(section["results"]) == len(plan["targets"])
     assert selection.validate_results(plan, section) == section
+
+
+def test_cli_snapshot_is_declared_bound_and_rechecked(release, tmp_path, monkeypatch):
+    repo, inputs, prepare, _, commit, *_ = release
+    (repo / "unknown.py").write_text("# broad\n")
+    inputs["candidate"] = commit("broad CLI instruction control")
+    plan = prepare()
+    _qualify(monkeypatch, plan)
+    calls = []
+    section = selection.run_selected(plan, repo, sys.executable, _execution_runner(plan, calls), tmp_path / "work", tmp_path / "proof")
+    cli = next(c for c in calls if "cli-pytest" in c)
+    assert cli[:2] == ("/usr/bin/env", selection.ENV_NAME + "=" + plan["identity"]["cli_instruction_snapshot"]["root"])
+    assert cli[cli.index("--pass-env") + 1] == selection.ENV_NAME
+    row = next(r for r in section["results"] if r["target"]["target"] == "cli-pytest")
+    for state in ("prepared", "terminal"):
+        changed = copy.deepcopy(section)
+        evidence = next(r for r in changed["results"] if r["target"]["target"] == "cli-pytest")["evidence"]
+        event = selection.read(evidence[state]["path"])
+        (event if state == "prepared" else event["secondary"])["passed_environment"] = {selection.ENV_NAME: {"root": "/unproved"}}
+        evidence[state] = _write(tmp_path / (state + "-changed.json"), event)
+        with pytest.raises(selection.Invalid, match="CLI instruction execution binding"):
+            selection.validate_results(plan, changed)
+    monkeypatch.delenv(selection.ENV_NAME)
+    with pytest.raises(selection.Invalid, match="missing declared input"):
+        prepare()
+
+
+def test_cli_snapshot_cannot_be_unbound_from_release_inputs(release, tmp_path):
+    repo, inputs, prepare, _, commit, *_ = release
+    (repo / "unknown.py").write_text("# broad\n")
+    inputs["candidate"] = commit("broad")
+    plan = prepare()
+    snapshot = plan["identity"]["cli_instruction_snapshot"]
+    inputs["external_inputs"]["deploy_config"]["candidate"]["files"].remove(snapshot["manifest"])
+    with pytest.raises(selection.Invalid, match="unbound CLI instruction input"):
+        prepare()
 
 
 @pytest.mark.parametrize("field", ["map_sha256", "source_tree_sha256", "gate_env_sha256", "admission_sha256"])

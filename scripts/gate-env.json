@@ -177,6 +177,9 @@
         },
         "cli-pytest": {
           "kind": "pytest_files",
+          "pass_env": [
+            "AGENT_ORCH_MEMORY_REPO"
+          ],
           "needs": [
             "python",
             "tmux"

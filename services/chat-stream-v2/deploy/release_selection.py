@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -15,6 +16,9 @@ import sys
 import tempfile
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts/lib"))
+from instruction_snapshot import ENV_NAME, instruction_snapshot
 
 
 PUBLIC_REPO = "https://github.com/HJK6/pentacle.git"
@@ -30,6 +34,8 @@ QUALIFICATION_PATH = Path(__file__).with_name("qualified_seams.json")
 QUALIFIED_SEAMS: dict[str, dict] = json.loads(QUALIFICATION_PATH.read_bytes())
 LOADED_QUALIFICATION_SHA256 = hashlib.sha256(QUALIFICATION_PATH.read_bytes()).hexdigest()
 LOADED_ADMISSION_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+INSTRUCTION_PATH = Path(__file__).resolve().parents[3] / "scripts/lib/instruction_snapshot.py"
+LOADED_INSTRUCTION_SHA256 = hashlib.sha256(INSTRUCTION_PATH.read_bytes()).hexdigest()
 TOOLCHAIN_QUERY = """
 import json, sys
 sys.path.insert(0, sys.argv[1] + '/scripts')
@@ -262,6 +268,17 @@ def prepare(repo, sha, input_path, python, runner):
             "targets": [targets[k] for k in sorted(targets)],
             "classification": "broad_fallback" if any(r["classification"] == "broad_fallback" for r in reports)
             else "mapped" if boundaries else "docs_only"}
+    if any(t["target"] == "cli-pytest" for t in plan["targets"]):
+        require(digest(INSTRUCTION_PATH.read_bytes()) == LOADED_INSTRUCTION_SHA256, "changed CLI instruction validator")
+        try:
+            snapshot = instruction_snapshot(os.environ.get(ENV_NAME))
+        except ValueError as exc:
+            raise Invalid(str(exc)) from exc
+        bound = external["deploy_config"]["candidate"]["files"]
+        require(all(b in bound for b in [snapshot["manifest"], *snapshot["files"]]),
+                "unbound CLI instruction input")
+        identity["cli_instruction_snapshot"] = snapshot
+        identity["cli_instruction_code_sha256"] = LOADED_INSTRUCTION_SHA256
     plan["qualification_contexts"] = {
         name: qualification_context(repo, plan, name, proof, runner)
         for name, proof in QUALIFIED_SEAMS.items() if name in boundaries}
@@ -337,6 +354,12 @@ def execution_scope(plan, target):
         and any(b["id"] == "client_wire_render" for b in plan.get("boundaries", []))) else "default"
 
 
+def execution_env(plan, target):
+    if target["target"] == "cli-pytest":
+        return {ENV_NAME: plan["identity"]["cli_instruction_snapshot"]["root"]}
+    return {"PENTACLE_WEB_GATE_SCENARIOS": "installed-client-seam"} if execution_scope(plan, target) != "default" else {}
+
+
 def scenario_verdict(terminal, scope):
     """Bind the scenario actually executed, using the existing browser artifacts."""
     logs = [b for b in terminal.get("evidence", []) if Path(b["path"]).name == "web-browser.log"]
@@ -393,9 +416,19 @@ def validate_results(plan, section):
                 and started.get("target") == row["target"]["target"]
                 and started.get("selected", {}).get("select") == row["target"]["select"]
                 and started.get("selected", {}).get("pass_env_names", []) ==
-                    (["PENTACLE_WEB_GATE_SCENARIOS"] if scope != "default" else [])
+                    list(execution_env(plan, row["target"]))
                 and started.get("identities", {}).get("source") == {"sha": plan["identity"]["candidate"], "dirty": False},
                 "seam execution source/selection mismatch")
+        if row["target"]["target"] == "cli-pytest":
+            snapshot = plan["identity"]["cli_instruction_snapshot"]
+            try:
+                require(instruction_snapshot(snapshot["root"]) == snapshot, "changed CLI instruction input")
+            except ValueError as exc:
+                raise Invalid(str(exc)) from exc
+            expected_env = {ENV_NAME: snapshot}
+            require(prepared.get("passed_environment") == expected_env
+                    and terminal.get("secondary", {}).get("passed_environment") == expected_env,
+                    "CLI instruction execution binding mismatch")
         require(terminal.get("outcome") == "pass" and terminal.get("first_failure") is None
                 and terminal.get("secondary", {}).get("cleanup") != "failed"
                 and type(terminal.get("detail", {}).get("returncode")) is int
@@ -431,6 +464,14 @@ def revalidate(plan, input_path):
     require(digest(Path(input_path).read_bytes()) == identity["inputs_sha256"], "changed release inputs before activation")
     require(digest(Path(__file__).read_bytes()) == identity["admission_sha256"], "changed admission code before activation")
     require(digest(QUALIFICATION_PATH.read_bytes()) == identity["qualification_sha256"], "changed qualification before activation")
+    if "cli_instruction_snapshot" in identity:
+        require(digest(INSTRUCTION_PATH.read_bytes()) == identity["cli_instruction_code_sha256"],
+                "changed CLI instruction validator before activation")
+        try:
+            require(instruction_snapshot(identity["cli_instruction_snapshot"]["root"]) == identity["cli_instruction_snapshot"],
+                    "changed CLI instruction input before activation")
+        except ValueError as exc:
+            raise Invalid(str(exc)) from exc
     for row in identity["installed"]:
         installed_receipt(row, identity["candidate"])
     for pair in identity["external_inputs"].values():
@@ -456,9 +497,11 @@ def run_selected(plan, repo, python, runner, workspace, evidence_dir):
         for item in target["select"]:
             command.extend(("--select", item))
         scope = execution_scope(plan, target)
-        if scope != "default":
-            command.extend(("--pass-env", "PENTACLE_WEB_GATE_SCENARIOS"))
-            command = ["/usr/bin/env", "PENTACLE_WEB_GATE_SCENARIOS=installed-client-seam", *command]
+        passed = execution_env(plan, target)
+        for name in passed:
+            command.extend(("--pass-env", name))
+        if passed:
+            command = ["/usr/bin/env", *[name + "=" + value for name, value in passed.items()], *command]
         result = runner(command, repo)
         require(result.returncode == 0, "non-green selected target " + target["target"])
         bound = {}
