@@ -38,7 +38,7 @@
     "scope_sha256": "63281060d4c284e903112e4ebe8266e51a34bbd4722293893df7c2ddf03f92b6"
   },
   "provider_startup": {
-    "source_ref": "1dbeb442db2418502529ca07d1fe583d8a18e98e",
+    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
     "source_paths": [
       "services/chat-stream-v2/*.py",
       "services/chat-stream-v2/tools/",
@@ -56,17 +56,107 @@
       "provider_config"
     ],
     "assertion_scope": [
-      "One recorded local Codex promptless native-owner/startup/send/exact-reply/audit/fenced-cleanup tuple.",
-      "Reuse requires equal exercised source bytes and the recorded configuration, binding, executable and same installed dependency/interpreter predicates."
+      "One recorded local Codex promptless native-owner/startup/send/exact-reply/audit/fenced-closed-cell tuple at the exercised source, with explicit intended deployment endpoint mapping.",
+      "Original adapter cleanup failure/raw nonzero exit is retained; separately completed physical cleanup is accepted only as the recorded lower-trust composite."
     ],
     "remaining_coverage": [
-      "No all-host, all-account, all-provider or arbitrary executable/config/model/effort matrix.",
-      "Installed-runtime evidence does not certify changed startup/dependency inputs or unrelated deployment/satellite behavior.",
-      "No native UI-counter drift was exercised in this successful run; earlier deterministic controls retain their separate scope."
+      "No all-host, all-account, all-provider, arbitrary model/effort/config or actual deployed-runtime qualification.",
+      "Scratch endpoint/store/policy/credentials/physical interpreter remain distinct; reuse requires exact accepted target/source/dependency/config predicates.",
+      "Cleanup adapter and supplemental script need bounded repair before reuse; selected native configuration-counter additions remain refused."
     ],
-    "qa_report": "64e00fed-d8cd-47e0-aad0-19ff126a70e2",
-    "qa_review_sha256": "c40dc19801c8004167a53a8883da0bffba75723daa50cdf7162bfedc49172165",
-    "evidence_sha256": "27218917c82ca5b71dacb5d032aaab16f284aff3a368ff100ea072acfd70625c",
-    "scope_sha256": "ae35aa3483cb41e50de7e8647d3aa6b9e70564d206cdf230c9959c1c42fa45e3"
+    "qa_report": "b256fb88-c457-403f-a201-9ffaccc4f829",
+    "qa_review_sha256": "b0bf9c2fed5db3624b40f93438b206832cfc18f4d4e181d8ad415abce666af04",
+    "evidence_sha256": "c599f977855b4a6736d6f75ad45e094d0c737fd7a5ca6c2a0303efca6e0b6581",
+    "scope_sha256": "506974b102ec061f1acd23d1336217c9d53af10933dbc0748f80fd8fd2b69749"
+  },
+  "satellite_transition": {
+    "source_ref": "70655e727e043010c9c1f9d33141b99e94ef88a1",
+    "source_paths": [
+      "services/chat-stream-v2/chat_recovery.py",
+      "services/chat-stream-v2/deploy/satellite/README.md",
+      "services/chat-stream-v2/deploy/satellite/com.pentacle.satellite.plist",
+      "services/chat-stream-v2/deploy/satellite/pentacle-satellite.service",
+      "services/chat-stream-v2/event_push.py",
+      "services/chat-stream-v2/satellite.py",
+      "services/chat-stream-v2/server.py",
+      "services/chat-stream-v2/store.py",
+      "services/chat-stream-v2/store_usage.py",
+      "services/chat-stream-v2/tests/conftest.py",
+      "services/chat-stream-v2/tests/pin_fixtures.py",
+      "services/chat-stream-v2/tests/test_event_push_pin.py",
+      "services/chat-stream-v2/tests/test_event_push_pin_cli.py",
+      "services/chat-stream-v2/tests/test_satellite_ack_backoff.py",
+      "services/chat-stream-v2/tests/test_satellite_recovery.py",
+      "services/chat-stream-v2/tools/event_push_pin.py",
+      "services/chat-stream-v2/*.py",
+      "services/chat-stream-v2/tools/",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "services/chat-stream-v2/requirements.txt",
+      "services/agent-orch/pyproject.toml",
+      "services/chat-stream-v2/tests/test_provider_account_native.py",
+      "services/chat-stream-v2/tests/test_account_launch_environment.py",
+      "services/chat-stream-v2/tests/test_provider_startup_smoke.py",
+      "services/chat-stream-v2/tests/test_fleet_smoke_provider_errors.py"
+    ],
+    "input_labels": [
+      "satellite_config"
+    ],
+    "assertion_scope": [
+      "Recorded installed and candidate collector payloads authenticated against the candidate EventPush component on two recorded service/interpreter/dependency/config/consumer tuples, with exact old-pin acceptance, new-pin old-source refusal/no insertion, new-source acceptance and cleanup.",
+      "Finite compatibility composes with recorded prior-source live recovery, restoration and updater-enabled useful/drained evidence plus accepted named upstream controls; original composite trust limits remain."
+    ],
+    "remaining_coverage": [
+      "No new live candidate-daemon recovery, production ingress, operational source transition or downgrade is claimed by component replay.",
+      "Loaded-helper runtime attestation is absent and current incarnation is unexposed in component inventory; fresh complete participant evidence within900seconds is separately required.",
+      "Forward/compatible pin-only downgrade/restoration and final return remain actual release predicates; no arbitrary host/dependency/configuration matrix."
+    ],
+    "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
+    "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
+    "evidence_sha256": "a8269af6308254a9dd6524c8d7075be2b0ab883527612ab4f43f8227857c389c",
+    "scope_sha256": "6cd3bc1f215ad9e5e01518cc909c9470c4ab7b93cf60fa2a585c39ad0d2e9f2a"
+  },
+  "deploy_invocation": {
+    "source_ref": "8be1ee0003f839dd0f703660baca9fc1d6930aa0",
+    "source_paths": [
+      "services/chat-stream-v2/deploy/deploy.py",
+      "services/chat-stream-v2/deploy/release_selection.py",
+      "services/chat-stream-v2/deploy/packet/log_scan.py",
+      "services/chat-stream-v2/managed_logs.py",
+      "services/chat-stream-v2/requirements.txt",
+      "services/chat-stream-v2/tools/spawn_fleet_smoke.py",
+      "services/chat-stream-v2/tests/test_deploy_gate_bounds.py",
+      "services/chat-stream-v2/tests/test_deploy_gate_evidence.py",
+      "services/chat-stream-v2/tests/test_deploy_direct_script.py",
+      "services/chat-stream-v2/tests/test_deploy_release_selection.py",
+      "services/chat-stream-v2/tests/test_deploy_log_guard.py",
+      "services/chat-stream-v2/tests/test_deploy_fleet_verdict.py",
+      "services/chat-stream-v2/tests/test_release_selection.py",
+      "services/chat-stream-v2/tests/test_deploy_script.py",
+      "scripts/select_tests.py",
+      "scripts/gate_env.py",
+      "scripts/gate-env.json",
+      "scripts/lib/"
+    ],
+    "input_labels": [
+      "deploy_config"
+    ],
+    "assertion_scope": [
+      "Saved merge loader and actual seam admission/selection/revalidation execute; no duplicate mandatory merge process.",
+      "Complete fixture baseline union selects client plus deploy; changed/missing actual receipt/config/scenario proof refuses before daemon activation and restores real Git/stamp/plist bytes.",
+      "Revalidation failure after a real isolated plist mutation invokes the existing preimage rollback; collector counterpart is separate from daemon.",
+      "Actual provider-counterpart subprocess receives only URL/HOST and installed machine file, strips ambient host overrides; affected required-cell verdict agrees and other seven cells are UNTESTED without full-fleet acceptance.",
+      "Quota/missing/cleanup results remain non-green while healthy applied source/stamp persists.",
+      "Rollback entry refuses stale candidate proof; fresh actual recorded-prior source receipt permits isolated rollback and records both source identities."
+    ],
+    "remaining_coverage": [
+      "Installed fixture observations/qualification/results and launchd/restart/boot/runtime/slow-consumer/provider counterparts remain synthetic; actual native startup and satellite convergence belong to separate proof.",
+      "Actual managed service/interpreter/config input projection maps only to finite admission/invocation/preimage controls, with unchanged requirements and no reinstall.",
+      "Final source/data input affirmation, canonical gate, actual boot/useful/readback and representative release or conditional preimage restoration remain separate."
+    ],
+    "qa_report": "0f5b5b57-4e36-4525-a652-2fdb3a8e7181",
+    "qa_review_sha256": "81e2ec1376f4d2f0e1d7c2ecf28400bef4ca08ab63bb45d3086b975a203513d5",
+    "evidence_sha256": "7c49c0b9c3fc1571734e2c32eb75e040193adab5b885b53a6ba77590671aeeff",
+    "scope_sha256": "841068c1202def6412616db9e03846a4c1114f0145a8bf43154cfa8bddb2dcfb"
   }
 }
