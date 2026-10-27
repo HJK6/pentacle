@@ -3720,23 +3720,8 @@ def reconcile_status(args: argparse.Namespace) -> int:
 
 
 def _local_admin_token(config) -> str:
-    from urllib.parse import urlparse
-    import ipaddress
-    import stat
-    hostname = urlparse(config.ws_url).hostname or ""
-    if hostname != "localhost":
-        try:
-            if not ipaddress.ip_address(hostname).is_loopback:
-                raise ValueError("local admin commands require a loopback endpoint")
-        except ValueError:
-            raise ValueError("local admin commands require a loopback endpoint") from None
-    path = Path.home() / ".config/pentacle-stream/local-admin.token"
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd) as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
-            raise ValueError("unsafe local admin token file")
-        return source.read(256).strip()
+    from .config import local_admin_token
+    return local_admin_token(config)
 
 
 def consent_command(args: argparse.Namespace) -> int:
@@ -4826,10 +4811,13 @@ def report(args: argparse.Namespace) -> int:
 
 def grant_self_token(args: argparse.Namespace) -> int:
     """Bootstrap-once: ask chat_streamd to mint an AGENT_ORCH_STREAM_TOKEN for
-    this session's stream id and print the plaintext to stdout. Use as:
+    the target stream id and print the plaintext to stdout. From a fresh
+    operator shell on the daemon host, without seat/service identity, use:
 
-        export AGENT_ORCH_STREAM_TOKEN=$(agent-orch grant-self-token)
+        agent-orch grant-self-token --stream node:session
 
+    Token-less env-seat bootstrap is refused. Authenticated seats need the
+    server's existing operator-authority opt-in for privileged token grants.
     Refused if the session already has a token (`token_already_set`). Typed
     exit codes mirror the other direct verbs: 0 ok, 1 grant_token.error,
     2 invalid stream id, 64 daemon unreachable, 67 timeout.

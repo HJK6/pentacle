@@ -39,9 +39,29 @@ def test_actual_loopback_keeps_local_cli_bootstrap(address):
     async def run():
         daemon = Server()
         async def handler(msg):
-            return {"type": "grant_token.ok"}
-        daemon.handlers["grant_token"] = handler
-        assert (await daemon._dispatch('{"type":"grant_token"}', websocket=Peer(address)))[0]["type"] == "grant_token.ok"
+            return {"type": "spawn.ok"}
+        daemon.handlers["spawn"] = handler
+        assert (await daemon._dispatch('{"type":"spawn"}', websocket=Peer(address)))[0]["type"] == "spawn.ok"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+@pytest.mark.parametrize("verb", ["grant_token", "spawn_freeze", "spawn_unfreeze"])
+def test_loopback_requires_privileged_proof_before_handler(address, verb):
+    async def run():
+        daemon = Server()
+        calls = []
+        async def handler(msg):
+            calls.append(msg)
+            return {"type": f"{verb}.ok"}
+        daemon.handlers[verb] = handler
+        response = await daemon._dispatch(json.dumps({
+            "type": verb, "request_id": "denied", "client": "pentacle",
+            "from_stream_id": "local:claimed",
+            "_auth_context": {"operator_authenticated": True, "local_admin_verified": True},
+        }), websocket=Peer(address))
+        assert response == [{"type": f"{verb}.error", "error_code": "operator_auth_required", "request_id": "denied"}]
+        assert calls == []
     asyncio.run(run())
 
 

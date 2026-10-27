@@ -11,6 +11,35 @@ from typing import Any
 DEFAULT_WS_URL = "ws://127.0.0.1:7791"
 
 
+def is_loopback_endpoint(url: str) -> bool:
+    from urllib.parse import urlparse
+    import ipaddress
+    hostname = urlparse(url).hostname or ""
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def local_admin_token(config: Config) -> str:
+    """Read daemon-user proof only for a literal loopback endpoint."""
+    import stat
+    if not is_loopback_endpoint(config.ws_url):
+        raise ValueError("local admin commands require a loopback endpoint")
+    path = Path.home() / ".config/pentacle-stream/local-admin.token"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+            raise ValueError("unsafe local admin token file")
+        token = source.read(256).strip()
+    if len(token) != 64:
+        raise ValueError("invalid local admin token file")
+    return token
+
+
 @dataclass(frozen=True)
 class OperatorTokenSource:
     env_name: str

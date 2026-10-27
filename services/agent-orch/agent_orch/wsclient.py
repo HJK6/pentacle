@@ -1550,6 +1550,9 @@ async def _read_rpc_response(
         deadline=deadline,
         matches=lambda message: (
             str(message.get("type", "")).startswith(f"{prefix}.")
+            # The daemon's existing unfreeze success uses the freeze receipt;
+            # admission errors still use the requested spawn_unfreeze prefix.
+            or (prefix == "spawn_unfreeze" and message.get("type") == "spawn_freeze.ok")
             or (prefix.startswith("asset.") and message.get("type") == "asset.error")
         ),
         timeout_message=timeout_message or f"{prefix.replace('.', '_')}_timeout",
