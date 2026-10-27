@@ -250,15 +250,17 @@ def source_scope(repo, revision, paths, runner):
     require(full_sha(revision) and isinstance(paths, list) and paths, "invalid qualification source scope")
     require(all(isinstance(p, str) and p and not p.startswith("/") and ".." not in PurePosixPath(p).parts for p in paths),
             "invalid qualification source path")
-    result = runner(("git", "ls-tree", "-r", "--full-tree", revision), repo)
+    result = runner(("git", "ls-tree", "-r", "-z", "--full-tree", revision), repo)
     require(result.returncode == 0, "qualification source reference unavailable")
     records = []
-    for line in result.stdout.splitlines():
+    for line in result.stdout.split("\0"):
+        if not line:
+            continue
         path = line.split("\t", 1)[1]
         if any(path.startswith(p) if p.endswith("/") else PurePosixPath(path).match(p) for p in paths):
             records.append(line)
     require(records, "empty qualification source scope")
-    return digest("\n".join(records).encode())
+    return digest("\0".join(records).encode())
 
 
 def qualification_context(repo, plan, name, proof, runner):

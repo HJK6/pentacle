@@ -388,3 +388,11 @@ def test_accepted_source_reference_is_not_relabelled_after_product_change(releas
     changed = prepare()
     with pytest.raises(selection.Invalid, match="unqualified source/tuple"):
         selection.require_qualification(changed)
+
+
+def test_source_scope_includes_git_paths_with_embedded_newlines(release):
+    repo, inputs, _, _, commit, runner, _ = release
+    before = selection.source_scope(repo, inputs["candidate"], ["renderer/"], runner)
+    (repo / "renderer/new\nmodule.js").write_text("// source with a Git-valid path\n")
+    changed = commit("add source with newline path")
+    assert selection.source_scope(repo, changed, ["renderer/"], runner) != before
