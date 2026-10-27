@@ -36,5 +36,37 @@
     "qa_review_sha256": "156a5d8b3ec7f72f4c0585b6f48b5a47e84fea0d0977bc91bf21d8feb998a03b",
     "evidence_sha256": "c003ef5860cd37eefdab2718b01713b92e0665c64617f3da64cca96ec2b5f54d",
     "scope_sha256": "0078fef58dc4cc99676c32a2aba4827b0e7988266d82ec18795e160af688fd1d"
+  },
+  "provider_startup": {
+    "source_ref": "1dbeb442db2418502529ca07d1fe583d8a18e98e",
+    "source_paths": [
+      "services/chat-stream-v2/*.py",
+      "services/chat-stream-v2/tools/",
+      "services/_shared/",
+      "services/agent-orch/agent_orch/",
+      "services/chat-stream-v2/requirements.txt",
+      "services/agent-orch/pyproject.toml",
+      "services/chat-stream-v2/tests/conftest.py",
+      "services/chat-stream-v2/tests/test_provider_account_native.py",
+      "services/chat-stream-v2/tests/test_account_launch_environment.py",
+      "services/chat-stream-v2/tests/test_provider_startup_smoke.py",
+      "services/chat-stream-v2/tests/test_fleet_smoke_provider_errors.py"
+    ],
+    "input_labels": [
+      "provider_config"
+    ],
+    "assertion_scope": [
+      "One recorded local Codex promptless native-owner/startup/send/exact-reply/audit/fenced-cleanup tuple.",
+      "Reuse requires equal exercised source bytes and the recorded configuration, binding, executable and same installed dependency/interpreter predicates."
+    ],
+    "remaining_coverage": [
+      "No all-host, all-account, all-provider or arbitrary executable/config/model/effort matrix.",
+      "Installed-runtime evidence does not certify changed startup/dependency inputs or unrelated deployment/satellite behavior.",
+      "No native UI-counter drift was exercised in this successful run; earlier deterministic controls retain their separate scope."
+    ],
+    "qa_report": "64e00fed-d8cd-47e0-aad0-19ff126a70e2",
+    "qa_review_sha256": "c40dc19801c8004167a53a8883da0bffba75723daa50cdf7162bfedc49172165",
+    "evidence_sha256": "27218917c82ca5b71dacb5d032aaab16f284aff3a368ff100ea072acfd70625c",
+    "scope_sha256": "ae35aa3483cb41e50de7e8647d3aa6b9e70564d206cdf230c9959c1c42fa45e3"
   }
 }
