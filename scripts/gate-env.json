@@ -213,6 +213,7 @@
         },
         "web-gate": {
           "kind": "web_gate",
+          "pass_env": ["PENTACLE_WEB_GATE_SCENARIOS", "PENTACLE_WEB_GATE_CONSUMER_ROOT"],
           "needs": [
             "python",
             "node",

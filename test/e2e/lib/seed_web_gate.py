@@ -50,6 +50,14 @@ MARKDOWN_PREVIEW = [
     ("ASSIST_TEXT", "## Result\n- **Gate** passed with *italics*, `inline code` and a [link](https://example.com/docs)"),
 ]
 
+# Synthetic input, never a producer response. Both seeding and the live fixture
+# driver use the candidate's Store/ingest and summary projection unchanged.
+SEAM_STREAM = 'local:web-gate-seam'
+SEAM_TEXT = ('## Summary fallback probe\n\nA paragraph before the list.\n\n'
+             '- First item\n- Second item\n\n```ts\nconst first = 1;\n'
+             '  const second = 2;\n```\n\nA final paragraph.')
+SEAM_UPDATE = '## Later answer\n\n- Third item\n- Fourth item'
+
 
 SCHEDULE_FIXTURE = {
     "recurring_id": "5ced0000-0000-4000-8000-000000000001",
@@ -119,7 +127,8 @@ def _event(stream_id: str, kind: str, text: str, index: int) -> dict:
         "kind": kind,
         "text": text,
         "timestamp": "2026-08-05T00:00:00Z",
-        "raw": {"jsonl_record_uuid": f"web-gate-seed-{index}", "jsonl_event_index": index},
+        "raw": {"jsonl_record_uuid": f"web-gate-seed-{index}", "jsonl_event_index": index,
+                **({'transport': 'claude-jsonl', 'source': 'structured'} if stream_id == SEAM_STREAM else {})},
     }
 
 
@@ -167,17 +176,37 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
                 Path(db).parent.joinpath('voice-answers-fixture.json').write_text(json.dumps(manifest))
         appended = 0
         transcript = TRANSCRIPT + (MARKDOWN_PREVIEW if session == 'web-gate-second-host' else [])
+        if stream_id == SEAM_STREAM:
+            transcript = [('ASSIST_TEXT', SEAM_TEXT), ('TOOL_RESULT', 'Synthetic tool completed')]
+            Path(db).parent.joinpath('client-seam-fixture.json').write_text(json.dumps({
+                'stream_id': stream_id, 'text': SEAM_TEXT, 'update': SEAM_UPDATE,
+            }))
         for index, (kind, text) in enumerate(transcript):
             event = _event(stream_id, kind, text, index)
-            if index >= len(TRANSCRIPT):
+            if index >= len(TRANSCRIPT) or stream_id == SEAM_STREAM:
                 # The summary only takes messages from this session's lifecycle.
-                event["timestamp"] = _iso(datetime.now(timezone.utc))
+                event["timestamp"] = _iso(datetime.now(timezone.utc) + timedelta(milliseconds=index))
             result = await store.append_session_event(
                 stream_id, event, identity=_identity_key(event), limit=500,
             )
             if result:
                 appended += 1
         if session == 'web-gate-1':
+            # Exercise the real producer and authenticated ingest, rather than
+            # manufacturing a registry tag that could mask a parsing failure.
+            from notify import _answer_back_text
+            from message_envelopes import build_message_envelope
+            from ingest import append_ingested_event
+            wire = build_message_envelope('notification_answer',
+                notice_id='notification-answer-multiline-web-fixture',
+                body=_answer_back_text({'notification_id': 'notification-multiline-web-fixture',
+                    'custom_text': 'line one\nline two', 'by': 'operator'}))
+            event = _event(stream_id, 'USER', wire, 90)
+            event['raw']['source'] = 'structured'
+            async def discard_broadcast(_frame):
+                pass
+            if await append_ingested_event(store, discard_broadcast, event, recent_limit=500):
+                appended += 1
             await seed_schedules(store)
         if blob_root and session == 'web-gate-1':
             fixtures = [
