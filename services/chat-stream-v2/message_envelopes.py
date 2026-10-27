@@ -88,11 +88,23 @@ def _match_notification_answer(text: str, **_: Any) -> dict[str, Any] | None:
     if len(lines) < 2 or not lines[-1].startswith("by=") or not lines[-1][3:]:
         return None
     fields: dict[str, str] = {}
+    encoded = False
     for line in lines:
         key, separator, value = line.partition("=")
-        if not separator or key not in {"answer", "text", "custom_text", "choice", "by"}:
+        if not separator or not value or "\r" in value:
             return None
-        if not value or "\r" in value:
+        if key in {"answer_json", "text_json", "custom_text_json"}:
+            key = key.removesuffix("_json")
+            try:
+                value = json.loads(value)
+            except (ValueError, RecursionError):
+                return None
+            if not isinstance(value, str) or not value:
+                return None
+            encoded = True
+        elif key not in {"answer", "text", "custom_text", "choice", "by"}:
+            return None
+        if key in fields:
             return None
         fields[key] = value
     if not any(key in fields for key in ("answer", "text", "custom_text", "choice")):
@@ -101,6 +113,9 @@ def _match_notification_answer(text: str, **_: Any) -> dict[str, Any] | None:
         "kind": "notification_answer",
         "id": match["id"],
         "notification_id": match["notification_id"],
+        # Preserve historical tags while carrying decoded multiline values all
+        # the way to clients; one-line fields retain their original wire bytes.
+        **(fields if encoded else {}),
     }
 
 
@@ -480,6 +495,14 @@ def annotate_message_envelope(event: dict[str, Any]) -> dict[str, Any]:
         )
     if matched is not None:
         result["message_envelope"] = {"kind": matched["kind"], "id": matched["id"], "schema_version": SCHEMA_VERSION}
+        if matched["kind"] == "notification_answer" and any(
+            key in matched for key in ("answer", "text", "custom_text", "choice")
+        ):
+            result["message_envelope"].update({
+                key: matched[key] for key in
+                ("notification_id", "answer", "text", "custom_text", "choice", "by")
+                if key in matched
+            })
     elif _has_marker_prefix(text):
         _record_untagged_marker(text)
     clean_raw["envelope_source"] = source

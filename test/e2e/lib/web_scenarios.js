@@ -188,6 +188,43 @@ async function chatTranscriptPaint(ctx) {
     { items: painted.items, chars: painted.text.length, containsSeededText: textOk });
 }
 
+// Producer-generated multiline answer must survive ingest, transport and the
+// shipped transcript renderer. Only the hermetic seeder supplies this event.
+async function multilineNotificationAnswer(ctx) {
+  const { session, report, fixture } = ctx;
+  if (!fixture) return;
+  await session.eval(`window.cc.requestStreamEvents({ streamId: ${JSON.stringify(fixture.streamId)}, limit: 30 })`);
+  const painted = await session.eval(`(() => {
+    const container = document.createElement('div');
+    container.className = 'cosmic';
+    document.body.appendChild(container);
+    const detail = window.PentacleChatView.renderStreamTranscript(${JSON.stringify(fixture.streamId)}, container);
+    const item = detail.transcriptItems.find(item => item.notificationId === 'notification-multiline-web-fixture');
+    const row = container.querySelector('.slot-chat-v3-answers');
+    if (row) row.open = true;
+    const answer = row?.querySelector('.slot-chat-v3-answer-text');
+    const node = answer?.firstChild;
+    const lineTop = (start, end) => {
+      if (!node) return null;
+      const range = document.createRange();
+      range.setStart(node, start); range.setEnd(node, end);
+      return range.getBoundingClientRect().top;
+    };
+    const result = { text: item?.text, eventCase: item?.eventCase,
+      answerText: answer?.textContent, whiteSpace: answer && getComputedStyle(answer).whiteSpace,
+      firstLineTop: lineTop(0, 8), secondLineTop: lineTop(9, 17),
+      rowText: row?.innerText, rawVisible: container.innerText.includes('[notification.answer]') };
+    container.remove();
+    return result;
+  })()`);
+  report.ok('multiline notification answer keeps original LF in a compact history row',
+    painted.text === 'Operator answered: line one\nline two' &&
+    painted.eventCase === 'agent-question-answer' &&
+    painted.answerText === 'line one\nline two' && painted.whiteSpace === 'pre-wrap' &&
+    painted.secondLineTop > painted.firstLineTop && !painted.rawVisible,
+    painted);
+}
+
 // A web host restart mid-session must restore full interaction WITHOUT a manual
 // reload: the frozen (degraded) chat input re-enables and the reconnected socket
 // serves the live daemon inventory. Regression guard for
@@ -508,6 +545,7 @@ const SCENARIOS = [
   ['coloured-host-glyphs', colouredHostGlyphs],
   ['slot-attach-type-resize-kill', slotAttachTypeResizeKill],
   ['chat-transcript-paint', chatTranscriptPaint],
+  ['multiline-notification-answer', multilineNotificationAnswer],
   ['sidebar-preview-plain-text', sidebarPreviewPlainText],
   ['summary-fallback-formatting', summaryFallbackFormatting],
   ['installed-client-seam', installedClientSeam],

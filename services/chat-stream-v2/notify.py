@@ -2173,19 +2173,33 @@ def _answer_back_text(answer: dict) -> str:
     """A readable pane message carrying the operator's answer to the asking
     agent (v2's one-injection-path replacement for v1's peer-queue
     `notification.answer` payload)."""
+    encoded = False
+
+    def answer_field(key: str, value: str) -> str:
+        nonlocal encoded
+        # An explicit spelling avoids interpreting legacy literal backslashes
+        # as escapes and keeps every existing one-line wire byte unchanged.
+        if "\n" in value or "\r" in value:
+            encoded = True
+            return key + "_json=" + json.dumps(value, ensure_ascii=False)
+        return key + "=" + value
+
     parts = ["[notification.answer]", f"notification_id={answer.get('notification_id')}"]
     if answer.get("selections"):
-        parts.append("answer=" + ", ".join(str(s) for s in answer["selections"]))
+        parts.append(answer_field("answer", ", ".join(str(s) for s in answer["selections"])))
     if isinstance(answer.get("text"), str):
-        parts.append("text=" + answer["text"])
+        parts.append(answer_field("text", answer["text"]))
     if isinstance(answer.get("custom_text"), str):
-        parts.append("custom_text=" + answer["custom_text"])
+        parts.append(answer_field("custom_text", answer["custom_text"]))
     if "choice" in answer:
         parts.append(f"choice={answer['choice']}")
     parts.append(f"by={answer.get('by')}")
     text = "\n".join(parts)
     if len(text) > ANSWER_BACK_MAX_CHARS:
-        text = text[: ANSWER_BACK_MAX_CHARS - 3] + "..."
+        # A cut inside by= must not authenticate a partial actor. Keep the
+        # legacy one-line bytes, but make encoded truncation unregistrable.
+        suffix = "\n[answer truncated]" if encoded else "..."
+        text = text[: ANSWER_BACK_MAX_CHARS - len(suffix)] + suffix
     return text
 
 

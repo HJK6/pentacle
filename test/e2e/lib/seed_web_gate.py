@@ -192,6 +192,21 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
             if result:
                 appended += 1
         if session == 'web-gate-1':
+            # Exercise the real producer and authenticated ingest, rather than
+            # manufacturing a registry tag that could mask a parsing failure.
+            from notify import _answer_back_text
+            from message_envelopes import build_message_envelope
+            from ingest import append_ingested_event
+            wire = build_message_envelope('notification_answer',
+                notice_id='notification-answer-multiline-web-fixture',
+                body=_answer_back_text({'notification_id': 'notification-multiline-web-fixture',
+                    'custom_text': 'line one\nline two', 'by': 'operator'}))
+            event = _event(stream_id, 'USER', wire, 90)
+            event['raw']['source'] = 'structured'
+            async def discard_broadcast(_frame):
+                pass
+            if await append_ingested_event(store, discard_broadcast, event, recent_limit=500):
+                appended += 1
             await seed_schedules(store)
         if blob_root and session == 'web-gate-1':
             fixtures = [
