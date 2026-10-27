@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Closed web-gate subject: existing real-browser journey and interrupt contract."""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +11,9 @@ def main():
     summary = Path(sys.argv[1])
     summary.parent.mkdir(parents=True, exist_ok=True)
     phases = []
-    commands = [('browser', ['node', 'test/e2e/web_gate.js']),
+    selected = os.environ.get('PENTACLE_WEB_GATE_SCENARIOS', '').split(',')
+    scenario_args = [arg for name in selected if name for arg in ('--scenario', name)]
+    commands = [('browser', ['node', 'test/e2e/web_gate.js', *scenario_args]),
                 ('interrupt', ['node', '--test', 'test/e2e/web_gate_interrupt.test.js'])]
     for name, argv in commands:
         with (summary.parent / ('web-%s.log' % name)).open('w') as log:

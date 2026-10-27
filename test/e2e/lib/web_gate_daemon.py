@@ -115,5 +115,63 @@ else:
     # END HOUSEHOLD FIXTURE
 
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
+
+    # The existing isolated daemon owns this synthetic input driver. It calls
+    # production ingest/broadcast, including durable identity and inventory;
+    # no snapshot, summary, history response, or chat event is manufactured.
+    seam_manifest = scratch / 'client-seam-fixture.json'
+    if seam_manifest.exists():
+        import asyncio
+        from datetime import datetime, timezone
+        from server import Server
+        from ingest import append_ingested_event
+        from inventory import InventoryEmitter
+        from seed_web_gate import _event, SEAM_STREAM
+
+        seam = json.loads(seam_manifest.read_text())
+        if seam['stream_id'] != SEAM_STREAM:
+            raise ValueError('invalid isolated client seam fixture')
+        original_bind, original_close = Server.bind, Server.close
+
+        async def seam_driver(server):
+            await server.inventory_ready.wait()
+            emitter = InventoryEmitter(server.sessions, server.broadcast, min_interval_s=0)
+            command = scratch / 'client-seam-command.json'
+            try:
+                while True:
+                    if command.exists():
+                        action = json.loads(command.read_text())['action']
+                        command.unlink()
+                        if action == 'update':
+                            event = _event(SEAM_STREAM, 'ASSIST_TEXT', seam['update'], 2)
+                            event['timestamp'] = datetime.now(timezone.utc).isoformat()
+                            await append_ingested_event(server.store, server.broadcast, event,
+                                                        recent_limit=500, sessions=server.sessions)
+                        elif action == 'replay':
+                            tail = await server.store.fetch_session_event_tail(SEAM_STREAM, limit=1)
+                            await server.broadcast({'type': 'chat.event', 'event': tail[-1]})
+                        else:
+                            raise ValueError('unknown client seam action')
+                        await emitter.emit_if_changed(immediate=True)
+                        scratch.joinpath('client-seam-command.done').write_text(action)
+                    await asyncio.sleep(0.05)
+            finally:
+                if emitter._flush_task is not None:
+                    emitter._flush_task.cancel()
+                    await asyncio.gather(emitter._flush_task, return_exceptions=True)
+
+        async def seam_bind(self, **kwargs):
+            port = await original_bind(self, **kwargs)
+            self._web_gate_seam_task = asyncio.create_task(seam_driver(self))
+            return port
+
+        async def seam_close(self, **kwargs):
+            task = getattr(self, '_web_gate_seam_task', None)
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            return await original_close(self, **kwargs)
+
+        Server.bind, Server.close = seam_bind, seam_close
     sys.argv = [str(ROOT / 'services/chat-stream-v2/main.py'), *sys.argv[2:]]
     runpy.run_path(sys.argv[0], run_name='__main__')
