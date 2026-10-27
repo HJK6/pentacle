@@ -6,10 +6,12 @@ passing `--gate-evidence` or runs the existing inline fallback. CI, hooks and
 activation readbacks remain required.
 
 **Qualified scope:** `deploy/qualified_seams.json` records one finite accepted
-client producer-wire/web-render/mobile-model tuple. Its source reference,
-dependency/harness scope, installed build/configuration inputs, independent QA
-and evidence are pinned by digests. Provider, satellite and deploy surfaces
-remain unqualified. Synthetic tests exercise admission separately. A larger
+client producer-wire/web-render/mobile-model tuple and one finite installed
+provider-startup tuple. Source references, dependency/harness scopes, actual
+configuration inputs, independent QA and evidence are pinned by digests.
+Provider reuse also binds the actual activation endpoint and host; changed
+startup or dependency inputs refuse. Satellite and deploy surfaces remain
+unqualified. Synthetic tests exercise admission separately. A larger
 suite cannot cure a known coverage gap. Legacy deployment
 reports `selective_qualification: not_enabled`; it cannot certify selective
 acceptance or waive required gaps. Final integration QA and an authorized
