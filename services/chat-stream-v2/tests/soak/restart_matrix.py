@@ -320,7 +320,7 @@ def tmux_blocking_wrapper(root: Path, socket: str, real_tmux: str, control: Path
         f"      while [ -e {shlex.quote(str(control / 'block_new_session'))} ]; do sleep 0.05; done\n"
         "    fi ;;\n"
         "esac\n"
-        f"exec {shlex.quote(real_tmux)} -L {shlex.quote(socket)} \"$@\"\n"
+        f"exec {shlex.quote(real_tmux)} -S {shlex.quote(socket)} \"$@\"\n"
     )
     wrapper.chmod(0o755)
     return wrapper
