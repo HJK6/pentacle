@@ -19,8 +19,10 @@ function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', 
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 33);
+  assert.equal(SCENARIOS.length, 35);
   const names = SCENARIOS.map(([name]) => name);
+  const optimistic = names.indexOf('optimistic-reload');
+  assert.ok(optimistic >= 0 && optimistic < names.indexOf('closed-chat-slot'));
   assert.ok(names.indexOf('provider-visibility') > names.indexOf('branding'));
   assert.ok(names.indexOf('provider-visibility') < names.indexOf('closed-chat-slot'));
   assert.ok(names.includes('cross-origin-boundary'));
