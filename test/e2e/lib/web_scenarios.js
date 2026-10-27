@@ -19,6 +19,7 @@ const { crossOriginBoundary } = require('./cross_origin_scenario');
 const { defaultPaneAssistant, paneCountSelector, chatFirstStyle } = require('./workspace_scenario');
 const { branding } = require('./branding_scenario');
 const { agentChatSendDefaultQueueState } = require('./send_default_queue_state_scenario');
+const { optimisticReload } = require('./optimistic_reload_scenario');
 const { scheduledSection } = require('./scheduled_section_scenario');
 const { providerVisibility } = require('./provider_visibility_scenario');
 const { summaryFallbackFormatting } = require('./summary_fallback_scenario');
@@ -575,6 +576,7 @@ const SCENARIOS = [
   ['pane-count-selector', paneCountSelector],
   ['chat-first-style', chatFirstStyle],
   ['agent-chat-send-default-queue-state', agentChatSendDefaultQueueState],
+  ['optimistic-reload', optimisticReload],
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.

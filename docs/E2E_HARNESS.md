@@ -178,6 +178,16 @@ shared daemon. A chat *send-turn* round trip is intentionally not a CDP scenario
 browser send path is covered by `test/web_cc.test.js` and daemon send/ingest by
 the `chat-stream-v2` python tests.
 
+The **optimistic-reload** scenario drives the real composer before and after a
+page reload, holding sends in a deterministic bridge while replaying a delayed
+pre-reload USER echo. With both different and identical message text, it checks
+that the new send stays visible and pending until its own echo arrives. This
+tests renderer/chat-core correlation against the isolated fixture daemon;
+provider delivery is outside this scenario. New ordinary and composite input
+IDs use 128 random bits via `crypto.getRandomValues`, including on HTTP hosts
+without `randomUUID`; retries and reconnect replays retain the stored ID. The
+daemon still receives an opaque string, with no wire-contract change.
+
 The **question-partial-send** scenario answers one of two owned durable cards and
 checks that its sibling stays open. **question-skip** clicks Skip, then verifies
 the ordinary answered state, reserved answer text and producer await readback.
