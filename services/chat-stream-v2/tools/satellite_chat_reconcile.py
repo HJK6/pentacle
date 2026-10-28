@@ -251,7 +251,7 @@ def inspect_checkpoint(path, host, rows):
     require(data.get('version') == 1 and data.get('host') == host and isinstance(data.get('sources'), list),
             'checkpoint schema/host')
     facts = []
-    for token, proof in rows.items():
+    for token, proof in sorted(rows.items()):
         selected = [s for s in data['sources'] if (s.get('binding') or {}).get('checkpoint_id') == token]
         require(len(selected) == 1, 'selected source not unique')
         facts.append(source_facts(selected[0], proof['checkpoint'], host))
@@ -303,7 +303,7 @@ def fsync_dir(path):
 def verify_retained_preimage(raw, plan):
     data = json.loads(raw)
     actual = []
-    for token, proof in plan['coordinator']['rows'].items():
+    for token, proof in sorted(plan['coordinator']['rows'].items()):
         selected = [s for s in data['sources'] if (s.get('binding') or {}).get('checkpoint_id') == token]
         require(len(selected) == 1, 'preimage selected source changed')
         actual.append(source_facts(selected[0], proof['checkpoint'], plan['host']))
@@ -444,12 +444,37 @@ def service_snapshot(checkout, host):
             if sep and key in safe_keys:
                 unit_safe[key] = value
         safe = {**unit_safe, **safe}
-        require(python in props.get('ExecStart', '') and script in props.get('ExecStart', ''), 'satellite program mismatch')
+        execution = props.get('ExecStart', '')
+        require(execution.count('argv[]=') == 1, 'ambiguous satellite program')
+        match = re.search(r'argv\[\]=(.*?) ; ignore_errors=', execution)
+        require(match, 'unrecognized systemd program')
+        arguments = shlex.split(match[1])
+        command_safe = {}
+        if arguments and arguments[0] == '/usr/bin/env':
+            arguments = arguments[1:]
+            while arguments and '=' in arguments[0]:
+                key, value = arguments.pop(0).split('=', 1)
+                require(re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', key), 'invalid launcher environment')
+                if key in safe_keys:
+                    command_safe[key] = value
+        require(arguments == [python, script], 'satellite program mismatch')
+        safe.update(command_safe)  # ExecStart env assignments override EnvironmentFile
         pid = int(props.get('MainPID') or 0)
+        if pid:
+            # Verify the observed launcher interpretation against the process,
+            # exporting only these three non-secret configuration fields.
+            live_safe = {}
+            for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+                key, sep, value = item.partition(b'=')
+                name = key.decode('utf-8', 'replace')
+                if sep and name in safe_keys:
+                    live_safe[name] = value.decode('utf-8')
+            require(live_safe == safe, 'live satellite configuration differs from launcher')
         stopped = props.get('ActiveState') == 'inactive' and pid == 0
         stop = ['systemctl', '--user', 'stop', target]
     require(safe.get('PENTACLE_SATELLITE_HOST') == host, 'configured host mismatch')
-    require(safe.get('PENTACLE_SATELLITE_CHECKOUT', str(checkout)) == str(checkout), 'configured checkout mismatch')
+    require(Path(safe.get('PENTACLE_SATELLITE_CHECKOUT', str(checkout))).resolve() == checkout.resolve(),
+            'configured checkout mismatch')
     from satellite import DEFAULT_CHAT_CHECKPOINT_PATH
     checkpoint = Path(safe.get('PENTACLE_SATELLITE_CHAT_CHECKPOINT_PATH') or DEFAULT_CHAT_CHECKPOINT_PATH).expanduser()
     sha = run(['git', '-C', str(checkout), 'rev-parse', 'HEAD'])
@@ -464,7 +489,8 @@ def service_snapshot(checkout, host):
     require(sorted(writers) == ([pid] if pid else []), 'unmanaged or duplicate satellite writer')
     return {'checkout': str(checkout), 'sha': sha, 'definition': str(definition),
             'definition_sha256': digest(definition.read_bytes()), 'environment_sha256': digest(env_file.read_bytes()),
-            'checkpoint_path': str(checkpoint), 'pid': pid, 'birth': process_birth(pid) if pid else None,
+            'checkpoint_path': str(checkpoint), 'effective_config': safe,
+            'pid': pid, 'birth': process_birth(pid) if pid else None,
             'stopped': stopped, 'writers': writers, 'stop_command': stop}
 
 
@@ -480,7 +506,7 @@ def peer_main(request):
     else:
         plan = request['plan']
         prior = plan['peer']['service']
-        for key in ('checkout', 'sha', 'definition', 'definition_sha256', 'environment_sha256', 'checkpoint_path'):
+        for key in ('checkout', 'sha', 'definition', 'definition_sha256', 'environment_sha256', 'checkpoint_path', 'effective_config'):
             require(service[key] == prior[key], 'peer service/configuration changed')
         old_pid = prior['pid'] or plan['coordinator']['peer_runtime']['pid']
         if not service['stopped']:
@@ -493,7 +519,7 @@ def peer_main(request):
             now = service_snapshot(root, host)
             require(now['stopped'] and not now['writers'] and (not old_pid or process_absent(old_pid)),
                     'satellite writer or auto-restart not excluded')
-            for key in ('sha', 'definition_sha256', 'environment_sha256', 'checkpoint_path'):
+            for key in ('sha', 'definition_sha256', 'environment_sha256', 'checkpoint_path', 'effective_config'):
                 require(now[key] == prior[key], 'stopped supervisor configuration changed')
         def authority():
             # Read authoritative DB/FD/PID fences on the coordinator at each

@@ -335,6 +335,7 @@ def test_multiple_sources_replace_as_one_whole_checkpoint(retained, tmp_path):
     with repair.ro_database(tmp_path / 'sessions.db') as conn:
         rows = repair.original_rows(conn, HOST, [state['token'], second])
     plan = {'host': HOST, 'coordinator': {'rows': rows}, 'peer': {'snapshot': repair.inspect_checkpoint(state['checkpoint'], HOST, rows)}}
+    plan = json.loads(repair.encoded(plan))  # canonical on-disk key order cannot change source order
     def check():
         with repair.ro_database(tmp_path / 'sessions.db') as conn:
             assert repair.original_rows(conn, HOST, list(rows)) == rows
@@ -500,7 +501,7 @@ def test_supported_systemd_configuration_and_writer_exclusion(tmp_path, monkeypa
     env.parent.mkdir(parents=True)
     root = tmp_path / 'peer'
     root.mkdir()
-    env.write_text('PENTACLE_SATELLITE_HOST=worker\nPENTACLE_EVENT_PUSH_SECRET=must-never-export\n')
+    env.write_text('PENTACLE_SATELLITE_HOST=worker\nPENTACLE_SATELLITE_CHECKOUT=/old/env-file/checkout\nPENTACLE_EVENT_PUSH_SECRET=must-never-export\n')
     env.chmod(0o600)
     definition = tmp_path / 'satellite.service'
     definition.write_text('fixture unit definition')
@@ -511,7 +512,9 @@ def test_supported_systemd_configuration_and_writer_exclusion(tmp_path, monkeypa
     def command(args):
         if args[0] == 'systemctl':
             return '\n'.join(['MainPID=0', 'ActiveState=inactive', 'FragmentPath=' + str(definition),
-                'ExecStart=' + str(root / '.venv/bin/python') + ' ' + str(root / 'services/chat-stream-v2/satellite.py'),
+                'ExecStart={ path=/usr/bin/env ; argv[]=/usr/bin/env PENTACLE_SATELLITE_CHECKOUT=' + str(root) + ' '
+                + str(root / '.venv/bin/python') + ' ' + str(root / 'services/chat-stream-v2/satellite.py')
+                + ' ; ignore_errors=no ; start_time=fixture }',
                 'EnvironmentFiles=' + str(env) + ' (ignore_errors=no)',
                 'Environment=PENTACLE_SATELLITE_CHAT_CHECKPOINT_PATH=' + str(checkpoint)])
         if args[0] == 'git':
