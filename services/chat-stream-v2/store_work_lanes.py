@@ -492,7 +492,8 @@ class _WorkLanesStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        return await self.submit(_op)
+        async with self.session_graph_lock:
+            return await self.submit(_op)
 
     async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
         def _op(conn):

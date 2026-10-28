@@ -292,7 +292,9 @@ class Sessions:
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         # Parent-graph mutations (reparent, manager close) validate ancestry and
         # write under this one lock, so concurrent moves cannot form a cycle.
-        self._graph_lock = asyncio.Lock()
+        # Inventory-only registries and structural test stores have no durable
+        # graph. Real Store instances share their fence with ownership writes.
+        self._graph_lock = getattr(store, "session_graph_lock", None) or asyncio.Lock()
         #: Ledger callback for confirmed-dead close resolution. The callback is
         #: optional so the registry remains usable in focused lifecycle tests.
         self._awaiter_resolver: Any = None
@@ -1057,6 +1059,13 @@ class Sessions:
         return await self._set_role(host, session_name, role, auth_context=auth_context)
 
     async def _set_role(
+        self, host: str, session_name: str, role: str, *,
+        auth_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._graph_lock:
+            return await self._set_role_locked(host, session_name, role, auth_context=auth_context)
+
+    async def _set_role_locked(
         self,
         host: str,
         session_name: str,
@@ -1180,7 +1189,8 @@ class Sessions:
     async def set_visibility(self, host: str, session_name: str, visibility: str) -> dict[str, Any]:
         if visibility not in VISIBILITIES:
             raise VerbError("bad_request", f"visibility must be one of {', '.join(VISIBILITIES)}")
-        row = await self.store.update_session(host, session_name, visibility=visibility)
+        async with self._graph_lock:
+            row = await self.store.update_session(host, session_name, visibility=visibility)
         updated = self._cache(row)
         if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
             await emit_if_changed(immediate=True)

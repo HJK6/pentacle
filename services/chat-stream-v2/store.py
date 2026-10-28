@@ -1473,6 +1473,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
                  archive_path: str | None = None) -> None:
         self._path = path
+        # Shared with Sessions: ownership/binding writes cannot outrun a close
+        # between its final authoritative admission and process termination.
+        self.session_graph_lock = asyncio.Lock()
         self._configured_archive_path = archive_path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
         self._spec_identities_resolver: Callable[[Any], dict] | None = None
