@@ -147,7 +147,6 @@ export type ChatSendBridge = (args: {
   meta?: VoiceMeta;
   replyToMessageId?: string;
   replyToQuestionId?: string;
-  urgent?: boolean;
 }) => Promise<{ ok?: boolean; error?: string; provider_queued?: boolean } | undefined>;
 
 // B3 (chat_send_turn_lifecycle_batch2): how the controller asks main to
@@ -177,7 +176,6 @@ export type ChatInterruptResult = {
 };
 
 export type ChatInterruptState = {
-  intent?: 'send_now';
   streamId: string;
   turnId: string;
   expectedSessionGeneration?: string;
@@ -213,17 +211,16 @@ export class ChatStoreController {
   private sendBridge: ChatSendBridge | null = null;
   private sendDispatches = new Set<string>();
   private reconcilingDispatches = new Set<string>();
-  private urgentSends = new Set<string>();
   private webRecovery = new Map<string, { optimisticId: string; lostEpoch: number; attemptedEpoch?: number }>();
   private webEpoch = 0;
   private webReady = false;
   private disposed = false;
   private cancelBridge: ChatCancelBridge | null = null;
   private interruptStates: Record<string, ChatInterruptState> = {};
-  // Queued-row keys own Escape independently of local turn/paint state.
+  // Explicit Stop reserves Escape for its provider-owned queued rows.
   // A replacement generation discards the previous generation's entire budget.
   private queueEscapes = new Map<string, QueueEscapeBudget>();
-  // Composer notice per stream (queue release / stopped with queued rows).
+  // Composer notice per stream (delivery / stopped with queued rows).
   private composerNotices: Record<string, string> = {};
   // A Stop notice outlives the turn it stopped (the turn clears at once); the next send or turn clears it.
   private stoppedNoticeStreams = new Set<string>();
@@ -401,19 +398,15 @@ export class ChatStoreController {
       if (Number.isFinite(seq) && seq >= 0) voices.set(`${streamId}:${seq}`, voice);
       if (event.optimistic_id) voices.set(`${streamId}:optimistic:${event.optimistic_id}`, voice);
     }
-    const interrupt = this.getInterruptState(streamId);
     const uncertain = Object.values(this.state.optimisticSends ?? {}).some(send => send.stream_id === streamId && send.status === 'indeterminate');
-    if (!voices.size && !uncertain && interrupt?.intent !== 'send_now') return detail;
+    if (!voices.size && !uncertain) return detail;
     return { ...detail, transcriptItems: detail.transcriptItems.map(item => {
       const voice = voices.get(item.eventKey || '');
-      const sendingNow = item.providerQueued && interrupt?.intent === 'send_now'
-        && !interrupt.error && item.optimisticId === interrupt.optimisticId;
       const indeterminate = item.optimisticId && this.state.optimisticSends?.[item.optimisticId]?.status === 'indeterminate';
-      if (!voice && !sendingNow && !indeterminate) return item;
+      if (!voice && !indeterminate) return item;
       return { ...item,
         ...(indeterminate ? { sendState: 'indeterminate' as const } : {}),
         ...(voice && (item.isUser || item.displayRule === 'bubble:user') ? { voice } : {}),
-        ...(sendingNow ? { providerQueued: false, receiptCaption: 'sending' as const } : {}),
       };
     }) };
   }
@@ -435,10 +428,6 @@ export class ChatStoreController {
       const send = next.optimisticSends?.[id];
       if (!send || send.status === 'acked' || send.status === 'cancelled') this.voiceMetas.delete(id);
     }
-    for (const id of this.urgentSends) {
-      const send = next.optimisticSends?.[id];
-      if (!send || ['acked', 'echoed', 'reconciled', 'cancelled'].includes(send.status)) this.urgentSends.delete(id);
-    }
     for (const [id, recovery] of this.webRecovery) {
       const send = next.optimisticSends?.[recovery.optimisticId];
       if (!send || send.request_id !== id || send.provider_queued
@@ -453,12 +442,6 @@ export class ChatStoreController {
 
   private reconcileQueueEscapesAndNotices(): void {
     for (const streamId of this.queueEscapes.keys()) this.queueEscapeBudget(streamId);
-    for (const [streamId, interrupt] of Object.entries(this.interruptStates)) {
-      if (interrupt.intent === 'send_now' && !this.queueEscapeBudget(streamId)) {
-        delete this.interruptStates[streamId];
-        this.setComposerNotice(streamId, '');
-      }
-    }
     for (const streamId of Object.keys(this.composerNotices)) {
       const idle = this.getTurnPhase(streamId) === 'idle';
       // A Stop notice outlives its cleared turn and ends when a new turn starts; any other notice ends with its turn.
@@ -639,7 +622,6 @@ export class ChatStoreController {
     this.sendSessionGenerations.clear();
     this.sendDispatches.clear();
     this.reconcilingDispatches.clear();
-    this.urgentSends.clear();
     this.webRecovery.clear();
     this.webReady = false;
     this.disposed = true;
@@ -719,10 +701,10 @@ export class ChatStoreController {
    *      the visible running turn.
    * Returns the optimistic_id ('' only on empty/invalid input).
    */
-  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta; urgent?: boolean } = {}): string {
+  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta } = {}): string {
     const literal = String(text || '');
     const composite = this.state.sessions.find(item => item.stream_id === streamId)?.session_kind === 'assistant_composite';
-    if (this.disposed || (composite && reply.urgent === true)) return '';
+    if (this.disposed) return '';
     const sendText = composite ? literal : literal.trim();
     const sendAttachments = Array.isArray(attachments) ? structuredClone(attachments.filter((item) => item && item.key && item.mime)) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
@@ -771,7 +753,7 @@ export class ChatStoreController {
     });
 
     if (reply.meta?.voice) this.voiceMetas.set(optimisticId, structuredClone(reply.meta));
-    if (reply.urgent === true) this.urgentSends.add(optimisticId);
+    this.recordOperatorRoute('ordinary', streamId, requestId);
     this.dispatchOptimistic(streamId, optimisticId, requestId, sendText, generation, sendAttachments);
 
     return optimisticId;
@@ -891,7 +873,6 @@ export class ChatStoreController {
         requestId,
         optimisticId,
         meta: this.voiceMetas.get(optimisticId),
-        ...(this.urgentSends.has(optimisticId) ? { urgent: true } : {}),
         replyToMessageId: this.state.optimisticSends?.[optimisticId]?.reply_to_message_id,
         replyToQuestionId: this.state.optimisticSends?.[optimisticId]?.reply_to_question_id,
         ...(attachments.length ? { attachments } : {}),
@@ -922,53 +903,30 @@ export class ChatStoreController {
       });
   }
 
-  /** Current row/generation ownership is also used to enable the rendered action. */
-  canSendQueuedNow(streamId: string, optimisticId: string): boolean {
-    const send = this.state.optimisticSends?.[optimisticId];
-    const session = this.state.sessions.find(item => item.stream_id === streamId);
-    const generation = session?.session_generation;
-    if (!this.cancelBridge || !session || session.session_kind === 'assistant_composite'
-        || session.status === 'closed' || !generation
-        || this.sendSessionGenerations.get(optimisticId) !== generation
-        || !send || send.stream_id !== streamId || send.provider_queued !== true
-        || ['failed', 'cancelled', 'indeterminate', 'echoed', 'reconciled'].includes(send.status)) return false;
-
-    const existing = this.interruptStates[streamId];
-    return !this.queueEscapeBudget(streamId)
-      && !(existing?.expectedSessionGeneration === generation && existing.pending);
+  /** Interim capability: no audited native route preserves work and drafts. */
+  canSendQueuedNow(_streamId: string, _optimisticId: string): boolean {
+    return false;
   }
 
-  /** Release a provider-owned queue without ever pasting the message again. */
+  /** Retain an inert boundary for a stale row/callback in the current renderer. */
   sendQueuedNow(streamId: string, optimisticId: string): boolean {
-    if (!this.canSendQueuedNow(streamId, optimisticId)) return false;
-    const generation = this.sendSessionGenerations.get(optimisticId)!;
-    const turn = this.getTurnState(streamId);
-    const turnId = turn ? ChatStoreController.turnIdentity(turn) : `queued:${generation}`;
-    const budget = this.reserveQueueEscape(streamId, generation);
-    const request: ChatInterruptState = {
-      intent: 'send_now', streamId, turnId, expectedSessionGeneration: generation, optimisticId,
-      pending: true, retryable: false, message: '', requestedAt: Date.now(),
-    };
-    this.setComposerNotice(streamId, '');
-    this.setInterruptState(streamId, request);
-    const finish = (error?: string, confirm?: ChatInterruptConfirm) => {
-      if (this.interruptStates[streamId] !== request) return;
-      if (error) this.releaseQueueEscape(streamId, budget);
-      const message = error ? 'Could not send now. Message remains queued.' : '';
-      this.setComposerNotice(streamId, message, !this.getTurnState(streamId));
-      this.setInterruptState(streamId, {
-        ...request, pending: false, retryable: !!error, message, resolvedAt: Date.now(),
-        ...(confirm ? { confirm } : {}), ...(error ? { error } : {}),
-      });
-    };
-    Promise.resolve().then(() => this.cancelBridge!({ streamId, expectedSessionGeneration: generation }))
-      .then(result => {
-        const confirm = ChatStoreController.normalizeInterruptConfirm(result);
-        const failed = result?.ok === false || confirm === 'pane_unavailable' || confirm === 'not_working';
-        finish(failed ? String(result?.error || confirm) : undefined, confirm);
-      })
-      .catch(error => finish(error instanceof Error ? error.message : String(error || 'interrupt_failed')));
-    return true;
+    this.recordOperatorRoute('queue_unavailable', streamId, optimisticId);
+    return false;
+  }
+
+  private recordOperatorRoute(action: 'ordinary' | 'queue_unavailable', streamId: string, identity: string): void {
+    const session = this.state.sessions.find(item => item.stream_id === streamId);
+    // A bounded correlation hash, never message text or attachment/account data.
+    let hash = 2166136261;
+    for (let i = 0; i < identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 16777619);
+    console.info('[send_now]', {
+      subsystem: 'send_now', bug_ref: 'send_now_interrupt_loss_2026_10_28',
+      origin: 'operator_renderer', action, route: action === 'ordinary' ? 'ordinary_intake' : 'unavailable',
+      provider: session?.provider || 'unknown',
+      provider_version: (session as (PentacleSessionSummary & { provider_version?: string }) | undefined)?.provider_version || 'unknown',
+      generation: session?.session_generation || null, request_hash: (hash >>> 0).toString(16).padStart(8, '0'),
+      cancel_dispatches: 0,
+    });
   }
 
   private static normalizeInterruptConfirm(result: ChatInterruptResult | undefined): ChatInterruptConfirm {

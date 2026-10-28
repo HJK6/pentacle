@@ -215,7 +215,14 @@ function createCcHandlers({
     });
     target.handle('chat-stream:send', (_event, host, sessionName, text, requestId, optimisticId, attachments, reply = {}) =>
       command(async () => {
-        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, meta: reply?.meta, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id, urgent: reply?.urgent });
+        // Operator IPC always uses ordinary intake, including requests from stale tabs.
+        // Intentional agent/CLI/wake urgency remains below this producer boundary.
+        if (reply?.urgent === true) console.info('[send_now]', {
+          subsystem: 'send_now', bug_ref: 'send_now_interrupt_loss_2026_10_28',
+          origin: 'operator_ipc', action: 'drop_urgency', route: 'ordinary_intake', cancel_dispatches: 0,
+          request_hash: require('node:crypto').createHash('sha256').update(String(requestId || '')).digest('hex').slice(0, 16),
+        });
+        const receipt = await chatStreamClient.sendMessage({ host, sessionName, streamId: reply?.stream_id, text, requestId, optimisticId, attachments, meta: reply?.meta, replyToMessageId: reply?.reply_to_message_id, replyToQuestionId: reply?.reply_to_question_id });
         return { ...receipt, ok: receipt.delivery === 'landed' || receipt.action_committed === true,
           ...(receipt.delivery === 'not_landed' && !receipt.action_committed ? { error: receipt.reason || 'Message was not delivered' } : {}) };
       }));
