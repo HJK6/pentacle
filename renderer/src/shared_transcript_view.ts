@@ -394,7 +394,7 @@ function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticI
     ? `<button type="button" class="slot-chat-send-retry" data-optimistic-id="${escapeHtml(optimisticId)}">Retry</button>`
     : '';
   const sendNow = sendState === 'queued' && allowSendNow && optimisticId && streamId
-    ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}" title="Interrupt the current turn and run the queued messages">Send now</button>` : '';
+    ? `<button type="button" class="slot-chat-send-now" data-stream-id="${escapeHtml(streamId)}" data-optimistic-id="${escapeHtml(optimisticId)}" disabled aria-label="Send now unavailable">Send now unavailable</button><span class="slot-chat-send-now-reason">Forcing the queue can interrupt current work or submit an unrelated draft. Your message stays queued.</span>` : '';
   return `<div class="slot-chat-send-status is-${sendState}">${label}${retry}${sendNow}</div>`;
 }
 

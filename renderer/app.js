@@ -2900,17 +2900,7 @@ function ensureSlotChatSurface(slot) {
 	  composeEl.appendChild(micEl);
 	  composeEl.appendChild(stopEl);
 	  composeEl.appendChild(sendEl);
-  const urgentEl = document.createElement('button');
-  urgentEl.className = 'slot-chat-compose-send slot-chat-compose-urgent';
-  urgentEl.type = 'button';
-  urgentEl.title = 'Send urgently';
-  urgentEl.setAttribute('aria-label', 'Send urgently');
-  urgentEl.textContent = '↯';
-  urgentEl.hidden = true;
-  urgentEl.style.display = 'none';
-  urgentEl.style.gridColumn = 'auto';
-  urgentEl.addEventListener('click', () => sendChatComposer(slot, { urgent: true }));
-  composeEl.appendChild(urgentEl);
+
 	  chatShell.appendChild(scrollEl);
 
   // Jump-to-latest pill (session-reliability parity): shown while the reader is
@@ -3080,7 +3070,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, urgentEl, stopEl, noticeEl, voiceController, syncComposerLayout: autoSize };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, stopEl, noticeEl, voiceController, syncComposerLayout: autoSize };
   return state.slotChatRefs[slot];
 }
 
@@ -3110,11 +3100,6 @@ function updateSendControls(slot) {
     refs.sendEl.dataset.action = 'send';
     refs.sendEl.classList.toggle('is-idle', !hasDraft);
     refs.sendEl.disabled = pending || !target || !!target.error || !hasDraft;
-    if (refs.urgentEl) {
-      refs.urgentEl.hidden = isCompositeSlot(slot);
-      refs.urgentEl.style.display = refs.urgentEl.hidden ? 'none' : 'inline-flex';
-      refs.urgentEl.disabled = refs.sendEl.disabled || refs.urgentEl.hidden;
-    }
     if (refs.stopEl) refs.stopEl.hidden = !working;
     if (refs.noticeEl) {
       const notice = (!isCompositeSlot(slot) && streamId && window.PentacleChatStore?.getComposerNotice?.(streamId)) || '';
@@ -4429,8 +4414,7 @@ function cancelChatComposer(slot) {
   return cancelled;
 }
 
-async function sendChatComposer(slot, { urgent = false } = {}) {
-  if (urgent && isCompositeSlot(slot)) return;
+async function sendChatComposer(slot) {
   if (!chatUiEnabled() || state.slots[slot]?.laneHistory) return;
   const refs = state.slotChatRefs[slot];
   const inputEl = refs?.inputEl;
@@ -4451,7 +4435,7 @@ async function sendChatComposer(slot, { urgent = false } = {}) {
     if (streamId) {
       // Native queue: do NOT gate on idle here. sendTurn dispatches immediately;
       // provider CLIs queue mid-turn input natively.
-      if (!urgent && await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length)) {
+      if (await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length)) {
         return;
       }
       state.slotSendPending[slot] = true;
@@ -4462,10 +4446,8 @@ async function sendChatComposer(slot, { urgent = false } = {}) {
       try {
         const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot) : [];
         if (!assertAssistantDirectSlot(slot)) return;
-        if (urgent && (state.slotGen[slot] !== sendGeneration
-            || state.slotChatBoundStream[slot] !== streamId || isCompositeSlot(slot))) return;
         const optimisticId = window.PentacleChatStore.sendTurn(streamId, text, attachments,
-          { ...(reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {}), ...(urgent ? { urgent: true } : {}) });
+          { ...(reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {}) });
         if (optimisticId && state.slotGen[slot] === sendGeneration) {
           state.slotReplies[slot] = null;
           state.slotDrafts[slot] = '';
@@ -4489,7 +4471,6 @@ async function sendChatComposer(slot, { urgent = false } = {}) {
     }
   }
 
-  if (urgent) return;
   await sendStructuredSlotMessage(slot, text, {
     onSuccess: () => {
       state.slotDrafts[slot] = '';

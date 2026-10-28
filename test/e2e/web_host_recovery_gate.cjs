@@ -215,11 +215,8 @@ async function main() {
     await page.click("#header-0 [data-mode=chat]");
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-compose-input')", { timeoutMs: 1e4 });
     const urgentExists = await page.eval(`!!document.querySelector('#cell-0 [aria-label="Send urgently"]')`);
-    write("urgent-path-observation.json", { exists: urgentExists, expected: !red, actualDOM: true });
-    if (red) assert.equal(urgentExists, false, "unmodified urgent path missing");
-    else {
-      assert.equal(urgentExists, true);
-    }
+    write("urgent-path-observation.json", { exists: urgentExists, expected: false, actualDOM: true });
+    assert.equal(urgentExists, false, 'operator urgency control is retired');
     const assets = await page.eval(`(async()=>{const o={};for(const f of ['bundle.js','chat_core.bundle.js']){const r=await fetch(f),h=await crypto.subtle.digest('SHA-256',await r.arrayBuffer());o[f]=Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}return o})()`);
     for (const [n, h] of Object.entries(assets)) assert.equal(h, hash(fs.readFileSync(ROOT + "/renderer/dist/web/" + n)));
     write("served-assets.json", assets);
@@ -238,12 +235,7 @@ async function main() {
     }
     await page.type("#cell-0 .slot-chat-compose-input", text);
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-compose-send')?.disabled === false");
-    if (!red) {
-      const visible = await page.eval(`getComputedStyle(document.querySelector('#cell-0 [aria-label="Send urgently"]')).display !== 'none'`);
-      write("urgent-dom.json", await page.eval(`([...document.querySelectorAll('#cell-0 .slot-chat-compose-send')].map(e=>({html:e.outerHTML,display:getComputedStyle(e).display,connected:e.isConnected})))`));
-      assert.equal(visible, kind !== "composite");
-    }
-    await page.click(kind === "urgent" ? '#cell-0 [aria-label="Send urgently"]' : "#cell-0 .slot-chat-compose-send");
+    await page.click("#cell-0 .slot-chat-compose-send");
     if (beforeAdmission) {
       await wait(() => rpc.length, (n) => n === 2, "one automatic recovery after no host admission");
       await wait(submissions, (v) => v.length === baseline + 1, "one first physical submission");
@@ -315,15 +307,15 @@ async function main() {
     if (!process.argv.includes("--quick") && !daemonGap) assert(Date.now() - acceptedAt > 6e4);
     assert(trace.some((t) => t.frame?.request_id === lost.requestId && (t.frame.coalesced === true || t.frame.assistant_composite?.duplicate === true || String(t.frame.reason).includes("coalesced"))));
     const escapes = fs.existsSync(out + "/escapes.jsonl") ? fs.readFileSync(out + "/escapes.jsonl", "utf8").trim().split("\n").filter(Boolean).length : 0;
-    assert.equal(escapes, kind === "urgent" ? 1 : 0, "urgent has one initial Escape, never another on replay");
-    assert(original.every((w) => kind === "urgent" ? w.frame.urgent === true : !Object.hasOwn(w.frame, "urgent")), "wire urgency preserved");
+    assert.equal(escapes, 0, "all operator paths use ordinary intake, including retired urgency replacement");
+    assert(original.every((w) => !Object.hasOwn(w.frame, "urgent")), "operator wire cannot carry urgency");
     const receipts = trace.filter((t) => t.event === "daemon_frame" && t.frame.type === "send.result" && t.frame.request_id === lost.requestId).map((t) => t.frame.receipt_id);
     assert.equal(new Set(receipts).size, 1, "same durable receipt");
     assert(!d.body.includes("Synthetic reply:"), "no false model completion before provider releases response");
     const originalProof = { elapsedMs: Date.now() - acceptedAt, rpc: rpc.slice(), wire: wire.slice(), submissions: submissions(), dom: d, urgentEscapes: escapes };
     // A deliberate new input with identical text is distinct from recovery.
     await page.type('#cell-0 .slot-chat-compose-input', text);
-    await page.click(kind === 'urgent' ? '#cell-0 [aria-label="Send urgently"]' : '#cell-0 .slot-chat-compose-send');
+    await page.click('#cell-0 .slot-chat-compose-send');
     await wait(submissions, v => v.length === baseline + 2, 'new intentional same-text input adds one submission');
     assert.notEqual(rpc.at(-1).frame.args[3], lost.requestId);
     assert.notEqual(rpc.at(-1).frame.args[4], lost.optimisticId);

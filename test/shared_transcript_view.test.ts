@@ -312,7 +312,7 @@ test('C4/C12: send.result provider_queued shows Queued through the controller, e
   const queued = a.container.querySelector('.slot-chat-send-status.is-queued');
   assert.ok(queued, a.container.innerHTML);
   assert.equal(queued!.firstChild?.textContent, 'Queued');
-  assert.equal(queued!.querySelector('.slot-chat-send-now')?.textContent, 'Send now');
+  assert.equal(queued!.querySelector('.slot-chat-send-now')?.textContent, 'Send now unavailable');
   assert.equal(a.container.querySelector('.slot-chat-send-status.is-sending'), null);
   assert.equal(controller.getState().optimisticSends?.[optimisticId]?.status, 'acked');
 

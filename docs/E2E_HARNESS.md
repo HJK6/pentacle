@@ -430,16 +430,11 @@ region: the titlebar (sidebar toggle and pane selector) or live data (working
 spinners, machine stats). Gate page reloads (`reloadDashboardPage`) start the next document
 with an empty four-pane workspace so scenarios see a fresh renderer.
 
-`agent-chat-steer-controls` checks the composer of a working agent chat: the
-`Queue` | `Steer now` choice (default Queue), Stop beside Send while a draft
-exists, and the absence of both on the assistant composite chat. A send whose bridge
-never answers keeps a turn in flight (the daemon cannot make a seeded seat
-work); the real Send, Steer now, `Alt+Enter` and Stop controls then drive fake
-send and cancel bridges. It asserts `urgent` only on the first Steer now of a
-turn, the reset to Queue after each send, the "Steer did not take" and
-"Stopped. Queued messages run next" notices, that a second Stop is a no-op, and
-that Stop keeps the draft and the queued row. The Escape reaching a pane is a
-live-seat journey, not part of this hermetic gate.
+`agent-chat-send-default-queue-state` drives the real composer/shared transcript with deterministic send/cancel counterparts. Enter and Alt+Enter use ordinary intake during work, provider queue proof shows an unavailable acceleration control with a visible reason, repeated clicks retain both queued inputs and the draft with zero cancellation, and explicit Stop remains generation-fenced. The composite has no queued acceleration or Stop. These are DOM/bridge checks, not native provider proofs.
+
+`test/e2e/web_host_recovery_gate.cjs` retains counted ordinary/composite lost-ACK, real reconnect, manual Retry overlap and >60-second durable restart acceptance. Its legacy `PHASE2_KIND=urgent` cell now verifies the retired operator action's ordinary replacement, with zero Escape and no urgent wire flag; intentional lower-level urgency has separate preservation controls. Counters live outside restarted processes; provider acceptance/queued receipts never stand in for model completion.
+
+Disposable installed-provider acceptance must separately bind the actual CLI/version, owned session generation, browser assets and harness hash. Establish the real provider queue creation route first (Codex versions that steer without queuing require explicit queue-cell N/A, not seeded queue proof). Delay only the owned USER echo to reproduce native intake before the stale queued control; count original inputs and native turn interruption/current-tool completion separately, since Codex tools can outlive an aborted turn. Keep the original failure and any corrected oracle replay, release owned profiles/processes, and never use operator chats. Deployment additionally inventories each operator tab's own injected build; the existing refresh icon only prompts a click.
 
 After a successful no-profile main run, the command also runs the
 [history retention](../test/e2e/web_chat_history_retention_gate.cjs),

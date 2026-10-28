@@ -750,8 +750,8 @@ try {
       ? { type: 'send', stream_id: targetId, message: text, msg_id: optimisticId }
       : { type: 'send', host, session_name: sessionName, text };
     if (!composite && typeof optimisticId === 'string' && optimisticId) payload.optimistic_id = optimisticId;
-    // Steer now: one guarded Escape before the message. Agent chats only; the
-    // composite branch above never carries it.
+    // Intentional lower-level agent callers may request one guarded Escape.
+    // Operator IPC drops urgency; the composite branch never carries it.
     if (!composite && urgent === true) payload.urgent = true;
     if (Array.isArray(attachments) && attachments.length > 0) payload.attachments = attachments;
     if (typeof replyToMessageId === 'string' && replyToMessageId) payload.reply_to_message_id = replyToMessageId;

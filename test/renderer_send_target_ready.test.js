@@ -217,9 +217,8 @@ test(`selection-release deferred commit refreshes ${eligibility} queued-row read
 });
 }
 
-test('an explicit urgent action cannot dispatch a stale composite target', async () => {
-  const start=app.indexOf('async function sendChatComposer('),end=app.indexOf('\nfunction renderSlotReply',start);
-  const context=vm.createContext({isCompositeSlot:()=>true});vm.runInContext(app.slice(start,end),context);
-  // The composite exclusion runs before touching a draft or any bridge.
-  await context.sendChatComposer(0,{urgent:true});
+test('the composer has one ordinary route, without an urgency control or producer flag', () => {
+  const start = app.indexOf('async function sendChatComposer('), end = app.indexOf('\nfunction renderSlotReply', start);
+  assert.doesNotMatch(app.slice(start, end), /urgent|cancelBridge|chatInterrupt/);
+  assert.doesNotMatch(app, /slot-chat-compose-urgent/);
 });
