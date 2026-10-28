@@ -219,8 +219,6 @@ async function main() {
     if (red) assert.equal(urgentExists, false, "unmodified urgent path missing");
     else {
       assert.equal(urgentExists, true);
-      const visible = await page.eval(`getComputedStyle(document.querySelector('#cell-0 [aria-label="Send urgently"]')).display !== 'none'`);
-      assert.equal(visible, kind !== "composite");
     }
     const assets = await page.eval(`(async()=>{const o={};for(const f of ['bundle.js','chat_core.bundle.js']){const r=await fetch(f),h=await crypto.subtle.digest('SHA-256',await r.arrayBuffer());o[f]=Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}return o})()`);
     for (const [n, h] of Object.entries(assets)) assert.equal(h, hash(fs.readFileSync(ROOT + "/renderer/dist/web/" + n)));
@@ -228,6 +226,7 @@ async function main() {
     classification = "PRODUCT_FAIL";
     if (kind === "urgent") {
       await page.type("#cell-0 .slot-chat-compose-input", "prime the working urgent target");
+      await page.waitFor("document.querySelector('#cell-0 .slot-chat-compose-send')?.disabled === false");
       await page.click("#cell-0 .slot-chat-compose-send");
       await wait(submissions, (v) => v.length === 1, "working-target distinct input");
       const primeId = wire.find(w => w.frame.text === 'prime the working urgent target').frame.request_id;
@@ -238,6 +237,11 @@ async function main() {
       baseline = 1;
     }
     await page.type("#cell-0 .slot-chat-compose-input", text);
+    await page.waitFor("document.querySelector('#cell-0 .slot-chat-compose-send')?.disabled === false");
+    if (!red) {
+      const visible = await page.eval(`getComputedStyle(document.querySelector('#cell-0 [aria-label="Send urgently"]')).display !== 'none'`);
+      assert.equal(visible, kind !== "composite");
+    }
     await page.click(kind === "urgent" ? '#cell-0 [aria-label="Send urgently"]' : "#cell-0 .slot-chat-compose-send");
     if (beforeAdmission) {
       await wait(() => rpc.length, (n) => n === 2, "one automatic recovery after no host admission");
