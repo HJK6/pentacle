@@ -69,7 +69,8 @@ test('explicit plain-note conversion re-arms the same row once with fresh metada
   assert.equal(originalSend.failure_reason, 'voice_answers_invalid');
   assert.equal(originalEvent.pending, false);
   assert.equal(calls.length, 1, 'a refused binding never resends without the user action');
-  assert.equal(calls[0].meta, meta, 'the supplied original send metadata is retained');
+  assert.deepEqual(calls[0].meta, meta, 'the supplied original send metadata values are retained');
+  assert.notEqual(calls[0].meta, meta, 'the original payload is frozen independently of the caller');
   assert.equal(userRows(store).length, 1);
 
   const plainResponse = deferred();

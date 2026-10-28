@@ -240,6 +240,7 @@ async function main() {
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-compose-send')?.disabled === false");
     if (!red) {
       const visible = await page.eval(`getComputedStyle(document.querySelector('#cell-0 [aria-label="Send urgently"]')).display !== 'none'`);
+      write("urgent-dom.json", await page.eval(`([...document.querySelectorAll('#cell-0 .slot-chat-compose-send')].map(e=>({html:e.outerHTML,display:getComputedStyle(e).display,connected:e.isConnected})))`));
       assert.equal(visible, kind !== "composite");
     }
     await page.click(kind === "urgent" ? '#cell-0 [aria-label="Send urgently"]' : "#cell-0 .slot-chat-compose-send");

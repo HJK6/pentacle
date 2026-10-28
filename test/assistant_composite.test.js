@@ -173,6 +173,7 @@ async function wireRenderer(t, compositeMode = true, {
   h.dom.window.cc.chatSendCorrelated = preload.window.cc.chatSendCorrelated;
   h.context.cc = h.dom.window.cc;
   h.context.crypto = h.dom.window.crypto;
+  h.context.structuredClone = structuredClone;
   const bundle = esbuild.buildSync({ entryPoints: [path.join(__dirname, '../renderer/src/chat_core_entry.ts')],
     bundle: true, format: 'iife', target: 'chrome134', write: false, logLevel: 'silent' }).outputFiles[0].text;
   vm.runInContext(bundle, h.context);

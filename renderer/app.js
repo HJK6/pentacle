@@ -2908,6 +2908,7 @@ function ensureSlotChatSurface(slot) {
   urgentEl.textContent = '↯';
   urgentEl.hidden = true;
   urgentEl.style.display = 'none';
+  urgentEl.style.gridColumn = 'auto';
   urgentEl.addEventListener('click', () => sendChatComposer(slot, { urgent: true }));
   composeEl.appendChild(urgentEl);
 	  chatShell.appendChild(scrollEl);
@@ -3111,7 +3112,7 @@ function updateSendControls(slot) {
     refs.sendEl.disabled = pending || !target || !!target.error || !hasDraft;
     if (refs.urgentEl) {
       refs.urgentEl.hidden = isCompositeSlot(slot);
-      refs.urgentEl.style.display = refs.urgentEl.hidden ? 'none' : '';
+      refs.urgentEl.style.display = refs.urgentEl.hidden ? 'none' : 'inline-flex';
       refs.urgentEl.disabled = refs.sendEl.disabled || refs.urgentEl.hidden;
     }
     if (refs.stopEl) refs.stopEl.hidden = !working;
