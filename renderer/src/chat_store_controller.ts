@@ -209,6 +209,7 @@ export class ChatStoreController {
   private voiceMetas = new Map<string, VoiceMeta>();
   private sendSessionGenerations = new Map<string, string>();
   private sendBridge: ChatSendBridge | null = null;
+  private sendDispatches = new Set<string>();
   private cancelBridge: ChatCancelBridge | null = null;
   private interruptStates: Record<string, ChatInterruptState> = {};
   // Queued-row keys own Escape independently of local turn/paint state.
@@ -393,13 +394,16 @@ export class ChatStoreController {
       if (event.optimistic_id) voices.set(`${streamId}:optimistic:${event.optimistic_id}`, voice);
     }
     const interrupt = this.getInterruptState(streamId);
-    if (!voices.size && interrupt?.intent !== 'send_now') return detail;
+    const uncertain = Object.values(this.state.optimisticSends ?? {}).some(send => send.stream_id === streamId && send.status === 'indeterminate');
+    if (!voices.size && !uncertain && interrupt?.intent !== 'send_now') return detail;
     return { ...detail, transcriptItems: detail.transcriptItems.map(item => {
       const voice = voices.get(item.eventKey || '');
       const sendingNow = item.providerQueued && interrupt?.intent === 'send_now'
         && !interrupt.error && item.optimisticId === interrupt.optimisticId;
-      if (!voice && !sendingNow) return item;
+      const indeterminate = item.optimisticId && this.state.optimisticSends?.[item.optimisticId]?.status === 'indeterminate';
+      if (!voice && !sendingNow && !indeterminate) return item;
       return { ...item,
+        ...(indeterminate ? { sendState: 'indeterminate' as const } : {}),
         ...(voice && (item.isUser || item.displayRule === 'bubble:user') ? { voice } : {}),
         ...(sendingNow ? { providerQueued: false, receiptCaption: 'sending' as const } : {}),
       };
@@ -616,6 +620,7 @@ export class ChatStoreController {
   /** Clear all pending settle timers (tests / teardown). */
   dispose(): void {
     this.sendSessionGenerations.clear();
+    this.sendDispatches.clear();
     this.queueEscapes.clear();
     for (const id of Object.keys(this.staleTurnTimers)) {
       clearTimeout(this.staleTurnTimers[id]);
@@ -748,23 +753,20 @@ export class ChatStoreController {
     return optimisticId;
   }
 
-  /**
-   * Re-send a visibly recoverable row as an explicit NEW attempt.  The
-   * optimistic id (and therefore its rendered row + attachments) remains stable,
-   * while the request id rotates so a terminal answer for the abandoned attempt
-   * cannot be mistaken for this user-directed retry.
-   */
+  /** Known failures start a new attempt; uncertain sends reconcile the original. */
   retryOptimisticSend(optimisticId: string): boolean {
     const send = this.state.optimisticSends?.[optimisticId];
     if (!send || (send.status !== 'failed' && send.status !== 'indeterminate')) return false;
-    const requestId = this.nextRequestId('retry');
+    if (this.sendDispatches.has(send.request_id)) return false;
+    const uncertain = send.status === 'indeterminate';
+    const requestId = uncertain ? send.request_id : this.nextRequestId('retry');
     const generation = this.state.sessions.find(item => item.stream_id === send.stream_id)?.session_generation;
     if (generation) this.sendSessionGenerations.set(optimisticId, generation);
     else this.sendSessionGenerations.delete(optimisticId);
-    this.setState(rotateOptimisticSendRequestId(this.state, optimisticId, requestId));
+    if (!uncertain) this.setState(rotateOptimisticSendRequestId(this.state, optimisticId, requestId));
     const retry = this.state.optimisticSends?.[optimisticId];
     if (!retry) return false;
-    this.dispatchOptimistic(retry.stream_id, optimisticId, requestId, retry.text, this.socketGeneration, retry.attachments ?? []);
+    this.dispatchOptimistic(retry.stream_id, optimisticId, requestId, retry.text, this.socketGeneration, retry.attachments ?? [], uncertain);
     logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_INSERT, {
       stream_id: retry.stream_id,
       optimistic_id: optimisticId,
@@ -811,8 +813,9 @@ export class ChatStoreController {
    * Put an optimistic send on the wire via the injected bridge and resolve its
    * lifecycle: dispatched on success, failed/indeterminate on error.
    */
-  private dispatchOptimistic(streamId: string, optimisticId: string, requestId: string, text: string, generation: number, attachments: ChatAttachment[] = []): void {
-    if (!this.sendBridge) return;
+  private dispatchOptimistic(streamId: string, optimisticId: string, requestId: string, text: string, generation: number, attachments: ChatAttachment[] = [], reconciling = false): void {
+    if (!this.sendBridge || this.sendDispatches.has(requestId)) return;
+    this.sendDispatches.add(requestId);
     Promise.resolve()
       .then(() => this.sendBridge!({
         streamId,
@@ -826,7 +829,7 @@ export class ChatStoreController {
       }))
       .then((result) => {
         if (result && result.ok === false) {
-          this.resolveSendDispatchError(streamId, optimisticId, requestId, String('error_code' in result && result.error_code === 'voice_answers_invalid' ? result.error_code : result.error || 'send_error'));
+          this.resolveSendDispatchError(streamId, optimisticId, requestId, String('error_code' in result && result.error_code === 'voice_answers_invalid' ? result.error_code : result.error || 'send_error'), reconciling);
           return;
         }
         let next = markOptimisticDispatchedByRequestId(this.state, requestId, Date.now(), generation);
@@ -834,8 +837,9 @@ export class ChatStoreController {
         this.setState(next);
       })
       .catch((error: unknown) => {
-        this.resolveSendDispatchError(streamId, optimisticId, requestId, error instanceof Error ? error.message : String(error || 'send_error'));
-      });
+        this.resolveSendDispatchError(streamId, optimisticId, requestId, error instanceof Error ? error.message : String(error || 'send_error'), reconciling);
+      })
+      .finally(() => this.sendDispatches.delete(requestId));
   }
 
   /** Current row/generation ownership is also used to enable the rendered action. */
@@ -1086,9 +1090,13 @@ export class ChatStoreController {
    * the reconnect. A refused question binding is terminal even while offline;
    * other errors retain their existing connected/transient handling.
    */
-  private resolveSendDispatchError(streamId: string, optimisticId: string, requestId: string, reason: string): void {
-    const transient = reason !== 'voice_answers_invalid'
-      && (this.state.connected !== true || /disconnect|closed|not open|reconnect|socket|ECONN|timed out/i.test(reason));
+  private resolveSendDispatchError(streamId: string, optimisticId: string, requestId: string, reason: string, reconciling = false): void {
+    const send = this.state.optimisticSends?.[optimisticId];
+    // A late reconciliation error cannot undo authoritative receipt evidence.
+    if (!send || ['acked', 'echoed', 'reconciled'].includes(send.status)) return;
+    const transient = reconciling || (reason !== 'voice_answers_invalid'
+      && (send.status === 'indeterminate' || this.state.connected !== true
+        || /disconnect|closed|not open|reconnect|socket|ECONN|timed out/i.test(reason)));
     if (transient) {
       this.setState(markOptimisticIndeterminateByRequestId(this.state, requestId, Date.now()));
       return;

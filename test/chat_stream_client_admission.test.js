@@ -44,7 +44,7 @@ test('only an explicit retryable read refusal retries once with the same identit
 });
 test('nonretryable busy, mutation refusal and send outcome never replay',async t=>{
  const {client,sent,command}=fixture(t);
- for(const [type,id,extra] of [['asset.list','no',{retryable:false}],['rename','mutation',{retryable:true}],['send','send',{retryable:true}]]){
+ for(const [type,id,extra] of [['asset.list','no',{retryable:false}],['rename','mutation',{retryable:true}],['send','send',{retryable:false}]]){
   const p=command(type,id);client._handleCommandResponse({type:type+'.error',request_id:id,error_code:'server_overloaded',...extra});
   await assert.rejects(p,e=>e.error_code==='server_overloaded');
  }
@@ -155,4 +155,62 @@ test('the refusal latch exists before the first nonfinal upload frame',async t=>
  client._handleCommandResponse({type:'upload_blob.init.ok',request_id:'early-error'});
  await assert.rejects(p,e=>e.error_code==='server_overloaded');
  assert.ok(!sent.some(x=>x.type==='upload_blob_chunk'&&x.final));assert.equal(client._uploadRefusals.size,0);
+});
+
+const refusal = id => ({ type: 'send.error', request_id: id, error_code: 'server_overloaded', retryable: true });
+for (const shape of [
+ {type:'send',stream_id:'peer:ordinary',text:'original',optimistic_id:'logical',urgent:true,attachments:[{blob_sha:'a'.repeat(64),name:'note.txt'}],reply_to_message_id:'reply',meta:{voice:{source:'fixture'}}},
+ {type:'send',stream_id:'peer:assistant',text:'composite',msg_id:'logical-composite'},
+]) test('pre-admission send retry preserves bytes and bypass priority: '+shape.stream_id,async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const {client,sent,command}=fixture(t);
+ for(let i=0;i<12;i++)command('asset.list','saturated'+i);
+ const raw=[];const original=client._ws.send;client._ws.send=data=>{raw.push(data);original(data);};
+ const p=client.sendCommand(shape,'send',{requestId:'refused'});p.catch(()=>{});
+ client._handleCommandResponse(refusal('refused'));
+ t.mock.timers.tick(249);assert.equal(raw.length,1);
+ t.mock.timers.tick(1);assert.equal(raw.length,2);assert.equal(raw[1],raw[0]);
+ assert.equal(client._ordinaryRequests.active.size <= 6,true);
+ client._handleCommandResponse({type:'send.result',request_id:'refused',delivery:'landed',provider_queued:true});
+ assert.equal((await p).provider_queued,true);
+ t.mock.timers.tick(1000);assert.equal(raw.length,2);
+});
+for(const extra of [{retryable:false},{retryable:undefined},{error_code:'busy'},
+ {error_code:'provider_429'},{action_committed:true},{confirmation_pending:true},{provider_queued:true},
+ {do_not_resubmit:true},{accepted:true},{delivery:'accepted'},{delivery:'landed'},{state:'accepted'}])
+ test('send does not retry ineligible refusal '+JSON.stringify(extra),async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});const {client,sent,command}=fixture(t);
+  const p=command('send','ineligible');client._handleCommandResponse({...refusal('ineligible'),...extra});
+  await assert.rejects(p);t.mock.timers.tick(1000);assert.equal(sent.length,1);
+ });
+test('duplicate refusals during backoff cannot trigger a third write or leak a timer',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const {client,sent,command}=fixture(t);const p=command('send','twice');
+ client._handleCommandResponse(refusal('twice'));t.mock.timers.tick(250);
+ client._handleCommandResponse(refusal('twice'));await assert.rejects(p);client._handleCommandResponse(refusal('twice'));
+ t.mock.timers.tick(1000);assert.equal(sent.length,2);assert.equal(client._pending.size,0);
+});
+for(const cancel of ['result','disconnect','replacement','destroy','generation'])
+ test('send backoff is owned by pending/socket/generation: '+cancel,async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});const {client,sent,command}=fixture(t);const p=command('send','cancel');p.catch(()=>{});
+  client._handleCommandResponse(refusal('cancel'));
+  if(cancel==='result')client._handleCommandResponse({type:'send.result',request_id:'cancel',delivery:'landed'});
+  if(cancel==='disconnect'){client.connected=false;client._rejectPending('Stream disconnected');}
+  if(cancel==='destroy')client.destroy();
+  if(cancel==='replacement')client._ws={readyState:1,send(){throw Error('stale write');},terminate(){}};
+  if(cancel==='generation')client._socketGeneration++;
+  t.mock.timers.tick(1000);assert.equal(sent.length,1);
+  if(cancel==='result')await p;else await assert.rejects(p);
+ });
+for(const type of ['send.result','send.indeterminate'])test(type+' never triggers automatic send retry',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const {client,sent,command}=fixture(t);const p=command('send','receipt');
+ client._handleCommandResponse({...refusal('receipt'),type,delivery:'not_landed'});await p;
+ t.mock.timers.tick(1000);assert.equal(sent.length,1);
+});
+
+test('wrong correlation, non-send error and timeout cannot grant a send retry',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const {client,sent,command}=fixture(t);
+ const p=command('send','timeout',{timeoutMs:20});
+ client._handleCommandResponse(refusal('someone-else'));t.mock.timers.tick(20);await assert.rejects(p,e=>e.error==='timed_out');
+ const q=command('send','wrong-type');client._handleCommandResponse({...refusal('wrong-type'),type:'rename.error'});await assert.rejects(q);
+ t.mock.timers.tick(1000);assert.equal(sent.length,2);
 });

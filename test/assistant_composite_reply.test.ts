@@ -30,10 +30,10 @@ test('assistant messages render without a Reply control and escape the rendered 
   dom.window.close();
 });
 
-test('retry retains reply binding and stable input identity while rotating the RPC request', async () => {
+for (const uncertain of [false, true]) test(`retry retains reply binding and ${uncertain ? 'reconciles' : 'rotates'} the RPC request`, async () => {
   const controller = store();
   const sends: Parameters<ChatSendBridge>[0][] = [];
-  controller.setSendBridge(async args => { sends.push(args); return { ok: false, error: 'socket unavailable' }; });
+  controller.setSendBridge(async args => { sends.push(args); return { ok: false, error: uncertain ? 'socket unavailable' : 'unavailable' }; });
   const id = controller.sendTurn(streamId, 'Yes', [], { reply_to_message_id: 'message-1', reply_to_question_id: 'question-1' });
   await new Promise(setImmediate);
   assert.equal(sends[0].replyToMessageId, 'message-1');
@@ -43,7 +43,9 @@ test('retry retains reply binding and stable input identity while rotating the R
   assert.equal(sends[1].replyToMessageId, 'message-1');
   assert.equal(sends[1].replyToQuestionId, 'question-1');
   assert.equal(sends[1].optimisticId, sends[0].optimisticId);
-  assert.notEqual(sends[1].requestId, sends[0].requestId);
+  if (uncertain) assert.equal(sends[1].requestId, sends[0].requestId);
+  else assert.notEqual(sends[1].requestId, sends[0].requestId);
+  controller.dispose();
 });
 
 test('independent and reloaded composite clients cannot reuse a durable input identity', async (t) => {
