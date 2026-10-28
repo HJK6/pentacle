@@ -630,7 +630,8 @@ class AssistantBindingStoreMixin:
                 conn.rollback()
                 raise
 
-        result = await self.submit(_op)
+        async with self.session_graph_lock:
+            result = await self.submit(_op)
         if result.get("error_code"):
             raise ValueError(result["error_code"])
         return result
@@ -667,7 +668,8 @@ class AssistantBindingStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        return await self.submit(_op)
+        async with self.session_graph_lock:
+            return await self.submit(_op)
 
     # -- daemon-owned restore of the bound seat (assistant_restore.py) --------
     # Every episode transition and its audit row share one transaction, and
@@ -1035,7 +1037,8 @@ class AssistantBindingStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        return await self.submit(_op)
+        async with self.session_graph_lock:
+            return await self.submit(_op)
 
     async def restore_reset_budget(
         self, *, episode_id: int, request_id: str, env_binding: dict[str, str],

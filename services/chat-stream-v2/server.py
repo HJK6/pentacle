@@ -5407,6 +5407,7 @@ class Server:
         close_kind = "session_close"
         coordinator_authorized = False
         manager_generation: str | None = None
+        fd_generation: str | None = None
         ruling_manager_close = (
             self.lane_rulings is not None
             and msg.get("_ruling_release") is self.lane_rulings
@@ -5434,6 +5435,15 @@ class Server:
                     # is re-checked under the lifecycle lock before any kill.
                     manager_generation = expected_generation or self._manager_target_generation(target)
                     close_kind = "manager_close"
+                elif await self._fd_close_caller(auth):
+                    fd_generation = expected_generation or self._manager_target_generation(target)
+                    try:
+                        await self._fd_close_fences(msg, auth, target_stream_id, target, fd_generation)
+                    except Exception as exc:
+                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
+                                                   "refused" if isinstance(exc, VerbError) else "failed",
+                                                   getattr(exc, "code", "fd_close_failed"))
+                        raise
                 else:
                     # A seat token proves only that seat's identity. Visibility
                     # and a caller-supplied confirmation bit do not promote it
@@ -5465,7 +5475,12 @@ class Server:
         if self.lane_rulings is not None and msg.get("_ruling_release") is not self.lane_rulings:
             target_row = await self.store.fetch_session(host, name)
             target_generation = str((target_row or {}).get("session_generation") or "")
-            if target_generation and manager_generation is not None and target_generation != manager_generation:
+            pinned_generation = manager_generation or fd_generation
+            if target_generation and pinned_generation is not None and target_generation != pinned_generation:
+                if fd_generation is not None:
+                    await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
+                                               "refused", "lifecycle_generation_mismatch")
+                    raise VerbError("lifecycle_generation_mismatch", "FD target generation changed before ruling")
                 await self._manager_audit("close", msg, auth, target_stream_id, target_generation,
                                           result="refused", refusal_code="lifecycle_generation_mismatch")
                 raise VerbError("lifecycle_generation_mismatch", "manager target generation changed before ruling")
@@ -5476,8 +5491,14 @@ class Server:
                         target_generation=target_generation, auth=auth,
                     )
                 except ValueError as exc:
+                    if fd_generation is not None:
+                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
+                                                   "refused", str(exc))
                     raise VerbError(str(exc), str(exc)) from exc
                 if ruling_hold is not None:
+                    if fd_generation is not None:
+                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
+                                                   "refused", "close_pending_ruling")
                     return ruling_hold
         defer_if_working = bool(msg.get("defer_if_working"))
         if expired_self_close:
@@ -5486,6 +5507,8 @@ class Server:
             actor_kind, auth_kind = "operator", "operator_authenticated"
         elif close_kind == "manager_close":
             actor_kind, auth_kind = "manager", "token_verified"
+        elif fd_generation is not None:
+            actor_kind, auth_kind = "front_desk", "token_verified"
         elif coordinator_authorized:
             actor_kind, auth_kind = "parent", "token_verified"
         else:
@@ -5502,10 +5525,10 @@ class Server:
             "request_id": str(msg.get("request_id") or ""),
             "defer_if_working": defer_if_working,
         }
-        if manager_generation is not None:
+        if manager_generation is not None or fd_generation is not None:
             # Live panes require fresh idle proof. Initially offline peers may
             # record a generation-fenced retirement intent, never claimed death.
-            expected_generation = manager_generation
+            expected_generation = manager_generation or fd_generation
             defer_if_working = False
             attribution["defer_if_working"] = False
         close = functools.partial(
@@ -5515,21 +5538,28 @@ class Server:
             str(msg.get("reason") or ""),
             expected_generation=expected_generation,
             close_kind=close_kind,
-            requires_idle=bool(msg.get("requires_idle") or msg.get("reap")) or manager_generation is not None,
+            requires_idle=bool(msg.get("requires_idle") or msg.get("reap"))
+            or manager_generation is not None or fd_generation is not None,
             operator_override=bool(msg.get("operator_override"))
             and (operator_authenticated or coordinator_authorized)
-            and manager_generation is None,
-            operator_confirm=msg.get("operator_confirm") is True and manager_generation is None,
+            and manager_generation is None and fd_generation is None,
+            operator_confirm=msg.get("operator_confirm") is True
+            and manager_generation is None and fd_generation is None,
             defer_if_working=defer_if_working,
             attribution=attribution,
             admission_guard=(
+                (lambda row: self._fd_close_admission(msg, auth, target_stream_id, row, fd_generation))
+                if fd_generation is not None else
                 (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
                 else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
             ),
         )
-        if manager_generation is None:
+        if fd_generation is not None:
+            result = await _finish_despite_cancel(
+                self._fd_close_locked(close, msg, auth, target_stream_id, fd_generation))
+        elif manager_generation is None:
             result = await close()
         else:
             # The grant cannot change between the manager's admission, the kill
@@ -5571,6 +5601,75 @@ class Server:
             "reap_status": result.get("reap_status", "unknown"),
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
+
+    async def _fd_close_caller(self, auth: dict[str, Any]) -> bool:
+        """The effective primary FD binding, at its verified open generation."""
+        composite = self.assistant_composite
+        if (auth.get("token_verified") is not True or composite is None
+                or not composite.enabled or not composite.env_config.direct_primary):
+            return False
+        try:
+            binding = await self.store.get_assistant_binding(
+                env_binding=composite._env_binding(), name=composite.env_config.name)
+            if (auth.get("stream_id"), auth.get("session_generation")) != (
+                    binding.get("stream_id"), binding.get("generation")) or not binding.get("generation"):
+                return False
+            actor = await self.store.fetch_session(*self.sessions.split(binding["stream_id"]))
+            return bool(actor and actor.get("status") == "open"
+                        and actor.get("session_generation") == binding["generation"])
+        except Exception:  # unreadable authority grants nothing
+            return False
+
+    async def _fd_close_fences(self, msg, auth, target, row, generation):
+        if not await self._fd_close_caller(auth):
+            raise VerbError("fd_close_authority_required", "current bound FD generation required")
+        if code := self.sessions.assistant.manager_request_code(msg):
+            raise VerbError(code, "FD close requires an explicit directive reason and request id")
+        if str((row or {}).get("session_generation") or "") != generation:
+            raise VerbError("lifecycle_generation_mismatch", "FD target generation changed")
+        if row.get("status") == "closed":
+            return  # Receipt only; Sessions preserves generation-fenced repeat semantics.
+        self.sessions.assistant.guard_close(row, "session_close")
+        if (row.get("status") != "open" or row.get("parent_stream_id")
+                or row.get("handoff_from_stream_id")
+                or (row.get("visibility") or "default") not in {"default", "visible"}):
+            raise VerbError("fd_close_target_ineligible", "FD exception requires a top-level visible kickoff seat")
+        # All ownership mutations share Sessions' graph fence. An unavailable
+        # authoritative read propagates before admission; it cannot grant close.
+        for lane in await self.store.work_lane_rows():
+            if lane.get("owner_kind") == "operator" and target in {
+                    lane.get("bound_stream_id"), lane.get("visible_chat_stream_id")}:
+                raise VerbError("close_operator_lane_protected", "open operator-owned lane requires its own close confirmation")
+
+    async def _fd_close_admission(self, msg, auth, target, row, generation):
+        # Runs under lifecycle + graph locks, held through the existing kill
+        # ladder. Rebind, transfer and lane mutations cannot cross this fence.
+        await self._fd_close_fences(msg, auth, target, row, generation)
+        if row.get("status") != "closed":
+            await self._fd_close_audit(msg, auth, target, generation, "admitted")
+
+    async def _fd_close_audit(self, msg, auth, target, generation, result, code=None):
+        revision = (await self.store.lifecycle_authority_current())["revision"]
+        await self.store.lifecycle_authority_audit(
+            action="fd_close", actor_kind="front_desk", actor_identity=auth.get("stream_id"),
+            actor_generation=auth.get("session_generation"), target_stream_id=target,
+            target_generation=generation, old_revision=revision, new_revision=revision,
+            reason=msg.get("reason"), request_id=msg.get("request_id"), result=result, refusal_code=code)
+
+    async def _fd_close_locked(self, close, msg, auth, target, generation):
+        try:
+            result = await close()
+        except Exception as exc:
+            await self._fd_close_audit(msg, auth, target, generation,
+                                       "refused" if isinstance(exc, VerbError) else "failed",
+                                       getattr(exc, "code", "fd_close_failed"))
+            raise
+        applied = not (result.get("failed") or result.get("deferred")
+                       or result.get("already_closed") or result.get("stale_generation"))
+        await self._fd_close_audit(msg, auth, target, generation,
+                                   "applied" if applied else "failed" if result.get("failed") else "refused",
+                                   None if applied else str(result.get("reason") or "close_not_applied")[:200])
+        return result
 
     async def _seat_close_admission(self, auth, caller, target, row):
         # Runs after acquiring the target lifecycle and graph locks, directly

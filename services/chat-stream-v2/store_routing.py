@@ -2003,7 +2003,8 @@ class _RoutingStoreMixin:
                 conn.rollback()
                 raise
 
-        return await self.submit(_op)
+        async with self.session_graph_lock:
+            return await self.submit(_op)
 
     async def complete_assistant_composite_lane(
         self, *, stream_id: str, lane_id: str, dispatch_id: str,
