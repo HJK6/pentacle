@@ -611,6 +611,8 @@ try {
       this._ordinaryRequests = new OrdinaryRequestQueue();
     }
     const queue = ordinary ? this._ordinaryRequests : null;
+    const sendWire = payload.type === 'send' ? JSON.stringify({ ...payload, request_id }) : null;
+    const generation = this._socketGeneration;
     return new Promise((resolve, reject) => {
       let timer = null, retryTimer = null, graceTimer = null, retries = 0;
       const clear = () => {
@@ -618,8 +620,16 @@ try {
         timer = retryTimer = graceTimer = null;
       };
       const release = () => { if (queue) queue.release(job); };
-      const settleResolve = value => { clear(); release(); resolve(value); };
-      const settleReject = error => { clear(); release(); reject(error); };
+      const retryDiagnostic = outcome => {
+        if (sendWire && retries) console.info('[client_send_retry]', {
+          subsystem: 'client_send_retry',
+          bug_ref: 'spec_pentacle__daemon_send_latency_dashboard_outage_2026_10_28',
+          request_id, optimistic_id: payload.optimistic_id || payload.msg_id,
+          attempt: retries + 1, outcome,
+        });
+      };
+      const settleResolve = value => { clear(); release(); retryDiagnostic('resolved'); resolve(value); };
+      const settleReject = error => { clear(); release(); retryDiagnostic('rejected'); reject(error); };
       const pending = {
         prefix, resolve: settleResolve, reject: settleReject, expired: false,
         rawResponse: options?.rawResponse === true,
@@ -648,13 +658,15 @@ try {
         }
       };
       const armQueueTimeout = () => { if (!timeoutMs) { timer = setTimeout(timeout, 30000); timer.unref?.(); } };
-      const job = { bytes: Buffer.byteLength(JSON.stringify({ ...payload, request_id })),
+      const job = { bytes: Buffer.byteLength(sendWire || JSON.stringify({ ...payload, request_id })),
         background: BACKGROUND.has(payload.type), state: 'new', run: () => {
           if (!timeoutMs && timer) { clearTimeout(timer); timer = null; }
           try {
-            if (ws !== this._ws || !this.connected || ws.readyState !== WebSocket.OPEN) throw Error('Stream disconnected');
+            if (ws !== this._ws || !this.connected || ws.readyState !== WebSocket.OPEN
+              || (sendWire && generation !== this._socketGeneration)) throw Error('Stream disconnected');
             options.beforeSend?.();
-            ws.send(JSON.stringify({ ...payload, request_id }));
+            retryDiagnostic('dispatch');
+            ws.send(sendWire || JSON.stringify({ ...payload, request_id }));
           } catch (e) {
             this._pending.delete(request_id);
             settleReject(e?.error_code ? e : { type: `${prefix}.error`, request_id, error: e.message || String(e) });
@@ -669,14 +681,25 @@ try {
         }
       };
       pending.retry = error => {
-        if (!queue || pending.expired || retries || error.error_code !== 'server_overloaded' || error.retryable !== true
-          || !(BACKGROUND.has(payload.type) || payload.type === 'upload_blob_init') || ws !== this._ws) return false;
+        if (pending.expired || retries || error.error_code !== 'server_overloaded' || error.retryable !== true
+          || ws !== this._ws || this._pending.get(request_id) !== pending) return false;
+        const refusedSend = sendWire && error.type === 'send.error'
+          && !error.action_committed && !error.confirmation_pending && !error.provider_queued
+          && !error.do_not_resubmit && !error.accepted && !('state' in error) && !('delivery' in error);
+        const refusedRead = queue && (BACKGROUND.has(payload.type) || payload.type === 'upload_blob_init');
+        if (!refusedSend && !refusedRead) return false;
         retries++;
         release();
         this._streamEventChunks.delete(request_id);
         this._fetchBlobChunks.delete(request_id);
-        armQueueTimeout();
-        retryTimer = setTimeout(() => { retryTimer = null; enqueue(); }, 250);
+        if (queue) armQueueTimeout();
+        retryDiagnostic('scheduled');
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (this._pending.get(request_id) !== pending || pending.expired) return;
+          if (queue) enqueue();
+          else job.run(); // Send keeps its independent bypass lane.
+        }, 250);
         retryTimer.unref?.();
         return true;
       };

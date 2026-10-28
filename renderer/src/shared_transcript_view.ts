@@ -383,7 +383,7 @@ function renderChatBody(text: string, options: TranscriptRenderOptions = {}): st
 const ACTIONABLE_ASSISTANT_STATES = new Set(['waiting_for_operator', 'waiting_for_dependency', 'uncertain', 'failed', 'cancelled']);
 
 function renderUserSendStatus(sendState: PentacleSendState | 'sent', optimisticId?: string, streamId?: string, allowSendNow = false): string {
-  const label = sendState === 'sent' ? 'Sent' : sendState === 'queued'
+  const label = sendState === 'indeterminate' ? 'Delivery uncertain' : sendState === 'sent' ? 'Sent' : sendState === 'queued'
     ? 'Queued'
     : sendState === 'sending'
       ? 'sending…'
