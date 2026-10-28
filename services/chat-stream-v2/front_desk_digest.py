@@ -13,6 +13,7 @@ import re
 import time
 
 from message_envelopes import build_message_envelope
+from screen_monitor_principal import ACTOR as SCREEN_MONITOR_ACTOR
 from store_routing import _insert_outbound_notice_conn
 from v2_runtime import env_number, iso_now, primary_assistant_name
 
@@ -104,6 +105,9 @@ class FrontDeskDigest:
         auth = msg.get('_auth_context') or {}
         wake = (auth.get('operator_authenticated') is True
                 or msg.get('_assistant_operator_authenticated') is True
+                or (verb == 'tell' and msg.get('from_stream_id') == SCREEN_MONITOR_ACTOR
+                    and isinstance(original, str)
+                    and original.startswith(('CODEX RESET SIGNAL ', 'CODEX RESET WATCHER FAILURE:')))
                 or re.match(r'^(GATE|BLOCKER)\b', text, re.I)
                 or kind in {'report', 'notification_answer', 'wake', 'wake_urgent', 'wake_missed', 'external_work_due', 'spawn_delivery_failed',
                             'screen_lease_contended', 'screen_lease_revoked'}
