@@ -320,3 +320,88 @@ fresh, account-stamped quota. It is not part of the ingest satellite and has its
 timer/plist (`pentacle-usage-state-collector.{service,timer}`,
 `com.pentacle.usage-state-collector.plist`, 600 s). Install, verify, enable and roll back
 with `../install_usage_collector.py`; see `docs/usage_accounting.md` § Per-host collector.
+
+## Never-accepted initial ranges ahead of the durable ACK
+
+Live delivery and durable source proof have separate progress. A generic push
+acceptance still advances the live read cursor under the existing drop/usage
+rules. A matching source binding advances the replay position serialized in the
+existing checkpoint `offset` field. Refused or absent binding cannot move that
+replay position. An open seat continues delivering while its replay position
+lags. All emitted checkpoints retain the version-1 schema and can be loaded by
+the unchanged older producer; no sidecar is required for correctness.
+
+`tools/satellite_chat_reconcile.py` is a bounded recovery utility for an older
+producer that already froze an invalid **initial** range ahead of the actual
+coordinator ACK. It supports only closed original sources with complete retained
+bytes and original live-issued proof, an empty predecessor, no accepted recovery
+head or range, and `origin <= ACK < start <= offset <= end`. Every selected source
+must satisfy those conditions. It refuses source reuse, missing/replaced/truncated
+bytes, partial bounds, stale plans, unknown checkpoint fields and changed proof.
+It never edits the coordinator database or an accepted range.
+
+Use it only within an explicit FD recovery window after source gates and
+independent implementation QA. The tool checks the current primary FD binding
+and open generation, but a directive string is audit provenance, not an authority
+grant. Freeze the full release SHA, daemon checkout/stamp/PID/birth, retained pin,
+peer source/PID/incarnation, original proof and exact pending-source catalog.
+A daemon-first repair release with an older admitted peer/pin needs its own
+explicit exception; this utility grants none and suppresses no drift.
+
+From a clean, frozen release checkout on the coordinator, using its prepared
+service interpreter, plan against the exact configured peer and original
+checkpoint IDs. The existing machines configuration supplies the SSH route.
+Paths below are deployment inputs, not repository defaults:
+
+```sh
+python services/chat-stream-v2/tools/satellite_chat_reconcile.py plan \
+  --db /absolute/coordinator/sessions.db --host worker \
+  --fd-stream coordinator:v2-current-fd --fd-generation FULL_CURRENT_GENERATION \
+  --directive RECORDED_FD_WINDOW \
+  --daemon-checkout /absolute/daemon-checkout \
+  --peer-checkout /absolute/peer-checkout \
+  --peer-python /absolute/peer-checkout/.venv/bin/python \
+  --checkpoint-id ORIGINAL_CHECKPOINT_ID \
+  --plan /absolute/evidence/reconciliation-plan.json
+```
+
+Repeat `--checkpoint-id` for each selected checkpoint. The exact selection must
+cover the advertised gap catalog; a new source invalidates the plan. Planning
+reads SQLite with `mode=ro` and `query_only`, inspects the peer through SSH and
+writes only the local mode-600 plan. The normalizer inventory exports identities,
+counts and text hashes/lengths, never transcript text. Review the plan SHA256 and
+obtain the FD apply window before running `apply` with the same deployment
+inputs, `--plan-sha256 FULL_PLAN_DIGEST` and
+`--receipt-dir /absolute/owned-peer-evidence/new-reconciliation`.
+
+Apply stops only that peer's configured supported supervisor. It proves the old
+PID is gone, the supervisor cannot auto-restart and no other satellite writer
+exists, then holds an exclusive tool lock. The satellite's fixed `.tmp` saver
+is not protected by that lock; proved supervisor/process exclusion is mandatory.
+If the checkpoint changed between plan and stop, apply refuses and leaves the
+peer stopped. Preserve the evidence and return to FD for a new read-only plan;
+never loop mutation attempts automatically.
+
+Before replacing the checkpoint, apply rechecks the authoritative coordinator
+rows, FD generation and daemon PID/artifact through the same SSH session. It
+archives the old checkpoint, exact replacement and ID mapping in mode-600 files
+under a mode-700 receipt directory. Only unaccepted initial ranges receive fresh
+IDs and starts at the real ACK; original bindings, fixed ends/digests and all
+unselected rows remain unchanged. Replacement is whole-file atomic and fsynced.
+Native appends beyond fixed EOF remain for an ordinary successor range. Lost
+receipts can retry the same prepared replacement; changed receipts or accepted
+progress cannot authorize an older plan.
+
+The tool leaves the satellite **stopped**. FD verifies the applied receipt and
+fresh proof, then resumes the captured supported service with its honest source
+SHA. Normal historical append/dedupe recovers missing events exactly once in the
+original closed lifecycle. Verify durable ingest and ACK/drain, both peers'
+useful delivery and zero gaps before the existing strict pin promotion. No old
+readiness receipt, equality claim or source-SHA relabeling substitutes for that
+proof.
+
+On failure, retain the newest checkpoint, all native files and all receipts.
+Resume only the captured known-good supported component under FD direction.
+Never restore an older checkpoint after possible accepted replay, restore a
+session database, erase ranges/events or resurrect a closed seat. A post-repair
+source rollback must load the newest compatible metadata and dedupe from it.

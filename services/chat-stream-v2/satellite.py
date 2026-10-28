@@ -951,15 +951,40 @@ class Satellite:
             self._chat_gap = 'checkpoint_corrupt'
             log.error('chat recovery gap: %s (%s)', self._chat_gap, type(exc).__name__)
 
+    def _replay_offset(self, tail):
+        """Live delivery may outrun source proof; only this cursor reaches disk."""
+        if not tail.binding:
+            return tail.offset
+        if not hasattr(self, '_chat_ack_offsets'):
+            self._chat_ack_offsets = {}
+        key = tuple(tail.binding.get(k) for k in (*chat_recovery.SOURCE_FIELDS, 'checkpoint_id'))
+        return self._chat_ack_offsets.setdefault(key, tail.offset)
+
+    def _set_replay_offset(self, tail, offset):
+        self._replay_offset(tail)  # lazy initialization for loaded/re-adopted sources
+        key = tuple(tail.binding.get(k) for k in (*chat_recovery.SOURCE_FIELDS, 'checkpoint_id'))
+        self._chat_ack_offsets[key] = offset
+
+    def _retain_chat_tail(self, tail):
+        # Retire before either disappearance or identity rebind. Never freeze a
+        # range from a delivery cursor whose source binding was refused.
+        tail.offset = self._replay_offset(tail)
+        key = tuple(tail.binding.get(k) for k in (*chat_recovery.SOURCE_FIELDS, 'checkpoint_id'))
+        self._chat_ack_offsets.pop(key, None)
+        self._recovering[tail.binding['checkpoint_id']] = tail
+
     def _save_chat_checkpoint(self):
         if getattr(self, '_chat_gap', ''):
             return
         from dataclasses import asdict
         sources = []
-        for tail in [*self._recovering.values(), *self._tails.values()]:
+        for tail, live in [*((t, False) for t in self._recovering.values()),
+                           *((t, True) for t in self._tails.values())]:
             if not tail.path:
                 continue
             item = asdict(tail)
+            if live and tail.binding:
+                item['offset'] = self._replay_offset(tail)
             item['provenance_state'] = {}
             sources.append(item)
         data = {'version': 1, 'host': self.config.host, 'sources': sources}
@@ -1067,7 +1092,7 @@ class Satellite:
                 'file_digest': self._source_file_identity_digest(tail.path),
                 'pane_pid': tail.source_pane_pid, 'generation': fence['session_generation'],
                 'session_created_at': fence['session_created_at'],
-                'start_offset': tail.offset, 'next_offset': next_offset}
+                'start_offset': self._replay_offset(tail), 'next_offset': next_offset}
 
     def _collect(
         self,
@@ -1112,6 +1137,7 @@ class Satellite:
                     and not tail.partial_tail_bytes
                     and fence.get('session_generation') == tail.binding.get('generation')
                     and str(pane.pane_pid or '') == tail.source_pane_pid):
+                self._set_replay_offset(tail, tail.offset)
                 self._tails[tail.session_name] = tail
                 self._recovering.pop(key)
         # Retain only already-discovered native sources. A closed name never
@@ -1119,7 +1145,7 @@ class Satellite:
         for name, tail in list(self._tails.items()):
             if name not in discovered:
                 if tail.binding:
-                    self._recovering[tail.binding['checkpoint_id']] = tail
+                    self._retain_chat_tail(tail)
                 self._tails.pop(name, None)
 
         budget = cfg.max_events_per_pass
@@ -1161,7 +1187,7 @@ class Satellite:
             if st.binding and (st.path != path or st.source_pane_pid != str(pane.pane_pid or '')
                     or (fence.get('session_generation') and
                         fence['session_generation'] != st.binding['generation'])):
-                self._recovering[st.binding['checkpoint_id']] = st
+                self._retain_chat_tail(st)
                 if st.path == path:
                     st = self._tails[name] = _StreamTail(session_name=name, path=path,
                         offset=st.offset, provider_session_id=st.provider_session_id,
@@ -1673,6 +1699,14 @@ class Satellite:
             frame["source_host_proof"] = proof
         self._attach_unfenced(frame)
         self._attach_provenance(frame)
+        from copy import deepcopy
+        sources = []
+        for source in deepcopy(frame.get('chat_sources', [])):
+            tail = self._tails.get(source.get('stream_id', '').removeprefix(f'{self.config.host}:'))
+            if tail is not None:
+                sources.append((source, tail, tail.binding.get('checkpoint_id'),
+                                self._replay_offset(tail)))
+        self._inflight_chat_sources = (rid, sources)
         await ws.send(json.dumps(frame))
         # Read frames until our reply arrives; the daemon fans broadcasts (incl.
         # our own chat.event echoes) to every client — those are ignored here.
@@ -1778,7 +1812,12 @@ class Satellite:
                 and stream_id not in usage_rejected_streams
                 and st.path in high_water
             ):
+                self._replay_offset(st)
                 st.offset = high_water[st.path]
+        rid, sent = getattr(self, '_inflight_chat_sources', (None, []))
+        if ack.get('request_id') != rid:
+            sent = []
+        self._inflight_chat_sources = (None, [])
         for binding in ack.get('chat_bindings') or ():
             if not isinstance(binding, dict):
                 continue
@@ -1786,10 +1825,38 @@ class Satellite:
                 log.error('chat checkpoint refused stream=%s reason=%s',
                           binding.get('stream_id'), binding.get('status'))
                 continue
-            name = binding['stream_id'].removeprefix(f'{self.config.host}:')
-            tail = self._tails.get(name)
-            if tail is not None and binding.get('native_session_id') == tail.provider_session_id:
+            stream_id = binding.get('stream_id', '')
+            if stream_id in dropped_streams:
+                continue
+            for source, tail, token, replay in sent:
+                name = stream_id.removeprefix(f'{self.config.host}:')
+                if (self._tails.get(name) is not tail
+                        or any(binding.get(k) != source.get(k) for k in chat_recovery.SOURCE_FIELDS)
+                        or tail.provider_session_id != source.get('native_session_id')
+                        or tail.provider != source.get('provider')
+                        or tail.source_pane_pid != source.get('pane_pid')
+                        or tail.binding.get('checkpoint_id') != token
+                        or (token and binding.get('checkpoint_id') != token)
+                        or not isinstance(binding.get('checkpoint_id'), str)
+                        or chat_recovery.HEX32.fullmatch(binding['checkpoint_id']) is None
+                        or source.get('start_offset') != replay
+                        or (token and self._replay_offset(tail) != replay)):
+                    continue
+                fence = self._usage_fences.get(stream_id) or {}
+                if (fence.get('session_generation') != source.get('generation')
+                        or fence.get('session_created_at') != source.get('session_created_at')):
+                    continue
+                try:
+                    if self._source_file_identity_digest(tail.path) != source.get('file_digest'):
+                        continue
+                except OSError:
+                    continue
                 tail.binding = {key: value for key, value in binding.items() if key != 'status'}
+                # A source binding remains useful proof even when independent
+                # usage admission keeps delivery behind. Conservatively replay
+                # from the lesser proven prefix; never outrun delivery.
+                self._set_replay_offset(tail, min(source['next_offset'], tail.offset))
+                break
         for result in ack.get('chat_recovery') or ():
             if (result.get('checkpoint_id') in refused_recovery_tokens
                     or result.get('stream_id') in refused_recovery_streams):
