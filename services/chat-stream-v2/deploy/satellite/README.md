@@ -392,6 +392,13 @@ Native appends beyond fixed EOF remain for an ordinary successor range. Lost
 receipts can retry the same prepared replacement; changed receipts or accepted
 progress cannot authorize an older plan.
 
+An interruption after receipt-directory creation but before `prepared.json`
+refuses a retry in that incomplete directory, before checkpoint replacement.
+Preserve the incomplete evidence. Under FD direction, verify that the checkpoint
+and authoritative rows still match the plan, then use a fresh receipt directory.
+Do not delete the incomplete receipt or infer that a later interruption is safe
+to rewind.
+
 The tool leaves the satellite **stopped**. FD verifies the applied receipt and
 fresh proof, then resumes the captured supported service with its honest source
 SHA. Normal historical append/dedupe recovers missing events exactly once in the

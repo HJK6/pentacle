@@ -1187,10 +1187,11 @@ class Satellite:
             if st.binding and (st.path != path or st.source_pane_pid != str(pane.pane_pid or '')
                     or (fence.get('session_generation') and
                         fence['session_generation'] != st.binding['generation'])):
+                delivery_offset = st.offset
                 self._retain_chat_tail(st)
                 if st.path == path:
                     st = self._tails[name] = _StreamTail(session_name=name, path=path,
-                        offset=st.offset, provider_session_id=st.provider_session_id,
+                        offset=delivery_offset, provider_session_id=st.provider_session_id,
                         provider=st.provider, source_pane_pid=str(pane.pane_pid or ''), primed=True)
                 else:
                     st = self._tails[name] = _StreamTail(session_name=name)

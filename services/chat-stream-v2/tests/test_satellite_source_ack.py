@@ -231,6 +231,7 @@ def test_readoption_and_same_path_rebind_keep_original_replay_cursor(tmp_path):
             assert old.offset == parent_end < delivery
             assert sat._tails['seat'] is not old
             assert not sat._tails['seat'].binding
+            assert sat._tails['seat'].offset == delivery
             assert_7dd_load(tmp_path / 'chat.json')
         finally:
             store.stop()

@@ -139,6 +139,7 @@ def checkpoint_bytes(path):
 
 def source_facts(source, cp, host):
     """Read original bytes twice, export identities/counts only, never text."""
+    require(cp['provider'] in ('claude', 'codex'), 'unsupported provider')
     import chat_recovery
     from claude_jsonl_norm import normalize_claude_jsonl_records_grouped
     from codex_rollout_norm import normalize_codex_rollout_records_grouped

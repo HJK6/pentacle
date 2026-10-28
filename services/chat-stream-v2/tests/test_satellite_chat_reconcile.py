@@ -72,6 +72,22 @@ def authority(state):
     return check
 
 
+def test_plan_refuses_unsupported_provider(retained, monkeypatch):
+    import claude_jsonl_norm
+
+    def unexpected_normalization(*args, **kwargs):
+        raise AssertionError('unsupported provider reached Claude normalization')
+
+    monkeypatch.setattr(claude_jsonl_norm, 'normalize_claude_jsonl_records_grouped',
+                        unexpected_normalization)
+    state = retained
+    source = json.loads(state['checkpoint'].read_bytes())['sources'][0]
+    cp = {**state['rows'][state['token']]['checkpoint'], 'provider': 'unsupported'}
+    source['provider'] = source['binding']['provider'] = 'unsupported'
+    with pytest.raises(ValueError):
+        repair.source_facts(source, cp, HOST)
+
+
 def test_plan_apply_replay_and_7dd_compatibility(retained, tmp_path):
     state = retained
     old = state['checkpoint'].read_bytes()
