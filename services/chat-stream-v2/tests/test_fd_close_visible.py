@@ -67,8 +67,8 @@ def test_fd_close_is_audited_without_lifecycle_or_custody_change():
 @pytest.mark.parametrize("case,code", [
     ("ordinary", "close_unauthorized"), ("stale_fd", "close_unauthorized"),
     ("closed_fd", "close_unauthorized"), ("unverified", "close_unauthorized"),
-    ("forged", "close_unauthorized"), ("hidden", "fd_close_target_ineligible"),
-    ("parented", "fd_close_target_ineligible"), ("handoff", "fd_close_target_ineligible"),
+    ("forged", "close_unauthorized"), ("hidden", "close_unauthorized"),
+    ("parented", "close_unauthorized"), ("handoff", "close_unauthorized"),
     ("protected", "close_protected"), ("missing_reason", "lifecycle_reason_required"),
     ("default_reason", "lifecycle_reason_required"), ("missing_request", "lifecycle_request_id_required"),
     ("generation", "lifecycle_generation_mismatch"), ("child", "close_live_children"),
@@ -161,7 +161,7 @@ def test_unavailable_authoritative_state_never_kills(failure):
 
 @pytest.mark.parametrize("change,code", [("binding", "fd_close_authority_required"),
     ("fd_generation", "fd_close_authority_required"), ("target_generation", "lifecycle_generation_mismatch"),
-    ("shape", "fd_close_target_ineligible"), ("lane", "close_operator_lane_protected")])
+    ("shape", "close_unauthorized"), ("lane", "close_operator_lane_protected")])
 def test_admission_rechecks_after_preliminary_authorization(change, code):
     async def run(env):
         auth = await setup(env)

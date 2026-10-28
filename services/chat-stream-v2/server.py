@@ -5633,7 +5633,8 @@ class Server:
         if (row.get("status") != "open" or row.get("parent_stream_id")
                 or row.get("handoff_from_stream_id")
                 or (row.get("visibility") or "default") not in {"default", "visible"}):
-            raise VerbError("fd_close_target_ineligible", "FD exception requires a top-level visible kickoff seat")
+            raise VerbError("close_unauthorized",
+                            "close requires a verified self, direct-parent, or authenticated operator")
         # All ownership mutations share Sessions' graph fence. An unavailable
         # authoritative read propagates before admission; it cannot grant close.
         for lane in await self.store.work_lane_rows():
