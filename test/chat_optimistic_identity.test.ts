@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ChatStoreController, type ChatSendBridge } from '../renderer/src/chat_store_controller';
+import { renderTranscriptItemHtml } from '../renderer/src/shared_transcript_view';
 
 const STREAM = 'peer:ordinary-chat';
 const COMPOSITE = 'peer:assistant';
@@ -98,4 +99,68 @@ test('ordinary retry and reconnect keep the input identity while old RPC receipt
   assert.equal(replay.length, 2, 'eligible reconnect replay is dispatched');
   assert.equal(replay[1].optimisticId, replayId);
   assert.equal(replay[1].requestId, requestId, 'reconnect preserves the current request identity');
+});
+
+for (const reason of ['server_overloaded', 'Request is already pending', 'unavailable', 'socket closed']) {
+ test('indeterminate reconciliation keeps original identity after '+reason, async t => {
+  const controller=store(t); const sends: Parameters<ChatSendBridge>[0][]=[];
+  controller.setSendBridge(async args=>{sends.push(args);return {ok:false,error:sends.length===1?'socket closed':reason};});
+  const id=controller.sendTurn(STREAM,'uncertain original');await flush();
+  const original=sends[0]; assert.equal(controller.getState().optimisticSends?.[id].status,'indeterminate');
+  const future=Date.now()+61000;t.mock.method(Date,'now',()=>future); // age is irrelevant to the identity branch
+  assert.equal(controller.retryOptimisticSend(id),true);
+  assert.equal(controller.retryOptimisticSend(id),false,'concurrent click is guarded');await flush();
+  assert.deepEqual(sends[1],original,'frozen original payload and IDs');
+  assert.equal(controller.getState().optimisticSends?.[id].status,'indeterminate');
+  assert.equal(controller.retryOptimisticSend(id),true);await flush();assert.deepEqual(sends[2],original);
+  controller.applyFrame({type:'send.result',request_id:original.requestId,delivery:'landed',provider_queued:true});
+  assert.equal(controller.getState().optimisticSends?.[id].status,'acked');
+  assert.equal(controller.retryOptimisticSend(id),false);
+  controller.sendTurn(STREAM,'uncertain original');await flush();
+  assert.notEqual(sends.at(-1)?.requestId,original.requestId);assert.notEqual(sends.at(-1)?.optimisticId,id);
+ });
+}
+test('an indeterminate original RPC still pending is joined without a second dispatch',async t=>{
+ const controller=store(t);const sends: Parameters<ChatSendBridge>[0][]=[];let finish: (value:{ok:true})=>void=()=>{};
+ controller.setSendBridge(args=>{sends.push(args);return new Promise(resolve=>{finish=resolve;});});
+ const id=controller.sendTurn(STREAM,'original pending');await flush();
+ controller.applyFrame({type:'send.indeterminate',request_id:sends[0].requestId});
+ controller.retryOptimisticSend(id);controller.retryOptimisticSend(id);await flush();
+ assert.equal(sends.length,1);assert.equal(controller.getState().optimisticSends?.[id].status,'indeterminate');
+ controller.applyFrame({type:'send.result',request_id:sends[0].requestId,delivery:'landed'});finish({ok:true});await flush();
+ assert.equal(controller.getState().optimisticSends?.[id].status,'acked');
+});
+
+test('a late receipt wins over a later rejection of the original uncertain RPC',async t=>{
+ const controller=store(t);const sends: Parameters<ChatSendBridge>[0][]=[];let reject:(error:Error)=>void=()=>{};
+ controller.setSendBridge(args=>{sends.push(args);return new Promise((_,fail)=>{reject=fail;});});
+ const id=controller.sendTurn(STREAM,'late ACK');await flush();
+ controller.applyFrame({type:'send.indeterminate',request_id:sends[0].requestId});
+ assert.equal(controller.retryOptimisticSend(id),false);
+ controller.applyFrame({type:'send.result',request_id:sends[0].requestId,delivery:'landed'});
+ reject(new Error('socket closed'));await flush();
+ assert.equal(controller.getState().optimisticSends?.[id].status,'acked');
+ assert.equal(controller.retryOptimisticSend(id),false);assert.equal(sends.length,1);
+});
+
+test('uncertain row offers a truthful rendered Retry for same-ID reconciliation',async t=>{
+ const controller=store(t);let request='';controller.setSendBridge(async args=>{request=args.requestId;return {ok:false,error:'socket closed'};});
+ const id=controller.sendTurn(STREAM,'uncertain visible action');await flush();
+ assert.equal(controller.getState().optimisticSends?.[id].status,'indeterminate');
+ const row=controller.selectSessionDetail(STREAM).transcriptItems.find(row=>row.optimisticId===id)!;
+ assert.equal(row.sendState,'indeterminate');const html=renderTranscriptItemHtml(row);
+ assert.match(html,/Delivery uncertain/);assert.match(html,/slot-chat-send-retry/);assert.doesNotMatch(html,/Failed to send/);
+ controller.applyFrame({type:'send.result',request_id:request,delivery:'landed'});
+ const settled=controller.selectSessionDetail(STREAM).transcriptItems.find(row=>row.optimisticId===id)!;
+ assert.doesNotMatch(renderTranscriptItemHtml(settled),/slot-chat-send-retry/);
+});
+
+for(const target of [STREAM,COMPOSITE])test('uncertain Retry retains attachment, reply and voice provenance: '+target,async t=>{
+ const controller=store(t);const sends: Parameters<ChatSendBridge>[0][]=[];
+ controller.setSendBridge(async args=>{sends.push(args);return {ok:false,error:'socket closed'};});
+ const id=controller.sendTurn(target,'Read /tmp/legitimate-operator-note',[{key:'a'.repeat(64),mime:'text/plain',size:4}],{
+  reply_to_message_id:'original-message',reply_to_question_id:'original-question',meta:{voice:{duration_s:0}}});
+ await flush();assert.equal(controller.retryOptimisticSend(id),true);await flush();
+ assert.deepEqual(sends[1],sends[0]);assert.equal(sends[1].text,'Read /tmp/legitimate-operator-note');
+ assert.equal(sends[1].replyToMessageId,'original-message');assert.equal(sends[1].attachments?.length,1);
 });
