@@ -357,7 +357,7 @@ def test_cli_plan_apply_and_current_fd_fences(retained, tmp_path, monkeypatch, c
             from v2_runtime import primary_assistant_name
             conn.execute('INSERT OR REPLACE INTO v2_assistant_direct_binding '
                          '(name,stream_id,generation,revision,updated_at) VALUES (?,?,?,?,?)',
-                         (primary_assistant_name(), HOST + ':' + fd_name, fd['session_generation'], 1, 'fixture'))
+                         ('runtime-primary', HOST + ':' + fd_name, fd['session_generation'], 1, 'fixture'))
             conn.commit()
         await state['store'].submit(bind)
         await state['store'].put('event_push.runtime.' + HOST, json.dumps({
@@ -367,7 +367,9 @@ def test_cli_plan_apply_and_current_fd_fences(retained, tmp_path, monkeypatch, c
     fd = asyncio.run(configure())
     monkeypatch.setattr(machines, 'load_machines', lambda: [SimpleNamespace(name=HOST, ssh_target='fixture-peer')])
     monkeypatch.setattr(repair, 'run', lambda args: '' if '--porcelain' in args else TARGET)
-    daemon = {'checkout': str(tmp_path / 'daemon'), 'sha': TARGET, 'pid': os.getpid(), 'birth': 'fixture'}
+    monkeypatch.setenv('PENTACLE_ASSISTANT_PRIMARY_NAME', 'different-developer-default')
+    daemon = {'checkout': str(tmp_path / 'daemon'), 'sha': TARGET, 'pid': os.getpid(), 'birth': 'fixture',
+              'assistant_name': 'runtime-primary'}
     monkeypatch.setattr(repair, 'daemon_identity', lambda path, db: daemon)
     peer_service = {'checkout': str(tmp_path), 'sha': TARGET, 'checkpoint_path': str(state['checkpoint']),
                     'pid': os.getpid(), 'birth': 'fixture', 'stopped': False}
@@ -474,13 +476,15 @@ def test_daemon_proof_refuses_a_database_copy_or_stale_loaded_arguments(tmp_path
     db.write_bytes(b'placeholder database identity')
     args = [str(root / '.venv/bin/python'), '-u', str(root / 'services/chat-stream-v2/main.py'), '--db', str(db)]
     definition = tmp_path / 'daemon.plist'
-    definition.write_bytes(plistlib.dumps({'ProgramArguments': args}))
+    definition.write_bytes(plistlib.dumps({'ProgramArguments': args,
+        'EnvironmentVariables': {'PENTACLE_ASSISTANT_PRIMARY_NAME': 'runtime-primary'}}))
     monkeypatch.setattr(deploy, '_launchd_plist_path', lambda label: definition)
     monkeypatch.setattr(deploy, '_launchd_state', lambda label, runner: SimpleNamespace(pid=os.getpid()))
     actual_argv = ['python ' + ' '.join(args[1:])]
     monkeypatch.setattr(repair, 'run', lambda argv: actual_argv[0] if argv[0] == 'ps' else TARGET)
     observed = repair.daemon_identity(root, db)
     assert observed['database']['inode'] == db.stat().st_ino
+    assert observed['assistant_name'] == 'runtime-primary'
     copied = tmp_path / 'copy.db'
     copied.write_bytes(db.read_bytes())
     with pytest.raises(ValueError, match='supervised daemon database'):

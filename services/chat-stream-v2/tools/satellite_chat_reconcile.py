@@ -88,15 +88,14 @@ def original_rows(conn, host, tokens):
     return result
 
 
-def fd_binding(conn, stream, generation):
+def fd_binding(conn, stream, generation, assistant_name):
     require(re.fullmatch(r'[^: ]+:v2-[^: ]+', stream) and re.fullmatch(r'[0-9a-f]{32}', generation),
             'invalid FD identity')
     bindings = [dict(r) for r in conn.execute('SELECT name,stream_id,generation,revision '
                                              'FROM v2_assistant_direct_binding WHERE stream_id=? '
                                              'AND generation=?', (stream, generation))]
     require(len(bindings) == 1, 'FD binding changed or ambiguous')
-    from v2_runtime import primary_assistant_name
-    require(bindings[0]['name'] == primary_assistant_name(), 'not the current front desk')
+    require(bindings[0]['name'] == assistant_name, 'not the current front desk')
     host, name = stream.split(':', 1)
     row = conn.execute('SELECT s.status,g.generation FROM sessions s JOIN v2_session_generations g '
                        'USING(host,session_name) WHERE host=? AND session_name=?', (host, name)).fetchone()
@@ -571,7 +570,10 @@ def daemon_identity(checkout, db):
     state = _launchd_state(V2_DAEMON_LABEL, runner)
     require(state.pid and state.pid > 0, 'daemon supervisor has no PID')
     definition = _launchd_plist_path(V2_DAEMON_LABEL).read_bytes()
-    arguments = plistlib.loads(definition).get('ProgramArguments') or []
+    configured = plistlib.loads(definition)
+    arguments = configured.get('ProgramArguments') or []
+    from v2_runtime import primary_assistant_name
+    assistant_name = primary_assistant_name(configured.get('EnvironmentVariables') or {})
     _validate_v2_launchd_program(Path(checkout), arguments)
     require(arguments.count('--db') == 1, 'daemon database argument ambiguous')
     configured_db = Path(arguments[arguments.index('--db') + 1])
@@ -584,16 +586,17 @@ def daemon_identity(checkout, db):
     stamp_raw = stamp_path.read_bytes()
     sha = run(['git', '-C', str(checkout), 'rev-parse', 'HEAD'])
     require(json.loads(stamp_raw).get('sha') == sha, 'daemon checkout/stamp mismatch')
-    return {'checkout': str(checkout), 'sha': sha, 'stamp_sha256': digest(stamp_raw),
+    return {'checkout': str(checkout), 'sha': sha, 'assistant_name': assistant_name,
+            'stamp_sha256': digest(stamp_raw),
             'pid': state.pid, 'birth': process_birth(state.pid), 'definition_sha256': digest(definition),
             'argv_sha256': digest(argv.encode()), 'database': {'path': str(configured_db.resolve()),
                 'device': database.st_dev, 'inode': database.st_ino}}
 
 
-def coordinator_snapshot(db, host, tokens, stream, generation):
+def coordinator_snapshot(db, host, tokens, stream, generation, assistant_name):
     with ro_database(db) as conn:
         conn.execute('BEGIN')
-        binding = fd_binding(conn, stream, generation)
+        binding = fd_binding(conn, stream, generation, assistant_name)
         rows = original_rows(conn, host, tokens)
         def kv(key):
             row = conn.execute('SELECT v FROM kv WHERE k=?', (key,)).fetchone()
@@ -633,11 +636,11 @@ def main(argv=None):
     require(not run(['git', '-C', str(service.parents[1]), 'status', '--porcelain']), 'tool checkout must be frozen')
     if args.action == 'plan':
         require(args.checkpoint_id and len(set(args.checkpoint_id)) == len(args.checkpoint_id), 'exact unique source selection required')
-        state = coordinator_snapshot(args.db, args.host, args.checkpoint_id, args.fd_stream, args.fd_generation)
+        daemon = daemon_identity(args.daemon_checkout, args.db)
+        state = coordinator_snapshot(args.db, args.host, args.checkpoint_id, args.fd_stream, args.fd_generation, daemon['assistant_name'])
         selected_streams = {args.host + ':' + p['checkpoint']['session_name'] for p in state['rows'].values()}
         require(selected_streams == {g.get('stream_id') for g in state['gaps']},
                 'exact pending-source catalog required; unknown or omitted gap')
-        daemon = daemon_identity(args.daemon_checkout, args.db)
         peer = peer_call(machines[0], args.peer_python, program, {'action': 'inspect', 'host': args.host,
                          'checkout': str(args.peer_checkout), 'rows': state['rows']})
         runtime = state['peer_runtime']
@@ -657,7 +660,7 @@ def main(argv=None):
         for source in peer['snapshot']['sources']:
             for event in source['events']:
                 event.pop('stored_original', None)
-        require(coordinator_snapshot(args.db, args.host, args.checkpoint_id, args.fd_stream, args.fd_generation) == state,
+        require(coordinator_snapshot(args.db, args.host, args.checkpoint_id, args.fd_stream, args.fd_generation, daemon['assistant_name']) == state,
                 'coordinator changed across plan')
         require(daemon_identity(args.daemon_checkout, args.db) == daemon, 'daemon changed across plan')
         plan = {'version': 1, 'host': args.host, 'tool_sha': tool_sha, 'tool_sha256': digest(program.encode()),
@@ -677,7 +680,7 @@ def main(argv=None):
             and plan['peer']['service']['checkout'] == str(args.peer_checkout)
             and plan['ssh_target'] == machines[0].ssh_target, 'plan execution inputs changed')
     def revalidate():
-        require(coordinator_snapshot(args.db, args.host, list(plan['coordinator']['rows']), args.fd_stream, args.fd_generation)
+        require(coordinator_snapshot(args.db, args.host, list(plan['coordinator']['rows']), args.fd_stream, args.fd_generation, plan['daemon']['assistant_name'])
                 == plan['coordinator'], 'authoritative plan changed')
         require(daemon_identity(args.daemon_checkout, args.db) == plan['daemon'], 'daemon PID/artifact changed')
     revalidate()
