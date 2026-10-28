@@ -1,7 +1,7 @@
 'use strict';
 
 // Drive the real composer and queued-row controls with deterministic bridges.
-// The deployed disposable-provider journey separately proves Escape/queue release.
+// The disposable native-provider journey separately proves work/queue preservation.
 const { WORKSPACE_KEY, waitFor, reloadWith } = require('./workspace_scenario');
 const json = JSON.stringify;
 const probe = cell => `(() => {
@@ -57,20 +57,25 @@ async function agentChatSendDefaultQueueState(ctx) {
     report.ok('a working agent has no chooser and keeps Stop and Send with a draft', !working.mode && working.stop && working.send && !working.sendDisabled, working);
     const sends = await session.eval('window.__normalSends.map(args => ({ text: args.text, urgent: "urgent" in args }))');
     report.ok('Enter and Alt+Enter dispatch immediately without urgent', sends.length === 3 && sends.every(row => !row.urgent), sends);
-    await session.eval(`document.querySelectorAll('#cell-0 .slot-chat-send-now')[1].click(), true`);
-    await waitFor(ctx, 'window.__queueInterrupts.length === 1', 'Send now invokes the interrupt bridge');
-    await session.eval(`document.querySelector('#cell-0 .slot-chat-send-now').click(); document.querySelector('#cell-0 .slot-chat-compose-stop').click(); true`);
-    await cdp.sleep(100);
-    const released = await session.eval(`(() => ({
-      sends: window.__normalSends.length, interrupts: window.__queueInterrupts,
-      draft: document.querySelector('#cell-0 .slot-chat-compose-input').value,
-      queued: document.querySelectorAll('#cell-0 .slot-chat-send-status.is-queued').length,
-      selectedStatus: [...document.querySelectorAll('#cell-0 .slot-chat-row')].find(el => el.textContent.includes('second queued message'))?.querySelector('.slot-chat-send-status')?.textContent,
-      notice: document.querySelector('#cell-0 .slot-chat-compose-notice').textContent,
+    const queued = await session.eval(`(() => ({
+      controls: [...document.querySelectorAll('#cell-0 .slot-chat-send-now')].map(b => ({ disabled: b.disabled, text: b.textContent })),
+      reasons: [...document.querySelectorAll('#cell-0 .slot-chat-send-now-reason')].map(e => e.textContent),
+      urgent: !!document.querySelector('#cell-0 .slot-chat-compose-urgent'),
     }))()`);
-    report.ok('Send now coalesces with other controls, preserves the draft, and never resends', released.sends === 3 && released.interrupts.length === 1 && released.draft === 'keep this unsent draft', released);
-    report.ok('Send now shows the selected row sending with no composer notice', released.queued === 1 && released.selectedStatus === 'sending…' && released.notice === '', released);
-    report.ok('the interrupt carries the selected session generation', typeof released.interrupts[0]?.expectedSessionGeneration === 'string' && released.interrupts[0].expectedSessionGeneration.length > 0, released.interrupts[0]);
+    report.ok('queue acceleration is visibly unavailable with a work-preservation reason',
+      queued.controls.length === 2 && queued.controls.every(b => b.disabled && b.text.includes('unavailable'))
+      && queued.reasons.every(t => /interrupt.*draft.*stays queued/i.test(t)) && !queued.urgent, queued);
+    await session.eval(`document.querySelectorAll('#cell-0 .slot-chat-send-now').forEach(b => { b.click(); b.click(); }); true`);
+    await cdp.sleep(100);
+    const preserved = await session.eval(`({ sends: window.__normalSends.length, interrupts: window.__queueInterrupts.length,
+      draft: document.querySelector('#cell-0 .slot-chat-compose-input').value,
+      queued: document.querySelectorAll('#cell-0 .slot-chat-send-status.is-queued').length })`);
+    report.ok('repeated unavailable controls retain every queued input and the unsent draft', preserved.sends === 3
+      && preserved.interrupts === 0 && preserved.draft === 'keep this unsent draft' && preserved.queued === 2, preserved);
+    // Only explicit Stop may dispatch an interrupt; unavailable sends reserve no budget.
+    await session.eval(`document.querySelector('#cell-0 .slot-chat-compose-stop').click(); true`);
+    await waitFor(ctx, 'window.__queueInterrupts.length === 1', 'explicit Stop still dispatches once');
+    report.ok('Stop retains its generation fence', await session.eval('typeof window.__queueInterrupts[0].expectedSessionGeneration === "string"'), {});
     await session.eval(`(() => {
       window.__normalSends.slice(1).forEach((args, index) => window.PentacleChatStore.applyFrame({ type: 'chat.event', event: {
         daemon_seq: 900001 + index, host: 'local', provider: 'claude', stream_id: ${json(agent)}, session_name: ${json(agent.split(':')[1])},

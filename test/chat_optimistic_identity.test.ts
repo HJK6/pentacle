@@ -169,15 +169,15 @@ function webLoss(epoch: number) {
   return Object.assign(new Error('pentacle web host connection lost'), { code: 'pentacle_web_host_connection_lost', webEpoch: epoch });
 }
 
-test('exact web loss reconciles once per ready web epoch with frozen identity and urgent intent', async t => {
+test('exact web loss reconciles once per ready web epoch with frozen identity and ordinary intake', async t => {
   const c = store(t); const calls: Parameters<ChatSendBridge>[0][] = [];
   c.setSendBridge(async args => { calls.push(args); throw webLoss(calls.length === 1 ? 1 : 2); });
-  const id = c.sendTurn(STREAM, 'urgent payload', [], { urgent: true, reply_to_message_id: 'reply-1' });
+  const id = c.sendTurn(STREAM, 'urgent payload', [], { urgent: true, reply_to_message_id: 'reply-1' } as never);
   c.webHostDisconnected(1); await flush();
   assert.equal(c.getState().optimisticSends?.[id].status, 'indeterminate');
   c.webHostReady(1); await flush(); assert.equal(calls.length, 1, 'same closed epoch is not readiness');
   c.webHostReady(2); c.webHostReady(2); await flush(); await flush();
-  assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(calls[1].urgent, true);
+  assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(Object.hasOwn(calls[1], 'urgent'), false);
   assert.equal(c.getState().optimisticSends?.[id].status, 'indeterminate');
   c.webHostReady(2); await flush(); assert.equal(calls.length, 2, 'no retry loop after failed reconciliation');
   c.applyFrame({ type: 'send.result', request_id: calls[0].requestId, delivery: 'landed', provider_queued: true });
@@ -223,12 +223,12 @@ test('web recovery age bound and dispose keep uncertainty without a stale automa
   c.dispose(); c.webHostReady(3); await flush(); assert.equal(n, 2);
 });
 
-test('urgent is rejected for a composite and ordinary new intents remain separate', async t => {
+test('stale urgency remains ordinary on a composite and new intents remain separate', async t => {
   const c = store(t); const calls: Parameters<ChatSendBridge>[0][] = [];
   c.setSendBridge(async args => { calls.push(args); return { ok: true }; });
-  assert.equal(c.sendTurn(COMPOSITE, 'stale urgent', [], { urgent: true }), '');
+  assert.ok(c.sendTurn(COMPOSITE, 'stale urgent', [], { urgent: true } as never));
   c.sendTurn(STREAM, 'same'); c.sendTurn(COMPOSITE, 'same'); await flush();
-  assert.equal(calls.length, 2); assert.notEqual(calls[0].requestId, calls[1].requestId);
+  assert.equal(calls.length, 3); assert.equal(new Set(calls.map(c => c.requestId)).size, 3);
   assert.ok(calls.every(c => !Object.hasOwn(c, 'urgent')));
 });
 
@@ -264,7 +264,7 @@ test('caller attachment and voice mutation cannot change a web recovery payload'
   const c = store(t); const calls: Parameters<ChatSendBridge>[0][] = [];
   c.setSendBridge(async args => { calls.push(structuredClone(args)); if (calls.length === 1) throw webLoss(1); return { ok: true }; });
   const attachments = [{ key: 'original-key', mime: 'image/png' }]; const meta = { voice: { duration_s: 4 } };
-  c.sendTurn(STREAM, 'freeze', attachments, { meta, urgent: true, reply_to_message_id: 'message-1', reply_to_question_id: 'question-1' });
+  c.sendTurn(STREAM, 'freeze', attachments, { meta, reply_to_message_id: 'message-1', reply_to_question_id: 'question-1' });
   c.webHostDisconnected(1); await flush(); attachments[0].key = 'mutated'; meta.voice.duration_s = 8;
   c.webHostReady(2); await flush(); assert.deepEqual(calls[1], calls[0]);
 });
