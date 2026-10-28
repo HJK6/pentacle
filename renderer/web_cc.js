@@ -54,6 +54,9 @@ function createTransport({ url, logger = console } = {}) {
   let closed = false;
   let hasOpenedBefore = false;
   let reconnectHandler = null;
+  let disconnectHandler = null;
+  let epoch = 0;
+  let reconnectTimer = null;
 
   function flush() {
     while (queued.length && socket && socket.readyState === WebSocket.OPEN) {
@@ -62,7 +65,7 @@ function createTransport({ url, logger = console } = {}) {
   }
 
   function rejectAllPending(reason) {
-    for (const [, entry] of pending) entry.reject(new Error(reason));
+    for (const [, entry] of pending) entry.reject(Object.assign(new Error(reason), { code: 'pentacle_web_host_connection_lost', webEpoch: epoch }));
     // A caller told its request failed must never see it sent later: drop its
     // queued frame too. Send-mode frames carry no id and stay queued.
     for (let i = queued.length - 1; i >= 0; i -= 1) {
@@ -73,8 +76,11 @@ function createTransport({ url, logger = console } = {}) {
 
   function connect() {
     if (closed) return;
-    socket = new WebSocket(url);
-    socket.addEventListener('open', () => {
+    const current = new WebSocket(url);
+    socket = current;
+    epoch += 1;
+    current.addEventListener('open', () => {
+      if (socket !== current || closed) return;
       attempt = 0;
       flush();
       // A RE-open means the /cc host went away and came back — e.g. the web host
@@ -84,11 +90,12 @@ function createTransport({ url, logger = console } = {}) {
       // re-enable the input. The FIRST open is the initial connect, already
       // covered by the app's startup snapshot pull, so it is skipped.
       if (hasOpenedBefore && reconnectHandler) {
-        try { reconnectHandler(); } catch (e) { logger.warn('[web] reconnect handler threw:', e); }
+        try { reconnectHandler({ epoch }); } catch (e) { logger.warn('[web] reconnect handler threw:', e); }
       }
       hasOpenedBefore = true;
     });
-    socket.addEventListener('message', (event) => {
+    current.addEventListener('message', (event) => {
+      if (socket !== current || closed) return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message && message.event) {
@@ -104,7 +111,8 @@ function createTransport({ url, logger = console } = {}) {
       if (message.ok) entry.resolve(message.result);
       else entry.reject(Object.assign(new Error(message.error?.message || 'request failed'), { code: message.error?.code }));
     });
-    socket.addEventListener('close', () => {
+    current.addEventListener('close', () => {
+      if (socket !== current) return;
       // A dropped socket can never answer; failing fast beats a hung promise.
       if (typeof window !== 'undefined') {
         window.hostedDashboardPolicy = null;
@@ -112,19 +120,21 @@ function createTransport({ url, logger = console } = {}) {
         window.dispatchEvent(new window.Event('pentacle:hosted-dashboard-invalidate'));
       }
       rejectAllPending('pentacle web host connection lost');
+      try { disconnectHandler?.({ epoch }); } catch (e) { logger.warn('[web] disconnect handler threw:', e); }
       // Auth material never survives a connection loss or enters the replay queue.
       try { listeners.get('provider-relogin:state')?.({ state: 'disconnected' }); } catch {}
       if (closed) return;
       const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** attempt++);
-      setTimeout(connect, delay);
+      reconnectTimer = setTimeout(connect, delay);
     });
-    socket.addEventListener('error', () => { try { socket.close(); } catch {} });
+    current.addEventListener('error', () => { try { current.close(); } catch {} });
   }
 
   connect();
 
   return {
     get socket() { return socket; },
+    get connectionState() { return { epoch, open: !closed && socket?.readyState === WebSocket.OPEN }; },
     /** invoke-mode: resolves with the handler's return value. */
     call(method, ...args) {
       const id = nextId++;
@@ -159,6 +169,7 @@ function createTransport({ url, logger = console } = {}) {
      * `window.cc.onReconnect?.(…)` is a no-op on the desktop.
      */
     onReconnect(handler) { reconnectHandler = handler; },
+    onDisconnect(handler) { disconnectHandler = handler; },
     /**
      * Deliver an event to the local listener as if the host had pushed it. The
      * web context menu uses this to fire `assign-slot`/`action` — on the desktop
@@ -170,7 +181,7 @@ function createTransport({ url, logger = console } = {}) {
       if (!handler) return;
       try { handler(...args); } catch (e) { logger.warn(`[web] ${event} handler threw:`, e); }
     },
-    close() { closed = true; try { socket && socket.close(); } catch {} },
+    close() { closed = true; clearTimeout(reconnectTimer); try { socket && socket.close(); } catch {} },
   };
 }
 
@@ -392,6 +403,8 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     // a web host restart). app.js uses it to re-pull chat-stream state so the
     // input re-enables and inventory re-syncs without a manual reload.
     onReconnect: (callback) => transport.onReconnect(callback),
+    onDisconnect: (callback) => transport.onDisconnect?.(callback),
+    webConnectionState: () => transport.connectionState,
     chatClose: (hostId, sessionName, options) => call('chat-stream:close', hostId || 'local', sessionName, options || null),
 
     chatKill: (args) => call('chat-stream:kill', args || {}),

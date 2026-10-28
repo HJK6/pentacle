@@ -216,3 +216,10 @@ test(`selection-release deferred commit refreshes ${eligibility} queued-row read
   assert.equal(button.disabled, eligibility !== 'ready');
 });
 }
+
+test('an explicit urgent action cannot dispatch a stale composite target', async () => {
+  const start=app.indexOf('async function sendChatComposer('),end=app.indexOf('\nfunction renderSlotReply',start);
+  const context=vm.createContext({isCompositeSlot:()=>true});vm.runInContext(app.slice(start,end),context);
+  // The composite exclusion runs before touching a draft or any bridge.
+  await context.sendChatComposer(0,{urgent:true});
+});
