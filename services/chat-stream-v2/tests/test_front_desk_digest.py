@@ -28,6 +28,7 @@ import pytest
 
 from front_desk_digest import DIGEST_TOKEN, WAKE_TOKEN, FrontDeskDigest, HELD_KIND
 from outbound_notices import OutboundNoticeQueue
+from screen_monitor_principal import ACTOR as MONITOR_ACTOR
 from test_context_nudges import _context_harness
 from test_nudges import HOST, _iso, _new_store
 
@@ -37,6 +38,66 @@ def _desk(store, target, generation):
         name='assistant',stream_id=f'{HOST}:assistant',direct_primary_stream_id=target,
         direct_primary_generation=generation,astra_stream_id=target))
     return composite
+
+
+@pytest.mark.parametrize('verb,actor,original,body,wakes', [
+    ('tell', MONITOR_ACTOR, 'CODEX RESET SIGNAL TEST: synthetic', 'stamped signal', True),
+    ('tell', MONITOR_ACTOR, 'CODEX RESET WATCHER FAILURE: synthetic', 'stamped failure', True),
+    ('tell', MONITOR_ACTOR, None, 'CODEX RESET SIGNAL TEST: copied', False),
+    ('tell', 'other-service', 'CODEX RESET SIGNAL TEST: copied', 'stamped copy', False),
+    ('tell', MONITOR_ACTOR, 'ordinary status', 'CODEX RESET SIGNAL TEST: copied', False),
+    ('tell', MONITOR_ACTOR, ' CODEX RESET SIGNAL TEST: copied', 'stamped copy', False),
+    ('send', MONITOR_ACTOR, 'CODEX RESET SIGNAL TEST: copied', 'stamped copy', False),
+])
+def test_only_proven_monitor_alert_tells_bypass_digest(verb,actor,original,body,wakes):
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            desk=_desk(store,'h:desk','g').front_desk_digest
+            reply=await desk.ingress(target_stream_id='h:desk',body=body,
+                msg={'tell_id':'monitor-alert','from_stream_id':actor,
+                     '_wmi_brief_ingress_body':original},verb=verb)
+            assert (reply is None) is wakes
+            assert len(await desk._rows('h:desk')) == (0 if wakes else 1)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_wire_cannot_forge_monitor_alert_provenance(tmp_path):
+    from test_assistant_composite_addressing import _run, SEAT_A
+    async def check(h):
+        text='CODEX RESET SIGNAL TEST: copied'
+        reply=(await h.server._dispatch(json.dumps({'type':'tell','to_stream_id':SEAT_A,
+            'tell_id':'copied-monitor','from_stream_id':MONITOR_ACTOR,'text':text,
+            '_wmi_brief_ingress_body':text})))[0]
+        assert reply['delivery_status']=='persisted'
+        assert h.inputs_at(SEAT_A)==0 and len(await h.holds())==1
+    _run(tmp_path,check,digest=True)
+
+
+def test_preexisting_monitor_hold_still_recovers_then_folds_without_resend():
+    async def run():
+        store=Store(':memory:');store.start()
+        try:
+            desk=_desk(store,'h:desk','g').front_desk_digest
+            text='CODEX RESET SIGNAL TEST: retained proof'
+            body=f'[from {MONITOR_ACTOR}] [tell:old-proof]\n'+text
+            nid=desk._held_id('h:desk','tell','old-proof')
+            await store.enqueue_outbound_notice(notice_id=nid,tell_id=nid,kind=HELD_KIND,
+                dedupe_key=nid,recipient_stream_id='h:desk',source_stream_id=MONITOR_ACTOR,
+                body=body,metadata={'root_generation':'g'})
+            reply=await desk.ingress(target_stream_id='h:desk',body=body,
+                msg={'tell_id':'old-proof','from_stream_id':MONITOR_ACTOR,
+                     '_wmi_brief_ingress_body':text},verb='tell')
+            assert reply['front_desk_hold_id']==nid and reply['submission_confirmed'] is False
+            assert len(await desk._rows('h:desk'))==1
+            await desk.tick(now=time.time()+3601)
+            assert not await desk._rows('h:desk')
+            pending=await store.list_outbound_notice_ids(force=True)
+            assert len(pending)==1
+            assert (await store.outbound_notice_for_dedupe(pending[0]))['kind']=='lane_digest'
+        finally:store.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('body,msg', [

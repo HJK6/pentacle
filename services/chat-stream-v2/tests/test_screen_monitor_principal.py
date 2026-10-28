@@ -59,14 +59,16 @@ def test_revoked_or_unreadable_token_never_falls_back_to_local_operator(credenti
     asyncio.run(run())
 
 
-def test_monitor_tell_resolves_current_composite_and_cannot_target_a_seat(credentials,tmp_path,monkeypatch):
+@pytest.mark.parametrize('alert_text', ['CODEX RESET SIGNAL TEST: no reset is being announced',
+                                  'CODEX RESET WATCHER FAILURE: synthetic source unavailable'])
+def test_monitor_tell_resolves_current_composite_and_cannot_target_a_seat(credentials,tmp_path,monkeypatch,alert_text):
     from test_assistant_composite_addressing import _run,COMPOSITE_CHAT,SEAT_A,SEAT_B
     monkeypatch.setenv('PENTACLE_CODEX_RESET_MONITOR_COMPOSITE',COMPOSITE_CHAT)
     async def check(h):
         p=Peer('127.0.0.1')
         async def call(kind,**kw):return (await h.server._dispatch(json.dumps(frame(kind,**kw)),websocket=p))[0]
         assert (await call('hello',subscribe={'snapshot':False,'mode':'rpc'}))['type']=='ready'
-        payload={'text':'CODEX RESET SIGNAL TEST: no reset is being announced','ttl_seconds':3600,'sanitize':True}
+        payload={'text':alert_text,'ttl_seconds':3600,'sanitize':True}
         first=await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-one',**payload)
         assert first['type']=='tell.ok' and h.inputs_at(SEAT_A)==1,first
         await h.move_to_b()
@@ -74,8 +76,9 @@ def test_monitor_tell_resolves_current_composite_and_cannot_target_a_seat(creden
         assert second['type']=='tell.ok' and h.inputs_at(SEAT_B)==1,second
         await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-two',**payload)
         assert h.inputs_at(SEAT_B)==1
+        assert not await h.holds()
         for target in [SEAT_A,SEAT_B,'assistant','other:assistant']:
             assert (await call('tell',to_stream_id=target,tell_id='monitor-invalid',**payload))['error_code']=='system_producer_payload_invalid'
         for text in ['arbitrary instructions','CODEX RESET SIGNAL TEST: '+('x'*3000)]:
             assert (await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-badbody',text=text,ttl_seconds=3600,sanitize=True))['error_code']=='system_producer_payload_invalid'
-    _run(tmp_path,check)
+    _run(tmp_path,check,digest=True)
