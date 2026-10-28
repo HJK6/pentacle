@@ -452,6 +452,11 @@ def service_snapshot(checkout, host):
         command_safe = {}
         if arguments and arguments[0] == '/usr/bin/env':
             arguments = arguments[1:]
+            while arguments and arguments[0] == '-u':
+                require(len(arguments) >= 2 and re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', arguments[1]),
+                        'invalid launcher unset')
+                safe.pop(arguments[1], None)
+                arguments = arguments[2:]
             while arguments and '=' in arguments[0]:
                 key, value = arguments.pop(0).split('=', 1)
                 require(re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', key), 'invalid launcher environment')

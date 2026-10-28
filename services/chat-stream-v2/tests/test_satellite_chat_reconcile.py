@@ -512,7 +512,7 @@ def test_supported_systemd_configuration_and_writer_exclusion(tmp_path, monkeypa
     def command(args):
         if args[0] == 'systemctl':
             return '\n'.join(['MainPID=0', 'ActiveState=inactive', 'FragmentPath=' + str(definition),
-                'ExecStart={ path=/usr/bin/env ; argv[]=/usr/bin/env PENTACLE_SATELLITE_CHECKOUT=' + str(root) + ' '
+                'ExecStart={ path=/usr/bin/env ; argv[]=/usr/bin/env -u PENTACLE_SATELLITE_NO_AUTOUPDATE PENTACLE_SATELLITE_CHECKOUT=' + str(root) + ' '
                 + str(root / '.venv/bin/python') + ' ' + str(root / 'services/chat-stream-v2/satellite.py')
                 + ' ; ignore_errors=no ; start_time=fixture }',
                 'EnvironmentFiles=' + str(env) + ' (ignore_errors=no)',
