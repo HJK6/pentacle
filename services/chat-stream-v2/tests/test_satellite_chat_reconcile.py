@@ -142,8 +142,11 @@ def test_changed_plan_or_native_source_never_writes(retained, tmp_path, fault):
         state['path'].write_bytes(data)
     elif fault == 'replace':
         old = state['path'].read_bytes()
-        state['path'].unlink()
+        original = state['path'].stat()
+        state['path'].rename(tmp_path / 'retained-native-preimage.jsonl')
         state['path'].write_bytes(old)
+        replacement = state['path'].stat()
+        assert (replacement.st_dev, replacement.st_ino) != (original.st_dev, original.st_ino)
     elif fault == 'truncate':
         state['path'].write_bytes(b'{}\n')
     elif fault == 'mode':
