@@ -17,7 +17,7 @@ from agent_orch import cli, config, send_boundary as b, wsclient as w
 from send_boundary_capture import Connection, Socket, ENVELOPE, NONCE
 
 
-@pytest.mark.parametrize("values", list(product([None, "fixture:seat", "altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader"], repeat=4)))
+@pytest.mark.parametrize("values", list(product([None, "fixture:seat", "altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader", "codex-reset-monitor"], repeat=4)))
 def test_identity_all_source_conflicts(values):
     explicit, *environment = values
     env = {name: value for name, value in zip(b.IDENTITY_ENV, environment) if value is not None}
@@ -36,6 +36,8 @@ def test_service_mapping_matches_daemon():
     server = (Path(__file__).parents[2] / "chat-stream-v2/server.py").read_text()
     names = ("FIXED_SYSTEM_PRODUCER_STREAM_ID", "WMI_BACKUP_PRODUCER_STREAM_ID", "WORK_REPORT_READER")
     identities = {re.search(rf'^{name}\s*=\s*[\'"]([^\'"]+)', server, re.M).group(1) for name in names}
+    principal=(Path(__file__).parents[2]/'chat-stream-v2/screen_monitor_principal.py').read_text()
+    identities.add(re.search(r"^ACTOR=['\"]([^'\"]+)",principal,re.M).group(1))
     assert set(b.FIXED_SERVICE_IDENTITIES) == identities
     assert b.FIXED_SERVICE_IDENTITIES["work-report-reader"] == ("env", "PENTACLE_WORK_REPORT_READER_TOKEN")
 

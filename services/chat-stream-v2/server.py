@@ -25,6 +25,7 @@ import desk_stamp
 import wmi_brief_producer
 
 import asyncio
+import screen_monitor_principal
 import errno
 import functools
 import hmac
@@ -2349,6 +2350,20 @@ class Server:
                       and self.account_runtime.watcher_authorized(service_auth, msg.get("host"))
                       and msg.get("action") in {"probe", "observe-failure", "observation"}):
                     pass  # Typed payload and generation checks are in AccountRuntime.
+                elif service_auth["service_actor"] == screen_monitor_principal.ACTOR:
+                    if verb=='tell':
+                        target=screen_monitor_principal.composite()
+                        if not screen_monitor_principal.valid_tell(msg) or self._composite_for(target) is None:
+                            return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
+                        actor=screen_monitor_principal.ACTOR
+                        dispatch_msg['from_stream_id']=actor
+                        dispatch_msg['_wmi_brief_ingress_body']=sanitize_injectable(msg['text'])
+                        dispatch_msg['text']=f"[from {actor}] [tell:{msg['tell_id']}]\n"+dispatch_msg['_wmi_brief_ingress_body']
+                    elif verb in screen_monitor_principal.VERBS:
+                        if not screen_monitor_principal.valid_request(msg):
+                            return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
+                    else:
+                        return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
                 elif service_auth["service_actor"] == WORK_REPORT_READER:
                     if verb != "work.report.get":
                         return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
@@ -2838,6 +2853,7 @@ class Server:
         """Fixed principals whose credential is a user-owned 0600 token file,
         re-read on every RPC (removal/rotation revokes bound sockets too)."""
         sources = {
+            screen_monitor_principal.ACTOR: os.environ.get(screen_monitor_principal.TOKEN_FILE_ENV),
             WORK_REPORT_READER: os.environ.get(WORK_REPORT_READER_TOKEN_FILE_ENV),
             WMI_BACKUP_PRODUCER_STREAM_ID: os.environ.get(WMI_BACKUP_STREAM_TOKEN_FILE_ENV),
             BOT_MESSAGING_PRODUCER_STREAM_ID: os.environ.get(BOT_MESSAGING_STREAM_TOKEN_FILE_ENV),

@@ -45,7 +45,7 @@ def _notice(conn, kind, recipient, identity, data):
 
 class ScreenLeaseStoreMixin:
     async def screen_lease_call(
-        self, verb, *, hosts, message, actor=None, env_binding=None, now
+        self, verb, *, hosts, message, actor=None, env_binding=None, now, service=None
     ):
         def body(conn):
             def error(code, **fields):
@@ -86,13 +86,17 @@ class ScreenLeaseStoreMixin:
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (ah, an)
             ).fetchone()
             token = message.get("stream_token")
-            if (
-                not seat
-                or seat["status"] != "open"
-                or not isinstance(token, str)
-                or hashlib.sha256(token.encode()).hexdigest() != seat["token_hash"]
-            ):
-                return error("not_authenticated")
+            if service is not None:
+                if (service.get('actor')!=actor or not isinstance(token,str) or
+                    hashlib.sha256(token.encode()).hexdigest()!=service.get('token_hash') or
+                    verb not in ('acquire','renew','release') or message.get('force') or
+                    (host is not None and host!=service.get('host'))):
+                    return error('not_authenticated')
+                if verb in ('acquire','renew') and (type(message.get('ttl')) is not int or not 1<=message['ttl']<=120):
+                    return error('screen_ttl_invalid')
+            elif (not seat or seat['status']!='open' or not isinstance(token,str) or
+                  hashlib.sha256(token.encode()).hexdigest()!=seat['token_hash']):
+                return error('not_authenticated')
             binding = _binding_conn(conn, env_binding or {}, include_target=False)
             force = verb == "release" and bool(message.get("force"))
             if verb != "release" and message.get("force"):
@@ -189,7 +193,7 @@ class ScreenLeaseStoreMixin:
                         "renewed": True,
                     }
                 lid = "lease-" + uuid.uuid4().hex
-                label = seat["title"] or actor
+                label = 'Codex reset monitor' if service is not None else (seat["title"] or actor)
                 conn.execute(
                     "INSERT INTO v2_screen_leases (lease_id,host,holder_stream_id,holder_label,reason,acquired_at,expires_at) VALUES (?,?,?,?,?,?,?)",
                     (lid, host, actor, label, message["reason"], now, now + ttl),
@@ -214,6 +218,8 @@ class ScreenLeaseStoreMixin:
                     (host,),
                 ).fetchone()
             )
+            if service is not None and row and row['host']!=service.get('host'):
+                return error('screen_host_invalid')
             if not row or row["released_at"] is not None:
                 state = (
                     ("expired" if row["release_reason"] == "expired" else "released")
