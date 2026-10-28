@@ -25,3 +25,22 @@ def valid_request(message):
         ttl=message.get('ttl',120)
         if type(ttl) is not int or not 1<=ttl<=120:return False
     return True
+
+COMPOSITE_ENV='PENTACLE_CODEX_RESET_MONITOR_COMPOSITE'
+
+
+def composite():
+    value=os.environ.get(COMPOSITE_ENV,'')
+    return value if re.fullmatch(r'[A-Za-z0-9._-]+:assistant',value) else None
+
+
+def valid_tell(message):
+    fields={'type','request_id','tell_id','from_stream_id','stream_token','to_stream_id','text','ttl_seconds','sanitize'}
+    if set(message)!=fields or composite() is None:return False
+    text=message.get('text')
+    return (message.get('type')=='tell' and message.get('from_stream_id')==ACTOR and
+            message.get('to_stream_id')==composite() and
+            all(isinstance(message.get(k),str) and re.fullmatch(r'[!-~]{1,120}',message[k]) for k in ('request_id','tell_id')) and
+            type(message.get('ttl_seconds')) is int and message['ttl_seconds']==3600 and
+            message.get('sanitize') is True and isinstance(text,str) and len(text)<=1000 and
+            text.startswith(('CODEX RESET SIGNAL ','CODEX RESET WATCHER FAILURE:')))

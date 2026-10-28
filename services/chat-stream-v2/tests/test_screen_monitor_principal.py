@@ -38,7 +38,7 @@ def test_fixed_principal_real_dispatch_and_store_scope(credentials):
                 assert 'error_code' in await call('screen.lease.renew',lease_id=lease['lease_id'],ttl=ttl)
             assert 'error_code' in await call('screen.lease.acquire',host='peer',ttl=120,reason='outside scope')
             assert 'error_code' in await call('screen.lease.release',lease_id=lease['lease_id'],force=True)
-            for verb in ['tell','notification.create','asset.publish','list_sessions','screen.lease.status','account']:
+            for verb in ['notification.create','asset.publish','list_sessions','screen.lease.status','account']:
                 assert (await call(verb))['error_code']=='system_producer_forbidden'
             assert (await call('screen.lease.renew',lease_id=lease['lease_id'],ttl=60))['type'].endswith('.ok')
             assert (await call('screen.lease.release',lease_id=lease['lease_id']))['type'].endswith('.ok')
@@ -57,3 +57,25 @@ def test_revoked_or_unreadable_token_never_falls_back_to_local_operator(credenti
         denied=(await s._dispatch(json.dumps(frame('screen.lease.acquire',host='test',ttl=120,reason='test')),websocket=p))[0]
         assert denied['error_code']=='system_producer_auth_required'
     asyncio.run(run())
+
+
+def test_monitor_tell_resolves_current_composite_and_cannot_target_a_seat(credentials,tmp_path,monkeypatch):
+    from test_assistant_composite_addressing import _run,COMPOSITE_CHAT,SEAT_A,SEAT_B
+    monkeypatch.setenv('PENTACLE_CODEX_RESET_MONITOR_COMPOSITE',COMPOSITE_CHAT)
+    async def check(h):
+        p=Peer('127.0.0.1')
+        async def call(kind,**kw):return (await h.server._dispatch(json.dumps(frame(kind,**kw)),websocket=p))[0]
+        assert (await call('hello',subscribe={'snapshot':False,'mode':'rpc'}))['type']=='ready'
+        payload={'text':'CODEX RESET SIGNAL TEST: no reset is being announced','ttl_seconds':3600,'sanitize':True}
+        first=await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-one',**payload)
+        assert first['type']=='tell.ok' and h.inputs_at(SEAT_A)==1,first
+        await h.move_to_b()
+        second=await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-two',**payload)
+        assert second['type']=='tell.ok' and h.inputs_at(SEAT_B)==1,second
+        await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-two',**payload)
+        assert h.inputs_at(SEAT_B)==1
+        for target in [SEAT_A,SEAT_B,'assistant','other:assistant']:
+            assert (await call('tell',to_stream_id=target,tell_id='monitor-invalid',**payload))['error_code']=='system_producer_payload_invalid'
+        for text in ['arbitrary instructions','CODEX RESET SIGNAL TEST: '+('x'*3000)]:
+            assert (await call('tell',to_stream_id=COMPOSITE_CHAT,tell_id='monitor-badbody',text=text,ttl_seconds=3600,sanitize=True))['error_code']=='system_producer_payload_invalid'
+    _run(tmp_path,check)

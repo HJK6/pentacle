@@ -2351,10 +2351,19 @@ class Server:
                       and msg.get("action") in {"probe", "observe-failure", "observation"}):
                     pass  # Typed payload and generation checks are in AccountRuntime.
                 elif service_auth["service_actor"] == screen_monitor_principal.ACTOR:
-                    if verb not in screen_monitor_principal.VERBS:
+                    if verb=='tell':
+                        target=screen_monitor_principal.composite()
+                        if not screen_monitor_principal.valid_tell(msg) or self._composite_for(target) is None:
+                            return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
+                        actor=screen_monitor_principal.ACTOR
+                        dispatch_msg['from_stream_id']=actor
+                        dispatch_msg['_wmi_brief_ingress_body']=sanitize_injectable(msg['text'])
+                        dispatch_msg['text']=f"[from {actor}] [tell:{msg['tell_id']}]\n"+dispatch_msg['_wmi_brief_ingress_body']
+                    elif verb in screen_monitor_principal.VERBS:
+                        if not screen_monitor_principal.valid_request(msg):
+                            return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
+                    else:
                         return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
-                    if not screen_monitor_principal.valid_request(msg):
-                        return [self._auth_error_frame(verb, request_id, "system_producer_payload_invalid")]
                 elif service_auth["service_actor"] == WORK_REPORT_READER:
                     if verb != "work.report.get":
                         return [self._auth_error_frame(verb, request_id, "system_producer_forbidden")]
