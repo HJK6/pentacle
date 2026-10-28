@@ -13,7 +13,7 @@ def cmd_screen(args):
     payload = {"type": "screen.lease." + args.screen_command}
     for key in ("host", "reason", "ttl", "lease_id", "force"):
         value = getattr(args, key, None)
-        if value is not None:
+        if value is not None and (key != "force" or value):
             payload[key] = value
     try:
         response = asyncio.run(

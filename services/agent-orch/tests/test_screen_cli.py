@@ -16,7 +16,7 @@ from agent_orch import cli, wsclient
             {"host": "test", "reason": "test work"},
         ),
         (["renew", "lease-1", "--ttl", "20"], {"lease_id": "lease-1", "ttl": 20}),
-        (["release", "lease-1"], {"lease_id": "lease-1", "force": False}),
+        (["release", "lease-1"], {"lease_id": "lease-1"}),
         (["release", "--host", "test", "--force"], {"host": "test", "force": True}),
         (["status", "--host", "test"], {"host": "test"}),
         (["status"], {}),
@@ -38,6 +38,39 @@ def test_wire(monkeypatch, capsys, argv, fields):
     assert args.func(args) == 0
     assert calls == [{"type": "screen.lease." + argv[0], **fields}]
     assert json.loads(capsys.readouterr().out)["type"].endswith(".ok")
+
+
+@pytest.mark.parametrize("argv,allowed", [
+    (["acquire", "--host", "test", "--reason", "read timeline", "--ttl", "120"], True),
+    (["renew", "lease-1", "--ttl", "120"], True),
+    (["release", "lease-1"], True),
+    (["release", "--host", "test", "--force"], False),
+])
+def test_monitor_cli_frames_pass_deployed_principal_contract(monkeypatch, capsys, tmp_path, argv, allowed):
+    import runpy
+    from pathlib import Path
+
+    principal = runpy.run_path(str(Path(__file__).resolve().parents[2] /
+                                  "chat-stream-v2" / "screen_monitor_principal.py"))
+    monkeypatch.setenv(principal["HOST_ENV"], "test")
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", principal["ACTOR"])
+    token = tmp_path / "service-token"
+    token.write_text("fixture-token")
+    token.chmod(0o600)
+    monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN_FILE", str(token))
+
+    async def rpc(config, payload, **kw):
+        frame = await wire_frame(config, payload)
+        assert frame["from_stream_id"] == principal["ACTOR"]
+        assert frame["stream_token"] == "fixture-token"
+        assert principal["valid_request"](frame) is allowed, {k: v for k, v in frame.items() if k != "stream_token"}
+        return {"type": frame["type"] + (".ok" if allowed else ".error")}
+
+    monkeypatch.setattr(wsclient, "_one_shot_rpc", rpc)
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    args = cli.build_parser().parse_args(["screen", *argv, "--json"])
+    assert args.func(args) == (0 if allowed else 1)
+    capsys.readouterr()
 
 
 def test_errors_and_plain_status(monkeypatch, capsys):
