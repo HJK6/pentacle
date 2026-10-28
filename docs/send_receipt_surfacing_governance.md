@@ -54,3 +54,11 @@ external submission counter spans both processes. JSON/DOM/PNG receipts and
 source/asset hashes stay in the output directory; plaintext operator token and
 owned runtime resources are removed. `--red` records the expected unpatched
 refusal failure and is for a baseline checkout, not candidate acceptance.
+
+### Web-host connection recovery
+
+When an unresolved send loses its browser-to-web-host connection, the local transport marks that exact failure with its connection epoch. The row stays **Delivery uncertain**. After the current authenticated connection has merged a connected daemon snapshot, the renderer reconciles the original request once for that web epoch. It preserves request/input IDs, text, attachments, reply/voice metadata and an explicit Send urgently flag. Existing receipts or matching USER history settle the same row. Missing receipt evidence never creates a new identity.
+
+This path is separate from daemon reconnect generations and from the bounded pre-admission overload retry. Repeated readiness callbacks coalesce; manual Retry joins an in-flight reconciliation; late receipts win. No generic web RPC is replayed. Automatic recovery uses the existing30-minute reconnect bound; an older unresolved row keeps explicit original-ID Retry. Queued records provider admission, not assistant completion.
+
+Real acceptance: `node test/e2e/web_host_recovery_gate.cjs <fresh-output> <provisioned-python>` with `PHASE2_KIND=ordinary`, `composite` or `urgent`. Each counted run loses a real ACK, waits over60seconds, restarts the isolated web host and daemon on persisted stores and checks one original provider submission/USER row under the same IDs. Urgent additionally checks one initial Escape and no second Escape on reconciliation. `--manual-overlap` clicks the actual Retry while automatic recovery is in flight; `--before-admission` drops the first browser request before it reaches the host. `--quick` is development-only and does not satisfy the real elapsed-time acceptance. The provider is a controlled native-format counterpart; its counter survives both process restarts. No production store or provider is used.

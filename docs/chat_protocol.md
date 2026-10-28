@@ -173,7 +173,7 @@ household store. The daemon keeps no household state, cache or broadcast.
 
 ## Session interrupt
 
-The web/desktop composer uses ordinary `send` for every message. A provider-queued row's Send now action uses the existing generation-fenced `send.interrupt`; it does not resend the already-queued message. Native queue order and combined release remain provider-owned, and the row stays Queued until normal receipt/USER reconciliation confirms processing. The lower-level `send.urgent` field remains available to callers that explicitly request Escape before a new message; the composer does not use it. The composite send path ignores that field and exposes no queued-row interrupt action.
+The web/desktop composer uses ordinary `send` for Send, Enter and Alt+Enter; Shift+Enter inserts a newline. A ready agent chat also offers **Send urgently**, which sends a new message with `urgent: true` (one guarded Escape before that input). Composite chats do not offer this agent-only action. A provider-queued row's Send now action uses the existing generation-fenced `send.interrupt`; it does not resend the already-queued message. Native queue order and combined release remain provider-owned, and the row stays Queued until normal receipt/USER reconciliation confirms processing. The lower-level `send.urgent` field remains available to callers that explicitly request Escape before a new message; the explicit Send urgently action uses it. The composite send path ignores that field and exposes no queued-row interrupt action.
 
 `send.interrupt` names a session with `host` and `session_name`. For a configured
 remote host, updated web and desktop clients also send the selected open row's

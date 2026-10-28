@@ -33,6 +33,7 @@ import {
   eligibleReconnectReplayOptimisticIds,
   markDaemonRestartSurvivorsIndeterminate,
   rotateOptimisticSendRequestId,
+  RECONNECT_REPLAY_MAX_AGE_MS,
 } from './chat_reconnect_replay';
 import type {
   PentacleStreamState,
@@ -146,6 +147,7 @@ export type ChatSendBridge = (args: {
   meta?: VoiceMeta;
   replyToMessageId?: string;
   replyToQuestionId?: string;
+  urgent?: boolean;
 }) => Promise<{ ok?: boolean; error?: string; provider_queued?: boolean } | undefined>;
 
 // B3 (chat_send_turn_lifecycle_batch2): how the controller asks main to
@@ -210,6 +212,12 @@ export class ChatStoreController {
   private sendSessionGenerations = new Map<string, string>();
   private sendBridge: ChatSendBridge | null = null;
   private sendDispatches = new Set<string>();
+  private reconcilingDispatches = new Set<string>();
+  private urgentSends = new Set<string>();
+  private webRecovery = new Map<string, { optimisticId: string; lostEpoch: number; attemptedEpoch?: number }>();
+  private webEpoch = 0;
+  private webReady = false;
+  private disposed = false;
   private cancelBridge: ChatCancelBridge | null = null;
   private interruptStates: Record<string, ChatInterruptState> = {};
   // Queued-row keys own Escape independently of local turn/paint state.
@@ -427,6 +435,15 @@ export class ChatStoreController {
       const send = next.optimisticSends?.[id];
       if (!send || send.status === 'acked' || send.status === 'cancelled') this.voiceMetas.delete(id);
     }
+    for (const id of this.urgentSends) {
+      const send = next.optimisticSends?.[id];
+      if (!send || ['acked', 'echoed', 'reconciled', 'cancelled'].includes(send.status)) this.urgentSends.delete(id);
+    }
+    for (const [id, recovery] of this.webRecovery) {
+      const send = next.optimisticSends?.[recovery.optimisticId];
+      if (!send || send.request_id !== id || send.provider_queued
+          || ['acked', 'echoed', 'reconciled', 'failed', 'cancelled'].includes(send.status)) this.webRecovery.delete(id);
+    }
     for (const id of this.sendSessionGenerations.keys()) {
       if (!next.optimisticSends?.[id]) this.sendSessionGenerations.delete(id);
     }
@@ -621,6 +638,11 @@ export class ChatStoreController {
   dispose(): void {
     this.sendSessionGenerations.clear();
     this.sendDispatches.clear();
+    this.reconcilingDispatches.clear();
+    this.urgentSends.clear();
+    this.webRecovery.clear();
+    this.webReady = false;
+    this.disposed = true;
     this.queueEscapes.clear();
     for (const id of Object.keys(this.staleTurnTimers)) {
       clearTimeout(this.staleTurnTimers[id]);
@@ -697,11 +719,12 @@ export class ChatStoreController {
    *      the visible running turn.
    * Returns the optimistic_id ('' only on empty/invalid input).
    */
-  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta } = {}): string {
+  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta; urgent?: boolean } = {}): string {
     const literal = String(text || '');
     const composite = this.state.sessions.find(item => item.stream_id === streamId)?.session_kind === 'assistant_composite';
+    if (this.disposed || (composite && reply.urgent === true)) return '';
     const sendText = composite ? literal : literal.trim();
-    const sendAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && item.key && item.mime) : [];
+    const sendAttachments = Array.isArray(attachments) ? structuredClone(attachments.filter((item) => item && item.key && item.mime)) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
 
     const optimisticId = this.nextOptimisticId(streamId);
@@ -747,7 +770,8 @@ export class ChatStoreController {
       request_id: requestId,
     });
 
-    if (reply.meta?.voice) this.voiceMetas.set(optimisticId, reply.meta);
+    if (reply.meta?.voice) this.voiceMetas.set(optimisticId, structuredClone(reply.meta));
+    if (reply.urgent === true) this.urgentSends.add(optimisticId);
     this.dispatchOptimistic(streamId, optimisticId, requestId, sendText, generation, sendAttachments);
 
     return optimisticId;
@@ -795,10 +819,49 @@ export class ChatStoreController {
     return true;
   }
 
+  /** Browser transport epochs never alter the daemon reconnect generation. */
+  webHostDisconnected(epoch: number): void {
+    if (!Number.isInteger(epoch) || epoch < this.webEpoch || this.disposed) return;
+    this.webEpoch = epoch;
+    this.webReady = false;
+  }
+
+  /** Called only after a current, authenticated connected snapshot is merged. */
+  webHostReady(epoch: number): void {
+    if (!Number.isInteger(epoch) || epoch < this.webEpoch || this.disposed) return;
+    this.webEpoch = epoch;
+    this.webReady = true;
+    this.drainWebRecovery();
+  }
+
+  private drainWebRecovery(): void {
+    if (!this.webReady || this.disposed) return;
+    for (const [requestId, recovery] of this.webRecovery) {
+      const send = this.state.optimisticSends?.[recovery.optimisticId];
+      if (!send || send.request_id !== requestId || send.provider_queued
+          || ['acked', 'echoed', 'reconciled', 'failed', 'cancelled'].includes(send.status)) {
+        this.webRecovery.delete(requestId);
+        continue;
+      }
+      if (send.status !== 'indeterminate' || this.webEpoch <= recovery.lostEpoch
+          || recovery.attemptedEpoch === this.webEpoch
+          || Date.now() - send.created_at > RECONNECT_REPLAY_MAX_AGE_MS) continue;
+      if (this.sendDispatches.has(requestId)) {
+        // An explicit uncertain Retry joins this epoch's recovery. The original
+        // interrupted invocation instead drains when its finally releases it.
+        if (this.reconcilingDispatches.has(requestId)) recovery.attemptedEpoch = this.webEpoch;
+        continue;
+      }
+      recovery.attemptedEpoch = this.webEpoch;
+      this.dispatchOptimistic(send.stream_id, recovery.optimisticId, requestId,
+        send.text, this.socketGeneration, send.attachments ?? [], true);
+    }
+  }
+
   private replayReconnectSurvivors(generation: number): void {
     for (const optimisticId of eligibleReconnectReplayOptimisticIds(this.state, generation)) {
       const send = this.state.optimisticSends?.[optimisticId];
-      if (!send) continue;
+      if (!send || this.webRecovery.has(send.request_id)) continue;
       this.dispatchOptimistic(send.stream_id, optimisticId, send.request_id, send.text, generation, send.attachments ?? []);
       logTelemetry(TELEMETRY_EVENTS.CHAT_COMPOSE_OPTIMISTIC_INSERT, {
         stream_id: send.stream_id,
@@ -814,20 +877,28 @@ export class ChatStoreController {
    * lifecycle: dispatched on success, failed/indeterminate on error.
    */
   private dispatchOptimistic(streamId: string, optimisticId: string, requestId: string, text: string, generation: number, attachments: ChatAttachment[] = [], reconciling = false): void {
-    if (!this.sendBridge || this.sendDispatches.has(requestId)) return;
+    if (this.disposed || !this.sendBridge || this.sendDispatches.has(requestId)) return;
     this.sendDispatches.add(requestId);
+    if (reconciling) this.reconcilingDispatches.add(requestId);
     Promise.resolve()
-      .then(() => this.sendBridge!({
+      .then(() => {
+        const current = this.state.optimisticSends?.[optimisticId];
+        if (this.disposed || !current || current.request_id !== requestId
+            || ['acked', 'echoed', 'reconciled', 'cancelled'].includes(current.status)) return undefined;
+        return this.sendBridge!({
         streamId,
         text,
         requestId,
         optimisticId,
         meta: this.voiceMetas.get(optimisticId),
+        ...(this.urgentSends.has(optimisticId) ? { urgent: true } : {}),
         replyToMessageId: this.state.optimisticSends?.[optimisticId]?.reply_to_message_id,
         replyToQuestionId: this.state.optimisticSends?.[optimisticId]?.reply_to_question_id,
         ...(attachments.length ? { attachments } : {}),
-      }))
+      });
+      })
       .then((result) => {
+        if (this.disposed) return;
         if (result && result.ok === false) {
           this.resolveSendDispatchError(streamId, optimisticId, requestId, String('error_code' in result && result.error_code === 'voice_answers_invalid' ? result.error_code : result.error || 'send_error'), reconciling);
           return;
@@ -837,9 +908,18 @@ export class ChatStoreController {
         this.setState(next);
       })
       .catch((error: unknown) => {
-        this.resolveSendDispatchError(streamId, optimisticId, requestId, error instanceof Error ? error.message : String(error || 'send_error'), reconciling);
+        const transport = error as { code?: unknown; webEpoch?: unknown } | null;
+        const lostEpoch = transport?.code === 'pentacle_web_host_connection_lost'
+          && Number.isInteger(transport.webEpoch) && error instanceof Error
+          && error.message === 'pentacle web host connection lost' ? Number(transport.webEpoch) : undefined;
+        this.resolveSendDispatchError(streamId, optimisticId, requestId,
+          error instanceof Error ? error.message : String(error || 'send_error'), reconciling, lostEpoch);
       })
-      .finally(() => this.sendDispatches.delete(requestId));
+      .finally(() => {
+        this.sendDispatches.delete(requestId);
+        this.reconcilingDispatches.delete(requestId);
+        this.drainWebRecovery();
+      });
   }
 
   /** Current row/generation ownership is also used to enable the rendered action. */
@@ -1090,11 +1170,15 @@ export class ChatStoreController {
    * the reconnect. A refused question binding is terminal even while offline;
    * other errors retain their existing connected/transient handling.
    */
-  private resolveSendDispatchError(streamId: string, optimisticId: string, requestId: string, reason: string, reconciling = false): void {
+  private resolveSendDispatchError(streamId: string, optimisticId: string, requestId: string, reason: string, reconciling = false, webLossEpoch?: number): void {
     const send = this.state.optimisticSends?.[optimisticId];
     // A late reconciliation error cannot undo authoritative receipt evidence.
-    if (!send || ['acked', 'echoed', 'reconciled'].includes(send.status)) return;
-    const transient = reconciling || (reason !== 'voice_answers_invalid'
+    if (this.disposed || !send || ['acked', 'echoed', 'reconciled'].includes(send.status)) return;
+    if (webLossEpoch !== undefined) {
+      const previous = this.webRecovery.get(requestId);
+      this.webRecovery.set(requestId, { ...previous, optimisticId, lostEpoch: Math.max(previous?.lostEpoch ?? 0, webLossEpoch) });
+    }
+    const transient = webLossEpoch !== undefined || reconciling || (reason !== 'voice_answers_invalid'
       && (send.status === 'indeterminate' || this.state.connected !== true
         || /disconnect|closed|not open|reconnect|socket|ECONN|timed out/i.test(reason)));
     if (transient) {
@@ -1223,7 +1307,21 @@ export class ChatStoreController {
       // Without this, the fetched ring lands only in the legacy renderer store
       // and the parity chat UI (which renders from this reducer state) shows an
       // empty transcript — just the session-summary fallback divider.
-      this.setState(applyFetchedStreamEvents(this.state, frame.events as PentacleEvent[], {
+      let next = this.state;
+      const remaining: PentacleEvent[] = [];
+      for (const event of frame.events as PentacleEvent[]) {
+        const id = event.optimistic_id;
+        const original = id && (next.optimisticSends?.[id]?.stream_id === event.stream_id
+          || next.events.some(prior => prior.optimistic_id === id && prior.stream_id === event.stream_id));
+        if (original && event.kind === 'USER' && event.client_origin !== true
+            && (!frame.stream_id || event.stream_id === frame.stream_id)) {
+          // Use the existing identity-aware event merge for our own input. A
+          // correlated composite row may already be settled and pruned from
+          // optimisticSends; adding its raw history twin would paint it twice.
+          next = applyPentacleEvent(next, event);
+        } else remaining.push(event);
+      }
+      this.setState(applyFetchedStreamEvents(next, remaining, {
         requestedStreamId: typeof frame.stream_id === 'string' ? frame.stream_id : undefined,
       }));
       return this.state;

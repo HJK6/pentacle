@@ -79,7 +79,9 @@ function fakeTransport() {
 
 test('the web shim exposes exactly the window.cc surface preload does', () => {
   const cc = buildCc(fakeTransport(), { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
-  assert.deepEqual(Object.keys(cc).sort(), preloadCcKeys(),
+  assert.equal(typeof cc.onDisconnect, 'function');
+  assert.equal(typeof cc.webConnectionState, 'function');
+  assert.deepEqual(Object.keys(cc).filter(k => !['onDisconnect', 'webConnectionState'].includes(k)).sort(), preloadCcKeys(),
     'renderer/web_cc.js must stay method-for-method with preload.js');
 });
 
@@ -555,4 +557,15 @@ test('renderWebContextMenu keeps only one menu open at a time', () => {
   renderWebContextMenu([{ label: 'B', onSelect: noop }], { document: doc });
   const menus = doc.body.children.filter((c) => c.id === 'web-context-menu');
   assert.equal(menus.length, 1, 'a second open replaces the first');
+});
+
+test('loss carries local epoch ownership and stale sockets cannot reject successor work', async t => {
+  const fake = installFakeWebSocket(); t.mock.timers.enable({ apis: ['setTimeout'] });
+  const transport = createTransport({ url: 'ws://host/cc', logger: { warn() {} } });
+  t.after(() => { transport.close(); fake.restore(); });
+  const first = fake.instances[0]; first.open(); const pending = transport.call('chat-stream:send', 'local', 'a', 'text'); first.close();
+  await assert.rejects(pending, error => error.code === 'pentacle_web_host_connection_lost' && error.webEpoch === 1);
+  t.mock.timers.tick(5000); const second = fake.instances[1]; second.open(); const next = transport.call('get-config');
+  first.close(); assert.equal(transport.connectionState.epoch,2); assert.equal(transport.connectionState.open,true);
+  second.deliver({id:second.sent[0].id,ok:true,result:{ready:true}}); assert.deepEqual(await next,{ready:true});
 });

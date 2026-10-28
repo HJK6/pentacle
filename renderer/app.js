@@ -2900,6 +2900,17 @@ function ensureSlotChatSurface(slot) {
 	  composeEl.appendChild(micEl);
 	  composeEl.appendChild(stopEl);
 	  composeEl.appendChild(sendEl);
+  const urgentEl = document.createElement('button');
+  urgentEl.className = 'slot-chat-compose-send slot-chat-compose-urgent';
+  urgentEl.type = 'button';
+  urgentEl.title = 'Send urgently';
+  urgentEl.setAttribute('aria-label', 'Send urgently');
+  urgentEl.textContent = '↯';
+  urgentEl.hidden = true;
+  urgentEl.style.display = 'none';
+  urgentEl.style.gridColumn = 'auto';
+  urgentEl.addEventListener('click', () => sendChatComposer(slot, { urgent: true }));
+  composeEl.appendChild(urgentEl);
 	  chatShell.appendChild(scrollEl);
 
   // Jump-to-latest pill (session-reliability parity): shown while the reader is
@@ -3069,7 +3080,7 @@ function ensureSlotChatSurface(slot) {
   shell.appendChild(statusMount);
   container.appendChild(shell);
 
-	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, stopEl, noticeEl, voiceController, syncComposerLayout: autoSize };
+	  state.slotChatRefs[slot] = { shell, chatShell, terminalMount, chatMount, assetMount, statusMount, scrollEl, listEl, loadEarlierEl, jumpPillEl, dockEl, statusEl, draftPreviewEl, errorEl, questionEl, replyEl, attachmentTrayEl, composeEl, cardViewEl, fileInputEl, attachEl, micEl, menuEl, inputEl, sendEl, urgentEl, stopEl, noticeEl, voiceController, syncComposerLayout: autoSize };
   return state.slotChatRefs[slot];
 }
 
@@ -3099,6 +3110,11 @@ function updateSendControls(slot) {
     refs.sendEl.dataset.action = 'send';
     refs.sendEl.classList.toggle('is-idle', !hasDraft);
     refs.sendEl.disabled = pending || !target || !!target.error || !hasDraft;
+    if (refs.urgentEl) {
+      refs.urgentEl.hidden = isCompositeSlot(slot);
+      refs.urgentEl.style.display = refs.urgentEl.hidden ? 'none' : 'inline-flex';
+      refs.urgentEl.disabled = refs.sendEl.disabled || refs.urgentEl.hidden;
+    }
     if (refs.stopEl) refs.stopEl.hidden = !working;
     if (refs.noticeEl) {
       const notice = (!isCompositeSlot(slot) && streamId && window.PentacleChatStore?.getComposerNotice?.(streamId)) || '';
@@ -4413,7 +4429,8 @@ function cancelChatComposer(slot) {
   return cancelled;
 }
 
-async function sendChatComposer(slot) {
+async function sendChatComposer(slot, { urgent = false } = {}) {
+  if (urgent && isCompositeSlot(slot)) return;
   if (!chatUiEnabled() || state.slots[slot]?.laneHistory) return;
   const refs = state.slotChatRefs[slot];
   const inputEl = refs?.inputEl;
@@ -4434,7 +4451,7 @@ async function sendChatComposer(slot) {
     if (streamId) {
       // Native queue: do NOT gate on idle here. sendTurn dispatches immediately;
       // provider CLIs queue mid-turn input natively.
-      if (await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length)) {
+      if (!urgent && await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length)) {
         return;
       }
       state.slotSendPending[slot] = true;
@@ -4445,8 +4462,10 @@ async function sendChatComposer(slot) {
       try {
         const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot) : [];
         if (!assertAssistantDirectSlot(slot)) return;
+        if (urgent && (state.slotGen[slot] !== sendGeneration
+            || state.slotChatBoundStream[slot] !== streamId || isCompositeSlot(slot))) return;
         const optimisticId = window.PentacleChatStore.sendTurn(streamId, text, attachments,
-          reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {});
+          { ...(reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {}), ...(urgent ? { urgent: true } : {}) });
         if (optimisticId && state.slotGen[slot] === sendGeneration) {
           state.slotReplies[slot] = null;
           state.slotDrafts[slot] = '';
@@ -4470,6 +4489,7 @@ async function sendChatComposer(slot) {
     }
   }
 
+  if (urgent) return;
   await sendStructuredSlotMessage(slot, text, {
     onSuccess: () => {
       state.slotDrafts[slot] = '';
@@ -6200,6 +6220,10 @@ window.cc.onChatStreamFrame((frame) => {
   window.PentacleChatStore?.applyFrame?.(frame);
   roomMicTurns?.observe(frame);
   applyChatStreamPayload(frame);
+  if (frame?.connected === true || frame?.type === '__reconnect') {
+    webChatReadySignal += 1;
+    if (webChatRecoveryEpoch !== null) resyncWebChatState().catch(() => {});
+  }
 });
 
 // Web only: the /cc websocket reconnected to a (possibly fresh) web host
@@ -6214,16 +6238,31 @@ window.cc.onChatStreamFrame((frame) => {
 // fresh host's state_version namespace restarts at 0, so a lower version would
 // otherwise be rejected as stale by applyVersionedConnectionState.
 let webChatResyncPending = null;
+let webChatRecoveryEpoch = null;
+let webChatReadySignal = 0;
 function resyncWebChatState() {
-  if (webChatResyncPending) return webChatResyncPending;
-  webChatResyncPending = performWebChatResync().finally(() => { webChatResyncPending = null; });
-  return webChatResyncPending;
+  const connection = window.cc.webConnectionState?.();
+  if (connection && !connection.open) return Promise.reject(new Error('Web host is reconnecting'));
+  const epoch = connection?.epoch;
+  if (webChatResyncPending?.epoch === epoch) return webChatResyncPending.promise;
+  const signal = webChatReadySignal;
+  const promise = performWebChatResync(connection).finally(() => {
+    if (webChatResyncPending?.promise === promise) webChatResyncPending = null;
+    // A ready push can race the not-yet-ready snapshot reply. Drain only that
+    // new signal, never a timer or an unbounded readiness polling loop.
+    if (webChatRecoveryEpoch === epoch && webChatReadySignal !== signal
+        && window.cc.webConnectionState?.()?.open) resyncWebChatState().catch(() => {});
+  });
+  webChatResyncPending = { epoch, promise };
+  return promise;
 }
 
-async function performWebChatResync() {
-  state.chatStream.stateVersion = -1;
+async function performWebChatResync(connection) {
   const rawSnapshot = await window.cc.getChatStreamState();
+  const current = window.cc.webConnectionState?.();
+  if (connection && (!current?.open || current.epoch !== connection.epoch)) throw new Error('Stale web host snapshot');
   if (!rawSnapshot?.connected) throw new Error('Chat stream is reconnecting');
+  state.chatStream.stateVersion = -1;
   const snapshot = preserveOpenSlotSessionsInSnapshot(rawSnapshot, {
     slots: state.slots,
     botSlots: state.botSlots,
@@ -6233,15 +6272,33 @@ async function performWebChatResync() {
   });
   window.PentacleChatStore?.applyFrame?.({ type: 'snapshot', ...snapshot });
   applyChatStreamState(snapshot);
-  if (Object.prototype.hasOwnProperty.call(snapshot, 'limits')) {
-    renderLimits(snapshot.limits, snapshot.limits_health ?? null);
-  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'limits')) renderLimits(snapshot.limits, snapshot.limits_health ?? null);
   restoreSlotsAfterReconnect();
   hydrateOpenDurableQuestions();
+  if (connection && webChatRecoveryEpoch === connection.epoch) {
+    // connected can stay latched during main's daemon-restart grace period.
+    // A related read uses the actual authenticated RPC path before any send
+    // reconciliation. It also merges available original-input proof first.
+    const unresolved = Object.values(window.PentacleChatStore?.getState?.()?.optimisticSends || {})
+      .filter(send => ['queued', 'dispatched', 'indeterminate'].includes(send.status));
+    for (const streamId of new Set(unresolved.map(send => send.stream_id))) {
+      const reply = await window.cc.requestStreamEvents({ streamId, limit: 1 });
+      if (reply?.ok !== true) throw new Error('Chat stream recovery is awaiting authenticated readiness');
+    }
+    const ready = window.cc.webConnectionState?.();
+    if (!ready?.open || ready.epoch !== connection.epoch) throw new Error('Stale web host recovery');
+    webChatRecoveryEpoch = null;
+    window.PentacleChatStore?.webHostReady?.(connection.epoch);
+  }
 }
 
-window.cc.onReconnect?.(() => {
-  resyncWebChatState().catch(() => { /* the next reconnect retries the resync */ });
+window.cc.onDisconnect?.(({ epoch }) => {
+  webChatRecoveryEpoch = null;
+  window.PentacleChatStore?.webHostDisconnected?.(epoch);
+});
+window.cc.onReconnect?.(({ epoch }) => {
+  webChatRecoveryEpoch = epoch;
+  resyncWebChatState().catch(() => { /* current daemon-ready signal resumes recovery */ });
   checkForWebUpdate();
 });
 
