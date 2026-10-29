@@ -13,6 +13,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-10-29
+
 ### Added
 
 - Opt-in release seam admission unions installed baselines, rejects stale or incomplete proof, and keeps affected canary invocation and verdict scopes aligned. One finite client wire/render/model tuple is registered; other surfaces remain unqualified.
@@ -22,6 +24,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 - Front-desk account health revalidation with an exact native identity proof, revision fence and durable audit receipt; ordinary probes keep existing health flags.
 
 ### Fixed
+
+- Assistant backing sessions stay out of the normal chat list across spawn, resume and recovery while their composite chat remains available.
 
 - New image sends with decomposed Unicode captions retain their caption and image after chat reload.
 
