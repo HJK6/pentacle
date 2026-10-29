@@ -24,6 +24,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 ### Fixed
 
 - Assistant backing sessions stay out of the normal chat list across spawn, resume and recovery while their composite chat remains available.
+- Central Codex usage collection follows the host's healthy default account after account switches and redeploys, retaining stale data honestly when the default is unavailable.
 
 - New image sends with decomposed Unicode captions retain their caption and image after chat reload.
 
