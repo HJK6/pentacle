@@ -67,7 +67,7 @@ def test_catalog_inventory():
         assert {case.connection for case in present}=={"online","return","flap"}
         assert {case.provider for case in present}=={"claude","codex"}
         assert {case.platform for case in present}=={"macos","wsl"}
-        assert {case.alias for case in present}=={"repin","sai"}
+        assert {case.alias for case in present}=={"ours","sai"}
     inventory={"scope":"enumeration only; no acceptance claim","case_count":len(selected),"rows":rows,
         "counts_by_row":dict(Counter(case.row for case in selected)),"structural_exclusions":EXCLUSIONS,
         "case_ids":[case.id for case in selected]}
