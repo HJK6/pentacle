@@ -30,11 +30,23 @@ PINS = {
 TERMINAL = {"completed", "cancelled", "indeterminate"}
 
 
-def route_for(row, local_host):
+def route_for(row, local_host, peers=None):
     binding = row.get("account_binding") or {}
     provider = row.get("provider")
-    if (row.get("host") != local_host or not isinstance(binding, dict)
-            or (binding.get("version"), binding.get("executable_sha256")) != PINS.get(provider)):
+    remote = row.get("host") != local_host
+    if remote:
+        machine = (peers or {}).get(row.get("host"))
+        if machine is None or machine.name != row.get("host") or machine.is_local:
+            return None
+        pins = {name: (version, digest)
+                for name, version, digest in machine.queued_send_now_qualifications}
+        pin = pins.get(provider)
+    else:
+        pin = PINS.get(provider)
+    if (not isinstance(binding, dict) or pin is None
+            or (binding.get("version"), binding.get("executable_sha256")) != pin
+            or (remote and (binding.get("host") != row.get("host")
+                            or binding.get("provider") != provider))):
         return None
     return {"claude": "claude-native", "codex": "codex-continue"}.get(provider)
 
@@ -137,8 +149,34 @@ class QueuedSendNow:
         self.tick_lock = asyncio.Lock()
         self.scan_offset = 0
 
-    @staticmethod
-    async def _verify_executable(row):
+    async def _peer_tmux(self, row):
+        if row["host"] == self.sessions.local_host:
+            return self.tmux
+        hosts = getattr(self.comms, "hosts", None)
+        if hosts is None or row["host"] not in hosts.peers or hosts.is_local(row["host"]):
+            raise VerbError("unsupported_host", "Selected remote host is not configured")
+        await hosts.ensure_reachable(row["host"], "queued_send_now")
+        return hosts.tmux_for(row["host"])
+
+    async def _remote_snapshot(self, row):
+        await self._peer_tmux(row)  # Exclude Hosts' unknown-peer local fallback.
+        from queued_send_now_probe import program
+        fields = ("host", "session_name", "provider", "status", "session_generation",
+                  "pane_pid", "account_binding", "observer_binding", "claude_session_id")
+        expected = {key: row.get(key) for key in fields}
+        try:
+            rc, output = await self.comms.hosts.run_command(row["host"], "python3", "-c",
+                program(row["provider"]), json.dumps(expected), timeout=12.0)
+            if rc or len(output) > 262144:
+                return None
+            result = json.loads(output)
+            return result if isinstance(result, dict) and result.get("ok") is True else None
+        except (OSError, ValueError, TypeError, asyncio.TimeoutError):
+            return None
+
+    async def _verify_executable(self, row):
+        if row["host"] != self.sessions.local_host:
+            return await self._remote_snapshot(row) is not None
         binding = row.get("account_binding") or {}
         def verify():
             try:
@@ -149,6 +187,8 @@ class QueuedSendNow:
         return await asyncio.to_thread(verify)
 
     async def _source_snapshot(self, row):
+        if row["host"] != self.sessions.local_host:
+            return await self._remote_snapshot(row)
         # Reuse the installed ingress proof: exact pane PID/start/executable,
         # and for Codex its unique writable launch-bound native descriptor.
         from ingest import Ingest, _open_writable_transcripts
@@ -288,8 +328,12 @@ class QueuedSendNow:
             row = await self.store.fetch_session(host, name) or {}
             if row.get("status") != "open" or row.get("session_generation") != generation:
                 raise VerbError("stale_session_generation", "Selected generation changed")
-            route = route_for(row, self.sessions.local_host)
-            if not route or not await self.verify_executable(row):
+            route = route_for(row, self.sessions.local_host,
+                getattr(getattr(self.comms, "hosts", None), "peers", None))
+            if not route:
+                raise VerbError("queued_send_now_unsupported", "Provider executable is not qualified for Send now")
+            tmux = await self._peer_tmux(row)
+            if not await self.verify_executable(row):
                 raise VerbError("queued_send_now_unsupported", "Provider executable is not qualified for Send now")
             account_runtime = getattr(self.comms, "account_runtime", None)
             if account_runtime is not None:
@@ -310,10 +354,10 @@ class QueuedSendNow:
                 return self._reply(msg, reason="already_consumed")
             if not str(receipt.get("reason") or "").endswith("provider_queued"):
                 raise VerbError("queued_send_now_pending", "Selected native intake is not confirmed")
-            pane = await self.tmux.capture(name)
+            pane = await tmux.capture(name)
             composer_empty = route != "claude-native" or claude_composer_empty(pane)
             if route == "claude-native" and not composer_empty:
-                rc, styled = await self.tmux.run("capture-pane", "-p", "-e", "-t", f"={name}:")
+                rc, styled = await tmux.run("capture-pane", "-p", "-e", "-t", f"={name}:")
                 composer_empty = rc == 0 and claude_queue_composer_empty(styled)
                 pane = re.sub(r"\x1b\[[0-9;]*m", "", styled) if rc == 0 else ""
             if (not prompt_in_native_queue(pane, receipt.get("display_text") or "", row["provider"])
@@ -339,14 +383,22 @@ class QueuedSendNow:
                          "native_turn_id": (active or {}).get("turn_id"),
                          "source_session_id": (active or {}).get("source_session_id"),
                          "source_file_id": source.get("file_id"), "source_watermark": source.get("watermark"),
+                         "native_executable_sha256": source.get("native_executable_sha256"),
+                         "native_executable_file_id": source.get("native_executable_file_id"),
                          "watermark": max((e["daemon_seq"] for e in events), default=0),
                          "state": "dispatch_claimed", "created_at": time.time()}
             operation, claimed = await self._record(key, expected={"queued"}, update=operation)
             if not claimed:
                 return self._reply(msg, operation, reason="operation_replay")
+            current = await self.store.fetch_session(host, name) or {}
+            if any(current.get(key) != row.get(key) for key in (
+                    "status", "session_generation", "pane_pid", "observer_binding", "account_binding")):
+                await self._record(key, expected={"dispatch_claimed"},
+                                   update={"state": "cancelled", "reason": "binding_changed"})
+                raise VerbError("stale_session_generation", "Selected source binding changed")
             try:
                 keys = ("C-x", "C-s") if route == "claude-native" else ("Escape",)
-                result = await self.tmux.run("send-keys", "-t", f"={name}:", *keys)
+                result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
                 if result and result[0] != 0:
                     raise VerbError("queued_send_now_key_uncertain", "Native control dispatch is unconfirmed")
             except BaseException:
@@ -370,7 +422,8 @@ class QueuedSendNow:
         operation, _ = await self._record(key)
         host, name = self.sessions.split(sid)
         row = await self.store.fetch_session(host, name) or {}
-        qualified = route_for(row, self.sessions.local_host) == "codex-continue" and await self.verify_executable(row)
+        qualified = route_for(row, self.sessions.local_host,
+            getattr(getattr(self.comms, "hosts", None), "peers", None)) == "codex-continue" and await self.verify_executable(row)
         source = await self.source_snapshot(row) if qualified else None
         source_matches = bool(source and operation and source.get("source_session_id") == operation.get("source_session_id")
             and source.get("file_id") == operation.get("source_file_id"))
