@@ -168,6 +168,70 @@ def test_own_handoff_allowed_but_worker_impersonation_refused(monkeypatch):
         assert exc.value.code=="role_authority_denied"
     scenario(check)
 
+
+@pytest.mark.parametrize("handoff", [False, True])
+def test_daff_spawn_and_handoff_persist_hidden_and_replay_once(monkeypatch, handoff):
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
+    monkeypatch.setenv("PENTACLE_ASSISTANT_DAFF_ROLE", "partner-assistant")
+
+    async def check(store, sessions):
+        tmux = LiveTmux()
+        sessions.tmux = tmux
+        ctl = SpawnCtl(store, sessions, tmux=tmux)
+        msg = {"objective": "Test hidden partner lifecycle", "role": "partner-assistant",
+               "visibility": "default", "command": "stub", "request_id": "hidden-partner",
+               "ready_marker": "READY", "_auth_context": OPERATOR}
+        if handoff:
+            await store.open_session(HOST, "old", role="partner-assistant", provider="claude",
+                                     effective_model="claude-opus-5-5", effective_effort="medium")
+            await sessions.refresh()
+            msg.update(handoff=True, handoff_from_stream_id=f"{HOST}:old")
+        reply = await asyncio.wait_for(ctl.spawn(dict(msg), HOST), 5)
+        await asyncio.wait_for(asyncio.gather(*list(ctl._background_spawns)), 5)
+        assert reply["type"] == "spawn.ok"
+        row = sessions.get(reply["stream_id"])
+        assert row["visibility"] == "hidden"
+        assert row["role"] == "partner-assistant"
+        replay = await asyncio.wait_for(ctl.spawn(dict(msg), HOST), 5)
+        assert replay["replayed"] is True
+        assert replay["stream_id"] == reply["stream_id"]
+        assert tmux.created == 1
+    scenario(check)
+
+
+def test_daff_hidden_launch_matches_primary_hidden_seat_instructions(monkeypatch, tmp_path):
+    import launch
+    import shlex
+
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
+    monkeypatch.setenv("PENTACLE_ASSISTANT_DAFF_ROLE", "partner-assistant")
+
+    async def check(store, sessions):
+        machine = launch.local_machine(HOST, cwd=str(tmp_path), claude_bin="/bin/echo",
+                                       projects_root=str(tmp_path / "projects"), agent_orch_bin_dir="/bin")
+        ctl = SpawnCtl(store, sessions, tmux=LiveTmux(), machine=machine)
+        for role, visible in (("partner-assistant", False), ("assistant", True)):
+            msg = {"role": role, "provider": "claude", "visibility": "default",
+                   "_auth_context": OPERATOR, "_defer_launch_token_stage": True}
+            async with sessions.assistant.spawn(msg, HOST):
+                command, _, _ = await ctl._resolve_launch(msg, HOST, "fixture")
+            assert (launch.VISIBLE_SESSION_METADATA_INSTRUCTION in shlex.split(command)) is visible
+    scenario(check)
+
+
+def test_daff_unauthorized_promotion_still_denied_before_normalization(monkeypatch):
+    monkeypatch.setenv("PENTACLE_ASSISTANT_DAFF_ROLE", "partner-assistant")
+
+    async def check(store, sessions):
+        msg = {"role": "partner-assistant", "visibility": "default",
+               "_auth_context": {"token_verified": True, "stream_id": f"{HOST}:worker"}}
+        with pytest.raises(VerbError) as caught:
+            async with sessions.assistant.spawn(msg, HOST):
+                pytest.fail("unauthorized role promotion")
+        assert caught.value.code == "role_authority_denied"
+        assert msg["visibility"] == "default"
+    scenario(check)
+
 def test_close_rpc_cannot_supply_managed_kind(monkeypatch):
     monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
     async def check(store,sessions):

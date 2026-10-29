@@ -61,7 +61,7 @@ def test_snapshot_projects_private_config_without_live_io_or_mutating_the_row():
     from server import Server
     projection = SimpleNamespace(local_host="coordinator", queued_send_now=object(),
         hosts=SimpleNamespace(peers={"peer-a": peer({"claude": PIN})}),
-        _composite_for=lambda _sid: None)
+        _composite_for=lambda _sid: None, _composites=lambda: {})
     original = {**row(), "stream_id": "peer-a:owned", "capabilities": {"other": True}}
     projected = Server._project_assistant_composite_session(projection, original)
     assert projected["capabilities"] == {"other": True, "queued_send_now": True}

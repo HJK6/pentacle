@@ -47,6 +47,10 @@ class AssistantPolicy:
     def protects(self, row):
         return bool(row and self.roles and row.get("role") in self.roles)
 
+    def is_daff_backend(self, row):
+        return bool(row and row.get("host") == self.local_host
+                    and row.get("role") in self.extra_roles)
+
     @staticmethod
     def _error(code, message):
         from sessions import VerbError
@@ -113,6 +117,8 @@ class AssistantPolicy:
             raise self._error("assistant_parent_invalid", "assistant must be a top-level session")
         if host != self.local_host:
             raise self._error("assistant_host_invalid", "assistant must run on the configured daemon host")
+        if self.is_daff_backend({"host": host, "role": role}):
+            msg["visibility"] = "hidden"
         async with self.lock:
             # Keep existing idempotent replay ahead of duplicate checks. A new
             # reservation is checked by SpawnCtl immediately before boot.

@@ -2074,6 +2074,9 @@ class SpawnCtl:
             "_defer_launch_token_stage": True,
             **({"_account_resume_binding": resume_prior_row.get("account_binding")} if resume_prior_row else {}),
         }
+        policy = getattr(self.sessions, "assistant", None)
+        if policy is not None and policy.is_daff_backend(resume_prior_row):
+            launch_msg["visibility"] = "hidden"
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
         try:
             command, resolution, open_overrides = await self._resolve_launch(launch_msg, host, name)
@@ -2176,6 +2179,9 @@ class SpawnCtl:
             for field in RESUME_PRESERVED_FIELDS:
                 if field in resume_prior_row:
                     open_flds[field] = resume_prior_row[field]
+        if policy is not None and policy.is_daff_backend({"host": host, **open_flds}):
+            open_flds["visibility"] = "hidden"
+            log.info("subsystem=assistant_inventory bug_ref=daff_backend_inventory_scope action=hidden_spawn")
         # Fence this spawn's lifecycle to a generation IT owns. Both boot-failure
         # cleanup closes below pass it as `expected_generation`, so a cleanup can
         # only ever close the row THIS spawn created — never a newer same-name

@@ -462,6 +462,38 @@ def test_service_generation_without_resume_cannot_promote_a_new_child(tmp_path):
     asyncio.run(run())
 
 
+def test_resume_normalizes_legacy_daff_visibility_after_preserving_metadata(monkeypatch, tmp_path):
+    import shlex
+
+    monkeypatch.setenv("PENTACLE_ASSISTANT_DAFF_ROLE", "partner-assistant")
+
+    async def run():
+        machine = _machine(tmp_path)
+        path = _write_transcript(machine)
+        store = Store(":memory:")
+        store.start()
+        try:
+            prior = await _closed_prior(store, path)
+            await store.update_session("localhost", prior["session_name"],
+                                       role="partner-assistant", visibility="default")
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+            commands = _install_successful_spawn(ctl, sessions, tmux)
+            result = await ctl.spawn({"provider": "claude", "model": "claude-opus-5-5", "effort": "medium",
+                                      "resume_session_id": RESUME_ID, "request_id": "resume-hidden-partner"}, "localhost")
+            row = sessions.get(result["stream_id"])
+            assert row["visibility"] == "hidden"
+            assert row["role"] == "partner-assistant"
+            assert row["session_generation"] != prior["session_generation"]
+            assert row["claude_session_id"] == RESUME_ID
+            assert len(commands) == 1
+            assert launch.VISIBLE_SESSION_METADATA_INSTRUCTION not in shlex.split(commands[0])
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_purged_row_fallback_uses_normal_lifecycle_and_surfaces_history(tmp_path: Path) -> None:
     async def _go() -> tuple[str, dict, str]:
         machine = _machine(tmp_path)

@@ -23,6 +23,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Assistant backing sessions stay out of the normal chat list across spawn, resume and recovery while their composite chat remains available.
+
 - New image sends with decomposed Unicode captions retain their caption and image after chat reload.
 
 - Web page-load reads leave request capacity for image uploads; queued user actions take priority over background reads, and image uploads verify the complete file digest before reporting success.
