@@ -27,6 +27,29 @@ def test_collector_template_renders_the_activated_v2_checkout(tmp_path: Path) ->
     # so a redeploy keeps the trusted-workspace fix instead of reverting to the
     # untrusted root that produced the "usage probe failed (RuntimeError)" banner.
     assert rendered["EnvironmentVariables"]["PENTACLE_USAGE_CWD"] == str(repo)
+    assert "CODEX_HOME" not in rendered["EnvironmentVariables"]
+    assert arguments[arguments.index("--account-ledger") + 1] == str(
+        Path.home() / ".local/share/pentacle-stream/sessions.db"
+    )
+
+
+def test_central_ledger_matches_default_daemon_state_path(tmp_path, monkeypatch):
+    from .test_daemon_service_install import installer, _params, _exe
+
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "release"
+    (repo / installer.DAEMON).parent.mkdir(parents=True)
+    (repo / installer.DAEMON).write_text("")
+    _exe(repo / installer.VENV_PYTHON)
+    params = _params(["--release-checkout", str(repo), "--tmux-bin", str(_exe(tmp_path / "tmux"))], home)
+    template = repo / deploy_mod.USAGE_COLLECTOR_TEMPLATE
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_bytes((Path(__file__).parents[1] / deploy_mod.USAGE_COLLECTOR_TEMPLATE.relative_to("services/chat-stream-v2")).read_bytes())
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    central = plistlib.loads(deploy_mod._render_v2_usage_collector_plist(repo))["ProgramArguments"]
+    daemon = plistlib.loads(installer.render_launchd(params)["com.pentacle.chat-streamd-v2.plist"])["ProgramArguments"]
+    assert central[central.index("--account-ledger") + 1] == daemon[daemon.index("--db") + 1]
 
 
 def test_collector_template_requires_release_checkout_placeholders(tmp_path: Path) -> None:

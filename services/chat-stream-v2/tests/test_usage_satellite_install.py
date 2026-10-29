@@ -51,6 +51,8 @@ def _unit_env(service: bytes) -> dict[str, str]:
 
 
 def _assert_pinned(env: dict[str, str], program: list[str], params) -> None:
+    assert "--account-ledger" not in program
+    assert "CODEX_HOME" not in env
     assert Path(env["PENTACLE_CLAUDE_BIN"]).is_absolute() and env["PENTACLE_CLAUDE_BIN"] == str(params.claude_bin)
     assert Path(env["PENTACLE_CODEX_BIN"]).is_absolute() and env["PENTACLE_CODEX_BIN"] == str(params.codex_bin)
     assert Path(env["PENTACLE_USAGE_TMUX_BIN"]).is_absolute()

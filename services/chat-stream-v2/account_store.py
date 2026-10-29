@@ -110,6 +110,24 @@ class AccountStore:
     def defaults(self):
         return [dict(row) for row in self.conn.execute("SELECT * FROM v2_account_defaults ORDER BY host,provider")]
 
+    def codex_default_home(self, *, host):
+        """Read only the default's non-secret probe fields; never select a binding payload."""
+        _component(host)
+        rows = self.conn.execute(
+            "SELECT d.alias, json_extract(b.data,'$.home'), "
+            "json_extract(b.data,'$.enabled'), b.health "
+            "FROM v2_account_defaults d JOIN v2_account_bindings b "
+            "ON b.host=d.host AND b.provider=d.provider AND b.alias=d.alias "
+            "WHERE d.host=? AND d.provider='codex' AND b.active=1", (host,),
+        ).fetchmany(2)
+        if len(rows) != 1:
+            raise AccountError("account_default_unavailable")
+        alias, home, enabled, health = rows[0]
+        _component(alias)
+        if type(enabled) is not int or enabled != 1 or health != "healthy" or not isinstance(home, str) or not home:
+            raise AccountError("account_default_unavailable")
+        return home
+
     def select(self,*,host,provider,alias=None):
         try:
             if self.policy.get("enabled") is not True: raise AccountError("account_feature_off")
