@@ -17,7 +17,7 @@ class AccountExecutor:
         self.execute = execute or self._execute
         self._host_locks = {}
 
-    async def _execute(self, account, action, operation_id, generation=None, *, pin=None):
+    async def _execute(self, account, action, operation_id, generation=None, *, pin=None, reconcile=None):
         if action=="observe" and pin is None:
             from provider_cli_pin import check
             pin=await self.runtime.run(lambda a:check(a,account))
@@ -32,9 +32,12 @@ class AccountExecutor:
         if pin is not None:
             from provider_cli_pin import canonical
             args += ["--pin-json", canonical(pin)]
+        if reconcile is not None:
+            from provider_cli_pin import canonical
+            args += ["--reconcile-json",canonical(reconcile)]
         try:
             code, output = await self.hosts.run_command(account.host, *args,
-                timeout=320 if action in {"enroll","repin"} else 200 if action == "observe" else 100)
+                timeout=320 if action in {"enroll","repin","repin-reconcile"} else 200 if action == "observe" else 100)
             if len(output) > 65536: raise AccountError("account_host_response_invalid")
             result = json.loads(output)
         except AccountError: raise

@@ -48,7 +48,7 @@ def resource_digest(root):
 
 def code_identity():
     root=Path(__file__).parent
-    files=("provider_cli_artifact.py","provider_account_host.py","provider_account_native.py","provider_accounts.py")
+    files=("account_repin.py","provider_cli_artifact.py","provider_account_host.py","provider_account_native.py","provider_accounts.py")
     inputs={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
     inputs["provider_cli_release.py"]=hashlib.sha256((root.parent/"_shared/provider_cli_release.py").read_bytes()).hexdigest()
     return digest(inputs)
@@ -88,3 +88,15 @@ def assert_drained(binding,*,run=subprocess.run):
                 raise AccountError("account_repin_home_busy")
     except (OSError,subprocess.SubprocessError):
         raise AccountError("account_repin_occupancy_unavailable") from None
+
+
+def validate_proof(binding,pin,proof):
+    key=proof.get("platform")
+    artifact=pin["providers"][binding.provider]["artifacts"].get(key)
+    family="macos" if str(key).startswith("darwin-") else "wsl" if str(key).startswith("linux-") else None
+    if (proof.get("outcome")!="ok" or proof.get("binding_key")!=binding.key or family!=binding.platform
+            or not artifact or proof.get("artifact")!=artifact or artifact["native_sha256"]!=binding.executable_sha256
+            or version(binding.provider,binding.version)!=pin["providers"][binding.provider]["version"]
+            or proof.get("pin_revision")!=pin["revision"] or proof.get("pin_digest")!=digest(pin)
+            or proof.get("code_identity")!=code_identity()):
+        raise AccountError("account_repin_receipt_invalid")

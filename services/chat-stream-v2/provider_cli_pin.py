@@ -66,6 +66,8 @@ def current(ledger):
 
 
 def check(ledger, binding):
+    from account_repin import fenced
+    if fenced(ledger,binding): raise AccountError("account_repin_reconciliation_required")
     pin = current(ledger)
     try: observed = version(binding.provider, binding.version)
     except ValueError: observed = binding.version

@@ -93,7 +93,8 @@ def test_front_desk_can_request_existing_handoff_to_a_named_account(monkeypatch,
     assert "resume_session_id" not in seen[0]
 
 
-def test_pin_snapshot_and_repin_payloads_use_existing_authenticated_transport(tmp_path,monkeypatch):
+@pytest.mark.parametrize("reconcile_of",[None,"prior-repin"])
+def test_pin_snapshot_and_repin_payloads_use_existing_authenticated_transport(tmp_path,monkeypatch,reconcile_of):
     from agent_orch import config,stream_id,wsclient
     monkeypatch.setattr(config,"load_config",lambda:object())
     monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"host-a:front-desk")
@@ -109,10 +110,11 @@ def test_pin_snapshot_and_repin_payloads_use_existing_authenticated_transport(tm
     assert "login_generation" not in payload
     args=cli.build_parser().parse_args(["account","repin","--host","host-a","--provider","claude","--account","primary",
         "--login-generation","old","--new-generation","new","--operation-id","same-home",
-        "--expected-pin-revision","2","--expected-pin-digest","a"*64,"--reason","reviewed"])
+        "--expected-pin-revision","2","--expected-pin-digest","a"*64,"--reason","reviewed"]+(["--reconcile-of",reconcile_of] if reconcile_of else []))
     assert args.func(args)==0
     payload,options=seen.pop()
     assert payload["action"]=="repin" and options["timeout"]==330
+    assert payload.get("reconcile_of")==reconcile_of
     assert not {"home","executable","profile_ref"}&payload.keys()
 
 

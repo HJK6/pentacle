@@ -1676,3 +1676,11 @@ Old minimum-only manifests cannot authorize managed native launches. Preparing
 or installing CLI source does not move the active provider pin or repin accounts.
 Offline hosts remain pending until their actual current-pin/code/artifact proof;
 retained packages support rollback through a fresh same-home successor.
+
+
+A parked repin whose pin advanced uses a fresh `account repin` operation with
+`--reconcile-of PRIOR_OPERATION_ID`, central's still-selected generation and the
+current pin snapshot under a real admission hold. The authenticated host resolves
+the successful chain. Matching artifacts reuse retained turn evidence without
+creating the prospective generation; only a changed provider target needs a new
+native turn. See [provider accounts](../../docs/provider_accounts.md).

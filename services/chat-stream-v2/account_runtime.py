@@ -257,7 +257,7 @@ class AccountRuntime:
         if action=="upgrade":
             allowed.discard("kind")
             allowed.update({"new_generation","expected_version","expected_executable_sha256"})
-        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest"})
+        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest","reconcile_of"})
         if action in {"pin-set","pin-status"}:
             allowed.update({"local_admin_token","pin","expected_revision","recover_receipt","expected_raw_digest","expected_high_water_revision"})
         if action=="observation": allowed.add("observation")
@@ -335,8 +335,12 @@ class AccountRuntime:
         from provider_cli_artifact import code_identity
         result=await self.run(status)
         readback=await self.run(lambda a:a.readback(now=self.clock()))
-        pending=await self.run(lambda a:[json.loads(r[0]) for r in a.conn.execute(
-            "SELECT data FROM v2_account_recovery WHERE substr(binding_key,1,6)='repin:' AND state='pending'")])
+        def outstanding(a):
+            from account_repin import _resolved
+            return [json.loads(r["data"]) for r in a.conn.execute(
+                "SELECT binding_key,data FROM v2_account_recovery WHERE substr(binding_key,1,6)='repin:' AND state IN ('pending','parked')")
+                if not _resolved(a,r["binding_key"])]
+        pending=await self.run(outstanding)
         seats=await self.store.list_sessions()
         known={(r["stream_id"],r.get("session_generation")) for r in seats}
         for reservation in await self.store.reservations(include_expired=True):
@@ -379,7 +383,8 @@ class AccountRuntime:
             except AccountError: source_current=False
             matches=bool(expected and observed==expected["version"] and any(
                 a["native_sha256"]==row.get("executable_sha256") for a in expected["artifacts"].values()))
-            reason=("no_active_binding" if not row.get("active") else "disabled" if not row["enabled"] else "offline" if not online else
+            split=any(all(p["arguments"].get(k)==row.get(rk) for k,rk in (("host","host"),("provider","provider"),("account","alias"))) for p in pending)
+            reason=("repin_reconciliation_pending" if split else "no_active_binding" if not row.get("active") else "disabled" if not row["enabled"] else "offline" if not online else
                     "account_policy_off" if not self.manages(row["host"],row["provider"]) else
                     "satellite_not_current" if not source_current else
                     row["health"] if row["health"]!="healthy" else "pin_absent_or_corrupt" if not pin else

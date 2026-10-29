@@ -453,6 +453,29 @@ success with failed central import remains parked: reconcile that same operation
 under a valid hold, without repeating its native turn. Auth, network, quota and
 identity failures stay distinct; they never initiate login automatically.
 
+If the pin advanced after host success, retry the old operation to retain its
+exact journal evidence, then use a fresh `account repin` operation with
+`--reconcile-of PRIOR_OPERATION_ID`, the still-selected central generation, an
+unused prospective generation and the current pin revision/digest. This requires
+a real, unexpired admission hold and unchanged original central binding, health,
+default and policy. The authenticated host resolves and validates every repin
+link, immutable registry row and original private home anchor. The affected cell
+stays fenced across hold expiry and pin rollback until reconciliation commits.
+
+When the active host artifact already matches the current pin, reconciliation
+reverifies bytes/resources/version read-only and imports that generation; it
+returns `repinned` and creates no prospective generation or additional native
+turn. Otherwise it repins once from the validated host selection to the current
+target. Only the final binding is selected centrally, atomically with every
+missing lineage link. Original receipts and proofs retain their old revisions.
+Retained successful identity/minimal-turn evidence has no age limit for ancestry;
+current artifact verification is stored separately, and ordinary observation
+freshness is unchanged. Same-pin, same-ID retry still reconciles normally.
+A second race or uncertain/failed outcome parks the chain; it never triggers
+login, historical selection or background retries. A fresh attempt must reference
+the latest parked chain tip; a predecessor can be consumed only once. Definitive
+host failure without a split remains for the existing FD recovery disposition.
+
 Successful immutable repin receipts link old and new binding keys. Resume,
 including automatic front-desk restore, follows only that proven same-home chain
 for the same host/provider/account. Fresh-login/enroll/adopt transitions do not
