@@ -27,7 +27,7 @@ def test_healthy_same_home_repin_is_a_distinct_receiver_journey(provider,tmp_pat
     asyncio.run(run())
 
 
-async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False,alias="repin",central_public=False):
+async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False,alias="repin",central_public=False,transport=False):
     import hashlib
     from pathlib import Path
     from types import SimpleNamespace
@@ -53,7 +53,7 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
         return "ok"
     def run(argv,**kwargs):
         native.append(argv)
-        return SimpleNamespace(returncode=0,stdout="" if argv[0]=="ps" else cell["version"] if argv[-1]=="--version" else "OK")
+        return SimpleNamespace(returncode=0,stdout="" if argv[0]=="ps" else cell.get("native_versions",{}).get(argv[0],cell["version"]) if argv[-1]=="--version" else "OK")
     host=NativeHost({"host":"host-a","registry":str(private/"registry.json"),"root":str(private/"homes"),
         "cells":{provider+":"+alias:cell}},run=run,login=login,observation=lambda b:dict(observation(b),provider_id="native-repin",pool_id="pool-repin"))
     enrolled=host.handle("adopt" if adopted else "enroll",provider=provider,alias=alias,expected_generation="unenrolled",operation_id="initial",generation="initial")
@@ -78,6 +78,35 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
         return host.handle(action,provider=account.provider,alias=account.alias,expected_generation=account.generation,
             operation_id=hashlib.sha256(op.encode()).hexdigest(),generation=generation,pin=pin,**({"reconcile":reconcile} if reconcile is not None else {}))
     runtime.executor=AccountExecutor(runtime,None,execute=execute)
+    if transport:
+        cell["native_versions"]={old.executable:old.version,cell["executable"]:cell["version"]}
+        from provider_account_native import verify_binary
+        def identity_probe(binding):
+            verify_binary(binding,run=host.run)
+            return dict(observation(binding),provider_id="native-repin",pool_id="pool-repin")
+        host._probe_observation=identity_probe
+        import json
+        class FixtureTransport:
+            async def run_command(self,hostname,*argv,timeout):
+                assert hostname==old.host and argv[:2]==("/fixture/python","/fixture/provider_account_host.py")
+                action=argv[2];flags=dict(zip(argv[3::2],argv[4::2]));calls.append(action)
+                target=host
+                if getattr(host,"separate_dispatch_registries",False):
+                    # SSH starts a separate helper process with its own local
+                    # RLock; only the durable registry flock is shared.
+                    import copy
+                    from provider_accounts import Registry
+                    target=copy.copy(host)
+                    target.registry=Registry(host.registry.path,host.registry.root,host.registry.adopted)
+                try:
+                    result=target.handle(action,provider=flags["--provider"],alias=flags["--account"],
+                        expected_generation=flags["--login-generation"],operation_id=flags["--operation-id"],generation=flags.get("--new-generation"),
+                        pin=json.loads(flags["--pin-json"]) if "--pin-json" in flags else None,
+                        reconcile=json.loads(flags["--reconcile-json"]) if "--reconcile-json" in flags else None)
+                    return 0,json.dumps(result)
+                except AccountError as exc:return 1,json.dumps({"outcome":str(exc)})
+        runtime.policy["executors"]={old.host:{"python":"/fixture/python","script":"/fixture/provider_account_host.py"}}
+        runtime.executor=AccountExecutor(runtime,FixtureTransport())
     request={"action":"repin","host":"host-a","provider":provider,"account":alias,"login_generation":old.generation,
         "new_generation":"successor","operation_id":"native-repin","expected_pin_revision":2,"expected_pin_digest":digest(pin),
         "reason":"reviewed pair","_auth_context":AUTH}

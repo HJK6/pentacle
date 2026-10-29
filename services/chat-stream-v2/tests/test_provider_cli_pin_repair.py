@@ -56,8 +56,8 @@ def test_confirmed_non_split_failure_is_recoverable(tmp_path,monkeypatch,recover
 def test_uncertain_host_outcome_does_not_lift_the_split_fence(tmp_path,monkeypatch):
     async def run():
         store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
-        async def offline(*args,**kwargs): raise AccountError("account_host_unreachable")
-        runtime.executor.execute=offline
+        from repin_state_matrix import outage_after_admission
+        runtime.executor.execute=outage_after_admission(runtime.executor.execute)
         try:
             with pytest.raises(VerbError): await runtime.operation(request)
             with pytest.raises(VerbError): await runtime.operation(dict(request,operation_id="fresh-offline",new_generation="unused"))

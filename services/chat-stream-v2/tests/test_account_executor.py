@@ -28,7 +28,7 @@ def AccountExecutor(runtime,hosts,*,execute):
             permit=permits[operation]
             assert reconcile=={"_clearance":permit["clearance_id"]}
             assert permit["expected_generation"]==account.generation and permit["generation"]==generation
-        return await execute(account,action,operation,generation)
+        return await execute(account,"observe" if action=="observe-bound" else action,operation,generation)
     return RealAccountExecutor(runtime,hosts,execute=guarded)
 
 

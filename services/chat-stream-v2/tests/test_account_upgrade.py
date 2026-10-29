@@ -72,7 +72,7 @@ def test_healthy_host_enrollment_requires_explicit_receiver_import(tmp_path):
         try:
             result = await runtime.operation(request)
             assert result["result"]["outcome"] == "upgraded"
-            assert calls == ["observe", "status", "observe"]
+            assert calls == ["observe-bound", "status", "observe"]
             assert (await runtime.run(lambda a: a.select(host="host-target", provider="codex"))).generation == "new"
             assert await runtime.run(lambda a: a.bound(old.key)) == old
             assert next(d for d in await runtime.run(lambda a: a.defaults()) if d["host"] == "host-target")["revision"] == 1
@@ -117,7 +117,7 @@ def test_upgrade_authentication_precedes_host_calls(tmp_path, auth):
         try:
             with pytest.raises(VerbError, match="account_control_unauthorized"):
                 await runtime.operation(dict(request, _auth_context=auth))
-            assert calls == ["observe"]
+            assert calls == ["observe-bound"]
         finally: store.stop()
     asyncio.run(run())
 
@@ -143,7 +143,7 @@ def test_admission_refusals_never_read_host(tmp_path, case):
             if case == "bad-hash": request["expected_executable_sha256"] = "invalid"
             if case == "empty-reason": request["reason"] = " "
             with pytest.raises(VerbError): await runtime.operation(request)
-            assert calls == ["observe"]
+            assert calls == ["observe-bound"]
             assert (await runtime.run(lambda a: a._cell(old.host, old.provider, old.alias)))["generation"] == "old"
         finally: store.stop()
     asyncio.run(run())
@@ -166,7 +166,7 @@ def test_wrong_host_binding_refuses_before_observation(tmp_path, field, value):
         runtime.executor.execute = tampered
         try:
             with pytest.raises(VerbError): await runtime.operation(request)
-            assert calls == ["observe", "status"]
+            assert calls == ["observe-bound", "status"]
         finally: store.stop()
     asyncio.run(run())
 
@@ -194,7 +194,7 @@ def test_incomplete_or_conflicting_host_receipt_refuses(tmp_path, case):
         runtime.executor.execute = tampered
         try:
             with pytest.raises(VerbError): await runtime.operation(request)
-            assert calls == ["observe", "status"]
+            assert calls == ["observe-bound", "status"]
         finally: store.stop()
     asyncio.run(run())
 
@@ -264,7 +264,7 @@ def test_import_transaction_rolls_back_and_same_intent_recovers(tmp_path, monkey
             monkeypatch.setattr(AccountStore, "_observe", real)
             runtime.executor = AccountExecutor(runtime, None, execute=runtime.executor.execute)
             assert (await runtime.operation(request))["result"]["outcome"] == "upgraded"
-            assert calls == ["observe", "status", "observe", "status", "observe"]
+            assert calls == ["observe-bound", "status", "observe", "status", "observe"]
         finally: store.stop()
     asyncio.run(run())
 
@@ -285,7 +285,7 @@ def test_pending_restart_readonly_retry_and_terminal_replay(tmp_path):
             runtime = AccountRuntime(store, Sessions(store), policy=policy, clock=lambda: NOW)
             runtime.server = server
             await runtime.start()
-            assert calls == ["observe"]
+            assert calls == ["observe-bound"]
             runtime.executor = AccountExecutor(runtime, None, execute=execute)
             first = await runtime.operation(request)
             store.stop(); store = Store(str(tmp_path / "state.db")); store.start()
@@ -298,7 +298,7 @@ def test_pending_restart_readonly_retry_and_terminal_replay(tmp_path):
             await runtime.start()
             await runtime.run(lambda a: a.set_default(host=old.host, provider=old.provider, alias=old.alias))
             assert await runtime.operation(request) == first
-            assert calls == ["observe", "status", "observe"]
+            assert calls == ["observe-bound", "status", "observe"]
             with pytest.raises(VerbError, match="account_upgrade_id_conflict"):
                 await runtime.operation(dict(request, reason="changed"))
             runtime.policy["enabled"] = False
@@ -317,7 +317,7 @@ def test_concurrent_upgrades_and_immutable_session_attribution(tmp_path):
             await runtime.bind_launch(row)
             results = await asyncio.gather(runtime.operation(request), runtime.operation(dict(request, operation_id="competing")), return_exceptions=True)
             assert results[0]["result"]["outcome"] == "upgraded" and isinstance(results[1], VerbError)
-            assert calls == ["observe", "status", "observe"]
+            assert calls == ["observe-bound", "status", "observe"]
             assert (await store.fetch_session("host-target", "existing"))["account_binding"] == selected.public()
             assert await runtime.run(lambda a: a.bound(old.key)) == old
         finally: store.stop()

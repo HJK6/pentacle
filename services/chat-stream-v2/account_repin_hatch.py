@@ -75,6 +75,10 @@ def _check(a,state,now):
     if current(a)!=snapshot["pin"]:raise AccountError("provider_cli_pin_stale")
     for key,before in state["captured"].items():
         if recovery.record_digest(a,key)!=before["record_digest"]:raise AccountError("account_repin_state_changed")
+    expected=snapshot["dispositions"]
+    actual=recovery.disposition_snapshot(a,(*snapshot["attempts"],*snapshot["hatches"]))
+    if any(actual.get(k)!=v for k,v in expected.items()) or set(actual)-set(expected)-set(state.get("supersession_keys",[])):
+        raise AccountError("account_repin_state_changed")
     # No new unresolved reservation may have slipped in before this intent won.
     current_causes={c["key"] for c in recovery.causes(a,value)}
     allowed=set(state["captured"])|{_key(value)}
@@ -87,10 +91,12 @@ def _superseded(a,state,sealed,retained,now):
         _check(a,state,now)
         if sealed.get("outcome")!="ok" or sealed.get("snapshot_digest")!=value["supersede_repin"] or sealed.get("worker_quiescent") is not True:
             raise AccountError("account_repin_receipt_invalid")
+        supersession_keys=[]
         for old,before in state["captured"].items():
-            recovery.put(a,recovery.SUPERSEDED+old,"done",{"disposition":"continued" if retained and old==retained[0] else "superseded",
+            proof_key=recovery.supersession_key(old,key);supersession_keys.append(proof_key)
+            recovery.put(a,proof_key,"done",{"disposition":"continued" if retained and old==retained[0] else "superseded",
                 "arguments_digest":before["arguments_digest"],"record_digest":before["record_digest"],"resolved_by":key},immutable=True)
-        updated={**state,"stage":"superseded","supersession_proof":sealed}
+        updated={**state,"stage":"superseded","supersession_proof":sealed,"supersession_keys":supersession_keys}
         if retained:updated["retained"]=retained[0]
         recovery.put(a,key,"pending",updated)
         return updated
@@ -167,7 +173,7 @@ async def _retained(executor,state):
             origin=candidate.get("enrollment_origin",candidate)
             old=Binding(**origin["snapshot"]["origin"]["binding"])
             receipt=candidate.get("enrollment_receipt")
-            if not receipt and candidate.get("stage") in {"started","host_success"}:
+            if receipt or candidate.get("stage") in {"started","host_success"}:
                 base=origin["snapshot"]["host"]["binding"]
                 base=Binding.from_public(base) if base else replace(old,generation="unenrolled")
                 receipt=await executor.execute(base,"status","hatch:"+origin["arguments"]["operation_id"],origin["generation"],pin=origin["snapshot"]["pin"])
@@ -189,8 +195,10 @@ async def _retained(executor,state):
             # Keep only the immutable enrollment origin, avoiding recursive captures.
             compact={k:origin[k] for k in ("arguments","snapshot","generation")}
             return key,{**candidate,"enrollment_origin":compact,"enrollment_receipt":receipt,"post_enrollment_links":links},root
-        except (AccountError,KeyError,TypeError,ValueError):
+        except AccountError as exc:
+            if str(exc) in {"account_host_unreachable","account_host_executor_unavailable","provider_timeout","account_host_response_invalid"}:raise
             continue
+        except (KeyError,TypeError,ValueError):continue
     return None
 
 
@@ -210,6 +218,7 @@ async def hatch(executor,message,auth):
             state,_=await runtime.run(lambda a:_begin(a,value,status,auth,runtime.clock()),settle_on_cancel=True)
         receipt=None
         try:
+            await recovery.mutation_status(executor,old)
             retained=await _retained(executor,state)
             operations=[]
             for key,candidate in state["captured"].items():
@@ -233,6 +242,8 @@ async def hatch(executor,message,auth):
             operations=sorted((set(operations)|set(state["snapshot"]["host"].get("permits",{})))-keep)
             if state.get("stage")=="reserved":
                 context={"snapshot_digest":value["supersede_repin"],"host_binding":state["snapshot"]["host"]["binding"],
+                    "expected_permits":state["snapshot"]["host"]["permits"],
+                    "expected_seals":state["snapshot"]["host"]["seals"],
                     "operations":operations,"retained":retained[1].get("enrollment_receipt") if retained else None}
                 if retained:
                     candidate=retained[1];origin=candidate["enrollment_origin"]
@@ -269,7 +280,7 @@ async def hatch(executor,message,auth):
             try:proof=await executor.verify_artifact(final,state["snapshot"]["pin"])
             except AccountError as exc:
                 if str(exc)!="provider_cli_pin_mismatch":raise
-                remote=await recovery.host_status(executor,old)
+                remote=await recovery.mutation_status(executor,old)
                 enrollment_origin=state.get("enrollment_origin",state)
                 context={"root":asdict(root),"links":links,"enrollment":{
                     "operation_id":hashlib.sha256(("hatch:"+enrollment_origin["arguments"]["operation_id"]).encode()).hexdigest(),
@@ -289,7 +300,7 @@ async def hatch(executor,message,auth):
                 links=result["links"];final=Binding.from_public(result["binding"])
                 state=await runtime.run(lambda a:_save(a,value,post_enrollment_links=links,final_binding=final.public()),settle_on_cancel=True)
                 proof=await executor.verify_artifact(final,state["snapshot"]["pin"])
-            remote=await recovery.host_status(executor,old)
+            remote=await recovery.mutation_status(executor,old)
             if remote["binding"]!=final.public():raise AccountError("account_repin_state_changed")
             await runtime._front_desk(auth)
             async with runtime.pin_lock:

@@ -37,7 +37,7 @@ class AccountExecutor:
             args += ["--reconcile-json",canonical(reconcile)]
         try:
             code, output = await self.hosts.run_command(account.host, *args,
-                timeout=320 if action in {"enroll","repin","repin-reconcile"} else 200 if action in {"observe","observe-lineage"} else 100)
+                timeout=320 if action in {"enroll","repin","repin-reconcile"} else 200 if action in {"observe","observe-lineage","observe-bound"} else 100)
             if len(output) > 65536: raise AccountError("account_host_response_invalid")
             result = json.loads(output)
         except AccountError: raise
@@ -76,9 +76,9 @@ class AccountExecutor:
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
             return await self._observe_locked(account)
 
-    async def _observe_locked(self, account, *, require_match=False):
+    async def _observe_locked(self, account, *, require_match=False, recovery=False):
         try:
-            result = await self.execute(account, "observe", uuid.uuid4().hex)
+            result = await self.execute(account, "observe-bound" if recovery else "observe", uuid.uuid4().hex)
             observation = result.get("observation")
             if result["outcome"] == "ok" and isinstance(observation, dict) and result.get("binding_key") == account.key:
                 matched=await self.runtime.record_observation(account, observation)
@@ -151,7 +151,7 @@ class AccountExecutor:
             return await self._inspect_recovery(account,state)
         # Confirm an actual auth failure before a requested re-login. A quota,
         # network or capacity failure never enters native enrollment.
-        probe = await self._observe_locked(account)
+        probe = await self._observe_locked(account,recovery=True)
         if probe["outcome"] == "ok": return {"outcome": "healthy"}
         if probe["outcome"] != "provider_auth_failed": return probe
         # Browser-attempt limits belong to the stable host/provider/account cell,
@@ -162,7 +162,8 @@ class AccountExecutor:
         if len(attempts) >= 3: return {"outcome": "recovery_capped"}
         if limits.get("last_attempt") is not None and now - limits["last_attempt"] < 900:
             return {"outcome": "recovery_cooldown"}
-        from account_repin_state import reserve_generation
+        from account_repin_state import reserve_generation,mutation_status
+        await mutation_status(self,account)
         intent=await self.runtime.run(lambda a:reserve_generation(a,account,operation_id,uuid.uuid4().hex,"enroll"),settle_on_cancel=True)
         state.update(inflight=operation_id,new_generation=intent["arguments"]["generation"],human_stop=False,
             mutation_intent=intent,mutation_stage="prepared")

@@ -94,7 +94,16 @@ class AccountRuntime:
             present=await self.run(lambda accounts:accounts.bound(binding.key))
             if present is None:
                 current=await self.run(lambda accounts:accounts._cell(binding.host,binding.provider,binding.alias))
-                if current is None: await self.run(lambda accounts:accounts.register(binding))
+                if current is None:
+                    def register_if_clear(accounts):
+                        from account_store import transaction
+                        from account_repin_state import causes,generation_intents
+                        value={"host":binding.host,"provider":binding.provider,"account":binding.alias}
+                        with transaction(accounts.conn):
+                            if accounts._cell(binding.host,binding.provider,binding.alias) is not None:return
+                            if causes(accounts,value) or generation_intents(accounts,value):return
+                            accounts._register(binding)
+                    await self.run(register_if_clear,settle_on_cancel=True)
 
     async def stop(self):
         self._stopping=True

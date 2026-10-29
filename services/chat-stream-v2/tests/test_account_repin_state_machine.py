@@ -32,6 +32,7 @@ def fresh(request,pin,name,**kw):
 async def recovery(runtime,old):
     status=await runtime.operation({"action":"status","host":old.host,"provider":old.provider,
         "account":old.alias,"_auth_context":AUTH})
+    assert isinstance(status.get("recovery"),list) and len(status["recovery"])==1,"FD status must expose the recovery snapshot"
     return status["recovery"][0]
 
 
@@ -231,86 +232,103 @@ def _run_b_table(row,tmp_path,monkeypatch,subtests):
             asyncio.run(run(case,case_root,isolated))
 
 
+@pytest.mark.timeout(180)
 def test_b_table_n1_verifier(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N1-verifier',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n1_unknown(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N1-unknown',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n2_before(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-before',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n2_turn(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-turn',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n2_after(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-after',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n2_artifact(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-artifact',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n2_registry(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N2-registry',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_u0_absent(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U0-absent',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_u0_success(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U0-success',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_u1_dead(tmp_path,monkeypatch,subtests):
     _run_b_table('B-U1-dead',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_z_late(tmp_path,monkeypatch,subtests):
     _run_b_table('B-Z-late',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_n3(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N3',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_s0(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S0',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_s1_absent(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S1-absent',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_s1_failed(tmp_path,monkeypatch,subtests):
     _run_b_table('B-S1-failed',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_c0(tmp_path,monkeypatch,subtests):
     _run_b_table('B-C0',tmp_path,monkeypatch,subtests)
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_hatch_g1(tmp_path,monkeypatch,subtests):
     _run_b_table('B-hatch-G1',tmp_path,monkeypatch,subtests)
 
@@ -441,7 +459,7 @@ def test_b_prepared_enrollment_blocks_repin_and_requires_host_clearance(tmp_path
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("damage",["started-journal","invalid-retained-proof"])
+@pytest.mark.parametrize("damage",["started-journal","invalid-retained-proof","central-proof-recoverable"])
 def test_b_hatch_unrecoverable_new_proof_allows_quiescent_second_hatch(tmp_path,monkeypatch,damage):
     from test_account_rotation import NOW
     from account_repin_hatch import _key
@@ -471,18 +489,25 @@ def test_b_hatch_unrecoverable_new_proof_allows_quiescent_second_hatch(tmp_path,
             runtime.executor.execute=lost
             with pytest.raises(VerbError):await runtime.operation(hatch)
             abandoned=host.registry.active(old.provider,old.alias,old.host)
-            if damage=="invalid-retained-proof":
+            if damage in {"invalid-retained-proof","central-proof-recoverable"}:
                 def corrupt(a):
                     from account_repin_state import get,put
                     key=_key(hatch);state=get(a,key);state["enrollment_receipt"]["proof"]["code_identity"]="f"*64;put(a,key,state["status"],state)
                 await runtime.run(corrupt)
+                if damage=="invalid-retained-proof":
+                    op=hashlib.sha256(("hatch:"+hatch["operation_id"]).encode()).hexdigest()
+                    damaged=host._read_operation(op);damaged["proof"]["code_identity"]="f"*64;host._save_operation(op,damaged)
             runtime.executor.execute=execute;runtime.clock=lambda:NOW+901
             await store.set_spawn_admission_hold(old.host,held_until=NOW+2000,reason="renewed second hatch fixture")
             status=await recovery(runtime,old)
             result=await runtime.operation(dict(hatch,operation_id="second-explicit-hatch",supersede_repin=status["snapshot_digest"]))
-            assert result["result"]["binding"]["home"] not in {old.home,abandoned.home}
-            assert len(logins)==3 and not (await recovery(runtime,old))["fence_causes"]
-            assert await runtime.run(lambda a:a.bound(abandoned.key)) is None
+            assert result["result"]["binding"]["home"]!=old.home
+            if damage=="central-proof-recoverable":
+                assert result["result"]["binding"]["home"]==abandoned.home and len(logins)==2
+            else:
+                assert result["result"]["binding"]["home"]!=abandoned.home and len(logins)==3
+                assert await runtime.run(lambda a:a.bound(abandoned.key)) is None
+            assert not (await recovery(runtime,old))["fence_causes"]
         finally:store.stop()
     asyncio.run(run())
 
@@ -523,17 +548,261 @@ def test_b_hatch_status_and_supersession_need_no_trusted_old_evidence(tmp_path,m
 
 
 @pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_s1_success(tmp_path,monkeypatch,subtests):
     _run_b_table("B-S1-success",tmp_path,monkeypatch,subtests)
 
 
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(180)
 def test_b_table_representative_boundaries(tmp_path,monkeypatch,subtests):
     from repin_state_matrix import ROWS,cases,run
-    for row in ROWS:
+    from repin_matrix_extra import ROWS as extras
+    for row in (*ROWS,*extras):
         # Fixed root/wrapper, both providers/platforms, artifact and outage
         # controls supplement the full fixed pre-action row in the unit gate.
-        selected=list(cases(row))
-        for index in (0,18,64,179,719):
-            case=selected[index];case_root=tmp_path/(row+"-"+str(index));case_root.mkdir()
-            with subtests.test(msg=case.id),monkeypatch.context() as isolated:
-                asyncio.run(run(case,case_root,isolated))
+        import itertools
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in sorted({0,min(18,len(selected)-1),len(selected)//2,len(selected)-1}):
+                case=selected[index];case_root=tmp_path/(row+"-"+variant.replace("/","-")+"-"+str(index));case_root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as isolated:
+                    asyncio.run(run(case,case_root,isolated))
+
+
+def test_b_non_split_auth_settlement_then_authorized_recovery_uses_real_transport(tmp_path,monkeypatch):
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True)
+        observe=host.observation
+        def expired(_):raise AccountError("provider_auth_failed")
+        host.observation=expired
+        try:
+            with pytest.raises(VerbError):await runtime.operation(request)
+            host.observation=observe;host._probe_observation=expired
+            await runtime.record_failure(old,"auth")
+            assert not (await recovery(runtime,old))["fence_causes"]
+            result=await runtime.operation({"action":"relogin","host":old.host,"provider":old.provider,"account":old.alias,
+                "login_generation":old.generation,"operation_id":"settled-auth-recovery","_auth_context":AUTH})
+            assert result["result"]["outcome"]=="recovered"
+            assert len(logins)==2 and result["result"]["binding"]["home"]!=old.home
+            assert (await runtime.operation(dict(fresh(request,pin,"new-agreed-base"),login_generation=result["result"]["binding"]["generation"])))["result"]["outcome"]=="no_op"
+        finally:store.stop()
+    asyncio.run(run())
+
+
+def test_b_startup_registration_cannot_supersede_an_unresolved_cell(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from repin_state_matrix import outage_after_admission
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True)
+        execute=runtime.executor.execute;runtime.executor.execute=outage_after_admission(execute)
+        try:
+            with pytest.raises(VerbError):await runtime.operation(request)
+            runtime.executor.execute=execute
+            proposed=replace(old,generation="startup-replacement",home=old.home+"-startup")
+            runtime.policy["bindings"]=[proposed.public()]
+            def inactive(a):
+                a.conn.execute("UPDATE v2_account_bindings SET active=0 WHERE binding_key=?",(old.key,));a.conn.commit()
+            await runtime.run(inactive)
+            before=list(native)
+            await runtime.start()
+            assert await runtime.run(lambda a:a.bound(proposed.key)) is None
+            assert await runtime.run(lambda a:a._cell(old.host,old.provider,old.alias)) is None
+            assert native==before
+            # Repair only the deliberately removed selection in this fixture.
+            def restore(a):
+                a.conn.execute("UPDATE v2_account_bindings SET active=1 WHERE binding_key=?",(old.key,));a.conn.commit()
+            await runtime.run(restore);runtime.policy.pop("bindings",None)
+            result=await runtime.operation(fresh(request,pin,"after-startup-park",reconcile_of=request["operation_id"]))
+            assert result["result"]["outcome"]=="repinned" and len(logins)==1
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("damage",["resolution-json","supersession-proof","disposition-race"])
+def test_b_hatch_disposition_snapshot_is_complete_and_recoverable(tmp_path,monkeypatch,damage):
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True)
+        execute=runtime.executor.execute
+        async def split(*a,**kw):
+            result=await execute(*a,**kw)
+            if a[1]=="repin":await move_pin(runtime,pin,3)
+            return result
+        runtime.executor.execute=split
+        try:
+            with pytest.raises(VerbError):await runtime.operation(request)
+            runtime.executor.execute=execute
+            from account_repin import _key
+            from account_repin_state import _supersession_prefix
+            key=_key(request)
+            def corrupt(a):
+                proof_key=(_supersession_prefix(key)+"f"*64 if damage=="supersession-proof" else "repin-resolved:"+key)
+                a.conn.execute("INSERT OR REPLACE INTO v2_account_recovery VALUES (?,?,?)",(proof_key,"done",
+                    "{corrupt fixture" if damage=="resolution-json" else json.dumps({"disposition":"untrusted"})))
+                a.conn.commit()
+            if damage!="disposition-race":await runtime.run(corrupt)
+            status=await recovery(runtime,old)
+            payload={"action":"relogin","host":old.host,"provider":old.provider,"account":old.alias,"login_generation":old.generation,
+                "operation_id":"snapshot-hatch","supersede_repin":status["snapshot_digest"],"_auth_context":AUTH}
+            if damage=="disposition-race":
+                async def raced(*a,**kw):
+                    result=await execute(*a,**kw)
+                    if a[1]=="repin-supersede":await runtime.run(corrupt)
+                    return result
+                runtime.executor.execute=raced
+                with pytest.raises(VerbError,match="account_repin_state_changed"):await runtime.operation(payload)
+                assert len(logins)==1
+                runtime.executor.execute=execute
+                payload.update(operation_id="fresh-after-disposition-race",supersede_repin=(await recovery(runtime,old))["snapshot_digest"])
+            result=await runtime.operation(payload)
+            assert result["result"]["binding"]["home"]!=old.home and len(logins)==2
+            assert not (await recovery(runtime,old))["fence_causes"]
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_live_worker_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for variant,group in itertools.groupby(cases("B-U1-live"),lambda c:c.variant):
+        selected=list(group)
+        for index in (0,18,len(selected)//2,len(selected)-1):
+            case=selected[index];root=tmp_path/(variant+str(index));root.mkdir()
+            with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.parametrize("changed",["permit","seal"])
+def test_b_hatch_rechecks_complete_host_mutation_snapshot_before_sealing(tmp_path,monkeypatch,changed):
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True)
+        execute=runtime.executor.execute
+        async def split(*args,**kwargs):
+            result=await execute(*args,**kwargs)
+            if args[1]=="repin":await move_pin(runtime,pin,3)
+            return result
+        runtime.executor.execute=split
+        try:
+            with pytest.raises(VerbError):await runtime.operation(request)
+            runtime.executor.execute=execute
+            status=await recovery(runtime,old)
+            from provider_account_mutation import write,read
+            from account_repin import _host_id
+            # The authenticated actual selection is unchanged, but an old
+            # executor's durable mutation metadata arrived after FD's snapshot.
+            async def raced(*args,**kwargs):
+                if args[1]=="repin-supersede":
+                    write(host,"permits" if changed=="permit" else "seals","foreign-delayed-operation",
+                        {"provider":old.provider,"alias":old.alias,"state":"pending","action":"repin"})
+                return await execute(*args,**kwargs)
+            runtime.executor.execute=raced
+            payload={"action":"relogin","host":old.host,"provider":old.provider,"account":old.alias,
+                "login_generation":old.generation,"operation_id":"host-snapshot-hatch",
+                "supersede_repin":status["snapshot_digest"],"_auth_context":AUTH}
+            with pytest.raises(VerbError):await runtime.operation(payload)
+            # Refuse before superseding any captured operation, not merely when
+            # a later enrollment discovers the new foreign permit.
+            assert read(host,"seals",_host_id(request)) is None
+            assert len(logins)==1 and (await recovery(runtime,old))["fence_causes"]
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_crash_transaction_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-Z-crash","B-C0"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_pin_origin_race_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-race-pin","B-race-origin"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant.replace("/","-")+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_evidence_collision_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-N1-collision","B-invalid-proof"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_hatch_state_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-hatch-all-states","B-hatch-prior-findings"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(90)
+def test_b_hatch_race_refusal_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-hatch-races","B-hatch-refusals"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(120)
+def test_b_admission_consumer_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-admission","B-status-locks"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant.replace("/","-")+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))
+
+
+@pytest.mark.repin_exhaustive
+@pytest.mark.timeout(120)
+def test_b_topology_exclusion_boundaries(tmp_path,monkeypatch,subtests):
+    from repin_state_matrix import cases,run
+    import itertools
+    for row in ("B-fence-topology","B-origin-refusals","B-generation-exclusion"):
+        for variant,group in itertools.groupby(cases(row),lambda c:c.variant):
+            selected=list(group)
+            for index in (0,18,len(selected)//2,len(selected)-1):
+                case=selected[index];root=tmp_path/(row+variant.replace("/","-")+str(index));root.mkdir()
+                with subtests.test(msg=case.id),monkeypatch.context() as mp:
+                    asyncio.run(run(case,root,mp))

@@ -176,11 +176,17 @@ def supersede(host,provider,alias,operation,context):
     if prior:
         if prior["snapshot_digest"]!=context.get("snapshot_digest"):raise AccountError("account_operation_conflict")
         return prior
+    # FD's digest includes every durable host permit and seal. Actual selection
+    # alone cannot detect a delayed executor reservation or abandonment record.
+    # Compare under the same flock before the first supersession side effect.
+    if (context.get("expected_permits")!=_cell_entries(host,"permits",provider,alias)
+            or context.get("expected_seals")!=_cell_entries(host,"seals",provider,alias)):
+        raise AccountError("account_repin_state_changed")
     operations=context.get("operations")
     if not isinstance(operations,list):raise AccountError("account_repin_supersession_empty")
-    if not operations:
-        lineage=context.get("retained_lineage")
-        if not lineage:raise AccountError("account_repin_supersession_empty")
+    lineage=context.get("retained_lineage")
+    if not operations and not lineage:raise AccountError("account_repin_supersession_empty")
+    if lineage:
         final=host._validate_repin_links(lineage,host.config["cells"][provider+":"+alias])
         if final.public()!=context["host_binding"]:raise AccountError("account_repin_state_changed")
     result={"outcome":"ok","provider":provider,"alias":alias,"snapshot_digest":context["snapshot_digest"],

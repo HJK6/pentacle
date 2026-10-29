@@ -170,7 +170,7 @@ async def revalidate_health(executor, message, auth):
                 if result.get("binding_key")!=provenance["host_binding"]["host"]+":"+provenance["host_binding"]["provider"]+":"+provenance["host_binding"]["alias"]+":"+provenance["host_binding"]["generation"]:
                     raise AccountError("account_repin_lineage_invalid")
                 result={**result,"lineage_provenance":provenance}
-            else:result=await executor._observe_locked(begun["binding"],require_match=True)
+            else:result=await executor._observe_locked(begun["binding"],require_match=True,recovery=True)
             await runtime._front_desk(auth)
         except asyncio.CancelledError:
             try:

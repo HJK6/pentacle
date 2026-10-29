@@ -190,12 +190,18 @@ The reviewed receiver checkout supplies the one private URL relay:
 ```sh
 python services/chat-stream-v2/tools/provider_account_operator_login.py \
   --policy /absolute/private-policy.json --host host-a --provider codex --account primary \
-  --login-generation login-one --new-generation login-two --operation-id upgrade-one
+  --login-generation login-one --new-generation login-two --operation-id upgrade-one \
+  --expected-version 'codex-cli PINNED_VERSION' --expected-executable-sha256 "$NATIVE_SHA256" \
+  --reason approved_bound_executable_upgrade
 ```
 
 This command verifies the live assistant binding and calling seat token, reads
-the host executor paths from the owner-controlled policy, and invokes the host
-helper over configured SSH. The policy may be OFF during enrollment. It emits
+the host executor paths from the owner-controlled policy, and reserves the exact
+upgrade intent with the coordinator before invoking the host over configured SSH.
+The managed policy must be enabled, the host must advertise the required mutation
+clearance guard, the real hold must remain valid, and no repin may be unresolved.
+The coordinator supplies the immutable current pin and host clearance; missing
+clearance or coordinator reachability refuses before sign-in. The relay emits
 exactly one validated HTTPS authorization URL to the authenticated binding's
 private composite, then creates a separate Done / Not yet action prompt. Only
 publication/prompt IDs and the safe native outcome reach stdout. Done is not
@@ -208,7 +214,9 @@ it non-inheritable by native children. Do not redirect it to a file, terminal,
 stdout or stderr. The relay owns its SSH child and has a 320-second deadline,
 beyond the host's 300-second enrollment alarm. Never log URLs, codes or tokens.
 
-On success, enable the managed Codex policy while retaining the same live hold:
+After native success the relay imports the exact verified enrollment through the
+coordinator while retaining the same live hold. For an uncertain import, inspect
+it with the same immutable arguments and operation ID:
 
 ```sh
 agent-orch account upgrade --host host-a --provider codex --account primary \
@@ -425,6 +433,8 @@ and acquire the existing authenticated operator/local-admin host admission hold.
 Keep `PENTACLE_SEAT_OPERATOR_AUTHORITY` OFF. Source publication alone grants no
 hold, installation, pin move, native proof or restart authority.
 
+Before enabling recovery for any cell, set `"mutation_clearance": "required"` in the private host-helper configuration on **every consumer host for that cell**, then read each value back through the authenticated `recovery-status` capability. Verify the accepted helper artifact and all active consumers as part of the same rollout. A missing or different setting refuses recovery and fresh-enrollment supersession with `account_mutation_clearance_required`; it is not an implicitly enabled recovery mode. Rollout steps are: stage source and artifacts, set and read back the required guard on every host, verify quiescence and the real hold, then enable and validate recovery. Raw host bootstrap behavior before this explicit activation remains unchanged. Rollback must park recovery before returning a consumer to bootstrap mode. These are rollout prerequisites; installing source alone does not activate them.
+
 Host cell configuration names the staged `executable`, its native `version` and
 `executable_sha256`, and `resource_root` for the complete immutable package. A
 standalone file's resource digest is its byte SHA256. A directory's digest is
@@ -453,34 +463,95 @@ success with failed central import remains parked: reconcile that same operation
 under a valid hold, without repeating its native turn. Auth, network, quota and
 identity failures stay distinct; they never initiate login automatically.
 
-If the pin advanced after host success, retry the old operation to retain its
-exact journal evidence, then use a fresh `account repin` operation with
-`--reconcile-of PRIOR_OPERATION_ID`, the still-selected central generation, an
-unused prospective generation and the current pin revision/digest. This requires
-a real, unexpired admission hold and unchanged original central binding, health,
-default and policy. The authenticated host resolves and validates every repin
-link, immutable registry row and original private home anchor. The affected cell
-stays fenced across hold expiry and pin rollback until reconciliation commits.
+An interrupted operation has two separate histories: attempts, including zero
+binding effects, and successful same-home binding links. Status reports the
+current pin, the union of `uncertain`, `split` and `conflict` causes, the chain's
+canonical tail, missing prerequisites and one FD next action. Offline or disabled
+consumers remain pending. Time, hold expiry and matching rollback bytes never
+clear a cause.
 
-When the active host artifact already matches the current pin, reconciliation
-reverifies bytes/resources/version read-only and imports that generation; it
-returns `repinned` and creates no prospective generation or additional native
-turn. Otherwise it repins once from the validated host selection to the current
-target. Only the final binding is selected centrally, atomically with every
-missing lineage link. Original receipts and proofs retain their old revisions.
-Retained successful identity/minimal-turn evidence has no age limit for ancestry;
-current artifact verification is stored separately, and ordinary observation
-freshness is unchanged. Same-pin, same-ID retry still reconciles normally.
-A second race or uncertain/failed outcome parks the chain; it never triggers
-login, historical selection or background retries. A fresh attempt must reference
-the latest parked chain tip; a predecessor can be consumed only once. Definitive
-host failure without a split is resolved only by an authenticated, read-only
-status proof of the unchanged original host binding and absent successor, with
-the original central binding, health, default and policy still unchanged.
-The failed receipt stays parked and immutable, but stops fencing the cell: a
-fresh authorized repin may proceed under its own current pin and hold, or a pin
-rollback matching the original binding permits admission. Missing, conflicting
-or uncertain evidence retains the fence.
+Use one fresh `account repin` with `--reconcile-of CANONICAL_TAIL`, the selected
+central generation, an unused prospective generation and the current pin's
+revision/digest. The tail is the newest reserved attempt, including a settled
+zero-link attempt. Earlier IDs cannot fork the chain. This request inspects the
+whole finite chain, seals abandoned work against delayed dispatch and folds only
+proved successful links. It needs an authenticated enforcing host and a real,
+unexpired admission hold. A live executor must finish or be owner-drained first;
+an absent journal or a transport error alone cannot authorize settlement.
+
+A conclusively non-split attempt can be sealed and settled without importing a
+binding, observation or lineage, even after its old pin or mutable central
+metadata changed. Its original arguments and receipt remain immutable. Settlement
+CASes the unchanged selected binding and current metadata/hold. It clears only
+that attempt's cause: a predecessor split, another unresolved attempt, unhealthy
+identity, unsafe home, current artifact mismatch or other admission refusal stays
+in force. A fresh current-pin request can proceed once the cause is clear.
+
+For a true split, every successful link must prove its immutable journal, registry
+row, original private home/anchor, identity, minimal turn and producing consumer.
+When actual host bytes already satisfy the current pin, reconciliation imports
+the verified host tip without creating its unused prospective generation or
+repeating a turn. A changed target adds one verified successor from that tip.
+Rollback creates a fresh successor; it never selects a historical generation.
+The final current-pin binding and all missing links are imported atomically.
+Historical proof retains its original revision; current verification is separate.
+
+Routine default, health-revision or policy changes require an explicit metadata
+re-anchor. Obtain `origin_digest` from authenticated account status, then include
+`--expected-origin-digest EXACT_CURRENT_ORIGIN_SHA256` on the fresh canonical-tail
+reconciliation. This accepts only the exact enabled/healthy current metadata for
+the unchanged original selected binding and proved same-account lineage. A
+successful real `revalidate-health` can clear eligible identity conflict using a
+read-only observation of the actual host tip; it records that provenance without
+selecting a generation. Outstanding auth/identity failures, disabled/unmanaged
+policy, changed immutable origin or invalid lineage still refuse. Re-anchor
+rechecks FD authority, metadata, actual host selection, current pin and the exact
+hold through commit; it preserves the current default. Omission or stale digest
+never silently refreshes an old import snapshot.
+
+Generation-changing relogin, enrollment, adoption and upgrade share durable
+per-cell ordering with repin, on both coordinator and host. An unresolved action
+in either order blocks the other until its exact outcome is accounted for.
+Restart does not release that exclusion. Read-only diagnosis, health revalidation,
+holds and policy/default maintenance remain available. No global pin lock spans
+remote work. With no unresolved repin, ordinary relogin retains its failed-auth
+requirement and ordinary upgrade retains its changed-artifact requirement.
+
+If old auth or proof cannot support in-place reconciliation, FD may explicitly
+choose one fresh sign-in through the existing relogin flow:
+
+```sh
+agent-orch account relogin --host host-a --provider claude --account primary \
+  --login-generation current-generation --operation-id fresh-recovery \
+  --supersede-repin EXACT_RECOVERY_SNAPSHOT_SHA256
+```
+
+The digest is the cell's `snapshot_digest` from authenticated status. It binds
+central metadata, actual host selection, current pin, real hold and the complete
+set of unresolved attempts, dispositions and host mutation records. The hatch
+works without trusted old lineage or healthy old credentials. It first accounts
+for/drains old workers and seals captured operations, retaining immutable
+supersession proof and a `fresh_enrollment_pending` fence. It stages/verifies the
+current pin, then enrolls one unused generation in a genuinely fresh managed
+home, with the same configured provider/pool identity. It never adopts, copies or
+reauthenticates a superseded home. Old host-only repin generations are not imported.
+
+Only the verified fresh enrollment is selected, atomically with resolution by
+supersession reference. Old-session attribution and the current default stay
+unchanged; old conversations need their existing checkpoint/handoff path across
+the new home. A stale digest, empty unresolved set, unauthorized caller, missing
+hold/guard, live unaccounted worker or bad new enrollment refuses. Existing
+browser safety, attempt limits, cooldown and human-stop outcomes remain.
+
+An uncertain started hatch is inspected by its exact journal, never signed in
+again automatically. After provable quiescence, a fresh explicit digest-authorized
+hatch may supersede an unrecoverable attempt. A successful fresh enrollment whose
+reply or central import was lost is retained and reverified without another
+sign-in. If the pin changed, continuation may repin only that new home to the
+current target before import, preserving its enrollment root and post-enrollment
+links. Metadata/hold/pin races park with a fresh snapshot and FD action; they do
+not make old attempts importable. Completed IDs replay one historical receipt
+without asserting current compliance or fleet readiness.
 
 Successful immutable repin receipts link old and new binding keys. Resume,
 including automatic front-desk restore, follows only that proven same-home chain

@@ -355,7 +355,7 @@ class NativeHost:
             if action=="observe-lineage":
                 observed=self._validate_repin_links(reconcile,cell)
                 return {"outcome":"ok","binding_key":observed.key,"observation":self._probe_observation(observed)}
-            if action == "observe":
+            if action in {"observe","observe-bound"}:
                 if active is None or active.generation != expected_generation:
                     raise AccountError("account_login_generation_stale")
                 proof=None
@@ -445,7 +445,7 @@ class NativeHost:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("observe", "observe-lineage", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status", "repin-reconcile", "repin-reconcile-status", "repin-reconcile-verify", "recovery-status", "mutation-reserve", "repin-inspect", "repin-settle", "repin-supersede"))
+    parser.add_argument("action", choices=("observe", "observe-bound", "observe-lineage", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status", "repin-reconcile", "repin-reconcile-status", "repin-reconcile-verify", "recovery-status", "mutation-reserve", "repin-inspect", "repin-settle", "repin-supersede"))
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--login-generation", required=True)
@@ -466,7 +466,7 @@ def main(argv=None):
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(300 if args.action in {"enroll", "adopt", "repin", "repin-reconcile"} else 180 if args.action in {"observe","observe-lineage"} else 90)
+        signal.alarm(300 if args.action in {"enroll", "adopt", "repin", "repin-reconcile"} else 180 if args.action in {"observe","observe-lineage","observe-bound"} else 90)
         result = NativeHost(config, operator_browser=browser).handle(args.action, provider=args.provider, alias=args.account,
             expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation,
             pin=json.loads(args.pin_json) if args.pin_json else None,

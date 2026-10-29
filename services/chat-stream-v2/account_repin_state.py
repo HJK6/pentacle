@@ -34,6 +34,7 @@ def rows(a,namespace,value):
     for row in a.conn.execute("SELECT binding_key,data FROM v2_account_recovery WHERE substr(binding_key,1,?)=?",(len(prefix),prefix)):
         try:
             state=json.loads(row["data"])
+            canonical(state)
             if (not isinstance(state,dict) or not isinstance(state.get("arguments"),dict)
                     or any(state["arguments"].get(k)!=v for k,v in cell(value).items())
                     or state["arguments"].get("operation_id")!=row["binding_key"][len(prefix):]):raise ValueError()
@@ -47,23 +48,54 @@ def rows(a,namespace,value):
 
 def record_digest(a,key):
     row=a.conn.execute("SELECT state,data FROM v2_account_recovery WHERE binding_key=?",(key,)).fetchone()
-    return digest(dict(row)) if row else None
+    if row is None:return None
+    values=[v if isinstance(v,bytes) else str(v).encode() for v in (row["state"],row["data"])]
+    return hashlib.sha256(b"".join(str(len(v)).encode()+b":"+v for v in values)).hexdigest()
+
+
+def _supersession_prefix(key):return SUPERSEDED+digest(key)+":"
+
+
+def supersession_key(key,owner):return _supersession_prefix(key)+digest(owner)
+
+
+def disposition_snapshot(a,keys):
+    result={}
+    for key in keys:
+        for candidate in (EFFECT+key,SUPERSEDED+key):
+            raw=record_digest(a,candidate)
+            if raw is not None:result[candidate]=raw
+        prefix=_supersession_prefix(key)
+        for row in a.conn.execute("SELECT binding_key FROM v2_account_recovery WHERE substr(binding_key,1,?)=?",(len(prefix),prefix)):
+            result[row[0]]=record_digest(a,row[0])
+    return result
 
 
 def superseded(a,key):
-    proof=get(a,SUPERSEDED+key)
-    if not proof:return False
-    if proof.get("disposition") not in {"superseded","continued"}:raise AccountError("account_repin_receipt_invalid")
-    owner=get(a,proof.get("resolved_by"))
-    captured=owner.get("captured",{}).get(key) if owner else None
-    if (not captured or proof.get("record_digest")!=captured.get("record_digest")
-            or record_digest(a,key)!=proof["record_digest"]):raise AccountError("account_repin_receipt_invalid")
-    return True
+    prefix=_supersession_prefix(key)
+    for row in a.conn.execute("SELECT binding_key FROM v2_account_recovery WHERE substr(binding_key,1,?)=?",(len(prefix),prefix)):
+        try:
+            proof=get(a,row[0])
+            if proof.get("disposition") not in {"superseded","continued"}:continue
+            owner=get(a,proof.get("resolved_by"));sealed=owner.get("supersession_proof",{}) if owner else {}
+            captured=owner.get("captured",{}).get(key) if owner else None
+            if (not captured or sealed.get("worker_quiescent") is not True
+                    or sealed.get("snapshot_digest")!=owner["arguments"]["supersede_repin"]
+                    or proof.get("record_digest")!=captured.get("record_digest")
+                    or record_digest(a,key)!=proof["record_digest"]):continue
+            return True
+        except (AccountError,KeyError,TypeError):continue
+    return False
 
 
 def get(a,key):
     row=a.conn.execute("SELECT data FROM v2_account_recovery WHERE binding_key=?",(key,)).fetchone()
-    return json.loads(row[0]) if row else None
+    if row is None:return None
+    try:
+        value=json.loads(row[0]);canonical(value)
+        if not isinstance(value,dict):raise ValueError()
+        return value
+    except (ValueError,TypeError):raise AccountError("account_operation_corrupt") from None
 
 
 def put(a,key,status,data,*,immutable=False):
@@ -155,7 +187,8 @@ def causes(a,value):
         if not isinstance(receipt,dict):receipt={}
         if state.get("_untrusted"):reason="account_operation_corrupt"
         effect="split" if receipt.get("outcome")=="ok" and receipt.get("state")=="done" else "uncertain"
-        if any(word in reason for word in ("invalid","conflict","corrupt","state_changed","unresolved_origin")):effect="conflict"
+        if reason not in {"account_host_response_invalid","account_host_unreachable","provider_timeout"} and any(
+            word in reason for word in ("invalid","conflict","corrupt","state_changed","unresolved_origin")):effect="conflict"
         result.append({"operation_id":state["arguments"]["operation_id"],"cause":effect,"key":key,"reason":reason or "awaiting classification"})
     result.extend({"operation_id":s["arguments"]["operation_id"],"cause":"fresh_enrollment_pending","key":k,
         "reason":s.get("park_reason","fresh enrollment pending")} for k,s in hatch_causes(a,value).items())
@@ -215,10 +248,12 @@ def generation_intents(a,value):
         key=row["binding_key"]
         if key.startswith("upgrade:"+":".join(value[k] for k in ("host","provider","account"))+":"):
             state=json.loads(row["data"])
+            canonical(state)
             if state.get("status")!="done":result[key]=state
         binding=a.bound(key)
         if binding and (binding.host,binding.provider,binding.alias)==tuple(value[k] for k in ("host","provider","account")):
             state=json.loads(row["data"])
+            canonical(state)
             if state.get("inflight"):result[key]=state
     return result
 
@@ -231,6 +266,12 @@ async def host_status(executor,old):
     return result
 
 
+async def mutation_status(executor,old):
+    remote=await host_status(executor,old)
+    if remote.get("mutation_clearance_required") is not True:raise AccountError("account_mutation_clearance_required")
+    return remote
+
+
 def public_status(a,value,remote,now):
     from account_repin import _states
     from provider_cli_pin import raw,raw_digest
@@ -240,13 +281,14 @@ def public_status(a,value,remote,now):
     held=a.conn.execute("SELECT * FROM v2_spawn_admission_hold WHERE host=?",(value["host"],)).fetchone()
     held=dict(held) if held else None
     attempts=_states(a,value);hatches=rows(a,HATCH,value)
+    disposition_records=disposition_snapshot(a,(*attempts,*hatches))
     dispositions={}
-    for k in (*attempts,*hatches):
-        disposition=get(a,SUPERSEDED+k) or get(a,EFFECT+k)
-        if disposition:dispositions[k]=disposition
+    for key,raw_hash in disposition_records.items():
+        try:dispositions[key]=get(a,key)
+        except AccountError:dispositions[key]={"disposition":"untrusted","record_digest":raw_hash}
     snapshot={"origin":origins,"host":remote,"pin":pin,"pin_raw_digest":raw_digest(raw(a)),"hold":held,
         "attempts":{k:digest(v) for k,v in attempts.items()},"hatches":{k:digest(v) for k,v in hatches.items()},
-        "dispositions":{k:digest(v) for k,v in dispositions.items()},
+        "dispositions":disposition_records,
         "generation_intents":{k:digest(v) for k,v in generation_intents(a,value).items()}}
     try:canonical_tail=tail(a,value)
     except AccountError:canonical_tail=None
@@ -296,7 +338,7 @@ def same_historical_origin(before,after):
     return all(before.get(k)==after.get(k) for k in ("binding","health_revision","default","policy"))
 
 
-def _begin(a,value,now,auth=None):
+def _begin(a,value,now,auth=None,*,reserve=True):
     from account_repin import _key,_read,_write,_states
     with transaction(a.conn):
         previous=_read(a,value)
@@ -322,6 +364,7 @@ def _begin(a,value,now,auth=None):
             raise AccountError("account_repin_reconciliation_required",canonical_tail=tail(a,value))
         if ancestors and any(s["arguments"].get("reconcile_of")==value["reconcile_of"] for s in _states(a,value).values()):
             raise AccountError("account_repin_reconciliation_required",canonical_tail=tail(a,value,address=value["reconcile_of"]))
+        if not reserve:return None,True
         state={"arguments":value,"status":"pending","snapshot":before,"old_key":Binding(**before["binding"]).key,
             "new_key":":".join(value[k] for k in ("host","provider","account","new_generation")),
             "principal":{"stream_id":(auth or {}).get("stream_id"),"generation":(auth or {}).get("session_generation")},
@@ -455,6 +498,21 @@ async def repin(executor,message,auth):
         if known and known["status"]=="done":return known["result"]
         if known and await runtime.run(lambda a:_resolved(a,__import__('account_repin')._key(value))):
             return {"outcome":"settled","operation_id":value["operation_id"],"historical":True}
+        # Pure coordinator refusals precede any remote call. Existing causes
+        # may still need Z under unhealthy metadata, so their maintenance path
+        # does not acquire a new healthy-origin prerequisite.
+        existing=await runtime.run(lambda a:causes(a,value))
+        if not known and not existing:
+            await runtime.run(lambda a:_begin(a,value,runtime.clock(),auth,reserve=False))
+        elif not known:
+            def maintenance(a):
+                if Binding(**origin(a,value)["binding"]).generation!=value["login_generation"]:raise AccountError("account_login_generation_stale")
+                pin=current(a)
+                if (pin["revision"],digest(pin))!=(value["expected_pin_revision"],value["expected_pin_digest"]):raise AccountError("provider_cli_pin_stale")
+                hold(a,value,runtime.clock())
+            await runtime.run(maintenance)
+        capability_old=await runtime.run(lambda a:Binding(**origin(a,value)["binding"]))
+        await mutation_status(executor,capability_old)
         if not value.get("reconcile_of") and not known:
             # A fresh ordinary request also classifies earlier non-split roots.
             previous=await runtime.run(lambda a:[s for k,s in _states(a,value).items()
@@ -511,6 +569,8 @@ async def repin(executor,message,auth):
                 elif receipt.get("outcome")=="ok":links=[{**_link(state),"receipt":receipt}]
             final=Binding.from_public(receipt.get("binding"))
             proof=await executor.verify_artifact(final,state["snapshot"]["pin"])
+            remote=await mutation_status(executor,old)
+            if remote["binding"]!=final.public():raise AccountError("account_repin_state_changed")
             await runtime._front_desk(auth)
             async with runtime.pin_lock:
                 return await runtime.run(lambda a:_commit(a,state,receipt,links,proof,runtime.clock()),settle_on_cancel=True)

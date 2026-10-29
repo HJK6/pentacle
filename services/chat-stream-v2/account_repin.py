@@ -73,10 +73,8 @@ def _resolved(a,key):
 
 
 def fenced(a,binding):
-    from account_repin_state import hatch_causes
-    if hatch_causes(a,{"host":binding.host,"provider":binding.provider,"account":binding.alias}):return True
-    value={"host":binding.host,"provider":binding.provider,"account":binding.alias}
-    return any(s.get("status")!="done" and not _resolved(a,k) for k,s in _states(a,value).items())
+    from account_repin_state import causes
+    return bool(causes(a,{"host":binding.host,"provider":binding.provider,"account":binding.alias}))
 
 
 def _save_host(a,value,receipt,reason=None):
