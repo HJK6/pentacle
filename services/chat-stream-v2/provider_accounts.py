@@ -434,7 +434,7 @@ class Registry:
     @_serialized
     def activate(self, draft: Binding, receipt: Mapping, *, expected_provider_id: str) -> Binding:
         self._validate_home(draft)
-        if any(row["home"]==draft.home for row in self._load()["generations"].values()):
+        if draft.home not in self.adopted and any(row["home"]==draft.home for row in self._load()["generations"].values()):
             raise AccountError("account_generation_exists")
         store = "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file"
         if (receipt.get("outcome", "ok") != "ok" or receipt.get("auth_mode") != "subscription"
