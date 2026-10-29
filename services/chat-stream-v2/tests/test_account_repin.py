@@ -279,3 +279,30 @@ def test_adopted_codex_repin_keeps_original_home_and_credential_file(tmp_path,mo
             assert not logins
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_required_catchup_after_host_success_then_pin_revision_changes(tmp_path,monkeypatch):
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
+        execute=runtime.executor.execute
+        async def advance(*args,**kwargs):
+            result=await execute(*args,**kwargs)
+            if args[1]=="repin":
+                from provider_cli_pin import set_pin
+                await runtime.run(lambda a:set_pin(a,{"pin":dict(pin,revision=3),"expected_revision":2,
+                    "operation_id":"benign-revision-advance","reason":"same exact reviewed pair"}))
+            return result
+        runtime.executor.execute=advance
+        try:
+            with pytest.raises(VerbError,match="provider_cli_pin_stale"):
+                await runtime.operation(request)
+            runtime.executor.execute=execute
+            assert host.registry.active(old.provider,old.alias,old.host).generation=="successor"
+            # The reviewed contract requires reconciliation, then newest-pin catch-up,
+            # with no repeated native action and no direct pointer edits.
+            latest=dict(request,operation_id="catch-up-current",expected_pin_revision=3,
+                expected_pin_digest=digest(dict(pin,revision=3)),new_generation="current-successor")
+            result=await runtime.operation(latest)
+            assert result["result"]["outcome"] in {"repinned","no_op"}
+        finally:store.stop()
+    asyncio.run(run())
