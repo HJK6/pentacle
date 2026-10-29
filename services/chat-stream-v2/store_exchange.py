@@ -216,6 +216,7 @@ class ExchangeStoreMixin:
 # changes, including updates below that cursor, in the source transaction.
 _REPAIR_VERSION = 1
 _REPAIR_ROWS = 100
+# Ordinary batches stay within 1 MiB; a larger receipt owns one transaction.
 _REPAIR_BYTES = 1024 * 1024
 _SOURCES = {
     "tell": ("v2_tell_deliveries", ("tell_id",), "reply"),
@@ -349,14 +350,12 @@ def _repair_batch(conn, kind, *, pending):
                 conn.execute("UPDATE v2_exchange_repair_progress SET complete=1,rebuilding=0 WHERE source=?", (kind,))
             conn.commit()
             return False, 0
-        used, repaired = 0, 0
+        used, repaired, processed = 0, 0, 0
         for key in rows:
             params = tuple(key[:len(keys)])
             size_row = conn.execute(f"SELECT length(CAST({payload} AS BLOB)) FROM {table} WHERE {lookup}", params).fetchone()
             size = (size_row[0] or 0) if size_row else 0
-            if size > _REPAIR_BYTES:
-                raise ValueError(f"exchange repair oversized {kind} receipt {tuple(key)!r}: {size} bytes")
-            if used + size > _REPAIR_BYTES:
+            if processed and used + size > _REPAIR_BYTES:
                 break
             used += size
             if size_row is not None:
@@ -366,6 +365,9 @@ def _repair_batch(conn, kind, *, pending):
             conn.execute("DELETE FROM v2_exchange_repair_pending WHERE source=? AND key1=? AND key2=?", (kind, *key))
             if not pending:
                 conn.execute("UPDATE v2_exchange_repair_progress SET key1=?,key2=? WHERE source=?", (*key, kind))
+            processed += 1
+            if size > _REPAIR_BYTES:
+                break
         conn.commit()
         return True, repaired
     except BaseException:
@@ -377,6 +379,7 @@ def repair(conn, *, rebuild=False):
     """Catch up retained fenced receipts in bounded, crash-resumable batches.
 
     Commits each batch with its progress; call only at the Store startup seam.
+    An oversized receipt is processed alone, preserving coverage at any size.
     No delivery occurs. Explicit rebuild replaces source-backed observations
     only, retaining healthy roster transition times and saved sequence ids.
     """
