@@ -395,6 +395,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     chatTranscribeBlob: (payload) => call('chat-stream:transcribe-blob', payload || {}),
     chatUploadBlob: (payload) => call('chat-stream:upload-blob', payload || {}),
     chatFetchBlob: (blobSha) => call('chat-stream:fetch-blob', blobSha),
+    chatQueuedSendNow: (hostId, sessionName, originalRequestId, optimisticId, expectedSessionGeneration) => call('chat-stream:queued-send-now', hostId || 'local', sessionName, originalRequestId, optimisticId, expectedSessionGeneration),
     chatInterrupt: (hostId, sessionName, expectedSessionGeneration) => call('chat-stream:interrupt', hostId || 'local', sessionName, expectedSessionGeneration),
     chatDismissQuestion: (hostId, sessionName, payload) => call('chat-stream:dismiss-question', hostId || 'local', sessionName, payload || {}),
     chatRename: (hostId, sessionName, displayName) => call('chat-stream:rename', hostId || 'local', sessionName, displayName),

@@ -35,8 +35,11 @@ async function agentChatSendDefaultQueueState(ctx) {
     const idle = await session.eval(probe('cell-0'));
     report.ok('an idle agent has one ordinary Send and no chooser', idle.compose && idle.send && !idle.mode && !idle.stop, idle);
     await session.eval(`(() => {
-      window.__normalSends = []; window.__queueInterrupts = [];
+      window.__normalSends = []; window.__queueInterrupts = []; window.__queuedActions = [];
       const store = window.PentacleChatStore;
+      store.applyFrame({ type: 'session.inventory', sessions: store.getState().sessions.map(row => row.stream_id === ${json(agent)}
+        ? { ...row, capabilities: { ...row.capabilities, queued_send_now: true } } : row) });
+      store.setQueuedSendNowBridge(async args => { window.__queuedActions.push(args); return { ok: true, confirm: 'interrupt_unconfirmed' }; });
       store.setSendBridge(async args => { window.__normalSends.push(args); return { ok: true, provider_queued: args.text !== 'working probe' }; });
       store.setCancelBridge(async args => { window.__queueInterrupts.push(args); return { ok: true, confirm: 'interrupt_unconfirmed' }; });
       store.sendTurn(${json(agent)}, 'working probe'); return true;
@@ -62,17 +65,18 @@ async function agentChatSendDefaultQueueState(ctx) {
       reasons: [...document.querySelectorAll('#cell-0 .slot-chat-send-now-reason')].map(e => e.textContent),
       urgent: !!document.querySelector('#cell-0 .slot-chat-compose-urgent'),
     }))()`);
-    report.ok('queue acceleration is visibly unavailable with a work-preservation reason',
-      queued.controls.length === 2 && queued.controls.every(b => b.disabled && b.text.includes('unavailable'))
-      && queued.reasons.every(t => /interrupt.*draft.*stays queued/i.test(t)) && !queued.urgent, queued);
+    report.ok('qualified queued rows offer minimal Send now without warnings or new-message urgency',
+      queued.controls.length === 2 && queued.controls.every(b => !b.disabled && b.text === 'Send now')
+      && queued.reasons.length === 0 && !queued.urgent, queued);
     await session.eval(`document.querySelectorAll('#cell-0 .slot-chat-send-now').forEach(b => { b.click(); b.click(); }); true`);
     await cdp.sleep(100);
     const preserved = await session.eval(`({ sends: window.__normalSends.length, interrupts: window.__queueInterrupts.length,
       draft: document.querySelector('#cell-0 .slot-chat-compose-input').value,
-      queued: document.querySelectorAll('#cell-0 .slot-chat-send-status.is-queued').length })`);
-    report.ok('repeated unavailable controls retain every queued input and the unsent draft', preserved.sends === 3
-      && preserved.interrupts === 0 && preserved.draft === 'keep this unsent draft' && preserved.queued === 2, preserved);
-    // Only explicit Stop may dispatch an interrupt; unavailable sends reserve no budget.
+      queued: document.querySelectorAll('#cell-0 .slot-chat-send-status.is-queued').length, actions: window.__queuedActions })`);
+    report.ok('repeated pending controls preserve each original and draft without invoking Stop or repasting', preserved.sends === 3
+      && preserved.interrupts === 0 && preserved.draft === 'keep this unsent draft' && preserved.queued === 2
+      && preserved.actions.length === 2 && new Set(preserved.actions.map(a => a.originalRequestId)).size === 2, preserved);
+    // The separate queued-action bridge does not consume the explicit Stop budget.
     await session.eval(`document.querySelector('#cell-0 .slot-chat-compose-stop').click(); true`);
     await waitFor(ctx, 'window.__queueInterrupts.length === 1', 'explicit Stop still dispatches once');
     report.ok('Stop retains its generation fence', await session.eval('typeof window.__queueInterrupts[0].expectedSessionGeneration === "string"'), {});

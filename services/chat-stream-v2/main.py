@@ -697,6 +697,9 @@ async def run(args: argparse.Namespace) -> int:
     from capacity_retry import CapacityRetry
     capacity_retry = CapacityRetry(store, sessions, comms, hosts, outbound=outbound)
     uiverbs.capacity_retry = capacity_retry
+    from queued_send_now import QueuedSendNow
+    queued_send_now = QueuedSendNow(store, sessions, comms, tmux, owner=lifecycle.instance_id)
+    uiverbs.queued_send_now = comms.queued_send_now = server.queued_send_now = queued_send_now
     server.handlers["capacity_retry.control"] = capacity_retry.control
     # Presence remains observation-only; the durable reconciler owns the
     # thresholded state transition and the read-only reconcile.status verb.
@@ -766,7 +769,7 @@ async def run(args: argparse.Namespace) -> int:
     async def reconcile_callbacks():
         # The alarm runs before tick so a late wake fired in this pass still alerts.
         callbacks = [event_push.check_pin_drift, watch_wake.missed_wake_alarm,
-                     watch_wake.tick, capacity_retry.tick, account_runtime.tick]
+                     watch_wake.tick, capacity_retry.tick, account_runtime.tick, queued_send_now.tick]
         if server.assistant_restore is not None:
             callbacks.append(server.assistant_restore.tick)
         await run_reconcile_callbacks(*callbacks)
@@ -1119,6 +1122,8 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
     # Restart continuity: no new spawn admission once stopping, then hand every
     # in-flight admitted spawn to durable state while the store still runs.
     server.spawn_ready.clear()
+    if getattr(server, "queued_send_now", None) is not None:
+        await budget.step("queued-send-now", server.queued_send_now.close(), cap=2.0)
     if getattr(server, "account_runtime", None) is not None:
         await budget.step("account-runtime", server.account_runtime.stop(), cap=3.0)
     await budget.step("spawn-drain", spawnctl.drain_background_spawns(

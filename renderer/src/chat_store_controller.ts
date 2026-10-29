@@ -158,6 +158,13 @@ export type ChatCancelBridge = (args: {
   expectedSessionGeneration?: string;
 }) => Promise<ChatInterruptResult | undefined>;
 
+export type ChatQueuedSendNowBridge = (args: {
+  streamId: string;
+  originalRequestId: string;
+  optimisticId: string;
+  expectedSessionGeneration: string;
+}) => Promise<ChatInterruptResult | undefined>;
+
 export type ChatInterruptConfirm =
   | 'interrupted'
   | 'interrupt_unconfirmed'
@@ -216,6 +223,8 @@ export class ChatStoreController {
   private webReady = false;
   private disposed = false;
   private cancelBridge: ChatCancelBridge | null = null;
+  private queuedSendNowBridge: ChatQueuedSendNowBridge | null = null;
+  private queuedSendNowDispatches = new Set<string>();
   private interruptStates: Record<string, ChatInterruptState> = {};
   // Explicit Stop reserves Escape for its provider-owned queued rows.
   // A replacement generation discards the previous generation's entire budget.
@@ -255,6 +264,10 @@ export class ChatStoreController {
   /** Install the cancel/interrupt IPC bridge used by cancelTurn (B3). */
   setCancelBridge(bridge: ChatCancelBridge | null): void {
     this.cancelBridge = bridge;
+  }
+
+  setQueuedSendNowBridge(bridge: ChatQueuedSendNowBridge | null): void {
+    this.queuedSendNowBridge = bridge;
   }
 
   /**
@@ -903,25 +916,50 @@ export class ChatStoreController {
       });
   }
 
-  /** Interim capability: no audited native route preserves work and drafts. */
-  canSendQueuedNow(_streamId: string, _optimisticId: string): boolean {
-    return false;
+  canSendQueuedNow(streamId: string, optimisticId: string): boolean {
+    const session = this.state.sessions.find(item => item.stream_id === streamId);
+    const send = this.state.optimisticSends?.[optimisticId];
+    return !this.disposed && !!this.queuedSendNowBridge && session?.status !== 'closed'
+      && session?.capabilities?.queued_send_now === true && !!session.session_generation
+      && this.providerQueueRowPending(streamId, optimisticId, session.session_generation)
+      && !!send?.request_id && !['indeterminate', 'retrying'].includes(send.status)
+      && !this.queuedSendNowDispatches.has(send.request_id);
   }
 
-  /** Retain an inert boundary for a stale row/callback in the current renderer. */
   sendQueuedNow(streamId: string, optimisticId: string): boolean {
-    this.recordOperatorRoute('queue_unavailable', streamId, optimisticId);
-    return false;
+    if (!this.canSendQueuedNow(streamId, optimisticId)) return false;
+    const requestId = this.state.optimisticSends![optimisticId].request_id;
+    const generation = this.state.sessions.find(item => item.stream_id === streamId)!.session_generation!;
+    this.queuedSendNowDispatches.add(requestId);
+    this.recordOperatorRoute('queued_now', streamId, requestId);
+    this.notifyListeners();
+    Promise.resolve().then(() => {
+      const session = this.state.sessions.find(item => item.stream_id === streamId);
+      const send = this.state.optimisticSends?.[optimisticId];
+      if (this.disposed || session?.session_generation !== generation || session?.status === 'closed'
+          || session?.capabilities?.queued_send_now !== true || send?.request_id !== requestId
+          || !this.providerQueueRowPending(streamId, optimisticId, generation) || send.status === 'indeterminate') return;
+      return this.queuedSendNowBridge!({ streamId, originalRequestId: requestId, optimisticId,
+        expectedSessionGeneration: generation });
+    }).then(result => {
+      if (!this.disposed && result?.ok === false) this.setComposerNotice(streamId, result.error || 'Send now did not take.');
+    }).catch(error => {
+      if (!this.disposed) this.setComposerNotice(streamId, error instanceof Error ? error.message : 'Send now did not take.');
+    }).finally(() => {
+      this.queuedSendNowDispatches.delete(requestId);
+      if (!this.disposed) this.notifyListeners();
+    });
+    return true;
   }
 
-  private recordOperatorRoute(action: 'ordinary' | 'queue_unavailable', streamId: string, identity: string): void {
+  private recordOperatorRoute(action: 'ordinary' | 'queued_now', streamId: string, identity: string): void {
     const session = this.state.sessions.find(item => item.stream_id === streamId);
     // A bounded correlation hash, never message text or attachment/account data.
     let hash = 2166136261;
     for (let i = 0; i < identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 16777619);
     console.info('[send_now]', {
       subsystem: 'send_now', bug_ref: 'send_now_interrupt_loss_2026_10_28',
-      origin: 'operator_renderer', action, route: action === 'ordinary' ? 'ordinary_intake' : 'unavailable',
+      origin: 'operator_renderer', action, route: action === 'ordinary' ? 'ordinary_intake' : 'provider_send_now',
       provider: session?.provider || 'unknown',
       provider_version: (session as (PentacleSessionSummary & { provider_version?: string }) | undefined)?.provider_version || 'unknown',
       generation: session?.session_generation || null, request_hash: (hash >>> 0).toString(16).padStart(8, '0'),

@@ -5639,7 +5639,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         receipt = await self.submit(_op)
         return receipt
 
-    async def get_send_receipt(self, to_stream_id: str, request_id: str) -> dict[str, Any] | None:
+    async def get_send_receipt(self, to_stream_id: str, request_id: str, *, include_display_text: bool = False, include_submission_identity: bool = False) -> dict[str, Any] | None:
         """Return only the highest-rowid receipt for one lookup key."""
         target = str(to_stream_id or "").strip()
         request = str(request_id or "").strip()
@@ -5653,7 +5653,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                    ORDER BY rowid DESC LIMIT 1""",
                 (target, request),
             ).fetchone()
-            return _project_send_receipt_row(conn, row) if row is not None else None
+            if row is None:
+                return None
+            result = _project_send_receipt_row(conn, row, include_display_text=include_display_text)
+            if include_submission_identity:
+                first = history_query(conn, "SELECT created_at FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid LIMIT 1", (target, request)).fetchone()
+                result["wire_digest"] = row["wire_digest"]
+                result["first_created_at"] = first[0] if first else None
+            return result
 
         return await self.submit(_op)
 

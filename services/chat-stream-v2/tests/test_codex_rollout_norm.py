@@ -41,6 +41,7 @@ def test_terminal_capacity_error_is_visible_after_tool_output() -> None:
     events = _events("codex_terminal_error.jsonl")
     assert [e["kind"] for e in events] == ["TOOL_USE", "TOOL_RESULT", "ERROR"]
     error = events[-1]
+    assert error["raw"]["native_turn_state"] == "task_complete"
     assert "capacity" in error["text"] and "server_overloaded" in error["text"]
     assert error["raw"]["provider_error_code"] == "server_overloaded"
     assert error["raw"]["turn_id"] == "turn-public-1"

@@ -1858,13 +1858,23 @@ class Comms:
         try:
             host, name = self.sessions.split(target)
             row = await self.store.fetch_session(host, name)
+            queued_operation = plan.message.get("_queued_send_now_operation")
+            queued_binding = (getattr(self, "queued_send_now", None) is not None
+                and (plan.message.get("_auth_context") or {}).get("operator_authenticated"))
             lifecycle = (
                 self.sessions._lifecycle_lock(host, name)
                 if qa_generation is not None or assistant_generation is not None or voice_generation is not None
+                or queued_operation is not None or queued_binding
                 or (row or {}).get("provider") == "claude" else nullcontext()
             )
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
             async with lifecycle, self._pane_input_lock(target):
+                if queued_operation is not None:
+                    policy = getattr(self, "queued_send_now", None)
+                    current = await self.store.fetch_session(host, name) or {}
+                    if (policy is None or not await policy.validate_continue_locked(
+                            queued_operation, target, current.get("session_generation"), request_id)):
+                        raise VerbError("queued_continue_cancelled", "Queued continuation was cancelled", phase="not_started")
                 if voice_generation is not None:
                     current = await self.store.fetch_session(host, name) or {}
                     if current.get("status") != "open" or current.get("session_generation") != voice_generation:
@@ -1904,6 +1914,11 @@ class Comms:
                     not active_draft and pane_mode_reason is None
                     and await self._prompt_in_native_queue(target, provider, plan.wire_text)
                 )
+                queued_policy = getattr(self, "queued_send_now", None)
+                if (provider_queued and queued_policy is not None
+                        and (plan.message.get("_auth_context") or {}).get("operator_authenticated")):
+                    current = await self.store.fetch_session(host, name) or {}
+                    await queued_policy.bind_receipt_locked(target, current.get("session_generation"), request_id, receipt_id)
         except VerbError as exc:
             phase = str(exc.extra.get("phase") or "body_maybe_pasted")
             if phase == "not_started":

@@ -171,7 +171,17 @@ async function publicChatRendererContracts(ctx) {
     })()`;
     await session.eval(`(() => {
       window.__publicRenderer.resolveQueuedBridge = null;
-      window.PentacleChatStore.setSendBridge(args => new Promise(resolve => {
+      window.__publicRenderer.queuedActions = [];
+      const store = window.PentacleChatStore;
+      const row = store.getState().sessions.find(row => row.stream_id === ${stream});
+      if (!row?.session_generation) throw new Error('owned fixture generation required');
+      store.applyFrame({ type: 'session.inventory', sessions: store.getState().sessions.map(item =>
+        item.stream_id === ${stream}
+          ? { ...item, capabilities: { ...item.capabilities, queued_send_now: true } } : item) });
+      store.setQueuedSendNowBridge(async args => {
+        window.__publicRenderer.queuedActions.push(args); return { ok: true };
+      });
+      store.setSendBridge(args => new Promise(resolve => {
         window.__publicRenderer.sends.push(args);
         window.__publicRenderer.resolveQueuedBridge = () => resolve({ ok: true, provider_queued: true });
       }));
@@ -197,6 +207,20 @@ async function publicChatRendererContracts(ctx) {
       queued.queued === true && queued.sending === false && queued.sendNow === true
         && stillQueued.text === 'Queued' && stillQueued.queued === true && stillQueued.sendNow === true,
       { queued, stillQueued });
+    await session.eval(`(() => {
+      const store = window.PentacleChatStore;
+      store.applyFrame({ type: 'session.inventory', sessions: store.getState().sessions.map(row =>
+        row.stream_id === ${stream}
+          ? { ...row, capabilities: { ...row.capabilities, queued_send_now: false } } : row) });
+      return true;
+    })()`);
+    const unqualified = await waitForValue(session, cdp, probe,
+      value => value?.text === 'Queued' && value.sendNow === false,
+      { timeoutMs, label: 'unqualified queued row has no Send now action' });
+    const queuedActions = await session.eval('window.__publicRenderer.queuedActions.length');
+    report.ok('unqualified capability hides only Send now, preserving the queued row without dispatch',
+      unqualified.queued === true && unqualified.sending === false && queuedActions === 0,
+      { unqualified, queuedActions });
     await session.eval(`(() => {
       const request = window.__publicRenderer.sends[2];
       const store = window.PentacleChatStore;

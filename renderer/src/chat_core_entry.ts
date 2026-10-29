@@ -22,6 +22,10 @@ store.setCancelBridge(async ({ streamId, expectedSessionGeneration }) => {
   const { host, session } = target(streamId);
   return browser.cc.chatInterrupt(host, session, expectedSessionGeneration);
 });
+store.setQueuedSendNowBridge(async ({ streamId, originalRequestId, optimisticId, expectedSessionGeneration }) => {
+  const { host, session } = target(streamId);
+  return browser.cc.chatQueuedSendNow(host, session, originalRequestId, optimisticId, expectedSessionGeneration);
+});
 browser.PentacleChatCore = PentacleChatCore;
 browser.PentacleChatStore = store;
 browser.PentacleChatView = PentacleChatView;

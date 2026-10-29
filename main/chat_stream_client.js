@@ -847,6 +847,18 @@ try {
     });
   }
 
+  queuedSendNow({ host, sessionName, originalRequestId, optimisticId, expectedSessionGeneration } = {}) {
+    if (![originalRequestId, optimisticId, expectedSessionGeneration].every(value => typeof value === 'string' && value)) {
+      return Promise.reject(new Error('Selected queued identity required'));
+    }
+    const requestId = 'queued-now-' + crypto.createHash('sha256')
+      .update(JSON.stringify([host, sessionName, expectedSessionGeneration, originalRequestId])).digest('hex');
+    return this.sendCommand({ type: 'send.interrupt', host, session_name: sessionName,
+      expected_session_generation: expectedSessionGeneration,
+      queued_send_now: { original_request_id: originalRequestId, optimistic_id: optimisticId } },
+      'send.interrupt', { requestId, timeoutMs: 15000 });
+  }
+
   // Settle an agent-asked question (claude AskUserQuestion selector). Optional
   // text is the shared-builder answer message; absent text is Cancel-only.
   dismissQuestion({ host, sessionName, questionKey, text } = {}) {
