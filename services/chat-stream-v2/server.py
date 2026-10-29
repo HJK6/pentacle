@@ -3176,8 +3176,11 @@ class Server:
         include_subagents: bool,
         opened_by_host_ids: frozenset[str] | None,
         include_assistant_composite: bool = False,
+        *, project_visibility: bool = False,
     ) -> bool:
         session = self.sessions.get(stream_id) if self.sessions is not None and stream_id else None
+        if project_visibility and session is not None:
+            session = self._project_assistant_composite_session(session)
         return self._session_is_visible_to_client(
             session, include_subagents, opened_by_host_ids, include_assistant_composite,
         )
@@ -3190,13 +3193,15 @@ class Server:
         include_assistant_composite: bool = False,
         scoped_stream_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return [
+        projected = (
             self._project_assistant_composite_session(session)
-            for session in sessions
-            if isinstance(session, dict)
+            for session in sessions if isinstance(session, dict)
+        )
+        return [
+            session for session in projected
             # Daff is listed only for its authenticated Cosmo scope. Keep this
             # inventory policy out of the shared direct-access visibility checks.
-            and not (
+            if not (
                 session.get("provider") == "composite"
                 and session.get("stream_id") == "daff:assistant"
                 and scoped_stream_id != "daff:assistant"
@@ -3246,6 +3251,18 @@ class Server:
         if composite is not None:
             return composite.project_session(session)
         projected = dict(session)
+        policy = getattr(getattr(self, "sessions", None), "assistant", None)
+        daff = self._composites().get("daff")
+        config = getattr(daff, "config", None)
+        bound_daff = bool(
+            getattr(daff, "enabled", False) and config is not None and config.direct_primary
+            and session.get("stream_id") == config.direct_primary_stream_id
+            and session.get("session_generation") == config.direct_primary_generation
+        )
+        if bound_daff or (policy is not None and policy.is_daff_backend(session)):
+            # Reuse hidden-seat presentation, including legacy persisted defaults.
+            # Diagnostic inventories retain these rows; direct access is unchanged.
+            projected["visibility"] = "hidden"
         if getattr(self, "queued_send_now", None) is not None:
             from queued_send_now import route_for
             projected["capabilities"] = {**(session.get("capabilities") or {}),
@@ -3418,6 +3435,7 @@ class Server:
             if not self._stream_is_visible_to_client(
                 str(event.get("stream_id") or ""), include_subagents, opened_by_host_ids,
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
+                project_visibility=True,
             ):
                 return None
         if frame_type in {"working.state", "completion.report", "session.died"}:
@@ -3425,6 +3443,7 @@ class Server:
             if stream_id and not self._stream_is_visible_to_client(
                 stream_id, include_subagents, opened_by_host_ids,
                 bool(self._client_assistant_composite_v1.get(websocket, False)),
+                project_visibility=True,
             ):
                 return None
         if frame_type == "work_lanes.inventory" and not self._client_work_lanes_v1.get(websocket, False):
@@ -3762,6 +3781,7 @@ class Server:
                 and self._stream_is_visible_to_client(
                     stream_id, include_subagents, opened_by_host_ids,
                     self._assistant_composite_capable_for_message(msg),
+                    project_visibility=True,
                 )
             },
         }

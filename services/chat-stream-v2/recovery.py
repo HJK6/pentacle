@@ -198,6 +198,7 @@ class DaffRecovery:
             "host": self.local_host,
             "provider": "claude", "model": self.model, "effort": self.effort,
             "role": row.get("role"),
+            "visibility": "hidden",
             "handoff_from_stream_id": predecessor, "handoff": True,
             "initial_prompt": self.startup_prompt,
         }

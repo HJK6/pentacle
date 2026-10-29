@@ -20,10 +20,10 @@ async def _noop_sleep(_seconds):
     return None
 
 
-def _open_seat(store, stream_id, role=DAFF_ROLE):
+def _open_seat(store, stream_id, role=DAFF_ROLE, visibility="default"):
     host, name = stream_id.split(":", 1)
     return store.open_session(
-        host, name, provider="claude", role=role, visibility="default",
+        host, name, provider="claude", role=role, visibility=visibility,
         pane_status="pane_alive", effective_model="claude-opus-5-5", effective_effort="high")
 
 
@@ -43,13 +43,15 @@ class _FakeSpawnctl:
         self.store = store
         self.calls = 0
         self.fail_times = fail_times
+        self.messages = []
 
     async def spawn(self, msg, host):
         self.calls += 1
+        self.messages.append(dict(msg))
         if self.calls <= self.fail_times:
             return {"type": "spawn.error", "error_code": "spawn_failed"}
         sid = f"{LOCAL}:daff-new-{self.calls}"
-        row = await _open_seat(self.store, sid)
+        row = await _open_seat(self.store, sid, visibility=msg.get("visibility") or "default")
         return {"type": "spawn.ok", "stream_id": sid,
                 "session": {"session_generation": row["session_generation"]}}
 
@@ -114,6 +116,8 @@ def test_recovers_daff_rebinds_and_flushes(monkeypatch):
             bound = await daff.binding()
             assert bound["stream_id"] == f"{LOCAL}:daff-new-1"
             seat = await store.fetch_session(LOCAL, "daff-new-1")
+            assert spawnctl.messages[0]["visibility"] == "hidden"
+            assert seat["visibility"] == "hidden"
             assert bound["generation"] == seat["session_generation"]
             # Queued input was flushed in order for daff.
             assert flushed == ["daff"]
