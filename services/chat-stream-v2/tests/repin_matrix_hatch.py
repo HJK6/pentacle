@@ -8,7 +8,7 @@ from sessions import VerbError
 from test_account_runtime import AUTH
 
 ROWS=("B-hatch-all-states","B-hatch-prior-findings","B-hatch-races","B-hatch-refusals")
-VARIANTS={"B-hatch-all-states":("N1","N2","N3","U0","U1","S0","S1","X-missing","X-fork","X-origin"),
+VARIANTS={"B-hatch-all-states":("N1","N2","N3","U0","U1","S0","S1","X-missing","X-fork","X-origin","sticky-auth"),
     "B-hatch-prior-findings":("R1","R2","F1-default","F1-health","F1-policy","F2","F3","combined")}
 
 from repin_matrix_hatch_boundaries import VARIANTS as BOUNDARY_VARIANTS
@@ -28,7 +28,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
         session_generation="hatch-old-attribution",account_binding=old.public())
     runtime._matrix_hatch_history={"session":historical,"old":old.public()}
     variant=case.variant
-    split_kind=case.row in {"B-hatch-races","B-hatch-refusals"} or variant in {"S0","S1","X-missing","X-fork","X-origin","R2","F1-default","F1-health","F1-policy","F2","F3","combined"}
+    split_kind=case.row in {"B-hatch-races","B-hatch-refusals"} or variant in {"S0","S1","X-missing","X-fork","X-origin","R2","F1-default","F1-health","F1-policy","F2","F3","combined","sticky-auth"}
     if split_kind and parent is None:
         async def split(*args,**kwargs):
             nonlocal current
@@ -105,8 +105,16 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
         await runtime.run(fork)
     if variant in {"X-origin","F1-default","combined"}:
         await runtime.run(lambda a:a.set_default(host=old.host,provider=old.provider,alias=old.alias))
-    if variant in {"F1-health","combined"}:
+    if variant in {"F1-health","combined","sticky-auth"}:
         await runtime.record_failure(old,"auth")
+        if variant=="sticky-auth":
+            def asserted_healthy(accounts):
+                accounts.conn.execute("UPDATE v2_account_bindings SET health='healthy' WHERE binding_key=?",(old.key,));accounts.conn.commit()
+            await runtime.run(asserted_healthy)
+            status=await recovery(runtime,old)
+            with pytest.raises(VerbError):
+                await runtime.operation(fresh(request,current,"sticky-auth-inplace",reconcile_of=status["canonical_tail"],expected_origin_digest=status["origin_digest"]))
+            parent=(await recovery(runtime,old))["canonical_tail"]
     if variant in {"F1-policy","combined"}:runtime.policy["hatch-policy-revision"]=1
     if variant in {"F2","combined"}:
         before=list(calls)

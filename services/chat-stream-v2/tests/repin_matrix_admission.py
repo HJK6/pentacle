@@ -10,7 +10,7 @@ from spawnctl import SpawnCtl
 from test_account_runtime import AUTH
 from test_spawn_cancel_fence_holes import ReconTmux
 
-CONSUMERS=("ordinary","explicit","scheduled","deferred","retry","resume","restore")
+CONSUMERS=("ordinary","explicit","scheduled","deferred","retry","resume","restore","handoff")
 ROWS=("B-admission","B-status-locks")
 VARIANTS={"B-admission":tuple(state+"/"+consumer for state in ("U","S","X") for consumer in CONSUMERS),
     "B-status-locks":("U","S","X")}
@@ -75,6 +75,11 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
     base={"objective":"Exercise repin admission","host":old.host,"provider":old.provider,"_auth_context":AUTH,
         "session_name":"matrix-refused","request_id":"matrix-refused-request","ready_marker":"READY","_defer_launch_token_stage":True}
     if consumer=="explicit":base["account"]=old.alias
+    if consumer=="handoff":
+        model="gpt-6-sol" if old.provider=="codex" else "claude-sonnet-5-5"
+        await store.open_session(old.host,"matrix-handoff-source",provider=old.provider,session_generation="matrix-prior-handoff",
+            effective_model=model,effective_effort="high",role="worker",account_binding=old.public())
+        base.update(handoff=True,handoff_from_stream_id=old.host+":matrix-handoff-source",initial_prompt="Continue from this fixture checkpoint")
     if consumer in {"resume","restore"}:
         base.update(resume_session_id="531c40b0-706d-47d7-b2f9-24e61b50b216",_account_resume_binding=old.public(),
             _resume_jsonl_path=old.transcript_root+"/matrix.jsonl",_resume_cwd=str(tmp_path))
@@ -94,7 +99,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
     try:
         if consumer in {"ordinary","explicit"}:
             with pytest.raises(VerbError,match="account_repin_reconciliation_required"):await ctl.spawn(dict(base),old.host)
-        elif consumer in {"resume","restore"}:
+        elif consumer in {"resume","restore","handoff"}:
             with pytest.raises(VerbError,match="account_repin_reconciliation_required"):await ctl._resolve_launch(dict(base),old.host,"matrix-refused")
         elif consumer in {"deferred","retry"}:
             for number in range(2 if consumer=="retry" else 1):
@@ -116,6 +121,11 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             assert refused.value.extra["schedule"]["last_error_code"]=="account_repin_reconciliation_required"
         assert tmux.created==0 and native==native_before
         assert await store.fetch_session(old.host,"matrix-refused") is None
+        for name in ("matrix-refused","matrix-refused-0","matrix-refused-1"):
+            assert await store.fetch_session(old.host,name) is None
+            attribution=await runtime.run(lambda a,name=name:a.conn.execute(
+                "SELECT count(*) FROM v2_account_session_bindings WHERE stream_id=?",(old.host+":"+name,)).fetchone()[0])
+            assert attribution==0
         count=await runtime.run(lambda a:a.conn.execute("SELECT count(*) FROM kv WHERE k GLOB 'provider_cli.admission:host-a:matrix-refused*'").fetchone()[0])
         assert count==0
     finally:

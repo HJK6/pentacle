@@ -13,7 +13,7 @@ from test_account_runtime import AUTH
 ROWS=("B-U0-outcomes","B-generation-exclusion","B-guard-required","B-U1-live","B-Z-crash","B-C0","B-race-pin","B-race-origin")
 VARIANTS={"B-U0-outcomes":tuple(effect+"/"+transport for effect in ("absent","started","failed","success","no-op")
     for transport in ("unreachable","timeout","ssh-auth","malformed")),
-    "B-generation-exclusion":("repin-first","enrollment-first")+tuple("parked/"+kind for kind in ("N1","N2","U0","U1","S0","S1")),"B-guard-required":("missing","unset"),"B-U1-live":("stable-hold","expired-hold","replaced-hold"),"B-Z-crash":("seal-before-disposition","delayed-dispatch-after-restart"),
+    "B-generation-exclusion":("repin-first","enrollment-first")+tuple("parked/"+kind for kind in ("N1","N2","U0","U1","S0","S1")),"B-guard-required":("missing","unset"),"B-U1-live":("stable-hold","expired-hold","replaced-hold","fresh-hatch"),"B-Z-crash":("seal-before-disposition","delayed-dispatch-after-restart"),
     "B-C0":("before-transaction","during-transaction","after-transaction","lost-reply"),
     "B-race-pin":("guard","host-selection","permit","native-result","artifact","final-host","final-cas","ancestry-inspect","zero-seal"),
     "B-race-origin":tuple(kind+"/"+boundary for kind in ("default","health","policy","auth-principal","hold-expired","hold-replaced","host-selection")
@@ -300,7 +300,8 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
         await store.set_spawn_admission_hold(old.host,held_until=runtime.clock()+1300,reason="drained worker recovery")
         status=await recovery(runtime,old)
         assert status["fence_causes"]
-        return {"current":current,"parent":attempt["operation_id"],"expected_logins":expected_logins,"staged":True}
+        return {"current":current,"parent":attempt["operation_id"],"expected_logins":expected_logins,"staged":True,
+            "hatch":case.variant=="fresh-hatch","hatch_signins":expected_logins+1}
     if case.row=="B-guard-required":
         if case.variant=="missing":host.config.pop("mutation_clearance",None)
         else:host.config["mutation_clearance"]="unset"
