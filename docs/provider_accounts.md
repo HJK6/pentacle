@@ -474,7 +474,13 @@ freshness is unchanged. Same-pin, same-ID retry still reconciles normally.
 A second race or uncertain/failed outcome parks the chain; it never triggers
 login, historical selection or background retries. A fresh attempt must reference
 the latest parked chain tip; a predecessor can be consumed only once. Definitive
-host failure without a split remains for the existing FD recovery disposition.
+host failure without a split is resolved only by an authenticated, read-only
+status proof of the unchanged original host binding and absent successor, with
+the original central binding, health, default and policy still unchanged.
+The failed receipt stays parked and immutable, but stops fencing the cell: a
+fresh authorized repin may proceed under its own current pin and hold, or a pin
+rollback matching the original binding permits admission. Missing, conflicting
+or uncertain evidence retains the fence.
 
 Successful immutable repin receipts link old and new binding keys. Resume,
 including automatic front-desk restore, follows only that proven same-home chain
@@ -491,6 +497,12 @@ seat. New normal work input to mismatching seats is refused while queued work
 and receipts are preserved. Status/read, checkpoints, reports and closure remain
 available. Same-release artifacts need verification rather than an unnecessary
 restart.
+
+Input verifies remote artifacts before taking the short pin decision lock.
+Each physical paste or key action shares a barrier with other targets; a pin
+move takes it exclusively, after in-flight physical actions finish. Input
+rechecks the current pin after entering that barrier. Submission-evidence waits
+hold neither lock, and any later Enter retry must pass the current pin again.
 
 An offline host remains pending and supplies no completion proof. On return,
 current satellite/helper code admission precedes native verification; catch up

@@ -1,7 +1,7 @@
 """Final-QA regressions: recoverable non-splits and bounded input decisions."""
 import asyncio
 import copy
-from pathlib import Path
+import json
 
 import pytest
 from provider_accounts import AccountError
@@ -64,6 +64,39 @@ def test_uncertain_host_outcome_does_not_lift_the_split_fence(tmp_path,monkeypat
             from account_repin import fenced
             assert await runtime.run(lambda a:fenced(a,old))
         finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case",["binding","successor","central-health","auth","auth-race"])
+def test_non_split_resolution_requires_exact_proof_origin_and_current_authority(tmp_path,monkeypatch,case):
+    from account_repin import fenced
+    async def run():
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
+        observe=host.observation;execute=runtime.executor.execute;fresh=False
+        def fail(_): raise AccountError("provider_transport_failed")
+        host.observation=fail
+        async def uncertain(account,action,*args,**kwargs):
+            result=await execute(account,action,*args,**kwargs)
+            if action=="repin-status":
+                result=copy.deepcopy(result)
+                if not fresh: result.pop("non_split",None)
+                elif case=="binding": result["non_split"]["binding"]["generation"]="wrong-origin"
+                elif case=="successor": result["non_split"]["successor_absent"]=False
+                elif case=="auth-race": runtime.server.assistant_composite.enabled=False
+            return result
+        runtime.executor.execute=uncertain
+        try:
+            with pytest.raises(VerbError): await runtime.operation(request)
+            assert await runtime.run(lambda a:fenced(a,old))
+            host.observation=observe;fresh=True
+            if case=="central-health": await runtime.record_failure(old,"identity")
+            auth={} if case=="auth" else AUTH
+            with pytest.raises(VerbError):
+                await runtime.operation(dict(request,operation_id="unproven-recovery",new_generation="unused",_auth_context=auth))
+            assert await runtime.run(lambda a:fenced(a,old))
+            assert host.registry.active(old.provider,old.alias,old.host).key==old.key
+            assert not [v for v in native if "Reply exactly OK" in v] and len(logins)==1
+        finally: store.stop()
     asyncio.run(run())
 
 
@@ -153,4 +186,108 @@ def test_pin_move_orders_with_physical_input_and_refuses_the_next_old_input():
             release.set();await first
             if second: await second
             store.stop()
+    asyncio.run(run())
+
+
+def test_real_send_evidence_wait_allows_other_send_and_pin_move_but_refuses_enter_retry(tmp_path):
+    from comms import Comms
+    from spawnctl import SpawnCtl
+    from test_send_semantics import FakeTmux
+    async def run():
+        store,runtime,rows=await input_rows()
+        started=asyncio.Event();release=asyncio.Event()
+        class Tmux(FakeTmux):
+            async def capture(self,name):
+                text=self.pastes[0] if name=="input-primary" and self.pastes else ""
+                return "OpenAI Codex\n─────────\n› "+text+"\n  gpt-6-test high"
+        tmux=Tmux(submit_on_paste=False)
+        comms=Comms(store,runtime.sessions,SpawnCtl(store,runtime.sessions,tmux=tmux),attachment_root=tmp_path)
+        comms.account_runtime=runtime
+        async def evidence(_tmux,name,*args,**kwargs):
+            if name=="input-primary": started.set();await release.wait();return False
+            return True
+        comms._submission_evidence=evidence
+        task=None
+        try:
+            await runtime.sessions.refresh()
+            task=asyncio.create_task(comms.send({"stream_id":rows[0]["stream_id"],"text":"primary marker","request_id":"primary-send"}))
+            await asyncio.wait_for(started.wait(),1)
+            result=await asyncio.wait_for(comms.send({"stream_id":rows[1]["stream_id"],"text":"spare marker","request_id":"spare-send"}),1)
+            assert result["submission_confirmed"]
+            pin=copy.deepcopy(release_pair());pin["revision"]=2;pin["providers"]["codex"]["version"]="9.9.9"
+            await asyncio.wait_for(runtime.operation({"action":"pin-set","pin":pin,"expected_revision":1,
+                "operation_id":"move-during-send-evidence","reason":"fixture","_auth_context":AUTH}),1)
+            release.set();result=await task
+            assert result["action_committed"] and result["confirmation_pending"]
+            assert result["reason"]=="enter_failed"
+            assert tmux.enters==0 and tmux.pastes==["primary marker","spare marker"]
+        finally:
+            release.set()
+            if task: await task
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("move_at",["qualification","physical"])
+def test_real_queued_control_rechecks_pin_and_orders_physical_keys(move_at):
+    from account_runtime import AccountRuntime
+    from test_account_rotation import policy
+    from test_queued_send_now import setup as queued_setup, message, finish
+    from provider_cli_fixtures import seed_pin
+    from dataclasses import replace
+    async def run():
+        h=await queued_setup();started=asyncio.Event();release=asyncio.Event();order=[]
+        runtime=AccountRuntime(h.store,h.sessions,policy=policy())
+        account=replace(binding(),host="fixture",version=h.sessions.get("fixture:v2-capacity")["account_binding"]["version"],
+            executable_sha256=h.sessions.get("fixture:v2-capacity")["account_binding"]["executable_sha256"])
+        await runtime.run(lambda a:a.register(account))
+        pin=copy.deepcopy(release_pair())
+        for artifact in pin["providers"]["codex"]["artifacts"].values():
+            artifact["native_sha256"]=account.executable_sha256
+        await seed_pin(runtime,pin)
+        await artifact_executor(runtime)
+        def bind_fixture(conn):
+            with conn:
+                conn.execute("UPDATE sessions SET account_binding=? WHERE host=? AND session_name=?",
+                    (json.dumps(account.public()),"fixture","v2-capacity"))
+        await h.store.submit(bind_fixture)
+        h.comms.account_runtime=runtime
+        source=h.controller.source_snapshot;run_keys=h.tmux.run
+        async def paused_source(row):
+            if move_at=="qualification": started.set();await release.wait()
+            return await source(row)
+        async def paused_keys(*args,**kwargs):
+            if args[0]=="send-keys" and move_at=="physical":
+                order.append("keys-start");started.set();await release.wait();order.append("keys-end")
+            return await run_keys(*args,**kwargs)
+        h.controller.source_snapshot=paused_source;h.tmux.run=paused_keys
+        async def move():
+            changed=copy.deepcopy(pin);changed["revision"]=2;changed["providers"]["codex"]["version"]="9.9.9"
+            await runtime.operation({"action":"pin-set","pin":changed,"expected_revision":1,"operation_id":"queued-race",
+                "reason":"fixture","_auth_context":{"operator_authenticated":True}})
+            order.append("pin-moved")
+        task=asyncio.create_task(h.controller.send(message()));writer=None
+        task.add_done_callback(lambda _:started.set())
+        try:
+            await asyncio.wait_for(started.wait(),1)
+            if task.done():
+                await task
+                pytest.fail("queued control returned before the race point")
+            writer=asyncio.create_task(move())
+            if move_at=="qualification":
+                await asyncio.wait_for(writer,1);release.set()
+                with pytest.raises(VerbError,match="provider_cli_pin_mismatch"): await task
+                record,_=await h.controller._record(h.controller.operation_key("fixture:v2-capacity","test-generation","selected"))
+                assert record["state"]=="cancelled" and h.tmux.keys==[]
+            else:
+                await asyncio.sleep(0);assert not writer.done()
+                release.set();await task;await writer
+                assert order==["keys-start","keys-end","pin-moved"] and len(h.tmux.keys)==1
+        finally:
+            release.set()
+            if not task.done():
+                try: await task
+                except VerbError: pass
+            if writer: await writer
+            await finish(h)
     asyncio.run(run())

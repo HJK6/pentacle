@@ -378,45 +378,49 @@ class QueuedSendNow:
             if route == "codex-continue" and (not active or active["turn_id"] != source.get("active_turn_id")
                     or active["source_session_id"] != source.get("source_session_id")):
                 raise VerbError("queued_send_now_turn_unproven", "Active native turn is not confirmed")
-            from contextlib import AsyncExitStack
-            from provider_accounts import AccountError
-            async with AsyncExitStack() as pin_guard:
+            operation = {"key": key, "stream_id": sid, "generation": generation,
+                         "original_request_id": request, "optimistic_id": optimistic,
+                         "receipt_id": receipt["receipt_id"], "route": route, "owner": self.owner,
+                         "provider": row["provider"], "executable_sha256": row["account_binding"]["executable_sha256"],
+                         "native_turn_id": (active or {}).get("turn_id"),
+                         "source_session_id": (active or {}).get("source_session_id"),
+                         "source_file_id": source.get("file_id"), "source_watermark": source.get("watermark"),
+                         "native_executable_sha256": source.get("native_executable_sha256"),
+                         "native_executable_file_id": source.get("native_executable_file_id"),
+                         "watermark": max((e["daemon_seq"] for e in events), default=0),
+                         "state": "dispatch_claimed", "created_at": time.time()}
+            operation, claimed = await self._record(key, expected={"queued"}, update=operation)
+            if not claimed:
+                return self._reply(msg, operation, reason="operation_replay")
+            current = await self.store.fetch_session(host, name) or {}
+            if any(current.get(key) != row.get(key) for key in (
+                    "status", "session_generation", "pane_pid", "observer_binding", "account_binding")):
+                await self._record(key, expected={"dispatch_claimed"},
+                                   update={"state": "cancelled", "reason": "binding_changed"})
+                raise VerbError("stale_session_generation", "Selected source binding changed")
+            try:
+                keys = ("C-x", "C-s") if route == "claude-native" else ("Escape",)
                 if account_runtime is not None:
                     try:
-                        await pin_guard.enter_async_context(account_runtime.input_guard(row))
+                        async with account_runtime.input_guard(row):
+                            result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
                     except AccountError as exc:
-                        raise VerbError(str(exc),str(exc),**exc.context) from None
-                operation = {"key": key, "stream_id": sid, "generation": generation,
-                             "original_request_id": request, "optimistic_id": optimistic,
-                             "receipt_id": receipt["receipt_id"], "route": route, "owner": self.owner,
-                             "provider": row["provider"], "executable_sha256": row["account_binding"]["executable_sha256"],
-                             "native_turn_id": (active or {}).get("turn_id"),
-                             "source_session_id": (active or {}).get("source_session_id"),
-                             "source_file_id": source.get("file_id"), "source_watermark": source.get("watermark"),
-                             "native_executable_sha256": source.get("native_executable_sha256"),
-                             "native_executable_file_id": source.get("native_executable_file_id"),
-                             "watermark": max((e["daemon_seq"] for e in events), default=0),
-                             "state": "dispatch_claimed", "created_at": time.time()}
-                operation, claimed = await self._record(key, expected={"queued"}, update=operation)
-                if not claimed:
-                    return self._reply(msg, operation, reason="operation_replay")
-                current = await self.store.fetch_session(host, name) or {}
-                if any(current.get(key) != row.get(key) for key in (
-                        "status", "session_generation", "pane_pid", "observer_binding", "account_binding")):
-                    await self._record(key, expected={"dispatch_claimed"},
-                                       update={"state": "cancelled", "reason": "binding_changed"})
-                    raise VerbError("stale_session_generation", "Selected source binding changed")
-                try:
-                    keys = ("C-x", "C-s") if route == "claude-native" else ("Escape",)
+                        await self._record(key, expected={"dispatch_claimed"},update={"state":"cancelled","reason":str(exc)})
+                        raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+                else:
                     result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
-                    if result and result[0] != 0:
-                        raise VerbError("queued_send_now_key_uncertain", "Native control dispatch is unconfirmed")
-                except BaseException:
-                    await self._record(key, expected={"dispatch_claimed"}, update={"state": "indeterminate", "reason": "key_dispatch_uncertain"})
-                    raise
-                operation, _ = await self._record(key, expected={"dispatch_claimed"}, update={"state": "completed" if route == "claude-native" else "wait_interrupt"})
-                self.request_tick()
-                return self._reply(msg, operation)
+                if result and result[0] != 0:
+                    raise VerbError("queued_send_now_key_uncertain", "Native control dispatch is unconfirmed")
+            except VerbError as exc:
+                if exc.extra.get("phase")=="not_started": raise
+                await self._record(key, expected={"dispatch_claimed"}, update={"state":"indeterminate","reason":"key_dispatch_uncertain"})
+                raise
+            except BaseException:
+                await self._record(key, expected={"dispatch_claimed"}, update={"state": "indeterminate", "reason": "key_dispatch_uncertain"})
+                raise
+            operation, _ = await self._record(key, expected={"dispatch_claimed"}, update={"state": "completed" if route == "claude-native" else "wait_interrupt"})
+            self.request_tick()
+            return self._reply(msg, operation)
 
     async def cancel_locked(self, sid, generation):
         def operation(conn):

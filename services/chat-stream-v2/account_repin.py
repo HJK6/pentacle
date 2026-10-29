@@ -77,11 +77,33 @@ def _states(a,value):
         "SELECT binding_key,data FROM v2_account_recovery WHERE substr(binding_key,1,?)=?",(len(prefix),prefix))}
 
 
+def _non_split_status(state,status):
+    """Only authenticated terminal failure, or proven pre-action refusal, is conclusive."""
+    value=state["arguments"];old=Binding(**state["snapshot"]["binding"])
+    identity={"kind":"repin","provider":old.provider,"alias":old.alias,
+        "expected_generation":old.generation,"generation":value["new_generation"],
+        "pin_revision":state["snapshot"]["pin"]["revision"],"pin_digest":digest(state["snapshot"]["pin"])}
+    proof=status.get("non_split") or {}
+    terminal=(status.get("state")=="done" and status.get("outcome") not in {"ok","no_op","execution_unresolved"})
+    pre_action=(status.get("state")=="absent" and (state.get("park_reason") in {
+        "account_repin_home_busy","account_repin_occupancy_unavailable"} or
+        state.get("host_receipt",{}).get("outcome") in {"account_repin_home_busy","account_repin_occupancy_unavailable"}))
+    return (not value.get("reconcile_of") and (terminal or pre_action)
+        and all(status.get(k)==v for k,v in identity.items())
+        and proof.get("binding")==old.public() and proof.get("successor_absent") is True)
+
+
 def _resolved(a,key):
     row=a.conn.execute("SELECT data FROM v2_account_recovery WHERE binding_key=? AND state='done'",("repin-resolved:"+key,)).fetchone()
     if not row: return False
     try:
-        reference=json.loads(row[0])["resolved_by"]
+        resolution=json.loads(row[0])
+        if resolution.get("disposition")=="confirmed_non_split":
+            original=a.conn.execute("SELECT data FROM v2_account_recovery WHERE binding_key=?",(key,)).fetchone()
+            state=json.loads(original[0]) if original else {}
+            if resolution.get("operation_key")!=key or not _non_split_status(state,resolution["host_status"]): raise ValueError()
+            return True
+        reference=resolution["resolved_by"]
         child=a.conn.execute("SELECT data FROM v2_account_recovery WHERE binding_key=? AND state='done'",(reference,)).fetchone()
         state=json.loads(child[0]) if child else {}
         if (not reference.startswith(PREFIX) or state.get("status")!="done"
@@ -116,7 +138,7 @@ def _same_origin(before,after):
 def _begin(a,value,now):
     with transaction(a.conn):
         prior=_read(a,value)
-        if prior and prior["status"]=="done": return prior,False
+        if prior and (prior["status"]=="done" or _resolved(a,_key(value))): return prior,False
         # A stale retry may inspect only its exact journal. Do not refresh its snapshot.
         if prior and current(a)!=prior["snapshot"]["pin"]: return prior,False
         snapshot=_state_snapshot(a,value,now)
@@ -143,12 +165,43 @@ def _begin(a,value,now):
 def _save_host(a,value,receipt,reason=None):
     with transaction(a.conn):
         state=_read(a,value)
-        if not state or state["status"]=="done": return state
+        if not state or state["status"]=="done" or _resolved(a,_key(value)): return state
         state=dict(state)
         if receipt is not None: state["host_receipt"]=receipt
         if reason: state.update(status="parked",park_reason=reason)
         _write(a,value,state)
         return state
+
+
+def _resolve_non_split(a,value,status):
+    with transaction(a.conn):
+        state=_read(a,value)
+        if not state or state["status"]=="done" or _resolved(a,_key(value)): return
+        if not _non_split_status(state,status): return
+        old=Binding(**state["snapshot"]["binding"])
+        row=a._cell(old.host,old.provider,old.alias)
+        selected=a._available(row)
+        default=a.conn.execute("SELECT * FROM v2_account_defaults WHERE host=? AND provider=?",(old.host,old.provider)).fetchone()
+        now={"binding":asdict(selected),"health_revision":row["health_revision"],
+             "default":dict(default) if default else None,"policy":a.policy}
+        if not _same_origin(state["snapshot"],now): return
+        # This disposition proves that no host/central split exists; it imports no binding.
+        a.conn.execute("INSERT INTO v2_account_recovery VALUES (?,?,?)",("repin-resolved:"+_key(value),"done",
+            canonical({"disposition":"confirmed_non_split","operation_key":_key(value),"host_status":status})))
+
+
+async def _inspect_non_split(executor,state,auth):
+    value=state["arguments"]
+    if (value.get("reconcile_of") or state["status"]=="done"
+            or state.get("host_receipt",{}).get("outcome") in {"ok","no_op"}): return
+    try:
+        old=Binding(**state["snapshot"]["binding"])
+        status=await executor.execute(old,"repin-status","repin:"+value["operation_id"],
+            value["new_generation"],pin=state["snapshot"]["pin"])
+        await executor.runtime._front_desk(auth)
+        await executor.runtime.run(lambda a:_resolve_non_split(a,value,status),settle_on_cancel=True)
+    except AccountError:
+        pass  # Offline, conflicting or uncertain evidence retains its fence.
 
 
 def _host_id(value):
@@ -293,6 +346,13 @@ async def repin(executor,message,auth):
     value=_payload(message)
     async with executor._host_locks.setdefault(value["host"],asyncio.Lock()):
         await runtime._front_desk(auth)
+        known=await runtime.run(lambda a:_read(a,value))
+        if known and known["status"]=="done": return known["result"]
+        # A fresh FD attempt may resolve an earlier conclusively failed, unchanged-G0 operation.
+        pending=await runtime.run(lambda a:[s for k,s in _states(a,value).items()
+            if s.get("status")!="done" and not _resolved(a,k)])
+        for previous in pending: await _inspect_non_split(executor,previous,auth)
+        await runtime._front_desk(auth)
         state,created=await runtime.run(lambda a:_begin(a,value,runtime.clock()),settle_on_cancel=True)
         if state["status"]=="done": return state["result"]
         old=Binding(**state["snapshot"]["binding"])
@@ -318,7 +378,8 @@ async def repin(executor,message,auth):
             if receipt.get("state")=="done" and receipt.get("outcome") not in {"ok","no_op"}:
                 raise AccountError("account_repin_execution_failed")
             if receipt.get("state")!="done":
-                await runtime.run(lambda a:_save_host(a,value,receipt,"execution_unresolved"),settle_on_cancel=True)
+                parked=await runtime.run(lambda a:_save_host(a,value,receipt,"execution_unresolved"),settle_on_cancel=True)
+                await _inspect_non_split(executor,parked,auth)
                 return {"outcome":"execution_unresolved","operation_id":value["operation_id"]}
             if value.get("reconcile_of"):
                 # Read the immutable host result and current selection again; never another target turn.
@@ -329,7 +390,10 @@ async def repin(executor,message,auth):
                 commit=_commit_reconcile if value.get("reconcile_of") else _commit
                 return await runtime.run(lambda a:commit(a,value,state,receipt,runtime.clock()),settle_on_cancel=True)
         except (AccountError,asyncio.CancelledError) as exc:
-            await runtime.run(lambda a:_save_host(a,value,receipt,str(exc) or "cancelled"),settle_on_cancel=True)
+            parked=await runtime.run(lambda a:_save_host(a,value,receipt,str(exc) or "cancelled"),settle_on_cancel=True)
+            if not isinstance(exc,asyncio.CancelledError):
+                await runtime._front_desk(auth)
+                await _inspect_non_split(executor,parked,auth)
             raise
 
 

@@ -159,13 +159,17 @@ class NativeHost:
         prior=self._read_operation(operation_id)
         if prior:
             if any(prior.get(k)!=v for k,v in identity.items()): raise AccountError("account_operation_conflict")
-            if prior["state"]=="done": return prior
+            if prior["state"]=="done":
+                if action=="repin-status" and prior.get("outcome") not in {"ok","no_op"}:
+                    return self._non_split_status(prior,active,identity)
+                return prior
             if active and active.generation==identity["generation"] and prior.get("proof"):
                 result={**prior,"state":"done","outcome":"ok","binding":active.public()}
                 self._save_operation(operation_id,result)
                 return result
             return {**prior,"outcome":"execution_unresolved"}
-        if action=="repin-status": return {"state":"absent","outcome":"execution_unresolved"}
+        if action=="repin-status":
+            return self._non_split_status({**identity,"state":"absent","outcome":"execution_unresolved"},active,identity)
         if not active or active.generation!=identity["expected_generation"]:
             raise AccountError("account_login_generation_stale")
         if not active.enabled or not active.healthy: raise AccountError("account_unavailable")
@@ -200,6 +204,14 @@ class NativeHost:
             result={**identity,"state":"done","outcome":str(exc)}
         self._save_operation(operation_id,result)
         return result
+
+    def _non_split_status(self,receipt,active,identity):
+        if active and active.generation==identity["expected_generation"] and active.enabled and active.healthy:
+            self.registry._validate_home(active)
+            key=":".join((active.host,active.provider,active.alias,identity["generation"]))
+            if key not in self.registry._load()["generations"]:
+                return {**receipt,"non_split":{"binding":active.public(),"successor_absent":True}}
+        return receipt
 
     def _validate_repin_links(self,context,cell,*,require_active=True):
         from provider_accounts import Binding

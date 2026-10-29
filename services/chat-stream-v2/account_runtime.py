@@ -29,6 +29,37 @@ def load_policy(path=None):
     return value
 
 
+class _PinInputBarrier:
+    """Concurrent physical input; pin writes wait only for in-flight physical actions."""
+    def __init__(self):
+        self.condition=asyncio.Condition()
+        self.readers=0;self.writer=False;self.waiting_writers=0
+
+    @asynccontextmanager
+    async def read(self):
+        async with self.condition:
+            await self.condition.wait_for(lambda:not self.writer and not self.waiting_writers)
+            self.readers+=1
+        try: yield
+        finally:
+            async with self.condition:
+                self.readers-=1;self.condition.notify_all()
+
+    @asynccontextmanager
+    async def write(self):
+        async with self.condition:
+            self.waiting_writers+=1
+            try:
+                await self.condition.wait_for(lambda:not self.writer and not self.readers)
+                self.writer=True
+            finally:
+                self.waiting_writers-=1;self.condition.notify_all()
+        try: yield
+        finally:
+            async with self.condition:
+                self.writer=False;self.condition.notify_all()
+
+
 class AccountRuntime:
     def __init__(self,store,sessions,*,policy=None,clock=time.time,executor=None):
         self.store,self.sessions=store,sessions
@@ -38,6 +69,7 @@ class AccountRuntime:
         self._next_probe=0; self._collector_task=None; self._stopping=False
         self._health_epoch=uuid.uuid4().hex; self._health_started=False
         self.pin_lock=asyncio.Lock()
+        self.pin_inputs=_PinInputBarrier()
 
     def attach(self,server,spawnctl,comms):
         self.server,self.spawnctl,self.comms=server,spawnctl,comms
@@ -175,7 +207,7 @@ class AccountRuntime:
         if not matched: await self._alert(account,"identity_unverified")
         return matched
 
-    async def before_input(self,row):
+    async def before_input(self,row,*,verify=True):
         # Rollback can disable new launches while existing bound agents drain.
         if not row.get("account_binding") and await self.enrolled(row.get("host"),row.get("provider")):
             raise AccountError("provider_cli_pin_unavailable",reason="binding_unknown")
@@ -193,6 +225,7 @@ class AccountRuntime:
                 key="provider_cli.observed:"+row["stream_id"]+":"+row["session_generation"]
                 receipt=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone())
                 if not receipt:
+                    if not verify: raise AccountError("provider_cli_verification_unavailable")
                     if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
                     proof=await self.executor.verify_artifact(binding,pin)
                     from provider_cli_pin import canonical,consumer_current
@@ -213,9 +246,13 @@ class AccountRuntime:
 
     @asynccontextmanager
     async def input_guard(self,row):
-        async with self.pin_lock:
-            await self.before_input(row)
-            yield
+        # Remote preparation must never hold the fleet pin decision lock/barrier.
+        await self.before_input(row)
+        async with self.pin_inputs.read():
+            async with self.pin_lock:
+                # Recheck after preparation and barrier admission; this path cannot invoke SSH.
+                await self.before_input(row,verify=False)
+            yield  # The caller scopes this to one physical action, never evidence waiting.
 
     async def _front_desk(self,auth):
         composite=self.server.assistant_composite if self.server else None
@@ -266,8 +303,9 @@ class AccountRuntime:
         if action in {"pin-set","pin-status"}:
             from provider_cli_pin import privileged,set_pin,status
             if action=="pin-set":
-                async with self.pin_lock:
-                    receipt=await self.run(lambda a:set_pin(a,message,recovery_principal=privileged(auth)),settle_on_cancel=True)
+                async with self.pin_inputs.write():
+                    async with self.pin_lock:
+                        receipt=await self.run(lambda a:set_pin(a,message,recovery_principal=privileged(auth)),settle_on_cancel=True)
                 public_receipt={k:v for k,v in receipt.items() if k!="previous"}
                 return {"type":"account.ok","pin":receipt["pin"],"receipt":public_receipt,
                         **(await self.pin_status())}
