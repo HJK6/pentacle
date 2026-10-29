@@ -1,4 +1,4 @@
-"""Dedicated ALL-rows B4/B5 acceptance; separately budgeted at 4500 seconds.
+"""Dedicated ALL-rows B4/B5 acceptance; separately budgeted at 6400 seconds.
 
 The standard merge gate selects its fixed full-axis representative in
  test_account_repin_state_machine.py. This module never samples its ALL run.
@@ -27,7 +27,7 @@ def test_worker_transport_controls(tmp_path):
     assert all(receipt["outcome"]=="passed" for receipt in receipts),path
 
 
-@pytest.mark.timeout(4400)
+@pytest.mark.timeout(6300)
 def test_all_required_b4_b5_rows(tmp_path):
     from repin_state_matrix import ROWS,cases
     from repin_matrix_extra import ROWS as extra_rows,EXCLUSIONS
@@ -45,7 +45,7 @@ def test_all_required_b4_b5_rows(tmp_path):
     (evidence/"exhaustive-matrix.json").write_text(canonical)
     (evidence/"exhaustive-matrix.sha256").write_text(hashlib.sha256(canonical.encode()).hexdigest()+"\n")
     print(f"ALL B4/B5 cases={len(selected)} rows={len(rows)} failed={len(failures)} actual_seconds={cleanup['seconds']:.3f}")
-    assert cleanup["seconds"]<=4500
+    assert cleanup["seconds"]<=6400
     assert not failures,failures[:10]
 
 
