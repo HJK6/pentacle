@@ -136,7 +136,11 @@ def relay(argv, operation_id, *, publish=publish_url, popen=subprocess.Popen, ti
         process.stdout.close(); process.stderr.close()
 
 
-def enrollment_command(args, policy, machines):
+def enrollment_command(args, policy, machines, *, clearance=None):
+    if not isinstance(clearance,dict) or clearance.get("outcome")!="enrollment_prepared":
+        raise AccountError("account_mutation_clearance_required")
+    intended={k:getattr(args,k) for k in ("host","provider","account","login_generation","new_generation","operation_id")}
+    if any(clearance.get("arguments",{}).get(k)!=v for k,v in intended.items()):raise AccountError("account_mutation_clearance_required")
     for value in (args.host, args.account, args.login_generation, args.new_generation): _component(value)
     if (args.provider != "codex" or args.login_generation == "active"
             or args.new_generation in {"active", args.login_generation}
@@ -153,19 +157,37 @@ def enrollment_command(args, policy, machines):
     remote = [configured["python"], "-c", REMOTE_RUNNER, configured["script"], "enroll",
         "--provider", args.provider, "--account", args.account, "--login-generation", args.login_generation,
         "--operation-id", hashlib.sha256(args.operation_id.encode()).hexdigest(),
-        "--new-generation", args.new_generation, "--operator-browser-fd", "3"]
+        "--new-generation", args.new_generation,"--pin-json",json.dumps(clearance["pin"],sort_keys=True),
+        "--reconcile-json",json.dumps({"_clearance":clearance["clearance"]}),"--operator-browser-fd", "3"]
     return ssh_command(machine.ssh_target, "exec " + shlex.join(remote), multiplex=False)
+
+
+def coordinator(args, *, prepare, prepared=None):
+    from agent_orch.config import load_config
+    from agent_orch.wsclient import account_once,_resolved_rpc_from_stream_id
+    payload={"type":"account","action":"upgrade","from_stream_id":_resolved_rpc_from_stream_id()}
+    if prepared:payload.update(prepared["arguments"])
+    else:
+        payload.update({k:getattr(args,k) for k in ("host","provider","account","login_generation","new_generation","operation_id")})
+        payload.update(expected_version=args.expected_version,expected_executable_sha256=args.expected_executable_sha256,reason=args.reason)
+    if prepare:payload["prepare_enrollment"]=True
+    reply=asyncio.run(account_once(load_config(),payload,timeout=210))
+    if reply.get("type")!="account.ok" or not isinstance(reply.get("result"),dict):raise AccountError("account_mutation_clearance_required")
+    return reply["result"]
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("policy", "host", "provider", "account", "login-generation", "new-generation", "operation-id"):
         parser.add_argument("--" + name, required=True)
+    for name in ("expected-version","expected-executable-sha256","reason"):parser.add_argument("--"+name)
     args = parser.parse_args(argv)
     try:
-        command = enrollment_command(args, load_policy(args.policy), load_machines())
         verify_front_desk()
+        prepared=coordinator(args,prepare=True)
+        command = enrollment_command(args, load_policy(args.policy), load_machines(),clearance=prepared)
         result = relay(command, args.operation_id)
+        coordinator(args,prepare=False,prepared=prepared)
         print(json.dumps(result))
         return 0
     except AccountError as exc:

@@ -23,6 +23,8 @@ def register(subparsers):
     parser.add_argument("--expected-pin-revision", type=int)
     parser.add_argument("--expected-pin-digest")
     parser.add_argument("--reconcile-of")
+    parser.add_argument("--expected-origin-digest")
+    parser.add_argument("--supersede-repin")
     parser.add_argument("--recover-receipt")
     parser.add_argument("--expected-raw-digest")
     parser.add_argument("--expected-high-water-revision", type=int)
@@ -57,7 +59,7 @@ def execute(args):
                "request_id": "account-" + uuid.uuid4().hex}
     for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id", "expected_revision",
                   "new_generation", "expected_version", "expected_executable_sha256", "expected_pin_revision",
-                  "expected_pin_digest", "reconcile_of", "recover_receipt", "expected_raw_digest", "expected_high_water_revision"):
+                  "expected_pin_digest", "reconcile_of", "expected_origin_digest", "supersede_repin", "recover_receipt", "expected_raw_digest", "expected_high_water_revision"):
         value = getattr(args, field, None)
         if value is not None: payload[field] = value
     try:
@@ -86,7 +88,7 @@ def execute(args):
     if args.action not in {"status","pin-status","pin-set"}:
         payload.setdefault("login_generation", "active")
     try:
-        timeout = args.timeout if args.timeout is not None else (330 if args.action=="repin" else 210 if args.action in {"probe", "revalidate-health", "upgrade"} else 30)
+        timeout = args.timeout if args.timeout is not None else (330 if args.action in {"repin","relogin"} else 210 if args.action in {"probe", "revalidate-health", "upgrade"} else 30)
         reply = asyncio.run(account_once(config, payload, timeout=timeout))
     except Exception as exc:
         reply, code, _ = _direct_rpc_transport_error("account", payload["request_id"], exc)

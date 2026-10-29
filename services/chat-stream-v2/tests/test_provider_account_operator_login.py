@@ -83,7 +83,11 @@ def test_remote_contract_uses_policy_paths_hashed_operation_and_private_fd():
     args = SimpleNamespace(host="host-target", provider="codex", account="ours", login_generation="old",
         new_generation="new", operation_id="op")
     policy = {"enabled": False, "executors": {"host-target": {"python": "/usr/bin/python3", "script": "/reviewed/host.py"}}}
-    argv = tool.enrollment_command(args, policy, [MachineConfig(name="host-target", ssh_target="fixture-target")])
+    from provider_cli_fixtures import release_pair
+    clearance={"outcome":"enrollment_prepared","clearance":"a"*64,"pin":release_pair(),"arguments":vars(args).copy()}
+    with pytest.raises(AccountError,match="account_mutation_clearance_required"):
+        tool.enrollment_command(args,policy,[MachineConfig(name="host-target",ssh_target="fixture-target")])
+    argv = tool.enrollment_command(args, policy, [MachineConfig(name="host-target", ssh_target="fixture-target")],clearance=clearance)
     import shlex
     remote = shlex.split(argv[-1])
     assert remote[:4] == ["exec", "/usr/bin/python3", "-c", tool.REMOTE_RUNNER]

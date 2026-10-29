@@ -293,8 +293,9 @@ class AccountRuntime:
             "reason","kind","from_stream_id","stream_token","protocol"}
         if action=="upgrade":
             allowed.discard("kind")
-            allowed.update({"new_generation","expected_version","expected_executable_sha256"})
-        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest","reconcile_of"})
+            allowed.update({"new_generation","expected_version","expected_executable_sha256","prepare_enrollment"})
+        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest","reconcile_of","expected_origin_digest"})
+        if action=="relogin":allowed.add("supersede_repin")
         if action in {"pin-set","pin-status"}:
             allowed.update({"local_admin_token","pin","expected_revision","recover_receipt","expected_raw_digest","expected_high_water_revision"})
         if action=="observation": allowed.add("observation")
@@ -317,6 +318,14 @@ class AccountRuntime:
             result["defaults"]=[row for row in result["defaults"] if all(v is None or row.get(k)==v for k,v in filters.items())]
             pools={(row["provider"],row["pool_id"]) for row in result["accounts"]}
             result["quota_pools"]=[row for row in result["quota_pools"] if (row["provider"],row["pool_id"]) in pools]
+            if all(filters.values()):
+                try:await self._front_desk(auth)
+                except AccountError:pass
+                else:
+                    from account_repin_state import recovery_status
+                    recovery=await recovery_status(self,{"host":filters["host"],"provider":filters["provider"],"account":filters["alias"]})
+                    recovery.pop("_snapshot",None)
+                    result["recovery"]=[recovery]
             return {"type":"account.ok",**result}
         if self.policy.get("enabled") is not True: raise AccountError("account_feature_off")
         host,provider,alias=message.get("host"),message.get("provider"),message.get("account")
@@ -328,6 +337,10 @@ class AccountRuntime:
             from account_repin import repin
             result=await repin(self.executor,message,auth)
             return {"type":"account.ok","accepted":True,"result":result}
+        if action=="relogin" and message.get("supersede_repin") is not None:
+            if not self.executor:raise AccountError("account_executor_unavailable")
+            from account_repin_hatch import hatch
+            return {"type":"account.ok","accepted":True,"result":await hatch(self.executor,message,auth)}
         if action=="upgrade":
             if not self.executor: raise AccountError("account_executor_unavailable")
             from account_upgrade import upgrade

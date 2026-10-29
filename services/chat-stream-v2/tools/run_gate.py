@@ -93,7 +93,7 @@ def _apply_strict_full_soak(env: dict[str, str]) -> None:
         env.update({"SOAK_TIER": "full", **SOAK_PRESETS["full"]})
 def _tier_command(tier: str, junit: Path, basetemp: Path) -> list[str]:
     args = {
-        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", "not soak", "-q", "-rs"],
+        "unit": ["tests", "--ignore=tests/smoke", "--ignore=tests/soak", "-m", "not soak and not repin_exhaustive", "-q", "-rs"],
         "smoke": ["tests/smoke", "-q", "-rs", "--maxfail=1"],
         "soak": ["tests/soak", "-m", "soak", "-q", "-s", "-rs"],
     }.get(tier)

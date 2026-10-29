@@ -117,7 +117,11 @@ def _finish(ledger, payload, operation_id, payload_hash, epoch, result, now):
                 account=_eligible(ledger,payload)
                 if _digest(asdict(account))!=data["binding_digest"]:
                     raise AccountError("account_launch_binding_mismatch")
-                if not _valid_observation(account,result.get("observation")):
+                provenance=result.get("lineage_provenance")
+                observed=Binding.from_public(provenance["host_binding"]) if provenance else account
+                if provenance and (not provenance.get("links") or provenance.get("root")!=asdict(account)):
+                    outcome="provider_probe_failed"
+                if not _valid_observation(observed,result.get("observation")):
                     outcome="provider_probe_failed"
             except AccountError:
                 outcome="account_revalidation_state_changed"
@@ -128,6 +132,7 @@ def _finish(ledger, payload, operation_id, payload_hash, epoch, result, now):
                 if changed!=1: raise AccountError("account_revalidation_state_changed")
                 applied_revision=payload["expected_revision"]+1
                 data.update(observed_at=result["observation"]["observed_at"],evidence_digest=_digest(result["observation"]))
+                if provenance:data["lineage_provenance"]=provenance
                 outcome="health_revalidated"
         receipt={"outcome":outcome,"operation_id":operation_id,"applied_revision":applied_revision}
         if applied_revision is not None: receipt["health_at_operation"]="healthy"
@@ -158,7 +163,15 @@ async def revalidate_health(executor, message, auth):
             raise
         if "receipt" in begun: return begun["receipt"]
         try:
-            result=await executor._observe_locked(begun["binding"],require_match=True)
+            from account_repin_state import diagnostic_lineage
+            provenance=await diagnostic_lineage(executor,payload,auth)
+            if provenance:
+                result=await executor.execute(begun["binding"],"observe-lineage",operation_id,reconcile=provenance)
+                if result.get("binding_key")!=provenance["host_binding"]["host"]+":"+provenance["host_binding"]["provider"]+":"+provenance["host_binding"]["alias"]+":"+provenance["host_binding"]["generation"]:
+                    raise AccountError("account_repin_lineage_invalid")
+                result={**result,"lineage_provenance":provenance}
+            else:result=await executor._observe_locked(begun["binding"],require_match=True)
+            await runtime._front_desk(auth)
         except asyncio.CancelledError:
             try:
                 await asyncio.shield(runtime.run(lambda ledger:_finish(ledger,payload,operation_id,payload_hash,

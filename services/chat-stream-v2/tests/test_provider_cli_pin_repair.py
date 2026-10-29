@@ -77,11 +77,11 @@ def test_non_split_resolution_requires_exact_proof_origin_and_current_authority(
         host.observation=fail
         async def uncertain(account,action,*args,**kwargs):
             result=await execute(account,action,*args,**kwargs)
-            if action=="repin-status":
+            if action in {"repin-inspect","repin-settle"}:
                 result=copy.deepcopy(result)
-                if not fresh: result.pop("non_split",None)
-                elif case=="binding": result["non_split"]["binding"]["generation"]="wrong-origin"
-                elif case=="successor": result["non_split"]["successor_absent"]=False
+                if not fresh: result.pop("seal",None)
+                elif case=="binding": result["seal"]["base"]["generation"]="wrong-origin"
+                elif case=="successor": result["seal"]["successor_absent"]=False
                 elif case=="auth-race": runtime.server.assistant_composite.enabled=False
             return result
         runtime.executor.execute=uncertain
@@ -93,7 +93,13 @@ def test_non_split_resolution_requires_exact_proof_origin_and_current_authority(
             auth={} if case=="auth" else AUTH
             with pytest.raises(VerbError):
                 await runtime.operation(dict(request,operation_id="unproven-recovery",new_generation="unused",_auth_context=auth))
-            assert await runtime.run(lambda a:fenced(a,old))
+            if case=="central-health":
+                # B explicitly allows disposition-only CAS of current metadata;
+                # it must preserve the independent health refusal.
+                assert not await runtime.run(lambda a:fenced(a,old))
+                assert (await runtime.run(lambda a:a._cell(old.host,old.provider,old.alias)))["health"]=="identity_conflict"
+            else:
+                assert await runtime.run(lambda a:fenced(a,old))
             assert host.registry.active(old.provider,old.alias,old.host).key==old.key
             assert not [v for v in native if "Reply exactly OK" in v] and len(logins)==1
         finally: store.stop()

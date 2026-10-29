@@ -37,7 +37,7 @@ class AccountExecutor:
             args += ["--reconcile-json",canonical(reconcile)]
         try:
             code, output = await self.hosts.run_command(account.host, *args,
-                timeout=320 if action in {"enroll","repin","repin-reconcile"} else 200 if action == "observe" else 100)
+                timeout=320 if action in {"enroll","repin","repin-reconcile"} else 200 if action in {"observe","observe-lineage"} else 100)
             if len(output) > 65536: raise AccountError("account_host_response_invalid")
             result = json.loads(output)
         except AccountError: raise
@@ -131,25 +131,24 @@ class AccountExecutor:
             state = await self.runtime.run(lambda ledger: self._read_recovery(ledger, account.key))
             if operation_id in state.get("receipts", {}): return state["receipts"][operation_id]
             if state.get("inflight") == operation_id:
-                result = await self.execute(account, "status", operation_id, state["new_generation"])
-                return await self._finish_recovery(account, state, result, operation_id)
+                return await self._inspect_recovery(account,state)
             return None
 
     async def _recover_locked(self, account, *, relogin, operation_id):
         now = self.runtime.clock()
+        from account_repin_state import require_generation_clear
+        await self.runtime.run(lambda a:require_generation_clear(a,{"host":account.host,"provider":account.provider,"account":account.alias}))
         prior = await self.runtime.run(lambda ledger: self._prior_recovery(ledger, account, operation_id))
         if prior:
             owner, prior_state = prior
             if operation_id in prior_state.get("receipts", {}): return prior_state["receipts"][operation_id]
-            result = await self.execute(owner, "status", prior_state["inflight"], prior_state["new_generation"])
-            return await self._finish_recovery(owner, prior_state, result, prior_state["inflight"])
+            return await self._inspect_recovery(owner,prior_state)
         state = await self.runtime.run(lambda ledger: self._read_recovery(ledger, account.key))
         receipts = state.get("receipts", {})
         if operation_id in receipts: return receipts[operation_id]
         if state.get("inflight"):
             # After an uncertain remote reply, only inspect the same generation.
-            result = await self.execute(account, "status", state["inflight"], state["new_generation"])
-            return await self._finish_recovery(account, state, result, state["inflight"])
+            return await self._inspect_recovery(account,state)
         # Confirm an actual auth failure before a requested re-login. A quota,
         # network or capacity failure never enters native enrollment.
         probe = await self._observe_locked(account)
@@ -163,19 +162,41 @@ class AccountExecutor:
         if len(attempts) >= 3: return {"outcome": "recovery_capped"}
         if limits.get("last_attempt") is not None and now - limits["last_attempt"] < 900:
             return {"outcome": "recovery_cooldown"}
-        state.update(inflight=operation_id, new_generation=uuid.uuid4().hex, human_stop=False)
-        limits.update(attempts=attempts + [now], last_attempt=now)
-        def save_attempt(ledger):
-            with transaction(ledger.conn):
-                self._write_recovery(ledger, account.key, state)
-                self._write_recovery(ledger, limits_key, limits)
-        await self.runtime.run(save_attempt)
-        try: result = await self.execute(account, "enroll", operation_id, state["new_generation"])
-        except AccountError:
-            # The host may still be authorizing. Persist the outstanding call;
-            # a daemon restart must never turn it into another login attempt.
-            return {"outcome": "execution_unresolved"}
-        return await self._finish_recovery(account, state, result, operation_id)
+        from account_repin_state import reserve_generation
+        intent=await self.runtime.run(lambda a:reserve_generation(a,account,operation_id,uuid.uuid4().hex,"enroll"),settle_on_cancel=True)
+        state.update(inflight=operation_id,new_generation=intent["arguments"]["generation"],human_stop=False,
+            mutation_intent=intent,mutation_stage="prepared")
+        await self.runtime.run(lambda a:self._save_recovery(a,account.key,state),settle_on_cancel=True)
+        return await self._dispatch_recovery(account,state)
+
+    async def _inspect_recovery(self,account,state):
+        if state.get("mutation_stage")=="prepared":return await self._dispatch_recovery(account,state)
+        result=await self.execute(account,"status",state["inflight"],state["new_generation"])
+        return await self._finish_recovery(account,state,result,state["inflight"])
+
+    async def _dispatch_recovery(self,account,state):
+        from account_repin_state import host_status,permit,require_generation_clear
+        operation=state["inflight"];now=self.runtime.clock()
+        try:
+            remote=await host_status(self,account)
+            clearance=await permit(self,account,"enroll",operation,state["new_generation"],remote,state["mutation_intent"])
+            def started(a):
+                with transaction(a.conn):
+                    require_generation_clear(a,{"host":account.host,"provider":account.provider,"account":account.alias})
+                    row=a._cell(account.host,account.provider,account.alias)
+                    if row is None or Binding(**json.loads(row["data"])).public()!=account.public():raise AccountError("account_login_generation_stale")
+                    key="cell:"+":".join((account.host,account.provider,account.alias))
+                    limits=self._read_recovery(a,key)
+                    attempts=[t for t in limits.get("attempts",[]) if 0<=now-t<3600]
+                    if len(attempts)>=3:raise AccountError("recovery_capped")
+                    if limits.get("last_attempt") is not None and now-limits["last_attempt"]<900:raise AccountError("recovery_cooldown")
+                    self._write_recovery(a,key,{**limits,"attempts":attempts+[now],"last_attempt":now})
+                    state["mutation_stage"]="started"
+                    self._write_recovery(a,account.key,state)
+            await self.runtime.run(started,settle_on_cancel=True)
+            result=await self.execute(account,"enroll",operation,state["new_generation"],reconcile={"_clearance":clearance})
+        except AccountError:return {"outcome":"execution_unresolved"}
+        return await self._finish_recovery(account,state,result,operation)
 
     async def _finish_recovery(self, old, state, result, operation_id):
         if result.get("state") != "done": return {"outcome": "execution_unresolved"}
@@ -186,14 +207,24 @@ class AccountExecutor:
                     or binding.generation != state["new_generation"] or binding.provider_id != old.provider_id
                     or binding.pool_id != old.pool_id or binding.home == old.home or not binding.enabled or not binding.healthy):
                 raise AccountError("account_host_binding_invalid")
-            await self.runtime.run(lambda ledger: ledger.register(binding))
             result = {"outcome": "recovered", "binding": binding.public()}
         else:
             result = {"outcome": result.get("outcome", "account_enrollment_failed")}
             state["human_stop"] = result["outcome"] in {"human_reseed_required", "cancelled", "locked_keychain"}
         state.pop("inflight", None)
+        state.pop("mutation_stage",None)
         state.setdefault("receipts", {})[operation_id] = result
-        await self.runtime.run(lambda ledger: self._save_recovery(ledger, old.key, state))
+        def commit(ledger):
+            from account_repin_state import require_generation_clear,complete_generation
+            with transaction(ledger.conn):
+                require_generation_clear(ledger,{"host":old.host,"provider":old.provider,"account":old.alias})
+                row=ledger._cell(old.host,old.provider,old.alias)
+                if row is None or Binding(**json.loads(row["data"])).public()!=old.public():
+                    raise AccountError("account_login_generation_stale")
+                if result["outcome"]=="recovered":ledger._register(binding)
+                self._write_recovery(ledger,old.key,state)
+                complete_generation(ledger,old,operation_id)
+        await self.runtime.run(commit,settle_on_cancel=True)
         return result
 
     @staticmethod

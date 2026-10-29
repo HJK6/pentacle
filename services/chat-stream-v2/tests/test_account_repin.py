@@ -14,38 +14,16 @@ from test_provider_cli_pin import release_pair, seed_pin
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_healthy_same_home_repin_is_a_distinct_receiver_journey(provider):
+def test_healthy_same_home_repin_is_a_distinct_receiver_journey(provider,tmp_path,monkeypatch):
     async def run():
-        store, runtime = await setup()
-        old = replace(binding("repin", provider=provider), version="0.1.0", executable_sha256="c" * 64)
-        new = replace(old, generation="repin-two", executable="/fixture/new-provider",
-                      version=release_pair()["providers"][provider]["version"], executable_sha256="a" * 64)
-        calls = []
-        async def execute(account, action, operation_id, generation=None, *, pin=None):
-            calls.append(action)
-            if action == "observe":
-                return {"outcome": "ok", "binding_key": new.key, "observation": observation(new)}
-            return {"state": "done", "outcome": "ok", "provider": provider, "alias": old.alias,
-                    "expected_generation": old.generation, "generation": new.generation,
-                    "binding": new.public(), "observation": observation(new),
-                    "proof": {"outcome":"ok", "binding_key":new.key,"platform":"darwin-arm64",
-                              "artifact":pin["providers"][provider]["artifacts"]["darwin-arm64"],
-                              "pin_revision":pin["revision"],"pin_digest":digest(pin),"code_identity":code_identity()}}
-        runtime.executor = AccountExecutor(runtime, None, execute=execute)
+        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,provider)
         try:
-            await runtime.run(lambda a: a.register(old))
-            await runtime.run(lambda a: a.set_default(host=old.host, provider=provider, alias=old.alias))
-            await store.set_spawn_admission_hold(old.host, held_until=NOW + 1000, reason="repin fixture")
-            await seed_pin(runtime, release_pair())
-            result = await runtime.operation({"action": "repin", "host": old.host, "provider": provider,
-                "account": old.alias, "login_generation": old.generation, "new_generation": new.generation,
-                "operation_id": "same-home-repin", "expected_pin_revision": 1,
-                "expected_pin_digest": digest(release_pair()), "reason": "reviewed release", "_auth_context": AUTH})
-            assert result["result"]["binding"]["home"] == old.home
-            assert await runtime.run(lambda a: a.bound(old.key)) == old
-            assert "enroll" not in calls
-        finally:
-            store.stop()
+            result=await runtime.operation(request)
+            assert result["result"]["binding"]["home"]==old.home
+            assert await runtime.run(lambda a:a.bound(old.key))==old
+            assert "enroll" not in calls and len(logins)==1
+            assert len([argv for argv in native if "Reply exactly OK" in argv])==1
+        finally:store.stop()
     asyncio.run(run())
 
 
@@ -82,6 +60,7 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
     assert enrolled["outcome"]=="ok"
     from provider_accounts import Binding
     old=host.registry.active(provider,alias,"host-a")
+    host.config["mutation_clearance"]="required"
     store,runtime=await setup()
     await runtime.run(lambda a:a.register(replace(old,profile_ref="") if central_public else old))
     await runtime.run(lambda a:a.set_default(host="host-a",provider=provider,alias=alias))
@@ -178,7 +157,7 @@ def test_host_success_central_race_parks_then_exact_hold_replay_reconciles(tmp_p
                 runtime.executor.execute=execute
                 result=await runtime.operation(request)
                 assert result["result"]["outcome"]=="repinned"
-                assert calls==["repin","repin-status"]
+                assert calls.count("repin")==1 and "repin-inspect" in calls and calls.count("repin-reconcile")==0
                 assert len([v for v in native if "Reply exactly OK" in v])==1
             else:
                 with pytest.raises(VerbError): await runtime.operation(request)
@@ -567,11 +546,11 @@ def test_reconcile_split_fence_survives_hold_expiry_and_pin_rollback(tmp_path,mo
 
 @pytest.mark.parametrize("point",["before-host","after-host","before-central","after-central"])
 def test_reconcile_idempotency_crash_and_sibling_attempts(tmp_path,monkeypatch,point):
-    import account_repin
+    import account_repin_state
     async def run():
         j,request,pin=await split_journey(tmp_path,monkeypatch,changed=True)
         store,runtime,host,old,original,calls,native,logins,cell,_=j
-        execute=runtime.executor.execute;commit=account_repin._commit_reconcile
+        execute=runtime.executor.execute;commit=account_repin_state._commit
         crashed=False
         async def crash(*args,**kwargs):
             nonlocal crashed
@@ -587,7 +566,7 @@ def test_reconcile_idempotency_crash_and_sibling_attempts(tmp_path,monkeypatch,p
             raise AccountError("fixture_lost_commit_reply")
         runtime.executor.execute=crash
         try:
-            if point in {"before-central","after-central"}: monkeypatch.setattr(account_repin,"_commit_reconcile",crash_commit)
+            if point in {"before-central","after-central"}: monkeypatch.setattr(account_repin_state,"_commit",crash_commit)
             with pytest.raises(VerbError): await runtime.operation(request)
             # Unchanged payload is immutable even during an unresolved attempt.
             with pytest.raises(VerbError,match="account_repin_id_conflict"):
@@ -596,8 +575,12 @@ def test_reconcile_idempotency_crash_and_sibling_attempts(tmp_path,monkeypatch,p
                 await assert_split(runtime,old)
                 with pytest.raises(VerbError):
                     await runtime.operation(dict(request,operation_id="sibling",new_generation="sibling"))
-            runtime.executor.execute=execute;monkeypatch.setattr(account_repin,"_commit_reconcile",commit)
+            runtime.executor.execute=execute;monkeypatch.setattr(account_repin_state,"_commit",commit)
             result=(await runtime.operation(request))["result"]
+            if point=="before-host":
+                assert result=={"outcome":"settled","operation_id":request["operation_id"],"historical":True}
+                request=dict(request,operation_id="fresh-after-absent",reconcile_of=request["operation_id"])
+                result=(await runtime.operation(request))["result"]
             count=len(calls)
             assert (await runtime.operation(request))["result"]==result and len(calls)==count
             assert result["binding"]["generation"]=="current-successor"
@@ -723,7 +706,8 @@ def test_reconcile_stale_same_id_status_never_starts_an_absent_target(tmp_path,m
             with pytest.raises(VerbError): await runtime.operation(request)
             monkeypatch.setattr(host,"_repin",repin)
             await runtime.run(lambda a:set_pin(a,{"pin":dict(pin,revision=4),"expected_revision":3,"operation_id":"advance-after-start","reason":"fixture"}))
-            with pytest.raises(VerbError,match="provider_cli_pin_stale"): await runtime.operation(request)
+            replay=(await runtime.operation(request))["result"]
+            assert replay=={"outcome":"settled","operation_id":request["operation_id"],"historical":True}
             assert len([v for v in native if "Reply exactly OK" in v])==1
             assert host.registry.active(old.provider,old.alias,old.host).generation=="successor"
             await assert_split(runtime,old)
@@ -751,7 +735,7 @@ def test_reconcile_recovers_lost_original_host_reply_by_status_only(tmp_path,mon
                 expected_pin_revision=3,expected_pin_digest=digest(dict(pin,revision=3)))
             result=(await runtime.operation(request))["result"]
             assert result["binding"]["generation"]=="successor"
-            assert calls.count("repin")==1 and "repin-status" in calls
+            assert calls.count("repin")==1 and "repin-inspect" in calls
             assert len([v for v in native if "Reply exactly OK" in v])==1 and len(logins)==1
         finally:store.stop()
     asyncio.run(run())
