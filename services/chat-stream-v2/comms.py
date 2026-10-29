@@ -1858,14 +1858,17 @@ class Comms:
         try:
             host, name = self.sessions.split(target)
             row = await self.store.fetch_session(host, name)
+            queued_operation = plan.message.get("_queued_send_now_operation")
+            queued_binding = (getattr(self, "queued_send_now", None) is not None
+                and (plan.message.get("_auth_context") or {}).get("operator_authenticated"))
             lifecycle = (
                 self.sessions._lifecycle_lock(host, name)
                 if qa_generation is not None or assistant_generation is not None or voice_generation is not None
+                or queued_operation is not None or queued_binding
                 or (row or {}).get("provider") == "claude" else nullcontext()
             )
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
             async with lifecycle, self._pane_input_lock(target):
-                queued_operation = plan.message.get("_queued_send_now_operation")
                 if queued_operation is not None:
                     policy = getattr(self, "queued_send_now", None)
                     current = await self.store.fetch_session(host, name) or {}

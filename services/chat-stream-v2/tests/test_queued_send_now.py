@@ -300,3 +300,121 @@ def test_uncertain_key_crash_reconciles_native_abort_without_repeating_the_key()
         finally:
             await finish(h)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('recovery', ['retry', 'restart', 'stop'])
+def test_transient_continue_validation_retries_same_id_only_on_bounded_cadence(recovery):
+    async def run():
+        h = await setup()
+        try:
+            h.controller.clock = lambda: h.now
+            await h.controller.send(message())
+            await signal(h, 'turn_aborted'); await intake(h)
+            h.tmux.screen = 'OpenAI Codex\n› \n  gpt-6-test high'
+            calls = 0
+            async def transient(row):
+                nonlocal calls
+                calls += 1
+                return None if calls == 1 else await qualified_source(row)
+            h.controller.source_snapshot = transient
+            await settle(h)
+            key = h.controller.operation_key(SID, GEN, 'selected')
+            operation, _ = await h.controller._record(key)
+            request = operation['continue_request_id']
+            assert operation['state'] == 'continue_retry_wait'
+            assert h.tmux.pastes == []
+            for _ in range(3): await settle(h)
+            assert calls == 1  # events cannot turn a transient refusal into a tight loop
+            if recovery == 'stop':
+                async with h.sessions._lifecycle_lock('fixture', 'v2-capacity'), h.comms._pane_input_lock(SID):
+                    await h.controller.cancel_locked(SID, GEN)
+                h.now += 61; await settle(h)
+                operation, _ = await h.controller._record(key)
+                assert operation['state'] == 'cancelled' and h.tmux.pastes == []
+                return
+            if recovery == 'restart':
+                await h.controller.close()
+                h.controller = QueuedSendNow(h.store, h.sessions, h.comms, h.tmux,
+                    source_snapshot=qualified_source, owner='retry-restart', clock=lambda: h.now,
+                    verify_executable=lambda row: asyncio.sleep(0, result=True))
+                h.controller.request_tick = lambda: None
+                h.comms.queued_send_now = h.controller
+            h.now += 61
+            await settle(h)
+            operation, _ = await h.controller._record(key)
+            assert operation['continue_request_id'] == request
+            assert operation['state'] == 'continue_pending_proof'
+            assert h.tmux.pastes == ['continue']
+            assert len(h.tmux.keys) == 1
+            await settle(h)
+            assert h.tmux.pastes == ['continue']
+        finally:
+            await finish(h)
+    asyncio.run(run())
+
+
+def test_terminal_continuation_uncertainty_is_logged(caplog):
+    async def run():
+        h = await setup()
+        try:
+            await h.controller.send(message())
+            await signal(h, 'turn_aborted'); await intake(h)
+            async def refused(_msg):
+                return {'delivery': 'not_landed', 'reason': 'unsafe_native_state'}
+            h.comms.send = refused
+            await settle(h)
+            operation, _ = await h.controller._record(h.controller.operation_key(SID, GEN, 'selected'))
+            assert operation['state'] == 'indeterminate'
+            assert operation['reason'] == 'continue_not_landed'
+            assert 'continuation indeterminate' in caplog.text
+            assert 'unsafe_native_state' in caplog.text
+            assert h.tmux.pastes == []
+        finally:
+            await finish(h)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['binding', 'continuation'])
+def test_codex_generation_close_cannot_enter_during_queued_input(mode):
+    async def run():
+        h = await setup()
+        at_paste, release_paste, close_attempted, close_entered = (asyncio.Event() for _ in range(4))
+        send_task = close_task = None
+        try:
+            if mode == 'continuation':
+                await h.controller.send(message())
+                await signal(h, 'turn_aborted'); await intake(h)
+                h.tmux.screen = 'OpenAI Codex\n› \n  gpt-6-test high'
+            else:
+                h.tmux.screen = 'OpenAI Codex\n• Messages to be submitted after next tool call\n  new queued operator\n› \n  gpt-6-test high'
+            paste = h.tmux.paste
+            async def blocked_paste(name, text):
+                at_paste.set()
+                await release_paste.wait()
+                return await paste(name, text)
+            h.tmux.paste = blocked_paste
+            if mode == 'continuation':
+                await h.controller.tick()
+                send_task = next(iter(h.controller.jobs.values()))
+            else:
+                send_task = asyncio.create_task(h.comms.send({'host': 'fixture', 'session_name': 'v2-capacity',
+                    'text': 'new queued operator', 'request_id': 'binding-send', '_auth_context': AUTH}))
+            await asyncio.wait_for(at_paste.wait(), 2)
+            async def close_generation():
+                close_attempted.set()
+                async with h.sessions._lifecycle_lock('fixture', 'v2-capacity'):
+                    close_entered.set()
+                    await h.store.update_session('fixture', 'v2-capacity', status='closed')
+            close_task = asyncio.create_task(close_generation())
+            await close_attempted.wait()
+            await asyncio.sleep(0)
+            assert not close_entered.is_set(), 'generation closed between validation/binding and native input'
+            release_paste.set()
+            await asyncio.wait_for(send_task, 2)
+            await asyncio.wait_for(close_task, 2)
+            assert close_entered.is_set()
+        finally:
+            release_paste.set()
+            await asyncio.gather(*(t for t in [send_task, close_task] if t is not None), return_exceptions=True)
+            await finish(h)
+    asyncio.run(run())

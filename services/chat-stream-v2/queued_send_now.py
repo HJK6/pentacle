@@ -22,6 +22,7 @@ from sessions import VerbError
 log = logging.getLogger("chat_streamd_v2.queued_send_now")
 
 PREFIX = "queued-send-now.operation."
+CONTINUE_RETRY_DELAY_S = 5.0
 PINS = {
     "claude": ("2.1.312 (Claude Code)", "6b5ec691195e551b02c41df9f7d723f4ea61eaa03c2df90acefe3736f1aeb620"),
     "codex": ("codex-cli 0.160.0", "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"),
@@ -123,9 +124,10 @@ def possible_native_intake(receipt, candidates):
 
 
 class QueuedSendNow:
-    def __init__(self, store, sessions, comms, tmux, *, owner=None, verify_executable=None, source_snapshot=None):
+    def __init__(self, store, sessions, comms, tmux, *, owner=None, verify_executable=None, source_snapshot=None, clock=None):
         self.store, self.sessions, self.comms, self.tmux = store, sessions, comms, tmux
         self.owner = owner or str(uuid.uuid4())
+        self.clock = clock or time.time
         self.verify_executable = verify_executable or self._verify_executable
         self.source_snapshot = source_snapshot or self._source_snapshot
         self.jobs = {}
@@ -385,8 +387,19 @@ class QueuedSendNow:
                 "text": "continue", "request_id": operation["continue_request_id"],
                 "_queued_send_now_operation": key,
                 "_auth_context": {"service_authenticated": True, "service_actor": "daemon:send-now"}})
-            state = "continue_pending_proof" if result.get("delivery") != "not_landed" else "indeterminate"
-            await self._record(key, expected={"continue_claimed"}, update={"state": state})
+            if result.get("delivery") != "not_landed":
+                update = {"state": "continue_pending_proof", "reason": None}
+            elif result.get("reason") == "queued_continue_cancelled":
+                # Comms refused before native input. Preserve the durable ID and
+                # retry validation on the bounded cadence, never on every event.
+                update = {"state": "continue_retry_wait", "reason": "continue_validation_pending",
+                          "next_retry_at": self.clock() + CONTINUE_RETRY_DELAY_S}
+            else:
+                update = {"state": "indeterminate", "reason": "continue_not_landed"}
+            _saved, changed = await self._record(key, expected={"continue_claimed"}, update=update)
+            if changed and update["state"] == "indeterminate":
+                log.error("queued Send now continuation indeterminate stream=%s operation=%s reason=%s",
+                          sid, key, result.get("reason") or "unknown")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -459,6 +472,11 @@ class QueuedSendNow:
                         continue
                     request_id = "send-now-continue-" + hashlib.sha256(json.dumps([key, abort["event_id"]]).encode()).hexdigest()
                     current, _ = await self._record(key, expected={"wait_interrupt", "indeterminate"}, update={"state": "continue_claimed", "continue_request_id": request_id, "interrupt_event_id": abort["event_id"]})
+                if current["state"] == "continue_retry_wait":
+                    if self.clock() < current["next_retry_at"]:
+                        continue
+                    current, _ = await self._record(key, expected={"continue_retry_wait"},
+                        update={"state": "continue_claimed", "reason": None})
                 if current["state"] == "continue_pending_proof":
                     if self._intake(events, current["continue_request_id"]):
                         await self._record(key, expected={"continue_pending_proof"}, update={"state": "completed"})
