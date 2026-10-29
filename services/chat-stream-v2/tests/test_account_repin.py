@@ -49,7 +49,7 @@ def test_healthy_same_home_repin_is_a_distinct_receiver_journey(provider):
     asyncio.run(run())
 
 
-async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False):
+async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False,alias="repin"):
     import hashlib
     from pathlib import Path
     from types import SimpleNamespace
@@ -77,14 +77,14 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
         native.append(argv)
         return SimpleNamespace(returncode=0,stdout="" if argv[0]=="ps" else cell["version"] if argv[-1]=="--version" else "OK")
     host=NativeHost({"host":"host-a","registry":str(private/"registry.json"),"root":str(private/"homes"),
-        "cells":{provider+":repin":cell}},run=run,login=login,observation=lambda b:dict(observation(b),provider_id="native-repin",pool_id="pool-repin"))
-    enrolled=host.handle("adopt" if adopted else "enroll",provider=provider,alias="repin",expected_generation="unenrolled",operation_id="initial",generation="initial")
+        "cells":{provider+":"+alias:cell}},run=run,login=login,observation=lambda b:dict(observation(b),provider_id="native-repin",pool_id="pool-repin"))
+    enrolled=host.handle("adopt" if adopted else "enroll",provider=provider,alias=alias,expected_generation="unenrolled",operation_id="initial",generation="initial")
     assert enrolled["outcome"]=="ok"
     from provider_accounts import Binding
-    old=host.registry.active(provider,"repin","host-a")
+    old=host.registry.active(provider,alias,"host-a")
     store,runtime=await setup()
     await runtime.run(lambda a:a.register(old))
-    await runtime.run(lambda a:a.set_default(host="host-a",provider=provider,alias="repin"))
+    await runtime.run(lambda a:a.set_default(host="host-a",provider=provider,alias=alias))
     await store.set_spawn_admission_hold("host-a",held_until=NOW+1000,reason="repin fixture")
     pin=release_pair();pin["revision"]=2
     new_hash=hashlib.sha256(new_bin.read_bytes()).hexdigest()
@@ -94,12 +94,12 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
     await runtime.run(lambda a:set_pin(a,{"pin":pin,"expected_revision":1,"operation_id":"native-pair","reason":"fixture"}))
     cell.update(executable=str(new_bin),executable_sha256=new_hash,resource_root=str(new_bin),version=pin["providers"][provider]["version"])
     monkeypatch.setattr(provider_cli_artifact,"platform_key",lambda:"darwin-arm64" if platform=="macos" else "linux-x64")
-    async def execute(account,action,op,generation=None,*,pin=None):
+    async def execute(account,action,op,generation=None,*,pin=None,reconcile=None):
         calls.append(action)
         return host.handle(action,provider=account.provider,alias=account.alias,expected_generation=account.generation,
-            operation_id=hashlib.sha256(op.encode()).hexdigest(),generation=generation,pin=pin)
+            operation_id=hashlib.sha256(op.encode()).hexdigest(),generation=generation,pin=pin,**({"reconcile":reconcile} if reconcile is not None else {}))
     runtime.executor=AccountExecutor(runtime,None,execute=execute)
-    request={"action":"repin","host":"host-a","provider":provider,"account":"repin","login_generation":old.generation,
+    request={"action":"repin","host":"host-a","provider":provider,"account":alias,"login_generation":old.generation,
         "new_generation":"successor","operation_id":"native-repin","expected_pin_revision":2,"expected_pin_digest":digest(pin),
         "reason":"reviewed pair","_auth_context":AUTH}
     native.clear()
@@ -281,28 +281,90 @@ def test_adopted_codex_repin_keeps_original_home_and_credential_file(tmp_path,mo
     asyncio.run(run())
 
 
-def test_required_catchup_after_host_success_then_pin_revision_changes(tmp_path,monkeypatch):
+
+async def split_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,alias="repin",changed=False,other=False,adopted=False):
+    import copy,hashlib
+    from pathlib import Path
+    from provider_cli_pin import set_pin
+    j=await host_journey(tmp_path,monkeypatch,provider,platform,alias=alias,adopted=adopted)
+    store,runtime,host,old,request,calls,native,logins,cell,pin=j
+    latest=copy.deepcopy(pin);latest["revision"]=3
+    if changed:
+        target=tmp_path/"latest-native";target.write_text("latest fixture")
+        sha=hashlib.sha256(target.read_bytes()).hexdigest()
+        latest["providers"][provider]["version"]="9.9.9"
+        for a in latest["providers"][provider]["artifacts"].values(): a.update(native_sha256=sha,resource_sha256=sha)
+    if other: latest["providers"]["claude" if provider=="codex" else "codex"]["version"]="8.8.8"
+    execute=runtime.executor.execute
+    async def advance(*args,**kwargs):
+        result=await execute(*args,**kwargs)
+        if args[1]=="repin":
+            await runtime.run(lambda a:set_pin(a,{"pin":latest,"expected_revision":2,
+                "operation_id":"benign-revision-advance","reason":"reviewed pair"}))
+        return result
+    runtime.executor.execute=advance
+    with pytest.raises(VerbError,match="provider_cli_pin_stale"): await runtime.operation(request)
+    runtime.executor.execute=execute
+    if changed: cell.update(executable=str(target),resource_root=str(target),executable_sha256=sha,version="9.9.9")
+    catchup=dict(request,operation_id="catch-up-current",expected_pin_revision=3,
+        expected_pin_digest=digest(latest),new_generation="current-successor",reconcile_of=request["operation_id"])
+    return j,catchup,latest
+
+
+@pytest.mark.parametrize("provider,platform,alias",[(p,s,a) for p in ("claude","codex") for s in ("macos","wsl") for a in ("repin","sai")])
+def test_required_catchup_after_host_success_then_pin_revision_changes(tmp_path,monkeypatch,provider,platform,alias):
     async def run():
-        store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
-        execute=runtime.executor.execute
-        async def advance(*args,**kwargs):
-            result=await execute(*args,**kwargs)
-            if args[1]=="repin":
-                from provider_cli_pin import set_pin
-                await runtime.run(lambda a:set_pin(a,{"pin":dict(pin,revision=3),"expected_revision":2,
-                    "operation_id":"benign-revision-advance","reason":"same exact reviewed pair"}))
-            return result
-        runtime.executor.execute=advance
+        j,latest,pin=await split_journey(tmp_path,monkeypatch,provider,platform,alias=alias)
+        store,runtime,host,old,request,calls,native,logins,cell,_=j
         try:
-            with pytest.raises(VerbError,match="provider_cli_pin_stale"):
-                await runtime.operation(request)
-            runtime.executor.execute=execute
-            assert host.registry.active(old.provider,old.alias,old.host).generation=="successor"
-            # The reviewed contract requires reconciliation, then newest-pin catch-up,
-            # with no repeated native action and no direct pointer edits.
-            latest=dict(request,operation_id="catch-up-current",expected_pin_revision=3,
-                expected_pin_digest=digest(dict(pin,revision=3)),new_generation="current-successor")
-            result=await runtime.operation(latest)
-            assert result["result"]["outcome"] in {"repinned","no_op"}
+            import copy
+            saved=copy.deepcopy(list(host.journal.glob("*.json")))
+            original={p.name:p.read_bytes() for p in saved}
+            # Ordinary import remains strict; no caller-selected successor may bridge the split.
+            with pytest.raises(VerbError): await runtime.operation({k:v for k,v in latest.items() if k!="reconcile_of"})
+            result=(await runtime.operation(latest))["result"]
+            new=host.registry.active(provider,alias,old.host)
+            assert result["outcome"]=="repinned" and result["binding"]["generation"]=="successor"
+            assert await runtime.run(lambda a:a.bound(old.key))==old
+            assert await runtime.run(lambda a:a.bound(old.host+":"+provider+":"+alias+":current-successor")) is None
+            assert len([v for v in native if "Reply exactly OK" in v])==1 and len(logins)==1
+            assert all((host.journal/name).read_bytes()==body for name,body in original.items())
+            assert (await runtime.operation(latest))["result"]==result
+            resumed=await runtime.choose_launch(host=old.host,provider=provider,model="fixture",effort="high",
+                message={"resume_session_id":"old-conversation","_account_resume_binding":old.public()})
+            assert resumed.key==new.key
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider,platform",[(p,s) for p in ("claude","codex") for s in ("macos","wsl")])
+def test_reconcile_catchup_changed_current_target(tmp_path,monkeypatch,provider,platform):
+    async def run():
+        j,latest,pin=await split_journey(tmp_path,monkeypatch,provider,platform,changed=True)
+        store,runtime,host,old,request,calls,native,logins,cell,_=j
+        try:
+            defaults=await runtime.run(lambda a:a.defaults())
+            result=(await runtime.operation(latest))["result"]
+            assert result["binding"]["generation"]=="current-successor"
+            assert len([v for v in native if "Reply exactly OK" in v])==2 and len(logins)==1
+            assert result["binding"]["home"]==old.home
+            assert await runtime.run(lambda a:a.defaults())==defaults
+            resumed=await runtime.choose_launch(host=old.host,provider=provider,model="fixture",effort="high",
+                message={"resume_session_id":"conversation","_account_resume_binding":old.public()})
+            assert resumed.generation=="current-successor"
+            assert await runtime.run(lambda a:a.bound(old.key))==old
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider,platform",[(p,s) for p in ("claude","codex") for s in ("macos","wsl")])
+def test_reconcile_other_provider_only_pin_change(tmp_path,monkeypatch,provider,platform):
+    async def run():
+        j,latest,pin=await split_journey(tmp_path,monkeypatch,provider,platform,other=True)
+        store,runtime,host,old,request,calls,native,logins,cell,_=j
+        try:
+            result=(await runtime.operation(latest))["result"]
+            assert result["binding"]["generation"]=="successor"
+            assert len([v for v in native if "Reply exactly OK" in v])==1 and len(logins)==1
         finally:store.stop()
     asyncio.run(run())
