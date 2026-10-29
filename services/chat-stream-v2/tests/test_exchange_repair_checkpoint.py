@@ -188,20 +188,182 @@ def test_legacy_latest_report_and_existing_transition_timestamp(legacy):
     assert conn.execute("SELECT ts FROM v2_agent_report_state").fetchone()[0] == "preserved-transition"
 
 
-def test_oversized_source_fails_without_skipping_then_recovers(legacy):
+@pytest.mark.parametrize("kind", ["tell", "report", "brief"])
+@pytest.mark.parametrize("mode", ["legacy", "pending", "rebuild"])
+@pytest.mark.parametrize("payload_bytes", [1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024 + 1])
+def test_receipt_budget_boundaries_and_singletons(legacy, monkeypatch, kind, mode, payload_bytes):
+    import hashlib
+    import json
     conn, binding, _ = legacy
-    receipt(conn, binding, "tell", "a-safe")
-    receipt(conn, binding, "tell", "b-oversized", text="x" * (1024 * 1024 + 1))
-    receipt(conn, binding, "tell", "c-later")
-    conn.commit()
-    with pytest.raises(ValueError, match="oversiz|budget|large"):
+    if mode == "pending":
         store_exchange.repair(conn)
-    assert not any(row[1] == "c-later" for row in projected(conn))
-    conn.execute("DELETE FROM v2_tell_deliveries WHERE tell_id='b-oversized'")
-    receipt(conn, binding, "tell", "b-oversized", text="now bounded")
+    table, keys, payload = store_exchange._SOURCES[kind]
+    expected = {}
+    # Oversized first, between and last; adjacent large keys must never share a
+    # transaction. Escaping and multibyte text make serialized size significant.
+    for identity, large in [("a", True), ("b", False), ("c", True), ("d", True)]:
+        text = '界\\"\n' * 2000
+        observation = receipt(conn, binding, kind, identity, text=text)
+        expected[identity] = (text.encode()[:8192].decode(errors="ignore"),
+                              int(len(text.encode()) > 8192), hashlib.sha256(text.encode()).hexdigest())
+        if large:
+            value = ({"delivery": {"exchange": observation}} if kind == "tell" else
+                     {"exchange": observation} if kind == "brief" else observation)
+            value["padding"] = ""
+            encoded = json.dumps(value, ensure_ascii=False)
+            value["padding"] = "x" * (payload_bytes - len(encoded.encode()))
+            encoded = json.dumps(value, ensure_ascii=False)
+            assert len(encoded.encode()) == payload_bytes
+            conn.execute(f"UPDATE {table} SET {payload}=? WHERE {keys[-1]}=?", (encoded, identity))
+    conn.commit()
+    sources = list(conn.execute(f"SELECT {payload} FROM {table} ORDER BY {','.join(keys)}"))
+    batches = capture_repair_batches(conn, monkeypatch, rebuild=mode == "rebuild")
+    assert sum(n for n, _ in batches) == 4
+    assert all(n <= 100 and (size <= store_exchange._REPAIR_BYTES or n == 1) for n, size in batches)
+    if payload_bytes > store_exchange._REPAIR_BYTES:
+        assert sum(size == payload_bytes and n == 1 for n, size in batches) == 3
+    assert {r[0]: tuple(r)[1:] for r in conn.execute(
+        "SELECT ref_id,text,truncated,payload_sha256 FROM v2_child_exchange")} == expected
+    assert [tuple(r) for r in sources] == [tuple(r) for r in conn.execute(
+        f"SELECT {payload} FROM {table} ORDER BY {','.join(keys)}")]
+    assert conn.execute("SELECT count(*) FROM v2_exchange_repair_pending").fetchone()[0] == 0
+    if kind == "report":
+        assert tuple(conn.execute("SELECT status,ts FROM v2_agent_report_state").fetchone()) == (
+            "done", "2026-01-01T00:00:00Z")
+    sequences = [tuple(r) for r in conn.execute("SELECT ref_id,seq FROM v2_child_exchange ORDER BY ref_id")]
+    if mode == "rebuild":
+        conn.execute("UPDATE v2_child_exchange SET text='damaged'")
+        conn.commit()
+        capture_repair_batches(conn, monkeypatch, rebuild=True)
+        assert sequences == [tuple(r) for r in conn.execute("SELECT ref_id,seq FROM v2_child_exchange ORDER BY ref_id")]
+        assert {r[0]: tuple(r)[1:] for r in conn.execute(
+            "SELECT ref_id,text,truncated,payload_sha256 FROM v2_child_exchange")} == expected
+    def no_decode(*args):
+        pytest.fail("unchanged restart decoded an accounted receipt")
+    monkeypatch.setattr(store_exchange, "_decoded", no_decode)
+    store_exchange.repair(conn)
+
+
+def capture_repair_batches(conn, monkeypatch, *, rebuild=False):
+    # Count processed keys, including absent/NULL sources, rather than only
+    # successful projections or nonzero JSON payloads.
+    batches, current = [], [0, 0]
+    project = store_exchange._project_receipt
+    def counted(conn, kind, row, rebuilding):
+        current[1] += len((row[0] or "").encode())
+        return project(conn, kind, row, rebuilding)
+    def trace(sql):
+        if sql.startswith("DELETE FROM v2_exchange_repair_pending WHERE"):
+            current[0] += 1
+        if sql.upper() == "COMMIT" and current[0]:
+            batches.append(tuple(current))
+            current[:] = [0, 0]
+    with monkeypatch.context() as patch:
+        patch.setattr(store_exchange, "_project_receipt", counted)
+        conn.set_trace_callback(trace)
+        try:
+            store_exchange.repair(conn, rebuild=rebuild)
+        finally:
+            conn.set_trace_callback(None)
+    assert current == [0, 0]
+    return batches
+
+
+@pytest.mark.parametrize("kind", ["tell", "report", "brief"])
+@pytest.mark.parametrize("mode", ["legacy", "pending", "rebuild"])
+@pytest.mark.parametrize("predecessor", ["null", "missing", "no_exchange", "fenced"])
+def test_zero_or_unprojected_predecessor_stays_out_of_singleton(legacy, monkeypatch, kind, mode, predecessor):
+    conn, binding, _ = legacy
+    if mode == "pending":
+        store_exchange.repair(conn)
+    table, keys, payload = store_exchange._SOURCES[kind]
+    lookup = f"{keys[-1]}=?"
+    receipt(conn, binding, kind, "a-zero")
+    if predecessor in ("null", "no_exchange"):
+        conn.execute(f"UPDATE {table} SET {payload}=? WHERE {lookup}",
+                     (("" if kind == "tell" else None) if predecessor == "null" else "{}", "a-zero"))
+    elif predecessor == "missing":
+        conn.execute(f"DELETE FROM {table} WHERE {lookup}", ("a-zero",))
+        # Only pending mode can contain a missing source key.
+        store_exchange._initialize_repair(conn, False)
+        conn.execute("INSERT OR IGNORE INTO v2_exchange_repair_pending VALUES(?,?,?)",
+                     (kind, "test-host" if kind == "brief" else "a-zero", "a-zero" if kind == "brief" else ""))
+    else:
+        stale = dict(binding, epoch="stale")
+        conn.execute(f"DELETE FROM {table} WHERE {lookup}", ("a-zero",))
+        receipt(conn, stale, kind, "a-zero")
+    receipt(conn, binding, kind, "b-large", text="x" * (2 * 1024 * 1024))
+    receipt(conn, binding, kind, "c-later")
+    conn.commit()
+    batches = capture_repair_batches(conn, monkeypatch, rebuild=mode == "rebuild")
+    large = [(n, size) for n, size in batches if size > store_exchange._REPAIR_BYTES]
+    assert len(large) == 1 and large[0][0] == 1
+    assert {row[1] for row in projected(conn)} == {"b-large", "c-later"}
+    assert conn.execute("SELECT count(*) FROM v2_exchange_repair_pending").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("kind", ["tell", "report", "brief"])
+@pytest.mark.parametrize("mode", ["legacy", "pending", "rebuild"])
+@pytest.mark.parametrize("fence", ["closed", "reparented", "generation", "no_exchange"])
+def test_oversized_lifecycle_invalidated_receipt_is_drained(legacy, monkeypatch, kind, mode, fence):
+    conn, binding, _ = legacy
+    if mode == "pending":
+        store_exchange.repair(conn)
+    receipt(conn, binding, kind, "a-large", text="x" * (2 * 1024 * 1024))
+    if fence == "generation":
+        conn.execute("UPDATE v2_session_generations SET generation='new' WHERE session_name='child'")
+    elif fence == "closed":
+        conn.execute("UPDATE sessions SET status='closed' WHERE session_name='child'")
+    elif fence == "reparented":
+        conn.execute("UPDATE sessions SET parent_stream_id='test-host:other' WHERE session_name='child'")
+    else:
+        table, _, payload = store_exchange._SOURCES[kind]
+        conn.execute(f"UPDATE {table} SET {payload}=?", ("{}" + " " * (2 * 1024 * 1024),))
+    conn.commit()
+    batches = capture_repair_batches(conn, monkeypatch, rebuild=mode == "rebuild")
+    assert len(batches) == 1 and batches[0][0] == 1 and batches[0][1] > store_exchange._REPAIR_BYTES
+    assert projected(conn) == []
+    assert conn.execute("SELECT count(*) FROM v2_exchange_repair_pending").fetchone()[0] == 0
+
+
+def test_oversized_identity_conflict_still_rolls_back(legacy):
+    conn, binding, _ = legacy
+    receipt(conn, binding, "tell", "conflict", text="x" * (2 * 1024 * 1024))
     conn.commit()
     store_exchange.repair(conn)
-    assert len(projected(conn)) == 3
+    conn.execute("UPDATE v2_child_exchange SET payload_sha256='conflict'")
+    conn.execute("UPDATE v2_tell_deliveries SET created_at=created_at WHERE tell_id='conflict'")
+    conn.commit()
+    with pytest.raises(ValueError, match="exchange_ref_conflict"):
+        store_exchange.repair(conn)
+    assert conn.execute("SELECT count(*) FROM v2_exchange_repair_pending").fetchone()[0] == 1
+
+
+def test_oversized_pending_store_start_is_usable(legacy, monkeypatch):
+    import hashlib
+    conn, binding, path = legacy
+    store_exchange.repair(conn)
+    text = "界" * (1024 * 1024)
+    receipt(conn, binding, "tell", "startup", text=text)
+    conn.commit()
+    source = conn.execute("SELECT reply FROM v2_tell_deliveries").fetchone()[0]
+    async def use_store():
+        store = Store(str(path))
+        try:
+            store.start()
+            await store.put("usable", "yes")
+            assert await store.get("usable") == "yes"
+        finally:
+            assert store.stop()
+    asyncio.run(use_store())
+    assert tuple(conn.execute("SELECT text,truncated,payload_sha256 FROM v2_child_exchange").fetchone()) == (
+        text.encode()[:8192].decode(errors="ignore"), 1, hashlib.sha256(text.encode()).hexdigest())
+    assert conn.execute("SELECT reply FROM v2_tell_deliveries").fetchone()[0] == source
+    assert conn.execute("SELECT count(*) FROM v2_exchange_repair_pending").fetchone()[0] == 0
+    def no_decode(*args):
+        pytest.fail("unchanged Store restart decoded an accounted receipt")
+    monkeypatch.setattr(store_exchange, "_decoded", no_decode)
+    asyncio.run(use_store())
 
 
 def test_explicit_corruption_rebuild(legacy):
@@ -268,9 +430,10 @@ def test_empty_source_key_is_not_skipped(legacy, kind):
     assert projected(conn) == [(kind, "", "retained")]
 
 
+@pytest.mark.parametrize("kind,oversized", [("tell", False), ("tell", True), ("report", True), ("brief", True)])
 @pytest.mark.parametrize("boundary", ["projection", "checkpoint", "before_commit", "after_commit"])
 @pytest.mark.parametrize("pending", [False, True])
-def test_abrupt_exit_at_progress_boundaries_resumes(legacy, tmp_path, boundary, pending):
+def test_abrupt_exit_at_progress_boundaries_resumes(legacy, tmp_path, boundary, pending, kind, oversized):
     import os
     import subprocess
     import sys
@@ -279,7 +442,7 @@ def test_abrupt_exit_at_progress_boundaries_resumes(legacy, tmp_path, boundary, 
     if pending:
         store_exchange.repair(conn)
     for i in range(105):
-        receipt(conn, binding, "tell", f"{i:04d}")
+        receipt(conn, binding, kind, f"{i:04d}", text="x" * (2 * 1024 * 1024) if oversized and i == 0 else "retained")
     conn.commit()
     program = r'''
 import os,sqlite3,sys
@@ -318,7 +481,14 @@ raise RuntimeError('crash boundary was never reached')
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 73, result.stderr
     partial = projected(conn)
-    assert len(partial) == (100 if boundary == "after_commit" else 0)
+    assert len(partial) == ((1 if oversized else 100) if boundary == "after_commit" else 0)
+    if oversized:
+        progress = conn.execute("SELECT key1 FROM v2_exchange_repair_progress WHERE source=?", (kind,)).fetchone()[0]
+        if not pending:
+            assert progress == (("test-host" if kind == "brief" else "0000") if boundary == "after_commit" else None)
+        dirty = conn.execute("SELECT count(*) FROM v2_exchange_repair_pending WHERE source=?", (kind,)).fetchone()[0]
+        assert dirty == ((104 if boundary == "after_commit" else 105) if pending else 0)
+        assert conn.execute("SELECT count(*) FROM v2_agent_report_state").fetchone()[0] == int(kind == "report" and boundary == "after_commit")
     store_exchange.repair(conn)
     assert len(projected(conn)) == 105
     assert len({(kind, ref) for kind, ref, _ in projected(conn)}) == 105

@@ -24,6 +24,15 @@ Example fixture:
 
 Requests and replies are retained for the lifetime of the local store so reconnecting clients can rebuild a bounded view. A request is correlated by `request_id`; repeated registration with different material is rejected. Retention is not a promise to retain user transcripts forever: configure a disposable store and clear it after tests.
 
+At startup, retained tell, report and brief receipts repair the exchange view in
+checkpointed transactions. Ordinary batches process at most 100 source keys and
+1 MiB of serialized receipt bytes. A receipt larger than 1 MiB is processed alone
+in its own transaction, including when lifecycle fences exclude its observation.
+Receipt size does not skip repair coverage or prevent readiness. Each transaction
+commits its projection and cursor/pending changes together; a restart retries
+uncommitted work without redelivering messages. Source receipts remain unchanged,
+and exchange previews retain their 8 KiB UTF-8-safe limit and full-text hash.
+
 ## Notifications
 
 Parents may subscribe to `end`, `blocker`, `idle`, or `quiet` notices for their direct children. A notice has one immutable identity, a trigger timestamp, and a delivery state. Repeated notices require an explicit repeat policy and a new activity baseline.
