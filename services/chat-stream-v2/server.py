@@ -1923,6 +1923,9 @@ class Server:
     async def broadcast(self, frame: dict[str, Any]) -> None:
         """Project a top-level frame for each connected client before enqueue."""
         frame_type = str(frame.get("type") or "")
+        queued_policy = getattr(self, "queued_send_now", None)
+        if queued_policy is not None and frame_type == "chat.event":
+            queued_policy.request_tick()
         if frame_type == 'notification' and str((frame.get('notification') or {}).get('producer') or '').startswith('consent.'):
             await self._publish_consent()
             return
@@ -3242,7 +3245,12 @@ class Server:
         composite = self._composite_for(session.get("stream_id"))
         if composite is not None:
             return composite.project_session(session)
-        return dict(session)
+        projected = dict(session)
+        if getattr(self, "queued_send_now", None) is not None:
+            from queued_send_now import route_for
+            projected["capabilities"] = {**(session.get("capabilities") or {}),
+                "queued_send_now": bool(route_for(session, self.local_host))}
+        return projected
 
     @staticmethod
     def _client_wants_assistant_composite(msg: dict[str, Any]) -> bool:

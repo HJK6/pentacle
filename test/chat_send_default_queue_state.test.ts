@@ -55,12 +55,12 @@ test('a local queued lifecycle and working hint render sending until provider qu
   assert.equal(doc.querySelector('.slot-chat-send-now'), null);
 });
 
-test('a provider queue explains unavailable acceleration and retains the queued row', () => {
+test('a qualified provider queue renders the minimal Send now control', () => {
   const doc = status({ sendState: 'sending', receiptCaption: 'queued', providerQueued: true });
   const button = doc.querySelector<HTMLButtonElement>('.slot-chat-send-now')!;
-  assert.equal(button.textContent, 'Send now unavailable');
-  assert.equal(button.disabled, true);
-  assert.match(doc.querySelector('.slot-chat-send-now-reason')?.textContent || '', /interrupt.*draft.*stays queued/i);
+  assert.equal(button.textContent, 'Send now');
+  assert.equal(button.disabled, false);
+  assert.equal(doc.querySelector('.slot-chat-send-now-reason'), null);
   assert.equal(button.getAttribute('data-optimistic-id'), 'optimistic-row');
   assert.equal(status({ receiptCaption: 'sent' }).querySelector('.slot-chat-send-now'), null);
   assert.equal(status({ receiptCaption: 'queued', providerQueued: true }, { allowQueuedSendNow: false }).querySelector('.slot-chat-send-now'), null);
@@ -176,3 +176,40 @@ test('Stop does not announce a retired generation queue for a nonqueued current 
   assert.equal(controller.getComposerNotice(STREAM), '');
   controller.dispose();
 });
+
+for (const provider of ['claude', 'codex']) {
+  test(`${provider}: queued action carries the existing identity and coalesces pending clicks`, async () => {
+    const { controller, sends, interrupts } = setup();
+    controller.applyFrame({ type: 'session.inventory', sessions: [{ ...session(STREAM), provider,
+      capabilities: { queued_send_now: true } }] });
+    const calls: any[] = []; let finish!: (value: any) => void;
+    controller.setQueuedSendNowBridge(args => { calls.push(args); return new Promise(resolve => { finish = resolve; }); });
+    const id = controller.sendTurn(STREAM, 'keep the original body'); await settle();
+    const original = structuredClone(controller.getState().optimisticSends![id]);
+    assert.equal(controller.canSendQueuedNow(STREAM, id), true);
+    assert.equal(controller.sendQueuedNow(STREAM, id), true);
+    assert.equal(controller.sendQueuedNow(STREAM, id), false);
+    await settle();
+    assert.deepEqual(calls, [{ streamId: STREAM, originalRequestId: original.request_id,
+      optimisticId: id, expectedSessionGeneration: 'generation-1' }]);
+    assert.equal(sends.length, 1); assert.equal(interrupts.length, 0);
+    assert.deepEqual(controller.getState().optimisticSends![id], original);
+    finish({ ok: true, confirm: 'interrupt_unconfirmed' }); await settle();
+    assert.equal(controller.getState().optimisticSends![id].provider_queued, true);
+    controller.dispose();
+  });
+  test(`${provider}: native proof between click and callback prevents queued control`, async () => {
+    const { controller } = setup(); const calls: any[] = [];
+    controller.applyFrame({ type: 'session.inventory', sessions: [{ ...session(STREAM), provider,
+      capabilities: { queued_send_now: true } }] });
+    controller.setQueuedSendNowBridge(async args => { calls.push(args); return { ok: true }; });
+    const id = controller.sendTurn(STREAM, 'already landed'); await settle();
+    const send = controller.getState().optimisticSends![id];
+    assert.equal(controller.sendQueuedNow(STREAM, id), true);
+    controller.applyFrame({ type: 'chat.event', event: { daemon_seq: 123, host: 'peer', provider,
+      stream_id: STREAM, session_name: 'queue-seat', timestamp: new Date().toISOString(), kind: 'USER',
+      text: send.text, optimistic_id: id, request_id: send.request_id,
+      raw: { receipt_state: 'landed', receipt_delivery: 'landed' } } });
+    await settle(); assert.equal(calls.length, 0); controller.dispose();
+  });
+}

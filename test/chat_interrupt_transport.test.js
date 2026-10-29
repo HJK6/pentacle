@@ -100,3 +100,28 @@ test('IPC and wire carry generation; a missing remote generation returns a typed
   assert.equal(local.ok, true);
   assert.equal(Object.hasOwn(payloads[2], 'expected_session_generation'), false);
 });
+
+test('queued action IPC freezes original identity and uses a separate deterministic control request', async (t) => {
+  const original = chatStreamClient.sendCommand;
+  t.after(() => { chatStreamClient.sendCommand = original; });
+  const calls = [];
+  chatStreamClient.sendCommand = async (payload, prefix, options) => {
+    calls.push({ payload, prefix, options });
+    return { type: 'send.interrupt.ok', landed: false, queued_now_state: 'wait_interrupt' };
+  };
+  const collector = createCollector();
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient, harness: true }).register(collector);
+  const action = collector.table['chat-stream:queued-send-now'].handler;
+  assert.equal((await action(null, 'local', 'owned-seat', 'send-original', 'optimistic-original', 'generation-1')).ok, true);
+  await action(null, 'local', 'owned-seat', 'send-original', 'optimistic-original', 'generation-1');
+  assert.deepEqual(calls[0].payload, { type: 'send.interrupt', host: 'local', session_name: 'owned-seat',
+    expected_session_generation: 'generation-1',
+    queued_send_now: { original_request_id: 'send-original', optimistic_id: 'optimistic-original' } });
+  assert.equal(calls[0].prefix, 'send.interrupt');
+  assert.equal(calls[0].options.requestId, calls[1].options.requestId);
+  assert.notEqual(calls[0].options.requestId, 'send-original');
+  const denied = await action(null, 'local', 'owned-seat', 'send-original', 'optimistic-original');
+  assert.equal(denied.ok, false); assert.equal(calls.length, 2);
+  await collector.table['chat-stream:interrupt'].handler(null, 'local', 'owned-seat', 'generation-1');
+  assert.equal(Object.hasOwn(calls[2].payload, 'queued_send_now'), false);
+});

@@ -153,6 +153,18 @@ def normalize_codex_rollout_record(
 
     record_type = record.get("type")
     payload_type = payload.get("type")
+    turn_control = []
+    if record_type == "event_msg" and payload_type in {"task_started", "task_complete", "turn_aborted"}:
+        turn_id = payload.get("turn_id")
+        if isinstance(turn_id, str) and turn_id and len(turn_id) <= 200 and session_id:
+            # Typed native lifecycle, not the user-role <turn_aborted> text.
+            # Empty content keeps these control observations out of chat prose.
+            turn_control = _stamp_jsonl_event_identity(
+                [make("SYSTEM", "", {"subtype": "provider-turn-control",
+                    "turn_id": turn_id, "native_turn_state": payload_type,
+                    "interrupt_reason": payload.get("reason") if payload_type == "turn_aborted" else None})],
+                f"codex-native-turn:{turn_id}:{payload_type}",
+            )
 
     if record_type == "event_msg" and payload_type == "task_complete" and payload.get("error"):
         # A provider failure can end the turn without any final assistant item.
@@ -182,6 +194,7 @@ def normalize_codex_rollout_record(
         return _stamp_jsonl_event_identity(
             [make("ERROR", text, {
                 "subtype": "provider-turn-error",
+                "native_turn_state": "task_complete",
                 "provider_error_code": code,
                 "turn_id": turn_id,
                 "subsystem": "codex_rollout",
@@ -193,7 +206,7 @@ def normalize_codex_rollout_record(
         # Other `event_msg` (token counts, item_completed), `turn_context` and
         # `world_state` are Codex bookkeeping, not conversation. Ingesting them
         # would inflate every stream's tail with rows no view renders.
-        return []
+        return turn_control
 
     if payload_type == "message":
         role = str(payload.get("role") or "")

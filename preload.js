@@ -134,6 +134,7 @@ window.cc = {
   chatFetchBlob: (blobSha) => ipcRenderer.invoke('chat-stream:fetch-blob', blobSha),
   // B3 (chat_send_turn_lifecycle_batch2): interrupt/cancel the latest in-flight
   // turn (daemon injects Escape into the agent pane).
+  chatQueuedSendNow: (hostId, sessionName, originalRequestId, optimisticId, expectedSessionGeneration) => ipcRenderer.invoke('chat-stream:queued-send-now', hostId || 'local', sessionName, originalRequestId, optimisticId, expectedSessionGeneration),
   chatInterrupt: (hostId, sessionName, expectedSessionGeneration) => ipcRenderer.invoke('chat-stream:interrupt', hostId || 'local', sessionName, expectedSessionGeneration),
   // Settle an agent-asked question (Esc) and optionally submit formatted answer
   // text through the daemon's atomic question.dismiss RPC.

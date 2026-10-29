@@ -3806,6 +3806,7 @@ function renderSlotChat(slot) {
   const renderedTranscript = (detail && window.PentacleChatView
     ? window.PentacleChatView.renderTranscriptTimelineHtml(detail, chrome, {
       showTurnDuration,
+      allowQueuedSendNow: detail?.sessionKind !== 'assistant_composite' && window.PentacleChatStore?.getState?.()?.sessions?.find(item => item.stream_id === streamId)?.capabilities?.queued_send_now === true,
       allowReplies: !isCompositeSlot(slot) && !!session.assistantDirect,
       resolvedQuestions: resolvedQuestionsForStream(streamId),
     })

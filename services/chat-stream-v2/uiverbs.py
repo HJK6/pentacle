@@ -92,6 +92,7 @@ class UIVerbs:
         self.sessions = sessions
         self.spawnctl = spawnctl
         self.capacity_retry = None
+        self.queued_send_now = None
         self._spec_catalog = specs
         self.enrollment_registry = enrollment_registry or EnrollmentRegistry()
         self.token_telemetry = (
@@ -193,6 +194,10 @@ class UIVerbs:
     # -- functional-degraded ----------------------------------------------
 
     async def send_interrupt(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if msg.get("queued_send_now") is not None:
+            if getattr(self, "queued_send_now", None) is None:
+                raise VerbError("queued_send_now_unsupported", "Queued Send now is unavailable on this daemon")
+            return await self.queued_send_now.send(msg)
         policy = self.capacity_retry
         if policy is not None:
             host = str(msg.get("host") or "").strip()
@@ -235,6 +240,12 @@ class UIVerbs:
         if not (tmux and await tmux.has_session(name)):
             return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
                     "interrupted": False, "landed": False, "confirm": "pane_unavailable", "coalesced": False}
+        if getattr(self, "queued_send_now", None) is not None:
+            row = await self.store.fetch_session(host, name) or {}
+            expected = str(msg.get("expected_session_generation") or "")
+            if expected and expected != row.get("session_generation"):
+                raise VerbError("stale_session_generation", "Selected generation changed")
+            await self.queued_send_now.cancel_locked(f"{host}:{name}", row.get("session_generation"))
         # The interrupt itself: one Escape into the pane (v1's B6 mechanism). The
         # `Interrupted` landing marker is scraped from the transcript by the
         # mirror (lane 4); without it v2 reports the honest `interrupt_unconfirmed`

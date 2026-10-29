@@ -35,12 +35,9 @@ An optimistic send starts as `queued`, becomes `dispatched` after the transport 
 
 The composer sends normally with Enter, Alt+Enter or Send, including while the agent works. The provider owns any native queue; there is no Queue/Steer chooser. Shift+Enter inserts a newline. Stop stays beside Send while a non-composite agent works, even with a draft.
 
-Rows show sending until receipt proof arrives. `provider_queued` shows Queued with a disabled Send now unavailable control and a visible work/draft-preservation reason; a local working hint or the optimistic lifecycle's initial queued state does not establish native queueing. A confirmed nonqueued receipt or correlated processing echo resolves the row to Sent. Historical receipt captions and ordinary failure/retry reconciliation retain their existing rules.
+Rows show sending until receipt proof arrives. A genuine `provider_queued` receipt shows Queued; a local working hint does not establish native queueing. Qualified queued rows offer Send now through a separate receipt/generation-bound bridge. Pending actions coalesce; a native echo arriving before the callback prevents dispatch. The queued action never sends a replacement original or clears the web draft. Normal receipt/native proof controls Sent, independently of control acknowledgement or model completion.
 
-Queued-row actions in the current controller are inert in every state, including delayed USER echo, reconnect, replaced generation and repeated stale callbacks: no cancel, keys, repaste or replacement identity. The provider retains the original input; ordinary sending preserves attachments/reply/voice metadata and existing dedupe/reconciliation. The renderer and operator-only IPC boundary never forward urgency. Explicit Stop keeps its generation fencing and queue budget; intentional agent/lower-client urgency is unchanged. Composite chats have no Stop or queued acceleration.
-
-Interim acceleration is unavailable per provider/version until a reviewed native route proves no cancel fallback, selected queued item only, no unrelated draft and counted native intake/work preservation. Existing open tabs require actual build readback/refresh before a live claim: an old queued action still reaches the generic Stop wire method, even though host stripping blocks stale new-message urgency.
-
+The daemon selects the pinned native Claude shortcut or exact-turn Codex interruption/ordinary-continue route described in [chat protocol](chat_protocol.md#session-interrupt). Nonempty/unproven native drafts, unqualified versions and unbound legacy queues fail closed. No persistent unavailable label/reason is rendered. Explicit Stop keeps its generation fence and cancels pending continuation; agent urgency and new-message operator urgency stripping remain unchanged. Composite chats have no queued acceleration or Stop. Old operator tabs require the deployment's authorized refresh/closure disposition.
 
 ## Transcript rendering
 
