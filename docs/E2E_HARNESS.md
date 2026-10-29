@@ -205,6 +205,14 @@ reconnect and answered-state reload. Free-text questions send `text` with the
 shows its labeled textarea immediately. Actual asking-seat delivery still needs
 a live fixture journey; this provider-free gate asserts durable resolution.
 
+The **composer-draft-per-chat** scenario uses the disposable chats and the real
+composer to check navigation, image ownership, send clearing, delayed uploads,
+newer edits, a composite chat and separate browser-context isolation. It also
+checks that unsent fixture text is absent from outgoing websocket frames. The
+**composer-draft-pending-send** and **composer-draft-retire** scenarios verify
+that a held upload cannot be sent twice after navigation and that an
+authoritatively closed, unmounted chat releases its image preview.
+
 The **scheduled-section** scenario reads the seeded recurring rule (weekly, days from
 firing, in America/Chicago) and one pending one-shot from the sidebar Scheduled section,
 then clicks Pause, Resume and Edit (a new `at_time`) and reads each result back from the

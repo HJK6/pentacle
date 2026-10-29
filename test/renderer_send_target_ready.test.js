@@ -13,7 +13,7 @@ assert.ok(start >= 0 && end > start);
 function controls(initialTarget, pending = false) {
   let target = initialTarget;
   const refs = { sendEl: { dataset: {}, classList: { toggle() {} }, setAttribute() {} }, inputEl: { value: 'draft survives' }, attachEl: {} };
-  const state = { slotSendPending: [pending], slotChatRefs: [refs], slotDrafts: ['draft survives'], slotAttachments: [[]], slotChatBoundStream: [null] };
+  const state = { chatComposerDrafts: new Map(), slotComposerKeys: [null], slotSendPending: [pending], slotChatRefs: [refs], slotDrafts: ['draft survives'], slotAttachments: [[]], slotChatBoundStream: [null] };
   const context = vm.createContext({ state, window: {}, chatControlTargetForSlot: () => target, slotAttachmentDrafts: () => [], isCompositeSlot: () => false });
   vm.runInContext(app.slice(start, end), context);
   const update = () => vm.runInContext('updateSendControls(0)', context);
@@ -83,6 +83,18 @@ test('existing pending operation still disables every control until it finishes'
   for (const ref of Object.values(c.refs)) assert.equal(ref.disabled, false);
 });
 
+test('a returning chat disables Send for its held upload while keeping the draft editable', () => {
+  const c = controls({ streamSession: { stream_id: 'hosta:test' } });
+  c.state.slotComposerKeys[0] = 'draft';
+  c.state.chatComposerDrafts.set('draft', { sendPending: true });
+  c.update();
+  assert.equal(c.refs.sendEl.disabled, true);
+  assert.equal(c.refs.inputEl.disabled, false);
+  c.state.chatComposerDrafts.get('draft').sendPending = false;
+  c.update();
+  assert.equal(c.refs.sendEl.disabled, false);
+});
+
 // Ordinary Send / Stop controls (agent chats only).
 function agentControls({ phase, composite = false, draft = 'draft survives', notice = '' }) {
   const refs = {
@@ -91,7 +103,7 @@ function agentControls({ phase, composite = false, draft = 'draft survives', not
   const extras = { stopEl: { hidden: true }, noticeEl: { hidden: true, textContent: '' } };
   Object.assign(refs, extras);
   const store = { getTurnPhase: () => phase, getComposerNotice: () => notice };
-  const state = { slotSendPending: [false], slotChatRefs: [refs], slotDrafts: [draft], slotChatBoundStream: ['hosta:test'] };
+  const state = { chatComposerDrafts: new Map(), slotComposerKeys: [null], slotSendPending: [false], slotChatRefs: [refs], slotDrafts: [draft], slotChatBoundStream: ['hosta:test'] };
   const context = vm.createContext({ state, window: { PentacleChatStore: store }, chatControlTargetForSlot: () => ({ streamSession: { stream_id: 'hosta:test' } }), slotAttachmentDrafts: () => [], isCompositeSlot: () => composite });
   vm.runInContext(app.slice(start, end), context);
   vm.runInContext('updateSendControls(0)', context);

@@ -363,6 +363,15 @@ dashboard registry and boards, the prebuilt chat-core and cosmic bundles) stay
 to `module.exports` — and `app.js` is bundled behind shims for `path` and
 `../config-loader`.
 
+## Composer drafts
+
+While a web page remains open, switching chats keeps each chat's unsent text and
+supported image attachments with that chat. A successful send clears the submitted
+draft; other chats' drafts remain. A pending upload cannot be submitted twice
+after navigating away and back. This cache is local to the page and is not
+synchronized to other tabs or devices. The existing active-pane text reload
+restore remains; switched-away drafts and attachments do not survive a reload.
+
 ## Closed chat slots
 
 When a previously known managed chat disappears from a connected daemon inventory

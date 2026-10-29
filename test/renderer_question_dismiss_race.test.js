@@ -196,6 +196,43 @@ test('stale_question with answer text moves the draft into the normal composer',
   assert.equal(vm.runInContext('state.slotDrafts[0]', context), dismissCalls[0].options.text);
 });
 
+test('a delayed stale question answer does not replace newer composer text', async () => {
+  let finish;
+  const { context, dom } = installRenderer({ ccOverrides: {
+    chatDismissQuestion: () => new Promise(resolve => { finish = resolve; }),
+  } });
+  await flush(); await flush(); mountRaceSlot(context);
+  const questionEl = openDesktopQuestions(dom);
+  questionEl.querySelector('[data-option="2"]').click();
+  questionEl.querySelector('.slot-chat-question-submit').click();
+  await flush();
+  const input = dom.window.document.querySelector('#cell-0 .slot-chat-compose-input');
+  input.value = 'newer draft'; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  finish({ ok: false, error_code: 'stale_question' });
+  await flush(); await flush();
+  assert.equal(input.value, 'newer draft');
+  dom.window.close();
+});
+
+test('a delayed stale answer respects an explicitly emptied newer draft', async () => {
+  let finish;
+  const { context, dom } = installRenderer({ ccOverrides: {
+    chatDismissQuestion: () => new Promise(resolve => { finish = resolve; }),
+  } });
+  await flush(); await flush(); mountRaceSlot(context);
+  const questionEl = openDesktopQuestions(dom);
+  questionEl.querySelector('[data-option="2"]').click();
+  questionEl.querySelector('.slot-chat-question-submit').click();
+  await flush();
+  const input = dom.window.document.querySelector('#cell-0 .slot-chat-compose-input');
+  input.value = 'temporary'; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  input.value = ''; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  finish({ ok: false, error_code: 'stale_question' });
+  await flush(); await flush();
+  assert.equal(input.value, '');
+  dom.window.close();
+});
+
 test('composer text answers an open pane question instead of normal send', async () => {
   const { context, dismissCalls, sendCalls, dom } = installRenderer({ dismissResult: { ok: true } });
   await flush();
