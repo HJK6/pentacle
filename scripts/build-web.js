@@ -35,6 +35,7 @@ const EXTERNAL_SCRIPTS = {
   'confirm_dialog.js': 'confirm_dialog.js',
   'dashboards/registry.js': 'dashboards-registry.js',
   'dashboards/demo.js': 'dashboards-demo.js',
+  'dashboards/travel_engine.js': 'dashboards-travel-engine.js',
   'dist/chat_core.bundle.js': 'chat_core.bundle.js',
   'dist/cosmic_tokens.bundle.js': 'cosmic_tokens.bundle.js',
   'dist/cosmic_components.bundle.js': 'cosmic_components.bundle.js',

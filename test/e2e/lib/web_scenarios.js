@@ -170,6 +170,47 @@ async function chatTranscriptPaint(ctx) {
     { items: painted.items, chars: painted.text.length, containsSeededText: textOk });
 }
 
+// Opt-in isolated provider fixture: spawn a real daemon-owned session, send
+// through the browser bridge, and wait for the fixture provider's JSONL reply
+// to be ingested and rendered back into the page. The fixture has no network.
+async function isolatedSendReply(ctx) {
+  const { session, report, cdp, timeoutMs, runtime } = ctx;
+  if (!runtime.roundtrip) throw new Error('roundtrip fixture not configured');
+  const catalog = await session.eval('window.cc.chatSpawnCatalog()', { awaitPromise: true });
+  const profile = catalog?.catalog?.catalog || catalog?.catalog;
+  const tuple = profile?.profiles?.desktop_manual?.claude;
+  report.ok('isolated Claude profile is available', catalog?.ok === true && Array.isArray(tuple) && tuple.length === 2);
+  const spawned = await session.eval(`window.cc.chatSpawnV2(${JSON.stringify({
+    hostId: 'local', provider: 'claude', model: tuple[0], effort: tuple[1],
+    spawnProfile: 'desktop_manual', catalogVersion: profile.catalog_version,
+    resolutionSource: 'profile_default',
+  })})`, { awaitPromise: true });
+  const item = spawned?.session || {};
+  const streamId = spawned?.streamId || item.stream_id;
+  const sessionName = item.sessionName || item.session_name;
+  report.ok('isolated provider session spawned through the web bridge', spawned?.ok === true && !!streamId && !!sessionName,
+    { ok: spawned?.ok, streamId, error: spawned?.error });
+  const bootstrap = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(state => state.sessions?.find(row => row.stream_id === ${JSON.stringify(streamId)})?.bootstrap_state || null)`,
+    value => value === 'ready', { timeoutMs: Math.max(timeoutMs, 45000), label: 'isolated provider bootstrap ready' });
+  report.ok('isolated provider is ready for input', bootstrap === 'ready', { bootstrap });
+  const turn = `web-gate-turn-${Date.now()}`;
+  const sent = await session.eval(`window.cc.chatSend('local', ${JSON.stringify(sessionName)}, ${JSON.stringify(turn)})`, { awaitPromise: true });
+  report.ok('synthetic browser turn reached the daemon', sent?.ok === true && (sent?.delivery === 'landed' || sent?.action_committed === true),
+    { ok: sent?.ok, delivery: sent?.delivery, error: sent?.error });
+  const observed = await waitForValue(session, cdp, `window.cc.requestStreamEvents({ streamId: ${JSON.stringify(streamId)}, limit: 20 }).then(() => {
+    const container = document.getElementById('web-gate-roundtrip') || (() => {
+      const el = document.createElement('div'); el.id = 'web-gate-roundtrip'; document.body.appendChild(el); return el;
+    })();
+    const detail = window.PentacleChatView.renderStreamTranscript(${JSON.stringify(streamId)}, container);
+    const text = container.innerText || '';
+    return { count: (detail?.transcriptItems || []).length, sent: text.includes(${JSON.stringify(turn)}),
+      reply: text.includes(${JSON.stringify(`Public fixture assistant: ${turn}`)}) };
+  })`, (value) => value?.sent && value?.reply,
+  { timeoutMs: Math.max(timeoutMs, 30000), label: 'isolated provider reply ingested and rendered' });
+  report.ok('synthetic send and provider reply render on the same stream', observed.sent && observed.reply, observed);
+}
+
 // A web host restart mid-session must restore full interaction WITHOUT a manual
 // reload: the frozen (degraded) chat input re-enables and the reconnected socket
 // serves the live daemon inventory. Regression guard for
@@ -309,8 +350,13 @@ async function slotSurvivesCcReconnect(ctx) {
     const typeTouch = (s, file) => session.eval(`window.cc.writePty(${s}, ${JSON.stringify('touch ' + file + '\r')}), true`);
     const fileAppears = (file) => pollUntil(() => fs.existsSync(file), Boolean, timeoutMs, `host file ${path.basename(file)} created via typed input`).catch(() => false);
 
-    // Attach the fixture to a slot through the app (defaults to the terminal view).
+    // Attach the fixture to a slot through the app. Chat-first workspaces open
+    // in Chat view, so explicitly select Terminal for the PTY reconnect probe.
     await session.eval(`window.focusStreamId(${JSON.stringify(sid)})`);
+    await waitForValue(session, cdp,
+      `!!document.querySelector('#header-0 [data-mode="terminal"]')`, Boolean,
+      { timeoutMs, label: 'terminal toggle present' });
+    await session.eval(`document.querySelector('#header-0 [data-mode="terminal"]').click()`);
     slot = await waitForValue(session, cdp,
       `(() => { for (let i=0;i<4;i++){ const c=document.getElementById('cell-'+i); if (c && c.querySelector('.xterm')) return i; } return -1; })()`,
       (v) => typeof v === 'number' && v >= 0, { timeoutMs, label: 'terminal attached to a slot' });
@@ -411,15 +457,10 @@ async function slotSurvivesCcReconnect(ctx) {
 // The ordered gate: names map to functions; web_gate runs them in this order.
 // These four are fully deterministic against the seeded loopback daemon.
 //
-// A chat "send-turn round trip" scenario is intentionally NOT in this gate: a
-// real chat send needs a live provider SPAWN, and the sanitized public repo
-// omits the spawn/ingest fixture `tests/smoke/stub_cli.py` (with the available
-// ingest_provider_stub the send reaches the provider and it writes the reply,
-// but ingest does not associate that transcript back to the spawned stream, so
-// the reply is not deterministically observable over the websocket). Per the
-// Nexus (2026-09-12): the browser send path is covered by the web_cc/ws_bridge
-// unit tests and the daemon send/ingest by the service's own python tests; see
-// spec_pentacle__web_mode_e2e_gate_2026_09 § Findings.
+// The default gate uses seeded transcript rows. The opt-in --roundtrip fixture
+// adds a real browser send and provider reply: it launches the public stub in
+// an owned tmux socket, waits for bootstrap readiness, and verifies that the
+// daemon ingests its JSONL reply into the same stream.
 async function colouredHostGlyphs({ session, report }) {
   const { hostGlyphContrast, hostSurfaceContrast } = require('./host_glyph_contrast');
   const cells = await hostGlyphContrast(session);
@@ -503,6 +544,7 @@ module.exports = {
   sidebarFromInventory,
   slotAttachTypeResizeKill,
   chatTranscriptPaint,
+  isolatedSendReply,
   slotSurvivesCcReconnect,
   hostRestartRestoresInput,
   SCENARIOS,

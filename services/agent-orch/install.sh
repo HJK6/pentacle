@@ -23,7 +23,7 @@ Options:
   --help          Show this help.
 
 Python discovery:
-  macOS: /Library/Frameworks/Python.framework/Versions/3.13/bin/python3,
+  macOS: Python 3.14 or 3.13 from python.org or Homebrew,
          /opt/homebrew/opt/python@3.13/bin/python3.13,
          /opt/homebrew/bin/python3.13
   Linux: python3.13, python3.12, python3 with version >= 3.12
@@ -83,6 +83,9 @@ find_linux_python() {
 find_darwin_python() {
   local candidate
   for candidate in \
+    /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
+    /opt/homebrew/opt/python@3.14/bin/python3.14 \
+    /opt/homebrew/bin/python3.14 \
     /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
     /opt/homebrew/opt/python@3.13/bin/python3.13 \
     /opt/homebrew/bin/python3.13

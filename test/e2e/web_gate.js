@@ -22,6 +22,7 @@ const { randomBytes } = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
+const WebSocket = require('ws');
 
 const cdp = require('./lib/cdp');
 const scenarios = require('./lib/web_scenarios');
@@ -53,7 +54,7 @@ const FIXTURE = {
 };
 
 function parseArgs(argv) {
-  const args = { profile: null, cdpPort: 0, keep: false, timeoutMs: 30000, python: process.env.PENTACLE_PYTHON || 'python3' };
+  const args = { profile: null, cdpPort: 0, keep: false, roundtrip: false, timeoutMs: 30000, python: process.env.PENTACLE_PYTHON || 'python3' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--profile') args.profile = argv[++i];
@@ -61,6 +62,7 @@ function parseArgs(argv) {
     else if (a === '--timeout') args.timeoutMs = Number(argv[++i]);
     else if (a === '--python') args.python = argv[++i];
     else if (a === '--keep') args.keep = true;
+    else if (a === '--roundtrip') args.roundtrip = true;
     else throw new Error(`unknown argument: ${a}`);
   }
   return args;
@@ -108,6 +110,42 @@ function waitForListen(port, timeoutMs, isDead = () => false) {
     };
     tryOnce();
   });
+}
+
+// bind() precedes the daemon's boot SHA read. A listening socket alone can
+// therefore send a welcome with an empty runtime_sha. Wait for the actual
+// welcome value before starting the web host so the Settings gate observes a
+// fully initialized daemon; a missing value still fails at a bounded deadline.
+async function waitForRuntimeSha(port, timeoutMs, isDead = () => false) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isDead()) throw new Error(`daemon exited before runtime SHA was ready on ${port}`);
+    const sha = await new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      const remaining = Math.max(1, deadline - Date.now());
+      const timer = setTimeout(() => { ws.terminate(); resolve(''); }, remaining);
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.terminate();
+        resolve(value);
+      };
+      ws.once('message', (raw) => {
+        let frame;
+        try { frame = JSON.parse(raw.toString()); } catch { finish(''); return; }
+        finish(frame?.type === 'welcome' ? String(frame.runtime_sha || '').trim() : '');
+      });
+      ws.once('error', () => finish(''));
+      ws.once('close', () => finish(''));
+    });
+    if (/^[0-9a-f]{40}$/i.test(sha)) return sha;
+    // This is a retry interval, never a readiness substitute: every attempt
+    // reads a new welcome and the deadline fails if no valid SHA is observed.
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`daemon welcome had no valid runtime SHA within ${timeoutMs}ms on ${port}`);
 }
 
 function onceExit(proc, timeoutMs = 3000) {
@@ -181,6 +219,44 @@ function writeProfile(scratch, daemonPort) {
   return file;
 }
 
+function prepareRoundtripFixture(scratch) {
+  const workspace = path.join(scratch, 'provider-workspace');
+  const projectsRoot = path.join(scratch, '.claude', 'projects');
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(projectsRoot, { recursive: true });
+  const socket = `pentacle-web-gate-${process.pid}-${randomBytes(4).toString('hex')}`;
+  const tmuxBin = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim();
+  const tmuxWrapper = path.join(scratch, 'owned-tmux');
+  fs.writeFileSync(tmuxWrapper, `#!/bin/sh\nexec ${JSON.stringify(tmuxBin)} -L ${socket} "$@"\n`, { mode: 0o700 });
+  return {
+    workspace, projectsRoot, socket, tmuxWrapper,
+    providerBin: path.join(ROOT, 'services/chat-stream-v2/tests/smoke/ingest_provider_stub.py'),
+  };
+}
+
+function fixtureDaemonArgs(args, scratch, port, runtime) {
+  const values = [DAEMON, scratch,
+    '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
+    '--db', path.join(scratch, 'sessions.db'),
+    '--notifications-db', path.join(scratch, 'notifications.db'),
+    '--assets-db', path.join(scratch, 'assets.db'),
+    '--blob-root', path.join(scratch, 'blobs'),
+    '--disable-hosts', '--disable-mirror', '--disable-nudges',
+    '--disable-outbound-notices', '--disable-remote-presence'];
+  if (args.roundtrip) values.push(
+    '--claude-bin', runtime.roundtrip.providerBin,
+    '--spawn-cwd', runtime.roundtrip.workspace,
+    '--projects-root', runtime.roundtrip.projectsRoot,
+    '--tmux-bin', runtime.roundtrip.tmuxWrapper);
+  return values;
+}
+
+function fixtureDaemonEnv(args, runtime) {
+  return args.roundtrip
+    ? { ...process.env, HOME: path.join(runtime.scratch, 'home'), CHAT_STREAM_STUB_ROOT: runtime.roundtrip.projectsRoot }
+    : process.env;
+}
+
 async function startDaemon(args, scratch, runtime, fixtures = [
   FIXTURE,
   { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' },
@@ -207,20 +283,14 @@ async function startDaemon(args, scratch, runtime, fixtures = [
   let lastErr;
   for (let attempt = 0; attempt < 4; attempt++) {
     const port = await freePort();
-    const proc = spawn(args.python, [DAEMON, scratch,
-      '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
-      '--db', db,
-      '--notifications-db', path.join(scratch, 'notifications.db'),
-      '--assets-db', path.join(scratch, 'assets.db'),
-      '--blob-root', path.join(scratch, 'blobs'),
-      '--disable-hosts', '--disable-mirror', '--disable-nudges',
-      '--disable-outbound-notices', '--disable-remote-presence',
-    ], { cwd: ROOT, stdio: ['ignore', daemonLog, daemonLog] });
+    const proc = spawn(args.python, fixtureDaemonArgs(args, scratch, port, runtime),
+      { cwd: ROOT, env: fixtureDaemonEnv(args, runtime), stdio: ['ignore', daemonLog, daemonLog] });
     runtime.daemonProc = proc;
     let dead = false;
     proc.once('exit', () => { dead = true; });
     try {
       await waitForListen(port, args.timeoutMs, () => dead);
+      runtime.daemonRuntimeSha = await waitForRuntimeSha(port, args.timeoutMs, () => dead);
       return { proc, port, seed: seed.trim() };
     } catch (e) {
       lastErr = e;
@@ -237,7 +307,7 @@ async function run(args) {
   const report = new Report(allocateReportDir());
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-')));
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-web-gate-chrome-'));
-  const runtime = {};
+  const runtime = { scratch };
   let daemon = null; let host = null; let chrome = null; let session = null;
   const fixture = args.profile ? null : FIXTURE;
 
@@ -265,6 +335,15 @@ async function run(args) {
       daemonCleanupError = e;
       runtime.daemonCleanup = { pid: dproc && dproc.pid, exited: false, error: String(e && e.message ? e.message : e) };
     }
+    if (runtime.roundtrip) {
+      try { tmux(['-L', runtime.roundtrip.socket, 'kill-server'], { stdio: 'ignore' }); }
+      catch { /* no owned tmux server was started */ }
+      let serverStillRunning = false;
+      try { tmux(['-L', runtime.roundtrip.socket, 'list-sessions'], { stdio: 'ignore' }); serverStillRunning = true; }
+      catch { /* no server at this owned socket */ }
+      runtime.roundtripTmuxCleanup = { socket: runtime.roundtrip.socket, server_still_running: serverStillRunning };
+      if (serverStillRunning && !daemonCleanupError) daemonCleanupError = new Error('CLEANUP_FAIL: owned roundtrip tmux server remains');
+    }
     // Keep scratch evidence if its daemon survived; deleting a live process's
     // files would hide the failed teardown. The verdict and exit code fail.
     if (!daemonCleanupError) {
@@ -277,12 +356,14 @@ async function run(args) {
   };
 
   try {
+    if (args.roundtrip) runtime.roundtrip = prepareRoundtripFixture(scratch);
     let profile = args.profile;
     if (!profile) {
       daemon = await startDaemon(args, scratch, runtime);
       runtime.fixtureDaemonPort = daemon.port;
       profile = writeProfile(scratch, daemon.port);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
+      report.note(`daemon welcome reports initialized runtime SHA ${runtime.daemonRuntimeSha.slice(0, 7)}`);
     } else {
       report.note(`external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
     }
@@ -345,19 +426,16 @@ async function run(args) {
       let lastErr;
       for (let i = 0; i < 40; i++) {
         const dlog = fs.openSync(path.join(scratch, 'daemon.log'), 'a');
-        const proc = spawn(args.python, [DAEMON, scratch,
-          '--host', '127.0.0.1', '--port', String(daemon.port), '--local-host', 'local',
-          '--db', db,
-          '--notifications-db', path.join(scratch, 'notifications.db'),
-          '--assets-db', path.join(scratch, 'assets.db'),
-          '--blob-root', path.join(scratch, 'blobs'),
-          '--disable-hosts', '--disable-mirror', '--disable-nudges',
-          '--disable-outbound-notices', '--disable-remote-presence',
-        ], { cwd: ROOT, stdio: ['ignore', dlog, dlog] });
+        const proc = spawn(args.python, fixtureDaemonArgs(args, scratch, daemon.port, runtime),
+          { cwd: ROOT, env: fixtureDaemonEnv(args, runtime), stdio: ['ignore', dlog, dlog] });
         runtime.daemonProc = proc;
         let dead = false;
         proc.once('exit', () => { dead = true; });
-        try { await waitForListen(daemon.port, 8000, () => dead); return daemon.port; }
+        try {
+          await waitForListen(daemon.port, 8000, () => dead);
+          runtime.daemonRuntimeSha = await waitForRuntimeSha(daemon.port, args.timeoutMs, () => dead);
+          return daemon.port;
+        }
         catch (e) { lastErr = e; try { proc.kill('SIGKILL'); } catch {} await onceExit(proc); runtime.daemonProc = null; await cdp.sleep(150); }
       }
       throw lastErr || new Error(`daemon did not re-listen on ${daemon.port}`);
@@ -393,7 +471,10 @@ async function run(args) {
 
     const ctx = { session, report, cdp, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort };
     let failed = 0;
-    for (const [name, fn] of scenarios.SCENARIOS) {
+    const chosenScenarios = args.roundtrip
+      ? [...scenarios.SCENARIOS.slice(0, -1), ['isolated-send-reply', scenarios.isolatedSendReply], scenarios.SCENARIOS.at(-1)]
+      : scenarios.SCENARIOS;
+    for (const [name, fn] of chosenScenarios) {
       console.log(`\n▸ ${name}`);
       try { await fn(ctx); } catch (e) { failed += 1; report.note(`scenario ${name} FAILED: ${e && e.message}`); }
     }
@@ -417,6 +498,7 @@ async function run(args) {
         const verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
         verdict.fixture_auth_cleanup = runtime.fixtureAuthCleanup;
         verdict.daemon_cleanup = runtime.daemonCleanup;
+        if (runtime.roundtripTmuxCleanup) verdict.roundtrip_tmux_cleanup = runtime.roundtripTmuxCleanup;
         if (cleanupError) { verdict.status = 'FAIL'; verdict.cleanup_error = String(cleanupError && cleanupError.message ? cleanupError.message : cleanupError); }
         if (!args.keep && (!runtime.fixtureAuthCleanup?.registry_removed || !runtime.fixtureAuthCleanup?.token_removed)) { verdict.status = 'FAIL'; verdict.cleanup_error = 'CLEANUP_FAIL'; }
         fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));

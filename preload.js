@@ -34,6 +34,7 @@ let _isClient = false;
 let _hasRemote = false;
 let _hasDashboardHub = false;
 let _dashboardHubConfig = null;
+let _travelEngineConfig = null;
 try {
   const _cfg = loadConfig(__dirname).config;
   _isClient = !!_cfg.remote;
@@ -44,6 +45,8 @@ try {
   // require('./config-loader') from a <script src> context where __dirname /
   // require resolution can vary by Electron version / asar packaging.
   _dashboardHubConfig = (_cfg.dashboardHub && _cfg.dashboardHub.url) ? _cfg.dashboardHub : null;
+  _travelEngineConfig = typeof _cfg.travelEngine?.url === 'string' && _cfg.travelEngine.url.trim()
+    ? { url: _cfg.travelEngine.url.trim() } : null;
 } catch { /* keep default false */ }
 
 window.HOST = {
@@ -53,6 +56,7 @@ window.HOST = {
   hasRemote: _hasRemote,
   hasDashboardHub: _hasDashboardHub,
   dashboardHubConfig: _dashboardHubConfig,
+  travelEngineConfig: _travelEngineConfig,
 };
 
 window.cc = {
@@ -117,6 +121,11 @@ window.cc = {
   // Session metadata used to come via apiUrl/apiPort tunnel; that's gone
   // since the server.py deprecation — use chat-stream:* IPC instead.
   getConfig: () => ipcRenderer.invoke('get-config'),
+  reviewInboxRead: () => ipcRenderer.invoke('review-inbox:read'),
+  onReviewInboxChanged: (callback) => {
+    ipcRenderer.removeAllListeners('review-inbox:changed');
+    ipcRenderer.on('review-inbox:changed', (_, payload) => callback(payload));
+  },
   getBuild: () => ipcRenderer.invoke('get-build'),
   // Open an external http(s) link in the OS browser (report/markdown links).
   openExternal: (url) => ipcRenderer.invoke('open-external', url),

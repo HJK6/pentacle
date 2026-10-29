@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {
       "case_key": "immediate-acceptance",
@@ -59,7 +59,9 @@
               "error_code": null,
               "dispatch_id": "dispatch-immediate",
               "lane_ids": [],
-              "publication_ids": []
+              "publication_ids": [],
+              "answered_via": null,
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -68,10 +70,10 @@
             "oldest_pending_at": "2026-09-20T00:00:00.000Z",
             "has_more": false
           },
-          "cell_sha256": "4ec2fe2f4a6bbbef22a820a51a0b0d701b9a04fd0e71ba36d2780e12d0bd0727"
+          "cell_sha256": "adbd250c58c11130e350ab7f0275fac51aad1fc363e18f7da8c3d6828872c44f"
         }
       ],
-      "case_sha256": "a255d7ed8e3810afaf9edc66197bf7b3074f75b5862eeda12d81779380244714"
+      "case_sha256": "179c4a37d4d998e6479b8b59868a18e08d8fe039d248db2c582afa79af606500"
     },
     {
       "case_key": "overlap-two-inputs",
@@ -158,7 +160,9 @@
               "error_code": null,
               "dispatch_id": "dispatch-overlap-first",
               "lane_ids": [],
-              "publication_ids": []
+              "publication_ids": [],
+              "answered_via": null,
+              "covered_by_publication_key": null
             },
             "activity-overlap-second": {
               "message_id": "activity-overlap-second",
@@ -177,7 +181,9 @@
               "error_code": null,
               "dispatch_id": "dispatch-overlap-second",
               "lane_ids": [],
-              "publication_ids": []
+              "publication_ids": [],
+              "answered_via": null,
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -186,10 +192,10 @@
             "oldest_pending_at": "2026-09-20T00:00:00.000Z",
             "has_more": false
           },
-          "cell_sha256": "fbe890f7de9951b0403701bbd1a1378462d2f904521aff5f1a6fa49930d335b6"
+          "cell_sha256": "b65ae2b36b3bf810ebc1887f5357091d7fd9dd226def94957ff096b5aad682b3"
         }
       ],
-      "case_sha256": "346f05d42eecb57a0cfd8a6204cefde2cd1e3eb2de124ee4cf496c08911379e0"
+      "case_sha256": "67ee74f07663756b6557745bce7694a9aa7b3ba137e37d601d425878cc6448ad"
     },
     {
       "case_key": "acknowledgment-then-final",
@@ -284,7 +290,12 @@
               "error_code": null,
               "dispatch_id": "dispatch-ack-final",
               "lane_ids": [],
-              "publication_ids": ["publication-ack", "publication-final"]
+              "publication_ids": [
+                "publication-ack",
+                "publication-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -293,10 +304,10 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "7d3917764510480911b97380327580748d55b0a7563d6e2fb3fec9bacca1b92a"
+          "cell_sha256": "e9f195870457c85502eb23ebfa65ee28784b55afed0eeb71c4fa659ff03fda5b"
         }
       ],
-      "case_sha256": "a3adbc41e1c081da739c7516afc4c2b25e55507ba8700d35f7f3f43df9a99e06"
+      "case_sha256": "8b7cf78d1d2b25a6560479d93e4b4f55f0be04cc7b05f2f515b2235946e927ea"
     },
     {
       "case_key": "uncertainty-and-error",
@@ -375,7 +386,11 @@
               "error_code": "delivery_evidence_required",
               "dispatch_id": "dispatch-uncertain",
               "lane_ids": [],
-              "publication_ids": ["publication-uncertain-final"]
+              "publication_ids": [
+                "publication-uncertain-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -384,7 +399,7 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "895f6081ce131f5705ce9c3e28eac2bf4c829c2df04c687e4caba872c1cd7488"
+          "cell_sha256": "60a24a7c9c382a1867f8a8bfa2e8f9113480214ab45c6c080b4b0b502b600940"
         },
         {
           "cell_key": "routing-error-wins-over-final-marker",
@@ -459,7 +474,11 @@
               "error_code": "router_rejected",
               "dispatch_id": "dispatch-failed",
               "lane_ids": [],
-              "publication_ids": ["publication-failed-final"]
+              "publication_ids": [
+                "publication-failed-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -468,10 +487,10 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "aee1259c56f540258c9f51fe0d690ecc0256688131b5041196893b499cdce051"
+          "cell_sha256": "d18e30abdc54b5376e97b9aec386783c38b1019caa4880cb1a20fc9b3e37b9a2"
         }
       ],
-      "case_sha256": "5cc2c857ba7da1f9ef68eea0eaa25abc659427dd8eaff1cbbe382f2f339dbfe5"
+      "case_sha256": "f52f9ecc58d94eb510b166821a8f629abc9f64022632419addf1182f4fab5ed5"
     },
     {
       "case_key": "question-wait-cancel-resume",
@@ -584,8 +603,14 @@
               "work_state": "waiting",
               "error_code": null,
               "dispatch_id": "dispatch-question-wait",
-              "lane_ids": ["lane-question-wait"],
-              "publication_ids": ["publication-question-wait"]
+              "lane_ids": [
+                "lane-question-wait"
+              ],
+              "publication_ids": [
+                "publication-question-wait"
+              ],
+              "answered_via": null,
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -594,7 +619,7 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "d8a0670963cddb74dad986319323c1d0f7624f0cee575a2b2623f62c05b8dc17"
+          "cell_sha256": "7b1424f7af1befe1aa759d66e9d034382307f08c71ae763ad3776885800a7c00"
         },
         {
           "cell_key": "cancelled-lane",
@@ -688,8 +713,12 @@
               "work_state": "cancelled",
               "error_code": null,
               "dispatch_id": "dispatch-cancelled",
-              "lane_ids": ["lane-cancelled"],
-              "publication_ids": []
+              "lane_ids": [
+                "lane-cancelled"
+              ],
+              "publication_ids": [],
+              "answered_via": null,
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -698,7 +727,7 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "f372f2575e8ffb5abb5341c5944d1f7365a0aea755cd66965b174469e1821375"
+          "cell_sha256": "3da752edd444ad53f33db33def1c0e1676ca8679304caf7cf8973b764319d14a"
         },
         {
           "cell_key": "answered-question-resumes-execution",
@@ -823,8 +852,15 @@
               "work_state": "in_progress",
               "error_code": null,
               "dispatch_id": "dispatch-question-resume",
-              "lane_ids": ["lane-question-resume"],
-              "publication_ids": ["publication-question-resumed", "publication-question-resume-final"]
+              "lane_ids": [
+                "lane-question-resume"
+              ],
+              "publication_ids": [
+                "publication-question-resumed",
+                "publication-question-resume-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -833,10 +869,10 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "75b6c42ce0d7d59936b65a312af4322cb5fccfe5fa7c85b607561c8b1533617a"
+          "cell_sha256": "edb160367e54914e88ce896d54ae47ff2534b9c6ff2f7bcf9c836ce15f807255"
         }
       ],
-      "case_sha256": "daed6c8f6cc2e3517226193b132300266b6bbff2ec693ccc9c9581374d890bbe"
+      "case_sha256": "45329035f4642f7a2b6a72f0ea57e8c5cffa28bb4d11fe760a1318e14f252cc1"
     },
     {
       "case_key": "partial-multi-lane-completion",
@@ -984,8 +1020,15 @@
               "work_state": "in_progress",
               "error_code": null,
               "dispatch_id": "dispatch-partial",
-              "lane_ids": ["lane-done", "lane-exec"],
-              "publication_ids": ["publication-partial-final"]
+              "lane_ids": [
+                "lane-done",
+                "lane-exec"
+              ],
+              "publication_ids": [
+                "publication-partial-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -994,10 +1037,10 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "3fff9f1ab78b41cb0f8ad8b385a02a0809a920bc891cca5fe4cedaa6108db95c"
+          "cell_sha256": "b0d7371b8212b76164aafef30b93352bcb472d74d8a4fd753fd4854a3e26c5b7"
         }
       ],
-      "case_sha256": "609326e2275b11ad8acaec3757b9f5fb327ef6d78beb40081ef3519eaee7b2a2"
+      "case_sha256": "eeb0ba261f6afa40177dfef16ff943c3e5f4f7291e59b97dfe41ed652cbf9fbc"
     },
     {
       "case_key": "external-owner-without-lane",
@@ -1076,7 +1119,11 @@
               "error_code": null,
               "dispatch_id": "dispatch-external-owner",
               "lane_ids": [],
-              "publication_ids": ["publication-external-owner-final"]
+              "publication_ids": [
+                "publication-external-owner-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
             }
           },
           "expected_snapshot": {
@@ -1085,10 +1132,206 @@
             "oldest_pending_at": null,
             "has_more": false
           },
-          "cell_sha256": "33fc72d449b86ed44226bba7871c03d645b06fdc2f2bf81ccb06f8538b11c4cd"
+          "cell_sha256": "83e7ae18d2ecdd2dcc39ea86e94423505a23d1ba598851ba34b0cdf544962480"
         }
       ],
-      "case_sha256": "36e48376e669a6463befc56bdd41be5e09fba0a0b86fd49527f5111cb97cb5b1"
+      "case_sha256": "6600289ffd32f6a0c2af1dd4cf88bcce1f0daa64b7c966ccbb949f1cdb05e0d5"
+    },
+    {
+      "case_key": "covered-and-promoted-finals",
+      "scenario": 8,
+      "cells": [
+        {
+          "cell_key": "covered-final",
+          "routes": [
+            {
+              "route_id": "route-covered",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-covered",
+              "payload_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+              "input_request_id": "request-external-owner",
+              "event_id": 19,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-covered",
+              "route_target": "fixture-host-owner:owner",
+              "route_target_generation": "generation-owner",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                }
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-covering-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "1818181818181818181818181818181818181818181818181818181818181818",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-external-owner",
+              "reply_to_message_id": "other-input",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 20,
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-covered": {
+              "message_id": "activity-covered",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.900Z",
+              "final_visible_at": "2026-09-20T00:00:00.900Z",
+              "reply_latency_ms": 900,
+              "final_latency_ms": 900,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-covered",
+              "lane_ids": [],
+              "publication_ids": [
+                "publication-covering-final"
+              ],
+              "answered_via": "burst",
+              "covered_by_publication_key": "publication-covering-final"
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "558080bf1439d94d72d48cc001391b0e2c37c4332dfd89d5b30b72a8a1d9d6af",
+          "links": [
+            {
+              "stream_id": "fixture-host-chat:assistant",
+              "covered_message_id": "activity-covered",
+              "publication_key": "publication-covering-final",
+              "covered_dispatch_id": "dispatch-covered",
+              "link_kind": "burst",
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ]
+        },
+        {
+          "cell_key": "promoted-own-final",
+          "routes": [
+            {
+              "route_id": "route-promoted",
+              "stream_id": "fixture-host-chat:assistant",
+              "input_identity": "activity-promoted",
+              "payload_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+              "input_request_id": "request-external-owner",
+              "event_id": 19,
+              "body": "fixture body",
+              "attachments_json": [],
+              "reply_to_message_id": null,
+              "reply_to_question_id": null,
+              "actor_stream_id": "operator:fixture",
+              "routing_state": "resolved",
+              "delivery_state": "landed",
+              "dispatch_id": "dispatch-promoted",
+              "route_target": "fixture-host-owner:owner",
+              "route_target_generation": "generation-owner",
+              "route_json": {
+                "timings": {
+                  "routing_started_at": "2026-09-20T00:00:00.100Z",
+                  "routed_at": "2026-09-20T00:00:00.200Z",
+                  "delivery_recorded_at": "2026-09-20T00:00:00.300Z"
+                },
+                "landed_by_publication": "publication-promoted-final",
+                "landed_evidence": "own_final",
+                "prior_delivery_state": "committed_pending"
+              },
+              "depends_on_message_id": null,
+              "error_code": null,
+              "lease_owner": null,
+              "lease_until": null,
+              "created_at": "2026-09-20T00:00:00.000Z",
+              "updated_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "publications": [
+            {
+              "publication_key": "publication-promoted-final",
+              "stream_id": "fixture-host-chat:assistant",
+              "payload_digest": "1818181818181818181818181818181818181818181818181818181818181818",
+              "canonical_payload_json": {
+                "response_state": "final"
+              },
+              "dispatch_id": "dispatch-promoted",
+              "reply_to_message_id": "activity-promoted",
+              "reply_to_question_id": null,
+              "publish_kind": "result",
+              "attachment_ids_json": [],
+              "evidence_refs_json": [],
+              "event_id": 20,
+              "created_at": "2026-09-20T00:00:00.900Z"
+            }
+          ],
+          "lanes": [],
+          "operations": [],
+          "expected_inputs": {
+            "activity-promoted": {
+              "message_id": "activity-promoted",
+              "accepted_at": "2026-09-20T00:00:00.000Z",
+              "first_visible_at": "2026-09-20T00:00:00.900Z",
+              "final_visible_at": "2026-09-20T00:00:00.900Z",
+              "reply_latency_ms": 900,
+              "final_latency_ms": 900,
+              "routing_started_at": "2026-09-20T00:00:00.100Z",
+              "routed_at": "2026-09-20T00:00:00.200Z",
+              "delivery_recorded_at": "2026-09-20T00:00:00.300Z",
+              "queue_latency_ms": 100,
+              "routing_latency_ms": 100,
+              "response_state": "answered",
+              "work_state": "unknown",
+              "error_code": null,
+              "dispatch_id": "dispatch-promoted",
+              "lane_ids": [],
+              "publication_ids": [
+                "publication-promoted-final"
+              ],
+              "answered_via": "own",
+              "covered_by_publication_key": null
+            }
+          },
+          "expected_snapshot": {
+            "pending_count": 0,
+            "waiting_for_operator_count": 0,
+            "oldest_pending_at": null,
+            "has_more": false
+          },
+          "cell_sha256": "ff7a3c860b3544a5eb3074396069a03d19fb5297baf70279894a2b93e5246f1f"
+        }
+      ],
+      "case_sha256": "b517def8912bb55aa9473b141ea485cbdffdd21df827cb898e84254ba63b9153"
     }
   ]
 }

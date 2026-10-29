@@ -28,6 +28,10 @@ test('unknown top-level keys warn without exposing their values', () => {
   assert.doesNotMatch(warnings[0].message, /do not log me/);
 });
 
+test('travelEngine is an allowlisted private integration setting', () => {
+  assert.deepEqual(configWarnings({ travelEngine: { url: 'http://127.0.0.1:8777' } }), []);
+});
+
 test('loadConfig returns warnings and writes them to stderr', (t) => {
   const fs = require('node:fs');
   const os = require('node:os');

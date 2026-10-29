@@ -28,7 +28,9 @@ test('titlebar keeps settings and reload controls without duplicate branding', (
   const app = read('renderer/app.js');
   const css = read('renderer/styles.css');
   assert.doesNotMatch(html, /id="titlebar-(?:text|machines)"/);
-  assert.match(html, /<div class="titlebar-right">\s*<button class="settings-btn"/);
+  assert.match(html, /<div class="titlebar-right">[\s\S]*?<button class="settings-btn"/);
+  assert.equal((html.match(/class="workspace-brand"/g) || []).length, 1);
+  assert.match(html, /aria-label="Workspace layout"/);
   assert.match(html, /id="web-refresh-btn"/);
   assert.doesNotMatch(app, /renderTitlebarMachines/);
   assert.match(css, /\.titlebar-right[^}]*margin-left: auto/);

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import shlex
 
 import pytest
 
@@ -39,3 +41,25 @@ def test_v2_rejects_bogus_codex_effort_before_launch() -> None:
     with pytest.raises(SpawnProfileError) as exc:
         resolve_spawn(provider="codex", model="gpt-5.6-luna", effort="banana", host="hosta")
     assert exc.value.code == "spawn_effort_unsupported"
+
+
+def test_codex_tuple_resolution_keeps_requested_cwd(tmp_path: Path) -> None:
+    configured = tmp_path / "configured workspace"
+    requested = tmp_path / "requested repo"
+    configured.mkdir()
+    requested.mkdir()
+    machine = launch.local_machine(
+        "hosta", cwd=str(configured), codex_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+    controller = SpawnCtl(store=None, sessions=None, tmux=object(), machine=machine)
+
+    async def resolve(cwd: str | None) -> str:
+        message = {"provider": "codex", "model": "gpt-5.6-luna", "effort": "max"}
+        if cwd is not None:
+            message["cwd"] = cwd
+        command, _, _ = await controller._resolve_launch(message, "hosta", "cwd-seat")
+        return command
+
+    assert asyncio.run(resolve(str(requested))).startswith(f"cd {shlex.quote(str(requested))} && ")
+    assert asyncio.run(resolve(None)).startswith(f"cd {shlex.quote(str(configured))} && ")

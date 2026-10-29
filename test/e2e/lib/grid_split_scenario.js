@@ -55,6 +55,9 @@ async function reload(session) {
   await settle(session);
 }
 async function runGridSplit({session,report}) {
+  // The chat-first workspace starts with one pane; the row divider contract
+  // applies to its four-pane layout.
+  await session.eval(`document.querySelector('[data-pane-count-button="4"]')?.click()`);
   await session.waitFor("document.readyState==='complete' && document.querySelectorAll('.grid-col-resizer[aria-valuenow]').length===2");
   const before=await session.eval(geometry);
   report.ok('two row-scoped accessible dividers are rendered',before.handles.length===2&&before.handles.every((h,i)=>h.width>=10&&Math.abs(h.height-before.cells[i*2].height)<2),before);

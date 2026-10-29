@@ -34,6 +34,7 @@ OPERATION_COLUMNS = (
     "payload_digest", "payload_json", "evidence_refs_json", "expected_lane_version",
     "actor_stream_id", "prior_phase", "next_phase", "created_at",
 )
+LINK_COLUMNS = ("stream_id", "covered_message_id", "publication_key", "covered_dispatch_id", "link_kind", "created_at")
 
 
 def _canonical(value: object) -> str:
@@ -50,8 +51,8 @@ def _without(mapping: dict, key: str) -> dict:
 
 def _load_fixture() -> dict:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    assert fixture["schema_version"] == 1
-    assert len(fixture["cases"]) == 7
+    assert fixture["schema_version"] == 2
+    assert len(fixture["cases"]) == 8
     for case in fixture["cases"]:
         assert _digest(_without(case, "case_sha256")) == case["case_sha256"]
         assert case["cells"]
@@ -90,6 +91,12 @@ async def _seed(store: Store, cell: dict) -> None:
                 f"INSERT INTO v2_assistant_composite_publications ({','.join(PUBLICATION_COLUMNS)}) "
                 f"VALUES ({','.join('?' for _ in PUBLICATION_COLUMNS)})",
                 tuple(values[column] for column in PUBLICATION_COLUMNS),
+            )
+        for link in cell.get("links", []):
+            conn.execute(
+                f"INSERT INTO v2_assistant_composite_publication_links ({','.join(LINK_COLUMNS)}) "
+                f"VALUES ({','.join('?' for _ in LINK_COLUMNS)})",
+                tuple(link[column] for column in LINK_COLUMNS),
             )
         for lane in cell["lanes"]:
             conn.execute(

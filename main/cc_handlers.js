@@ -29,6 +29,7 @@ const { registerProviderRelogin } = require('./provider_relogin');
 const { isProtectedAssistantRename } = require('./assistant_role_guard');
 const { probeMicServer } = require('./mic-url');
 const { createMicRequest } = require('./mic_request');
+const reviewStore = require('./review_store');
 
 // Channels the browser answers itself rather than sending to the host. The
 // clipboard is the important one: a round trip would read the SERVER's
@@ -66,6 +67,7 @@ const PUSH_EVENTS = [
   'assign-slot',
   'action',
   'chat-stream:frame',
+  'review-inbox:changed',
   'asset-popout:init',
   'asset:dock',
   'chat:popout-dock',
@@ -141,7 +143,8 @@ function createCcHandlers({
   function publicConfig() {
     const { token, tokenPath, ...chatStream } = CONFIG.chatStream || {};
     const { startCommand, ...mic } = CONFIG.mic || {};
-    return { ...CONFIG, mic, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
+    const { reviewInbox, ...rest } = CONFIG;
+    return { ...rest, reviewInbox: { enabled: !!reviewInbox?.dir }, mic, chatStream, hostIds: CONFIG.chatStream?.hosts || ['local'], platform: process.platform,
       hostname: os.hostname(), isClient: Boolean(CONFIG.remote), configError: configError?.message || null, configWarnings,
       buildId };
   }
@@ -154,6 +157,13 @@ function createCcHandlers({
 
   function register(target) {
     target.handle('get-config', () => publicConfig());
+    target.handle('review-inbox:read', () => {
+      if (!CONFIG.reviewInbox?.dir || !path.isAbsolute(CONFIG.reviewInbox.dir)) {
+        return { state: 'unavailable', read_at: nowIso(), updated_at: null, mtime: null,
+          pending_count: 0, items: [], error_code: 'store_unreadable' };
+      }
+      return reviewStore.projection(CONFIG.reviewInbox.dir);
+    });
     // The build id of the currently-running host (update-available refresh).
     target.handle('get-build', () => ({ buildId }));
 

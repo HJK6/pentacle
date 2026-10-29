@@ -2896,6 +2896,7 @@ class SpawnCtl:
                         str(msg.get("_native_initial_prompt_path") or "")
                         if provider == "codex" and not explicit else None
                     ),
+                    spawn_cwd=(str(msg.get("cwd") or "") or None),
                     resume_session_id=(
                         str(msg.get("resume_session_id") or "") or None
                     ),

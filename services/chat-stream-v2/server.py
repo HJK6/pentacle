@@ -1957,7 +1957,16 @@ class Server:
 
     @staticmethod
     def _is_loopback_client(websocket: Any) -> bool:
-        """Local bootstrap trusts the actual transport peer, never wire claims."""
+        """Bootstrap trusts local native tools, never browser-origin requests."""
+        # Browsers can connect to loopback from unrelated websites. Presence
+        # of Origin removes the local exception even for null/empty/local
+        # values; the existing operator/stream/service auth still applies.
+        # These are transport headers, never fields in a client message.
+        headers = getattr(getattr(websocket, "request", None), "headers", None)
+        if headers is None:  # supported legacy websockets server API
+            headers = getattr(websocket, "request_headers", None)
+        if headers is not None and any(str(name).lower() == "origin" for name in headers):
+            return False
         peer = getattr(websocket, "remote_address", None)
         if not isinstance(peer, (tuple, list)) or not peer:
             return False
@@ -2778,7 +2787,7 @@ class Server:
         try:
             return await composite.publish(msg, actor_stream_id=str(auth.get("stream_id") or "") or None)
         except ValueError as exc:
-            raise VerbError(str(exc), str(exc)) from exc
+            raise VerbError(str(exc), str(exc), **getattr(exc, "extra", {})) from exc
 
     async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:
         if self.notify is None:

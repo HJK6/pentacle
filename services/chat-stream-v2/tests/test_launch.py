@@ -62,6 +62,26 @@ def test_codex_launch_changes_to_configured_cwd(tmp_path: Path) -> None:
     assert "retry only that agent-orch command with require_escalated" in plan.command
 
 
+def test_codex_launch_prefers_explicit_spawn_cwd_for_both_prompt_paths(tmp_path: Path) -> None:
+    configured = tmp_path / "configured workspace"
+    requested = tmp_path / "requested repo"
+    configured.mkdir()
+    requested.mkdir()
+    machine = launch.local_machine(
+        "local", cwd=str(configured), codex_bin="/bin/echo",
+        projects_root=str(tmp_path / "projects"),
+    )
+
+    for initial_prompt_file in (None, str(tmp_path / "prompt.txt")):
+        plan = launch.build_launch(
+            machine, provider="codex", tmux_session="requested-cwd",
+            launch_model=None, launch_effort=None,
+            spawn_cwd=str(requested), initial_prompt_file=initial_prompt_file,
+        )
+        assert plan.command.startswith(f"cd {shlex.quote(str(requested))} && ")
+        assert f"cd {shlex.quote(str(configured))} && " not in plan.command
+
+
 def test_visible_codex_launch_requires_title_and_status(tmp_path: Path) -> None:
     machine = launch.local_machine(
         "local",

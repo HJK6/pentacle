@@ -2,12 +2,175 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 import time
 
 from ingest import append_ingested_event
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from store import Store
+
+
+def _boundary_key(generation):
+    return f"assistant.mirror.boundary:{ROOT}:{generation}"
+
+
+async def _set_fixture_boundary(store, generation, set_at):
+    """Place the boundary before a legacy timestamp in watermark-only fixtures."""
+    await store.put(_boundary_key(generation), json.dumps({
+        "set_at": set_at, "set_by": "startup", "composite_stream_id": ASSISTANT,
+    }))
+
+
+def test_initial_history_boundary_written_once():
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            await store.put("assistant.mirror.enabled", "0")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            first = json.loads(await store.get(_boundary_key(root["session_generation"])))
+            assert first["set_by"] == "startup"
+            assert first["composite_stream_id"] == ASSISTANT
+            assert (await store.assistant_mirror_state())["boundary"] == first
+            await composite.ensure_projection()
+            assert json.loads(await store.get(_boundary_key(root["session_generation"]))) == first
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_boundary_excludes_history_and_allows_new_prose():
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            boundary = json.loads(await store.get(_boundary_key(root["session_generation"])))
+            old = {**_source_event("old history"), "timestamp": boundary["set_at"]}
+            await store.append_session_events_lifecycle_cas([
+                {"stream_id": ROOT, "event": old, "identity": "old-1",
+                 "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+            ], limit=20)
+            assert not await _answer_rows(store)
+            new = {**_source_event("new prose"),
+                   "timestamp": (datetime.fromisoformat(boundary["set_at"].replace("Z", "+00:00")) +
+                                 timedelta(seconds=1)).isoformat().replace("+00:00", "Z")}
+            await store.append_session_events_lifecycle_cas([
+                {"stream_id": ROOT, "event": new, "identity": "new-1",
+                 "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+            ], limit=20)
+            assert [row["text"] for row in await _answer_rows(store)] == ["new prose"]
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_links_clear_mirror_early_return():
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            release = asyncio.Future()
+            async def dispatch(_route):
+                return await release
+            composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
+            await composite.ensure_projection()
+            route = await _route_for(composite, store, "covered-question")
+            await _append(store, "blocked before link", identity="blocked-before")
+            assert await _answer_rows(store) == []
+            await store.submit(lambda conn: (conn.execute(
+                "INSERT INTO v2_assistant_composite_publication_links "
+                "(stream_id,covered_message_id,publication_key,covered_dispatch_id,link_kind,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (ASSISTANT, "covered-question", "fixture-publication", route["dispatch_id"],
+                 "burst", datetime.now(timezone.utc).isoformat())), conn.commit()))
+            await _append(store, "mirrors after link", identity="after-link")
+            assert [row["text"] for row in await _answer_rows(store)] == ["mirrors after link"]
+            await _route_for(composite, store, "uncovered-question")
+            await _append(store, "blocked by uncovered", identity="uncovered")
+            assert [row["text"] for row in await _answer_rows(store)] == ["mirrors after link"]
+            release.set_result({"delivery": "landed"})
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_kv_guard_blocks_every_mirror_write(caplog):
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            # A malformed boundary proves the guard returns before boundary JSON is read.
+            await store.put(_boundary_key(root["session_generation"]), "invalid JSON")
+            await store.put("assistant.mirror.enabled", "0")
+            await _append(store, "guarded fresh", identity="guarded-fresh")
+            await _append(store, "guarded fresh", identity="guarded-fresh-reminted")
+            assert await _answer_rows(store) == []
+            assert "assistant mirror committed" not in caplog.text
+            await _set_fixture_boundary(store, root["session_generation"], "2025-01-01T00:00:00Z")
+            await store.put("assistant.mirror.enabled", "1")
+            await _append(store, "enabled prose", identity="enabled-prose")
+            assert [row["text"] for row in await _answer_rows(store)] == ["enabled prose"]
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_missing_boundary_skips_mirror_with_warning(caplog):
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            await store.submit(lambda conn: (conn.execute(
+                "DELETE FROM kv WHERE k=?", (_boundary_key(root["session_generation"]),)), conn.commit()))
+            await _append(store, "must not mirror", identity="missing-boundary")
+            assert await _answer_rows(store) == []
+            assert "assistant mirror skipped boundary_unverifiable" in caplog.text
+            assert "reason=boundary_missing" in caplog.text
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_unparseable_timestamp_skips_mirror_with_warning(caplog):
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            composite = AssistantComposite(store, config=_config(root["session_generation"]))
+            await composite.ensure_projection()
+            for identity, bad in (("missing-ts", None), ("invalid-ts", "not-an-iso-time")):
+                event = _source_event("must not mirror")
+                if bad is None:
+                    del event["timestamp"]
+                else:
+                    event["timestamp"] = bad
+                await store.append_session_events_lifecycle_cas([
+                    {"stream_id": ROOT, "event": event, "identity": identity,
+                     "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
+                ], limit=20)
+            assert await _answer_rows(store) == []
+            assert caplog.text.count("reason=timestamp") >= 2
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
 
 
 ASSISTANT = "fixture-chat:assistant"
@@ -38,7 +201,7 @@ def _source_event(text: str = "A proactive milestone") -> dict:
         "provider": "codex",
         "kind": "ASSIST_TEXT",
         "text": text,
-        "timestamp": "2026-09-27T05:00:00.000Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "raw": {"source_session_identity": "fixture-session", "message_id": "fixture-message"},
     }
 
@@ -229,6 +392,7 @@ def test_kv_disable_invalid_value_and_nonprose_are_excluded():
             await store.put("assistant.mirror.enabled", "0")
             assert (await store.assistant_mirror_state()) == {
                 "enabled": False, "source": "kv",
+                "boundary": json.loads(await store.get(_boundary_key(root["session_generation"]))),
                 "binding": {"composite_stream_id": ASSISTANT,
                             "source_stream_id": ROOT,
                             "source_generation": root["session_generation"],
@@ -318,7 +482,7 @@ def test_remote_claude_binding_fenced_prose_is_projected():
                 "kind": "ASSIST_TEXT",
                 "text": "A remote proactive milestone",
                 "session_id": "fixture-session",
-                "timestamp": "2026-09-27T05:00:00.000Z",
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "raw": {
                     "source_session_identity": "fixture-session",
                     "jsonl_record_uuid": "fixture-record",
@@ -597,6 +761,9 @@ async def _set_durable_binding(store: Store, stream_id: str, generation: str):
         )
         conn.commit()
     await store.submit(_op)
+    await store.ensure_assistant_mirror_boundary(
+        composite_stream_id=ASSISTANT, source_stream_id=stream_id,
+        source_generation=generation, set_by="rebind")
 
 
 async def _append_from(store: Store, stream_id: str, pane_pid: str, text: str, identity: str):
@@ -629,13 +796,15 @@ def test_durable_hot_rebind_moves_mirror_source_without_restart():
             # B's dispatch-free prose now mirrors, with B's effective provenance.
             b_id = await _append_from(store, "fixture-newdesk:visible", "5252",
                                       "update from the rebound desk", "b-line")
+            b_source = next(row for row in await store.fetch_session_event_tail("fixture-newdesk:visible", limit=20)
+                            if row["daemon_seq"] == b_id)
             rows = await _answer_rows(store)
             assert [row["text"] for row in rows] == ["update from the rebound desk"]
             assert rows[-1]["raw"]["mirrored_from"] == {
                 "stream_id": "fixture-newdesk:visible",
                 "generation": newseat["session_generation"],
                 "event_id": b_id,
-                "event_ts": "2026-09-27T05:00:00.000Z",
+                "event_ts": b_source["timestamp"],
             }
 
             # The retired env-pinned seat A no longer mirrors after the rebind.
@@ -1053,6 +1222,8 @@ def test_publication_precedes_delayed_source_transcript_rows():
                 route = await _route_for(composite, store, "late-question")
                 user_stamp = datetime.now(timezone.utc).isoformat()
                 prior_stamp = (datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat()
+                await _set_fixture_boundary(store, root["session_generation"],
+                                            (datetime.now(timezone.utc)-timedelta(minutes=20)).isoformat())
                 await composite.publish({
                     "request_id": "publish:" + route["dispatch_id"], "composite_stream_id": ASSISTANT,
                     "dispatch_id": route["dispatch_id"], "reply_to_message_id": "late-question",
@@ -1164,6 +1335,61 @@ async def _append_ts(store: Store, text: str, *, identity: str, timestamp: str):
     return result[0]
 
 
+def test_boundary_excludes_history_within_ab74aff_dedup_bounds(tmp_path, caplog):
+    """Re-minted identities model replay after restart, rotation and truncation."""
+    import logging
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.store")
+    async def run():
+        database = str(tmp_path / "boundary-replay.sqlite")
+        store = Store(database)
+        store.start()
+        try:
+            root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            generation = root["session_generation"]
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            boundary = json.loads(await store.get(_boundary_key(generation)))
+            pre = boundary["set_at"]
+            assert await _append_ts(store, "pre boundary", identity="first-pass", timestamp=pre)
+            assert await _answer_rows(store) == []
+            assert any("assistant mirror skipped before boundary" in record.message and
+                       f"event_ts={pre}" in record.message for record in caplog.records)
+            await composite.stop()
+        finally:
+            store.stop()
+        store = Store(database)
+        store.start()
+        try:
+            composite = AssistantComposite(store, config=_config(generation))
+            await composite.ensure_projection()
+            assert json.loads(await store.get(_boundary_key(generation))) == boundary
+            for cause in ("restart", "rotation", "truncation"):
+                # The ingest layer can assign a new identity after a source file
+                # is reread; the mirror must still reject the old timestamp.
+                await _append_ts(store, "pre boundary", identity=cause, timestamp=pre)
+                assert await _answer_rows(store) == []
+            assert sum("assistant mirror skipped before boundary" in record.message for record in
+                       caplog.records) >= 4
+            post = (datetime.fromisoformat(pre.replace("Z", "+00:00")) +
+                    timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            first = await _append_ts(store, "post boundary", identity="post", timestamp=post)
+            assert first and [r["text"] for r in await _answer_rows(store)] == ["post boundary"]
+            assert await _append_ts(store, "post boundary", identity="post", timestamp=post) is None
+            assert len(await _answer_rows(store)) == 1
+            # Phase 2 carry: ab74aff's strictly-older watermark cannot reject
+            # a same-timestamp source row re-minted after its old row is pruned.
+            def prune_source(conn):
+                conn.execute("DELETE FROM session_event_tail WHERE stream_id=? AND identity='post'", (ROOT,))
+                conn.commit()
+            await store.submit(prune_source)
+            assert await _append_ts(store, "post boundary", identity="post-reminted", timestamp=post)
+            assert [row["text"] for row in await _answer_rows(store)] == ["post boundary", "post boundary"]
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_restart_reingest_does_not_remirror_stale_turns(tmp_path):
     """A restart re-ingests the source transcript; turns that escaped the
     identity-dedup window get a NEW source seq (new mirror:<id> key) and used to
@@ -1179,6 +1405,7 @@ def test_restart_reingest_does_not_remirror_stale_turns(tmp_path):
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _set_fixture_boundary(store, generation, "2025-01-01T00:00:00Z")
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
             assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two"]
@@ -1232,6 +1459,7 @@ def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_t
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _set_fixture_boundary(store, generation, "2025-01-01T00:00:00Z")
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
             # Retention pruned the composite tail; the publications remain.
@@ -1275,6 +1503,7 @@ def test_restart_reingest_watermark_compares_instants_not_text(tmp_path):
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _set_fixture_boundary(store, generation, "2025-01-01T00:00:00Z")
             # 06:55Z, then the newer 07:05Z written with a later offset and no fraction.
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2025-11-02T01:55:00.000-05:00")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2025-11-02T01:05:00-06:00")

@@ -52,6 +52,33 @@ async def _resolved(store, input_id):
     raise AssertionError("direct route did not resolve")
 
 
+def test_rebind_writes_new_boundary():
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            a, b = await _seat(store, A), await _seat(store, B)
+            composite = AssistantComposite(store, config=_config(a["session_generation"]))
+            await composite.ensure_projection()
+            old_key = f"assistant.mirror.boundary:{A}:{a['session_generation']}"
+            old = json.loads(await store.get(old_key))
+            receipt = await composite.rebind(_request("boundary-a-b", 0, B), actor_stream_id=A)
+            assert receipt["new_binding"]["stream_id"] == B
+            new_key = f"assistant.mirror.boundary:{B}:{b['session_generation']}"
+            new = json.loads(await store.get(new_key))
+            assert new["set_by"] == "rebind"
+            assert new["composite_stream_id"] == CHAT
+            assert new["set_at"] >= old["set_at"]
+            assert json.loads(await store.get(old_key)) == old
+            assert (await store.assistant_mirror_state())["boundary"] == new
+            await composite.ensure_projection()
+            assert json.loads(await store.get(new_key)) == new
+            await composite.stop()
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_rebind_changes_next_route_but_old_final_keeps_dispatch_authority(tmp_path):
     async def run():
         db = tmp_path / "sessions.db"

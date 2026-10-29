@@ -287,7 +287,7 @@ class Mirror:
         rows = [
             r for r in self.sessions.list_open()
             if str(r.get("host") or "") == self.local_host
-            and str(r.get("provider") or "") != "composite"
+            and str(r.get("provider") or "") not in {"composite", "service"}
         ]
         open_ids = {r["stream_id"] for r in rows}
         # Forget observation state for streams no longer open. Membership follows

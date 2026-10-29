@@ -341,6 +341,8 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     saveImage: (base64Data) => Promise.resolve(browserDownloadImage(base64Data)),
 
     getConfig: () => call('get-config'),
+    reviewInboxRead: () => call('review-inbox:read'),
+    onReviewInboxChanged: (callback) => on('review-inbox:changed', callback),
     getBuild: () => call('get-build'),
     // In a browser the OS browser IS the browser; opening a tab beats a round
     // trip to a channel the host refuses.
@@ -462,6 +464,8 @@ function buildHost(config) {
     hasRemote: !!config.remote,
     hasDashboardHub: !!(config.dashboardHub && config.dashboardHub.url),
     dashboardHubConfig: (config.dashboardHub && config.dashboardHub.url) ? config.dashboardHub : null,
+    travelEngineConfig: typeof config.travelEngine?.url === 'string' && config.travelEngine.url.trim()
+      ? { url: config.travelEngine.url.trim() } : null,
   };
 }
 

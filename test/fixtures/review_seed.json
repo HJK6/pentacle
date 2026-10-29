@@ -1,0 +1,104 @@
+{
+ "note": "Synthetic sample seed for tests (titles and links are examples).",
+ "prepared_at": "2026-10-28T19:24:24Z",
+ "items": [
+  {
+   "kind": "review",
+   "title": "Sample review item 1",
+   "link": "https://example.com/sample-1",
+   "first_raised_at": "2026-10-28T18:30:51Z",
+   "source": "sample source 1"
+  },
+  {
+   "kind": "review",
+   "title": "Sample review item 2",
+   "link": "https://example.com/sample-2",
+   "first_raised_at": null,
+   "source": "sample source 2"
+  },
+  {
+   "kind": "answer",
+   "title": "Sample answer item 3",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 3"
+  },
+  {
+   "kind": "answer",
+   "title": "Sample answer item 4",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 4"
+  },
+  {
+   "kind": "review",
+   "title": "Sample review item 5",
+   "link": "https://example.com/sample-5",
+   "first_raised_at": null,
+   "source": "sample source 5"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 6",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 6"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 7",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 7"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 8",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 8"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 9",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 9"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 10",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 10"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 11",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 11"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 12",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 12"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 13",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 13"
+  },
+  {
+   "kind": "input",
+   "title": "Sample input item 14",
+   "link": null,
+   "first_raised_at": null,
+   "source": "sample source 14"
+  }
+ ]
+}

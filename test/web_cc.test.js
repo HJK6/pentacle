@@ -213,11 +213,15 @@ test('window.HOST mirrors preload’s synchronous host metadata', () => {
       hasRemote: false,
       hasDashboardHub: true,
       dashboardHubConfig: { url: 'http://h' },
+      travelEngineConfig: null,
     },
   );
+  assert.deepEqual(buildHost({ travelEngine: { url: ' http://127.0.0.1:8777 ' } }).travelEngineConfig,
+    { url: 'http://127.0.0.1:8777' }, 'only the trimmed service URL is exposed');
   assert.equal(buildHost({ remote: { host: 'x' } }).isClient, true, 'a remote block means client mode');
   assert.equal(buildHost({}).hasDashboardHub, false);
   assert.equal(buildHost({ dashboardHub: {} }).dashboardHubConfig, null, 'a hub without a url is not configured');
+  assert.equal(buildHost({ travelEngine: { url: '  ' } }).travelEngineConfig, null, 'blank URLs are not configured');
 });
 
 test('the chat popout context comes from the query string', () => {

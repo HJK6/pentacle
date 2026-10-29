@@ -6,6 +6,8 @@ You give the assistant a name and an icon. This guide uses the default name **Ba
 
 ## Configuration
 
+For a paneless local integration, set `PENTACLE_SERVICE_SEAT_STREAM_IDS` in the daemon environment to a comma-separated list of stream IDs (for example, `local:slack-bridge`) and restart. The daemon opens each as a hidden service seat; issue its token once with the existing `grant_token` RPC. Removing an ID and restarting closes that seat and expires its token; adding it back creates a fresh seat that needs a new grant. Tell ledger reads (`ledger_get` and `inbound_audit`) expose `actor_stream_id` and `actor_trusted`, so consumers can distinguish a verified seat from a tokenless loopback claim. With the variable absent or empty, no service seats are opened and ordinary behavior continues.
+
 Set `PENTACLE_ASSISTANT_ROLE=assistant` in the daemon's private environment to protect that role on its local host. Set `features.assistantRole` to the same nonempty slug in each participating desktop/mobile private configuration. Leave these absent or empty for ordinary behavior. Public examples ship without an active assistant role. Restart the daemon after changing its environment and rebuild/reload clients according to their existing configuration workflow. Do not commit personal instructions, machine identities, credentials or context into these public repositories.
 
 Clients pin an exact role match ahead of the normal attention order while retaining its attention indicators. They hide existing delete and rename controls and refuse local deletion and rename attempts. The mobile assistant row does not respond to sideways swipe gestures. Other sessions retain their existing behavior. A mismatched or disabled client may still show a delete action; the enabled daemon remains authoritative and returns `close_protected`. That error is terminal and must not enter a retry loop.
@@ -213,6 +215,54 @@ A direct-primary dispatch publishes its final answer through `assistant publish`
 with the dispatch's fixed request key and `response_state=final`. Publish the
 exact answer, preserving Markdown and whitespace. The canonical prose event is
 the authoritative reply; the shared transcript renderer handles its Markdown.
+
+### Burst links
+
+When one direct-primary final also answers earlier inputs, publish it with
+`--covers-message-ids-json '["<message-id>"]'`. The final keeps its own
+`reply_to_message_id`; each extra message ID becomes a typed burst link. The
+dispatch envelope lists earlier coverable and unconfirmed **message IDs** with
+their acceptance times. It does not include their dispatch IDs. Include a
+coverable ID only when the answer actually addresses that input. An unconfirmed
+input needs a final through its own dispatch's publish command.
+
+The daemon accepts at most 16 distinct extra IDs on a direct-primary prose
+final. Each linked input must be resolved, `landed`, unanswered, bound to the
+same target and generation, and contiguous with the publishing input across
+previously answered inputs. The full publication is refused if any ID fails;
+no partial link is recorded. Links do not change the covered route's delivery
+receipt. Activity reports `answered_via=burst` (or `own+burst`) and the
+covering publication key; a covered input leaves the pending set.
+
+An exact own prose final or terminal `result` can promote an `intent`,
+`committed_pending` or `uncertain` direct route to `landed` in the same
+publication transaction. This requires the publication's dispatch ID, reply
+message ID and authenticated bound actor to match that route. A late dispatch
+receipt cannot downgrade it. The offline
+[delivery recovery tool](../services/chat-stream-v2/tools/README-recover_assistant_composite_delivery.md)
+uses the same exact-final proof for older rows.
+
+### Boundary and guard
+
+The existing prose mirror writes one boundary per effective source stream and
+generation before ingest starts. `agent-orch inspect <composite-stream> --event-tail 0 --json`
+reports `assistant_mirror.boundary` with `set_at`, `set_by` (`startup` or
+`rebind`) and `composite_stream_id`. A rebind writes a new pair's boundary and
+retains the old one. Source rows stamped at or before `set_at` are skipped;
+rows with a missing or invalid timestamp, or with no boundary, are skipped with
+a warning. The boundary is written even while the guard disables mirroring.
+After re-enable, the existing mirror resumes for post-boundary nonempty
+`ASSIST_TEXT` rows, including tool-use commentary and non-final text. Its
+existing source identity and stale-timestamp dedup bounds still apply.
+
+The rollback guard is kv `assistant.mirror.enabled=0`, written while the daemon
+is stopped. Inspect then reads `assistant_mirror.enabled=false, source="kv"`.
+The mirror checks that guard before reading the boundary or writing a status
+row. On a guarded return to the new code after an old-code run, remove the old
+`assistant.mirror.boundary:%` kv rows while stopped so startup fixes a fresh
+boundary, and keep the guard set until the new code and boundary readback are
+verified. Re-enable during a later stop by deleting only the guard key; inspect
+then reads `enabled=true, source="env"` and the same boundary `set_at`.
 
 ## Direct-primary questions
 

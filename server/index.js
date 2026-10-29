@@ -27,6 +27,7 @@ const { createMicStarter, micStartSameOrigin, isLoopbackPeer } = require('./mic_
 const { createMicRequest } = require('../main/mic_request');
 const { createCcHandlers, createCollector } = require(path.join(ROOT, 'main', 'cc_handlers'));
 const { createWsBridge } = require('./ws_bridge');
+const { makeReviewRoutes } = require('./review_routes');
 const { freezeWebDist } = require('./web_build_id');
 const chatStreamClient = require(path.join(ROOT, 'main', 'chat_stream_client'));
 
@@ -200,6 +201,29 @@ function headerValues(req, name) {
 function singleHeader(req, name) {
   const values = headerValues(req, name);
   return values.length === 1 ? values[0].trim() : null;
+}
+
+// The unauthenticated single-user exception is for local tools and pages, not
+// arbitrary websites. Pin Host to a literal loopback authority (DNS rebinding)
+// and any browser-supplied Origin to that exact listener (cross-site WebSocket
+// hijacking). Origin-less local CLI clients remain supported. Authenticated
+// proxy modes have their own boundary and do not use this local-only rule.
+function loopbackRequestAllowed(req) {
+  const authority = singleHeader(req, 'host');
+  if (!authority) return false;
+  let target;
+  try { target = new URL(`http://${authority}`); } catch { return false; }
+  if (target.username || target.password || target.pathname !== '/' || target.search || target.hash) return false;
+  const normalizedAuthority = authority.toLowerCase();
+  if (target.host !== normalizedAuthority && `${target.host}:80` !== normalizedAuthority) return false;
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
+  const ipv6 = net.isIPv6(hostname) ? expandIPv6(hostname) : null;
+  const mappedLoopback = ipv6 && ipv6.slice(0, 5).every(n => n === 0)
+    && ipv6[5] === 0xffff && (ipv6[6] >> 8) === 127;
+  if (!isLoopbackBind(hostname) && !mappedLoopback) return false;
+  if (Number(target.port || 80) !== req.socket?.localPort) return false;
+  const origins = headerValues(req, 'origin');
+  return origins.length === 0 || (origins.length === 1 && origins[0] === target.origin);
 }
 
 function canonicalOrigin(origin) {
@@ -386,7 +410,13 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   const configJson = ccHandlers.publicConfig();
+  const reviewRoute = makeReviewRoutes({ config: CONFIG, auth, singleHeader, headerValues,
+    broadcast: (event, payload) => bridge.broadcast(event, payload) });
   const server = http.createServer((req, res) => {
+    if (!auth && !loopbackRequestAllowed(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end('origin_refused');
+      return;
+    }
     const urlPath = new URL(req.url, 'http://localhost').pathname;
     // When auth is on, /login is the only unauthenticated surface; a GET
     // navigation for anything else is redirected there and every api call gets
@@ -409,6 +439,14 @@ async function main(argv = process.argv.slice(2)) {
         return;
       }
     }
+    if (urlPath === '/api/review-inbox/ack' || urlPath === '/api/review-inbox/smoke-cleanup') {
+      reviewRoute(req, res, urlPath);
+      return;
+    }
+    if (urlPath.startsWith('/api/review-inbox/')) {
+      res.writeHead(404, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-store' }).end(JSON.stringify({ ok: false, code: 'not_found' }));
+      return;
+    }
     if (urlPath === '/api/config') {
       res.writeHead(200, { 'content-type': CONTENT_TYPES['.json'], 'cache-control': 'no-cache' })
         .end(JSON.stringify(ccHandlers.publicConfig()));
@@ -426,7 +464,8 @@ async function main(argv = process.argv.slice(2)) {
     server,
     path: '/cc',
     // The upgrade carries the browser's cookies; reject an unauthenticated one
-    // before it becomes a socket. Loopback (auth === null) accepts every upgrade.
+    // before it becomes a socket. Unauthenticated loopback also verifies the
+    // local Host and browser Origin before exposing the operator bridge.
     // Identity mode also pins the upgrade to the proxy's canonical Origin, so a
     // page on any other origin cannot ride the operator's tailnet identity.
     verifyClient: auth
@@ -435,7 +474,8 @@ async function main(argv = process.argv.slice(2)) {
         if (auth.mode === 'tailscale' && !auth.originAllowed(info.req)) return done(false, 403, 'origin_refused');
         return done(true);
       }
-      : undefined,
+      : (info, done) => loopbackRequestAllowed(info.req)
+        ? done(true) : done(false, 403, 'origin_refused'),
   });
   wss.on('connection', (socket, req) => {
     bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req), reloginAllowed: micStartSameOrigin(req) });

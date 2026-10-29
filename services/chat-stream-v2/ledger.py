@@ -1181,6 +1181,8 @@ def _tell_audit_record(record: dict[str, Any]) -> dict[str, Any]:
         "ledger_row_id": int(row_id) if isinstance(row_id, int) and not isinstance(row_id, bool) else row_id,
         "tell_id": tell_id,
         "from_stream_id": str(delivery.get("from_stream_id") or ""),
+        "actor_stream_id": delivery.get("actor_stream_id"),
+        "actor_trusted": delivery.get("actor_trusted"),
         "to_stream_id": str(delivery.get("to_stream_id") or reply.get("to_stream_id") or ""),
         "original_to_stream_id": str(
             delivery.get("original_to_stream_id")

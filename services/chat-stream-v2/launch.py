@@ -443,6 +443,7 @@ def _codex_command(
     *, launch_model: str | None, launch_effort: str | None,
     operator_facing: bool = False,
     initial_prompt_file: str | None = None,
+    spawn_cwd: str | None = None,
 ) -> str:
     """The codex launch shell command (v1 codex_provider.py:_codex_launch_prefix).
 
@@ -509,7 +510,7 @@ def _codex_command(
             "exec \"$@\" \"$prompt\"",
         ))
         return (
-            f"cd {shlex.quote(machine.codex_cwd)} && "
+            f"cd {shlex.quote(spawn_cwd or machine.codex_cwd)} && "
             f"{agent_orch_path_export(machine, provider_bin=executable)}"
             f"{_codex_path_export(executable)}"
             f"{env_prefix}exec /bin/sh -c {shlex.quote(launcher)} "
@@ -517,7 +518,7 @@ def _codex_command(
             f"{shlex.quote(initial_prompt_file)} {argv}"
         )
     return (
-        f"cd {shlex.quote(machine.codex_cwd)} && "
+        f"cd {shlex.quote(spawn_cwd or machine.codex_cwd)} && "
         f"{agent_orch_path_export(machine, provider_bin=executable)}"
         f"{_codex_path_export(executable)}"
         f"{env_prefix}exec {argv}"
@@ -546,6 +547,7 @@ def build_launch(
     launch_effort: str | None,
     operator_facing: bool = False,
     initial_prompt_file: str | None = None,
+    spawn_cwd: str | None = None,
     resume_session_id: str | None = None,
     resume_jsonl_path: str | None = None,
     resume_cwd: str | None = None,
@@ -586,6 +588,7 @@ def build_launch(
             launch_model=launch_model, launch_effort=launch_effort,
             operator_facing=operator_facing,
             initial_prompt_file=initial_prompt_file,
+            spawn_cwd=spawn_cwd,
         )
         return LaunchPlan(
             command=command,

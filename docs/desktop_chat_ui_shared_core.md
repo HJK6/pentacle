@@ -70,8 +70,9 @@ remain outside the transcript.
 
 Delivery captions consume the core receipt; failure and cancellation override a
 stale caption. The renderer never infers Sent from elapsed time or an RPC result.
-Normal assistant text uses Rajdhani at 14.5px/22px and user text uses JetBrains
-Mono at 13px/20px. Desktop compact density remains available at 12px/18px.
+The chat-first workspace uses system sans-serif for conversation text (16px/1.7
+for assistant prose) and monospace for code. Both light and dark palettes use
+workspace semantic tokens. Desktop compact density remains available at 12px/18px.
 
 ## Question completion and recovery
 

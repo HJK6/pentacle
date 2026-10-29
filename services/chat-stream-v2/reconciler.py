@@ -150,7 +150,7 @@ class SessionReconciler:
         }
         all_open_rows = [
             row for row in await self.store.list_sessions("open")
-            if str(row.get("provider") or "") != "composite"
+            if str(row.get("provider") or "") not in {"composite", "service"}
         ]
         local_rows = [
             row for row in all_open_rows

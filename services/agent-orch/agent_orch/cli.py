@@ -1536,6 +1536,7 @@ def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int
 def assistant_publish(args: argparse.Namespace) -> int:
     attachment_ids: object = []
     evidence_refs: object = []
+    covers_message_ids: object = []
     if args.attachment_ids_json:
         try:
             attachment_ids = json.loads(args.attachment_ids_json)
@@ -1548,7 +1549,13 @@ def assistant_publish(args: argparse.Namespace) -> int:
         except json.JSONDecodeError:
             print("agent-orch assistant publish: --evidence-refs-json must be JSON", file=sys.stderr)
             return 2
-    if not isinstance(attachment_ids, list) or not isinstance(evidence_refs, list):
+    if args.covers_message_ids_json:
+        try:
+            covers_message_ids = json.loads(args.covers_message_ids_json)
+        except json.JSONDecodeError:
+            print("agent-orch assistant publish: --covers-message-ids-json must be JSON", file=sys.stderr)
+            return 2
+    if not isinstance(attachment_ids, list) or not isinstance(evidence_refs, list) or not isinstance(covers_message_ids, list):
         print("agent-orch assistant publish: ID/ref options must be arrays", file=sys.stderr)
         return 2
     payload: dict[str, object] = {
@@ -1565,6 +1572,8 @@ def assistant_publish(args: argparse.Namespace) -> int:
     }
     if getattr(args, "response_state", None) is not None:
         payload["response_state"] = args.response_state
+    if covers_message_ids:
+        payload["covers_message_ids"] = covers_message_ids
     return _assistant_call(args, payload)
 
 
@@ -5058,6 +5067,7 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--response-state", choices=("acknowledged", "final"))
     assistant_publish_parser.add_argument("--attachment-ids-json")
     assistant_publish_parser.add_argument("--evidence-refs-json")
+    assistant_publish_parser.add_argument("--covers-message-ids-json")
     assistant_publish_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_publish_parser.add_argument("--message", required=True)
     assistant_publish_parser.set_defaults(func=assistant_publish)

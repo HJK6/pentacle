@@ -55,6 +55,10 @@ from store_routing import (
     ASSISTANT_COMPOSITE_LANES_DDL,
     ASSISTANT_COMPOSITE_OPERATIONS_DDL,
     ASSISTANT_COMPOSITE_PUBLICATIONS_DDL,
+    ASSISTANT_COMPOSITE_PUBLICATION_LINKS_DDL,
+    ASSISTANT_COMPOSITE_PUBLICATION_LINKS_INDEX_DDL,
+    ASSISTANT_COMPOSITE_RECOVERY_RUNS_DDL,
+    ASSISTANT_COMPOSITE_RECOVERY_AUDIT_DDL,
     ASSISTANT_COMPOSITE_QUESTION_BRIDGES_DDL,
     ASSISTANT_COMPOSITE_ROUTES_DDL,
     ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL,
@@ -1454,6 +1458,10 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_PUBLICATION_LINKS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_PUBLICATION_LINKS_INDEX_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_RECOVERY_RUNS_DDL)
+            conn.execute(ASSISTANT_COMPOSITE_RECOVERY_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
@@ -1652,11 +1660,39 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         source_generation: str, enabled_default: bool,
     ) -> None:
         """Install the daemon's trusted direct-primary mirror binding."""
-        def _op(_conn: sqlite3.Connection) -> None:
+        def _op(conn: sqlite3.Connection) -> None:
             self._assistant_mirror_binding = (
                 composite_stream_id, source_stream_id, source_generation, enabled_default,
             )
+            effective = self._effective_mirror_source_conn(conn)
+            pair = (effective[0], effective[1]) if effective else (source_stream_id, source_generation)
+            self._write_assistant_mirror_boundary_conn(
+                conn, composite_stream_id=composite_stream_id,
+                source_stream_id=pair[0], source_generation=pair[1], set_by="startup",
+            )
         await self.submit(_op)
+
+    @staticmethod
+    def _assistant_mirror_boundary_key(source_stream_id: str, source_generation: str) -> str:
+        return f"assistant.mirror.boundary:{source_stream_id}:{source_generation}"
+
+    def _write_assistant_mirror_boundary_conn(self, conn: sqlite3.Connection, *,
+                                               composite_stream_id: str, source_stream_id: str,
+                                               source_generation: str, set_by: str) -> None:
+        if not source_stream_id or not source_generation:
+            return
+        value = json.dumps({"set_at": iso_now(), "set_by": set_by,
+                            "composite_stream_id": composite_stream_id}, sort_keys=True)
+        conn.execute("INSERT OR IGNORE INTO kv(k,v) VALUES (?,?)",
+                     (self._assistant_mirror_boundary_key(source_stream_id, source_generation), value))
+        conn.commit()
+
+    async def ensure_assistant_mirror_boundary(self, *, composite_stream_id: str,
+                                                source_stream_id: str, source_generation: str,
+                                                set_by: str = "rebind") -> None:
+        await self.submit(lambda conn: self._write_assistant_mirror_boundary_conn(
+            conn, composite_stream_id=composite_stream_id, source_stream_id=source_stream_id,
+            source_generation=source_generation, set_by=set_by))
 
     def _effective_mirror_source_conn(
         self, conn: sqlite3.Connection,
@@ -1709,7 +1745,17 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         }
 
     async def assistant_mirror_state(self) -> dict[str, Any]:
-        return await self.submit(self._assistant_mirror_state_conn)
+        def _op(conn):
+            state = self._assistant_mirror_state_conn(conn)
+            binding = state.get("binding")
+            boundary = None
+            if binding is not None:
+                row = conn.execute("SELECT v FROM kv WHERE k=?", (
+                    self._assistant_mirror_boundary_key(binding["source_stream_id"],
+                                                        binding["source_generation"]),)).fetchone()
+                boundary = json.loads(row[0]) if row is not None else None
+            return {**state, "boundary": boundary}
+        return await self.submit(_op)
 
     def _mirror_source_event_conn(
         self, conn: sqlite3.Connection, *, source_stream_id: str,
@@ -1726,6 +1772,27 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
         if source_stream_id != effective_source_stream_id:
             return
         if not self._assistant_mirror_state_conn(conn)["enabled"]:
+            return
+        boundary_row = conn.execute("SELECT v FROM kv WHERE k=?", (
+            self._assistant_mirror_boundary_key(source_stream_id, source_generation),)).fetchone()
+        if boundary_row is None:
+            log.warning("assistant mirror skipped boundary_unverifiable source_event_id=%s reason=boundary_missing",
+                        source_event_id)
+            return
+        boundary = json.loads(boundary_row[0])
+        event_ts = source_event.get("timestamp")
+        try:
+            if not isinstance(event_ts, str):
+                raise ValueError("timestamp missing")
+            before_boundary = (datetime.fromisoformat(event_ts.replace("Z", "+00:00")) <=
+                               datetime.fromisoformat(boundary["set_at"].replace("Z", "+00:00")))
+        except (TypeError, ValueError):
+            log.warning("assistant mirror skipped boundary_unverifiable source_event_id=%s reason=timestamp",
+                        source_event_id)
+            return
+        if before_boundary:
+            log.info("assistant mirror skipped before boundary source_event_id=%s event_ts=%s boundary=%s",
+                     source_event_id, event_ts, boundary["set_at"])
             return
         if source_event.get("kind") != "ASSIST_TEXT" or source_event.get("attachments"):
             return
@@ -1763,6 +1830,8 @@ class Store(QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, Assis
             "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id "
             "AND p.publish_kind='prose' "
             "AND json_extract(p.canonical_payload_json,'$.response_state')='final') "
+            "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l "
+            "WHERE l.stream_id=r.stream_id AND l.covered_message_id=r.input_identity) "
             "LIMIT 1", (binding[0], source_stream_id, source_generation),
         ).fetchone()
         if open_route is not None:

@@ -37,13 +37,14 @@ function createSidebarResizer({ main, sidebar, handle, grid, rows, rowResizers,
   let frame = null;
   const listeners = [];
   const on = (target, name, callback) => { target.addEventListener(name, callback); listeners.push(() => target.removeEventListener(name, callback)); };
-  const narrow = () => main.clientWidth < SIDEBAR_MIN + 2 * SLOT_MIN + 1;
-  const twoSlot = () => !narrow() && !grid.classList.contains('maximized');
+  const availableWidth = () => main.clientWidth - (main.classList.contains('review-inbox-expanded') ? 296 : 0);
+  const narrow = () => availableWidth() < SIDEBAR_MIN + 2 * SLOT_MIN + 1;
+  const twoSlot = () => !narrow() && grid.dataset.paneCount !== '1' && !grid.classList.contains('maximized');
   const differences = () => twoSlot() ? rows.map(row => {
     const cells = row.querySelectorAll('.grid-cell');
     return cells.length > 1 ? cells[0].getBoundingClientRect().width - cells[1].getBoundingClientRect().width : 0;
   }) : [];
-  const limits = (diffs = differences()) => sidebarBounds(main.clientWidth, diffs, twoSlot());
+  const limits = (diffs = differences()) => sidebarBounds(availableWidth(), diffs, twoSlot());
   const width = () => sidebar.getBoundingClientRect().width;
   function aria(lim = limits()) {
     handle.setAttribute('aria-valuemin', String(Math.round(lim.min)));

@@ -71,9 +71,39 @@ from store import Store
 from submission_events import DurableUserEventProof
 from uiverbs import UIVerbs
 from usage_publisher import UsageStatePublisher
+from v2_runtime import iso_now
 from window_schedule import WindowSchedule
 
 log = logging.getLogger("chat_streamd_v2")
+
+SERVICE_SEAT_STREAM_IDS_ENV = "PENTACLE_SERVICE_SEAT_STREAM_IDS"
+
+
+async def _sync_service_seats(sessions: Sessions, configured: str) -> None:
+    """Apply the boot-only service-seat allowlist without touching any pane."""
+    desired = {part.strip() for part in configured.split(",") if part.strip()}
+    for stream_id in desired:
+        host, name = sessions.split(stream_id)
+        if not host or not name or host != sessions.local_host:
+            raise ValueError(f"service seat must be a local host:session id: {stream_id!r}")
+    for row in await sessions.store.list_sessions("open"):
+        if row.get("provider") == "service" and row["stream_id"] not in desired:
+            await sessions.store.mark_closed(
+                row["host"], row["session_name"], closed_at=iso_now(),
+                pane_status="paneless", expected_generation=row.get("session_generation"),
+                close_kind="service_seat_removed",
+            )
+    for stream_id in sorted(desired):
+        host, name = sessions.split(stream_id)
+        row = await sessions.store.fetch_session(host, name)
+        if row is not None and row.get("status") == "open":
+            if row.get("provider") != "service":
+                raise ValueError(f"service seat id belongs to an open pane session: {stream_id}")
+            continue
+        await sessions.open(
+            host, name, provider="service", visibility="hidden", role="service",
+            pane_status="paneless", objective="service seat",
+        )
 
 
 def _read_checkout_sha() -> str:
@@ -606,6 +636,7 @@ async def run(args: argparse.Namespace) -> int:
     else:
         window_schedule.mark_store_failed()
     await lifecycle.start()
+    await _sync_service_seats(sessions, os.environ.get(SERVICE_SEAT_STREAM_IDS_ENV, ""))
     if assistant_config.enabled:
         projection = await assistant_composite.ensure_projection()
         recovery = await assistant_composite.recover()

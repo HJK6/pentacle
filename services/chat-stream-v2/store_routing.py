@@ -134,6 +134,49 @@ CREATE TABLE IF NOT EXISTS v2_assistant_composite_publications (
     created_at TEXT NOT NULL
 )
 """
+ASSISTANT_COMPOSITE_PUBLICATION_LINKS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_composite_publication_links (
+    stream_id TEXT NOT NULL,
+    covered_message_id TEXT NOT NULL,
+    publication_key TEXT NOT NULL,
+    covered_dispatch_id TEXT,
+    link_kind TEXT NOT NULL CHECK(link_kind IN ('burst')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (stream_id, covered_message_id)
+)
+"""
+ASSISTANT_COMPOSITE_PUBLICATION_LINKS_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_v2_assistant_composite_publication_links_publication "
+    "ON v2_assistant_composite_publication_links (publication_key)"
+)
+ASSISTANT_COMPOSITE_RECOVERY_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_composite_recovery_runs (
+    run_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('apply','rollback')),
+    target_run_id TEXT, stream_id TEXT NOT NULL, tool_version TEXT NOT NULL, db_path TEXT NOT NULL,
+    backup_path TEXT, backup_sha256 TEXT, preconditions_json TEXT NOT NULL,
+    candidate_ids_json TEXT NOT NULL, candidate_count INTEGER NOT NULL,
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK(state IN ('prepared','applied','aborted','abandoned','rolled_back','noop')),
+    abort_reason TEXT, verify_outcome TEXT CHECK(verify_outcome IN ('ok','mismatch')), verified_at TEXT,
+    started_at TEXT NOT NULL, finished_at TEXT)
+"""
+ASSISTANT_COMPOSITE_RECOVERY_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS v2_assistant_composite_recovery_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, route_id TEXT NOT NULL,
+    input_identity TEXT NOT NULL, dispatch_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('promote','rollback')),
+    prior_routing_state TEXT NOT NULL, prior_delivery_state TEXT NOT NULL, prior_error_code TEXT,
+    prior_updated_at TEXT NOT NULL, prior_route_json TEXT NOT NULL,
+    new_routing_state TEXT NOT NULL, new_delivery_state TEXT NOT NULL, new_error_code TEXT,
+    new_updated_at TEXT NOT NULL, new_route_json TEXT NOT NULL,
+    evidence_publication_key TEXT NOT NULL, evidence_created_at TEXT NOT NULL, created_at TEXT NOT NULL)
+"""
+
+
+class AssistantPublishCoverError(ValueError):
+    def __init__(self, code: str, **extra: Any) -> None:
+        super().__init__(code)
+        self.extra = extra
 ASSISTANT_COMPOSITE_LANES_DDL = """
 CREATE TABLE IF NOT EXISTS v2_assistant_composite_lanes (
     lane_id TEXT PRIMARY KEY,
@@ -1002,6 +1045,29 @@ class _RoutingStoreMixin:
             return dict(row) if row is not None else None
         return await self.submit(_op)
 
+    async def note_assistant_composite_late_receipt(self, *, route_id: str, dispatch_id: str,
+                                                    observed_delivery: str | None,
+                                                    reason: str | None,
+                                                    exception_type: str | None = None) -> bool:
+        note = {"observed_delivery": observed_delivery, "reason": reason,
+                "exception_type": exception_type, "at": _routing_iso_now()}
+        def _op(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = conn.execute(
+                    "UPDATE v2_assistant_composite_routes SET route_json=json_set(route_json,'$.late_receipts',"
+                    "json_insert(COALESCE(json_extract(route_json,'$.late_receipts'),'[]'),'$[#]',json(?))) "
+                    "WHERE route_id=? AND dispatch_id=? AND delivery_state='landed' "
+                    "AND json_extract(route_json,'$.landed_by_publication') IS NOT NULL",
+                    (json.dumps(note, sort_keys=True, separators=(",", ":")), route_id, dispatch_id),
+                ).rowcount
+                conn.commit()
+                return changed == 1
+            except BaseException:
+                conn.rollback()
+                raise
+        return await self.submit(_op)
+
     async def list_assistant_composite_unresolved(
         self, *, stream_id: str, exclude_route_id: str, limit: int = 8,
     ) -> list[dict[str, Any]]:
@@ -1037,14 +1103,21 @@ class _RoutingStoreMixin:
                 # Completed history remains available through the input-ID path.
                 where += """ AND (r.route_id IN (SELECT route_id FROM v2_assistant_composite_routes WHERE stream_id=? ORDER BY created_at DESC LIMIT 2000)
                     OR (r.routing_state!='routing_failed' AND COALESCE(r.delivery_state,'')!='failed' AND NOT EXISTS
-                        (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity))
+                        (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity)
+                        AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l WHERE l.stream_id=r.stream_id AND l.covered_message_id=r.input_identity))
                     OR (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND json_extract(p.canonical_payload_json,'$.response_state')='acknowledged')
-                        AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))))"""
+                        AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))
+                        AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l WHERE l.stream_id=r.stream_id AND l.covered_message_id=r.input_identity)))"""
                 params.append(stream_id)
             rows = [dict(r) for r in conn.execute("SELECT r.input_identity,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
             result = {}
             for row in rows:
                 pubs = [dict(p) for p in conn.execute("SELECT publication_key,created_at,canonical_payload_json,publish_kind FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? ORDER BY created_at,event_id", (stream_id, row["input_identity"]))]
+                covering = [dict(p) for p in conn.execute(
+                    "SELECT p.publication_key,p.created_at,p.canonical_payload_json,p.publish_kind "
+                    "FROM v2_assistant_composite_publication_links l JOIN v2_assistant_composite_publications p "
+                    "ON p.publication_key=l.publication_key WHERE l.stream_id=? AND l.covered_message_id=? "
+                    "ORDER BY p.created_at,p.event_id", (stream_id, row["input_identity"]))]
                 lane_ids = {op[0] for op in conn.execute("SELECT lane_id FROM v2_assistant_composite_operations WHERE stream_id=? AND operation='lane.admit' AND json_extract(payload_json,'$.request_message_id')=?", (stream_id, row["input_identity"]))}
                 lane_ids.add(json.loads(row["route_json"] or "{}").get("lane_id"))
                 lanes = []
@@ -1052,7 +1125,7 @@ class _RoutingStoreMixin:
                     lane = conn.execute("SELECT lane_id,phase,pending_question_id FROM v2_assistant_composite_lanes WHERE stream_id=? AND lane_id=?", (stream_id, lane_id)).fetchone()
                     if lane is not None:
                         lanes.append(dict(lane))
-                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]))
+                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]), covering=covering)
             return result
         return await self.submit(_op)
 
@@ -1074,6 +1147,42 @@ class _RoutingStoreMixin:
             return dict(row) if row is not None else None
         return await self.submit(_op)
 
+    async def list_earlier_unanswered_inputs(self, *, stream_id: str, target: str,
+                                             generation: str, relative_to_event_id: int):
+        def _op(conn):
+            rows = conn.execute(
+                "SELECT r.input_identity,r.created_at,r.event_id,r.delivery_state FROM v2_assistant_composite_routes r "
+                "WHERE r.stream_id=? AND r.route_target=? AND r.route_target_generation=? "
+                "AND r.routing_state='resolved' AND r.event_id<? "
+                "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+                "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id "
+                "AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR "
+                "json_extract(p.canonical_payload_json,'$.response_state')='final')) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l "
+                "WHERE l.stream_id=r.stream_id AND l.covered_message_id=r.input_identity) "
+                "ORDER BY r.event_id", (stream_id, target, generation, relative_to_event_id),
+            ).fetchall()
+            coverable, unconfirmed = [], []
+            for row in rows:
+                item = {"message_id": row["input_identity"], "accepted_at": row["created_at"]}
+                if row["delivery_state"] in ("intent", "committed_pending", "uncertain"):
+                    unconfirmed.append(item)
+                elif row["delivery_state"] == "landed":
+                    blocker = conn.execute(
+                        "SELECT 1 FROM v2_assistant_composite_routes w WHERE w.stream_id=? "
+                        "AND w.route_target=? AND w.route_target_generation=? AND w.event_id>? AND w.event_id<? "
+                        "AND (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=w.stream_id "
+                        "AND p.reply_to_message_id=w.input_identity AND (p.publish_kind='result' OR "
+                        "json_extract(p.canonical_payload_json,'$.response_state')='final')) "
+                        "OR EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l WHERE l.stream_id=w.stream_id "
+                        "AND l.covered_message_id=w.input_identity)) LIMIT 1",
+                        (stream_id, target, generation, row["event_id"], relative_to_event_id),
+                    ).fetchone()
+                    if blocker is None:
+                        coverable.append(item)
+            return {"coverable": coverable, "unconfirmed": unconfirmed}
+        return await self.submit(_op)
+
     async def record_assistant_composite_publication(
         self,
         *,
@@ -1093,10 +1202,12 @@ class _RoutingStoreMixin:
         direct_target_stream_id: str | None = None,
         direct_target_generation: str | None = None,
         direct_single_final: bool = False,
+        covers_message_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Append one assistant event and its idempotency receipt together."""
         if not publication_key or not dispatch_id:
             raise ValueError("assistant_publication_identity_required")
+        covers = covers_message_ids or []
         canonical_json = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
         event_json = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1115,8 +1226,8 @@ class _RoutingStoreMixin:
                             or actor_generation != direct_target_generation):
                         raise ValueError("assistant_direct_actor_unverified")
                     direct_route = conn.execute(
-                        "SELECT route_target,route_target_generation,routing_state,input_identity,"
-                        "reply_to_question_id FROM v2_assistant_composite_routes "
+                        "SELECT route_id,event_id,route_target,route_target_generation,routing_state,"
+                        "delivery_state,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
                         "WHERE stream_id=? AND dispatch_id=?", (stream_id, dispatch_id),
                     ).fetchone()
                     if (direct_route is None or direct_route["route_target"] != direct_target_stream_id
@@ -1144,6 +1255,9 @@ class _RoutingStoreMixin:
                     ).fetchone()[0])
                     replay_event["daemon_seq"] = int(saved["event_id"])
                     saved.update({"event": replay_event, "duplicate": True})
+                    saved["covered_message_ids"] = [row[0] for row in conn.execute(
+                        "SELECT covered_message_id FROM v2_assistant_composite_publication_links "
+                        "WHERE publication_key=? ORDER BY covered_message_id", (publication_key,))]
                     conn.commit()
                     return saved
                 if actor_generation is not None:
@@ -1235,10 +1349,80 @@ class _RoutingStoreMixin:
                         json.dumps(evidence_refs, separators=(",", ":")), event_id, stamp,
                     ),
                 )
+                if direct_single_final and (publish_kind == "result" or
+                                            publish_kind == "prose" and canonical_payload.get("response_state") == "final"):
+                    conn.execute(
+                        """UPDATE v2_assistant_composite_routes
+                           SET delivery_state='landed', error_code=NULL,
+                               route_json=json_set(route_json,
+                                   '$.landed_by_publication', ?, '$.landed_evidence', 'own_final',
+                                   '$.landed_at', ?, '$.prior_delivery_state', delivery_state,
+                                   '$.prior_error_code', error_code), updated_at=?
+                           WHERE route_id=? AND delivery_state IN ('intent','committed_pending','uncertain')""",
+                        (publication_key, stamp, stamp, direct_route["route_id"]),
+                    )
+                if covers:
+                    if not direct_single_final or publish_kind != "prose" or canonical_payload.get("response_state") != "final":
+                        raise AssistantPublishCoverError("assistant_publish_cover_unsupported", ids=covers)
+                    if len(covers) > 16 or len(set(covers)) != len(covers) or reply_to_message_id in covers:
+                        raise AssistantPublishCoverError("assistant_publish_cover_invalid", ids=covers)
+                    for covered_id in covers:
+                        covered = conn.execute(
+                            "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
+                            (stream_id, covered_id),
+                        ).fetchone()
+                        if covered is None:
+                            raise AssistantPublishCoverError("assistant_publish_cover_unknown", ids=[covered_id])
+                        if (covered["route_target"] != direct_target_stream_id or
+                                covered["route_target_generation"] != direct_target_generation):
+                            raise AssistantPublishCoverError("assistant_publish_cover_wrong_binding", ids=[covered_id])
+                        if conn.execute(
+                            "SELECT 1 FROM v2_assistant_composite_publication_links WHERE stream_id=? AND covered_message_id=?",
+                            (stream_id, covered_id),
+                        ).fetchone():
+                            raise AssistantPublishCoverError("assistant_publish_cover_already_linked", ids=[covered_id])
+                        if conn.execute(
+                            "SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? "
+                            "AND (publish_kind='result' OR json_extract(canonical_payload_json,'$.response_state')='final')",
+                            (stream_id, covered_id),
+                        ).fetchone():
+                            raise AssistantPublishCoverError("assistant_publish_cover_already_answered", ids=[covered_id])
+                        if (covered["routing_state"] != "resolved" or covered["delivery_state"] != "landed" or
+                                json.loads(covered["route_json"] or "{}").get("admission_mode") != "direct_primary"):
+                            raise AssistantPublishCoverError("assistant_publish_cover_not_landed", ids=[covered_id],
+                                                             delivery_state=covered["delivery_state"])
+                        lo, hi = sorted((direct_route["event_id"], covered["event_id"]))
+                        blocker = conn.execute(
+                            "SELECT r.input_identity FROM v2_assistant_composite_routes r WHERE r.stream_id=? "
+                            "AND r.route_target=? AND r.route_target_generation=? AND r.route_id NOT IN (?,?) "
+                            "AND r.event_id>? AND r.event_id<? AND ("
+                            "EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id "
+                            "AND p.reply_to_message_id=r.input_identity AND p.publication_key<>? "
+                            "AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final')) "
+                            "OR EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l WHERE l.stream_id=r.stream_id "
+                            "AND l.covered_message_id=r.input_identity AND l.publication_key<>?)) LIMIT 1",
+                            (stream_id, direct_target_stream_id, direct_target_generation,
+                             direct_route["route_id"], covered["route_id"], lo, hi, publication_key, publication_key),
+                        ).fetchone()
+                        if blocker:
+                            raise AssistantPublishCoverError("assistant_publish_cover_not_contiguous", ids=[covered_id],
+                                                             blocking_message_id=blocker[0])
+                    for covered_id in covers:
+                        covered = conn.execute(
+                            "SELECT dispatch_id FROM v2_assistant_composite_routes WHERE stream_id=? AND input_identity=?",
+                            (stream_id, covered_id),
+                        ).fetchone()
+                        conn.execute(
+                            "INSERT INTO v2_assistant_composite_publication_links "
+                            "(stream_id,covered_message_id,publication_key,covered_dispatch_id,link_kind,created_at) "
+                            "VALUES (?,?,?,?,'burst',?)",
+                            (stream_id, covered_id, publication_key, covered["dispatch_id"], stamp),
+                        )
                 stored = dict(conn.execute(
                     "SELECT * FROM v2_assistant_composite_publications WHERE publication_key=?", (publication_key,),
                 ).fetchone())
-                stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False})
+                stored.update({"event": dict(event) | {"daemon_seq": event_id}, "duplicate": False,
+                               "covered_message_ids": sorted(covers)})
                 conn.commit()
                 return stored
             except BaseException:

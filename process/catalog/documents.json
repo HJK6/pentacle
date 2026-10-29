@@ -167,5 +167,43 @@
     "summary": "Set up the full process.",
     "related": [],
     "status": "stable"
+  },
+  {
+    "id": "spec_pentacle__travel_engine_parity",
+    "path": "work/in_progress/pentacle__travel_engine_parity/spec.md",
+    "title": "Travel engine parity in Pentacle",
+    "type": "spec",
+    "canonical": false,
+    "updated_at": "2026-09-28",
+    "source_path": "work/in_progress/pentacle__travel_engine_parity/spec.md",
+    "tags": [
+      "pentacle"
+    ],
+    "summary": "Expose the full standalone travel engine inside Pentacle, including complete airport autocomplete, without maintaining a second implementation.",
+    "related": [
+      "work_pentacle__travel_engine_parity"
+    ],
+    "status": "in_progress",
+    "machine": "local",
+    "owner": "codex"
+  },
+  {
+    "id": "work_pentacle__travel_engine_parity",
+    "path": "work/in_progress/pentacle__travel_engine_parity/summary.md",
+    "title": "Travel engine parity in Pentacle",
+    "type": "work",
+    "canonical": false,
+    "updated_at": "2026-09-28",
+    "source_path": "work/in_progress/pentacle__travel_engine_parity/summary.md",
+    "tags": [
+      "pentacle"
+    ],
+    "summary": "Expose the full standalone travel engine inside Pentacle, including complete airport autocomplete, without maintaining a second implementation.",
+    "related": [
+      "spec_pentacle__travel_engine_parity"
+    ],
+    "status": "in_progress",
+    "machine": "local",
+    "owner": "codex"
   }
 ]

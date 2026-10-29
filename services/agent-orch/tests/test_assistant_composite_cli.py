@@ -110,6 +110,33 @@ def test_assistant_publish_serializes_explicit_final_response_marker(monkeypatch
     assert "assistant.publish.ok" in capsys.readouterr().out
 
 
+def test_covers_flag(monkeypatch, capsys) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "assistant", "publish", "--dispatch-id", "dispatch-1",
+        "--reply-to-message-id", "input-1", "--request-id", "publish:dispatch-1",
+        "--composite-stream-id", "fixture-host-chat:assistant", "--publish-kind", "prose",
+        "--response-state", "final", "--message", "done",
+        "--covers-message-ids-json", '["input-2","input-3"]',
+    ])
+    captured = {}
+    async def fake_once(_config, payload, *, timeout):
+        captured.update(payload)
+        return {"type": "assistant.publish.ok", "event_id": 10}
+    monkeypatch.setattr(cli, "assistant_once", fake_once)
+    monkeypatch.setattr(cli, "load_config", lambda: object())
+    assert args.func(args) == 0
+    assert captured["covers_message_ids"] == ["input-2", "input-3"]
+    malformed = parser.parse_args([
+        "assistant", "publish", "--dispatch-id", "dispatch-1",
+        "--reply-to-message-id", "input-1", "--request-id", "publish:dispatch-1",
+        "--composite-stream-id", "fixture-host-chat:assistant", "--publish-kind", "prose",
+        "--message", "done", "--covers-message-ids-json", "[not-json",
+    ])
+    assert malformed.func(malformed) == 2
+    assert "--covers-message-ids-json must be JSON" in capsys.readouterr().err
+
+
 def test_assistant_operation_refuses_non_object_payload(capsys) -> None:
     parser = cli.build_parser()
     args = parser.parse_args([

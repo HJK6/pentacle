@@ -52,7 +52,8 @@ const TOP_LEVEL_KEYS = new Set([
   'appName', 'appId', 'agents', 'dark', 'terminal', 'features', 'chatStream',
   'hosts', 'remote', 'tmux', 'hostNames', 'hostColors', 'localHostId', 'mic',
   'micServerUrl', 'wakeWord', 'machineStats', 'artifactDirs', 'repoRoots',
-  'dashboardHub', 'localSsh', 'localWsl', 'localTmux', 'peers',
+  'dashboardHub', 'travelEngine', 'localSsh', 'localWsl', 'localTmux', 'peers',
+  'reviewInbox',
 ]);
 const loggedWarnings = new Set();
 const isMap = value => value && typeof value === 'object' && !Array.isArray(value);

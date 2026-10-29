@@ -19,10 +19,12 @@ def _elapsed(start, end):
         return None
 
 
-def project_input(route, publications, lanes):
+def project_input(route, publications, lanes, covering=()):
     accepted = route["created_at"]
-    first = publications[0]["created_at"] if publications else None
+    first = publications[0]["created_at"] if publications else (covering[0]["created_at"] if covering else None)
     final = None
+    own_final = False
+    burst_final = False
     acknowledged = False
     question = False
     for publication in publications:
@@ -30,8 +32,15 @@ def project_input(route, publications, lanes):
         marker = payload.get("response_state")
         if final is None and (marker == "final" or publication["publish_kind"] == "result"):
             final = publication["created_at"]
+        own_final |= marker == "final" or publication["publish_kind"] == "result"
         acknowledged |= marker == "acknowledged"
         question = publication["publish_kind"] == "question"
+    for publication in covering:
+        payload = json.loads(publication["canonical_payload_json"] or "{}")
+        if payload.get("response_state") == "final" or publication["publish_kind"] == "result":
+            burst_final = True
+            if final is None or publication["created_at"] < final:
+                final = publication["created_at"]
     pending_question = any(lane.get("pending_question_id") for lane in lanes)
     phases = {lane["phase"] for lane in lanes}
     # Durable delivery uncertainty and explicit cancellation are safety states:
@@ -84,8 +93,11 @@ def project_input(route, publications, lanes):
         "routing_latency_ms": _elapsed(timing.get("routing_started_at"), timing.get("routed_at")),
         "response_state": state, "work_state": work, "error_code": route["error_code"],
         "dispatch_id": route["dispatch_id"],
+        "answered_via": ("own+burst" if own_final and burst_final else
+                         "own" if own_final else "burst" if burst_final else None),
+        "covered_by_publication_key": covering[0]["publication_key"] if covering else None,
         "lane_ids": [lane["lane_id"] for lane in lanes],
-        "publication_ids": [p["publication_key"] for p in publications],
+        "publication_ids": list(dict.fromkeys(p["publication_key"] for p in (*publications, *covering))),
     }
 
 

@@ -24,6 +24,8 @@
 // remote: { host: 'host.example', user: 'operator', port: 22, tmux: 'tmux' },
 //   // default absent; legacy single remote transport and client-mode marker
 // dashboardHub: { url: 'http://127.0.0.1:7777' }, // default absent; optional external adapter
+// travelEngine: { url: 'http://127.0.0.1:8777' }, // default absent; optional separately run Travel Engine service
+// reviewInbox: { dir: '/absolute/path/to/private/inbox' }, // default absent; set only in a private overlay
 // Legacy hosts.js helper inputs (public main uses hosts/tmux instead):
 // localTmux: 'tmux', // helper default /opt/homebrew/bin/tmux on macOS, tmux elsewhere
 // localSsh: { host: '127.0.0.1', port: 2222, user: 'operator', tmux: 'tmux' }, // default absent
@@ -83,7 +85,7 @@ module.exports = {
     "brightWhite": "#d6e8da"
   },
   "features": {
-    "chatUi": false, // default false; experimental; terminals remain the default
+    "defaultChatView": true, // new sessions open in Chat; Terminal remains available per pane
     "inputBar": true, // compatibility-only, currently unused
     "usage": false, // example default false; enables daemon usage/limits subscriptions
     "dashboards": false, // default false; optional dashboard adapters

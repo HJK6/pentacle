@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.sai.pentacle.hub</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/YOU/pentacle/services/dashboard-hub/.venv/bin/python</string>
+		<string>-m</string>
+		<string>dashboard_hub</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--host</string>
+		<string>YOUR_TAILSCALE_IP</string>
+		<string>--port</string>
+		<string>7781</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/YOU/pentacle/services/dashboard-hub</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/YOU</string>
+		<key>LANG</key>
+		<string>en_US.UTF-8</string>
+		<key>PATH</key>
+		<string>/Users/YOU/pentacle/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>AGENT_ORCH_HOST_ID</key>
+		<string>local</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/YOU/Library/Logs/Pentacle/hub.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOU/Library/Logs/Pentacle/hub.log</string>
+</dict>
+</plist>

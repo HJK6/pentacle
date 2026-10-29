@@ -158,7 +158,7 @@ class AssistantCompositeConfig:
 
 def direct_dispatch_envelope(
     config: AssistantCompositeConfig, route: dict[str, Any], *, dispatch_id: str,
-    target: str, generation: str,
+    target: str, generation: str, coverable_earlier_inputs=(), unconfirmed_earlier_inputs=(),
 ) -> dict[str, Any]:
     """Freeze the trusted root instruction with its durable route intent."""
     attachments = json.loads(str(route.get("attachments_json") or "[]"))
@@ -168,14 +168,26 @@ def direct_dispatch_envelope(
     question_id = str(route.get("reply_to_question_id") or "")
     original_input = {"text": str(route.get("body") or ""), "attachments": attachments}
     question_arg = f"--reply-to-question-id {question_id} " if question_id else ""
+    covers_arg = " --covers-message-ids-json '<json ids>'" if coverable_earlier_inputs else ""
     command = (
         "agent-orch assistant publish "
         f"--request-id publish:{dispatch_id} --composite-stream-id {config.stream_id} "
         f"--dispatch-id {dispatch_id} --reply-to-message-id {input_id} "
         f"{question_arg}--publish-kind prose --response-state final "
-        "--message <safely quoted final answer>"
+        "--message <safely quoted final answer>" + covers_arg
     )
     original_json = json.dumps(original_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    earlier_lines = ""
+    if coverable_earlier_inputs:
+        earlier_lines += ("coverable_earlier_inputs_json: " +
+                          json.dumps(list(coverable_earlier_inputs), separators=(",", ":")) + "\n")
+        earlier_lines += "Include each listed id only if this answer also answers that earlier message; otherwise omit it.\n"
+    if unconfirmed_earlier_inputs:
+        earlier_lines += ("unconfirmed_earlier_inputs_json: " +
+                          json.dumps(list(unconfirmed_earlier_inputs), separators=(",", ":")) + "\n")
+        earlier_lines += ("These earlier messages are not confirmed delivered to you. If you answer one of them, "
+                          "publish that answer through the publish command of that message's own dispatch envelope "
+                          "(it was pasted to you earlier); do not list it in --covers-message-ids-json.\n")
     wire_body = (
         "[canonical assistant direct dispatch — daemon authored]\n"
         f"assistant_display_name_json: {json.dumps(config.title)}\n"
@@ -185,6 +197,7 @@ def direct_dispatch_envelope(
         f"reply_to_question_id: {question_id or 'none'}\n"
         f"target_stream_id: {target}\n"
         f"target_generation: {generation}\n"
+        f"{earlier_lines}"
         "Answer the operator's original input below. For this exact dispatch, compose "
         "your final user-facing answer, then publish it to the originating assistant composite "
         "before ending your own turn. Publish the exact answer with its Markdown "
@@ -203,6 +216,8 @@ def direct_dispatch_envelope(
         "reply_to_message_id": input_id, "reply_to_question_id": question_id or None,
         "target_stream_id": target, "target_generation": generation,
         "original_input": original_input, "publish_command": command, "wire_body": wire_body,
+        "coverable_earlier_inputs": list(coverable_earlier_inputs),
+        "unconfirmed_earlier_inputs": list(unconfirmed_earlier_inputs),
     }
 
 
@@ -311,6 +326,16 @@ class AssistantComposite:
             )
             if not receipt.get("duplicate"):
                 self._apply_binding(receipt["new_binding"])
+                new_binding = receipt["new_binding"]
+                old_binding = receipt["old_binding"]
+                if (new_binding.get("stream_id") and new_binding.get("generation") and
+                        (new_binding.get("stream_id"), new_binding.get("generation")) !=
+                        (old_binding.get("stream_id"), old_binding.get("generation"))):
+                    await self.store.ensure_assistant_mirror_boundary(
+                        composite_stream_id=self.config.stream_id,
+                        source_stream_id=new_binding["stream_id"],
+                        source_generation=new_binding["generation"], set_by="rebind",
+                    )
                 log.info("assistant direct rebind actor=%s request=%s old=%s new=%s",
                          actor, request_id, receipt["old_binding"], receipt["new_binding"])
                 if self.broadcast is not None:
@@ -348,6 +373,12 @@ class AssistantComposite:
         from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
         if msg.get("_assistant_authority_request_token") is ASSISTANT_AUTHORITY_REQUEST_TOKEN:
             from sessions import VerbError
+            # A direct-primary lane ruling targets the independently bound
+            # ruling authority, not astra_stream_id (the primary itself);
+            # comms checks the pending ruling row's exact authority tuple.
+            if (self.enabled and self.config.direct_primary
+                    and msg.get("_assistant_lane_ruling_request_id")):
+                return None
             if not self.enabled or target_stream_id != self.config.astra_stream_id:
                 raise VerbError("unknown_session", "configured assistant authority changed")
             return None
@@ -764,9 +795,15 @@ class AssistantComposite:
                 try:
                     generation = await self._direct_target_generation()
                     dispatch_id = "assistant-direct-" + uuid.uuid4().hex
+                    earlier = await self.store.list_earlier_unanswered_inputs(
+                        stream_id=self.config.stream_id, target=self.config.direct_primary_stream_id,
+                        generation=generation, relative_to_event_id=int(route["event_id"]),
+                    )
                     direct_envelope = direct_dispatch_envelope(
                         self.config, route, dispatch_id=dispatch_id,
                         target=self.config.direct_primary_stream_id, generation=generation,
+                        coverable_earlier_inputs=earlier["coverable"],
+                        unconfirmed_earlier_inputs=earlier["unconfirmed"],
                     )
                     updated = await self._update_route(
                         str(route["route_id"]), routing_state="resolved", delivery_state="intent",
@@ -1129,12 +1166,20 @@ class AssistantComposite:
         try:
             result = await self.dispatch(dict(route))
         except Exception as exc:  # physical boundary is ambiguous
-            await self._update_route(
+            updated = await self._update_route(
                 str(route["route_id"]), routing_state=str(route["routing_state"]),
                 expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
                 expected_delivery_state="intent",
                 delivery_state="uncertain", error_code=f"dispatch_exception:{type(exc).__name__}",
             )
+            if updated is None:
+                noted = await self.store.note_assistant_composite_late_receipt(
+                    route_id=str(route["route_id"]), dispatch_id=str(route["dispatch_id"]),
+                    observed_delivery=None, reason=f"dispatch_exception:{type(exc).__name__}",
+                    exception_type=type(exc).__name__,
+                )
+                log.warning("assistant late dispatch exception route_id=%s noted=%s type=%s",
+                            route["route_id"], noted, type(exc).__name__)
             return
         delivery = str(
             result.get("delivery")
@@ -1153,13 +1198,23 @@ class AssistantComposite:
         reason = str(result.get("reason") or "")
         failure_code = (reason if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason)
                         else "assistant_dispatch_failed") if state == "failed" else None
-        await self._update_route(
+        updated = await self._update_route(
             str(route["route_id"]), routing_state=str(route["routing_state"]),
             expected_dispatch_id=str(route["dispatch_id"]), expected_routing_state=str(route["routing_state"]),
             expected_delivery_state="intent",
             delivery_state=state,
             error_code=failure_code if state == "failed" else "dispatch_receipt_ambiguous" if state == "uncertain" else None,
         )
+        if updated is None:
+            noted = await self.store.note_assistant_composite_late_receipt(
+                route_id=str(route["route_id"]), dispatch_id=str(route["dispatch_id"]),
+                observed_delivery=delivery, reason=str(result.get("reason")) if result.get("reason") is not None else None,
+            )
+            message = "assistant late dispatch receipt route_id=%s noted=%s observed_delivery=%s"
+            if state == "failed":
+                log.warning(message, route["route_id"], noted, delivery)
+            else:
+                log.info(message, route["route_id"], noted, delivery)
 
     async def _authenticated_generation(self, msg, actor):
         current = await self._target_generation(str(actor or ""))
@@ -1174,7 +1229,7 @@ class AssistantComposite:
         publish_fields = {
             "type", "request_id", "composite_stream_id", "dispatch_id",
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
-            "attachment_ids", "evidence_refs", "response_state",
+            "attachment_ids", "evidence_refs", "response_state", "covers_message_ids",
         }
         if {str(key) for key in msg if not str(key).startswith("_")} - publish_fields:
             raise ValueError("assistant_publish_payload_invalid")
@@ -1200,6 +1255,14 @@ class AssistantComposite:
         except (TypeError, ValueError):
             route_payload = {}
         direct_route = route_payload.get("admission_mode") == "direct_primary"
+        try:
+            covers = _id_list(msg.get("covers_message_ids"), "assistant_publish_cover_invalid")
+        except ValueError as exc:
+            from store_routing import AssistantPublishCoverError
+            raise AssistantPublishCoverError(str(exc), ids=msg.get("covers_message_ids")) from exc
+        if covers and not (direct_route and kind == "prose" and response_state == "final"):
+            from store_routing import AssistantPublishCoverError
+            raise AssistantPublishCoverError("assistant_publish_cover_unsupported", ids=covers)
         if direct_route and kind == "prose" and (
             response_state != "final" or publication_key != "publish:" + dispatch_id
         ):
@@ -1220,6 +1283,9 @@ class AssistantComposite:
             raise ValueError("assistant_publish_question_unverified")
         attachment_ids = _id_list(msg.get("attachment_ids"), "assistant_publish_attachment_ids_invalid")
         evidence_refs = _id_list(msg.get("evidence_refs"), "assistant_publish_evidence_refs_invalid")
+        if reply_to_message_id in covers:
+            from store_routing import AssistantPublishCoverError
+            raise AssistantPublishCoverError("assistant_publish_cover_invalid", ids=covers)
         attachments = []
         if attachment_ids:
             if self.publication_attachments is None:
@@ -1237,6 +1303,8 @@ class AssistantComposite:
         }
         if response_state is not None:
             canonical_payload["response_state"] = response_state
+        if covers:
+            canonical_payload["covers_message_ids"] = sorted(covers)
         event = {
             "stream_id": self.config.stream_id,
             "provider": "composite",
@@ -1261,6 +1329,9 @@ class AssistantComposite:
         }
         if response_state is not None:
             event["raw"]["response_state"] = response_state
+        if covers:
+            event["covers_message_ids"] = sorted(covers)
+            event["raw"]["covers_message_ids"] = sorted(covers)
         stored = await self.store.record_assistant_composite_publication(
             stream_id=self.config.stream_id, publication_key=publication_key,
             dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
@@ -1273,6 +1344,7 @@ class AssistantComposite:
             direct_target_stream_id=str(route.get("route_target") or "") if direct_route else None,
             direct_target_generation=str(route.get("route_target_generation") or "") if direct_route else None,
             direct_single_final=direct_route,
+            covers_message_ids=covers,
         )
         await self.refresh_activity()
         if not stored.get("duplicate") and self.broadcast is not None:
@@ -1280,6 +1352,7 @@ class AssistantComposite:
         return {
             "type": "assistant.publish.ok", "publication_key": publication_key,
             "event_id": stored["event_id"], "duplicate": bool(stored.get("duplicate")),
+            "covered_message_ids": stored["covered_message_ids"],
         }
 
     async def operation(self, msg: dict[str, Any], *, actor_stream_id: str | None) -> dict[str, Any]:

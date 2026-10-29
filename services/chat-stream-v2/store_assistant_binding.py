@@ -263,7 +263,10 @@ class AssistantBindingStoreMixin:
                     "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
                     "WHERE p.stream_id=v2_assistant_composite_routes.stream_id "
                     "AND p.reply_to_message_id=v2_assistant_composite_routes.input_identity "
-                    "AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))",
+                    "AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final')) "
+                    "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publication_links l "
+                    "WHERE l.stream_id=v2_assistant_composite_routes.stream_id "
+                    "AND l.covered_message_id=v2_assistant_composite_routes.input_identity)",
                     (_stamp(), stream_id, target_stream_id, target_generation),
                 ).rowcount
                 conn.commit()

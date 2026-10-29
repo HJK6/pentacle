@@ -45,6 +45,7 @@ async function closedChatSlot(ctx) {
   }
   const { waitForValue } = require('./web_scenarios');
   const survivor = 'local:web-gate-survivor';
+  await session.eval(`document.querySelector('[data-pane-count-button="2"]')?.click()`);
   for (const streamId of [fixture.streamId, survivor]) {
     const result = await ask(runtime, streamId);
     report.ok(`durable fixture question created for ${streamId}`, result.ok === true,

@@ -10,6 +10,7 @@ async function questionFreeText({ session, report, fixture, runtime, cdp }) {
   }
   await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'");
   await session.waitFor('window.cc.getChatStreamState().then(s => s.connected === true)');
+  await session.eval(`document.querySelector('[data-pane-count-button="1"]')?.click()`);
   await session.eval(`window.focusStreamId(${JSON.stringify(fixture.streamId)})`);
   await session.waitFor(`!!document.querySelector('#header-0 [data-mode="chat"]')`);
   await session.click('#header-0 [data-mode="chat"]');
@@ -58,6 +59,7 @@ async function questionFreeText({ session, report, fixture, runtime, cdp }) {
     await session.eval('window.__questionOldDocument = true');
     await session.send('Page.reload');
     await session.waitFor("!window.__questionOldDocument && document.readyState==='complete' && typeof window.focusStreamId==='function'");
+    await session.eval(`document.querySelector('[data-pane-count-button="1"]')?.click()`);
     await session.eval(`window.focusStreamId(${JSON.stringify(fixture.streamId)})`);
     await session.waitFor(`!!document.querySelector('#header-0 [data-mode="chat"]')`);
     await session.click('#header-0 [data-mode="chat"]');

@@ -844,9 +844,12 @@ class Comms:
             reply.update(watermark_fields(watermark))
             reply.update(proof.audit_fields())
         enqueued_at = iso_now()
+        from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(msg)
         delivery = {
             "tell_id": tell_id,
-            "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            "from_stream_id": from_stream_id or "",
+            "actor_stream_id": actor_stream_id,
+            "actor_trusted": actor_trusted,
             "to_stream_id": str(route["final_target"]),
             "original_to_stream_id": str(route["original_target"]),
             "route_hops": list(route.get("hops") or []),

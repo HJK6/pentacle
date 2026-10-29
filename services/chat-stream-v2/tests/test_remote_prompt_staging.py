@@ -110,7 +110,9 @@ def test_remote_stage_failure_removes_temp_file(
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
 
     def local_ssh(_target: str, remote_command: str, **_kwargs: object) -> list[str]:
-        return [shell, "-c", remote_command]
+        # Keep the injected PATH intact: a host .zshenv may replace it before
+        # the fake mv runs, masking the staging failure this test exercises.
+        return [shell, "-f", "-c", remote_command] if shell == "/bin/zsh" else [shell, "-c", remote_command]
 
     monkeypatch.setattr(tmux_transport, "ssh_command", local_ssh)
     path = tmp_path / "remote dir" / "brief.txt"

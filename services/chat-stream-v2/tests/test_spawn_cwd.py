@@ -107,6 +107,13 @@ def test_invalid_cwd_fails_before_reservation_open_or_new_session(
         candidate.write_text("marker", encoding="utf-8")
     tmux = CwdProbeTmux(exists=False)
     store, ctl, reservations = _controller(monkeypatch, tmux)
+    launch_calls = []
+
+    async def unexpected_launch(*args, **kwargs):
+        launch_calls.append((args, kwargs))
+        raise AssertionError("invalid cwd reached provider launch resolution")
+
+    monkeypatch.setattr(ctl, "_resolve_launch", unexpected_launch)
 
     async def run() -> tuple[VerbError, dict | None]:
         try:
@@ -122,6 +129,7 @@ def test_invalid_cwd_fails_before_reservation_open_or_new_session(
     assert reservations == []
     assert tmux.cwd_checks == [str(candidate)]
     assert tmux.new_sessions == []
+    assert launch_calls == []
     assert row is None
 
 

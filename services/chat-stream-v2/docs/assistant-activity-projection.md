@@ -1,8 +1,8 @@
 # Assistant activity projection
 
 The assistant-composite activity snapshot is a read-only, per-input view over
-the existing route, publication, lane, and operation receipts. It does not add
-a table or service. The routing store may add `route_json.timings` keys, using
+the existing route, publication, burst-link, lane, and operation receipts. It does not add
+a service. The routing store may add `route_json.timings` keys, using
 `setdefault` so a replay never replaces an accepted timestamp.
 
 Each input reports an independent `response_state` and `work_state`:
@@ -17,6 +17,22 @@ Each input reports an independent `response_state` and `work_state`:
   complete.
 - Failed routes, uncertain delivery, and cancelled lane sets take precedence
   over a contradictory final publication. Prose alone is `reply_received`.
+- A direct route is promoted to `landed` by an exact prose final or terminal
+  `result` from its bound target at publication time; only then does it read
+  `answered`. A receipt that arrives
+  after the final never downgrades it.
+- A final may cover another landed, unanswered direct input from the same
+  bound target and generation when the backend explicitly lists that input and
+  no other answered input lies between them. The publication keeps its primary
+  `reply_to_message_id`; each additional input has one typed burst link.
+  Linked inputs project as answered without changing their delivery receipt.
+  `answered_via` is `own`, `burst`, `own+burst`, or `null`, and
+  `covered_by_publication_key` names the covering final when present.
+  The response obligation closes for each linked input; no lane work state is
+  inferred from the link. The live activity set, generation-close check, and
+  prose mirror's open-route check all treat a linked input as answered.
+  Unconfirmed (`intent`, `committed_pending`, `uncertain`) inputs cannot be
+  covered; an exact final on their own dispatch supplies delivery evidence.
 
 The timing fields are derived from durable UTC receipts: `accepted_at` is route
 creation, `first_visible_at` is the first publication, and
