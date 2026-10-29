@@ -3249,7 +3249,8 @@ class Server:
         if getattr(self, "queued_send_now", None) is not None:
             from queued_send_now import route_for
             projected["capabilities"] = {**(session.get("capabilities") or {}),
-                "queued_send_now": bool(route_for(session, self.local_host))}
+                "queued_send_now": bool(route_for(session, self.local_host,
+                    getattr(getattr(self, "hosts", None), "peers", None)))}
         return projected
 
     @staticmethod

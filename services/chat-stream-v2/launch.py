@@ -105,6 +105,7 @@ class LocalMachine:
     projects_root: str
     agent_orch_bin_dir: str | None = None
     gemini_bin: str = "gemini"
+    resolve_cwd_locally: bool = True
 
 
 def local_machine(
@@ -176,6 +177,7 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
         )
     return LocalMachine(
         name=cfg.name,
+        resolve_cwd_locally=ssh_target is None,
         cwd=cfg.cwd,
         codex_cwd=getattr(cfg, "codex_cwd", None) or cfg.cwd,
         claude_bin=cfg.claude_bin or "",
@@ -335,7 +337,7 @@ def slugify_cwd(cwd: str) -> str:
 
 
 def jsonl_path_for(machine: LocalMachine, cwd: str, session_id: str) -> str:
-    resolved_cwd = os.path.realpath(cwd)
+    resolved_cwd = os.path.realpath(cwd) if machine.resolve_cwd_locally else cwd
     return f"{machine.projects_root}/{slugify_cwd(resolved_cwd)}/{session_id}.jsonl"
 
 

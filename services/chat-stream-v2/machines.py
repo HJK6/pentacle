@@ -45,6 +45,9 @@ class MachineConfig:
     label: str | None = None
     smoke_optional: bool = False
     gemini_bin: str = "gemini"
+    # Private, host-scoped native qualification; absent/invalid disables only
+    # remote queued-send control, leaving the peer's ordinary routes intact.
+    queued_send_now_qualifications: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def is_local(self) -> bool:
@@ -71,6 +74,23 @@ def _default_local_machine() -> MachineConfig:
         cwd=str(home / "agent-workspace"),
         label="Local",
     )
+
+
+def _queued_send_now_qualifications(raw: object) -> tuple[tuple[str, str, str], ...]:
+    """Accept a closed provider -> {version, executable_sha256} map."""
+    if not isinstance(raw, dict) or not raw or set(raw) - {"claude", "codex"}:
+        return ()
+    pins = []
+    for provider, pin in sorted(raw.items()):
+        if not isinstance(pin, dict) or set(pin) != {"version", "executable_sha256"}:
+            return ()
+        version, digest = pin["version"], pin["executable_sha256"]
+        if (not isinstance(version, str) or not 1 <= len(version) <= 128
+                or version != version.strip() or not version.isprintable()
+                or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            return ()
+        pins.append((provider, version, digest))
+    return tuple(pins)
 
 
 def _machine_from_dict(raw: dict) -> MachineConfig:
@@ -123,6 +143,8 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
             else None
         ),
         label=str(raw["label"]).strip() if raw.get("label") else None,
+        queued_send_now_qualifications=_queued_send_now_qualifications(
+            raw.get("queued_send_now_qualifications")),
     )
 
 
