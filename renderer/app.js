@@ -488,6 +488,9 @@ const state = {
   slotAssetRenderGen: [0, 0, 0, 0],
   slotAssetCommentsGen: [0, 0, 0, 0],
   slotAssetLabelTimers: [null, null, null, null],
+  chatComposerDrafts: new Map(), // page-local, keyed by canonical chat identity
+  slotComposerKeys: [null, null, null, null],
+  slotComposerVersions: [0, 0, 0, 0],
   slotDrafts: ['', '', '', ''], // chat composer draft per slot
   slotReplies: [null, null, null, null],
   slotDraftTouched: [false, false, false, false], // whether the user has taken ownership of the chat bar text
@@ -1935,8 +1938,10 @@ const closedChatSlots = createClosedChatSlots({
     delete state.desktopQuestionPortalHomes[streamId];
     delete state.questionDrafts[`${streamId}:flow`];
     delete state.questionPageIndexByStream[`${streamId}:flow`];
-    clearSlotAttachments(slot);
+    const key = state.slotComposerKeys[slot];
+    if (key && JSON.parse(key)[0] === 'chat') clearSlotAttachments(slot);
     detachSlot(slot, { force: true });
+    if (key && JSON.parse(key)[0] === 'chat') state.chatComposerDrafts.delete(key);
   },
 });
 
@@ -2012,6 +2017,7 @@ function applyChatStreamState(data) {
     onSpawnFailure: (session) => showToast(session.reason, { type: 'error' }),
   });
   closedChatSlots.update(data);
+  reconcileComposerDraftInventory(data);
   reconcileLocallyClosedStreamIds();
   state.durableQuestionHydrationByStream = {};
   if (Array.isArray(data.schedules)) {
@@ -2178,6 +2184,7 @@ function applyChatStreamPayload(payload) {
       onSpawnFailure: (session) => showToast(session.reason, { type: 'error' }),
     });
     closedChatSlots.update(payload);
+    reconcileComposerDraftInventory(payload);
     reconcileLocallyClosedStreamIds();
     state.durableQuestionHydrationByStream = {};
     if (state.chatStream.connected) {
@@ -2466,6 +2473,166 @@ function formatEventTime(timestamp) {
   }
 }
 
+// A full, connected inventory may retire an ordinary draft even when no pane
+// currently displays it. A grace period and connection epoch fence match the
+// existing closed-slot policy; partial inventories and disconnects are inert.
+let composerInventoryEpoch;
+let composerInventoryRows = null;
+const composerRetireTimers = new Map();
+function cancelComposerRetirements() {
+  for (const timer of composerRetireTimers.values()) clearTimeout(timer);
+  composerRetireTimers.clear();
+}
+function disposeComposerDraft(key, record) {
+  if (state.chatComposerDrafts.get(key) !== record) return;
+  for (const item of record.attachments) if (item.previewUrl && !item.sent) URL.revokeObjectURL(item.previewUrl);
+  state.chatComposerDrafts.delete(key);
+}
+function reconcileComposerDraftInventory(payload = {}) {
+  const epoch = state.chatStream.stateVersion;
+  if (!state.chatStream.connected || (composerInventoryEpoch !== undefined && composerInventoryEpoch !== epoch)) {
+    cancelComposerRetirements(); composerInventoryRows = null;
+  }
+  if (!state.chatStream.connected || !Array.isArray(payload.sessions)) return;
+  composerInventoryEpoch = epoch;
+  composerInventoryRows = payload.sessions;
+  for (const [key, record] of state.chatComposerDrafts) {
+    const identity = JSON.parse(key);
+    if (identity[0] !== 'chat' || !identity[2]) continue;
+    const sameStream = composerInventoryRows.filter(row => row?.stream_id === identity[1]);
+    const current = sameStream.find(row => row.session_generation === identity[2]);
+    if (current || sameStream.some(row => !row.session_generation)) {
+      if (composerRetireTimers.has(key)) clearTimeout(composerRetireTimers.get(key));
+      composerRetireTimers.delete(key);
+      continue;
+    }
+    if (composerRetireTimers.has(key)) continue;
+    const timer = setTimeout(() => {
+      composerRetireTimers.delete(key);
+      if (!state.chatStream.connected || state.chatStream.stateVersion !== epoch || composerInventoryEpoch !== epoch || !composerInventoryRows) return;
+      if (composerInventoryRows.some(row => row?.stream_id === identity[1] && (!row.session_generation || row.session_generation === identity[2]))) return;
+      disposeComposerDraft(key, record);
+    }, 1500);
+    composerRetireTimers.set(key, timer);
+  }
+}
+
+// The slot is a view onto a chat-owned draft, not the draft's identity.
+function composerKey(session) {
+  if (!session || session.laneHistory) return null;
+  if (session.assistantDirect?.sourceId) return JSON.stringify(['assistant', session.assistantDirect.sourceId]);
+  const resolved = canonicalChatSessionStateForNameHost(session.name, session.hostId);
+  if (!resolved?.stream_id) return session.draftStreamId ? JSON.stringify(['pending', session.draftStreamId]) : null;
+  return JSON.stringify(isCompositeAssistant(resolved)
+    ? ['assistant', resolved.stream_id]
+    : ['chat', resolved.stream_id, resolved.session_generation || '']);
+}
+
+function saveComposerDraft(slot) {
+  const key = state.slotComposerKeys[slot];
+  if (!key) return null;
+  const record = state.chatComposerDrafts.get(key);
+  if (!record) return null;
+  record.text = state.slotChatRefs[slot]?.inputEl?.value ?? state.slotDrafts[slot];
+  record.touched = state.slotDraftTouched[slot];
+  record.reply = state.slotReplies[slot];
+  record.attachments = slotAttachmentDrafts(slot);
+  return record;
+}
+
+function bindComposerDraft(slot) {
+  const key = composerKey(state.slots[slot]);
+  state.slotComposerKeys[slot] = key;
+  let record = key && state.chatComposerDrafts.get(key);
+  if (key && !record) {
+    const identity = JSON.parse(key);
+    const pendingKey = JSON.stringify(['pending', identity[1]]);
+    if (identity[0] === 'chat' && state.chatComposerDrafts.has(pendingKey)) {
+      record = state.chatComposerDrafts.get(pendingKey);
+      state.chatComposerDrafts.delete(pendingKey);
+      state.chatComposerDrafts.set(key, record);
+    }
+    if (identity[0] === 'chat' && identity[2]) {
+      for (const [oldKey, old] of state.chatComposerDrafts) {
+        const previous = JSON.parse(oldKey);
+        if (previous[0] !== 'chat' || previous[1] !== identity[1] || !previous[2] || previous[2] === identity[2]) continue;
+        for (const item of old.attachments) if (item.previewUrl && !item.sent) URL.revokeObjectURL(item.previewUrl);
+        state.chatComposerDrafts.delete(oldKey);
+      }
+    }
+    if (!record) {
+      record = { text: '', touched: false, reply: null, attachments: [], version: 0 };
+      state.chatComposerDrafts.set(key, record);
+    }
+  }
+  state.slotDrafts[slot] = record?.text || '';
+  state.slotDraftTouched[slot] = record?.touched || false;
+  state.slotReplies[slot] = record?.reply || null;
+  state.slotAttachments[slot] = record?.attachments || [];
+  const refs = state.slotChatRefs[slot];
+  if (refs?.inputEl) refs.inputEl.value = state.slotDrafts[slot];
+  renderSlotAttachmentTray(slot);
+  renderSlotReply(slot);
+  window.PentacleHarness?.emit?.('composer:draft', { data: { subsystem: 'web_composer', bug_ref: 'spec_pentacle__web_composer_draft_per_chat_2026_10', operation: 'bind', key_kind: key ? JSON.parse(key)[0] : 'unresolved', count: record?.attachments.length || 0 } });
+}
+
+function captureComposer(slot) {
+  return { key: state.slotComposerKeys[slot], record: saveComposerDraft(slot), generation: state.slotGen[slot],
+    text: state.slotChatRefs[slot]?.inputEl?.value ?? state.slotDrafts[slot], slotVersion: state.slotComposerVersions[slot] };
+}
+
+function composerMounted(slot, owner) {
+  return state.slotGen[slot] === owner.generation && (state.slotComposerKeys[slot] === owner.key
+    || (owner.record && state.chatComposerDrafts.get(state.slotComposerKeys[slot]) === owner.record));
+}
+
+function composerRecordLive(record) {
+  return record && Array.from(state.chatComposerDrafts.values()).includes(record);
+}
+
+function composerRecordSlot(record) {
+  return state.slotComposerKeys.findIndex(key => key && state.chatComposerDrafts.get(key) === record);
+}
+
+function clearSubmittedComposer(slot, owner, version, { attachments = true, reply = true } = {}) {
+  const record = owner.record;
+  if (!record && composerMounted(slot, owner) && state.slotComposerVersions[slot] === owner.slotVersion
+    && (state.slotChatRefs[slot]?.inputEl?.value ?? state.slotDrafts[slot]) === owner.text) {
+    state.slotDrafts[slot] = ''; state.slotDraftTouched[slot] = true;
+    if (reply) state.slotReplies[slot] = null;
+    if (attachments) clearSlotAttachments(slot);
+    const refs = state.slotChatRefs[slot];
+    if (refs?.inputEl) refs.inputEl.value = '';
+    refs?.syncComposerLayout?.(); renderSlotReply(slot); renderSlotChat(slot);
+    return;
+  }
+  if (composerRecordLive(record) && record.version === version) {
+    record.text = ''; record.touched = true;
+    if (reply) record.reply = null;
+    if (attachments) {
+      for (const item of record.attachments) if (item.previewUrl && !item.sent) URL.revokeObjectURL(item.previewUrl);
+      record.attachments = [];
+    }
+    record.version++;
+    const mounted = composerRecordSlot(record);
+    if (mounted >= 0) {
+      slot = mounted;
+      state.slotDrafts[slot] = ''; state.slotDraftTouched[slot] = true; state.slotReplies[slot] = record.reply;
+      state.slotAttachments[slot] = record.attachments;
+      const refs = state.slotChatRefs[slot];
+      if (refs?.inputEl) refs.inputEl.value = '';
+      renderSlotAttachmentTray(slot); renderSlotReply(slot); refs?.syncComposerLayout?.();
+      renderSlotChat(slot);
+    }
+  }
+}
+
+function composerChanged(slot) {
+  state.slotComposerVersions[slot]++;
+  const record = saveComposerDraft(slot);
+  if (record) record.version++;
+}
+
 const CHAT_ATTACHMENT_MIMES = new Set(['image/jpeg', 'image/png']);
 
 function chatAttachmentLimit() {
@@ -2506,23 +2673,23 @@ function readImageDimensions(previewUrl) {
   });
 }
 
-async function addSlotAttachmentFiles(slot, files) {
+async function addSlotAttachmentFiles(slot, files, owner = captureComposer(slot)) {
   const allFiles = Array.from(files || []);
   if (!allFiles.length) return;
-  setSlotSendError(slot, '');
-  const drafts = slotAttachmentDrafts(slot);
+  if (composerMounted(slot, owner)) setSlotSendError(slot, '');
+  const drafts = owner.record?.attachments || slotAttachmentDrafts(slot);
   const limit = chatAttachmentLimit();
   const accepted = allFiles.filter((file) => file && CHAT_ATTACHMENT_MIMES.has(String(file.type || '').toLowerCase()));
-  if (accepted.length !== allFiles.length) {
+  if (accepted.length !== allFiles.length && composerMounted(slot, owner)) {
     setSlotSendError(slot, 'Only JPEG and PNG image attachments are supported.');
   }
   for (const file of accepted) {
     if (drafts.length >= limit) {
-      setSlotSendError(slot, `At most ${limit} images can be attached.`);
+      if (composerMounted(slot, owner)) setSlotSendError(slot, `At most ${limit} images can be attached.`);
       break;
     }
     if (!file.size || file.size > 25 * 1024 * 1024) {
-      setSlotSendError(slot, file.size ? 'Each image must be 25 MiB or smaller.' : 'Empty images cannot be attached.');
+      if (composerMounted(slot, owner)) setSlotSendError(slot, file.size ? 'Each image must be 25 MiB or smaller.' : 'Empty images cannot be attached.');
       continue;
     }
     const previewUrl = URL.createObjectURL(file);
@@ -2536,7 +2703,10 @@ async function addSlotAttachmentFiles(slot, files) {
       if (!dims.width || !dims.height || decodedBytes !== file.size) {
         throw new Error('This JPEG or PNG image could not be decoded.');
       }
-      drafts.push({
+      if (owner.record && !composerRecordLive(owner.record)) { URL.revokeObjectURL(previewUrl); continue; }
+      const destination = owner.record?.attachments || drafts;
+      if (destination.length >= limit) { URL.revokeObjectURL(previewUrl); continue; }
+      destination.push({
         id: nextAttachmentDraftId(slot),
         name: file.name || 'image',
         mime: file.type,
@@ -2546,16 +2716,18 @@ async function addSlotAttachmentFiles(slot, files) {
         width: dims.width,
         height: dims.height,
       });
+      if (owner.record) owner.record.version++;
     } catch (error) {
       URL.revokeObjectURL(previewUrl);
-      setSlotSendError(slot, error?.message || 'This image could not be read.');
+      if (composerMounted(slot, owner)) setSlotSendError(slot, error?.message || 'This image could not be read.');
     }
   }
-  renderSlotAttachmentTray(slot);
-  updateSendControls(slot);
+  const mounted = owner.record ? composerRecordSlot(owner.record) : (composerMounted(slot, owner) ? slot : -1);
+  if (mounted >= 0) { renderSlotAttachmentTray(mounted); updateSendControls(mounted); }
 }
 
 async function addSlotScreenshot(slot) {
+  const owner = captureComposer(slot);
   const capture = window.navigator?.mediaDevices?.getDisplayMedia;
   if (typeof capture !== 'function') throw new Error('Screen capture is unavailable in this browser.');
   let stream;
@@ -2575,7 +2747,7 @@ async function addSlotScreenshot(slot) {
     canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Screen capture failed.')), 'image/png'));
-    await addSlotAttachmentFiles(slot, [new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })]);
+    await addSlotAttachmentFiles(slot, [new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })], owner);
   } catch (error) {
     // The browser chooser's Cancel is an ordinary no-op; it leaves the draft.
     if (error?.name !== 'NotAllowedError' && error?.name !== 'AbortError') throw error;
@@ -2591,6 +2763,7 @@ function removeSlotAttachment(slot, id) {
   if (idx < 0) return;
   const [removed] = drafts.splice(idx, 1);
   if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  composerChanged(slot);
   renderSlotAttachmentTray(slot);
   updateSendControls(slot);
 }
@@ -2640,8 +2813,7 @@ function renderSlotAttachmentTray(slot) {
   refs.syncComposerLayout?.();
 }
 
-async function uploadSlotAttachments(slot) {
-  const drafts = slotAttachmentDrafts(slot);
+async function uploadSlotAttachments(slot, drafts = slotAttachmentDrafts(slot)) {
   const uploaded = [];
   for (const item of drafts) {
     const result = await window.cc.chatUploadBlob({
@@ -2662,7 +2834,6 @@ async function uploadSlotAttachments(slot) {
       uri: item.previewUrl,
       name: item.name,
     });
-    item.sent = true;
   }
   return uploaded;
 }
@@ -2973,6 +3144,7 @@ function ensureSlotChatSurface(slot) {
 	  inputEl.addEventListener('input', () => {
 	    state.slotDrafts[slot] = inputEl.value;
 	    state.slotDraftTouched[slot] = true;
+	    composerChanged(slot);
 	    autoSize();
 	    updateSendControls(slot);
 	  });
@@ -2980,7 +3152,8 @@ function ensureSlotChatSurface(slot) {
 	    const files = Array.from(event.clipboardData?.files || []);
 	    if (!files.length) return;
 	    event.preventDefault();
-	    addSlotAttachmentFiles(slot, files).catch(error => setSlotSendError(slot, error?.message || 'Attachment failed.'));
+	    const owner = captureComposer(slot);
+	    addSlotAttachmentFiles(slot, files, owner).catch(error => { if (composerMounted(slot, owner)) setSlotSendError(slot, error?.message || 'Attachment failed.'); });
 	  });
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -3006,7 +3179,10 @@ function ensureSlotChatSurface(slot) {
 	    const action = event.target?.closest?.('[data-chat-image-action]')?.dataset.chatImageAction;
 	    if (!action) return;
 	    closePlusMenu();
-	    if (action === 'screenshot') addSlotScreenshot(slot).catch(error => setSlotSendError(slot, error?.message || 'Screen capture failed.'));
+	    if (action === 'screenshot') {
+        const owner = captureComposer(slot);
+        addSlotScreenshot(slot).catch(error => { if (composerMounted(slot, owner)) setSlotSendError(slot, error?.message || 'Screen capture failed.'); });
+      }
 	    else fileInputEl.click();
 	  });
 	  document.addEventListener('pointerdown', (event) => { if (!plusWrapEl.contains(event.target)) closePlusMenu(); });
@@ -3028,8 +3204,9 @@ function ensureSlotChatSurface(slot) {
         telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
       });
 	  fileInputEl.addEventListener('change', () => {
-	    addSlotAttachmentFiles(slot, fileInputEl.files).catch((error) => {
-	      setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Attachment failed.'));
+	    const owner = captureComposer(slot);
+	    addSlotAttachmentFiles(slot, fileInputEl.files, owner).catch((error) => {
+	      if (composerMounted(slot, owner)) setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Attachment failed.'));
 	    }).finally(() => {
 	      fileInputEl.value = '';
 	    });
@@ -3048,7 +3225,8 @@ function ensureSlotChatSurface(slot) {
 	  chatShell.addEventListener('drop', (event) => {
 	    if (!event.dataTransfer?.files?.length) return;
 	    event.preventDefault(); dragDepth = 0; chatShell.classList.remove('is-drag-over');
-	    addSlotAttachmentFiles(slot, event.dataTransfer.files).catch((error) => setSlotSendError(slot, error?.message || 'Attachment failed.'));
+	    const owner = captureComposer(slot);
+	    addSlotAttachmentFiles(slot, event.dataTransfer.files, owner).catch((error) => { if (composerMounted(slot, owner)) setSlotSendError(slot, error?.message || 'Attachment failed.'); });
 	  });
 	  sendEl.addEventListener('click', () => sendChatComposer(slot));
 	  if (typeof ResizeObserver === 'function') {
@@ -3089,7 +3267,8 @@ function updateSendControls(slot) {
   // receipts, rather than the working hint, determine whether it was queued.
   // Keep drafts editable while websocket detail is arriving, but do not offer
   // Send before the same control target used by sendChatComposer is available.
-  const pending = !!state.slotSendPending[slot];
+  const draftPending = !!state.chatComposerDrafts.get(state.slotComposerKeys[slot])?.sendPending;
+  const pending = !!state.slotSendPending[slot] || draftPending;
   const target = chatControlTargetForSlot(slot);
   const refs = state.slotChatRefs[slot];
   if (refs?.sendEl) {
@@ -3107,8 +3286,8 @@ function updateSendControls(slot) {
       refs.noticeEl.hidden = !notice;
     }
   }
-  if (refs?.inputEl) refs.inputEl.disabled = pending;
-  if (refs?.attachEl) refs.attachEl.disabled = pending;
+  if (refs?.inputEl) refs.inputEl.disabled = !!state.slotSendPending[slot];
+  if (refs?.attachEl) refs.attachEl.disabled = !!state.slotSendPending[slot];
   // Refresh even when the transcript HTML is byte-identical or its paint is deferred.
   for (const button of refs?.listEl?.querySelectorAll?.('.slot-chat-send-now') || []) {
     const streamId = button.dataset.streamId || '';
@@ -3139,6 +3318,7 @@ function maybeRestoreReturnedToPromptDraft(slot, streamId) {
         refs.inputEl.style.overflowY = refs.inputEl.scrollHeight > 220 ? 'auto' : 'hidden';
       }
     }
+    composerChanged(slot);
     setSlotSendError(slot, '');
     state.returnedPromptDrafts[key] = 'restored';
     return;
@@ -3362,6 +3542,7 @@ function applySlotChatListRender(slot, refs, render) {
       const messageId = button.dataset.replyMessageId;
       const text = button.closest('article')?.querySelector('.slot-chat-user-bubble, .slot-chat-assistant-card')?.textContent || '';
       state.slotReplies[slot] = { reply_to_message_id: messageId, reply_to_question_id: button.dataset.replyQuestionId, preview: text.slice(0, 160) };
+      composerChanged(slot);
       renderSlotReply(slot);
       refs.inputEl?.focus();
     });
@@ -4072,6 +4253,8 @@ function renderSlotChat(slot) {
       const lock = entry => { state.answeredQuestionSig[entry.key] = entry.signature; entry.locked = true; };
       const needsReconcile = () => (state.questionUncertainIdsByStream?.[streamId]?.size || 0) > 0;
       const submit = async (_text, detail) => {
+        const owner = captureComposer(slot);
+        const version = owner.record?.version;
         if (!assertAssistantDirectSlot(slot)) throw new Error('Direct assistant target is unavailable or changed.');
         if (state.questionSubmissionPending[streamId] || needsReconcile()) return;
         let resolvingNotificationId = '';
@@ -4086,11 +4269,23 @@ function renderSlotChat(slot) {
             if (!result?.ok && !['stale_question', 'text_send_failed'].includes(result?.error_code)) throw new Error(result?.error || 'Question dismiss failed.');
             paneEntries.forEach(lock);
             if (!result.ok && text.trim()) {
-              state.slotDrafts[slot] = text; state.slotDraftTouched[slot] = true;
-              if (refs.inputEl) refs.inputEl.value = text;
-              setSlotSendError(slot, result.error_code === 'text_send_failed' ? result.error || 'Answer was not sent. Review the composer and send it normally.' : '');
-              updateSendControls(slot);
-            } else setSlotSendError(slot, '');
+              if (owner.record && owner.record.version === version && composerRecordLive(owner.record)) {
+                owner.record.text = text; owner.record.touched = true; owner.record.version++;
+                const mounted = composerRecordSlot(owner.record);
+                if (mounted >= 0) {
+                  state.slotDrafts[mounted] = text; state.slotDraftTouched[mounted] = true;
+                  if (state.slotChatRefs[mounted]?.inputEl) state.slotChatRefs[mounted].inputEl.value = text;
+                  setSlotSendError(mounted, result.error_code === 'text_send_failed' ? result.error || 'Answer was not sent. Review the composer and send it normally.' : '');
+                  updateSendControls(mounted);
+                }
+              } else if (!owner.record && composerMounted(slot, owner) && state.slotComposerVersions[slot] === owner.slotVersion
+                && (state.slotChatRefs[slot]?.inputEl?.value ?? state.slotDrafts[slot]) === owner.text) {
+                state.slotDrafts[slot] = text; state.slotDraftTouched[slot] = true;
+                if (state.slotChatRefs[slot]?.inputEl) state.slotChatRefs[slot].inputEl.value = text;
+                setSlotSendError(slot, result.error_code === 'text_send_failed' ? result.error || 'Answer was not sent. Review the composer and send it normally.' : '');
+                updateSendControls(slot);
+              }
+            } else if (composerMounted(slot, owner)) setSlotSendError(slot, '');
           }
           for (let index = paneEntries.length; index < entries.length; index++) {
             const entry = entries[index];
@@ -4340,6 +4535,7 @@ function syncWorkingTimer() {
 }
 
 async function sendStructuredSlotMessage(slot, text, { onSuccess } = {}) {
+  const owner = captureComposer(slot);
   const cleanText = String(text || '').trim();
   if (!cleanText || !state.slots[slot] || state.botSlots[slot]) return false;
   const target = chatControlTargetForSlot(slot);
@@ -4359,12 +4555,14 @@ async function sendStructuredSlotMessage(slot, text, { onSuccess } = {}) {
     if (typeof onSuccess === 'function') onSuccess();
     return true;
   } catch (error) {
-    setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Chat send failed'));
+    if (composerMounted(slot, owner)) setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Chat send failed'));
     return false;
   } finally {
-    state.slotSendPending[slot] = false;
-    updateSendControls(slot);
-    requestAnimationFrame(() => renderSlotChat(slot));
+    if (composerMounted(slot, owner)) {
+      state.slotSendPending[slot] = false;
+      updateSendControls(slot);
+      requestAnimationFrame(() => { if (composerMounted(slot, owner)) renderSlotChat(slot); });
+    }
   }
 }
 
@@ -4421,8 +4619,14 @@ async function sendChatComposer(slot) {
   const inputEl = refs?.inputEl;
   const literal = inputEl ? inputEl.value : state.slotDrafts[slot];
   const text = isCompositeSlot(slot) ? literal : literal.trim();
-  const pendingAttachments = slotAttachmentDrafts(slot);
-  if ((!text.trim() && pendingAttachments.length === 0) || !state.slots[slot] || state.botSlots[slot]) return;
+  const owner = captureComposer(slot);
+  const version = owner.record?.version;
+  const capturedSession = state.slots[slot];
+  const pendingAttachments = slotAttachmentDrafts(slot).slice();
+  if ((!text.trim() && pendingAttachments.length === 0) || !state.slots[slot] || state.botSlots[slot] || owner.record?.sendPending) return;
+  if (owner.record) owner.record.sendPending = true;
+  updateSendControls(slot);
+  try {
 
   // Shared-core optimistic send (desktop_chat_ui_mobile_parity): when the slot
   // has a resolved stream, the composer routes through PentacleChatStore.sendTurn
@@ -4436,29 +4640,27 @@ async function sendChatComposer(slot) {
     if (streamId) {
       // Native queue: do NOT gate on idle here. sendTurn dispatches immediately;
       // provider CLIs queue mid-turn input natively.
-      if (await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length)) {
+      if (await sendComposerQuestionAnswer(slot, streamId, text, inputEl, pendingAttachments.length, owner, version)) {
         return;
       }
+      if (!composerMounted(slot, owner)) return;
       state.slotSendPending[slot] = true;
       setSlotSendError(slot, '');
       updateSendControls(slot);
       const reply = state.slotReplies[slot];
       const sendGeneration = state.slotGen[slot];
       try {
-        const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot) : [];
-        if (!assertAssistantDirectSlot(slot)) return;
+        const attachments = pendingAttachments.length ? await uploadSlotAttachments(slot, pendingAttachments) : [];
+        const current = state.chatStream.sessions.find(item => item.stream_id === streamId);
+        const direct = capturedSession.assistantDirect;
+        const currentDirect = direct && assistantDirectForEntry(direct.sourceId);
+        if (!current || (target.streamSession.session_generation && current.session_generation !== target.streamSession.session_generation)
+          || (direct && (!currentDirect?.enabled || currentDirect.error || currentDirect.targetId !== direct.targetId || currentDirect.generation !== direct.generation))) return;
         const optimisticId = window.PentacleChatStore.sendTurn(streamId, text, attachments,
           { ...(reply ? { reply_to_message_id: reply.reply_to_message_id, reply_to_question_id: reply.reply_to_question_id } : {}) });
-        if (optimisticId && state.slotGen[slot] === sendGeneration) {
-          state.slotReplies[slot] = null;
-          state.slotDrafts[slot] = '';
-          state.slotDraftTouched[slot] = true;
-          clearSlotAttachments(slot);
-          if (inputEl) {
-            inputEl.value = '';
-            refs?.syncComposerLayout?.();
-          }
-          renderSlotChat(slot);
+        if (optimisticId) {
+          pendingAttachments.forEach(item => { item.sent = true; });
+          clearSubmittedComposer(slot, owner, version);
         }
       } catch (error) {
         if (state.slotGen[slot] === sendGeneration) setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Chat send failed'));
@@ -4473,15 +4675,15 @@ async function sendChatComposer(slot) {
   }
 
   await sendStructuredSlotMessage(slot, text, {
-    onSuccess: () => {
-      state.slotDrafts[slot] = '';
-      state.slotDraftTouched[slot] = true;
-      if (inputEl) {
-        inputEl.value = '';
-        refs?.syncComposerLayout?.();
-      }
-    },
+    onSuccess: () => clearSubmittedComposer(slot, owner, version),
   });
+  } finally {
+    if (owner.record) {
+      owner.record.sendPending = false;
+      const mounted = composerRecordSlot(owner.record);
+      if (mounted >= 0) updateSendControls(mounted);
+    }
+  }
 }
 
 function renderSlotReply(slot) {
@@ -4497,11 +4699,11 @@ function renderSlotReply(slot) {
   cancel.type = 'button';
   cancel.textContent = '×';
   cancel.setAttribute('aria-label', 'Cancel reply');
-  cancel.addEventListener('click', () => { state.slotReplies[slot] = null; renderSlotReply(slot); });
+  cancel.addEventListener('click', () => { state.slotReplies[slot] = null; composerChanged(slot); renderSlotReply(slot); });
   el.append(text, cancel);
 }
 
-async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachmentCount = 0) {
+async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachmentCount = 0, owner = captureComposer(slot), version = owner.record?.version) {
   if (isCompositeSlot(slot)) return false;
   if (!assertAssistantDirectSlot(slot)) return true;
   if (!window.PentacleChatStore || typeof window.PentacleChatStore.getQuestion !== 'function') return false;
@@ -4538,16 +4740,11 @@ async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachm
       text,
     });
     if (result?.ok) {
-      state.slotDrafts[slot] = '';
-      state.slotDraftTouched[slot] = true;
+      clearSubmittedComposer(slot, owner, version, { attachments: false, reply: false });
       if (streamId && state.questionDrafts) delete state.questionDrafts[streamId];
-      if (inputEl) {
-        inputEl.value = '';
-        refs?.syncComposerLayout?.();
-      }
-      renderSlotChat(slot);
       return true;
     }
+    if (!composerMounted(slot, owner) || (owner.record && owner.record.version !== version)) return true;
     const errorCode = result?.error_code || '';
     if (errorCode === 'stale_question' || errorCode === 'text_send_failed') {
       state.slotDrafts[slot] = text;
@@ -4563,11 +4760,10 @@ async function sendComposerQuestionAnswer(slot, streamId, text, inputEl, attachm
     setSlotSendError(slot, result?.error || 'Question dismiss failed.');
     return true;
   } catch (error) {
-    setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Question dismiss failed'));
+    if (composerMounted(slot, owner)) setSlotSendError(slot, error instanceof Error ? error.message : String(error || 'Question dismiss failed'));
     return true;
   } finally {
-    state.slotSendPending[slot] = false;
-    updateSendControls(slot);
+    if (composerMounted(slot, owner)) { state.slotSendPending[slot] = false; updateSendControls(slot); }
   }
 }
 
@@ -5333,7 +5529,7 @@ function esc(str) {
 
 // ── Slot Assignment ────────────────────────────────────────────
 
-function assignToSlot(sessionName, displayName, hostId) {
+function assignToSlot(sessionName, displayName, hostId, options = {}) {
   // Already in a slot? Focus it (and maximize if in maximized mode)
   const existing = getSlotForSession(sessionName, hostId);
   if (existing >= 0) {
@@ -5349,7 +5545,7 @@ function assignToSlot(sessionName, displayName, hostId) {
   if (state.maximizedSlot !== null) {
     // In maximized mode — replace the currently maximized slot
     const slot = state.maximizedSlot;
-    attachSession(slot, sessionName, displayName, hostId);
+    attachSession(slot, sessionName, displayName, hostId, options);
     maximizeSlot(slot);
     return slot;
   }
@@ -5358,7 +5554,7 @@ function assignToSlot(sessionName, displayName, hostId) {
   // their sessions and are never silently replaced.
   const slot = placementSlot(state.workspace, state.slots);
 
-  attachSession(slot, sessionName, displayName, hostId);
+  attachSession(slot, sessionName, displayName, hostId, options);
   return slot;
 }
 
@@ -5379,9 +5575,9 @@ function activateSidebarRow(el, defaultHostId) {
 // returns -1 for an unusable direct binding instead of toasting, so an
 // automatic open can retry on the next inventory. Returns the slot.
 function activateSessionEntry({ name, display, hostId, streamId = '', action = 'status' }, { slot: pinned = null, quiet = false } = {}) {
-  const place = (sessionName, displayName, host) => {
-    if (pinned === null) return assignToSlot(sessionName, displayName, host);
-    attachSession(pinned, sessionName, displayName, host, { activate: false });
+  const place = (sessionName, displayName, host, options = {}) => {
+    if (pinned === null) return assignToSlot(sessionName, displayName, host, options);
+    attachSession(pinned, sessionName, displayName, host, { ...options, activate: false });
     return pinned;
   };
   const direct = assistantDirectForEntry(streamId);
@@ -5391,11 +5587,14 @@ function activateSessionEntry({ name, display, hostId, streamId = '', action = '
       return -1;
     }
     const targetHostId = _streamHostToHostId(direct.host) || direct.host;
-    const slot = place(direct.sessionName, display, targetHostId);
+    const slot = place(direct.sessionName, display, targetHostId, { assistantDirect: { sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation } });
     if (typeof slot !== 'number' || slot < 0 || !state.slots[slot]) return -1;
+    const switchingIdentity = state.slots[slot].assistantDirect?.sourceId !== direct.sourceId;
+    if (switchingIdentity) saveComposerDraft(slot);
     state.slots[slot].assistantDirect = {
       sourceId: direct.sourceId, targetId: direct.targetId, generation: direct.generation,
     };
+    if (switchingIdentity) bindComposerDraft(slot);
     state.slots[slot].displayName = display;
     const label = document.querySelector(`#header-${slot} .cell-label`);
     if (label) label.textContent = display;
@@ -5405,10 +5604,12 @@ function activateSessionEntry({ name, display, hostId, streamId = '', action = '
     renderSidebar();
     return slot;
   }
-  const slot = place(name, display, hostId);
+  const slot = place(name, display, hostId, { draftStreamId: streamId || null });
   if (typeof slot !== 'number' || slot < 0) return -1;
   if (state.slots[slot]?.assistantDirect) {
+    saveComposerDraft(slot);
     delete state.slots[slot].assistantDirect;
+    bindComposerDraft(slot);
     state.slots[slot].displayName = display;
     const label = document.querySelector(`#header-${slot} .cell-label`);
     if (label) label.textContent = display;
@@ -5468,6 +5669,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   const gen = state.slotGen[slot]; // capture generation to detect stale async resumes
   state.slots[slot] = { name: sessionName, displayName, hostId,
     popoutStreamId: options.popoutStreamId || null,
+    draftStreamId: options.draftStreamId || options.popoutStreamId || null,
     laneHistory: options.laneHistory || null,
     assistantDirect: options.assistantDirect || null,
     session_kind: canonicalChatSessionStateForNameHost(sessionName, hostId)?.session_kind };
@@ -5528,10 +5730,8 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
   const container = refs?.terminalMount || document.getElementById(`term-${slot}`);
   if (!refs) container.innerHTML = '';
   if (refs?.listEl) refs.listEl.innerHTML = '';
-  if (refs?.inputEl) refs.inputEl.value = '';
   state.slotBuffers[slot] = '';
-  state.slotDrafts[slot] = '';
-  state.slotDraftTouched[slot] = false;
+  bindComposerDraft(slot);
   state.slotViewModes[slot] = isCompositeSlot(slot) || options.laneHistory ? 'chat'
     : (options.viewMode || defaultSessionView(defaultChatViewMode(), canonicalChatSessionStateForNameHost(sessionName, hostId)));
   if (options.activate !== false) setActiveWorkspaceSlot(slot);
@@ -5709,6 +5909,9 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
 
 function detachSlot(slot, { force = false, preserveWorkspace = false } = {}) {
   if (!force && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => detachSlot(slot))) return;
+  saveComposerDraft(slot);
+  state.slotComposerKeys[slot] = null;
+  state.slotAttachments[slot] = [];
   closedChatSlots.forget(slot);
   // A recording deck is nonmodal, so a slot can now be left with its deck open.
   // The portal lives on document.body: remove the one owning this slot's question
@@ -5772,6 +5975,8 @@ function detachSlot(slot, { force = false, preserveWorkspace = false } = {}) {
     delete state.chatStream.historyPaging?.[detachedStreamId];
   }
   state.slots[slot] = null;
+  state.slotSendPending[slot] = false;
+  state.slotSendErrors[slot] = '';
   state.slotReplies[slot] = null;
   state.botSlots[slot] = false;
   syncSlotCopyId(slot);
