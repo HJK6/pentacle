@@ -13,8 +13,6 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
-## 2026-10-29
-
 ### Added
 
 - Opt-in release seam admission unions installed baselines, rejects stale or incomplete proof, and keeps affected canary invocation and verdict scopes aligned. One finite client wire/render/model tuple is registered; other surfaces remain unqualified.
