@@ -35,7 +35,6 @@ from typing import Callable
 HOSTS = {
     "local": ("localhost", str(Path.home() / ".local/share/pentacle/releases")),
 }
-PINNED = {"claude": "2.1.207", "codex": "0.144.1"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 STAMP = re.compile(r"[0-9a-z][0-9a-z._-]{7,127}\Z")
 DEFAULT_SFTP_TIMEOUT_SECONDS = 120
@@ -233,7 +232,7 @@ def _runtime_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
     return member
 
 
-def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = None) -> dict[str, object]:
+def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = None, *, provider_cli_pin=None) -> dict[str, object]:
     canonical = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", f"{commit}^{{commit}}"], text=True
     ).strip()
@@ -257,8 +256,13 @@ def _archive(repo: Path, commit: str, destination: Path, stamp: str | None = Non
         "contract": {"path": "services/_shared/spawn_profiles.py", "sha256": _sha256_bytes(contract)},
         "catalog_version": catalog,
         "platforms": ["darwin", "linux"],
-        "provider_packages": {name: {"minimum_version": version, "binary": name} for name, version in PINNED.items()},
+        "provider_packages": {name: {"managed_admission": "pin_snapshot_required"} for name in ("claude", "codex")},
     }
+    if provider_cli_pin is not None:
+        services_root=str(Path(__file__).resolve().parents[2])
+        if services_root not in sys.path: sys.path.insert(0,services_root)
+        from _shared.provider_cli_release import manifest as provider_manifest
+        manifest["provider_packages"]=provider_manifest(provider_cli_pin)
     try:
         runtime_tree = _archive_tree_sha256(archive, runtime_package)
         support_sha256 = _archive_member_sha256(archive, runtime_support_module)
@@ -1087,6 +1091,7 @@ def main() -> int:
         help="comma-separated names from --host-config (default: local; must exist in the map)",
     )
     parser.add_argument("--host-config", metavar="PATH", help="JSON mapping names to ssh and absolute release_root")
+    parser.add_argument("--provider-cli-pin-file", metavar="PATH", help="reviewed exact release-pair snapshot; absent snapshots cannot attest managed admission")
     parser.add_argument("--run-host", default="local", metavar="NAME", help="configured name of this machine")
     parser.add_argument("--ssh-target", action="append", default=[], metavar="NAME=ALIAS")
     parser.add_argument("--sftp-timeout", type=_positive_seconds, default=DEFAULT_SFTP_TIMEOUT_SECONDS, metavar="SECONDS")
@@ -1154,7 +1159,13 @@ def main() -> int:
             manifest = None
             binding = None
             if not args.rollback:
-                manifest = _archive(repo, args.commit, Path(temp), args.resume)
+                provider_pin=None
+                if args.provider_cli_pin_file:
+                    services_root=str(Path(__file__).resolve().parents[2])
+                    if services_root not in sys.path: sys.path.insert(0,services_root)
+                    from _shared.provider_cli_release import loads as load_provider_pin
+                    provider_pin=load_provider_pin(Path(args.provider_cli_pin_file).read_text())
+                manifest = _archive(repo, args.commit, Path(temp), args.resume,provider_cli_pin=provider_pin)
                 records["manifest"] = manifest
                 binding = _preflight_binding(args, targets, manifest, private_artifacts)
                 if args.preflight_receipt:

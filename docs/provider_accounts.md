@@ -380,11 +380,118 @@ Enable policy and configure each managed host/provider's saved default in the
 same activation window; verify an ordinary spawn with no account override.
 An enabled host without a saved default refuses ordinary spawns.
 
-Rollback disables new controls/new managed launches first and restores ordinary
-legacy admission, while existing bound agents can drain. Retain binding and
+Disabling account policy parks new launches for every retained enrolled
+host/provider. Raw commands are refused on enrolled hosts. Management readback,
+reports and owner-directed draining remain available; new work to an old release
+is fenced by the active exact pair. Retain binding and
 default rows; no database restore or account-row deletion is needed. Use the
 existing handoff before reverting to a binary that
 cannot understand named transcript roots. Keep saved defaults and immutable
 bindings coherent. Never restore stale token bytes, wipe homes or log out another
 account as rollback. Missing host/provider/account enrollment is incomplete and
 must be reported explicitly.
+
+
+## One exact fleet release pair
+
+`provider_cli.release_pin` is the daemon-owned desired state for both providers.
+Its schema-1 JSON carries a positive monotonic revision and `providers`, whose
+`claude` and `codex` entries have exact semver `version` and an `artifacts` map.
+Artifact keys are `darwin-arm64`, `darwin-x64`, `linux-arm64` or `linux-x64`;
+both providers must cover the same reviewed platform set. Each entry supplies
+HTTPS release `provenance`, `native_sha256` and `resource_sha256`. No host or
+account selects a different desired release. Paths stay in host configuration.
+
+A deployment owner prepares the reviewed complete snapshot outside source:
+
+```sh
+agent-orch account pin-status
+agent-orch account pin-set --pin-file /absolute/reviewed-pair.json \
+  --expected-revision 0 --operation-id initial-pair --reason reviewed-release
+```
+
+First initialization uses absent revision 0; the snapshot supplies revision 1.
+Every later move, including rollback, supplies the next revision and both
+providers. An unchanged provider retains its artifact map. The receiver commits
+the pair, prior record and immutable receipt atomically. Identical operation-ID
+replay returns its historical receipt; changed payload or stale CAS refuses.
+A missing or corrupt pin parks managed admission, independently of account-policy
+OFF. Minimum-only installer manifests never attest exact managed admission.
+
+Deploy compatible enforcing consumers on every participating host before initial
+activation. In the named fleet window, stage official immutable artifacts beside
+retained releases; verify their complete hashes, checkpoint/drain affected seats,
+and acquire the existing authenticated operator/local-admin host admission hold.
+Keep `PENTACLE_SEAT_OPERATOR_AUTHORITY` OFF. Source publication alone grants no
+hold, installation, pin move, native proof or restart authority.
+
+Host cell configuration names the staged `executable`, its native `version` and
+`executable_sha256`, and `resource_root` for the complete immutable package. A
+standalone file's resource digest is its byte SHA256. A directory's digest is
+SHA256 of compact sorted-key JSON containing sorted `[relative_path, file_hash]`
+pairs for every regular file. Symlinks, writable artifacts and unsupported
+platforms refuse. Optional `resource_roots` maps retained executable paths to
+their original complete resource roots, so verification never substitutes a
+new package's resources for an older binding.
+
+```sh
+agent-orch account repin --host host-a --provider claude --account primary \
+  --login-generation current-generation --new-generation release-successor \
+  --operation-id reviewed-repin --expected-pin-revision 2 \
+  --expected-pin-digest EXACT_REVIEWED_PAIR_SHA256 --reason reviewed-release
+```
+
+Repin derives its successor from the healthy current binding. It keeps the exact
+home, transcript root, profile, provider/pool identity and saved default. It proves
+native bytes/resources, subscription identity and one minimal turn, then reads
+identity and artifacts again. It never logs in, copies credentials or changes a
+home's authentication storage. The host lock and journal serialize proof and
+activation. Same-user native processes sharing the provider executable are
+ambiguous occupancy and must be drained; process environments are never read.
+The central import compares the pin, health, default and exact hold tuple. A host
+success with failed central import remains parked: reconcile that same operation
+under a valid hold, without repeating its native turn. Auth, network, quota and
+identity failures stay distinct; they never initiate login automatically.
+
+Successful immutable repin receipts link old and new binding keys. Resume,
+including automatic front-desk restore, follows only that proven same-home chain
+for the same host/provider/account. Fresh-login/enroll/adopt transitions do not
+supply repin lineage. Historical lifecycle attribution remains unchanged. CLI
+version rollback creates another verified successor pointing to retained bytes;
+it never reactivates a historical generation. If the current home is incompatible
+with the retained native client, park it for separately authorized recovery.
+
+Every new process rechecks the pair after asynchronous host verification and
+records its admitted revision/digest/artifact per lifecycle. A process created
+from an older committed admission after a pin move remains an enumerable old
+seat. New normal work input to mismatching seats is refused while queued work
+and receipts are preserved. Status/read, checkpoints, reports and closure remain
+available. Same-release artifacts need verification rather than an unnecessary
+restart.
+
+An offline host remains pending and supplies no completion proof. On return,
+current satellite/helper code admission precedes native verification; catch up
+directly to the current pair, not missed intermediate releases. Disconnect during
+an operation requires exact journal reconciliation before another operation.
+`pin-status` reports each retained active cell's expected/observed release,
+reachability, proof freshness and old seats; parked/offline cells prevent fleet
+completion. Proof freshness expires after 120 seconds and never triggers an
+installation, login or pin move.
+
+For a dead front desk, only the server-authenticated operator or verified local
+administrator may recover a pin. `pin-status` still returns the safe raw-record
+digest and retained receipt IDs for a corrupt primary. Select an approved receipt
+matching the front desk's retained healthy binding, then use:
+
+```sh
+agent-orch account pin-set --recover-receipt APPROVED_OPERATION_ID \
+  --expected-raw-digest RAW_SHA256_OR_absent --expected-high-water-revision 4 \
+  --operation-id recover-pair --reason restore-approved-pair \
+  --local-admin-token-file /absolute/private/admin-token
+```
+
+Recovery loads only the receipt's exact pair and writes a revision above all
+retained commits. It never trusts a revision parsed from corrupt bytes, accepts
+arbitrary replacement JSON, authorizes repin or bypasses normal pinned restore.
+Reverting the desired pair can fence cells already on a newer pair; inspect the
+named cells before resuming. Lost receipt history is a storage-recovery blocker.

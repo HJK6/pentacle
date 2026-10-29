@@ -10,7 +10,7 @@ from test_account_rotation import binding, policy, NOW
 
 AUTH={"token_verified":True,"stream_id":"host-a:front-desk","session_generation":"generation-one"}
 
-async def setup(path=":memory:"):
+async def setup(path=":memory:", *, initialize_pin=True):
     store=Store(path); store.start(); sessions=Sessions(store,local_host="host-a")
     runtime=AccountRuntime(store,sessions,policy=policy(),clock=lambda:NOW)
     composite=SimpleNamespace(enabled=True,env_config=SimpleNamespace(direct_primary=True,name="front-desk"),
@@ -19,6 +19,9 @@ async def setup(path=":memory:"):
     await store.open_session("host-a","front-desk",session_generation="generation-one",provider="codex")
     for alias in ("primary","spare"): await runtime.run(lambda a,alias=alias:a.register(binding(alias)))
     await runtime.run(lambda a:a.set_default(host="host-a",provider="codex",alias="primary"))
+    if initialize_pin:
+        from provider_cli_fixtures import seed_pin
+        await seed_pin(runtime)
     return store,runtime
 
 @pytest.mark.parametrize("auth",[{},dict(AUTH,token_verified=False),dict(AUTH,session_generation="old"),
@@ -52,8 +55,11 @@ def test_front_desk_defaults_and_concurrent_agents_bind_once(tmp_path):
             await runtime.operation({"action":"default-set","host":"host-a","provider":"codex","account":"primary","_auth_context":AUTH})
             assert (await store.fetch_session("host-a","two"))["account_binding"]==second.public()
             runtime.policy["enabled"]=False
-            await runtime.before_input(await store.fetch_session("host-a","two")) # drain on rollback
-            assert await choose({}) is None
+            from test_provider_cli_pin import artifact_executor
+            await artifact_executor(runtime)
+            await runtime.before_input(await store.fetch_session("host-a","two"))
+            with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
+                await choose({})
         finally: store.stop()
     asyncio.run(run())
 
@@ -117,7 +123,7 @@ def test_rollout_scope_preserves_untouched_hosts_and_never_unbinds_managed_cells
             runtime.policy["managed_hosts"]=["host-a"]
             assert await runtime.choose_launch(host="host-untouched",provider="codex",model="fixture",effort="high",message={}) is None
             runtime.policy["managed_hosts"]=[]
-            with pytest.raises(Exception,match="account_feature_off"):
+            with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
                 await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message={})
         finally: store.stop()
     asyncio.run(run())
@@ -127,7 +133,7 @@ def test_rollout_scope_preserves_untouched_hosts_and_never_unbinds_managed_cells
     {"provider":"codex","model":"gpt-5.6-sol","effort":"high"},
     {"command":"/bin/echo rollback-ready"},
 ])
-def test_policy_off_restores_pre_activation_launch_on_registered_database_copy(tmp_path, launch_request):
+def test_policy_off_parks_pre_activation_launch_on_registered_database_copy(tmp_path, launch_request):
     import sqlite3
     import launch
     from spawnctl import SpawnCtl
@@ -156,16 +162,9 @@ def test_policy_off_restores_pre_activation_launch_on_registered_database_copy(t
         runtime.store=store; runtime.sessions=Sessions(store,local_host="host-a")
         runtime.policy={"enabled":False}
         try:
-            after=await controller()._resolve_launch(message,"host-a","same-name")
-            assert after[0]==before[0]
-            # Each fresh launch mints a new token/native ID; compare admission
-            # and the complete stable tuple/observer fields, not that entropy.
-            assert {k:v for k,v in after[1].items() if k!="_deferred_launch_plan"}=={
-                k:v for k,v in before[1].items() if k!="_deferred_launch_plan"}
-            volatile={"token_hash","claude_session_id","jsonl_path"}
-            assert {k:v for k,v in after[2].items() if k not in volatile}=={
-                k:v for k,v in before[2].items() if k not in volatile}
-            assert "account_binding" not in after[2]
+            with pytest.raises(VerbError) as refused:
+                await controller()._resolve_launch(message,"host-a","same-name")
+            assert refused.value.code==("managed_command_forbidden" if "command" in launch_request else "provider_cli_pin_unavailable")
             assert (await store.fetch_session("host-a","bound-before-rollback"))["account_binding"]==binding().public()
             assert (await runtime.run(lambda a:a.defaults()))[0]["alias"]=="primary"
             assert await runtime.run(lambda a:a.bound(binding().key)) is not None
@@ -184,7 +183,7 @@ def test_policy_off_refuses_explicit_choice_and_bound_home_resume():
             runtime.policy["enabled"]=False
             for message in ({"account":"primary","_auth_context":AUTH},
                             {"resume_session_id":"native-id","_account_resume_binding":binding().public()}):
-                with pytest.raises(Exception,match="account_feature_off"):
+                with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
                     await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message=message)
         finally: store.stop()
     asyncio.run(run())

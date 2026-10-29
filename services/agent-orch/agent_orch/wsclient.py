@@ -1839,6 +1839,11 @@ async def capacity_retry_once(config: Config, payload: dict[str, Any], *, timeou
 
 
 async def account_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    if payload.get("action") in {"pin-status","pin-set"} and isinstance(payload.get("local_admin_token"),str):
+        # This separate authenticated recovery principal must not depend on a
+        # live FD/seat credential. The server still verifies loopback + token.
+        payload={k:v for k,v in payload.items() if k not in {"from_stream_id","stream_token"}}
+        return await _one_shot_rpc(config,payload,prefix="account",timeout=timeout,infer_from_env=False)
     actor = payload.get("from_stream_id")
     payload = defer_stream_token(payload, enabled=bool((actor)), keep=True)
     return await _one_shot_rpc(config, payload, prefix="account", timeout=timeout, from_stream_id=actor)

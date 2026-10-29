@@ -17,7 +17,10 @@ class AccountExecutor:
         self.execute = execute or self._execute
         self._host_locks = {}
 
-    async def _execute(self, account, action, operation_id, generation=None):
+    async def _execute(self, account, action, operation_id, generation=None, *, pin=None):
+        if action=="observe" and pin is None:
+            from provider_cli_pin import check
+            pin=await self.runtime.run(lambda a:check(a,account))
         configuration = self.runtime.policy.get("executors", {}).get(account.host)
         if not configuration or not self.hosts: raise AccountError("account_host_executor_unavailable")
         # The daemon's authenticated Hosts transport selects the destination.
@@ -26,9 +29,12 @@ class AccountExecutor:
                 "--provider", account.provider, "--account", account.alias,
                 "--login-generation", account.generation, "--operation-id", hashlib.sha256(operation_id.encode()).hexdigest()]
         if generation: args += ["--new-generation", generation]
+        if pin is not None:
+            from provider_cli_pin import canonical
+            args += ["--pin-json", canonical(pin)]
         try:
             code, output = await self.hosts.run_command(account.host, *args,
-                timeout=320 if action == "enroll" else 200 if action == "observe" else 100)
+                timeout=320 if action in {"enroll","repin"} else 200 if action == "observe" else 100)
             if len(output) > 65536: raise AccountError("account_host_response_invalid")
             result = json.loads(output)
         except AccountError: raise
@@ -41,9 +47,27 @@ class AccountExecutor:
             "provider_permission_denied", "provider_timeout", "provider_probe_failed", "provider_identity_changed",
             "subscription_identity_unverified", "provider_identity_unavailable", "provider_identity_or_cache_unverified",
             "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_cache_stale", "provider_windows_invalid",
-            "account_login_generation_stale"}:
+            "account_login_generation_stale", "provider_cli_pin_mismatch", "provider_cli_pin_unavailable",
+            "provider_cli_verification_unavailable", "account_repin_home_busy", "account_repin_occupancy_unavailable"}:
             raise AccountError("account_host_failed")
         return result
+
+    async def verify_artifact(self,account,pin):
+        from provider_cli_pin import digest
+        from provider_cli_artifact import code_identity
+        try:
+            proof=await self.execute(account,"verify-artifact",uuid.uuid4().hex,pin=pin)
+            artifact=pin["providers"][account.provider]["artifacts"].get(proof.get("platform"))
+            platform_matches=(str(proof.get("platform") or "").startswith("darwin-") if account.platform=="macos"
+                              else str(proof.get("platform") or "").startswith("linux-"))
+            if (proof.get("outcome")!="ok" or proof.get("binding_key")!=account.key
+                    or not platform_matches or not artifact or proof.get("artifact")!=artifact or proof.get("pin_revision")!=pin["revision"]
+                    or proof.get("pin_digest")!=digest(pin) or proof.get("code_identity")!=code_identity()
+                    or artifact["native_sha256"]!=account.executable_sha256):
+                raise AccountError("provider_cli_pin_mismatch")
+            return proof
+        except AccountError: raise
+        except Exception: raise AccountError("provider_cli_verification_unavailable") from None
 
     async def observe(self, account):
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
@@ -55,6 +79,16 @@ class AccountExecutor:
             observation = result.get("observation")
             if result["outcome"] == "ok" and isinstance(observation, dict) and result.get("binding_key") == account.key:
                 matched=await self.runtime.record_observation(account, observation)
+                if result.get("artifact_proof"):
+                    from provider_cli_pin import canonical,check,digest
+                    proof=result["artifact_proof"]
+                    def record(a):
+                        pin=check(a,account)
+                        if proof.get("pin_digest")!=digest(pin): raise AccountError("provider_cli_pin_mismatch")
+                        with transaction(a.conn):
+                            a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+account.key,
+                                canonical({"proof":proof,"verified_at":self.runtime.clock()})))
+                    await self.runtime.run(record)
                 if require_match and matched is not True:
                     return {"outcome":"provider_identity_or_cache_unverified"}
                 return result

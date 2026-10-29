@@ -2206,13 +2206,6 @@ class SpawnCtl:
             "state": "requested" if self._prompt_requested(msg) else "not_requested"
         }
         try:
-            account_runtime = getattr(self, "account_runtime", None)
-            if account_runtime is not None and open_flds.get("account_binding"):
-                from provider_accounts import AccountError
-                try:
-                    await account_runtime.bind_launch({**open_flds, "host": host, "stream_id": f"{host}:{name}"})
-                except AccountError as exc:
-                    raise VerbError(str(exc), str(exc), **exc.context) from None
             policy = getattr(self.sessions, "assistant", None)
             if policy is not None and policy.protects(open_flds):
                 await policy.available(
@@ -2987,6 +2980,18 @@ class SpawnCtl:
         if provider == "codex":
             # An explicitly reused name is a fresh pane, with its own Enter budget.
             self._native_trust_entered.discard(f"{host}:{name}")
+        account_runtime = getattr(self, "account_runtime", None)
+        if account_runtime is not None and not open_flds.get("account_binding"):
+            if (msg.get("command") or not provider) and await account_runtime.enrolled(host):
+                raise VerbError("managed_command_forbidden","retained managed enrollment forbids raw commands")
+            if await account_runtime.enrolled(host,provider):
+                raise VerbError("provider_cli_pin_unavailable","a retained managed launch requires a current verified binding")
+        if account_runtime is not None and open_flds.get("account_binding"):
+            from provider_accounts import AccountError
+            try:
+                await account_runtime.admit_launch({**open_flds, "host":host, "stream_id":f"{host}:{name}"})
+            except AccountError as exc:
+                raise VerbError(str(exc),str(exc),**exc.context) from None
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart
@@ -3350,7 +3355,7 @@ class SpawnCtl:
         provider = str(msg.get("provider") or "").strip()
         handoff = bool(msg.get("handoff"))
         account_runtime = getattr(self, "account_runtime", None)
-        if explicit and account_runtime is not None and (account_runtime.manages(host) or "account" in msg):
+        if explicit and account_runtime is not None and (account_runtime.manages(host) or await account_runtime.enrolled(host) or "account" in msg):
             raise VerbError("managed_command_forbidden", "managed launches require a native provider tuple")
 
         # Captured BEFORE resolution: v1 passes the model/effort FLAG to the CLI
@@ -3361,7 +3366,7 @@ class SpawnCtl:
         requested_effort = msg.get("effort")
 
         if not provider and not handoff:
-            if account_runtime is not None and account_runtime.policy.get("enabled") is True:
+            if account_runtime is not None:
                 managed = await account_runtime.run(lambda ledger: ledger.conn.execute(
                     "SELECT 1 FROM v2_account_bindings WHERE host=? LIMIT 1", (host,)).fetchone() is not None)
                 if managed or account_runtime.manages(host):

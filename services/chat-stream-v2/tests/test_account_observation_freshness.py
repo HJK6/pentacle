@@ -140,7 +140,8 @@ def test_host_stale_outcome_is_allowlisted_and_observe_budget_is_200():
             async def run_command(self,*args,**kw):seen.append(kw['timeout']);return 1,json.dumps({'outcome':'provider_cache_stale'})
         runtime=SimpleNamespace(policy={'executors':{'host-a':{'python':'/fixture/python','script':'/fixture/host.py'}}})
         executor=AccountExecutor(runtime,Hosts())
-        result=await executor._execute(binding(),'observe','fixture-op')
+        from provider_cli_fixtures import release_pair
+        result=await executor._execute(binding(),'observe','fixture-op',pin=release_pair())
         assert result['outcome']=='provider_cache_stale' and seen==[200]
     asyncio.run(journey())
 
@@ -231,7 +232,8 @@ def test_daemon_timeout_never_becomes_identity_failure():
             async def run_command(self,*args,**kwargs):raise TimeoutError()
         runtime=SimpleNamespace(policy={'executors':{'host-a':{'python':'/fixture/python','script':'/fixture/host.py'}}})
         with pytest.raises(AccountError,match='^provider_timeout$'):
-            await AccountExecutor(runtime,Hosts())._execute(binding(),'observe','timeout')
+            from provider_cli_fixtures import release_pair
+            await AccountExecutor(runtime,Hosts())._execute(binding(),'observe','timeout',pin=release_pair())
     asyncio.run(journey())
 
 

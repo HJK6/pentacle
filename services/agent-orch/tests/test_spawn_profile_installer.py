@@ -1514,3 +1514,20 @@ assert importlib.metadata.version('websockets') == sys.argv[2]
 assert importlib.util.find_spec('websockets.speedups') is None
 assert apply_mask(b'hello', b'1234') == bytes(a ^ b'1234'[i % 4] for i, a in enumerate(b'hello'))
 """, str(portable), distribution.version], check=True)
+
+
+def test_exact_provider_manifest_uses_shared_reviewed_snapshot():
+    services=str(SCRIPT.parents[2])
+    if services not in sys.path: sys.path.insert(0,services)
+    from _shared.provider_cli_release import manifest,digest
+    pin={"schema":1,"revision":7,"providers":{
+        provider:{"version":version,"artifacts":{"darwin-arm64":{
+            "provenance":"https://releases.example.test/"+provider,
+            "native_sha256":"a"*64,"resource_sha256":"b"*64}}}
+        for provider,version in (("claude","2.1.312"),("codex","0.160.0"))}}
+    metadata=manifest(pin)
+    assert metadata["codex"]["required_version"]=="0.160.0"
+    assert metadata["claude"]["pin_revision"]==7
+    assert metadata["codex"]["pin_digest"]==digest(pin)
+    assert all("minimum_version" not in entry for entry in metadata.values())
+    assert metadata["claude"]["artifacts"]==pin["providers"]["claude"]["artifacts"]

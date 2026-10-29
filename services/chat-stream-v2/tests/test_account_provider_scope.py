@@ -64,7 +64,7 @@ def test_retained_binding_prevents_legacy_fallback_after_scope_removal(retired_s
         store, runtime = await setup()
         try:
             runtime.policy.update(retired_scope)
-            with pytest.raises(AccountError, match="account_feature_off"):
+            with pytest.raises(AccountError, match="provider_cli_pin_unavailable"):
                 await choose(runtime, "codex")
             assert await choose(runtime) is None
         finally:
@@ -184,6 +184,8 @@ def test_existing_bound_seat_keeps_identity_after_scope_removal():
                 provider="codex", account_binding=account.public())
             await runtime.bind_launch(row)
             runtime.policy.update(scoped([]))
+            from test_provider_cli_pin import artifact_executor
+            await artifact_executor(runtime)
             await runtime.before_input(row)
             assert (await store.fetch_session("host-a", "bound"))["account_binding"] == account.public()
             assert await runtime.run(lambda a: asdict(a.bound(account.key))) == asdict(binding())

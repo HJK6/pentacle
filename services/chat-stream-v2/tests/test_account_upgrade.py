@@ -95,10 +95,11 @@ def test_off_safe_parking_on_exact_post_upgrade_database_copy(tmp_path):
         store = Store(copied); store.start(); runtime.store = store; runtime.policy["enabled"] = False
         try:
             await runtime.start()
-            assert await runtime.choose_launch(host=old.host, provider="codex", model="fixture", effort="high", message={}) is None
+            with pytest.raises(AccountError, match="provider_cli_pin_unavailable"):
+                await runtime.choose_launch(host=old.host, provider="codex", model="fixture", effort="high", message={})
             for message in ({"account":"ours", "_auth_context":AUTH},
                     {"resume_session_id":"native-id", "_account_resume_binding":new.public()}):
-                with pytest.raises(AccountError, match="account_feature_off"):
+                with pytest.raises(AccountError, match="provider_cli_pin_unavailable"):
                     await runtime.choose_launch(host=old.host, provider="codex", model="fixture", effort="high", message=message)
             assert await runtime.run(lambda a: a.bound(old.key)) == old
             assert await runtime.run(lambda a: a.bound(new.key)) == new

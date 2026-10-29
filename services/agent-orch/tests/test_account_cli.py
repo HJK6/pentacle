@@ -91,3 +91,54 @@ def test_front_desk_can_request_existing_handoff_to_a_named_account(monkeypatch,
     assert seen[0]["account"]=="spare" and seen[0]["handoff_from_stream_id"]=="host-a:conversation"
     assert seen[0]["initial_prompt"].startswith("Checkpoint:")
     assert "resume_session_id" not in seen[0]
+
+
+def test_pin_snapshot_and_repin_payloads_use_existing_authenticated_transport(tmp_path,monkeypatch):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"host-a:front-desk")
+    seen=[]
+    async def rpc(config,payload,**kwargs): seen.append((payload,kwargs));return {"type":"account.ok"}
+    monkeypatch.setattr(wsclient,"account_once",rpc)
+    snapshot=tmp_path/"pair.json";snapshot.write_text('{"schema":1,"revision":1}')
+    args=cli.build_parser().parse_args(["account","pin-set","--pin-file",str(snapshot),"--expected-revision","0",
+        "--operation-id","initial","--reason","reviewed"])
+    assert args.func(args)==0
+    payload,options=seen.pop()
+    assert payload["pin"]=={"schema":1,"revision":1} and payload["expected_revision"]==0
+    assert "login_generation" not in payload
+    args=cli.build_parser().parse_args(["account","repin","--host","host-a","--provider","claude","--account","primary",
+        "--login-generation","old","--new-generation","new","--operation-id","same-home",
+        "--expected-pin-revision","2","--expected-pin-digest","a"*64,"--reason","reviewed"])
+    assert args.func(args)==0
+    payload,options=seen.pop()
+    assert payload["action"]=="repin" and options["timeout"]==330
+    assert not {"home","executable","profile_ref"}&payload.keys()
+
+
+def test_duplicate_pin_json_refuses_before_rpc(tmp_path,monkeypatch):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"host-a:front-desk")
+    async def forbidden(*args,**kwargs): pytest.fail("duplicate snapshot reached transport")
+    monkeypatch.setattr(wsclient,"account_once",forbidden)
+    snapshot=tmp_path/"pair.json";snapshot.write_text('{"schema":1,"schema":2}')
+    args=cli.build_parser().parse_args(["account","pin-set","--pin-file",str(snapshot)])
+    assert args.func(args)==2
+
+
+def test_local_admin_pin_transport_does_not_depend_on_stale_seat_identity(monkeypatch):
+    import asyncio
+    from agent_orch import wsclient
+    seen=[]
+    async def rpc(config,payload,**kwargs):
+        seen.append((payload,kwargs)); return {"type":"account.ok"}
+    monkeypatch.setattr(wsclient,"_one_shot_rpc",rpc)
+    result=asyncio.run(wsclient.account_once(object(),{"type":"account","action":"pin-status",
+        "from_stream_id":"host-a:dead-fd","stream_token":"fixture-stale-seat",
+        "local_admin_token":"fixture-admin"}))
+    assert result["type"]=="account.ok"
+    payload,options=seen[0]
+    assert "from_stream_id" not in payload and "stream_token" not in payload
+    assert options["infer_from_env"] is False
+    assert payload["local_admin_token"]=="fixture-admin"

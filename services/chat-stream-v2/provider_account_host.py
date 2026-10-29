@@ -14,12 +14,13 @@ import signal
 import subprocess
 import sys
 import stat
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
     adopt, claude_observation, codex_observation, enroll, native_login, verify_binary,
-    native_run, classify_error,
+    native_run, classify_error, minimal_turn,
 )
 
 
@@ -150,7 +151,57 @@ class NativeHost:
         _mkdir(self.journal)
         write_private_json(self.journal / (_component(operation_id) + ".json"), state)
 
-    def handle(self, action, *, provider, alias, expected_generation, operation_id, generation=None):
+    def _repin(self,action,active,cell,identity,operation_id,pin):
+        from provider_cli_artifact import verify,assert_drained
+        from provider_cli_pin import digest
+        from account_revalidation import _valid_observation
+        identity={**identity,"kind":"repin","pin_revision":pin["revision"],"pin_digest":digest(pin)}
+        prior=self._read_operation(operation_id)
+        if prior:
+            if any(prior.get(k)!=v for k,v in identity.items()): raise AccountError("account_operation_conflict")
+            if prior["state"]=="done": return prior
+            if active and active.generation==identity["generation"] and prior.get("proof"):
+                result={**prior,"state":"done","outcome":"ok","binding":active.public()}
+                self._save_operation(operation_id,result)
+                return result
+            return {**prior,"outcome":"execution_unresolved"}
+        if action=="repin-status": return {"state":"absent","outcome":"execution_unresolved"}
+        if not active or active.generation!=identity["expected_generation"]:
+            raise AccountError("account_login_generation_stale")
+        if not active.enabled or not active.healthy: raise AccountError("account_unavailable")
+        _component(identity["generation"])
+        if identity["generation"]==active.generation: raise AccountError("account_generation_exists")
+        if self.registry._load()["generations"].get(":".join((active.host,active.provider,active.alias,identity["generation"]))):
+            raise AccountError("account_generation_exists")
+        target=replace(active,generation=identity["generation"],executable=cell["executable"],version=cell["version"],
+                       executable_sha256=cell["executable_sha256"])
+        proof=verify(target,cell,pin,run=self.run)
+        if (target.executable_sha256,target.version)==(active.executable_sha256,active.version):
+            proof=verify(active,cell,pin,run=self.run)
+            result={**identity,"state":"done","outcome":"no_op","binding":active.public(),"proof":proof}
+            self._save_operation(operation_id,result)
+            return result
+        assert_drained(active,run=self.run)
+        state={**identity,"state":"started","outcome":"execution_unresolved"}
+        self._save_operation(operation_id,state)
+        try:
+            before=self.observation(target)
+            if not _valid_observation(target,before): raise AccountError("account_repin_identity_invalid")
+            minimal_turn(target,model=cell["model"],effort=cell["effort"],cwd=cell["cwd"],run=self.run)
+            after=self.observation(target)
+            if not _valid_observation(target,after): raise AccountError("account_repin_identity_invalid")
+            proof=verify(target,cell,pin,run=self.run)
+            assert_drained(active,run=self.run)
+            state.update(proof=proof,observation=after)
+            self._save_operation(operation_id,state)
+            self.registry.repin(active,target)
+            result={**state,"state":"done","outcome":"ok","binding":target.public()}
+        except AccountError as exc:
+            result={**identity,"state":"done","outcome":str(exc)}
+        self._save_operation(operation_id,result)
+        return result
+
+    def handle(self, action, *, provider, alias, expected_generation, operation_id, generation=None, pin=None):
         if self.operator_browser is not None and (action != "enroll" or provider != "codex"):
             raise AccountError("account_browser_fd_invalid")
         _component(alias)
@@ -159,11 +210,29 @@ class NativeHost:
         cell = self._cell(provider, alias)
         with self.registry.lock():
             active = self.registry.active(provider, alias, self.config["host"])
+            if action in {"verify-artifact","repin","repin-status"}:
+                from provider_cli_pin import validate
+                try: pin=validate(pin)
+                except ValueError: raise AccountError("provider_cli_pin_unavailable") from None
+                if action=="verify-artifact":
+                    from provider_cli_artifact import verify
+                    if not active or active.generation!=expected_generation: raise AccountError("account_login_generation_stale")
+                    return verify(active,cell,pin,run=self.run)
+                identity={"provider":provider,"alias":alias,"expected_generation":expected_generation,"generation":generation}
+                return self._repin(action,active,cell,identity,operation_id,pin)
             if action == "observe":
                 if active is None or active.generation != expected_generation:
                     raise AccountError("account_login_generation_stale")
+                proof=None
+                if pin is not None:
+                    from provider_cli_pin import validate
+                    from provider_cli_artifact import verify
+                    try: pin=validate(pin)
+                    except ValueError: raise AccountError("provider_cli_pin_unavailable") from None
+                    proof=verify(active,cell,pin,run=self.run)
                 result = self._probe_observation(active)
-                return {"outcome": "ok", "binding_key": active.key, "observation": result}
+                return {"outcome": "ok", "binding_key": active.key, "observation": result,
+                        **({"artifact_proof":proof} if proof else {})}
             if action not in {"enroll", "adopt", "status"}: raise AccountError("account_action_invalid")
             if action == "adopt" and not cell.get("adopt_home"): raise AccountError("account_adopt_unsupported")
             prior = self._read_operation(operation_id)
@@ -214,13 +283,14 @@ class NativeHost:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("observe", "enroll", "adopt", "status"))
+    parser.add_argument("action", choices=("observe", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status"))
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--login-generation", required=True)
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--new-generation")
     parser.add_argument("--operator-browser-fd", type=int)
+    parser.add_argument("--pin-json")
     args = parser.parse_args(argv)
     # The location is host-owned configuration, never a worker's --target.
     path = Path.home() / ".config/pentacle/provider-account-host.json"
@@ -233,9 +303,10 @@ def main(argv=None):
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(300 if args.action in {"enroll", "adopt"} else 180 if args.action == "observe" else 90)
+        signal.alarm(300 if args.action in {"enroll", "adopt", "repin"} else 180 if args.action == "observe" else 90)
         result = NativeHost(config, operator_browser=browser).handle(args.action, provider=args.provider, alias=args.account,
-            expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation)
+            expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation,
+            pin=json.loads(args.pin_json) if args.pin_json else None)
         print(json.dumps(result))
         return 0
     except AccountError as exc:

@@ -27,7 +27,8 @@ class AccountError(ValueError):
 
     def __init__(self, code, **context):
         super().__init__(code)
-        self.context = {k:v for k,v in context.items() if k in {"host","provider","account"} and isinstance(v,str)}
+        safe = {"host", "provider", "account", "reason", "expected_version", "observed_version", "next_action", "pin_revision"}
+        self.context = {k:v for k,v in context.items() if k in safe and type(v) in {str, int}}
 
 
 def _serialized(method):
@@ -149,7 +150,7 @@ class Binding:
             "transcript_root": self.transcript_root}
 
 
-def validate_home(binding: Binding, root: Path, adopted: Mapping[str, str] | None = None) -> None:
+def validate_home(binding: Binding, root: Path, adopted: Mapping[str, str] | None = None, *, _registry_anchor=None) -> None:
     for value in (binding.alias, binding.host, binding.generation):
         _component(value)
     if binding.provider not in {"codex", "claude"} or binding.platform not in {"macos", "wsl"}:
@@ -161,7 +162,13 @@ def validate_home(binding: Binding, root: Path, adopted: Mapping[str, str] | Non
             raise AccountError("account_home_owner_conflict")
         _private(Path(binding.home), directory=True)
     else:
-        expected = root / binding.host / binding.provider / binding.alias / binding.generation
+        generation=binding.generation
+        if _registry_anchor is not None:
+            if any(getattr(binding,k)!=getattr(_registry_anchor,k) for k in
+                   ("host","provider","alias","home","profile_ref","platform","provider_id","pool_id")):
+                raise AccountError("account_home_owner_conflict")
+            generation=_registry_anchor.generation
+        expected = root / binding.host / binding.provider / binding.alias / generation
         if not root.is_absolute() or Path(binding.home) != expected:
             raise AccountError("account_home_outside_registry")
         current = root
@@ -329,7 +336,18 @@ class Registry:
         write_private_json(self.path, data)
 
     def _validate_home(self, binding: Binding) -> None:
-        validate_home(binding, self.root, self.adopted)
+        state=self._load()
+        anchor=None
+        if binding.home not in self.adopted and Path(binding.home).name!=binding.generation:
+            if state["generations"].get(binding.key)!=asdict(binding):
+                raise AccountError("account_home_outside_registry")
+            for raw in state["generations"].values():
+                candidate=Binding(**raw)
+                if candidate.home==binding.home and Path(candidate.home)==self.root/candidate.host/candidate.provider/candidate.alias/candidate.generation:
+                    anchor=candidate
+                    break
+            if anchor is None: raise AccountError("account_home_outside_registry")
+        validate_home(binding, self.root, self.adopted, _registry_anchor=anchor)
         if binding.home in self.adopted:
             owner = (binding.host, binding.provider, binding.alias)
             # Historical generations retain ownership across config edits/restarts.
@@ -416,6 +434,8 @@ class Registry:
     @_serialized
     def activate(self, draft: Binding, receipt: Mapping, *, expected_provider_id: str) -> Binding:
         self._validate_home(draft)
+        if any(row["home"]==draft.home for row in self._load()["generations"].values()):
+            raise AccountError("account_generation_exists")
         store = "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file"
         if (receipt.get("outcome", "ok") != "ok" or receipt.get("auth_mode") != "subscription"
                 or receipt.get("provider_id") != expected_provider_id or not expected_provider_id
@@ -452,6 +472,21 @@ class Registry:
         result = [Binding(**state["generations"][key]) for key in state["active"].values()]
         for binding in result: self._validate_home(binding)
         return result
+
+    @_serialized
+    def repin(self, old: Binding, successor: Binding) -> Binding:
+        state=self._load()
+        if state["active"].get(f"{old.host}:{old.provider}:{old.alias}")!=old.key:
+            raise AccountError("account_login_generation_stale")
+        self._validate_home(old)
+        if successor.key in state["generations"]: raise AccountError("account_generation_exists")
+        changed={"generation","executable","executable_sha256","version"}
+        if any(getattr(old,k)!=getattr(successor,k) for k in asdict(old) if k not in changed):
+            raise AccountError("account_repin_binding_invalid")
+        state["generations"][successor.key]=asdict(successor)
+        state["active"][f"{old.host}:{old.provider}:{old.alias}"]=successor.key
+        self._save(state)
+        return successor
 
 
 def write_private_json(path: Path, data: dict):

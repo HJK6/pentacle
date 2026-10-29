@@ -1901,15 +1901,18 @@ class Comms:
                         )
                 await self._assert_claude_send_ready(plan.route)
                 account_runtime = getattr(self, "account_runtime", None)
-                if account_runtime is not None:
-                    from provider_accounts import AccountError
-                    try:
-                        await account_runtime.before_input(await self.store.fetch_session(host, name) or {})
-                    except AccountError as exc:
-                        raise VerbError(str(exc), str(exc), phase="not_started") from None
-                if self.capacity_retry is not None:
-                    await self.capacity_retry.cancel_input(target)
-                confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
+                from contextlib import AsyncExitStack
+                async with AsyncExitStack() as pin_guard:
+                    if account_runtime is not None:
+                        from provider_accounts import AccountError
+                        try:
+                            await pin_guard.enter_async_context(account_runtime.input_guard(
+                                await self.store.fetch_session(host, name) or {}))
+                        except AccountError as exc:
+                            raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+                    if self.capacity_retry is not None:
+                        await self.capacity_retry.cancel_input(target)
+                    confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
                 provider_queued = (
                     not active_draft and pane_mode_reason is None
                     and await self._prompt_in_native_queue(target, provider, plan.wire_text)

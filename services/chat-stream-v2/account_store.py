@@ -146,17 +146,20 @@ class AccountStore:
         return self._available(self.conn.execute("SELECT * FROM v2_account_bindings WHERE binding_key=?",(key,)).fetchone())
 
     def bind_session(self,row):
+        with transaction(self.conn):
+            self._bind_session(row)
+
+    def _bind_session(self,row):
         account=row.get("account_binding")
         if not account: return
         key=":".join(str(account.get(k) or "") for k in ("host","provider","alias","generation"))
-        with transaction(self.conn):
-            binding=self.ensure_available(key)
-            if binding.public() != dict(account,default_revision=0): raise AccountError("account_launch_binding_mismatch")
-            existing=self.conn.execute("SELECT data FROM v2_account_session_bindings WHERE stream_id=? AND generation=?",
-                (row["stream_id"],row["session_generation"])).fetchone()
-            if existing and json.loads(existing[0]) != account: raise AccountError("account_launch_binding_mismatch")
-            self.conn.execute("INSERT OR IGNORE INTO v2_account_session_bindings VALUES (?,?,?,?)",
-                (row["stream_id"],row["session_generation"],key,json.dumps(account)))
+        binding=self.ensure_available(key)
+        if binding.public() != dict(account,default_revision=0): raise AccountError("account_launch_binding_mismatch")
+        existing=self.conn.execute("SELECT data FROM v2_account_session_bindings WHERE stream_id=? AND generation=?",
+            (row["stream_id"],row["session_generation"])).fetchone()
+        if existing and json.loads(existing[0]) != account: raise AccountError("account_launch_binding_mismatch")
+        self.conn.execute("INSERT OR IGNORE INTO v2_account_session_bindings VALUES (?,?,?,?)",
+            (row["stream_id"],row["session_generation"],key,json.dumps(account)))
 
     def observe(self,key,observation,*,now):
         with transaction(self.conn):
