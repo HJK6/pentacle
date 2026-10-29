@@ -359,7 +359,7 @@ class QueuedSendNow:
             with conn:
                 for row in conn.execute("SELECT k,v FROM kv WHERE k LIKE ?", (PREFIX + "%",)).fetchall():
                     value = json.loads(row[1])
-                    if value["stream_id"] == sid and value["generation"] == generation and value["state"] not in TERMINAL:
+                    if value["stream_id"] == sid and value["generation"] == generation and value["state"] not in {"completed", "cancelled"}:
                         value.update(state="cancelled", reason="explicit_stop")
                         conn.execute("UPDATE kv SET v=? WHERE k=?", (json.dumps(value), row[0]))
         await self.store.submit(operation)

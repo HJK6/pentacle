@@ -176,12 +176,16 @@ def test_codex_exact_abort_then_native_intake_then_continue_uses_real_send_dedup
     asyncio.run(run())
 
 
-def test_stop_or_generation_replacement_cancels_before_continuation():
+@pytest.mark.parametrize('uncertain_key', [False, True])
+def test_stop_or_generation_replacement_cancels_before_continuation(uncertain_key):
     async def run():
         for replace in (False, True):
             h = await setup()
             try:
                 await h.controller.send(message())
+                if uncertain_key:
+                    key = h.controller.operation_key(SID, GEN, 'selected')
+                    await h.controller._record(key, update={'state': 'indeterminate', 'reason': 'key_dispatch_uncertain'})
                 await signal(h, 'turn_aborted'); await intake(h)
                 if replace: await h.store.update_session('fixture', 'v2-capacity', status='closed')
                 else:
