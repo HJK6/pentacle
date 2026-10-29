@@ -52,7 +52,7 @@ def _batch(arguments):
 
 def inputs():
     root=Path(__file__).resolve().parents[3]
-    selected=[*Path(__file__).parent.glob("repin_*matrix*.py"),Path(__file__).parent/"test_account_repin.py",
+    selected=[*Path(__file__).parent.glob("repin_*matrix*.py"),*Path(__file__).parent.glob("test_*.py"),Path(__file__).parent/"test_account_repin.py",
         Path(__file__).parent/"test_account_repin_state_machine.py"]
     for pattern in ("services/chat-stream-v2/account*.py","services/chat-stream-v2/provider_account*.py",
             "services/chat-stream-v2/provider_cli*.py","services/_shared/provider_cli_release.py",
@@ -60,7 +60,9 @@ def inputs():
         selected.extend(root.glob(pattern))
     head=subprocess.check_output(["git","rev-parse","HEAD"],cwd=root,text=True).strip()
     tree=subprocess.check_output(["git","rev-parse","HEAD^{tree}"],cwd=root,text=True).strip()
-    return {"candidate_sha":head,"candidate_tree":tree,"files":{str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(set(selected))},
+    dirty=subprocess.check_output(["git","status","--porcelain"],cwd=root,text=True)
+    diff=subprocess.check_output(["git","diff","--binary","HEAD"],cwd=root)
+    return {"candidate_sha":head,"candidate_tree":tree,"worktree_status":dirty,"worktree_diff_sha256":hashlib.sha256(diff).hexdigest(),"files":{str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(set(selected))},
         "python":sys.version,"executable":sys.executable,"platform":platform.platform(),
         "gate_evidence_dir":os.environ["PENTACLE_GATE_EVIDENCE_DIR"]}
 

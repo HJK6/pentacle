@@ -14,7 +14,7 @@ from provider_cli_pin import digest
 from sessions import VerbError
 from test_account_runtime import AUTH
 
-CELLS=tuple((p,s,a) for p,s in (("codex","macos"),("codex","wsl"),("claude","macos"),("claude","wsl")) for a in ("repin","sai"))
+CELLS=tuple((p,s,a) for p,s in (("codex","macos"),("codex","wsl"),("claude","macos"),("claude","wsl")) for a in ("ours","sai"))
 PINS=((0,"identical"),)+tuple(itertools.product((1,3),("identical","other-provider","version","native","resources","rollback-central","rollback-tip")))
 CONNECTIVITY=("online","return","flap")
 MODES=("root","reconcile")

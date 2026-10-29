@@ -220,7 +220,7 @@ def test_in_scope_codex_health_revalidation_still_works(tmp_path):
             result = await runtime.operation(await request(runtime, account))
             assert result["result"]["outcome"] == "health_revalidated"
             assert (await state(runtime, account))["health"] == "healthy"
-            assert calls == [(account.key, "observe")]
+            assert calls == [(account.key, "observe-bound")]
         finally:
             store.stop()
     asyncio.run(journey())

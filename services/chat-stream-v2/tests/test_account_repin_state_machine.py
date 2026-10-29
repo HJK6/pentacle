@@ -422,8 +422,8 @@ def test_b_generation_exclusion_before_host_action(tmp_path,monkeypatch,action):
     async def run():
         store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
         execute=runtime.executor.execute
-        async def offline(*a,**kw):raise AccountError("account_host_unreachable")
-        runtime.executor.execute=offline
+        from repin_state_matrix import outage_after_admission
+        runtime.executor.execute=outage_after_admission(execute)
         try:
             with pytest.raises(VerbError):await runtime.operation(request)
             runtime.executor.execute=execute;before=list(calls)

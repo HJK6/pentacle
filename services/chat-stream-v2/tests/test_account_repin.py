@@ -27,7 +27,7 @@ def test_healthy_same_home_repin_is_a_distinct_receiver_journey(provider,tmp_pat
     asyncio.run(run())
 
 
-async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False,alias="repin",central_public=False,transport=False):
+async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,adopted=False,alias="repin",central_public=False,transport=False,database=None):
     import hashlib
     from pathlib import Path
     from types import SimpleNamespace
@@ -61,7 +61,7 @@ async def host_journey(tmp_path,monkeypatch,provider="codex",platform="macos",*,
     from provider_accounts import Binding
     old=host.registry.active(provider,alias,"host-a")
     host.config["mutation_clearance"]="required"
-    store,runtime=await setup()
+    store,runtime=await setup(str(database) if database else ":memory:")
     await runtime.run(lambda a:a.register(replace(old,profile_ref="") if central_public else old))
     await runtime.run(lambda a:a.set_default(host="host-a",provider=provider,alias=alias))
     await store.set_spawn_admission_hold("host-a",held_until=NOW+1000,reason="repin fixture")
