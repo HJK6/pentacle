@@ -105,7 +105,9 @@ def test_errors_and_plain_status(monkeypatch, capsys):
         assert e.value.code == 2
 
 
-def test_rpc_public_status_and_authenticated_mutators(monkeypatch):
+def test_rpc_public_status_and_authenticated_mutators(monkeypatch, tmp_path):
+    from agent_orch.config import Config
+    cfg = Config("ws://fixture.invalid", "", "test", tmp_path)
     calls = []
 
     async def rpc(config, payload, **kw):
@@ -116,14 +118,14 @@ def test_rpc_public_status_and_authenticated_mutators(monkeypatch):
     monkeypatch.setattr(wsclient, "_one_shot_rpc", rpc)
     monkeypatch.setattr(wsclient, "_resolved_rpc_from_stream_id", lambda: "test:seat")
     monkeypatch.setattr("agent_orch.send_boundary.stream_token_from_env", lambda: "fixture-token")
-    asyncio.run(wsclient.screen_lease_once(object(), {"type": "screen.lease.status"}))
+    asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.status"}))
     assert "stream_token" not in calls[-1][0] and calls[-1][1]["from_stream_id"] is None
     for v in ["acquire", "renew", "release"]:
-        asyncio.run(wsclient.screen_lease_once(object(), {"type": "screen.lease." + v}))
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease." + v}))
         assert (
             calls[-1][0]["from_stream_id"] == "test:seat"
             and calls[-1][0]["stream_token"] == "fixture-token"
         )
         assert "screen.lease." + v not in wsclient.RPC_RETRY_ELIGIBLE_TYPES
     with pytest.raises(ValueError):
-        asyncio.run(wsclient.screen_lease_once(object(), {"type": "tell"}))
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "tell"}))

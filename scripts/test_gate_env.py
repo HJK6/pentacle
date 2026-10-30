@@ -940,7 +940,7 @@ class MigratedTargets(Tmp):
         self.assertEqual(target["max_timeout_s"], 2100)
         self.assertEqual(profile["targets"]["v2-unit"]["timeout_s"], 900)
         self.assertEqual(standard["timeout_s"], 1800)
-        self.assertEqual(profile["targets"]["v2-merge-ci"]["tier_timeouts"], {"unit": 1500, "smoke": 900})
+        self.assertEqual(profile["targets"]["v2-merge-ci"]["tier_timeouts"], {"unit": 2100, "smoke": 900})
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S": "1", "V2_SMOKE_TIMEOUT_S": "1"})
@@ -959,13 +959,13 @@ class MigratedTargets(Tmp):
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S":"1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("1500","900"))
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("2100","900"))
         cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
                                        self.tmp / "ev",self.tmp / "t/b",[],target["timeout_s"],env)
         self.assertNotIn("--timeout-seconds",cmd)  # runner reads the reviewed per-tier limits
         self.assertIn("merge",cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds")+1]),2520)
-        self.assertEqual(result["wall_s"],2550)  # existing outer startup/teardown slack
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds")+1]),3120)
+        self.assertEqual(result["wall_s"],3150)  # existing outer startup/teardown slack
 
     def test_cli_and_shared_targets_use_their_own_roots_without_foreign_plugin(self):
         cfg = ge.load_config(); profile = cfg["profiles"]["pentacle"]

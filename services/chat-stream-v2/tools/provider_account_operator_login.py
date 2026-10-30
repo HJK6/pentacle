@@ -128,12 +128,19 @@ def relay(argv, operation_id, *, publish=publish_url, popen=subprocess.Popen, ti
             raise AccountError("account_enrollment_failed")
         return result | {"outcome": "ok"}
     finally:
-        selector.close()
-        # This group contains only the child SSH process, never a fleet seat.
-        try: os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
-        process.wait(timeout=5)
-        process.stdout.close(); process.stderr.close()
+        original = sys.exception()
+        try:
+            selector.close()
+            # This group contains only the child SSH process, never a fleet seat.
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError): pass
+            process.wait(timeout=5)
+        except Exception as cleanup_error:
+            if original is None:
+                raise
+            original.add_note("operator relay cleanup failed: " + type(cleanup_error).__name__)
+        finally:
+            process.stdout.close(); process.stderr.close()
 
 
 def enrollment_command(args, policy, machines, *, clearance=None):

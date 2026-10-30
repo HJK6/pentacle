@@ -55,6 +55,8 @@
     "test_harness_reaping.py::test_recycled_pgid_with_different_start_time_is_not_signalled",
     "test_harness_reaping.py::test_sigkill_then_reap_manifest_cleans",
     "test_harness_reaping.py::test_sigterm_reaps_owned_processes",
+    "test_harness_reaping.py::test_socket_exit_during_identity_read_is_terminal",
+    "test_harness_reaping.py::test_socket_reap_refuses_unverified_live_fixture",
     "test_harness_reaping.py::test_stale_reap_live_group_requires_terminal_absence",
     "test_run_gate_basetemp_cleanup.py::test_gate_removes_tier_basetemps_and_keeps_evidence",
     "test_run_gate_basetemp_cleanup.py::test_gate_retains_unresolved_cleanup_and_original_failure",

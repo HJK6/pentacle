@@ -705,3 +705,120 @@ def test_owned_group_exit_between_identity_check_and_registration(tmp_path: Path
     finally:
         if victim.poll() is None: victim.kill()
         victim.wait(timeout=5)
+
+
+@pytest.mark.requires("tmux usable", "process start identity readable")
+@pytest.mark.parametrize("boundary", ["initial"] +
+    (["registered-absent-root"] if sys.platform.startswith("linux") else []))
+def test_socket_exit_during_identity_read_is_terminal(tmp_path: Path, monkeypatch, boundary):
+    """Real exit/reap between the old exists probe and identity observation."""
+    from tests.soak.harness import TmuxNamespace
+    from tools import gate_owner_manifest as owner
+
+    namespace = TmuxNamespace(tmp_path)
+    server = subprocess.Popen(
+        [namespace.real_tmux, "-D", "-f", "/dev/null", "-S", namespace.socket],
+        env=namespace.child_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not namespace.socket_path.is_socket():
+            assert server.poll() is None and time.monotonic() < deadline
+            time.sleep(.01)
+        assert namespace.run("set-option", "-g", "@v2_gate_nonce", namespace.nonce).returncode == 0
+        assert int(namespace.run("display-message", "-p", "#{pid}").stdout.strip()) == server.pid
+        root, sock = namespace.root.stat(), namespace.socket_path.lstat()
+        binding = dict(nonce=namespace.nonce, server_pid=server.pid,
+            server_start_identity=owner.process_start_identity(server.pid),
+            root_dev=root.st_dev, root_ino=root.st_ino,
+            socket_dev=sock.st_dev, socket_ino=sock.st_ino)
+        original_identity, original_objects = owner.process_start_identity, owner._socket_objects
+        observations = 0
+
+        def identity_after_exit(pid):
+            nonlocal observations
+            assert pid == server.pid
+            observations += 1
+            if observations == (1 if boundary == "initial" else 2):
+                server.terminate()  # Only this Popen fixture, no ambient process/group.
+                server.wait(timeout=5)
+            return original_identity(pid)
+
+        def remove_own_root(socket, recorded):
+            namespace.socket_path.unlink()
+            namespace.root.rmdir()
+            return original_objects(socket, recorded)
+
+        monkeypatch.setattr(owner, "process_start_identity", identity_after_exit)
+        if boundary == "registered-absent-root":
+            monkeypatch.setattr(owner, "_socket_objects", remove_own_root)
+        with _server_exit_watch(server.pid) as exited:
+            owner._reap_socket(namespace.socket, binding, time.monotonic() + 5, namespace.real_tmux)
+            assert exited(), "actual kernel exit is required, never identity absence alone"
+        assert server.poll() is not None
+        assert not namespace.socket_path.exists() and not namespace.root.exists()
+    finally:
+        if server.poll() is None:
+            server.terminate()
+        server.wait(timeout=5)
+        # Only the fixture's private filesystem objects; no unchecked tmux transport.
+        if namespace.socket_path.exists():
+            namespace.socket_path.unlink()
+        if namespace.root.exists():
+            namespace.root.rmdir()
+
+
+@pytest.mark.requires("process start identity readable")
+@pytest.mark.parametrize("case", ["unreadable", "unreadable-absent-root", "recycled", "replaced-root"])
+def test_socket_reap_refuses_unverified_live_fixture(tmp_path: Path, monkeypatch, case):
+    import socket
+    from tests.soak.harness import TmuxNamespace
+    from tools import gate_owner_manifest as owner
+
+    namespace, victim = TmuxNamespace(tmp_path), _sleeper()
+    endpoint = socket.socket(socket.AF_UNIX)
+    replacement = None
+    moved = namespace.root.with_name(namespace.root.name + "-retained")
+    try:
+        endpoint.bind(namespace.socket)
+        root, sock = namespace.root.stat(), namespace.socket_path.lstat()
+        binding = dict(nonce=namespace.nonce, server_pid=victim.pid,
+            server_start_identity=owner.process_start_identity(victim.pid),
+            root_dev=root.st_dev, root_ino=root.st_ino,
+            socket_dev=sock.st_dev, socket_ino=sock.st_ino)
+        if case == "unreadable-absent-root":
+            namespace.socket_path.unlink()
+            namespace.root.rmdir()
+        elif case == "replaced-root":
+            namespace.root.rename(moved)
+            namespace.root.mkdir(mode=0o700)
+            replacement = socket.socket(socket.AF_UNIX)
+            replacement.bind(namespace.socket)
+        if case.startswith("unreadable"):
+            monkeypatch.setattr(owner, "process_start_identity", lambda pid: None)
+        elif case == "recycled":
+            monkeypatch.setattr(owner, "process_start_identity", lambda pid: "different-instance")
+        real_popen = owner._REAL_POPEN
+
+        def no_foreign_transport(argv, *args, **kwargs):
+            assert argv[0] != namespace.real_tmux, "must refuse before a tmux connection"
+            return real_popen(argv, *args, **kwargs)
+
+        monkeypatch.setattr(owner, "_REAL_POPEN", no_foreign_transport)
+        with pytest.raises(owner.ManifestError, match="identity|root"):
+            owner._reap_socket(namespace.socket, binding, time.monotonic() + 5, namespace.real_tmux)
+        assert victim.poll() is None
+        if case != "unreadable-absent-root":
+            assert namespace.socket_path.is_socket() and namespace.root.exists()
+    finally:
+        victim.kill()
+        victim.wait(timeout=5)
+        endpoint.close()
+        if replacement is not None:
+            replacement.close()
+        for root in [namespace.root, moved]:
+            if (root / "s").exists():
+                (root / "s").unlink()
+            if root.exists():
+                root.rmdir()

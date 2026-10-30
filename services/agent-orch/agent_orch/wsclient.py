@@ -1776,6 +1776,9 @@ async def screen_lease_once(config: Config, payload: dict[str, Any], *, timeout:
         payload = defer_stream_token(payload, enabled=bool(actor), keep=False,
                                      from_stream_id=actor, identity_with_token=True)
     payload.setdefault("request_id", f"screen-{uuid.uuid4()}")
+    identity = resolve_outbound_identity(actor)
+    if identity.kind not in {"service", "ambiguous"} and resolve_operator_token(config).form == "envelope":
+        return await _operator_envelope_rpc(config, payload, caller=actor, prefix=verb, timeout=timeout)
     return await _one_shot_rpc(config, payload, prefix=verb, timeout=timeout, from_stream_id=actor)
 
 
@@ -1964,40 +1967,49 @@ async def repo_once(
     return await _one_shot_rpc(config, payload, prefix="repo", timeout=timeout)
 
 
-async def _catalog_operator_rpc(config: Config, payload: dict[str, Any], *,
-                                caller: str | None, timeout: float) -> dict[str, Any]:
-    # This new command also supports a credential connection without a seat.
+async def _operator_envelope_rpc(config: Config, payload: dict[str, Any], *,
+                                 caller: str | None, prefix: str, timeout: float) -> dict[str, Any]:
     # Reuse the existing envelope/proof protocol; never send its proof key or
     # fall back to legacy bearer authentication after a credential failure.
     from _shared import operator_auth
     deadline = time.monotonic() + timeout
+    if _OWNER_DEADLINE.get() is not None:
+        deadline = min(deadline, _OWNER_DEADLINE.get())
     keepalive = _websocket_keepalive_from_env()
     ws = await asyncio.wait_for(websockets.connect(
         config.ws_url, max_size=WEBSOCKET_MAX_SIZE,
         ping_interval=keepalive.ping_interval, ping_timeout=keepalive.ping_timeout,
-        close_timeout=keepalive.close_timeout), timeout=timeout)
+        close_timeout=keepalive.close_timeout), timeout=max(0.0, deadline - time.monotonic()))
     _own_socket(ws)
     try:
-        welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic())))
-        challenge = welcome.get("auth", {}).get("operator", {})
-        if (welcome.get("type") != "welcome" or challenge.get("protocol_version") != 2
+        welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.0, deadline - time.monotonic())))
+        auth = welcome.get("auth")
+        challenge = auth.get("operator") if isinstance(auth, dict) else None
+        if (welcome.get("type") != "welcome" or not isinstance(challenge, dict) or challenge.get("protocol_version") != 2
                 or challenge.get("scheme") != operator_auth.AUTH_SCHEME):
             raise ValueError("operator credential challenge unavailable")
         hello = _rpc_hello(config, from_stream_id=caller)
-        await asyncio.wait_for(send_frame(ws, hello, config=config, explicit_from_stream_id=caller, challenge=challenge, compact=False), timeout=max(0.01, deadline - time.monotonic()))
+        await asyncio.wait_for(send_frame(ws, hello, config=config, explicit_from_stream_id=caller, challenge=challenge, compact=False), timeout=max(0.0, deadline - time.monotonic()))
         while True:
-            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.01, deadline - time.monotonic())))
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(0.0, deadline - time.monotonic())))
             if frame.get("type") == "ping":
                 await asyncio.wait_for(send_uncredentialed(ws, {"type": "pong"}, compact=False),
-                                       timeout=max(0.01, deadline - time.monotonic()))
+                                       timeout=max(0.0, deadline - time.monotonic()))
                 continue
             if frame.get("type") != "ready":
                 raise PermissionError("operator credential RPC admission refused")
             break
-        await asyncio.wait_for(send_frame(ws, payload, config=config, explicit_from_stream_id=caller, compact=False), timeout=max(0.01, deadline - time.monotonic()))
-        return await _read_rpc_response(ws, payload["request_id"], prefix="dashboard", deadline=deadline)
+        await asyncio.wait_for(send_frame(ws, payload, config=config, explicit_from_stream_id=caller, compact=False), timeout=max(0.0, deadline - time.monotonic()))
+        return await asyncio.wait_for(
+            _read_rpc_response(ws, payload["request_id"], prefix=prefix, deadline=deadline),
+            timeout=max(0.0, deadline - time.monotonic()))
     finally:
         await _close_within(ws, deadline)
+
+
+async def _catalog_operator_rpc(config: Config, payload: dict[str, Any], *,
+                                caller: str | None, timeout: float) -> dict[str, Any]:
+    return await _operator_envelope_rpc(config, payload, caller=caller, prefix="dashboard", timeout=timeout)
 
 
 async def dashboard_once(config: Config, payload: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
