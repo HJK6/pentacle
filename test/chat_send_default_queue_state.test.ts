@@ -213,3 +213,40 @@ for (const provider of ['claude', 'codex']) {
     await settle(); assert.equal(calls.length, 0); controller.dispose();
   });
 }
+
+test('three provider-queued operator messages survive helper filtering and reconcile in final order', async () => {
+  const { controller, sends } = setup();
+  const texts = ['so plan is ready nwo?', 'review with em before we implement', 'review with em before implementation'];
+  const ids: string[] = [];
+  const rows = () => controller.selectSessionDetail(STREAM).transcriptItems.filter(row => row.isUser);
+  controller.setSendBridge(async args => {
+    sends.push(args);
+    controller.applyFrame({ type: 'send.result', request_id: args.requestId, to_stream_id: STREAM,
+      delivery: 'landed', submission_confirmed: true, provider_queued: true, reason: 'provider_queued' });
+    return { ok: true, delivery: 'landed', submission_confirmed: true, provider_queued: true };
+  });
+  try {
+    for (const text of texts) {
+      ids.push(controller.sendTurn(STREAM, text));
+      assert.equal(rows().find(row => row.optimisticId === ids.at(-1))?.text, text);
+      await settle();
+      assert.equal(rows().length, ids.length);
+      assert.ok(rows().every(row => row.providerQueued === true));
+      assert.equal(rows().at(-1)?.receiptCaption, 'queued');
+    }
+    for (const [index, send] of sends.entries()) {
+      controller.applyFrame({ type: 'chat.event', event: {
+        daemon_seq: 900 + index, host: 'peer', provider: 'claude', stream_id: STREAM,
+        session_name: 'queue-seat', timestamp: new Date(Date.now() + 1000 + index).toISOString(), kind: 'USER',
+        text: send.text, optimistic_id: send.optimisticId, request_id: send.requestId,
+        receipt_state: 'landed', receipt_delivery: 'landed', raw: { source: 'structured', transport: 'claude-jsonl' },
+      } });
+      const row = rows().find(row => row.optimisticId === ids[index]);
+      assert.equal(row?.correlatedDaemonSeq, 900 + index);
+      assert.equal(Boolean(row?.providerQueued), false);
+    }
+    assert.deepEqual(rows().map(row => row.text), texts);
+    assert.equal(rows().at(-1)?.receiptCaption, 'sent');
+    assert.equal(Object.keys(controller.getState().optimisticSends ?? {}).length, 0);
+  } finally { controller.dispose(); }
+});
