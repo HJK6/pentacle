@@ -13,7 +13,7 @@ import {
   optimisticMatchesServerUser,
   parseServerEventTimeStrict,
 } from './optimisticMatch';
-import { isCodexHelperSuggestion, isTerminalDividerText, isTransientTranscriptNoise } from './pentacleEventInterpreter';
+import { isHelperSuggestionEvent, isTerminalDividerText, isTransientTranscriptNoise } from './pentacleEventInterpreter';
 import { normalizePentacleHost } from './pentacleHosts';
 import { logTelemetry } from '../utils/telemetry';
 import { TELEMETRY_EVENTS } from '../utils/telemetryEvents';
@@ -1704,10 +1704,6 @@ function isClaudeJsonlEvent(event: PentacleEvent) {
   return event.raw?.source === 'claude-jsonl';
 }
 
-function isHelperSuggestionEvent(event: PentacleEvent) {
-  return String(event.kind || '').toUpperCase() === 'USER' && isCodexHelperSuggestion(event.text);
-}
-
 function normalizeSession(summary: PentacleSessionSummary): PentacleSessionSummary {
   const host = normalizePentacleHost(summary.host);
   if (!("agents" in summary)) return host === summary.host ? summary : { ...summary, host };
@@ -1817,8 +1813,7 @@ function stripTransientSummary(
   summary: PentacleSessionSummary,
   existing?: PentacleSessionSummary,
 ): PentacleSessionSummary {
-  const isHelperSummary = String(summary.last_kind || '').toUpperCase() === 'USER' && isCodexHelperSuggestion(summary.last_text);
-  const cleanSummary = (!summary.last_text || (!isHelperSummary && !isTransientTranscriptNoise(summary.last_text)))
+  const cleanSummary = (!summary.last_text || !isTransientTranscriptNoise(summary.last_text))
     ? summary
     : {
         ...summary,

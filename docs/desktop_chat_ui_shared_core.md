@@ -47,6 +47,8 @@ Reply buttons are an opt-in transcript affordance. The renderer suppresses them 
 
 The latest user row derives a receipt caption from its correlated durable echo (see the send-receipt design note): a committed-but-unconfirmed receipt reads Sent once the echo has bound, never sticking at Sending. An attachment send's server echo is the daemon's agent-facing wrapper text (`Look at the image file at <path>, then respond…`), not the operator caption; the reducer correlates that wrapper to the optimistic row by its embedded attachment keys and keeps the operator caption as the rendered text across the live, snapshot, and duplicate-replay reconcile paths, so one caption bubble renders rather than a second wrapper row.
 
+Operator USER rows with client origin, an optimistic id, or structured provenance stay visible even when their text matches a Codex starter suggestion. Only legacy rows without that provenance use the starter-suggestion filter, consistently across live events, history, snapshots, rendering and diagnostics. Helper-shaped USER summaries can update the sidebar preview; transient noise remains suppressed.
+
 ### Lazy history recovery
 
 A chat slot fetches recent history on demand. A failed fetch or a completed fetch that leaves no transcript rows retries after 1, 2, 4, 8 and 16 seconds while the slot remains on that stream and the host is connected. Switching streams, leaving chat, disconnecting or a successful load with rows cancels stale work; reconnect loads the active slots again. Retry starts a new budget.
