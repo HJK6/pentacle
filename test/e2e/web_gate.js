@@ -187,8 +187,9 @@ function groupAlive(pgid, inspection) {
 async function groupEmpty(pgid, timeoutMs, inspection) {
   const deadline = Date.now() + timeoutMs;
   while (groupAlive(pgid, inspection)) {
-    if (Date.now() > deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
   }
   return true;
 }
@@ -200,16 +201,22 @@ async function stopOwnedGroup(proc, graceMs = 3000) {
   if (!proc || !proc.pid) return { pid: null, exited: true, forced: false };
   const pgid = proc.pid;
   const inspection = [];
-  let forced = false;
+  let forced = false, childExited;
   if (groupAlive(pgid, inspection)) {
+    let deadline = Date.now() + graceMs;
     try { process.kill(-pgid, 'SIGTERM'); } catch { /* verified below */ }
-    if (!await groupEmpty(pgid, graceMs, inspection)) {
+    childExited = await onceExit(proc, Math.max(0, deadline - Date.now()));
+    if (!await groupEmpty(pgid, Math.max(0, deadline - Date.now()), inspection)) {
       forced = true;
+      deadline = Date.now() + graceMs;
       try { process.kill(-pgid, 'SIGKILL'); } catch { /* verified below */ }
-      if (!await groupEmpty(pgid, graceMs, inspection)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
+      childExited = await onceExit(proc, Math.max(0, deadline - Date.now()));
+      if (!await groupEmpty(pgid, Math.max(0, deadline - Date.now()), inspection)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
     }
+  } else {
+    childExited = await onceExit(proc, graceMs);
   }
-  await onceExit(proc, graceMs);
+  if (!childExited) throw new Error(`CLEANUP_FAIL: owned child ${pgid} exit was not observed`);
   return { pid: pgid, exited: true, forced, ...(inspection.length ? { inspection } : {}) };
 }
 
