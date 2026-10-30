@@ -207,3 +207,28 @@ async def test_pending_notice_rebinds_to_new_fd_generation(wired):
     assert json.loads(successor["metadata"])["predecessor_notice_id"] == old["notice_id"]
     assert successor["body"].startswith("BLOCKER critical from red-probe: RED probe")
     assert next(r for r in rows if r["notice_id"] == old["notice_id"])["terminal_reason"] == "superseded_binding"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ["altum-bot-cd", "bot-messaging-desk"])
+async def test_fixed_actor_declined_critical_reaches_fd(wired, actor):
+    s = wired
+    auth = {"service_authenticated": True, "service_actor": actor}
+    card = await create(s, producer=actor, title="Deployment failed", dedup_key="qa:failure:1", _auth_context=auth)
+    (fact,) = await facts(s)
+    assert fact["error_context"]["principal"] == PRINCIPAL
+    assert fact["error_context"]["source_notification_id"] == card["notification_id"]
+    await s.service.reconcile()
+    (notice,) = await s.service.notice_rows()
+    assert notice["body"].startswith(f"BLOCKER critical from {actor}: Deployment failed ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ["altum-bot-cd", "bot-messaging-desk"])
+async def test_fixed_actor_declined_warning_stays_card(wired, actor):
+    s = wired
+    auth = {"service_authenticated": True, "service_actor": actor}
+    await create(s, producer=actor, severity="warning", title="Census drift", dedup_key="qa:warning:1", _auth_context=auth)
+    assert await s.notify._db.call("error_rows") == []
+    await s.service.reconcile()
+    assert await s.service.notice_rows() == []

@@ -83,6 +83,8 @@
     "test_error_adapters_operator_notification.py::test_four_producers_three_immediates_one_held",
     "test_error_adapters_operator_notification.py::test_muted_fact_stays_quiet_after_activation",
     "test_error_adapters_operator_notification.py::test_reply_bytes_identical_with_and_without_adapter",
-    "test_error_adapters_operator_notification.py::test_pending_notice_rebinds_to_new_fd_generation"
+    "test_error_adapters_operator_notification.py::test_pending_notice_rebinds_to_new_fd_generation",
+    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_critical_reaches_fd",
+    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_warning_stays_card"
   ]
 }
