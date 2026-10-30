@@ -13,12 +13,12 @@ BOUNDARY = "send_boundary"
 KEYS = {"stream_token", "identity_token", "token"}
 ENV = {"AGENT_ORCH_TOKEN", "AGENT_ORCH_STREAM_TOKEN", "AGENT_ORCH_STREAM_TOKEN_FILE", "PENTACLE_WORK_REPORT_READER_TOKEN"}
 READS = {"stream_token_from_env", "_stream_token_from_env", "_stream_token_from_file", "_file_token", "_token_path", "decode_envelope"}
-CONNECTS = {("wsclient", name) for name in ("WebsocketClient._connect_and_read", "_fetch_snapshot_async", "_connect_ready", "_connect_rpc_ready", "_catalog_operator_rpc")}
+CONNECTS = {("wsclient", name) for name in ("WebsocketClient._connect_and_read", "_fetch_snapshot_async", "_connect_ready", "_connect_rpc_ready", "_operator_envelope_rpc")}
 CONNECTS.add(("work_report_cli", "get_report"))
 UNCREDED = {
     ("wsclient", "WebsocketClient._handle_message", "pong"),
     ("wsclient", "_fetch_snapshot_async", "pong"), ("wsclient", "_connect_ready", "pong"),
-    ("wsclient", "_read_rpc_frame", "pong"), ("wsclient", "_catalog_operator_rpc", "pong"),
+    ("wsclient", "_read_rpc_frame", "pong"), ("wsclient", "_operator_envelope_rpc", "pong"),
     ("wsclient", "upload_blob_once", "upload_blob_chunk"),
     ("wsclient", "upload_prompt_blob_once", "upload_prompt_blob_chunk"),
     ("wsclient", "_fetch_blob_once_attempt", "fetch_blob"),
@@ -37,9 +37,9 @@ BASE_ROUTING = [
     ("wsclient", "_read_rpc_frame", "pong", "rpc"),
     ("wsclient", "_one_shot_rpc", "request", "rpc"),
     ("wsclient", "notification_create_once", "notification.create", "notification"),
-    ("wsclient", "_catalog_operator_rpc", "hello", "envelope"),
-    ("wsclient", "_catalog_operator_rpc", "pong", "envelope"),
-    ("wsclient", "_catalog_operator_rpc", "request", "envelope"),
+    ("wsclient", "_operator_envelope_rpc", "hello", "envelope"),
+    ("wsclient", "_operator_envelope_rpc", "pong", "envelope"),
+    ("wsclient", "_operator_envelope_rpc", "request", "envelope"),
     ("wsclient", "notification_await_once", "notification.await", "notification-await"),
     ("wsclient", "_inbox_once_attempt", "inbox", "inbox"),
     ("wsclient", "send_receipt_once", "send.receipt.get", "receipt"),
