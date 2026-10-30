@@ -75,7 +75,10 @@ function projectChatStreamSessionsToDesktop(streamSessions, hostIdResolver) {
       host: s.host,
       display_name: s.display_name || s.title || name,
       title: s.title || '',
-      preview: s.preview || s.last_text || '',
+      // Daemon last_text only: the tmux pane line in s.preview is status noise.
+      // Composite rows show nothing until the daemon advances their last_text on
+      // each publication, so they never preview an old reply.
+      preview: s.session_kind === 'assistant_composite' ? '' : (s.last_text || ''),
       attached: !!s.attached,
       agent_id: s.agent_id || null,
       stream_id: s.stream_id || null,

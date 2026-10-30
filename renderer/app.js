@@ -5240,7 +5240,7 @@ function renderSidebar() {
     const summary = direct?.target || s;
     return {
       session: direct?.target ? { ...s, working: !!summary.working,
-        preview: summary.preview || summary.last_text || '', last_event_at: summary.last_event_at } : s,
+        preview: summary.last_text || '', last_event_at: summary.last_event_at } : s,
       streamId,
       entryStreamId,
       direct,
