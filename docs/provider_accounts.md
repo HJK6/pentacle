@@ -478,6 +478,21 @@ snapshot and commit pin, history, marker and observations together. Failure
 releases only its owned admission pause and leaves pristine service available.
 An owned daemon restart aborts the old pause without forgetting late reservations.
 
+Input readiness uses the current open-session census. Unresolved receipts for
+verified concrete closed or missing stream IDs do not block initial promotion;
+their original delivery state is unchanged. Current open holders and unknown,
+malformed or configured logical/composite targets remain blocking. No receipt is
+acknowledged, replayed or waived by this projection. A reopened holder or changed
+lifecycle still invalidates the same-transaction snapshot.
+
+`initial_readiness.input_obligation_counts` reports `blocking` and `not_open`.
+These are diagnostics. Only the blocking projection enters the snapshot and
+readiness digest, so unrelated historical receipt churn cannot invalidate the
+security decision. A late tell proof uses the original same-ID evidence path
+described in [tell delivery proof](tell_delivery_proof.md). Non-derivable send
+IDs cannot use voice/dot-email proof reconciliation; unresolved custody needs an
+authorized lifecycle disposition. Status alone settles no input obligation.
+
 An explicit initial parking decision can be supplied with
 `--initial-parked-cells-file`: a JSON array whose entries contain exactly `host`,
 `provider`, `account`, `generation`, `reason` and `decision_ref`. Every retained

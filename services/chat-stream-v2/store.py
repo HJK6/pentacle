@@ -4075,6 +4075,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     async def promote_tell_delivery(
         self, tell_id: str, payload_digest: str, *, proof: dict[str, Any] | None = None,
+        reconcile: bool = False,
+        prepared_result: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Atomically promote one matching proof-pending tell.
 
@@ -4109,6 +4111,21 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 if not isinstance(reply, dict) or not isinstance(delivery, dict):
                     conn.rollback()
                     return None
+                if prepared_result is not None:
+                    from tell_proof import finalize_prepared
+                    completed = finalize_prepared(conn, payload, prepared_result)
+                    if completed is None:
+                        conn.rollback()
+                        return None
+                    completed["reply"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    completed["delivery"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    store_exchange.append(conn, completed["delivery"].get("exchange"))
+                    conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                                 (json.dumps(completed, separators=(",", ":")), tell_id))
+                    conn.commit()
+                    return _decode_tell_envelope(conn.execute(
+                        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                        (tell_id,)).fetchone())
                 if (
                     reply.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
                     or delivery.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
@@ -4116,11 +4133,26 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     conn.rollback()
                     return None
 
+                resolved_proof = proof
+                if reconcile:
+                    from tell_proof import retained_proof
+                    resolved_proof = retained_proof(conn, payload)
+                    if resolved_proof is None:
+                        conn.rollback()
+                        return None
+
                 acknowledged_at = iso_now()
                 reply["delivery_status"] = "delivered"
                 reply["submission_confirmed"] = True
                 reply["delivery_ack_at"] = acknowledged_at
                 reply.pop("reason", None)
+                if reconcile:
+                    reply.update(action_status="committed", action_committed=True,
+                                 confirmation_pending=False, confirmation_status="confirmed")
+                    delivery.update(action_status="committed", action_committed=True,
+                                    confirmation_pending=False, confirmation_status="confirmed")
+                    reply["submission_attempts"] = max(1, int(reply.get("submission_attempts") or 0))
+                    delivery["submission_attempts"] = reply["submission_attempts"]
                 if delivery.get("notification_answer_generation"):
                     reply.update(action_status="committed", action_committed=True,
                                  confirmation_pending=False, confirmation_status="confirmed")
@@ -4132,9 +4164,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 delivery["submission_confirmed"] = True
                 delivery["delivered_at"] = acknowledged_at
                 delivery["delivery_ack_at"] = acknowledged_at
-                if isinstance(proof, dict):
-                    reply.update(proof)
-                    delivery.update(proof)
+                if isinstance(resolved_proof, dict):
+                    reply.update(resolved_proof)
+                    delivery.update(resolved_proof)
                 conn.execute(
                     "UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
                     (json.dumps(payload, separators=(",", ":")), tell_id),
