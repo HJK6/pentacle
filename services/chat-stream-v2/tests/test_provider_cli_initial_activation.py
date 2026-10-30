@@ -85,6 +85,47 @@ def test_first_pin_cas_preserves_a_proved_serving_seat_and_replays(tmp_path,monk
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_first_pin_refuses_same_uid_native_process_without_launcher_record(tmp_path,monkeypatch,provider):
+    import os
+    from types import SimpleNamespace
+    from provider_cli_pin import pristine
+    admin={"peer_loopback":True,"local_admin_verified":True}
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,provider=provider)
+        try:
+            status_request={"action":"pin-status","pin":target,"_auth_context":admin}
+            before=await runtime.operation(status_request)
+            assert before["pin"] is None and before["initial_readiness"]["missing"]==[]
+            actual_run=host.run
+            def with_unrecorded_native(argv,**kwargs):
+                result=actual_run(argv,**kwargs)
+                if argv[0]=="ps" and result.returncode==0:
+                    if "pid=,comm=" in argv:
+                        extra="99 "+selected.executable+"\n"
+                    else:
+                        extra=f"99 1 {os.getuid()} 99 99 Thu Oct 29 10:00:00 2026 {selected.executable} app-server\n"
+                    return SimpleNamespace(returncode=0,stdout=result.stdout+extra)
+                return result
+            host.run=with_unrecorded_native
+            proof=await runtime.executor.verify_launchers(selected)
+            assert proof["missing"]==[] and proof["unmanaged"]==[{"pid":99}]
+            assert [managed["stream_id"] for managed in proof["managed"]]==[row["stream_id"]]
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                    "operation_id":"unrecorded-native-"+provider,"reason":"fixture boundary","_auth_context":admin})
+            missing=[{"host":selected.host,"provider":provider,"account":selected.alias,
+                "reason":"account_repin_home_busy"}]
+            assert refused.value.code=="provider_cli_initial_readiness_required"
+            after=await runtime.operation(status_request)
+            assert after["pin"] is None and after["initial_readiness"]["missing"]==missing
+            assert await runtime.run(pristine)
+            async with runtime.input_guard(row):pass
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("missing",["health","clearance","offline","artifact","consumer","seat-binding","stale-seat",
     "parked-seat","bootstrap","routing","pending-send","pending-tell","late-reservation","generation-intent","closed-parent"])
 def test_first_pin_refuses_each_missing_readiness_predicate_without_stranding_pristine_service(tmp_path,monkeypatch,missing):
@@ -207,6 +248,12 @@ def test_first_cas_waits_for_already_dispatched_creation_without_locking_existin
                 await asyncio.sleep(0)
             assert paused and not promotion.done() and not runtime.pin_lock.locked()
             assert not await store.reserve_stream_id(selected.host,"new-pause-request",ttl_s=60,refuse_if_held=False)
+            keyed_request={"idempotency_key":"initial-pause-key","request_payload_hash":"fixture-hash",
+                "ttl_s":60,"request_id":"keyed-pause-request","refuse_if_held":False}
+            assert await store.atomic_claim_or_replay(selected.host,"new-keyed-pause-request",
+                **keyed_request)=={"status":"frozen"}
+            assert all(reservation["session_name"]!="new-keyed-pause-request"
+                for reservation in await store.reservations())
             async with runtime.input_guard(row):pass
             tmux.release.set()
             assert (await spawn)["type"]=="spawn.ok" and created[0] and tmux.created==1
@@ -215,6 +262,8 @@ def test_first_cas_waits_for_already_dispatched_creation_without_locking_existin
             with pytest.raises(VerbError,match="provider_cli_initial_readiness_required"):await promotion
             assert (await store.fetch_session(selected.host,"already-dispatched"))["status"]=="open"
             assert (await runtime.operation({"action":"pin-status","_auth_context":{"operator_authenticated":True}}))["pin"] is None
+            assert (await store.atomic_claim_or_replay(selected.host,"new-keyed-pause-request",
+                **keyed_request))["status"]=="claimed"
         finally:
             tmux.release.set()
             await spawn
