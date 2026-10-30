@@ -156,6 +156,7 @@ class ConfigFailsClosed(Tmp):
             "target kind": lambda c: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(kind="shell"),
             "timeout over max": lambda c: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(timeout_s=99999),
             "unknown capability set": lambda c: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(capabilities="nope"),
+            "invalid required selection": lambda c: c["profiles"]["pentacle"]["targets"]["v2-pytest"].update(required_select="tests/test_x.py"),
             "no targets": lambda c: c["profiles"]["pentacle"].update(targets={}),
             "deadline budget": lambda c: c["deadline"].update(slack_s=-1),
         }
@@ -425,7 +426,15 @@ class PreflightFaults(Tmp):
         co = self.tmp / "co"
         (co / "services/chat-stream-v2/tests").mkdir(parents=True)
         (co / "services/chat-stream-v2/tests/test_a.py").write_text("")
-        self.assertEqual(ge.validate_selection(target, ["tests/test_a.py::test_x"], co), ["tests/test_a.py::test_x"])
+        guards = ["tests/test_capabilities.py::" + name for name in (
+            "test_changed_test_skip_calls_are_confined_to_requires",
+            "test_original_assertions_and_tracked_skip_are_unchanged",
+            "test_fixture_manifest_is_explicitly_synthetic_and_hash_pinned",
+            "test_scope_manifest_covers_all_new_portability_tests")]
+        (co / "services/chat-stream-v2/tests/test_capabilities.py").write_text("")
+        self.assertEqual(ge.validate_selection(target, ["tests/test_a.py::test_x"], co), ["tests/test_a.py::test_x", *guards])
+        self.assertEqual(ge.validate_selection(target, ["tests/test_capabilities.py"], co), ["tests/test_capabilities.py"])
+        self.assertEqual(ge.validate_selection(target, [guards[0]], co), guards)
         for bad in ("../x.py", "--co", "/etc/passwd", "tests/test_missing.py", "tests/test_a.py; rm -rf /", "tests/conftest.py"):
             with self.subTest(bad), self.assertRaises(ge.SetupFailure):
                 ge.validate_selection(target, [bad], co)
@@ -624,7 +633,11 @@ class EntrypointReceipts(Tmp):
         self.assertEqual((a["primary_outcome"], a["history"], a["purpose"]), ("setup_failure", "first_observed", "acceptance"))
 
     def test_resolved_default_scope_survives_setup_failure_without_prepared(self):
-        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({}, [ge.fail("toolchain", "fixture setup failure")]),
+        default_needs = []
+        def default_tools(config, needs):
+            default_needs.append(needs)
+            return {}, [ge.fail("toolchain", "fixture setup failure")]
+        with mock.patch.multiple(ge, resolve_toolchain=default_tools,
                                  pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
             code = self.run_main("--target", "npm-test", "--spec", "s", "--series", "x", "--purpose", "negative_control")
         self.assertEqual(code, 3)
@@ -632,6 +645,24 @@ class EntrypointReceipts(Tmp):
         events = [json.loads(p.read_text()) for p in files]
         self.assertEqual([e["state"] for e in events], ["started", "terminal"])
         self.assertEqual(events[-1]["effective_selection"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["default_patterns"])
+        self.assertEqual(default_needs, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["needs"]])
+        interrupt = self.tmp / "co/test/e2e/web_gate_interrupt.test.js"
+        interrupt.parent.mkdir(parents=True)
+        interrupt.write_text("")
+        observed = []
+        def toolchain(config, needs):
+            observed.append(needs)
+            return {}, [ge.fail("toolchain", "fixture setup failure")]
+        with mock.patch.multiple(ge, resolve_toolchain=toolchain,
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+            self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/web_gate_interrupt.test.js",
+                                           "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
+        self.assertEqual(observed, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"]])
+        with mock.patch.multiple(ge, resolve_toolchain=toolchain,
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+            self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/*.test.js",
+                                           "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
+        self.assertEqual(observed[-1], REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"])
 
     def test_unresolved_config_failure_never_fabricates_scope(self):
         self.run_main("--target", "npm-test", patch_load=ge.SetupFailure([ge.fail("config", "fixture malformed config")]))
@@ -685,6 +716,7 @@ class EntrypointReceipts(Tmp):
         tools.mkdir(parents=True, exist_ok=True)
         (self.tmp / "co" / "services" / "chat-stream-v2" / "tests").mkdir(exist_ok=True)
         (self.tmp / "co" / "services" / "chat-stream-v2" / "tests" / "test_x.py").write_text("")
+        (self.tmp / "co" / "services" / "chat-stream-v2" / "tests" / "test_capabilities.py").write_text("")
         (tools / "gate_owner_manifest.py").write_bytes((HERE.parent / "services" / "chat-stream-v2" / "tools" / "gate_owner_manifest.py").read_bytes())
         tool = {"path": "/x/t", "realpath": "/x/t", "version": "3.13.1", "sha256": "aa"}
         # A subject that records a detached child into the owner manifest, like the daemon fixtures do, then waits.
@@ -785,6 +817,7 @@ class ScratchRetention(Tmp):
         service = co / "services/chat-stream-v2"
         (service / "tests").mkdir(parents=True)
         (service / "tests/test_x.py").write_text("")
+        (service / "tests/test_capabilities.py").write_text("")
         (service / "requirements.txt").write_text("websockets==17.0.1\n")
         if target == "cli-pytest":
             (co / "services/agent-orch/tests").mkdir(parents=True)

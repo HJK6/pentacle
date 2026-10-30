@@ -12,9 +12,11 @@ const { startDaemon, targetId } = require(root + '/test/e2e/scenarios/assistant_
 const { getFreePort } = require(root + '/test/e2e/lib/disposable_web_daemon_config');
 const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 const cdp = require(root + '/test/e2e/lib/cdp');
-const out = path.resolve(process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'web-wrap-paste-')));
+let out = path.resolve(process.argv[2] || (process.env.PENTACLE_GATE_EVIDENCE_DIR
+  ? path.join(process.env.PENTACLE_GATE_EVIDENCE_DIR, 'wrap-counterpart')
+  : fs.mkdtempSync(path.join(os.tmpdir(), 'web-wrap-paste-'))));
 const expectRed = process.argv.includes('--expect-red');
-const browserBinary = process.env.PENTACLE_TEST_BROWSER || process.env.PENTACLE_CHROME || 'google-chrome';
+const browserBinary = process.env.PENTACLE_TEST_BROWSER || require('./web_gate').resolveChrome();
 const input = '#cell-0 .slot-chat-compose-input';
 const chips = '#cell-0 .slot-chat-attachment-chip';
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -24,41 +26,7 @@ const label = 'LinkedLabel' + 'abcdefghij'.repeat(35);
 const markdown = [longUrl, longWord, `[${label}](${longUrl})`, '`' + longWord + '`', '```\n' + longWord + '\n```'].join('\n\n');
 const result = { subsystem: 'chat', bug_ref: 'spec_pentacle__web_wrap_image_paste_2026_10', geometry: [], paste: [] };
 
-// This body executes in the browser and uses actual File/DataTransfer data.
-function pasteFixture(options) {
-  const e = document.querySelector('#cell-0 .slot-chat-compose-input');
-  e.focus();
-  if (options.draft !== undefined) {
-    e.value = options.draft; e.dispatchEvent(new Event('input', { bubbles: true }));
-    e.setSelectionRange(...(options.selection || [e.value.length, e.value.length]));
-  }
-  const canvas = document.createElement('canvas'); canvas.width = 3; canvas.height = 2;
-  canvas.getContext('2d').fillRect(0, 0, 3, 2);
-  const files = (options.mimes || ['image/png']).map((mime, i) => {
-    let bytes = Uint8Array.from(atob(canvas.toDataURL(mime === 'image/jpeg' ? mime : 'image/png').split(',')[1]), c => c.charCodeAt(0));
-    if (options.invalid === 'empty') bytes = new Uint8Array();
-    if (options.invalid === 'corrupt') bytes = new Uint8Array([1, 2, 3]);
-    if (options.size) { const padded = new Uint8Array(options.size); padded.set(bytes); bytes = padded; }
-    return new File([bytes], `clipboard-${i}.${mime === 'image/jpeg' ? 'jpg' : 'png'}`, { type: mime });
-  });
-  const dt = new DataTransfer(); files.forEach(f => dt.items.add(f));
-  if (options.text) dt.setData('text/plain', options.text);
-  dt.setData('text/html', '<b>never insert HTML</b>');
-  let clipboardData = dt;
-  if (options.shape) clipboardData = {
-    items: options.shape === 'files' ? [] : files.map(f => ({ kind: 'file', type: f.type,
-      getAsFile: () => options.shape === 'null' ? null : f })),
-    files: options.shape === 'items' || options.shape === 'null' ? [] : files,
-    getData: type => dt.getData(type),
-  };
-  const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-  Object.defineProperty(event, 'clipboardData', { value: clipboardData });
-  let inputs = 0; const count = () => { inputs++; }; e.addEventListener('input', count);
-  e.dispatchEvent(event); e.removeEventListener('input', count);
-  return { prevented: event.defaultPrevented, inputs, caret: e.selectionStart,
-    textCorrect: options.expected === undefined || e.value === options.expected,
-    files: files.map(f => ({ mime: f.type, bytes: f.size })) };
-}
+const { pasteFixture } = require('./lib/render_proofs');
 
 async function main() {
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
@@ -81,7 +49,7 @@ async function main() {
     web = await require(root + '/server').main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     const port = await getFreePort();
     browser = spawn(browserBinary, [...headlessChromeArgs(), '--disable-gpu', `--user-data-dir=${out}/chrome`,
-      `--remote-debugging-port=${port}`, 'about:blank'], { stdio: ['ignore', 'ignore', fs.openSync(out + '/chrome.log', 'w')] });
+      `--remote-debugging-port=${port}`, 'about:blank'], { stdio: ['ignore', 'ignore', fs.openSync(out + '/chrome.log', 'w')], detached: true });
     page = await cdp.connect(port, { timeoutMs: 15000 });
     result.browser = await page.send('Browser.getVersion');
     await page.send('Page.navigate', { url: web.url });
@@ -194,6 +162,8 @@ async function main() {
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-media-img')?.naturalWidth > 0", { timeoutMs: 15000 });
+    // Composer clearing is optimistic; wait for this fixture's received-send response.
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: image caption'))`);
     const sent = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.deepEqual(sent.attachments.map(a => a.mime), ['image/png', 'image/jpeg']);
     assert.equal(daemon.requests.filter(r => r.type === 'upload_blob_init').length, 2);
@@ -219,6 +189,7 @@ async function main() {
     daemon.setUploadFailure(false);
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: retry caption'))`);
     assert.equal(daemon.requests.filter(r => r.type === 'send').length, sendsBeforeFailure + 1);
     // File picker and drag/drop still use the same real intake and image-only send.
     for (const via of ['picker', 'drop']) {
@@ -236,6 +207,7 @@ async function main() {
     }
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: [image]'))`);
     const imageOnly = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.equal(imageOnly.text, ''); assert.equal(imageOnly.attachments.length, 1);
     // Assistant entry uses its existing direct route, including the same upload.
@@ -245,6 +217,7 @@ async function main() {
     await page.waitFor(`document.querySelectorAll('${chips}').length === 1`);
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: assistant caption'))`);
     const assistant = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.equal(assistant.session_name, 'live'); assert.equal(assistant.attachments.length, 1);
     result.send = { mixed: true, uploadFailureRetry: true, imageOnly: true, picker: true, drop: true, assistantDirect: true };
@@ -262,21 +235,40 @@ async function main() {
       await page.waitFor(`document.querySelectorAll('${chips}').length === 1`);
       await page.click('#cell-0 .slot-chat-compose-send');
       await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+      await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${composite.sourceId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo:') && card.textContent.includes('composite caption'))`);
       const sentComposite = composite.requests.filter(r => r.type === 'send').at(-1);
       assert.equal(sentComposite.stream_id, composite.sourceId);
       assert.equal(sentComposite.message, caption); assert.equal(sentComposite.attachments.length, 1);
       await page.waitFor("document.querySelector('#cell-0 .slot-chat-media-img')?.naturalWidth > 0");
       result.send.assistantComposite = true;
-    } finally { await compositeWeb?.close(); await composite.stop(); }
+    } finally {
+      result.compositeSendObservation = { at: new Date().toISOString(), phase: 'before fixture teardown',
+        requests: composite.requests.filter(r => r.type === 'send') };
+      await compositeWeb?.close(); await composite.stop();
+    }
     result.status = 'PASS';
   } finally {
+    result.directSendObservation = { at: new Date().toISOString(), phase: 'before fixture teardown',
+      requests: daemon.requests.filter(r => r.type === 'send') };
     fs.writeFileSync(out + '/observations.json', JSON.stringify(result, null, 2));
     page?.close();
-    if (browser && browser.exitCode === null) {
-      const exited = new Promise(resolve => browser.once('exit', resolve)); browser.kill('SIGTERM'); await exited;
-    }
+    await require('./web_gate').stopOwnedGroup(browser);
     await web?.close(); await daemon.stop();
   }
 }
-main().then(() => console.log(JSON.stringify({ status: result.status, evidence: out })))
-  .catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) {
+  const served = process.argv.indexOf('--served');
+  const run = served < 0 ? main : async () => {
+    const proof = JSON.parse(fs.readFileSync(process.argv[served + 1], 'utf8'));
+    require('./lib/render_proofs').assertFreshWrapFixture(proof, []);
+    assert.ok(proof.evidenceDir && proof.url && proof.expectedBuildId && /^[a-f0-9]{40}$/.test(proof.sourceSha), 'served URL/build/source identity required');
+    const { run, parseArgs } = require('./web_gate');
+    out = path.resolve(proof.evidenceDir);
+    process.env.PENTACLE_WEB_GATE_REPORT_ROOT = out;
+    const code = await run({ ...parseArgs(['--scenario', 'web-wrap-paste']), servedUrl: proof.url, wrapProof: proof });
+    if (code) throw new Error('served wrap/paste proof failed; retain the gate verdict');
+    result.status = 'PASS';
+  };
+  run().then(() => console.log(JSON.stringify({ status: result.status, evidence: out })))
+    .catch(error => { console.error(error); process.exitCode = 1; });
+}

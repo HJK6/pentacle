@@ -16,7 +16,7 @@ const INVENTORY = {
   'web_chat_history_paging_gate.cjs': 1, 'web_chat_history_retention_gate.cjs': 1,
   'web_chat_history_transport_gate.cjs': 1, 'web_default_pane_gate.cjs': 1,
   'web_gate.js': 1, 'web_popouts_gate.cjs': 1, 'web_sidebar_resize_gate.cjs': 1,
-  'web_wrap_paste_gate.cjs': 1,
+  'web_wrap_paste_gate.test.js': 1,
 };
 function audit(name, source, expected) {
   const code = stripComments(source);

@@ -15,7 +15,8 @@ const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 // touches only a local `ptest-web-*` tmux session; nothing is spawned, closed,
 // or sent on any shared/production daemon.
 //
-// Exit 0 = every scenario passed. Non-zero = a scenario failed or setup broke.
+// --keep retains debug files only; every run still stops its owned browser.
+// Exit 0 = every scenario passed and required cleanup completed.
 
 const fs = require('fs');
 const net = require('net');
@@ -160,13 +161,32 @@ async function stopOwnedProcess(proc, graceMs = 3000) {
   return { pid: proc.pid, exited: true, forced, exit_code: proc.exitCode, signal: proc.signalCode };
 }
 
-function groupAlive(pgid) {
-  try { process.kill(-pgid, 0); return true; } catch { return false; }
+function groupAlive(pgid, inspection) {
+  try { process.kill(-pgid, 0); return true; } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code === 'EPERM') {
+      const observed = { pgid, probe_error: { code: error.code, message: error.message }, probe_observed_at: new Date().toISOString() };
+      // Darwin's existing bounded inspector must parse the COMPLETE table. This
+      // is observation only: any member (including Z) or scan error still fails.
+      // No witness authorizes another signal or reconstructs historical absence.
+      if (process.platform === 'darwin') {
+        observed.scan_started_at = new Date().toISOString();
+        try { observed.members = require('../../scripts/lib/test-runner').groupMembers(pgid); }
+        catch (scanError) { observed.scan_error = scanError.message; }
+        observed.scan_finished_at = new Date().toISOString();
+      }
+      inspection.push(observed);
+      if (Array.isArray(observed.members) && observed.members.length === 0) return false;
+    }
+    const failure = new Error(`CLEANUP_FAIL: cannot inspect owned process group ${pgid}: ${error.message}`);
+    failure.inspection = inspection;
+    throw failure;
+  }
 }
 
-async function groupEmpty(pgid, timeoutMs) {
+async function groupEmpty(pgid, timeoutMs, inspection) {
   const deadline = Date.now() + timeoutMs;
-  while (groupAlive(pgid)) {
+  while (groupAlive(pgid, inspection)) {
     if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -179,17 +199,18 @@ async function groupEmpty(pgid, timeoutMs) {
 async function stopOwnedGroup(proc, graceMs = 3000) {
   if (!proc || !proc.pid) return { pid: null, exited: true, forced: false };
   const pgid = proc.pid;
+  const inspection = [];
   let forced = false;
-  if (groupAlive(pgid)) {
+  if (groupAlive(pgid, inspection)) {
     try { process.kill(-pgid, 'SIGTERM'); } catch { /* verified below */ }
-    if (!await groupEmpty(pgid, graceMs)) {
+    if (!await groupEmpty(pgid, graceMs, inspection)) {
       forced = true;
       try { process.kill(-pgid, 'SIGKILL'); } catch { /* verified below */ }
-      if (!await groupEmpty(pgid, graceMs)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
+      if (!await groupEmpty(pgid, graceMs, inspection)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
     }
   }
   await onceExit(proc, graceMs);
-  return { pid: pgid, exited: true, forced };
+  return { pid: pgid, exited: true, forced, ...(inspection.length ? { inspection } : {}) };
 }
 
 // server/index.js main() installs SIGINT/SIGTERM listeners that process.exit(0) and are never
@@ -271,6 +292,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
   { host: 'local', sessionName: 'web-gate-survivor', streamId: 'local:web-gate-survivor' },
   { host: 'local2', sessionName: 'web-gate-second-host', streamId: 'local2:web-gate-second-host' },
   { host: 'local', sessionName: 'web-gate-seam', streamId: 'local:web-gate-seam' },
+  { host: 'local', sessionName: 'web-gate-wrap-paste', streamId: 'local:web-gate-wrap-paste' },
 ]) {
   const db = path.join(scratch, 'sessions.db');
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
@@ -343,7 +365,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   const runtime = {};
   const chromeLog = [];
   let daemon = null; let host = null; let chrome = null; let session = null;
-  const fixture = args.profile ? null : FIXTURE;
+  const fixture = args.profile || args.servedUrl ? null : FIXTURE;
   let hostPort = null;
   let hostAuthArgs = [];
 
@@ -353,7 +375,11 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     const generatedCount = fs.existsSync(registryPath) ? Object.keys(JSON.parse(fs.readFileSync(registryPath, 'utf8')).credentials || {}).length : 0;
     try { if (session) session.close(); } catch {}
     let chromeCleanupError = null;
-    try { if (chrome && !args.keep) runtime.chromeCleanup = await stopOwnedGroup(chrome); } catch (e) { chromeCleanupError = e; }
+    try { runtime.chromeCleanup = await stopOwnedGroup(chrome); } catch (e) {
+      chromeCleanupError = e;
+      runtime.chromeCleanup = { pid: chrome && chrome.pid, exited: false, error: e.message,
+        ...(e.inspection?.length ? { inspection: e.inspection } : {}) };
+    }
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}
     try { if (host) await host.close(); } catch {}
@@ -410,6 +436,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     const verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
     verdict.fixture_auth_cleanup = runtime.fixtureAuthCleanup;
     verdict.daemon_cleanup = runtime.daemonCleanup;
+    verdict.chrome_cleanup = runtime.chromeCleanup;
+    verdict.debug_files_retained = args.keep;
     if (cleanupError) { verdict.status = 'FAIL'; verdict.cleanup_error = String(cleanupError && cleanupError.message ? cleanupError.message : cleanupError); }
     if (!args.keep && (!runtime.fixtureAuthCleanup?.registry_removed || !runtime.fixtureAuthCleanup?.token_removed)) { verdict.status = 'FAIL'; verdict.cleanup_error = 'CLEANUP_FAIL'; }
     fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));
@@ -438,7 +466,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   try {
     hostPort = await freePort();
     let profile = args.profile;
-    if (!profile) {
+    if (!profile && !args.servedUrl) {
       runtime.fakeCosmo = await startFakeCosmo();
       runtime.modelerFixture = await startHostedModelerFixture(scratch, hostPort);
       daemon = await startDaemon(args, scratch, runtime);
@@ -446,14 +474,15 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       profile = writeProfile(scratch, daemon.port, runtime.modelerFixture.url);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);
     } else {
-      report.note(`external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
+      report.note(args.servedUrl ? 'explicit served proof (no shared service is started or stopped)'
+        : `external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
     }
 
     // A FIXED port (not 0), so a restart rebinds the same address and the
     // already-loaded page reconnects to a fresh host process — the scenario the
     // host-restart walk needs (see restartHost below).
-    host = await startHostKeepingSignals(['--profile', profile, '--port', String(hostPort)]);
-    const url = `http://127.0.0.1:${host.port}/`;
+    if (!args.servedUrl) host = await startHostKeepingSignals(['--profile', profile, '--port', String(hostPort)]);
+    const url = args.servedUrl || `http://127.0.0.1:${host.port}/`;
     report.note(`web host ${url}`);
 
     // Simulate `pentacle-web-start stop && pentacle-web-start`: tear the host
@@ -575,7 +604,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     } : null;
 
     const chromeBin = resolveChrome();
-    const cdpMatch = new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`);
+    const cdpMatch = args.servedUrl ? new RegExp(new URL(url).host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      : new RegExp(`127\\.0\\.0\\.1:${host.port}|Terminal Dashboard`);
     // Retry on a lost CDP port race (fresh port each attempt) unless a fixed
     // --cdp-port was requested.
     let cdpErr;
@@ -617,7 +647,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       await new Promise((resolve) => setTimeout(resolve, args.timeoutMs));
     }
 
-    const ctx = { session, report, cdp, cdpPort, url, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
+    const ctx = { session, report, cdp, cdpPort, url, wrapProof: args.wrapProof, timeoutMs: args.timeoutMs, tmux, fixture, runtime, restartHost, stopHost, startHostSamePort, killDaemon, startDaemonSamePort,
       configureModeler, configureMic, modelerFixtureUrl: runtime.modelerFixture?.url, catalog };
     let failed = 0;
     for (const [name, fn] of scenarios.SCENARIOS.filter(([name]) => !args.scenarios?.length || args.scenarios.includes(name))) {
@@ -684,4 +714,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, allocateReportDir, resolveChrome };
+module.exports = { run, parseArgs, FIXTURE, startDaemon, writeProfile, freePort, onceExit, stopOwnedProcess, stopOwnedGroup, allocateReportDir, resolveChrome };

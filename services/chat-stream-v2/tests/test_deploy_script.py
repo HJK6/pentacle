@@ -1248,3 +1248,36 @@ def test_apply_post_activation_retains_prior_digest_on_bootstrap_failure(monkeyp
     assert stamp.get("post_activation_error", "").startswith("DeployError")
     assert stamp["launchd_plist_digest"] == "DPRIOR"  # NOT advanced on a failed bootstrap
     assert "daemon_boot_readback" not in stamp
+
+
+@pytest.mark.parametrize("unload_after,unknown", [(3.0, False), (1e9, False), (0.0, True)])
+def test_web_reload_requires_positive_unloaded_state(tmp_path, unload_after, unknown):
+    label = "com.example.disposable-web"
+    descriptor = tmp_path / "web.plist"
+    descriptor.write_bytes(plistlib.dumps({"Label": label}))
+    launchd = _GracefulLaunchd(unload_after_s=unload_after)
+    def runner(cmd, cwd):
+        if unknown and cmd[1] == "print":
+            launchd.calls.append(("print", launchd.now))
+            return subprocess.CompletedProcess(cmd, 1, "", "synthetic inspection failure")
+        return launchd.runner(cmd, cwd)
+    if unload_after > 10 or unknown:
+        with pytest.raises(deploy_mod.DeployError, match="unloaded|inspection failure"):
+            deploy_mod.reload_web(label, descriptor, runner, timeout_s=10,
+                                  sleep=launchd.sleep, monotonic=launchd.monotonic)
+        assert not any(verb == "bootstrap" for verb, _ in launchd.calls)
+        assert launchd.now <= 10.25
+    else:
+        result = deploy_mod.reload_web(label, descriptor, runner, timeout_s=10,
+                                       sleep=launchd.sleep, monotonic=launchd.monotonic)
+        assert result["unloaded"] is True
+        assert [at for verb, at in launchd.calls if verb == "bootstrap"] == [3.0]
+
+
+def test_web_reload_refuses_descriptor_identity_before_mutation(tmp_path):
+    descriptor = tmp_path / "web.plist"
+    descriptor.write_bytes(plistlib.dumps({"Label": "com.example.foreign"}))
+    launchd = _GracefulLaunchd(unload_after_s=0)
+    with pytest.raises(deploy_mod.DeployError, match="Label"):
+        deploy_mod.reload_web("com.example.owned", descriptor, launchd.runner)
+    assert not launchd.calls

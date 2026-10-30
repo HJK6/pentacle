@@ -883,12 +883,8 @@ def _reload_launchd(
     # bootout returns while the old daemon is still in its graceful shutdown, and launchd
     # refuses a bootstrap of a job it still holds (rc 5). Wait, bounded, for the job to go;
     # past the bound the bootstrap below still runs and reports its own failure.
-    unload_deadline = monotonic() + RELOAD_UNLOAD_WAIT_S
-    while monotonic() < unload_deadline:
-        state = _launchd_state(label, runner)
-        if state.answered and not state.loaded:
-            break
-        sleep(RELOAD_UNLOAD_POLL_S)
+    _wait_launchd_unloaded(label, runner, timeout_s=RELOAD_UNLOAD_WAIT_S,
+                          sleep=sleep, monotonic=monotonic)
     command = ("launchctl", "bootstrap", domain, str(_launchd_plist_path(label)))
     result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(3):
@@ -900,6 +896,48 @@ def _reload_launchd(
         sleep(0.25)
     detail = ((result.stderr or result.stdout) if result is not None else "") or ""
     raise DeployError(f"command failed rc={result.returncode if result is not None else '?'}: {' '.join(command)} {detail.strip()}".strip())
+
+
+def _wait_launchd_unloaded(
+    label: str, runner: Runner, *, timeout_s: float,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> LaunchdState:
+    deadline = monotonic() + timeout_s
+    state = LaunchdState(loaded=False, pid=None, answered=False)
+    while monotonic() < deadline:
+        state = _launchd_state(label, runner)
+        if state.answered and not state.loaded:
+            break
+        sleep(RELOAD_UNLOAD_POLL_S)
+    return state
+
+
+def reload_web(
+    label: str, plist: Path, runner: Runner, *, timeout_s: float = 10.0,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, object]:
+    """Reload only the caller's descriptor, after positively observing unload.
+
+    The web owner retains its artifact/config preimages, descriptor transaction,
+    PID/listener/served-build readback and exact rollback. This replaces only its
+    copied bootout/print/bootstrap block; it neither stages nor certifies a release.
+    Unlike daemon reload, web activation must refuse an unknown or stuck label.
+    """
+    plist = Path(plist)
+    if plistlib.loads(plist.read_bytes()).get("Label") != label:
+        raise DeployError("web descriptor Label does not match the requested label")
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise DeployError("web unload timeout must be positive and finite")
+    target = _launchctl_target(label)
+    _checked(("launchctl", "bootout", target), Path.cwd(), runner)
+    state = _wait_launchd_unloaded(label, runner, timeout_s=timeout_s,
+                                  sleep=sleep, monotonic=monotonic)
+    if not state.answered or state.loaded:
+        raise DeployError(f"web label not positively unloaded within {timeout_s:g}s: {target}; {state.detail}")
+    _checked(("launchctl", "bootstrap", target.rsplit("/", 1)[0], str(plist)), Path.cwd(), runner)
+    return {"target": target, "unloaded": True, "plist": str(plist)}
 
 
 def _asset_store_identity(service: ServiceConfig) -> dict[str, object]:
@@ -1189,6 +1227,7 @@ class LaunchdState:
     # the tool may just have hiccuped — so an unanswered poll is never counted as evidence of
     # a crash mid-wait; only the deadline check acts on it, after a confirming re-sample.
     answered: bool = True
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -1235,7 +1274,8 @@ def _launchd_state(label: str, runner: Runner) -> LaunchdState:
         # evidence against it.
         text = f"{result.stderr or ''}{result.stdout or ''}".lower()
         definite = result.returncode == _LAUNCHCTL_NO_SUCH_SERVICE or "could not find service" in text
-        return LaunchdState(loaded=False, pid=None, answered=definite)
+        return LaunchdState(loaded=False, pid=None, answered=definite,
+                            detail=f"launchctl print rc={result.returncode}: {(result.stderr or result.stdout or '').strip()}")
     match = _LAUNCHD_PID_RE.search(result.stdout or "")
     return LaunchdState(loaded=True, pid=int(match.group(1)) if match else None, answered=True)
 

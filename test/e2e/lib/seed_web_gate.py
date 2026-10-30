@@ -57,6 +57,7 @@ SEAM_TEXT = ('## Summary fallback probe\n\nA paragraph before the list.\n\n'
              '- First item\n- Second item\n\n```ts\nconst first = 1;\n'
              '  const second = 2;\n```\n\nA final paragraph.')
 SEAM_UPDATE = '## Later answer\n\n- Third item\n- Fourth item'
+WRAP_FIXTURE = json.loads((Path(__file__).parent.parent / 'fixtures/wrap-paste.json').read_text())
 
 
 SCHEDULE_FIXTURE = {
@@ -128,7 +129,7 @@ def _event(stream_id: str, kind: str, text: str, index: int) -> dict:
         "text": text,
         "timestamp": "2026-08-05T00:00:00Z",
         "raw": {"jsonl_record_uuid": f"web-gate-seed-{index}", "jsonl_event_index": index,
-                **({'transport': 'claude-jsonl', 'source': 'structured'} if stream_id == SEAM_STREAM else {})},
+                **({'transport': 'claude-jsonl', 'source': 'structured'} if stream_id in (SEAM_STREAM, WRAP_FIXTURE['streamId']) else {})},
     }
 
 
@@ -181,9 +182,11 @@ async def seed(db: str, host: str, session: str, objective: str, token_file: str
             Path(db).parent.joinpath('client-seam-fixture.json').write_text(json.dumps({
                 'stream_id': stream_id, 'text': SEAM_TEXT, 'update': SEAM_UPDATE,
             }))
+        if stream_id == WRAP_FIXTURE['streamId']:
+            transcript = [('ASSIST_TEXT', WRAP_FIXTURE['text'])]
         for index, (kind, text) in enumerate(transcript):
             event = _event(stream_id, kind, text, index)
-            if index >= len(TRANSCRIPT) or stream_id == SEAM_STREAM:
+            if index >= len(TRANSCRIPT) or stream_id in (SEAM_STREAM, WRAP_FIXTURE['streamId']):
                 # The summary only takes messages from this session's lifecycle.
                 event["timestamp"] = _iso(datetime.now(timezone.utc) + timedelta(milliseconds=index))
             result = await store.append_session_event(

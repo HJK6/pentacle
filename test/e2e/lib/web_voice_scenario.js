@@ -170,9 +170,11 @@ async function webVoice({ session, report, fixture, cdp }) {
   const retainedChecks = []; const errors = [];
   let recording; let pending; let result;
   try {
-    await session.eval(`window.focusStreamId(${JSON.stringify(fixture.streamId)})`);
+    await session.waitFor(`window.focusStreamId(${JSON.stringify(fixture.streamId)}) === true`);
     await session.waitFor("!!document.querySelector('#header-0 [data-mode=\"chat\"]')");
     await session.click('#header-0 [data-mode="chat"]');
+    await session.waitFor(`document.querySelector('#cell-0 .slot-chat-list')?.dataset.streamId === ${JSON.stringify(fixture.streamId)}`, { label: 'voice target slot0 is the base fixture before recording' });
+    report.note('voice target precondition: slot0=' + await session.eval("document.querySelector('#cell-0 .slot-chat-list').dataset.streamId"));
     const mic = '#cell-0 .slot-chat-compose-mic'; const panel = '#cell-0 .slot-chat-voice-take';
     await session.eval(`(${observeRecording.toString()})(document.querySelector(${JSON.stringify(panel)}), document.querySelector(${JSON.stringify(mic)}), window.__voiceGate)`);
     await session.send('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(mic)}).click()`, userGesture: true });

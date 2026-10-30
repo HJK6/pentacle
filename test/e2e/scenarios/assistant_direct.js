@@ -22,7 +22,7 @@ const extraSessions = [1, 2].map(index => ({ ...target,
   session_name: `history-extra-${index}`, stream_id: `mock-host:history-extra-${index}`,
   display_name: `Disposable history extra ${index}` }));
 
-async function startDaemon({ artifactsDir, includeReport = false, omitAssistant = false, directAssistant = true }) {
+async function startDaemon({ artifactsDir, includeReport = false, omitAssistant = false, directAssistant = true, replyText = null }) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise(resolve => server.once('listening', resolve));
   const authDir = path.join(artifactsDir, 'fixture-auth');
@@ -166,12 +166,15 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
         const text = composite ? msg.message : msg.text;
         const optimisticId = composite ? msg.msg_id : msg.optimistic_id;
         const user = event('USER', text, { ...stream, optimistic_id: optimisticId,
-          reply_to_message_id: msg.reply_to_message_id, attachments: msg.attachments });
+          // Canonical daemon echoes never persist a browser-only object URL.
+          reply_to_message_id: msg.reply_to_message_id,
+          attachments: msg.attachments?.map(({ uri, ...durable }) => durable) });
         rows.push(user);
         send(socket, { type: 'send.result', request_id: msg.request_id, optimistic_id: optimisticId,
           stream_id: stream.stream_id, action_committed: true, delivery: 'committed_pending', message_id: user.message_id });
         send(socket, { type: 'chat.event', event: user });
-        const answer = event('ASSIST_TEXT', `Echo: ${text || '[image]'}`, { ...stream, reply_to_message_id: user.message_id });
+        const answer = event('ASSIST_TEXT', replyText ?? `Echo: ${text || '[image]'}`, { ...stream, reply_to_message_id: user.message_id,
+          ...(replyText === null ? {} : { raw: { source: 'claude-jsonl' } }) });
         rows.push(answer);
         send(socket, { type: 'chat.event', event: answer });
       } else if (msg.request_id) {

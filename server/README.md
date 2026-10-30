@@ -405,7 +405,7 @@ retained conservatively.
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
 | `test/closed_chat_slots.test.js` | retirement deadline, connection authority, generation replacement and slot isolation |
 | `test/renderer_clipboard_paste.test.js` | clipboard item precedence, files fallback, native text passthrough, selection replacement and single input update |
-| `test/e2e/web_wrap_paste_gate.cjs` | desktop/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
+| `test/e2e/web_wrap_paste_gate.test.js` | desktop/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
 | `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
 
 The hermetic web gate also creates two isolated durable questions, self-closes one
@@ -413,15 +413,76 @@ seeded chat, and checks slot/portal retirement with survivor preservation. Fixtu
 self-tokens stay in private scratch files and are removed with the isolated daemon.
 The destructive fixture scenario is skipped for external `--profile` runs.
 
-After `npm run prestart && npm run build:web`, run the focused regression with
-`PENTACLE_RUNTIME_DIR=/tmp/paste-runtime node test/e2e/web_wrap_paste_gate.cjs /tmp/paste-evidence`.
-Set `PENTACLE_TEST_BROWSER` to the Chrome executable when it is not `google-chrome`.
-Use fresh owned scratch paths. To prove RED against an unchanged baseline build,
-set `PENTACLE_WRAP_PASTE_ROOT` to that checkout and append `--expect-red`; the same
-geometry and mixed-paste measurements must reproduce both defects. The runner
-owns its browser profile, ports, web hosts and daemon fixtures and closes them.
-Synthetic clipboard cases establish handler behavior; native Mac/Windows keyboard
-proof separately records trusted paste MIME/items, previews and sent media under
-an allocated clipboard window. Neither isolated check establishes deployment.
+Run the clipboard/upload counterpart through the supported npm entry by selecting
+`test/e2e/web_wrap_paste_gate.test.js`; select
+`test/e2e/web_wrap_paste_served.test.js` for the served adapter's actual-source and
+freshness controls, and `test/e2e/lib/render_proofs.test.js` for source-cohort,
+shortened-response and reused-fixture refusals. See the [gate entry](../docs/E2E_HARNESS.md).
+The former `web_wrap_paste_gate.cjs` path is retired; no wrapper or CJS runner
+exception remains. The same assertions cover both themes, desktop/phone geometry,
+fenced code, clipboard limits/undo, draft routing, upload retry and assistant sends.
+For a product baseline RED, the renamed script retains `PENTACLE_WRAP_PASTE_ROOT`
+and `--expect-red`; its measurements must execute before an observed RED is claimed.
+
+The ordinary `web-gate` also runs `web-wrap-paste` against a dedicated seeded
+stream. Its source-scoped oracle checks the exact URL, word, inline code, href and
+copy selection rather than counting unrelated fixture cards. The existing
+clipboard fixture and source oracle are shared with the served adapter.
+
+For an already-authorized real served proof, prepare a private JSON descriptor:
+
+```json
+{
+  "url": "https://web.example/",
+  "phase": "rehearsal",
+  "fixtureId": "fresh-rehearsal-id",
+  "streamId": "local:disposable-chat",
+  "expectedBuildId": "accepted-served-build-id",
+  "sourceSha": "accepted-40-hex-source-sha",
+  "evidenceDir": "/tmp/owned-served-proof"
+}
+```
+
+Invoke `node test/e2e/web_wrap_paste_gate.test.js --served DESCRIPTOR.json`.
+It uses `web_gate.run` against that exact URL, starts only its owned headless
+browser and never starts/stops the shared host or daemon. The release owner binds
+the descriptor to the accepted artifact, source, live PID and authorization in its
+existing release evidence. The helper checks the injected and served build IDs,
+positively empty history immediately before sending, actual provider source-event
+text against DOM/href/copy, image persistence after reload and the media viewer.
+A `live` descriptor must also name `rehearsalFixtureId` and `rehearsalStreamId`;
+both live identities must differ. Use fresh equivalent chats for each phase.
+No model echo promise substitutes for the actual structured source event. Dirty,
+missing or truncated fixture evidence fails; do not retry a mutated chat as fresh.
+Synthetic tests of this adapter do not establish real-provider or live adoption.
+
+Historical per-attempt deployed-proof/rehearsal variants are retained as evidence
+and retired from future supported use in favor of this adapter. Native Mac/Windows
+keyboard proof still requires its existing allocated clipboard window. Shared
+activation remains an owner-authorized transaction; see the helper below.
+
+### Web activation sequencing
+
+The product owner retains artifact/config/plist preimages, descriptor replacement,
+PID/listener/served-build checks and its exact rollback transaction. Replace only
+the copied `bootout` / poll-any-error / `bootstrap` block in historical activation
+scripts with the supported callable (using the prepared daemon interpreter):
+
+```python
+# Put services/chat-stream-v2 on sys.path in the existing owner caller.
+from deploy.deploy import reload_web, _run
+reload_web("com.example.web", live_plist_path, _run)
+```
+
+The plist Label must match. This call waits for positive unloaded state before
+bootstrap; unknown inspection or a deadline fails with original diagnostics.
+It uses the existing daemon manager-state/wait primitive, while preserving the
+daemon reload policy. It does not stage an artifact or certify a deployment.
+Historical `switch-web.py` activation/rollback sequencing variants are retired
+from future supported use; their bytes and receipts remain evidence. The existing
+release owner adopts this callable at the next already-needed authorized activation.
+Until that real caller runs, source/disposable-label integration is proven only
+within that scope; ordinary adoption remains unproven. No activation is invented
+to fill an observation metric.
 
 Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.
