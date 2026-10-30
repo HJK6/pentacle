@@ -37,16 +37,20 @@ class Alerts:
         log.warning("ALERT %s %s", kind, fact)
         return None if fact is None else await self.error(fact)
 
-    async def error(self, fact: ErrorFact, *, principal: str | None = None) -> str | None:
+    async def error(self, fact: ErrorFact, *, principal: str | None = None,
+                    source_notification_id: str | None = None) -> str | None:
         """Durably record one typed fact; delivery follows the outbox pass.
 
         Returns the notification_id after commit, or None when the alert core
         is not configured. `principal` is only an already-authenticated
-        existing identity; the default is this daemon.
+        existing identity; the default is this daemon. `source_notification_id`
+        links a fact to the Updates card it was raised from.
         """
         if not isinstance(fact, ErrorFact):
             raise ValueError("invalid_error_fact")
         if self.sink is None:
             log.warning("subsystem=error_alerts family=%s action=sink_unavailable", fact.family)
             return None
-        return await self.sink.emit(fact, principal=principal)
+        if source_notification_id is None:
+            return await self.sink.emit(fact, principal=principal)
+        return await self.sink.emit(fact, principal=principal, source_notification_id=source_notification_id)
