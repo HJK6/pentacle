@@ -73,6 +73,11 @@
     "test_h2_portable_fixtures.py::test_darwin_exit_registration_requires_matching_terminal_event",
     "test_h2_portable_fixtures.py::test_terminal_bound_socket_preserves_ownership_without_contact",
     "test_harness_reaping.py::test_owned_group_exit_between_identity_check_and_registration",
-    "test_h2_portable_fixtures.py::test_linux_pidfd_registration_observes_terminal_readiness"
+    "test_h2_portable_fixtures.py::test_linux_pidfd_registration_observes_terminal_readiness",
+    "test_assistant_composite_summary_advance.py::test_reply_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_work_lane_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_operator_input_admission_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_mirror_projection_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_unruled_ruling_status_advances_preview"
   ]
 }

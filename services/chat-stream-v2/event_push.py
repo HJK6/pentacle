@@ -770,7 +770,7 @@ class EventPush:
                         "type": "chat.event",
                         "event": projected[projected_index],
                     })
-                    await broadcast_assistant_mirror(self.store, self.broadcast, seq)
+                    await broadcast_assistant_mirror(self.store, self.broadcast, seq, sessions=self.sessions)
                     projected_index += 1
         except Exception as exc:  # noqa: BLE001 - never acknowledge a failed push
             log.warning("event.push broadcast failed host=%s: %s", host, exc)

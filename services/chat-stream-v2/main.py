@@ -502,6 +502,7 @@ async def run(args: argparse.Namespace) -> int:
             question_answer=server._assistant_question_answer,
             publication_attachments=server._assistant_publication_attachments,
             voice_answers_validate=_validate_voice_answers,
+            sessions=sessions,
         )
     server.assistant_composites = assistant_composites
     # Primary alias: existing single-composite call sites (notify binding,
