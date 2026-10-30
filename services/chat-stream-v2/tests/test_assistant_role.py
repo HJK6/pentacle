@@ -270,3 +270,108 @@ def test_schedule_admission_enforces_role_authority(monkeypatch):
         result=await ctl.admit_schedule({"handoff":True,"handoff_from_stream_id":"hosta:helper","_auth_context":{"token_verified":True,"stream_id":"hosta:helper"}},HOST,admission_name="scheduled")
         assert result=={"ok":True}
     scenario(check)
+
+
+FD_SPEC = "spec_example__fd_recovery"
+
+
+class _FdCatalog:
+    @staticmethod
+    def resolution_for(spec_id):
+        return "resolved" if str(spec_id or "").removeprefix("spec_") == FD_SPEC.removeprefix("spec_") else "zero_matches"
+
+    @staticmethod
+    def canonical_spec_identity(spec_id):
+        value = str(spec_id or "").removeprefix("spec_")
+        return f"spec_{value}" if value else None
+
+
+def _front_desk_composite(store, sessions, *, bound=None):
+    """Primary composite with no role env: the FD seat is an ordinary `lead`."""
+    from assistant_composite import AssistantComposite, AssistantCompositeConfig
+    config = AssistantCompositeConfig(
+        enabled=True, stream_id="fixture-chat:assistant", rebind_authorized_spec_ids=frozenset({FD_SPEC}),
+        **({"direct_primary_stream_id": bound[0], "direct_primary_generation": bound[1]} if bound else {}),
+    )
+    composite = AssistantComposite(store, config=config)
+    sessions.assistant.front_desk = composite
+    return composite
+
+
+def _spy_operator_facing(monkeypatch):
+    import launch
+    seen = []
+    real = launch.build_launch
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("operator_facing"))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(launch, "build_launch", spy)
+    return seen
+
+
+@pytest.mark.parametrize("requested", ["default", None])
+def test_front_desk_handoff_persists_hidden_without_role_env(monkeypatch, tmp_path, requested):
+    from test_spawn_resume import ResumeTmux, _install_successful_spawn, _machine
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+    monkeypatch.delenv("PENTACLE_ASSISTANT_DAFF_ROLE", raising=False)
+    operator_facing = _spy_operator_facing(monkeypatch)
+
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            old = await store.open_session("localhost", "old", provider="claude", role="lead",
+                                           visibility="hidden", pane_status="pane_alive",
+                                           effective_model="claude-opus-5-5", effective_effort="medium")
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            await sessions.refresh()
+            _front_desk_composite(store, sessions, bound=("localhost:old", old["session_generation"]))
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path))
+            _install_successful_spawn(ctl, sessions, tmux)
+            msg = {"provider": "claude", "model": "claude-opus-5-5", "effort": "medium", "handoff": True,
+                   "handoff_from_stream_id": "localhost:old", "request_id": "fd-succession",
+                   "_auth_context": OPERATOR}
+            if requested:
+                msg["visibility"] = requested
+            result = await ctl.spawn(msg, "localhost")
+            assert result["type"] == "spawn.ok"
+            assert sessions.get(result["stream_id"])["visibility"] == "hidden"
+            assert result["session"]["visibility"] == "hidden"
+            assert operator_facing == [False]
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_front_desk_recovery_spec_hides_parentless_seat_before_binding_loads(monkeypatch, tmp_path):
+    from test_spawn_resume import ResumeTmux, _install_successful_spawn, _machine
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+    monkeypatch.delenv("PENTACLE_ASSISTANT_DAFF_ROLE", raising=False)
+    operator_facing = _spy_operator_facing(monkeypatch)
+
+    async def run():
+        store = Store(":memory:")
+        store.start()
+        try:
+            await store.open_session("localhost", "parent", provider="claude", role="lead",
+                                     visibility="default", pane_status="pane_alive")
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            await sessions.refresh()
+            _front_desk_composite(store, sessions)  # binding not loaded: nothing bound
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=_FdCatalog())
+            _install_successful_spawn(ctl, sessions, tmux)
+            base = {"provider": "claude", "model": "claude-opus-5-5", "effort": "medium",
+                    "spec_id": FD_SPEC, "visibility": "default", "_auth_context": OPERATOR}
+            top = await ctl.spawn({**base, "request_id": "fd-recovery"}, "localhost")
+            assert sessions.get(top["stream_id"])["visibility"] == "hidden"
+            child = await ctl.spawn({**base, "request_id": "fd-child", "parent_stream_id": "localhost:parent",
+                                     "role": "lead"}, "localhost")
+            assert sessions.get(child["stream_id"])["visibility"] == "default"
+            assert operator_facing[0] is False
+            assert operator_facing[1:] == [False]  # a parented seat is never operator-facing
+        finally:
+            store.stop()
+    asyncio.run(run())

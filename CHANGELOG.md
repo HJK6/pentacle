@@ -25,6 +25,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 - Initial CLI pin readiness excludes verified closed or missing input holders while preserving live and unknown obligations; durable tell custody prevents promotion across an unrecorded paste.
 - Same-ID tell retries can settle late native input proof without sending the message again; missing or ambiguous original proof stays pending.
+- The front-desk seat now stays hidden through every handoff, resume, restore and rebind: the daemon hides the bound seat and any parentless seat carrying the configured recovery work item, and a hidden qualified front-desk seat may rebind the primary assistant.
 - Long assistant message text wraps within the chat width; image paste keeps accompanying text and uses the existing attachment preview and send flow.
 - Existing unbound sessions keep accepting input before the first fleet CLI pin; initialized or inconsistent pin state still refuses that input.
 - Initial fleet CLI pin activation prepares and proves every serving home before enforcing the pair, preserving compatible running seats. Home-scoped maintenance fences survive restarts and expiry, with authenticated proof-backed recovery and managed launcher attribution.

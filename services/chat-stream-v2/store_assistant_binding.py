@@ -388,10 +388,10 @@ def _live_seat(row: dict[str, Any] | None, *, target: bool = False) -> None:
 
 
 def _configured_spec_authorized(
-    row: dict[str, Any], authorized_spec_ids: frozenset[str], *, hidden_self_recovery: bool = False,
+    row: dict[str, Any], authorized_spec_ids: frozenset[str], *, allow_hidden: bool = False,
 ) -> bool:
     if (not authorized_spec_ids or row["parent_stream_id"]
-            or row["visibility"] not in ({"default", "hidden"} if hidden_self_recovery else {"default"})):
+            or row["visibility"] not in ({"default", "hidden"} if allow_hidden else {"default"})):
         return False
     try:
         qualified = json.loads(row["qualified_spec_ids"] or "[]")
@@ -554,13 +554,8 @@ class AssistantBindingStoreMixin:
                         "AND predecessor_stream_id=? AND predecessor_generation=?",
                         (actor_stream_id, actor_generation, old["stream_id"], old["generation"]),
                     ).fetchone()
-                    hidden_self_recovery = (
-                        name == primary_assistant_name() and not clear
-                        and actor_stream_id == old["stream_id"] == target_stream_id
-                        and target_generation == actor_generation
-                    )
                     if handoff is None and not _configured_spec_authorized(
-                        actor, authorized_spec_ids, hidden_self_recovery=hidden_self_recovery,
+                        actor, authorized_spec_ids, allow_hidden=name == primary_assistant_name(),
                     ):
                         raise ValueError("assistant_rebind_unauthorized")
                 if clear:

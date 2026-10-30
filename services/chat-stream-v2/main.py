@@ -510,6 +510,7 @@ async def run(args: argparse.Namespace) -> int:
     assistant_composite = assistant_composites[primary_assistant_name()]
     assistant_config = assistant_configs[primary_assistant_name()]
     server.assistant_composite = assistant_composite
+    sessions.assistant.front_desk = assistant_composite
 
     async def _assistant_ingress_policy(*, target_stream_id, body, msg, verb):
         """Fan routine backend ingress across named assistants.
