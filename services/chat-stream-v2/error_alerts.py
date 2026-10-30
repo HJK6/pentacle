@@ -951,7 +951,7 @@ class ErrorAlerts:
                     f"alert={row['notification_id']} card={card['notification_id']} "
                     f"first={intent['first_at']} count={intent['count']}"
                     + (" prior_submission=unconfirmed" if awareness else "")
-                    + "; Bart decides, no auto-repair."
+                    + "; the FD decides, no auto-repair."
                 )
 
         def op(conn):

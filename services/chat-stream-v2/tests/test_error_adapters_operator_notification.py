@@ -59,7 +59,7 @@ async def test_critical_card_records_linked_fact_and_blocker(wired):
     assert json.loads(notice["metadata"])["notification_id"] == fact["notification_id"]
     assert notice["body"].startswith("BLOCKER critical from red-probe: RED probe "
                                      f"alert={fact['notification_id']} card={card['notification_id']} ")
-    assert notice["body"].endswith("; Bart decides, no auto-repair.")
+    assert notice["body"].endswith("; the FD decides, no auto-repair.")
     assert "probe body never copied" not in notice["body"]
     await s.queue.drain_once()
     assert s.provider.pastes and s.provider.pastes[-1].endswith(notice["body"])
