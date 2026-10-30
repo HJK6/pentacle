@@ -30,6 +30,7 @@ FAMILY_CODES: dict[str, frozenset[str]] = {
         "send_transport_failed", "send_unconfirmed", "operation_cancelled", "recovered",
         "report_gap", "no_speech", "too_long", "unsupported", "permission_declined",
     }),
+    "operator_notification.v1": frozenset({"warning", "critical"}),
 }
 CONDITIONS = frozenset({"active", "recovered", "cancelled", "unknown"})
 _EPISODE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
@@ -118,6 +119,19 @@ def _map_daemon_stall(fields: Mapping[str, object]) -> ErrorFact | None:
     return ErrorFact('daemon_runtime.v1', 'loop_stalled', episode, condition, cause)
 
 
+def _map_operator_notification(fields: Mapping[str, object]) -> ErrorFact | None:
+    """Any warning/critical card: episode is (producer, severity, dedup_key or title)."""
+    producer, severity = fields.get("producer"), fields.get("severity")
+    if not isinstance(producer, str) or not isinstance(severity, str) \
+            or severity not in FAMILY_CODES["operator_notification.v1"]:
+        return None
+    # The producer slug keeps one immediate fingerprint per producer and severity.
+    stage = re.sub(r"[^a-z_]", "_", producer.lower())[:32]
+    key = fields.get("dedup_key") or fields.get("title")
+    return _map_fields("operator_notification.v1", severity, {"producer": producer, "key": key},
+                       ("producer", "key"), stage=stage or None)
+
+
 #: Alerts kind -> pure mapper(fields) returning a fact, or None to stay log-only.
 #: Producers call `await alerts.record(kind, **fields)`; it commits before return.
 ADAPTERS: dict[str, Callable[[Mapping[str, object]], ErrorFact | None]] = {
@@ -132,6 +146,7 @@ ADAPTERS: dict[str, Callable[[Mapping[str, object]], ErrorFact | None]] = {
     "system_deploy_failed": _map_system_deploy,
     "system_backup_failed": _map_system_backup,
     "bot_messaging_failed": _map_bot_messaging,
+    "operator_notification": _map_operator_notification,
 }
 
 

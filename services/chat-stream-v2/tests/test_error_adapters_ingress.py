@@ -121,9 +121,16 @@ class IngressTests(unittest.IsolatedAsyncioTestCase):
                 for dedup in ('census|fn-example|invariant-example|2026-01-15', 'infra-census|fn-example|2026-01-15'):
                     self.assertEqual((await dispatch(self.server, peer, producer_frame(actor, dedup_key=dedup)))['type'], 'notification.create.ok')
         self.assertEqual(self.recorder.calls, [])
+        # Unauthenticated: info stays a card; warning/critical record one
+        # operator_notification fact linked to the card, never the actor's family.
         frame = producer_frame(CD)
-        self.assertEqual((await self.notify.notification(frame))['type'], 'notification.create.ok')
-        self.assertEqual(self.recorder.calls, [])
+        for severity in ('info', 'warning', 'critical'):
+            reply = await self.notify.notification({**frame, 'severity': severity, 'dedup_key': 'unauth-' + severity})
+            self.assertEqual(reply['type'], 'notification.create.ok')
+        cards = {row['dedup_key']: row['notification_id'] for row in await self.notify._db.call('list_notifications')}
+        self.assertEqual([(f.family, f.code, p, s) for f, p, s in self.recorder.calls], [
+            ('operator_notification.v1', severity, 'system:operator-notify', cards['unauth-' + severity])
+            for severity in ('warning', 'critical')])
 
     async def test_A5_sink_unavailable_or_raising_does_not_change_ok(self):
         for actor in (CD, BACKUP, BOT):
