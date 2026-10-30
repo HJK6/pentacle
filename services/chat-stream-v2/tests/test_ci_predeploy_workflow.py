@@ -98,14 +98,14 @@ def test_predeploy_uses_the_shared_services_import_root(tmp_path):
 def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     workflow, step = _step()
     job = workflow['jobs']['daemon']
-    assert job['timeout-minutes'] == 50
+    assert job['timeout-minutes'] == 70
     argv = _invocations(step)['v2-merge-ci']
     target, command, _, env, _ = _trace('v2-merge-ci', argv, tmp_path)
-    assert target['tier_timeouts'] == {'unit':1500, 'smoke':900}
-    assert target['timeout_s'] == target['max_timeout_s'] == 2400
-    assert command[command.index('--deadline-seconds') + 1] == '2520'
+    assert target['tier_timeouts'] == {'unit':2100, 'smoke':900}
+    assert target['timeout_s'] == target['max_timeout_s'] == 3000
+    assert command[command.index('--deadline-seconds') + 1] == '3120'
     assert command[command.index('--deadline-reserve-seconds') + 1] == '60'
-    assert env['V2_UNIT_TIMEOUT_S'] == '1500' and env['V2_SMOKE_TIMEOUT_S'] == '900'
+    assert env['V2_UNIT_TIMEOUT_S'] == '2100' and env['V2_SMOKE_TIMEOUT_S'] == '900'
     assert 'V2_SOAK_TIMEOUT_S' not in env and '--timeout-seconds' not in command
     assert CONFIG['profiles']['pentacle']['targets']['v2-unit']['timeout_s'] == 900
     assert CONFIG['profiles']['pentacle']['targets']['v2-smoke']['timeout_s'] == 900
