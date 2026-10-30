@@ -517,7 +517,7 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         handoff_rec["checks"] = {
             "handoff_ok": ok_handoff,
             "successor_top_level": ok_handoff and not srow.get("parent_stream_id"),
-            "successor_visibility_default": srow.get("visibility") == "default",
+            "successor_visibility_hidden": srow.get("visibility") == "hidden",
             "successor_holds_recovery_spec": RECOVERY_SPEC in qualified,
             "provenance_expected": prov.get("provenance") == variant,
             "granting_principal_present": bool(str(prov.get("granting_principal") or "").strip()),
@@ -665,7 +665,13 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
         # A8: authority boundaries; Daff and the lifecycle grant untouched.
         rev_now = int(fd.binding().get("revision") or 0)
         boundary: dict[str, Any] = {}
-        for name in BOUNDARY:
+        # A hidden qualified parentless seat holds the same authority as a default one,
+        # so it is exercised last: its success moves the binding.
+        binding_before_hiddenseat = ""
+        for name in sorted(BOUNDARY, key=lambda n: n == "hiddenseat"):
+            if name == "hiddenseat":
+                binding_before_hiddenseat = fd.binding().get("generation")
+                rev_now = int(fd.binding().get("revision") or 0)
             gen = fd.generation(name)
             res = fd.rebind(name, name, gen, rev_now, f"a8-{name}-{gen}")
             row = fd.row(name) or {}
@@ -678,9 +684,11 @@ def run_handoff_recovery(root: Path, evidence: Path, *, assistant_role: str | No
               "daff_after": [r for r in fd.binding_rows() if r["name"] == "daff"]}
         a8["checks"] = {
             **{f"{name}_refused": boundary[name]["rc"] != 0
-               and "assistant_rebind_unauthorized" in json.dumps(boundary[name]["json"]) for name in BOUNDARY},
+               and "assistant_rebind_unauthorized" in json.dumps(boundary[name]["json"])
+               for name in BOUNDARY if name != "hiddenseat"},
+            "hiddenseat_authorized": boundary["hiddenseat"]["rc"] == 0,
             "opv2_holds_operator_v2": "operator_v2" in str(boundary["opv2"]["row"]["spec_binding_provenance"]),
-            "binding_still_successor": fd.binding().get("generation") == gen2,
+            "binding_still_successor": binding_before_hiddenseat == gen2,
             "daff_binding_unchanged": a8["daff_after"] == daff_before,
             "lifecycle_not_restored": not any(gen2 in json.dumps(r, default=str) for r in lifecycle_after),
         }

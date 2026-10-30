@@ -2056,6 +2056,11 @@ class SpawnCtl:
         # launch resolution and reservation so an explicit but unknown item can
         # never produce a pane, intent, or misleading spawn.ok.
         spec_binding = await self._resolve_spec_binding(msg, host, name)
+        policy = getattr(self.sessions, "assistant", None)
+        if policy is not None and policy.is_front_desk_seat(
+            f"{host}:{name}", {**tmux_transport.open_fields(msg), **spec_binding},
+        ):
+            msg["visibility"] = "hidden"
 
         # Resolve provider tuples before reservation; explicit commands still win.
         # The deterministic staged path is safe to put in a launcher command
@@ -2074,7 +2079,6 @@ class SpawnCtl:
             "_defer_launch_token_stage": True,
             **({"_account_resume_binding": resume_prior_row.get("account_binding")} if resume_prior_row else {}),
         }
-        policy = getattr(self.sessions, "assistant", None)
         if policy is not None and policy.is_daff_backend(resume_prior_row):
             launch_msg["visibility"] = "hidden"
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
@@ -2182,6 +2186,8 @@ class SpawnCtl:
         if policy is not None and policy.is_daff_backend({"host": host, **open_flds}):
             open_flds["visibility"] = "hidden"
             log.info("subsystem=assistant_inventory bug_ref=daff_backend_inventory_scope action=hidden_spawn")
+        if policy is not None and policy.is_front_desk_seat(f"{host}:{name}", open_flds):
+            open_flds["visibility"] = "hidden"
         # Fence this spawn's lifecycle to a generation IT owns. Both boot-failure
         # cleanup closes below pass it as `expected_generation`, so a cleanup can
         # only ever close the row THIS spawn created — never a newer same-name

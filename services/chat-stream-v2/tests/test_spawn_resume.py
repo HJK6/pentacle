@@ -494,6 +494,41 @@ def test_resume_normalizes_legacy_daff_visibility_after_preserving_metadata(monk
     asyncio.run(run())
 
 
+def test_resume_of_bound_primary_stream_persists_hidden(monkeypatch, tmp_path):
+    import shlex
+    from assistant_composite import AssistantComposite, AssistantCompositeConfig
+
+    monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
+    monkeypatch.delenv("PENTACLE_ASSISTANT_DAFF_ROLE", raising=False)
+
+    async def run():
+        machine = _machine(tmp_path)
+        path = _write_transcript(machine)
+        store = Store(":memory:")
+        store.start()
+        try:
+            prior = await _closed_prior(store, path)
+            tmux = ResumeTmux()
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            sessions.assistant.front_desk = AssistantComposite(store, config=AssistantCompositeConfig(
+                enabled=True, stream_id="fixture-chat:assistant",
+                direct_primary_stream_id=f"localhost:{prior['session_name']}",
+                direct_primary_generation=str(prior["session_generation"])))
+            ctl = SpawnCtl(store, sessions, tmux=tmux, machine=machine)
+            commands = _install_successful_spawn(ctl, sessions, tmux)
+            assert prior["visibility"] == "default"
+            result = await ctl.spawn({"provider": "claude", "model": "claude-opus-5-5", "effort": "medium",
+                                      "resume_session_id": RESUME_ID, "request_id": "resume-bound-fd"}, "localhost")
+            row = sessions.get(result["stream_id"])
+            assert row["visibility"] == "hidden"
+            assert row["session_generation"] != prior["session_generation"]
+            assert len(commands) == 1
+            assert launch.VISIBLE_SESSION_METADATA_INSTRUCTION not in shlex.split(commands[0])
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_purged_row_fallback_uses_normal_lifecycle_and_surfaces_history(tmp_path: Path) -> None:
     async def _go() -> tuple[str, dict, str]:
         machine = _machine(tmp_path)
