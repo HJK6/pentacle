@@ -22,9 +22,10 @@ test('Darwin group inspector rejects an incomplete row before claiming an empty 
   }
   const loaded = { exports: {} };
   vm.runInNewContext(source, { module: loaded, process: { platform: 'darwin' },
-    require: name => name === 'node:child_process' ? { execFileSync: () => '1 1 Ss\n22 99 Z\n' } : require(name) });
+    require: name => name === 'node:child_process' ? { execFileSync: () => '1 1 Ss\n22 99 Z\n23 99 ?\n24 99 ?E\n' } : require(name) });
   assert.equal(loaded.exports.groupMembers(424242).length, 0, 'a foreign group is observation only');
   assert.equal(loaded.exports.groupMembers(99)[0].state, 'Z', 'zombies remain visible to the caller');
+  assert.deepEqual(Array.from(loaded.exports.groupMembers(99), row => row.pid), [22, 23, 24], 'transitional states remain group members');
   const unavailable = { exports: {} };
   vm.runInNewContext(source, { module: unavailable, process: { platform: 'darwin' },
     require: name => name === 'node:child_process' ? { execFileSync: () => { throw Object.assign(new Error('scan timeout'), { code: 'ETIMEDOUT' }); } } : require(name) });

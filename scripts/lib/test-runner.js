@@ -78,7 +78,7 @@ function groupMembers(pgid) {
     return lines.map(line => {
       const row = line.trim().split(/\s+/);
       if (row.length !== 3 || !row.slice(0, 2).every(value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)))
-          || !/^[A-Z][A-Za-z+<>]*$/.test(row[2])) {
+          || !/^[A-Z?][A-Za-z+<>?]*$/.test(row[2])) {
         throw new Error('owned process inspection unavailable (malformed ps row)');
       }
       return { pid: Number(row[0]), pgid: Number(row[1]), state: row[2][0] };
