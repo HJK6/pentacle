@@ -470,8 +470,8 @@ scripts with the supported callable (using the prepared daemon interpreter):
 
 ```python
 # Put services/chat-stream-v2 on sys.path in the existing owner caller.
-from deploy.deploy import reload_web
-reload_web("com.example.web", live_plist_path)
+from deploy.deploy import reload_web, _run
+reload_web("com.example.web", live_plist_path, _run)
 ```
 
 The plist Label must match. This call waits for positive unloaded state before

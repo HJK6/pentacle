@@ -914,7 +914,7 @@ def _wait_launchd_unloaded(
 
 
 def reload_web(
-    label: str, plist: Path, runner: Runner = _run, *, timeout_s: float = 10.0,
+    label: str, plist: Path, runner: Runner, *, timeout_s: float = 10.0,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, object]:
