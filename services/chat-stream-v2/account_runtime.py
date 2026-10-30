@@ -250,6 +250,12 @@ class AccountRuntime:
         await self.maintenance_input(row)
         # Rollback can disable new launches while existing bound agents drain.
         if not row.get("account_binding") and await self.enrolled(row.get("host"),row.get("provider")):
+            from provider_cli_pin import pristine
+            try:
+                if await self.run(pristine):
+                    return  # Legacy input stays usable before the first pin.
+            except AccountError:
+                pass  # Corrupt history is never pre-enforcement.
             raise AccountError("provider_cli_pin_unavailable",reason="binding_unknown")
         if row.get("account_binding"):
             await self.run(lambda accounts:accounts.ensure_available(self.key(row["account_binding"])))
