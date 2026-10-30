@@ -87,7 +87,8 @@ the fallback even outside the visible page. A genuinely repeated message gains
 its own row when its transcript event arrives. Returned-to-prompt, optimistic,
 image-wrapper, working-state and tool suppression rules still apply.
 
-The web sidebar's one-line row preview is plain text: `sanitizeSidebarDetail`
+The web sidebar's one-line row preview comes from `last_text` only; the tmux pane
+line in a session's presence `preview` never appears in a row. It is plain text: `sanitizeSidebarDetail`
 in `renderer/chat_ui_state.js` drops emphasis, code-span ticks, link syntax and
 heading, list, quote and fence markers, keeping the words, and joins lines. The
 `sidebar-preview-plain-text` web gate scenario checks it against a seeded
