@@ -272,6 +272,15 @@ export function isCodexHelperSuggestion(text: string) {
   return matchesCodexHelperLine(firstLine || '');
 }
 
+// Legacy pane splash suggestions have no operator or structured-event provenance.
+export function isHelperSuggestionEvent(event: PentacleEvent): boolean {
+  return String(event.kind || '').toUpperCase() === 'USER'
+    && event.client_origin !== true
+    && !event.optimistic_id
+    && event.raw?.source !== 'structured'
+    && isCodexHelperSuggestion(stripTerminalPromptPrefix(event.text));
+}
+
 export type PeerAgentMessage = {
   fromStreamId: string;
   anchorId?: string;
@@ -1027,7 +1036,7 @@ export function interpretPentacleEvent(
     );
   }
 
-  if (kind === 'USER' && isCodexHelperSuggestion(userText)) {
+  if (isHelperSuggestionEvent(event)) {
     return interpreted(event, 'codex-helper-suggestion', 'hidden:helper', 'user', '', userText, true, 'Codex starter/helper prompts are not durable user conversation.');
   }
 
