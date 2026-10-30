@@ -118,3 +118,78 @@ def test_overlapping_identical_bare_inputs_cannot_share_one_user_proof():
             assert len(tmux.pastes) == 2 and tmux.enter_only == 0
         finally: store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["persist-before-paste", "proof-after-paste"])
+def test_unknown_input_after_restart_never_pastes_again(tmp_path, failure):
+    class InterruptedDaemon(BaseException):
+        pass
+    async def run():
+        path = tmp_path / "interrupted.db"
+        store, sessions, comms, tmux, request = await setup(path)
+        try:
+            if failure == "persist-before-paste":
+                put = store.put_tell_delivery
+                async def interrupted(*args, **kwargs):
+                    await put(*args, **kwargs)
+                    raise InterruptedDaemon()
+                store.put_tell_delivery = interrupted
+                error = InterruptedDaemon
+            else:
+                async def broken_reader(*args, **kwargs):
+                    raise RuntimeError("proof reader unavailable")
+                comms._submission_evidence = broken_reader
+                error = RuntimeError
+            with pytest.raises(error): await comms.tell(request)
+            saved = await store.get_tell_delivery(request["tell_id"])
+            assert saved["reply"]["delivery_status"] == "proof_unavailable"
+            assert saved["delivery"]["proof_generation"]
+            assert type(saved["delivery"]["proof_watermark"]) is int
+            assert len(tmux.pastes) == (0 if failure == "persist-before-paste" else 1)
+        finally: store.stop()
+        store = Store(str(path)); store.start()
+        try:
+            sessions = Sessions(store, tmux=tmux, local_host="localhost")
+            await sessions.refresh()
+            comms = Comms(store, sessions, SpawnCtl(store, sessions, tmux=tmux))
+            for _ in range(2):
+                result = await comms.tell(request)
+                assert result["duplicate"] and result["do_not_resubmit"]
+                assert result["delivery_status"] == "proof_unavailable"
+            assert len(tmux.pastes) == (0 if failure == "persist-before-paste" else 1)
+            assert tmux.enter_only == 0
+            if failure == "proof-after-paste":
+                await append(store, request["stream_id"], tmux.pastes[0])
+                result = await comms.tell(request)
+                assert result["delivery_status"] == "delivered" and result["submission_attempts"] == 1
+                assert len(tmux.pastes) == 1
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["payload_digest", "proof_generation", "proof_session_created_at",
+                                  "proof_watermark", "text", "to_stream_id"])
+def test_prepared_completion_cannot_change_original_payload_or_anchor(field):
+    async def run():
+        store, sessions, comms, tmux, request = await setup()
+        put = store.put_tell_delivery
+        async def before_paste(*args, **kwargs):
+            await put(*args, **kwargs)
+            raise RuntimeError("stop after durable preparation")
+        store.put_tell_delivery = before_paste
+        try:
+            with pytest.raises(RuntimeError): await comms.tell(request)
+            original = await store.get_tell_delivery(request["tell_id"])
+            completed = json.loads(json.dumps(original))
+            if field == "payload_digest": completed[field] = "other-payload"
+            else:
+                value = completed["delivery"][field]
+                completed["delivery"][field] = value + 1 if type(value) is int else str(value) + "-changed"
+            completed["reply"].update(delivery_status="delivered", submission_confirmed=True, submission_attempts=1)
+            completed["delivery"].update(delivery_status="delivered", submission_confirmed=True, submission_attempts=1)
+            assert await store.promote_tell_delivery(request["tell_id"], original["payload_digest"],
+                                                       prepared_result=completed) is None
+            assert await store.get_tell_delivery(request["tell_id"]) == original
+            assert tmux.pastes == []
+        finally: store.stop()
+    asyncio.run(run())

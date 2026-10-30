@@ -15,12 +15,12 @@ def _rows(conn, query, arguments=()):
     return [dict(row) for row in conn.execute(query, arguments)]
 
 
-def snapshot(a, now):
+def snapshot(a, now, *, composite_for=None, counts=None):
     """No message text, credentials, or time-varying quota projections."""
     if not pristine(a):
         raise AccountError("provider_cli_pin_stale")
     accounts = a.readback(now=now)
-    return {
+    before = {
         "accounts": accounts["accounts"], "defaults": accounts["defaults"],
         "policy": json.loads(canonical(a.policy)),
         "sessions": _rows(a.conn, "SELECT s.host,s.session_name,g.generation AS session_generation,s.provider,"
@@ -40,6 +40,26 @@ def snapshot(a, now):
             "WHERE child.status='open' AND parent.status='closed' AND parent.account_binding IS NOT NULL "
             "ORDER BY child.host,child.session_name"),
     }
+    from sessions import Sessions
+    open_ids = {row["host"] + ":" + row["session_name"] for row in before["sessions"]}
+    blocking = []
+    not_open = 0
+    for obligation in before["input_obligations"]:
+        target = obligation.get("to_stream_id")
+        concrete = False
+        if isinstance(target, str):
+            host, name = Sessions.split(target)
+            concrete = bool(host and name and ":" not in name
+                and not any(c.isspace() or ord(c) < 32 for c in target)
+                and not (composite_for and composite_for(target) is not None))
+        if (not concrete or obligation.get("delivery") == "unverifiable" or target in open_ids):
+            blocking.append(obligation)
+        else:
+            not_open += 1
+    before["input_obligations"] = blocking
+    if counts is not None:
+        counts.update(blocking=len(blocking), not_open=not_open)
+    return before
 
 
 def input_obligations(a):
@@ -54,6 +74,8 @@ def input_obligations(a):
         try:
             value=json.loads(row["reply"]);reply=value.get("reply",{});delivery=value.get("delivery",{})
             state=delivery.get("delivery_status") or reply.get("delivery_status")
+            if not isinstance(state, str) or not state:
+                raise ValueError("tell_state_unverifiable")
             if state in {"pasted_unsubmitted","proof_unavailable","committed_pending_proof","pending_input","persisted_suppressed"}:
                 result.append({"to_stream_id":delivery.get("to_stream_id") or reply.get("to_stream_id"),
                     "tell_id":row["tell_id"],"delivery":state})
@@ -161,7 +183,9 @@ async def prepare(runtime, message):
         raise AccountError("provider_cli_pin_request_invalid") from None
     if pin["revision"] != 1:
         raise AccountError("provider_cli_pin_stale")
-    before = await runtime.run(lambda a:snapshot(a,runtime.clock()))
+    counts = {}
+    before = await runtime.run(lambda a:snapshot(a,runtime.clock(),
+        composite_for=getattr(runtime.server,"_composite_for",None), counts=counts))
     cells = population(before)
     parked = parking(message.get("initial_parked_cells"), cells)
     missing = await runtime.run(lambda a:structural(a,before,pin,parked,runtime.clock()))
@@ -195,14 +219,15 @@ async def prepare(runtime, message):
                 missing.append({**cell,"reason":str(exc) if isinstance(exc,AccountError)
                                 else "launcher_verification_unavailable"})
     ready = {"target_digest":digest(pin),"snapshot_digest":digest(before),
-             "proofs":proofs,"parked_cells":list(parked.values()),"missing":missing}
+             "proofs":proofs,"parked_cells":list(parked.values()),"missing":missing,
+             "input_obligation_counts":counts}
     ready["digest"] = digest({k:ready[k] for k in ("target_digest","snapshot_digest","parked_cells")})
     if expected is not None and expected != ready["digest"]:
         ready["missing"].append({"reason":"readiness_digest_changed"})
     return before,ready
 
 
-def commit(a, message, before, ready, now, *, local_host,owner_epoch):
+def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_for=None):
     """Called inside the same transaction as the initial pin write."""
     from provider_cli_artifact import validate_proof
     from provider_cli_pin import consumer_current
@@ -211,7 +236,7 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch):
     except (ValueError,TypeError):owner_matches=False
     if not owner_matches:
         raise AccountError("provider_cli_initial_readiness_required",reason="promotion_pause_changed")
-    if ready["missing"] or snapshot(a,now) != before:
+    if ready["missing"] or snapshot(a,now,composite_for=composite_for) != before:
         raise AccountError("provider_cli_initial_readiness_required",missing=ready["missing"] or
                            [{"reason":"readiness_state_changed"}])
     pin = validate(message["pin"])
@@ -310,7 +335,8 @@ async def set_pair(runtime,message,*,recovery_principal):
             async with runtime.pin_lock:
                 return await runtime.run(lambda a:set_pin(a,message,recovery_principal=recovery_principal,
                     initial_check=(lambda ledger:commit(ledger,message,before,ready,runtime.clock(),
-                        local_host=getattr(runtime.sessions,"local_host",None),owner_epoch=runtime._health_epoch)) if initial else None,
+                        local_host=getattr(runtime.sessions,"local_host",None),owner_epoch=runtime._health_epoch,
+                        composite_for=getattr(runtime.server,"_composite_for",None))) if initial else None,
                     initial_readiness=ready),settle_on_cancel=True)
     finally:
         if initial:

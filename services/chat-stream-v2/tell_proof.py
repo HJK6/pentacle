@@ -6,6 +6,33 @@ import json
 from submission_events import EventProof, provider_text_digest, submission_text_matches
 
 
+def finalize_prepared(conn, original, result):
+    """Only the exact original payload and pre-input anchors may complete custody."""
+    old = original.get("delivery") or {}
+    final = result.get("delivery") or {}
+    reply = result.get("reply") or {}
+    anchors = ("tell_id", "to_stream_id", "text", "request_payload_hash", "proof_generation",
+               "proof_session_created_at", "proof_watermark", "proof_watermark_state", "proof_watermark_reason")
+    if (original.get("payload_digest") != result.get("payload_digest")
+            or old.get("delivery_status") != "proof_unavailable" or old.get("submission_attempts") != 0
+            or old.get("notification_answer_generation")
+            or final.get("delivery_status") not in {"delivered", "committed_pending_proof", "pasted_unsubmitted"}
+            or reply.get("delivery_status") != final.get("delivery_status")
+            or reply.get("tell_id") != final.get("tell_id")
+            or reply.get("to_stream_id") != final.get("to_stream_id")
+            or any(old.get(k) != final.get(k) for k in anchors)):
+        return None
+    target = old.get("to_stream_id") or ""
+    host, _, name = target.partition(":")
+    current = conn.execute("SELECT s.created_at,g.generation FROM sessions s JOIN v2_session_generations g "
+        "ON g.host=s.host AND g.session_name=s.session_name WHERE s.host=? AND s.session_name=?",
+        (host, name)).fetchone()
+    if current is None or (current["created_at"], current["generation"]) != (
+            old.get("proof_session_created_at"), old.get("proof_generation")):
+        return None
+    return result
+
+
 def retained_proof(conn, payload):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}

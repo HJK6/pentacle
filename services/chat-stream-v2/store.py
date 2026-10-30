@@ -4076,6 +4076,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def promote_tell_delivery(
         self, tell_id: str, payload_digest: str, *, proof: dict[str, Any] | None = None,
         reconcile: bool = False,
+        prepared_result: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Atomically promote one matching proof-pending tell.
 
@@ -4110,6 +4111,21 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 if not isinstance(reply, dict) or not isinstance(delivery, dict):
                     conn.rollback()
                     return None
+                if prepared_result is not None:
+                    from tell_proof import finalize_prepared
+                    completed = finalize_prepared(conn, payload, prepared_result)
+                    if completed is None:
+                        conn.rollback()
+                        return None
+                    completed["reply"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    completed["delivery"]["ledger_row_id"] = int(row["ledger_row_id"])
+                    store_exchange.append(conn, completed["delivery"].get("exchange"))
+                    conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                                 (json.dumps(completed, separators=(",", ":")), tell_id))
+                    conn.commit()
+                    return _decode_tell_envelope(conn.execute(
+                        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                        (tell_id,)).fetchone())
                 if (
                     reply.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
                     or delivery.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
@@ -4135,6 +4151,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                                  confirmation_pending=False, confirmation_status="confirmed")
                     delivery.update(action_status="committed", action_committed=True,
                                     confirmation_pending=False, confirmation_status="confirmed")
+                    reply["submission_attempts"] = max(1, int(reply.get("submission_attempts") or 0))
+                    delivery["submission_attempts"] = reply["submission_attempts"]
                 if delivery.get("notification_answer_generation"):
                     reply.update(action_status="committed", action_committed=True,
                                  confirmation_pending=False, confirmation_status="confirmed")

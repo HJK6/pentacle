@@ -5,7 +5,19 @@ never pastes or presses Enter again. Reusing an ID with a different payload or
 resolved target is a conflict.
 
 Ordinary tells retain their original pre-input event watermark, lifecycle
-generation, session birth and exact wire text. If native USER evidence arrives
+generation, session birth and exact wire text. After input admission and before
+the first paste, the existing tell table durably records `proof_unavailable`
+custody, with zero confirmed attempts. This is an unknown outcome, not a claim
+that input happened. The result can replace that prepared row only through an
+exact payload-and-anchor comparison in the existing promotion transaction.
+
+A caller cancellation, proof-reader failure, or daemon restart between
+persistence and paste cannot authorize a second paste. Definite input-admission
+refusals occur before this receipt is prepared. Pending custody is already
+visible to first-pin readiness while input or proof is in flight; the global
+pin decision lock is never held across delivery or evidence waiting.
+
+If native USER evidence arrives
 after the initial confirmation window, a same-ID retry can reconcile the
 original receipt. The evidence lookup and promotion run in one Store
 transaction. They require an exact post-watermark USER or authenticated TELL

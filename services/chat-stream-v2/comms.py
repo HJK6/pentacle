@@ -590,6 +590,8 @@ class Comms:
         if prior is not None:
             self._assert_same_payload(tell_id, digest, prior)
             async with self._pane_input_lock(str(route["final_target"])):
+                prior = await self.store.get_tell_delivery(tell_id)
+                self._assert_same_payload(tell_id, digest, prior)
                 prior = (await self.store.promote_tell_delivery(
                     tell_id, digest, reconcile=True)) or prior
             return {**prior["reply"], "duplicate": True}
@@ -860,8 +862,13 @@ class Comms:
         """Inject once, then durably record the provider's truth boundary."""
         binding = await self.store.exchange_binding(str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""), str(route["final_target"]))
         original = await self.store.fetch_session(*self.sessions.split(str(route["final_target"]))) or {}
+        prepared = False
+        async def before_paste(watermark):
+            nonlocal prepared
+            await self._prepare_tell_input(msg, tell_id, route, body, digest, original, watermark)
+            prepared = True
         confirmed, attempts, provider, active_draft, proof, watermark = await self._attempt_delivery(
-            msg, route, body,
+            msg, route, body, before_paste=before_paste,
         )
         if msg.get("_notification_answer_generation"):
             prior = await self.reconcile_notification_answer(
@@ -935,10 +942,32 @@ class Comms:
         }
         from store_exchange import source
         delivery["exchange"] = source(binding, "tell", tell_id, strip_peer_delivery_envelope(body), enqueued_at)
-        reply["ledger_row_id"] = await self.store.put_tell_delivery(
-            tell_id, {"payload_digest": digest, "reply": reply, "delivery": delivery}
-        )
+        envelope = {"payload_digest": digest, "reply": reply, "delivery": delivery}
+        if prepared:
+            finalized = await self.store.promote_tell_delivery(tell_id, digest, prepared_result=envelope)
+            if finalized is None:
+                # A stale/corrupt completion cannot overwrite original custody.
+                finalized = await self.store.get_tell_delivery(tell_id)
+                self._assert_same_payload(tell_id, digest, finalized)
+            return finalized["reply"]
+        reply["ledger_row_id"] = await self.store.put_tell_delivery(tell_id, envelope)
         return reply
+
+    async def _prepare_tell_input(self, msg, tell_id, route, body, digest, original, watermark):
+        """Existing tell receipt custody, before input, never a claim of delivery."""
+        reply = self._tell_reply(tell_id, route, submission_confirmed=False,
+            delivery_status="proof_unavailable", submission_attempts=0, reason="input_outcome_unknown")
+        reply.update(action_status="indeterminate", action_committed=False,
+                     confirmation_pending=True, confirmation_status="pending", do_not_resubmit=True,
+                     reconcile="tell_id_evidence_only", **watermark_fields(watermark))
+        delivery = {"tell_id":tell_id, "to_stream_id":str(route["final_target"]), "text":body,
+            "from_stream_id":str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            "delivery_status":"proof_unavailable", "submission_confirmed":False, "submission_attempts":0,
+            "delivered_at":None, "request_payload_hash":digest,
+            "proof_generation":original.get("session_generation"),
+            "proof_session_created_at":original.get("created_at"), **watermark_fields(watermark)}
+        await self.store.put_tell_delivery(tell_id,
+            {"payload_digest":digest, "reply":reply, "delivery":delivery})
 
     def _tell_reply(
         self,
@@ -1313,6 +1342,7 @@ class Comms:
 
     async def _attempt_delivery(
         self, msg: dict[str, Any], route: dict[str, Any], body: str,
+        *, before_paste=None,
     ) -> tuple[bool, int, str, bool, EventProof, EventWatermark]:
         """Deliver ``body`` and return proof, attempts, provider, and active-draft evidence."""
         target = str(route["final_target"])
@@ -1324,14 +1354,18 @@ class Comms:
         if msg.get("_notification_answer_generation") and provider not in SUBMIT_PREDICATES:
             raise VerbError("bad_request", "answer delivery requires a supported USER-proof provider")
         tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
+        async def prepare(watermark):
+            if msg.get("_notification_answer_generation"):
+                await self._prepare_answer_input(msg, route, body, watermark)
+            else:
+                if msg.get("_assistant_authority_request_generation"):
+                    await self._validate_assistant_request_target(msg, route)
+                if before_paste is not None:
+                    await before_paste(watermark)
         confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
             tmux, name, body, provider, bool(msg.get("urgent")), target,
             durable_proof=msg.get("_durable_notice_proof") is True,
-            before_paste=(
-                lambda watermark: self._prepare_answer_input(msg, route, body, watermark)
-            ) if msg.get("_notification_answer_generation") else (
-                lambda watermark: self._validate_assistant_request_target(msg, route)
-            ) if msg.get("_assistant_authority_request_generation") else None,
+            before_paste=prepare,
         )
         return confirmed, attempts, provider, active_draft, proof, watermark
 
@@ -1394,9 +1428,9 @@ class Comms:
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._watermark_before_action(stream_id)
-        if before_paste is not None:
-            await before_paste(watermark)
         async with self._account_input_guard(stream_id):
+            if before_paste is not None:
+                await before_paste(watermark)
             await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
