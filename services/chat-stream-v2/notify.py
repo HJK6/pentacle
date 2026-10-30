@@ -89,6 +89,8 @@ ANSWER_BACK_MAX_CHARS = 800
 ANSWERED_QUESTION_RECOVERY_LIMIT = 100
 ANSWER_TELL_ID_PREFIX = "notification-answer-"
 FIXED_SYSTEM_PRODUCER_STREAM_ID = "altum-bot-cd"
+#: Fixed daemon-owned principal for warning/critical cards from any other producer.
+OPERATOR_NOTIFY_PRINCIPAL = "system:operator-notify"
 _AGENT_QUESTION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
 #: D3 (daemon_updates_2026_09): ack is deleted from accepted modes. A question
 #: is a choice (single/multi) or pure free text; every mode admits free text via
@@ -1528,6 +1530,7 @@ class Notify:
             WMI_BACKUP_PRODUCER_STREAM_ID: "system_backup_failed",
             "bot-messaging-desk": "bot_messaging_failed",
         }.get(actor)
+        fact = None
         if kind is not None:
             fields = {"severity": msg.get("severity"), "dedup_key": msg.get("dedup_key")}
             if kind == "bot_messaging_failed":
@@ -1541,6 +1544,20 @@ class Notify:
                         log.warning("subsystem=error_adapters actor=%s action=sink_unavailable", actor)
                 except Exception:
                     log.warning("subsystem=error_adapters actor=%s action=sink_failed", actor)
+        severity = record.get("severity")
+        if fact is None and (severity == "critical" or (severity == "warning" and kind is None)):
+            # Any other warning/critical card reaches the FD as a typed fact; a
+            # fixed actor's declined frame does only when critical (an error).
+            fact = adapt("operator_notification", record)
+            if fact is not None:
+                try:
+                    nid = None if self.alerts is None else await self.alerts.error(
+                        fact, principal=OPERATOR_NOTIFY_PRINCIPAL,
+                        source_notification_id=record["notification_id"])
+                    if nid is None:
+                        log.warning("subsystem=error_adapters kind=operator_notification action=sink_unavailable")
+                except Exception:
+                    log.warning("subsystem=error_adapters kind=operator_notification action=sink_failed")
         client_record = await self._serialize(record)
         if self._broadcast is not None:
             await self._broadcast({"type": "notification", "notification": client_record})

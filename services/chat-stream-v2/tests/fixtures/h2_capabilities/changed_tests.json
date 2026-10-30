@@ -73,6 +73,18 @@
     "test_h2_portable_fixtures.py::test_darwin_exit_registration_requires_matching_terminal_event",
     "test_h2_portable_fixtures.py::test_terminal_bound_socket_preserves_ownership_without_contact",
     "test_harness_reaping.py::test_owned_group_exit_between_identity_check_and_registration",
-    "test_h2_portable_fixtures.py::test_linux_pidfd_registration_observes_terminal_readiness"
+    "test_h2_portable_fixtures.py::test_linux_pidfd_registration_observes_terminal_readiness",
+    "test_error_adapters_operator_notification.py::test_critical_card_records_linked_fact_and_blocker",
+    "test_error_adapters_operator_notification.py::test_title_is_bounded_and_stripped",
+    "test_error_adapters_operator_notification.py::test_missing_card_falls_back_to_generic_body",
+    "test_error_adapters_operator_notification.py::test_info_records_no_fact",
+    "test_error_adapters_operator_notification.py::test_repeat_dedup_key_updates_fact_without_new_notice",
+    "test_error_adapters_operator_notification.py::test_one_producer_four_keys_one_immediate_three_held",
+    "test_error_adapters_operator_notification.py::test_four_producers_three_immediates_one_held",
+    "test_error_adapters_operator_notification.py::test_muted_fact_stays_quiet_after_activation",
+    "test_error_adapters_operator_notification.py::test_reply_bytes_identical_with_and_without_adapter",
+    "test_error_adapters_operator_notification.py::test_pending_notice_rebinds_to_new_fd_generation",
+    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_critical_reaches_fd",
+    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_warning_stays_card"
   ]
 }
