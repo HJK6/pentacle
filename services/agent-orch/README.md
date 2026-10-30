@@ -1661,3 +1661,26 @@ free-text Skip as `text`. Both carry the same reserved value. Mobile's canonical
 `prompt.answer` always sends `text`; the daemon maps choice text to the existing
 `custom_text` storage path. Web's existing notification resolver sends that
 choice alias directly. Asking agents recognize either field.
+
+
+### Exact provider release metadata
+
+The fleet installer accepts `--provider-cli-pin-file /absolute/reviewed-pair.json`.
+It uses the shared strict release-pair validator and writes `required_version`,
+pin revision/digest and platform artifact identities into `provider_packages`.
+The snapshot is a reviewed copy of the daemon-owned pair described in
+[provider accounts](../../docs/provider_accounts.md#one-exact-fleet-release-pair),
+not another desired-state authority. Without a snapshot the manifest explicitly
+reports `pin_snapshot_required`; it contains no managed version attestation.
+Old minimum-only manifests cannot authorize managed native launches. Preparing
+or installing CLI source does not move the active provider pin or repin accounts.
+Offline hosts remain pending until their actual current-pin/code/artifact proof;
+retained packages support rollback through a fresh same-home successor.
+
+
+A parked repin whose pin advanced uses a fresh `account repin` operation with
+`--reconcile-of PRIOR_OPERATION_ID`, central's still-selected generation and the
+current pin snapshot under a real admission hold. The authenticated host resolves
+the successful chain. Matching artifacts reuse retained turn evidence without
+creating the prospective generation; only a changed provider target needs a new
+native turn. See [provider accounts](../../docs/provider_accounts.md).

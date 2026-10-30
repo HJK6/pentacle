@@ -383,7 +383,7 @@ def minimal_turn(binding: Binding, *, model: str, effort: str, cwd: str, run=sub
 
 
 def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_authorize,
-           login, identity, model: str, effort: str, cwd: str, manifest=None, run=subprocess.run):
+           login, identity, model: str, effort: str, cwd: str, manifest=None, run=subprocess.run, before_activate=None):
     """Execute native login in the FINAL home and atomically activate on proof.
 
     ``login`` is the pinned provider's native authorization driver; the browser
@@ -410,9 +410,10 @@ def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_autho
                 raise AccountError("account_enrollment_unverified")
             minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run)
             if identity(draft) != receipt: raise AccountError("provider_identity_changed")
-            return registry.activate(draft, receipt | {
-                "store": "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file",
-                "minimal_turn": True, "independent_login": True}, expected_provider_id=intended_id)
+            activation=receipt | {"store": "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file",
+                "minimal_turn": True,"independent_login":True}
+            if before_activate is not None:before_activate(draft,activation,intended_id)
+            return registry.activate(draft,activation,expected_provider_id=intended_id)
         except AccountError: raise
         except Exception: raise AccountError("provider_login_failed") from None
 

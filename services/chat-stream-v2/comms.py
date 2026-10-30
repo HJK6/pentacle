@@ -27,6 +27,8 @@ expired; backoff on failure; kill switch `--disable-notification-expiry`.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import qa_dispatch
 
 import asyncio
@@ -1662,6 +1664,20 @@ class Comms:
         except Exception as exc:  # noqa: BLE001 - public send error is stable
             raise VerbError("paste_failed", str(exc), phase="enter_failed") from exc
 
+    @asynccontextmanager
+    async def _account_input_guard(self,target,*,phase="not_started"):
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is None:
+            yield
+            return
+        from provider_accounts import AccountError
+        host,name=self.sessions.split(target)
+        try:
+            async with runtime.input_guard(await self.store.fetch_session(host,name) or {}):
+                yield
+        except AccountError as exc:
+            raise VerbError(str(exc),str(exc),phase=phase,**exc.context) from None
+
     async def _attempt_send_delivery(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
         """Submit one prepared plan: one paste, then at most one Enter retry."""
         target = str(plan.route["final_target"])
@@ -1674,7 +1690,8 @@ class Comms:
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(target, before)
         if plan.message.get("urgent"):
-            await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+            async with self._account_input_guard(target):
+                await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
             if provider == "codex":
                 before = await tmux.capture(name)
@@ -1682,13 +1699,15 @@ class Comms:
 
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            pane_mode_reason = await tmux.paste(name, plan.wire_text)
+            async with self._account_input_guard(target):
+                pane_mode_reason = await tmux.paste(name, plan.wire_text)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
             if confirmed:
                 return True, 1, False, provider, None
-            enter_mode_reason = await self._send_enter(tmux, name)
+            async with self._account_input_guard(target,phase="enter_failed"):
+                enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
@@ -1696,7 +1715,8 @@ class Comms:
 
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
-        pane_mode_reason = await tmux.paste(name, plan.wire_text)
+        async with self._account_input_guard(target):
+            pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
             stream_id=target, watermark=watermark,
@@ -1707,7 +1727,8 @@ class Comms:
             pane = await tmux.capture(name)
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
                 return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
-            enter_mode_reason = await self._send_enter(tmux, name)
+            async with self._account_input_guard(target,phase="enter_failed"):
+                enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
                 stream_id=target, watermark=watermark,
@@ -1721,7 +1742,8 @@ class Comms:
                 mode = self._claude_commit_mode(pane, mode)
             return False, 2, in_draft, provider, mode
         if provider != "codex":
-            enter_mode_reason = await self._send_enter(tmux, name)
+            async with self._account_input_guard(target,phase="enter_failed"):
+                enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
             )
@@ -1734,7 +1756,8 @@ class Comms:
         pane = await tmux.capture(name)
         if not codex_prompt_in_active_draft(pane, plan.wire_text, exact=True):
             return False, 1, False, provider, pane_mode_reason
-        enter_mode_reason = await self._send_enter(tmux, name)
+        async with self._account_input_guard(target,phase="enter_failed"):
+            enter_mode_reason = await self._send_enter(tmux, name)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
             stream_id=target, watermark=watermark,
@@ -1903,10 +1926,9 @@ class Comms:
                 account_runtime = getattr(self, "account_runtime", None)
                 if account_runtime is not None:
                     from provider_accounts import AccountError
-                    try:
-                        await account_runtime.before_input(await self.store.fetch_session(host, name) or {})
+                    try: await account_runtime.before_input(await self.store.fetch_session(host,name) or {})
                     except AccountError as exc:
-                        raise VerbError(str(exc), str(exc), phase="not_started") from None
+                        raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
                 if self.capacity_retry is not None:
                     await self.capacity_retry.cancel_input(target)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)

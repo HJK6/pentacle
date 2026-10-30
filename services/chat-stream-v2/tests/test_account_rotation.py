@@ -10,7 +10,7 @@ NOW = 2000000000
 
 def binding(alias="primary", host="host-a", provider="codex"):
     return Binding(provider=provider, alias=alias, host=host, home=f"/private-fixture/{host}/{provider}/{alias}/login-one",
-        generation="login-one", profile_ref="fixture-profile", executable="/fixture/provider", version="1", platform="macos",
+        generation="login-one", profile_ref="fixture-profile", executable="/fixture/provider", version="0.160.0" if provider=="codex" else "2.1.312", platform="macos", executable_sha256="a"*64,
         provider_id=f"native-{alias}", pool_id=f"pool-{alias}", enabled=True, healthy=True)
 
 def policy(): return {"enabled": True}

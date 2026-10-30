@@ -70,12 +70,14 @@ def _begin(ledger, payload, now):
     with transaction(ledger.conn):
         state = _read(ledger, payload)
         if state and state["status"] == "done": return state
+        from account_repin_state import require_generation_clear
+        require_generation_clear(ledger,payload)
         snapshot = _snapshot(ledger, payload, now)
         if state:
             if state["snapshot"] != snapshot: raise AccountError("account_upgrade_state_changed")
             return state
         old = Binding(**snapshot["binding"])
-        state = dict(arguments=payload, status="pending", snapshot=snapshot, old_key=old.key,
+        state = dict(arguments=payload, status="pending", snapshot=snapshot, old_key=old.key, reserved_at_ns=__import__("time").time_ns(),
             new_key=":".join((old.host, old.provider, old.alias, payload["new_generation"])))
         _write(ledger, payload, state)
         return state
@@ -110,6 +112,8 @@ def _checked_binding(old, payload, receipt):
 
 def _commit(ledger, payload, state, new, observation, now):
     with transaction(ledger.conn):
+        from account_repin_state import require_generation_clear
+        require_generation_clear(ledger,payload)
         current = _read(ledger, payload)
         if current and current["status"] == "done": return current["result"]
         if current != state or _snapshot(ledger, payload, now) != state["snapshot"]:
@@ -122,6 +126,8 @@ def _commit(ledger, payload, state, new, observation, now):
         result = dict(outcome="upgraded", operation_id=payload["operation_id"], binding=new.public())
         state = dict(state, status="done", result=result)
         _write(ledger, payload, state)
+        from account_repin_state import complete_generation
+        complete_generation(ledger,Binding(**state["snapshot"]["binding"]),payload["operation_id"])
         return result
 
 
@@ -135,6 +141,22 @@ async def upgrade(executor, message, auth):
         state = await runtime.run(lambda a: _begin(a, payload, runtime.clock()))
         if state["status"] == "done": return state["result"]
         old = Binding(**state["snapshot"]["binding"])
+        if message.get("prepare_enrollment") is True:
+            from account_repin_state import host_status,permit
+            from provider_cli_pin import current
+            pin=await runtime.run(current)
+            artifact=pin["providers"][old.provider]["artifacts"].get("darwin-arm64" if old.platform=="macos" else "linux-x64")
+            # The helper still stages/validates its exact native platform before login.
+            if (pin["providers"][old.provider]["version"]!=payload["expected_version"]
+                    or not any(v["native_sha256"]==payload["expected_executable_sha256"] for v in pin["providers"][old.provider]["artifacts"].values())
+                    or payload["expected_executable_sha256"]==old.executable_sha256):
+                raise AccountError("account_upgrade_receipt_invalid")
+            remote=await host_status(executor,old)
+            if remote["binding"]!=old.public():raise AccountError("account_login_generation_stale")
+            clearance=await permit(executor,old,"enroll",payload["operation_id"],payload["new_generation"],remote,state)
+            await runtime._front_desk(auth)
+            await runtime.run(lambda a:_snapshot(a,payload,runtime.clock())==state["snapshot"] or (_ for _ in ()).throw(AccountError("account_upgrade_state_changed")))
+            return {"outcome":"enrollment_prepared","clearance":clearance,"pin":pin,"arguments":payload}
         try:
             receipt = await executor.execute(old, "status", payload["operation_id"], payload["new_generation"])
             new = _binding(old, payload, receipt)

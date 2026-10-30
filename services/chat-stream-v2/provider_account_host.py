@@ -14,12 +14,13 @@ import signal
 import subprocess
 import sys
 import stat
+from dataclasses import replace, asdict
 from urllib.parse import urlsplit
 
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
     adopt, claude_observation, codex_observation, enroll, native_login, verify_binary,
-    native_run, classify_error,
+    native_run, classify_error, minimal_turn,
 )
 
 
@@ -150,20 +151,223 @@ class NativeHost:
         _mkdir(self.journal)
         write_private_json(self.journal / (_component(operation_id) + ".json"), state)
 
-    def handle(self, action, *, provider, alias, expected_generation, operation_id, generation=None):
+    def _repin(self,action,active,cell,identity,operation_id,pin):
+        from provider_cli_artifact import verify,assert_drained
+        from provider_cli_pin import digest
+        from account_revalidation import _valid_observation
+        identity={**identity,"kind":"repin","pin_revision":pin["revision"],"pin_digest":digest(pin)}
+        from provider_account_mutation import read as mutation_read
+        if mutation_read(self,"seals",operation_id): raise AccountError("account_operation_sealed")
+        prior=self._read_operation(operation_id)
+        if prior:
+            if any(prior.get(k)!=v for k,v in identity.items()): raise AccountError("account_operation_conflict")
+            if prior["state"]=="done":
+                if action=="repin-status" and prior.get("outcome") not in {"ok","no_op"}:
+                    return self._non_split_status(prior,active,identity)
+                return prior
+            if active and active.generation==identity["generation"] and prior.get("proof"):
+                result={**prior,"state":"done","outcome":"ok","binding":active.public()}
+                self._save_operation(operation_id,result)
+                return result
+            return {**prior,"outcome":"execution_unresolved"}
+        if action=="repin-status":
+            return self._non_split_status({**identity,"state":"absent","outcome":"execution_unresolved"},active,identity)
+        if not active or active.generation!=identity["expected_generation"]:
+            raise AccountError("account_login_generation_stale")
+        if not active.enabled or not active.healthy: raise AccountError("account_unavailable")
+        _component(identity["generation"])
+        if identity["generation"]==active.generation: raise AccountError("account_generation_exists")
+        if self.registry._load()["generations"].get(":".join((active.host,active.provider,active.alias,identity["generation"]))):
+            raise AccountError("account_generation_exists")
+        target=replace(active,generation=identity["generation"],executable=cell["executable"],version=cell["version"],
+                       executable_sha256=cell["executable_sha256"])
+        proof=verify(target,cell,pin,run=self.run)
+        if (target.executable_sha256,target.version)==(active.executable_sha256,active.version):
+            try:current_proof=verify(active,cell,pin,run=self.run)
+            except AccountError:current_proof=None
+            if current_proof is not None:
+                result={**identity,"state":"done","outcome":"no_op","binding":active.public(),"proof":current_proof}
+                self._save_operation(operation_id,result)
+                return result
+        assert_drained(active,run=self.run)
+        state={**identity,"state":"started","outcome":"execution_unresolved","started_at_ns":__import__("time").time_ns()}
+        self._save_operation(operation_id,state)
+        try:
+            before=self.observation(target)
+            if not _valid_observation(target,before): raise AccountError("account_repin_identity_invalid")
+            minimal_turn(target,model=cell["model"],effort=cell["effort"],cwd=cell["cwd"],run=self.run)
+            after=self.observation(target)
+            if not _valid_observation(target,after): raise AccountError("account_repin_identity_invalid")
+            proof=verify(target,cell,pin,run=self.run)
+            assert_drained(active,run=self.run)
+            state.update(proof=proof,observation=after)
+            self._save_operation(operation_id,state)
+            self.registry.repin(active,target)
+            result={**state,"state":"done","outcome":"ok","binding":target.public()}
+        except AccountError as exc:
+            result={**identity,"state":"done","outcome":str(exc)}
+        result["finished_at_ns"]=__import__("time").time_ns()
+        self._save_operation(operation_id,result)
+        return result
+
+    def _non_split_status(self,receipt,active,identity):
+        if active and active.generation==identity["expected_generation"] and active.enabled and active.healthy:
+            self.registry._validate_home(active)
+            key=":".join((active.host,active.provider,active.alias,identity["generation"]))
+            if key not in self.registry._load()["generations"]:
+                return {**receipt,"non_split":{"binding":active.public(),"successor_absent":True}}
+        return receipt
+
+    def _validate_repin_links(self,context,cell,*,require_active=True):
+        from provider_accounts import Binding
+        from account_repin import _successor
+        if not isinstance(context,dict) or not isinstance(context.get("links"),list) or (not context["links"] and not context.get("enrollment")):
+            raise AccountError("account_repin_lineage_invalid")
+        old=Binding(**context["root"])
+        registry=self.registry._load(); seen={old.key}
+        if context.get("enrollment"):
+            enrolled=context["enrollment"];receipt=enrolled.get("receipt") or {}
+            from provider_cli_artifact import validate_proof
+            if (self._read_operation(enrolled.get("operation_id",""))!=receipt
+                    or receipt.get("state")!="done" or receipt.get("outcome")!="ok"
+                    or receipt.get("new_home") is not True or receipt.get("binding")!=old.public()
+                    or not registry["generations"].get(old.key)
+                    or Binding(**registry["generations"][old.key]).public()!=old.public()):
+                raise AccountError("account_repin_lineage_invalid")
+            validate_proof(old,enrolled["pin"],receipt.get("proof") or {},consumer_identity=enrolled["consumer_code_identity"])
+            self.registry._validate_home(Binding(**registry["generations"][old.key]))
+        for link in context["links"]:
+            if link.get("old")!=asdict(old): raise AccountError("account_repin_lineage_invalid")
+            raw=registry["generations"].get(old.key)
+            if raw is None: raise AccountError("account_repin_lineage_invalid")
+            stored=Binding(**raw)
+            if stored.public()!=old.public() or (old.profile_ref and old.profile_ref!=stored.profile_ref):
+                raise AccountError("account_repin_lineage_invalid")
+            self.registry._validate_home(stored)
+            args=link["arguments"]; pin=link["pin"]; receipt=link["receipt"]
+            from provider_cli_pin import digest
+            identity={"kind":"repin","provider":old.provider,"alias":old.alias,
+                "expected_generation":old.generation,"generation":args["new_generation"],
+                "pin_revision":pin["revision"],"pin_digest":digest(pin)}
+            if (any(args.get(k)!=v for k,v in {"host":old.host,"provider":old.provider,"account":old.alias,
+                    "login_generation":old.generation,"expected_pin_revision":pin["revision"],"expected_pin_digest":digest(pin)}.items())
+                    or any(receipt.get(k)!=v for k,v in identity.items())
+                    or self._read_operation(link["operation_id"])!=receipt):
+                raise AccountError("account_repin_lineage_invalid")
+            new,no_op=_successor(stored,args,receipt,pin,consumer_identity=link["consumer_code_identity"])
+            if no_op or new.key in seen or registry["generations"].get(new.key)!=asdict(new):
+                raise AccountError("account_repin_lineage_invalid")
+            self.registry._validate_home(new)
+            # Retained config identity/auth-store must still identify this very home.
+            if (cell.get("platform")!=new.platform or cell.get("profile_ref")!=new.profile_ref
+                    or (cell.get("expected_provider_id") and cell["expected_provider_id"]!=new.provider_id)):
+                raise AccountError("account_repin_lineage_invalid")
+            if new.provider=="codex" or new.platform=="wsl":
+                _private(Path(new.home)/("auth.json" if new.provider=="codex" else ".credentials.json"),directory=False)
+            elif (Path(new.home)/".credentials.json").exists() or (Path(new.home)/".credentials.json").is_symlink():
+                raise AccountError("unexpected_store_fallback")
+            seen.add(new.key);old=replace(new,profile_ref=context["root"]["profile_ref"])
+        if require_active and registry["active"].get(f"{old.host}:{old.provider}:{old.alias}")!=old.key:
+            raise AccountError("account_login_generation_stale")
+        return Binding(**registry["generations"][old.key])
+
+    def _reconcile_repin(self,action,active,cell,identity,operation_id,pin,context):
+        from provider_cli_artifact import verify,assert_drained
+        from provider_cli_pin import digest,version
+        identity={**identity,"kind":"repin-reconcile","pin_revision":pin["revision"],
+                  "pin_digest":digest(pin),"reconcile":context}
+        prior=self._read_operation(operation_id)
+        if prior and any(prior.get(k)!=v for k,v in identity.items()): raise AccountError("account_operation_conflict")
+        if prior and prior["state"]=="done":
+            if action=="repin-reconcile-status": return prior
+            final=self._validate_repin_links({**context,"links":prior["links"]},cell)
+            verify(final,cell,pin,run=self.run)
+            return prior
+        if action=="repin-reconcile-status" and not prior: return {"state":"absent","outcome":"execution_unresolved"}
+        if action=="repin-reconcile-verify": raise AccountError("account_repin_lineage_invalid")
+        # A retry can recover a completed target from its exact journal, never a second turn.
+        _component(identity["generation"])
+        prospective=":".join((active.host,active.provider,active.alias,identity["generation"])) if active else ""
+        if not prior and self.registry._load()["generations"].get(prospective):
+            raise AccountError("account_generation_exists")
+        target_id=operation_id+"-target"
+        target_receipt=self._read_operation(target_id) if prior else None
+        if action=="repin-reconcile-status" and target_receipt is None:
+            return prior
+        base=self._validate_repin_links(context,cell,require_active=target_receipt is None)
+        assert_drained(base,run=self.run)
+        links=context["links"]
+        try:base_proof=verify(base,cell,pin,run=self.run)
+        except AccountError:base_proof=None
+        if target_receipt is not None or base_proof is None:
+            if not prior:
+                self._save_operation(operation_id,{**identity,"state":"started","outcome":"execution_unresolved"})
+            derived={"provider":base.provider,"alias":base.alias,"expected_generation":base.generation,"generation":identity["generation"]}
+            result=self._repin("repin-status" if target_receipt is not None else "repin",active,cell,derived,target_id,pin)
+            if result.get("state")!="done" or result.get("outcome")!="ok":
+                return {**identity,"state":"started","outcome":"execution_unresolved"}
+            args={"host":base.host,"provider":base.provider,"account":base.alias,"login_generation":base.generation,
+                "new_generation":identity["generation"],"expected_pin_revision":pin["revision"],"expected_pin_digest":digest(pin)}
+            links=links+[{"operation_id":target_id,"old":asdict(replace(base,profile_ref=context["root"]["profile_ref"])),"arguments":args,"pin":pin,"receipt":result,"consumer_code_identity":result["proof"]["code_identity"]}]
+            final=self._validate_repin_links({**context,"links":links},cell)
+        else:
+            final=base
+        proof=(target_receipt.get("proof") if action=="repin-reconcile-status" and target_receipt else verify(final,cell,pin,run=self.run))
+        result={**identity,"state":"done","outcome":"ok","links":links,"binding":final.public(),"current_artifact":proof}
+        self._save_operation(operation_id,result)
+        return result
+
+    def handle(self, action, *, provider, alias, expected_generation, operation_id, generation=None, pin=None, reconcile=None):
         if self.operator_browser is not None and (action != "enroll" or provider != "codex"):
             raise AccountError("account_browser_fd_invalid")
         _component(alias)
         if provider not in {"codex", "claude"}:
             raise AccountError("account_request_invalid")
-        cell = self._cell(provider, alias)
+        context=dict(reconcile or {})
+        clearance=context.pop("_clearance",None)
+        reconcile=context or None
         with self.registry.lock():
+            from provider_account_mutation import status,reserve,inspect,supersede,authorize,read as mutation_read
+            if action=="recovery-status":return status(self,provider,alias)
+            if action=="mutation-reserve":return reserve(self,provider,alias,operation_id,reconcile)
+            if action in {"repin-inspect","repin-settle"}:
+                return inspect(self,provider,alias,operation_id,reconcile,seal=action=="repin-settle")
+            if action=="repin-supersede":return supersede(self,provider,alias,operation_id,reconcile)
+            cell = self._cell(provider, alias)
             active = self.registry.active(provider, alias, self.config["host"])
-            if action == "observe":
+            if action in {"enroll","adopt","repin","repin-reconcile"}:
+                authorize(self,action,{"provider":provider,"alias":alias,
+                    "expected_generation":expected_generation,"generation":generation},operation_id,clearance)
+                if action=="repin-reconcile" and mutation_read(self,"seals",operation_id+"-target"):
+                    raise AccountError("account_operation_sealed")
+            if action in {"verify-artifact","repin","repin-status","repin-reconcile","repin-reconcile-status","repin-reconcile-verify"}:
+                from provider_cli_pin import validate
+                try: pin=validate(pin)
+                except ValueError: raise AccountError("provider_cli_pin_unavailable") from None
+                if action=="verify-artifact":
+                    from provider_cli_artifact import verify
+                    if not active or active.generation!=expected_generation: raise AccountError("account_login_generation_stale")
+                    return verify(active,cell,pin,run=self.run)
+                identity={"provider":provider,"alias":alias,"expected_generation":expected_generation,"generation":generation}
+                if action.startswith("repin-reconcile"):
+                    return self._reconcile_repin(action,active,cell,identity,operation_id,pin,reconcile)
+                return self._repin(action,active,cell,identity,operation_id,pin)
+            if action=="observe-lineage":
+                observed=self._validate_repin_links(reconcile,cell)
+                return {"outcome":"ok","binding_key":observed.key,"observation":self._probe_observation(observed)}
+            if action in {"observe","observe-bound"}:
                 if active is None or active.generation != expected_generation:
                     raise AccountError("account_login_generation_stale")
+                proof=None
+                if pin is not None:
+                    from provider_cli_pin import validate
+                    from provider_cli_artifact import verify
+                    try: pin=validate(pin)
+                    except ValueError: raise AccountError("provider_cli_pin_unavailable") from None
+                    proof=verify(active,cell,pin,run=self.run)
                 result = self._probe_observation(active)
-                return {"outcome": "ok", "binding_key": active.key, "observation": result}
+                return {"outcome": "ok", "binding_key": active.key, "observation": result,
+                        **({"artifact_proof":proof} if proof else {})}
             if action not in {"enroll", "adopt", "status"}: raise AccountError("account_action_invalid")
             if action == "adopt" and not cell.get("adopt_home"): raise AccountError("account_adopt_unsupported")
             prior = self._read_operation(operation_id)
@@ -177,6 +381,10 @@ class NativeHost:
                 # from the active generation. No second login is attempted.
                 if active and active.generation == generation and (not cell.get("expected_provider_id") or active.provider_id == cell["expected_provider_id"]):
                     result = identity | {"state": "done", "outcome": "ok", "binding": active.public()}
+                    if prior.get("enrollment_proof"):
+                        staged=prior["enrollment_proof"]
+                        if staged.get("binding")!=active.public():raise AccountError("account_host_binding_invalid")
+                        result.update(staged)
                     self._save_operation(operation_id, result); return result
                 return prior | {"outcome": "execution_unresolved"}
             if action == "status": return {"state": "absent", "outcome": "execution_unresolved"}
@@ -193,9 +401,24 @@ class NativeHost:
                 if (draft.executable_sha256 != cell["executable_sha256"] or
                         (draft.observer_executable and draft.observer_executable_sha256 != cell.get("observer_executable_sha256"))):
                     raise AccountError("provider_executable_changed")
+                if pin is not None:
+                    from provider_cli_pin import validate
+                    from provider_cli_artifact import verify
+                    try:pin=validate(pin)
+                    except ValueError:raise AccountError("provider_cli_pin_unavailable") from None
+                    verify(draft,cell,pin,run=self.run)
                 def identity_readback(binding):
                     row = self.observation(binding)
                     return {key: row.get(key) for key in ("provider_id", "pool_id", "auth_mode", "email_verified")}
+                def before_activate(draft,activation,intended_id):
+                    from provider_cli_artifact import verify
+                    bound=replace(draft,provider_id=intended_id,pool_id=activation["pool_id"],enabled=True,healthy=True)
+                    observed=self.observation(bound)
+                    from account_revalidation import _valid_observation
+                    if not _valid_observation(bound,observed):raise AccountError("account_repin_identity_invalid")
+                    staged={"proof":verify(bound,cell,pin,run=self.run),"observation":observed,
+                        "binding":bound.public(),"new_home":True,"kind":"enroll"}
+                    self._save_operation(operation_id,{**intent,"enrollment_proof":staged})
                 if action == "adopt":
                     bound = adopt(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
                         identity=identity_readback, model=cell["model"], effort=cell["effort"], cwd=cell["cwd"],
@@ -203,8 +426,16 @@ class NativeHost:
                 else:
                     bound = enroll(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
                         browser_authorize=self._browser, login=self.login, identity=identity_readback,
-                        model=cell["model"], effort=cell["effort"], cwd=cell["cwd"], manifest=cell.get("bootstrap", {}), run=self.run)
+                        model=cell["model"], effort=cell["effort"], cwd=cell["cwd"], manifest=cell.get("bootstrap", {}), run=self.run,
+                        before_activate=before_activate if pin is not None else None)
                 result = identity | {"state": "done", "outcome": "ok", "binding": bound.public()}
+                if pin is not None:
+                    self.registry._validate_home(bound)
+                    observed=self.observation(bound)
+                    from account_revalidation import _valid_observation
+                    if not _valid_observation(bound,observed):raise AccountError("account_repin_identity_invalid")
+                    result.update(proof=verify(bound,cell,pin,run=self.run),observation=observed,
+                        new_home=True,kind="enroll",finished_at_ns=__import__("time").time_ns())
             except AccountError as exc:
                 safe = str(exc) if str(exc) in {"human_reseed_required", "cancelled", "locked_keychain"} else "account_enrollment_failed"
                 result = identity | {"state": "done", "outcome": safe}
@@ -214,13 +445,15 @@ class NativeHost:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("observe", "enroll", "adopt", "status"))
+    parser.add_argument("action", choices=("observe", "observe-bound", "observe-lineage", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status", "repin-reconcile", "repin-reconcile-status", "repin-reconcile-verify", "recovery-status", "mutation-reserve", "repin-inspect", "repin-settle", "repin-supersede"))
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--login-generation", required=True)
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--new-generation")
     parser.add_argument("--operator-browser-fd", type=int)
+    parser.add_argument("--pin-json")
+    parser.add_argument("--reconcile-json")
     args = parser.parse_args(argv)
     # The location is host-owned configuration, never a worker's --target.
     path = Path.home() / ".config/pentacle/provider-account-host.json"
@@ -233,9 +466,11 @@ def main(argv=None):
         config = json.loads(path.read_text())
         def expired(*_): raise AccountError("provider_timeout")
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(300 if args.action in {"enroll", "adopt"} else 180 if args.action == "observe" else 90)
+        signal.alarm(300 if args.action in {"enroll", "adopt", "repin", "repin-reconcile"} else 180 if args.action in {"observe","observe-lineage","observe-bound"} else 90)
         result = NativeHost(config, operator_browser=browser).handle(args.action, provider=args.provider, alias=args.account,
-            expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation)
+            expected_generation=args.login_generation, operation_id=args.operation_id, generation=args.new_generation,
+            pin=json.loads(args.pin_json) if args.pin_json else None,
+            reconcile=json.loads(args.reconcile_json) if args.reconcile_json else None)
         print(json.dumps(result))
         return 0
     except AccountError as exc:

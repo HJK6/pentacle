@@ -27,7 +27,7 @@ async def fixture(path, provider="codex"):
     calls = []
     async def execute(selected, action, operation_id, generation=None):
         calls.append((selected.key, action))
-        assert action == "observe" and generation is None  # never enroll/status/login
+        assert action in {"observe","observe-bound"} and generation is None  # never enroll/status/login
         return {"outcome": "ok", "binding_key": selected.key, "observation": observation(selected)}
     runtime.executor = AccountExecutor(runtime, None, execute=execute)
     await runtime.record_failure(account, "identity")
@@ -68,7 +68,7 @@ def test_fresh_plain_probe_cannot_heal_but_explicit_fd_operation_can(tmp_path, p
             assert await runtime.run(lambda ledger: ledger.defaults()) == defaults
             assert (await runtime.run(lambda ledger: ledger.select(host=account.host,
                 provider=account.provider))).key == account.key
-            assert calls == [(account.key, "observe")] * 2
+            assert calls == [(account.key, "observe"), (account.key, "observe-bound")]
         finally:
             store.stop()
     asyncio.run(journey())
@@ -461,7 +461,7 @@ def test_real_transport_empty_timeout_refusal_is_not_an_identity_failure(tmp_pat
             before = await state(runtime, account)
             result = (await runtime.operation(await request(runtime, account)))["result"]
             assert result["outcome"] == "account_host_unreachable"
-            assert len(seen) == 1 and seen[0][2]["timeout"] == 200 and "observe" in seen[0][1]
+            assert len(seen) == 1 and seen[0][2]["timeout"] == 200 and "observe-bound" in seen[0][1]
             after = await state(runtime, account)
             assert (after["health"], after["health_revision"]) == (before["health"], before["health_revision"])
         finally: store.stop()

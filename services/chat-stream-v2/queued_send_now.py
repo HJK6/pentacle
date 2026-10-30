@@ -337,7 +337,9 @@ class QueuedSendNow:
                 raise VerbError("queued_send_now_unsupported", "Provider executable is not qualified for Send now")
             account_runtime = getattr(self.comms, "account_runtime", None)
             if account_runtime is not None:
-                await account_runtime.before_input(row)
+                from provider_accounts import AccountError
+                try: await account_runtime.before_input(row)
+                except AccountError as exc: raise VerbError(str(exc),str(exc),**exc.context) from None
             receipt = await self.store.get_send_receipt(sid, request, include_display_text=True, include_submission_identity=True)
             actor = self.comms._send_provenance(msg)[1]
             if (not receipt or receipt.get("optimistic_id") != optimistic
@@ -398,9 +400,21 @@ class QueuedSendNow:
                 raise VerbError("stale_session_generation", "Selected source binding changed")
             try:
                 keys = ("C-x", "C-s") if route == "claude-native" else ("Escape",)
-                result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
+                if account_runtime is not None:
+                    try:
+                        async with account_runtime.input_guard(row):
+                            result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
+                    except AccountError as exc:
+                        await self._record(key, expected={"dispatch_claimed"},update={"state":"cancelled","reason":str(exc)})
+                        raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+                else:
+                    result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
                 if result and result[0] != 0:
                     raise VerbError("queued_send_now_key_uncertain", "Native control dispatch is unconfirmed")
+            except VerbError as exc:
+                if exc.extra.get("phase")=="not_started": raise
+                await self._record(key, expected={"dispatch_claimed"}, update={"state":"indeterminate","reason":"key_dispatch_uncertain"})
+                raise
             except BaseException:
                 await self._record(key, expected={"dispatch_claimed"}, update={"state": "indeterminate", "reason": "key_dispatch_uncertain"})
                 raise

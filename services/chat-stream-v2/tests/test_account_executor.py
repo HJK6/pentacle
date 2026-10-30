@@ -4,12 +4,32 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from account_executor import AccountExecutor
+from account_executor import AccountExecutor as RealAccountExecutor
 from account_runtime import AccountRuntime
 from provider_accounts import AccountError, Binding
 from sessions import Sessions
 from store import Store
 from test_account_rotation import binding, observation, policy, NOW
+
+
+def AccountExecutor(runtime,hosts,*,execute):
+    """Independent authenticated host counterpart for enrollment unit journeys."""
+    permits={}
+    async def guarded(account,action,operation,generation=None,*,reconcile=None):
+        if action=="recovery-status":
+            from provider_cli_artifact import code_identity
+            return {"outcome":"ok","binding":account.public(),"code_identity":code_identity(),"mutation_clearance_required":True}
+        if action=="mutation-reserve":
+            permit={**reconcile,"provider":account.provider,"alias":account.alias}
+            if operation in permits:assert permits[operation]==permit
+            permits[operation]=permit
+            return {"outcome":"ok","permit":permit}
+        if action=="enroll":
+            permit=permits[operation]
+            assert reconcile=={"_clearance":permit["clearance_id"]}
+            assert permit["expected_generation"]==account.generation and permit["generation"]==generation
+        return await execute(account,"observe" if action=="observe-bound" else action,operation,generation)
+    return RealAccountExecutor(runtime,hosts,execute=guarded)
 
 
 def test_healthy_probe_never_relogs_and_auth_repairs_only_bound_cell(tmp_path):

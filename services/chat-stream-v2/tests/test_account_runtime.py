@@ -10,7 +10,7 @@ from test_account_rotation import binding, policy, NOW
 
 AUTH={"token_verified":True,"stream_id":"host-a:front-desk","session_generation":"generation-one"}
 
-async def setup(path=":memory:"):
+async def setup(path=":memory:", *, initialize_pin=True):
     store=Store(path); store.start(); sessions=Sessions(store,local_host="host-a")
     runtime=AccountRuntime(store,sessions,policy=policy(),clock=lambda:NOW)
     composite=SimpleNamespace(enabled=True,env_config=SimpleNamespace(direct_primary=True,name="front-desk"),
@@ -19,6 +19,9 @@ async def setup(path=":memory:"):
     await store.open_session("host-a","front-desk",session_generation="generation-one",provider="codex")
     for alias in ("primary","spare"): await runtime.run(lambda a,alias=alias:a.register(binding(alias)))
     await runtime.run(lambda a:a.set_default(host="host-a",provider="codex",alias="primary"))
+    if initialize_pin:
+        from provider_cli_fixtures import seed_pin
+        await seed_pin(runtime)
     return store,runtime
 
 @pytest.mark.parametrize("auth",[{},dict(AUTH,token_verified=False),dict(AUTH,session_generation="old"),
@@ -52,8 +55,11 @@ def test_front_desk_defaults_and_concurrent_agents_bind_once(tmp_path):
             await runtime.operation({"action":"default-set","host":"host-a","provider":"codex","account":"primary","_auth_context":AUTH})
             assert (await store.fetch_session("host-a","two"))["account_binding"]==second.public()
             runtime.policy["enabled"]=False
-            await runtime.before_input(await store.fetch_session("host-a","two")) # drain on rollback
-            assert await choose({}) is None
+            from test_provider_cli_pin import artifact_executor
+            await artifact_executor(runtime)
+            await runtime.before_input(await store.fetch_session("host-a","two"))
+            with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
+                await choose({})
         finally: store.stop()
     asyncio.run(run())
 
@@ -117,7 +123,7 @@ def test_rollout_scope_preserves_untouched_hosts_and_never_unbinds_managed_cells
             runtime.policy["managed_hosts"]=["host-a"]
             assert await runtime.choose_launch(host="host-untouched",provider="codex",model="fixture",effort="high",message={}) is None
             runtime.policy["managed_hosts"]=[]
-            with pytest.raises(Exception,match="account_feature_off"):
+            with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
                 await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message={})
         finally: store.stop()
     asyncio.run(run())
@@ -127,7 +133,7 @@ def test_rollout_scope_preserves_untouched_hosts_and_never_unbinds_managed_cells
     {"provider":"codex","model":"gpt-5.6-sol","effort":"high"},
     {"command":"/bin/echo rollback-ready"},
 ])
-def test_policy_off_restores_pre_activation_launch_on_registered_database_copy(tmp_path, launch_request):
+def test_policy_off_parks_pre_activation_launch_on_registered_database_copy(tmp_path, launch_request):
     import sqlite3
     import launch
     from spawnctl import SpawnCtl
@@ -156,16 +162,9 @@ def test_policy_off_restores_pre_activation_launch_on_registered_database_copy(t
         runtime.store=store; runtime.sessions=Sessions(store,local_host="host-a")
         runtime.policy={"enabled":False}
         try:
-            after=await controller()._resolve_launch(message,"host-a","same-name")
-            assert after[0]==before[0]
-            # Each fresh launch mints a new token/native ID; compare admission
-            # and the complete stable tuple/observer fields, not that entropy.
-            assert {k:v for k,v in after[1].items() if k!="_deferred_launch_plan"}=={
-                k:v for k,v in before[1].items() if k!="_deferred_launch_plan"}
-            volatile={"token_hash","claude_session_id","jsonl_path"}
-            assert {k:v for k,v in after[2].items() if k not in volatile}=={
-                k:v for k,v in before[2].items() if k not in volatile}
-            assert "account_binding" not in after[2]
+            with pytest.raises(VerbError) as refused:
+                await controller()._resolve_launch(message,"host-a","same-name")
+            assert refused.value.code==("managed_command_forbidden" if "command" in launch_request else "provider_cli_pin_unavailable")
             assert (await store.fetch_session("host-a","bound-before-rollback"))["account_binding"]==binding().public()
             assert (await runtime.run(lambda a:a.defaults()))[0]["alias"]=="primary"
             assert await runtime.run(lambda a:a.bound(binding().key)) is not None
@@ -184,7 +183,7 @@ def test_policy_off_refuses_explicit_choice_and_bound_home_resume():
             runtime.policy["enabled"]=False
             for message in ({"account":"primary","_auth_context":AUTH},
                             {"resume_session_id":"native-id","_account_resume_binding":binding().public()}):
-                with pytest.raises(Exception,match="account_feature_off"):
+                with pytest.raises(Exception,match="provider_cli_pin_unavailable"):
                     await runtime.choose_launch(host="host-a",provider="codex",model="fixture",effort="high",message=message)
         finally: store.stop()
     asyncio.run(run())
@@ -229,63 +228,61 @@ def test_retired_source_can_only_read_existing_account_handoff_receipt():
     asyncio.run(run())
 
 
-def test_completed_relogin_replays_original_generation_after_restart(tmp_path):
+def test_completed_relogin_replays_original_generation_after_restart(tmp_path,monkeypatch):
     from account_executor import AccountExecutor
-    calls=[]
-    async def execute(account,action,operation_id,generation=None):
-        calls.append(action)
-        if action=="observe": return {"outcome":"provider_auth_failed"}
-        return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
-            home="/private-fixture/"+generation).public()}
+    from test_account_repin import host_journey
     async def run():
-        path=str(tmp_path/"state.db")
-        store,runtime=await setup(path)
-        request={"action":"relogin","host":"host-a","provider":"codex","account":"primary",
-            "login_generation":"login-one","operation_id":"original","_auth_context":AUTH}
+        path=tmp_path/"state.db"
+        store,runtime,host,old,_,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True,database=path)
+        from provider_accounts import AccountError
+        def expired(_):raise AccountError("provider_auth_failed")
+        host._probe_observation=expired
+        request={"action":"relogin","host":old.host,"provider":old.provider,"account":old.alias,
+            "login_generation":old.generation,"operation_id":"original","_auth_context":AUTH}
         try:
-            runtime.executor=AccountExecutor(runtime,None,execute=execute)
             result=await runtime.operation(request)
-        finally: store.stop()
-        # A new executor/store must find the durable receipt without another probe/login.
-        store=Store(path); store.start(); runtime.store=store; runtime.sessions.store=store
-        runtime.executor=AccountExecutor(runtime,None,execute=execute)
+            assert result["result"]["outcome"]=="recovered" and len(logins)==2
+            before=list(calls);hosts=runtime.executor.hosts
+        finally:store.stop()
+        reopened=Store(str(path));reopened.start();runtime.store=reopened;runtime.sessions.store=reopened
+        runtime.executor=AccountExecutor(runtime,hosts)
         try:
             assert await runtime.operation(request)==result
             assert await runtime.operation(dict(request,login_generation="active"))==result
-            assert calls==["observe","enroll"]
+            assert calls==before and len(logins)==2
             with pytest.raises(VerbError,match="account_login_generation_stale"):
                 await runtime.operation(dict(request,operation_id="new-operation"))
             with pytest.raises(VerbError,match="account_control_unauthorized"):
                 await runtime.operation(dict(request,_auth_context=dict(AUTH,session_generation="stale")))
-            assert calls==["observe","enroll"]
-        finally: store.stop()
+            assert calls==before and len(logins)==2
+        finally:reopened.stop()
     asyncio.run(run())
 
-
-def test_interrupted_receipt_save_inspects_original_generation_after_activation(tmp_path):
+def test_interrupted_receipt_save_inspects_original_generation_after_activation(tmp_path,monkeypatch):
     from account_executor import AccountExecutor
-    calls=[]
+    from test_account_repin import host_journey
+    from provider_accounts import AccountError
     async def run():
-        store,runtime=await setup(str(tmp_path/"state.db"))
-        async def execute(account,action,operation_id,generation=None):
-            calls.append((action,operation_id,generation))
-            if action=="observe": return {"outcome":"provider_auth_failed"}
-            return {"state":"done","outcome":"ok","binding":replace(account,generation=generation,
-                home="/private-fixture/"+generation).public()}
-        executor=AccountExecutor(runtime,None,execute=execute); runtime.executor=executor
-        request={"action":"relogin","host":"host-a","provider":"codex","account":"primary",
-            "login_generation":"login-one","operation_id":"original","_auth_context":AUTH}
-        def interrupted_save(*args): raise RuntimeError("interrupted after activation")
-        executor._save_recovery=interrupted_save
+        store,runtime,host,old,_,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True,database=tmp_path/"state.db")
+        def expired(_):raise AccountError("provider_auth_failed")
+        host._probe_observation=expired
+        executor=runtime.executor;finish=executor._finish_recovery
+        request={"action":"relogin","host":old.host,"provider":old.provider,"account":old.alias,
+            "login_generation":old.generation,"operation_id":"original","_auth_context":AUTH}
+        async def interrupted(*args):raise RuntimeError("interrupted after host activation before atomic import")
+        executor._finish_recovery=interrupted
         try:
-            with pytest.raises(RuntimeError,match="interrupted after activation"):
+            with pytest.raises(RuntimeError,match="interrupted after host activation"):
                 await runtime.operation(request)
-            assert (await runtime.run(lambda a:a._cell("host-a","codex","primary")))["generation"]!="login-one"
-            runtime.executor=AccountExecutor(runtime,None,execute=execute)
-            assert (await runtime.operation(dict(request,login_generation="active")))["result"]["outcome"]=="recovered"
-            assert [c[0] for c in calls]==["observe","enroll","status"]
-            assert calls[-1][1:]==calls[-2][1:]
-            await runtime.operation(request)
-            assert len(calls)==3
-        finally: store.stop()
+            assert host.registry.active(old.provider,old.alias,old.host).generation!=old.generation
+            assert (await runtime.run(lambda a:a._cell(old.host,old.provider,old.alias)))["generation"]==old.generation
+            assert len(logins)==2
+            runtime.executor=AccountExecutor(runtime,executor.hosts)
+            before=calls.count("enroll")
+            result=await runtime.operation(dict(request,login_generation="active"))
+            assert result["result"]["outcome"]=="recovered" and calls[-1]=="status"
+            assert calls.count("enroll")==before and len(logins)==2
+            recorded=list(calls)
+            assert await runtime.operation(request)==result and calls==recorded
+        finally:store.stop()
     asyncio.run(run())
