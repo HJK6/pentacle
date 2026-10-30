@@ -129,3 +129,32 @@ test('transcript row proof fails when slot-chat chrome exists but transcript row
 test('transcript row proof counts conversational row wrappers only', () => {
   assert.equal(countTranscriptRows(cellRoot({ slotChatChrome: 3, transcriptRows: 2 })), 2);
 });
+
+const { wrapSourceEvent, assertFreshWrapFixture } = require('./render_proofs');
+const proofWord = 'LongWord' + 'a'.repeat(350);
+const proofUrl = 'https://example.com/' + 'b'.repeat(350);
+const proofRow = { stream_id: 'local:proof', event_id: 'reply-1', kind: 'ASSIST_TEXT',
+  text: `${proofUrl}\n\n${proofWord}\n\n\`${proofWord}\`\n\n[link](${proofUrl})` };
+
+test('wrap oracle derives exact output from one named source event, excluding other fixture cohorts', () => {
+  const actual = wrapSourceEvent([{ ...proofRow, stream_id: 'other:fixture', event_id: 'wrong' }, proofRow], 'local:proof', 'reply-1');
+  assert.equal(actual.sourceEventId, 'reply-1');
+  assert.equal(actual.word, proofWord);
+  assert.equal(actual.href, proofUrl);
+  assert.throws(() => wrapSourceEvent([proofRow], 'local:proof', 'wrong'), /named source event/);
+  assert.throws(() => wrapSourceEvent([proofRow, proofRow], 'local:proof', 'reply-1'), /named source event/);
+});
+
+test('wrap oracle rejects shortened provider output rather than testing a promised echo', () => {
+  assert.throws(() => wrapSourceEvent([{ ...proofRow, text: proofRow.text.replaceAll(proofWord, 'short') }], 'local:proof', 'reply-1'), /source.*word|source.*inline/);
+});
+
+test('served proof refuses dirty history and reused rehearsal identity before sending', () => {
+  const identity = { phase: 'live', fixtureId: 'live-1', streamId: 'local:live',
+    rehearsalFixtureId: 'rehearsal-1', rehearsalStreamId: 'local:rehearsal' };
+  assert.doesNotThrow(() => assertFreshWrapFixture(identity, [{ ...proofRow, stream_id: 'other:fixture' }]));
+  assert.throws(() => assertFreshWrapFixture(identity, [{ stream_id: identity.streamId, kind: 'USER', text: 'old' }]), /fresh/);
+  assert.throws(() => assertFreshWrapFixture(identity, [{ stream_id: identity.streamId, kind: 'ASSIST_TEXT', text: 'old' }]), /fresh/);
+  assert.throws(() => assertFreshWrapFixture({ ...identity, streamId: identity.rehearsalStreamId }, []), /distinct/);
+  assert.throws(() => assertFreshWrapFixture({ ...identity, fixtureId: identity.rehearsalFixtureId }, []), /distinct/);
+});

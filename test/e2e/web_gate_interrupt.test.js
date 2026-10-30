@@ -14,7 +14,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 
-const { resolveChrome } = require('./web_gate');
+const { resolveChrome, freePort, stopOwnedGroup } = require('./web_gate');
+const cdp = require('./lib/cdp');
+const os = require('node:os');
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 
 const ROOT = path.join(__dirname, '..', '..');
 const GATE = path.join(__dirname, 'web_gate.js');
@@ -33,6 +36,14 @@ function processTable() {
   const out = execFileSync('ps', ['-ww', '-Ao', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8' });
   return out.split('\n').map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/))
     .filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), command: m[4] }));
+}
+
+function audit(label) {
+  const table = processTable();
+  const roots = new Set(table.filter(p => p.command.startsWith(resolveChrome() + ' ')).map(p => p.pid));
+  const pids = table.filter(p => roots.has(p.pid) || roots.has(p.pgid) || roots.has(p.ppid))
+    .map(({ pid, ppid, pgid }) => ({ pid, ppid, pgid }));
+  console.log(`WEB_GATE_BROWSER_AUDIT ${JSON.stringify({ label, pids })}`);
 }
 
 function alive(pid) {
@@ -81,6 +92,7 @@ function tearDownMarked(marker) {
 
 for (const [signal, expectedCode] of CASES) {
   test(`web gate ${signal} exits ${expectedCode} and leaves nothing running`, { skip: skipReason(), timeout: 180000 }, async () => {
+    audit(`before ${signal}`);
     let output = '';
     const gate = spawn(process.execPath, [GATE], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
@@ -110,6 +122,61 @@ for (const [signal, expectedCode] of CASES) {
         await waitForExit(gate, 5000);
       }
     }
+    audit(`after ${signal}`);
     assert.deepEqual(problems, []);
+  });
+}
+
+// --keep retains debug files, while the same owner still releases every browser.
+// One unrelated, test-owned Chrome stays alive as an ownership sentinel.
+for (const failPage of [false, true]) {
+  test(`web gate --keep ${failPage ? 'failure' : 'success'} retains files and releases only its browser`, { skip: skipReason(), timeout: 180000 }, async () => {
+    audit(`before --keep ${failPage ? 'failure' : 'success'}`);
+    const sentinelDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-gate-sentinel-'));
+    const sentinelPort = await freePort();
+    const sentinel = spawn(resolveChrome(), [...headlessChromeArgs(), `--remote-debugging-port=${sentinelPort}`,
+      `--user-data-dir=${sentinelDir}`, 'about:blank'], { stdio: 'ignore', detached: true });
+    let sentinelPage, page, marker, gate;
+    let output = '';
+    try {
+      sentinelPage = await cdp.connect(sentinelPort, { match: /about:blank/ });
+      gate = spawn(process.execPath, [GATE, '--keep', '--scenario', 'transport-and-config', '--timeout', '1500'], {
+        cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, PENTACLE_WEB_GATE_TEST_HOLD_AFTER_ATTACH: '1' },
+      });
+      gate.stdout.on('data', d => { output += String(d); });
+      gate.stderr.on('data', d => { output += String(d); });
+      marker = await waitForMarker(gate, () => output, BOOT_TIMEOUT_MS);
+      if (failPage) {
+        const row = processTable().find(p => p.pid === marker.chromePid);
+        const port = Number(row.command.match(/--remote-debugging-port=(\d+)/)[1]);
+        page = await cdp.connect(port);
+        await page.send('Page.navigate', { url: 'about:blank' });
+      }
+      assert.ok(await waitForExit(gate, EXIT_TIMEOUT_MS), output);
+      assert.equal(gate.exitCode, failPage ? 1 : 0, output);
+      const reportDir = output.match(/artifacts: (.+)/)?.[1].trim();
+      assert.ok(reportDir, output);
+      const verdict = JSON.parse(fs.readFileSync(path.join(reportDir, 'verdict.json')));
+      assert.equal(verdict.status, failPage ? 'FAIL' : 'PASS');
+      const survivors = processTable().filter(p => p.command.includes(marker.userDataDir));
+      assert.deepEqual(survivors, [], 'run-owned Chrome and descendants must be absent even with --keep');
+      assert.equal(verdict.chrome_cleanup.exited, true);
+      assert.equal(verdict.chrome_cleanup.pid, marker.chromePid);
+      for (const dir of [marker.userDataDir, marker.scratch]) assert.ok(fs.existsSync(dir), `debug files retained: ${dir}`);
+      assert.equal(alive(marker.daemonPid), false);
+      assert.ok(alive(sentinel.pid), 'foreign Chrome sentinel remains alive');
+      assert.equal((await sentinelPage.send('Browser.getVersion')).product.startsWith('Chrome/'), true);
+    } finally {
+      page?.close(); sentinelPage?.close();
+      tearDownMarked(marker);
+      if (gate && gate.exitCode === null && gate.signalCode === null) {
+        gate.kill('SIGKILL'); await waitForExit(gate, 5000);
+      }
+      await stopOwnedGroup(sentinel);
+      assert.deepEqual(processTable().filter(p => p.command.includes(`--user-data-dir=${sentinelDir}`)), [], 'sentinel cleanup complete');
+      fs.rmSync(sentinelDir, { recursive: true, force: true });
+      audit(`after --keep ${failPage ? 'failure' : 'success'}`);
+    }
   });
 }
