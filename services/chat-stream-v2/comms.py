@@ -589,6 +589,9 @@ class Comms:
         prior = await self.store.get_tell_delivery(tell_id)
         if prior is not None:
             self._assert_same_payload(tell_id, digest, prior)
+            async with self._pane_input_lock(str(route["final_target"])):
+                prior = (await self.store.promote_tell_delivery(
+                    tell_id, digest, reconcile=True)) or prior
             return {**prior["reply"], "duplicate": True}
         pending = self._inflight.get(tell_id)
         if pending is not None:
@@ -856,6 +859,7 @@ class Comms:
     ) -> dict[str, Any]:
         """Inject once, then durably record the provider's truth boundary."""
         binding = await self.store.exchange_binding(str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""), str(route["final_target"]))
+        original = await self.store.fetch_session(*self.sessions.split(str(route["final_target"]))) or {}
         confirmed, attempts, provider, active_draft, proof, watermark = await self._attempt_delivery(
             msg, route, body,
         )
@@ -913,8 +917,10 @@ class Comms:
             "delivered_at": enqueued_at if delivery_status == "delivered" else None,
             "delivery_ack_at": ack_at,
             "request_payload_hash": digest,
-            **(watermark_fields(watermark) if durable_notice else {}),
-            **(proof.audit_fields() if durable_notice else {}),
+            **watermark_fields(watermark),
+            **proof.audit_fields(),
+            "proof_generation": original.get("session_generation"),
+            "proof_session_created_at": original.get("created_at"),
             **(
                 {
                     key: reply[key]
@@ -1387,11 +1393,7 @@ class Comms:
             proof = EventProof("proven" if confirmed else "pending", stream_id, 0)
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
-        if durable_proof:
-            watermark = await self._watermark_before_action(stream_id)
-        else:
-            legacy_watermark = await self._submission_watermark(stream_id) if provider == "codex" else 0
-            watermark = EventWatermark(stream_id, legacy_watermark, "reachable")
+        watermark = await self._watermark_before_action(stream_id)
         if before_paste is not None:
             await before_paste(watermark)
         async with self._account_input_guard(stream_id):

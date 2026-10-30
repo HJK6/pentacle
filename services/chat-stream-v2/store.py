@@ -4075,6 +4075,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     async def promote_tell_delivery(
         self, tell_id: str, payload_digest: str, *, proof: dict[str, Any] | None = None,
+        reconcile: bool = False,
     ) -> dict[str, Any] | None:
         """Atomically promote one matching proof-pending tell.
 
@@ -4116,11 +4117,24 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     conn.rollback()
                     return None
 
+                resolved_proof = proof
+                if reconcile:
+                    from tell_proof import retained_proof
+                    resolved_proof = retained_proof(conn, payload)
+                    if resolved_proof is None:
+                        conn.rollback()
+                        return None
+
                 acknowledged_at = iso_now()
                 reply["delivery_status"] = "delivered"
                 reply["submission_confirmed"] = True
                 reply["delivery_ack_at"] = acknowledged_at
                 reply.pop("reason", None)
+                if reconcile:
+                    reply.update(action_status="committed", action_committed=True,
+                                 confirmation_pending=False, confirmation_status="confirmed")
+                    delivery.update(action_status="committed", action_committed=True,
+                                    confirmation_pending=False, confirmation_status="confirmed")
                 if delivery.get("notification_answer_generation"):
                     reply.update(action_status="committed", action_committed=True,
                                  confirmation_pending=False, confirmation_status="confirmed")
@@ -4132,9 +4146,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 delivery["submission_confirmed"] = True
                 delivery["delivered_at"] = acknowledged_at
                 delivery["delivery_ack_at"] = acknowledged_at
-                if isinstance(proof, dict):
-                    reply.update(proof)
-                    delivery.update(proof)
+                if isinstance(resolved_proof, dict):
+                    reply.update(resolved_proof)
+                    delivery.update(resolved_proof)
                 conn.execute(
                     "UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
                     (json.dumps(payload, separators=(",", ":")), tell_id),

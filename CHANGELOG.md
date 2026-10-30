@@ -23,6 +23,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Same-ID tell retries can settle late native input proof without sending the message again; missing or ambiguous original proof stays pending.
 - Existing unbound sessions keep accepting input before the first fleet CLI pin; initialized or inconsistent pin state still refuses that input.
 - Initial fleet CLI pin activation prepares and proves every serving home before enforcing the pair, preserving compatible running seats. Home-scoped maintenance fences survive restarts and expiry, with authenticated proof-backed recovery and managed launcher attribution.
 - Oversized retained exchange receipts no longer crash daemon startup; repair processes each oversized receipt in its own checkpointed transaction.
