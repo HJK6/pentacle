@@ -162,6 +162,8 @@ async function main() {
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
     await page.waitFor("document.querySelector('#cell-0 .slot-chat-media-img')?.naturalWidth > 0", { timeoutMs: 15000 });
+    // Composer clearing is optimistic; wait for this fixture's received-send response.
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: image caption'))`);
     const sent = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.deepEqual(sent.attachments.map(a => a.mime), ['image/png', 'image/jpeg']);
     assert.equal(daemon.requests.filter(r => r.type === 'upload_blob_init').length, 2);
@@ -187,6 +189,7 @@ async function main() {
     daemon.setUploadFailure(false);
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: retry caption'))`);
     assert.equal(daemon.requests.filter(r => r.type === 'send').length, sendsBeforeFailure + 1);
     // File picker and drag/drop still use the same real intake and image-only send.
     for (const via of ['picker', 'drop']) {
@@ -204,6 +207,7 @@ async function main() {
     }
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: [image]'))`);
     const imageOnly = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.equal(imageOnly.text, ''); assert.equal(imageOnly.attachments.length, 1);
     // Assistant entry uses its existing direct route, including the same upload.
@@ -213,6 +217,7 @@ async function main() {
     await page.waitFor(`document.querySelectorAll('${chips}').length === 1`);
     await page.click('#cell-0 .slot-chat-compose-send');
     await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+    await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${targetId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo: assistant caption'))`);
     const assistant = daemon.requests.filter(r => r.type === 'send').at(-1);
     assert.equal(assistant.session_name, 'live'); assert.equal(assistant.attachments.length, 1);
     result.send = { mixed: true, uploadFailureRetry: true, imageOnly: true, picker: true, drop: true, assistantDirect: true };
@@ -230,14 +235,21 @@ async function main() {
       await page.waitFor(`document.querySelectorAll('${chips}').length === 1`);
       await page.click('#cell-0 .slot-chat-compose-send');
       await page.waitFor(`document.querySelectorAll('${chips}').length === 0`);
+      await page.waitFor(`[...document.querySelectorAll('#cell-0 .slot-chat-list[data-stream-id="${composite.sourceId}"] .slot-chat-assistant-card')].some(card => card.textContent.includes('Echo:') && card.textContent.includes('composite caption'))`);
       const sentComposite = composite.requests.filter(r => r.type === 'send').at(-1);
       assert.equal(sentComposite.stream_id, composite.sourceId);
       assert.equal(sentComposite.message, caption); assert.equal(sentComposite.attachments.length, 1);
       await page.waitFor("document.querySelector('#cell-0 .slot-chat-media-img')?.naturalWidth > 0");
       result.send.assistantComposite = true;
-    } finally { await compositeWeb?.close(); await composite.stop(); }
+    } finally {
+      result.compositeSendObservation = { at: new Date().toISOString(), phase: 'before fixture teardown',
+        requests: composite.requests.filter(r => r.type === 'send') };
+      await compositeWeb?.close(); await composite.stop();
+    }
     result.status = 'PASS';
   } finally {
+    result.directSendObservation = { at: new Date().toISOString(), phase: 'before fixture teardown',
+      requests: daemon.requests.filter(r => r.type === 'send') };
     fs.writeFileSync(out + '/observations.json', JSON.stringify(result, null, 2));
     page?.close();
     await require('./web_gate').stopOwnedGroup(browser);
