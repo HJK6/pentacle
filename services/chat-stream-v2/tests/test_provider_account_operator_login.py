@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -133,3 +134,99 @@ def test_main_masks_untrusted_exception_and_never_starts_for_non_fd(monkeypatch,
         "--login-generation", "old", "--new-generation", "new", "--operation-id", "op"]) == 1
     output = capsys.readouterr()
     assert output.err == "" and json.loads(output.out) == {"outcome":"operator_login_failed"}
+
+
+@pytest.mark.parametrize("signal_error", [PermissionError, ProcessLookupError])
+def test_exited_child_cleanup_preserves_original_refusal(monkeypatch, capsys, signal_error):
+    processes, published = [], []
+    refusal = AccountError("operator_delivery_failed")
+
+    def popen(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def publish(*args):
+        published.append(args)
+        raise refusal
+
+    def exited_group(pid, signum):
+        assert len(processes) == 1 and pid == processes[0].pid
+        assert signum == signal.SIGKILL
+        processes[0].wait(timeout=5)  # Schedule actual exit before the failed group signal.
+        raise signal_error()
+
+    monkeypatch.setattr(tool.os, "killpg", exited_group)
+    with pytest.raises(AccountError) as caught:
+        tool.relay(child_script(), "op", publish=publish, popen=popen)
+    assert caught.value is refusal
+    assert len(published) == 1
+    assert processes[0].poll() is not None
+    assert processes[0].stdout.closed and processes[0].stderr.closed
+    assert capsys.readouterr() == ("", "")
+
+
+def test_denied_live_child_cleanup_keeps_original_and_visible_failure(monkeypatch, capsys):
+    processes, original_waits = [], {}
+    refusal = AccountError("operator_delivery_failed")
+
+    def popen(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        processes.append(process)
+        real_wait = process.wait
+        original_waits[process.pid] = real_wait
+
+        def bounded_wait(timeout=None):
+            if process.poll() is None:
+                raise subprocess.TimeoutExpired("owned relay child", timeout)
+            return real_wait(timeout=timeout)
+
+        monkeypatch.setattr(process, "wait", bounded_wait)
+        return process
+
+    def denied_group(pid, signum):
+        assert pid == processes[0].pid and processes[0].poll() is None
+        raise PermissionError()
+
+    def publish(*args):
+        raise refusal
+
+    monkeypatch.setattr(tool.os, "killpg", denied_group)
+    try:
+        with pytest.raises(AccountError) as caught:
+            tool.relay(child_script(delay=30), "op", publish=publish, popen=popen)
+        assert caught.value is refusal
+        assert any("TimeoutExpired" in note for note in caught.value.__notes__)
+        assert processes[0].poll() is None  # Never pretend the denied cleanup reaped it.
+        assert processes[0].stdout.closed and processes[0].stderr.closed
+        assert capsys.readouterr() == ("", "")
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            original_waits[process.pid](timeout=5)
+
+
+def test_cleanup_failure_without_original_exception_is_not_success(monkeypatch):
+    processes = []
+
+    def popen(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        processes.append(process)
+        real_wait = process.wait
+        waits = 0
+
+        def wait(timeout=None):
+            nonlocal waits
+            waits += 1
+            if waits == 2:
+                raise subprocess.TimeoutExpired("owned relay cleanup", timeout)
+            return real_wait(timeout=timeout)
+
+        monkeypatch.setattr(process, "wait", wait)
+        return process
+
+    with pytest.raises(subprocess.TimeoutExpired, match="owned relay cleanup"):
+        tool.relay(child_script(), "op", publish=lambda *args: {"publication_id": "pub"}, popen=popen)
+    assert processes[0].poll() is not None
+    assert processes[0].stdout.closed and processes[0].stderr.closed
