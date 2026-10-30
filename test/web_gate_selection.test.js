@@ -25,7 +25,7 @@ test('owned Chrome inspection failure cannot be reported as successful cleanup',
   };
   try {
     Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
-    for (const observation of [[{ pid: 424243, state: 'S' }], [{ pid: 424243, state: 'Z' }], new Error('scan unavailable'), Object.assign(new Error('scan timeout'), { code: 'ETIMEDOUT' })]) {
+    for (const observation of [[{ pid: 424243, state: 'S' }], [{ pid: 424243, state: 'Z' }], [{ pid: 424243, state: '?' }], new Error('scan unavailable'), Object.assign(new Error('scan timeout'), { code: 'ETIMEDOUT' })]) {
       runner.groupMembers = () => { if (observation instanceof Error) throw observation; return observation; };
       await assert.rejects(stopOwnedGroup({ pid: 424242, exitCode: 0, signalCode: null }), error => {
         assert.match(error.message, /cannot inspect.*synthetic inspection denied/);
@@ -87,4 +87,114 @@ test('interrupt proof preserves its primary assertion and records secondary sent
   primaryFailure = false;
   await assert.rejects(selected.body(), /secondary sentinel denied/);
   assert.ok(secondary.some(message => message.includes('"primary":null')));
+});
+
+test('owned Chrome stop requires child exit and group absence within each existing phase budget', async t => {
+  const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  const source = fs.readFileSync(path.join(__dirname, 'e2e/web_gate.js'), 'utf8');
+  const seam = source.slice(source.indexOf('function onceExit('), source.indexOf('// server/index.js main()'));
+  async function run(configure) {
+    let now = 0, sequence = 0, settled = false, result, error;
+    const timers = new Map(), trace = [];
+    const child = Object.assign(new EventEmitter(), { pid: 424242, exitCode: null, signalCode: null });
+    const later = (fn, ms, kind = 'counterpart') => { const id = ++sequence; timers.set(id, { at: now + ms, fn, kind }); return id; };
+    const state = { child, later, trace, now: () => now,
+      exit() { child.exitCode = 0; trace.push({ event: 'exit', at: now }); child.emit('exit', 0); } };
+    const behavior = configure(state);
+    class Clock extends Date {
+      constructor(...args) { super(...(args.length ? args : [1700000000000 + now])); }
+      static now() { return 1700000000000 + now; }
+    }
+    const api = vm.runInNewContext(seam + '\n({ stopOwnedGroup });', {
+      Date: Clock, setTimeout: (fn, ms) => later(fn, ms, 'owned-wait'), clearTimeout: id => timers.delete(id),
+      process: { platform: 'darwin', kill(pgid, signal) {
+        assert.equal(pgid, -424242, 'only the exact owned group may be probed or signalled');
+        trace.push({ event: 'kill', signal, at: now, childExited: child.exitCode !== null });
+        return behavior.kill(signal);
+      } },
+      require(name) { assert.equal(name, '../../scripts/lib/test-runner'); return { groupMembers: () => behavior.members || [] }; },
+    });
+    const done = api.stopOwnedGroup(child, 100).then(value => { result = value; settled = true; }, value => { error = value; settled = true; });
+    for (let step = 0; step < 100 && !settled; step++) {
+      for (let micro = 0; micro < 8; micro++) await Promise.resolve();
+      if (settled) break;
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      assert.ok(next, 'the bounded owned-child operation must settle or have a scheduled event');
+      now = next[1].at; timers.delete(next[0]); next[1].fn();
+    }
+    assert.equal(settled, true, 'the stop operation remains finite'); await done;
+    assert.equal(child.listenerCount('exit'), 0, 'exit listener removed on success or failure');
+    assert.equal([...timers.values()].filter(timer => timer.kind === 'owned-wait').length, 0, 'no child-wait or group-wait timer remains');
+    return { result, error, trace, elapsed: now };
+  }
+  const absent = () => { throw Object.assign(new Error('synthetic absent'), { code: 'ESRCH' }); };
+  await t.test('post-TERM verification waits for the direct child before an early denied probe', async () => {
+    const out = await run(({ child, later, exit }) => ({ members: [{ pid: 424242, state: '?' }], kill(signal) {
+      if (signal === 'SIGTERM') { later(exit, 20); return true; }
+      if (child.exitCode !== null) return absent();
+      if (signal === 0 && this.termSent) throw Object.assign(new Error('synthetic pre-exit denial'), { code: 'EPERM' });
+      this.termSent = true; return true;
+    } }));
+    assert.equal(out.error, undefined); assert.equal(out.result.exited, true); assert.equal(out.elapsed, 20);
+    const term = out.trace.findIndex(row => row.signal === 'SIGTERM');
+    assert.ok(out.trace.slice(term + 1).filter(row => row.event === 'kill').every(row => row.childExited));
+    assert.deepEqual(out.trace.filter(row => typeof row.signal === 'string').map(row => row.signal), ['SIGTERM']);
+  });
+  await t.test('an observed leader exit never overrides EPERM with a retained helper', async () => {
+    const out = await run(({ child, later, exit }) => ({ members: [{ pid: 424243, state: '?' }], kill(signal) {
+      if (signal === 'SIGTERM') { later(exit, 20); return true; }
+      if (signal === 0 && child.exitCode !== null) throw Object.assign(new Error('synthetic post-exit denial'), { code: 'EPERM' });
+      return true;
+    } }));
+    assert.match(out.error?.message || '', /synthetic post-exit denial/); assert.equal(out.result, undefined);
+    assert.equal(out.error.inspection[0].members[0].state, '?');
+    assert.ok(out.trace.some(row => row.signal === 0 && row.childExited));
+    assert.deepEqual(out.trace.filter(row => typeof row.signal === 'string').map(row => row.signal), ['SIGTERM']);
+  });
+  await t.test('an absent group without observed child exit fails and is never signalled again', async () => {
+    const out = await run(() => ({ kill: absent }));
+    assert.match(out.error?.message || '', /child.*exit.*not observed/i);
+    assert.equal(out.result, undefined); assert.equal(out.elapsed, 100);
+    assert.ok(out.trace.every(row => row.signal === 0));
+  });
+  await t.test('child-exit timeout after TERM never escalates against a verified absent group', async () => {
+    const out = await run(() => ({ termSent: false, kill(signal) {
+      if (signal === 'SIGTERM') { this.termSent = true; return true; }
+      if (signal === 0 && this.termSent) return absent();
+      return true;
+    } }));
+    assert.match(out.error?.message || '', /child.*exit.*not observed/i); assert.equal(out.elapsed, 100);
+    assert.deepEqual(out.trace.filter(row => typeof row.signal === 'string').map(row => row.signal), ['SIGTERM']);
+  });
+  await t.test('TERM-resistant owned child reaches KILL within the original TERM deadline', async () => {
+    const out = await run(({ child, later, exit }) => ({ kill(signal) {
+      if (signal === 'SIGKILL') later(exit, 20);
+      if (signal === 0 && child.exitCode !== null) return absent();
+      return true;
+    } }));
+    assert.equal(out.error, undefined); assert.equal(out.result.forced, true);
+    assert.equal(out.trace.find(row => row.signal === 'SIGKILL').at, 100);
+    assert.equal(out.elapsed, 120);
+  });
+  await t.test('leader exit still requires a separate whole-group absence observation', async () => {
+    const out = await run(({ now, later, exit }) => ({ kill(signal) {
+      if (signal === 'SIGTERM') later(exit, 20);
+      if (signal === 0 && now() >= 60) return absent();
+      return true;
+    } }));
+    assert.equal(out.error, undefined); assert.equal(out.result.exited, true);
+    const exitedAt = out.trace.find(row => row.event === 'exit').at;
+    assert.ok(out.trace.some(row => row.signal === 0 && row.childExited && row.at > exitedAt));
+    assert.ok(out.elapsed >= 60 && out.elapsed <= 100);
+  });
+  await t.test('signal errors and a surviving child exhaust only the two existing budgets', async () => {
+    const out = await run(() => ({ kill(signal) {
+      if (signal !== 0) throw Object.assign(new Error('synthetic signal denied'), { code: 'EPERM' });
+      return true;
+    } }));
+    assert.match(out.error?.message || '', /survived SIGKILL/); assert.equal(out.result, undefined);
+    assert.equal(out.elapsed, 200);
+    assert.deepEqual(out.trace.filter(row => typeof row.signal === 'string').map(row => [row.signal, row.at]), [['SIGTERM', 0], ['SIGKILL', 100]]);
+  });
 });
