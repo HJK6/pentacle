@@ -39,9 +39,14 @@ for (const keep of [false, true]) {
       };
       fakeFs.openSync = (...args) => { const fd = fs.openSync(...args); openFds.push(fd); return fd; };
       const quiet = { log() {}, error() {} };
-      // The gate registers signal handlers and signals its Chrome group; the synthetic group is always empty.
+      // The synthetic Chrome group exists until its child receives the group signal.
       const syntheticProcess = { env, execPath: process.execPath, on() {}, removeListener() {}, listeners: () => [],
-        kill() { throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); } };
+        kill(pid, signal = 0) {
+          const child = children.find(p => p.pid === -pid && p.exitCode === null && p.signalCode === null);
+          if (!child) throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+          if (signal !== 0) child.kill(signal);
+          return true;
+        } };
       const context = { module: { exports: {} }, __dirname: path.join(root, 'e2e'), process: syntheticProcess,
         console: quiet, Buffer, Date, setTimeout, clearTimeout,
         require(name) {
