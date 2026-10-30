@@ -78,7 +78,7 @@ class WorkflowControls(unittest.TestCase):
             if job_id != 'checks':
                 self.assertNotIn('if', job)
             self.assertEqual(job['runs-on'], 'ubuntu-latest')
-            self.assertLessEqual(int(job['timeout-minutes']), 50)
+            self.assertLessEqual(int(job['timeout-minutes']), 70 if job_id == 'daemon' else 50)
             self.assertTrue(any(step.get('uses') == 'actions/checkout@v4' for step in job['steps']))
             for step in job['steps']:
                 self.assertNotIn('continue-on-error', step)

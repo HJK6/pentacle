@@ -372,13 +372,21 @@ def _socket_objects(socket: str, binding: dict[str, Any]) -> tuple[int, bool]:
         raise
 
 
+def _check_socket_identity(pid: int, identity: str) -> None:
+    # Exit/reap can occur between the PID probe and the identity read. A missing
+    # identity is terminal only with ESRCH; unreadable live/recycled PIDs refuse.
+    observed = process_start_identity(pid)
+    if observed != identity and (observed is not None or _exists(pid)):
+        raise ManifestError("tmux server identity is unreadable or recycled")
+
+
 def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
                  tmux: str = "tmux") -> None:
     binding = _socket_binding(socket, binding)
     pid, identity = binding["server_pid"], binding["server_start_identity"]
     live = _exists(pid)
-    if live and process_start_identity(pid) != identity:
-        raise ManifestError("tmux server identity is unreadable or recycled")
+    if live:
+        _check_socket_identity(pid, identity)
     try:
         fd, present = _socket_objects(socket, binding)
     except FileNotFoundError:
@@ -394,8 +402,7 @@ def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
                     pid, filter=select.KQ_FILTER_PROC,
                     flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
                     fflags=select.KQ_NOTE_EXIT)], 1, 0)
-                if _exists(pid) and process_start_identity(pid) != identity:
-                    raise ManifestError("tmux identity changed after event registration")
+                _check_socket_identity(pid, identity)
                 if len(events) != 1:
                     raise ManifestError("no bound terminal registration event")
                 event = events[0]
@@ -414,8 +421,7 @@ def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
         # An absent root is terminal only with the same bound instance's exit.
         exited = _ExitEvent(pid)
         try:
-            if _exists(pid) and process_start_identity(pid) != identity:
-                raise ManifestError("tmux identity changed after event registration")
+            _check_socket_identity(pid, identity)
             exited.wait(time.monotonic())
         except ManifestError as exc:
             raise ManifestError("private socket root vanished while its server is live") from exc
@@ -432,8 +438,7 @@ def _reap_socket(socket: str, binding: dict[str, Any], deadline: float,
             event = _ExitEvent(pid)
             # Revalidate the registered process and objects immediately before the
             # single connection, which pins the server evaluating this guard.
-            if _exists(pid) and process_start_identity(pid) != identity:
-                raise ManifestError("tmux identity changed after event registration")
+            _check_socket_identity(pid, identity)
             check, _ = _socket_objects(socket, binding)
             os.close(check)
             if not event.terminal:
