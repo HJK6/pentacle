@@ -215,10 +215,18 @@ def codex_source_pane_pid(value: Any) -> str | None:
 Broadcast = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-async def broadcast_assistant_mirror(store: Any, broadcast: Broadcast, source_event_id: int) -> None:
-    """Fan out the already-committed canonical projection of one source row."""
+async def broadcast_assistant_mirror(
+    store: Any, broadcast: Broadcast, source_event_id: int, *, sessions: Any = None,
+) -> None:
+    """Fan out the already-committed canonical projection of one source row.
+
+    The mirror row lands on the composite stream without touching the session
+    registry, so it advances that stream's preview here.
+    """
     event = await store.assistant_mirror_event_for_source(source_event_id)
     if event is not None:
+        if sessions is not None:
+            sessions.apply_genuine_activity_event(str(event.get("stream_id") or ""), event)
         await broadcast({"type": "chat.event", "event": event})
 
 
@@ -264,7 +272,7 @@ async def append_ingested_event(
                 expected_generation=lifecycle["generation"] if lifecycle else None,
             )
         await broadcast({"type": "chat.event", "event": projected[0]})
-        await broadcast_assistant_mirror(store, broadcast, seq)
+        await broadcast_assistant_mirror(store, broadcast, seq, sessions=sessions)
     return seq
 
 
@@ -825,7 +833,7 @@ class Ingest:
                             "type": "chat.event",
                             "event": projected[projected_index],
                         })
-                        await broadcast_assistant_mirror(self.store, self.broadcast, seq)
+                        await broadcast_assistant_mirror(self.store, self.broadcast, seq, sessions=self.sessions)
                         projected_index += 1
                 if any(seq is not None for seq in sequences) and self.inventory_emitter is not None:
                     await self.inventory_emitter.emit_if_changed()

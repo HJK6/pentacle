@@ -728,13 +728,17 @@ class AssistantLaneRulings:
         rid = request["ruling_request_id"]
         line = (f"Astra unavailable; {outcome}: {request['action']} "
                 f"{request['target_stream_id']} ({rid}; {request.get('reason') or 'deadline'}).")
+        # ISO like every other composite row: the preview contract rejects a numeric timestamp.
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now % 1 * 1000):03d}Z"
         event = {"stream_id": composite.config.stream_id, "provider": "composite",
                  "kind": "ASSIST_TEXT", "text": line, "publish_kind": "status",
-                 "timestamp": time.time(), "attachments": [],
+                 "timestamp": stamp, "attachments": [],
                  "raw": {"assistant_composite": True, "ruling_request_id": rid}}
         event_id = await self.store.append_session_event(
             composite.config.stream_id, event, identity="ruling-unruled:" + rid, limit=100,
         )
+        inserted = event_id is not None
         if event_id is None:
             previous = await self.store.submit(lambda conn: conn.execute(
                 "SELECT event_id,event_json FROM session_event_tail WHERE identity=?",
@@ -744,6 +748,8 @@ class AssistantLaneRulings:
                 raise ValueError("assistant_ruling_mirror_receipt_missing")
             event_id = int(previous["event_id"])
             event = json.loads(previous["event_json"])
+        if inserted:
+            composite._advance_summary({**event, "daemon_seq": event_id})
         if self.server.broadcast is not None:
             await self.server.broadcast({"type": "chat.event", "event": {**event, "daemon_seq": event_id}})
         def mark_mirrored(conn: sqlite3.Connection) -> None:

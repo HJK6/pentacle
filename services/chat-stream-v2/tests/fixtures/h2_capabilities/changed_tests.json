@@ -85,6 +85,11 @@
     "test_error_adapters_operator_notification.py::test_reply_bytes_identical_with_and_without_adapter",
     "test_error_adapters_operator_notification.py::test_pending_notice_rebinds_to_new_fd_generation",
     "test_error_adapters_operator_notification.py::test_fixed_actor_declined_critical_reaches_fd",
-    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_warning_stays_card"
+    "test_error_adapters_operator_notification.py::test_fixed_actor_declined_warning_stays_card",
+    "test_assistant_composite_summary_advance.py::test_reply_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_work_lane_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_operator_input_admission_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_mirror_projection_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_unruled_ruling_status_advances_preview"
   ]
 }
