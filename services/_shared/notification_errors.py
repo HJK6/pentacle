@@ -130,6 +130,7 @@ class ErrorNotificationMixin:
             "notice_ids",
             "notice_intent",
             "disposition",
+            "muted_revision",
         }
         if set(patch) - allowed:
             raise ValueError("invalid_request")
