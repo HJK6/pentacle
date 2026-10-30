@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const seeded = require('../fixtures/wrap-paste.json');
+const { reloadDashboardPage } = require('./dashboard_scenario');
 const { wrapSourceEvent, assertFreshWrapFixture, buildWrapSourceProofScript, pasteFixture } = require('./render_proofs');
 
 async function wrapPasteProof(ctx) {
@@ -32,7 +33,7 @@ async function wrapPasteProof(ctx) {
   if (!history?.ok) throw new Error('fixture history could not be inspected before mutation');
   if (wrapProof && (history.received !== 0 || history.exhausted !== true)) throw new Error('fixture chat must be fresh before mutation');
   const build = async () => session.eval('(async () => ({ injected: window.__PENTACLE_CONFIG__?.buildId, served: (await window.cc.getBuild()).buildId }))()');
-  let source;
+  let source, primaryError;
   try {
     if (wrapProof) {
       result.build = await build();
@@ -106,9 +107,23 @@ async function wrapPasteProof(ctx) {
       await session.waitFor("document.querySelectorAll('#cell-0 .slot-chat-attachment-chip').length === 0", { timeoutMs });
     }
     result.status = 'PASS';
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2));
-    if (!wrapProof) await session.send('Page.navigate', { url });
+    try {
+      if (!wrapProof) {
+        result.cleanup = { workspaceReset: false };
+        await reloadDashboardPage(ctx);
+        result.cleanup.workspaceReset = true;
+      }
+    } catch (error) {
+      result.cleanup.error = error.message;
+      if (primaryError) throw new AggregateError([primaryError, error], 'wrap proof failed; workspace reset also failed');
+      throw error;
+    } finally {
+      fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2));
+    }
   }
 }
 module.exports = { wrapPasteProof };
