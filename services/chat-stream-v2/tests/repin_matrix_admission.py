@@ -109,7 +109,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             from window_schedule import WindowSchedule
             from test_window_schedule_contract import FakeSessions,FakeComms,RouteProbeSpecs,SPEC,link_specs,future_time,message
             fake_sessions=FakeSessions()
-            fake_sessions.rows={key.replace("hosta",old.host):dict(value,stream_id=key.replace("hosta",old.host)) for key,value in fake_sessions.rows.items()}
+            fixture_host=next(iter(fake_sessions.rows)).split(":")[0];fake_sessions.rows={key.replace(fixture_host,old.host):dict(value,stream_id=key.replace(fixture_host,old.host)) for key,value in fake_sessions.rows.items()}
             ctl.specs=RouteProbeSpecs()
             surface=WindowSchedule(store,fake_sessions,FakeComms(),ctl,local_host=old.host);surface.mark_store_ready()
             await link_specs(store,SPEC)
