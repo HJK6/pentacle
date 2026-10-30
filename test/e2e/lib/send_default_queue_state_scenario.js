@@ -51,11 +51,18 @@ async function agentChatSendDefaultQueueState(ctx) {
     await draft('first queued message');
     await enter(false);
     await waitFor(ctx, 'window.__normalSends.length === 2', 'Enter dispatches without waiting for idle');
-    await draft('second queued message');
+    await draft('review with em before we implement');
     await enter(true);
     await waitFor(ctx, 'window.__normalSends.length === 3', 'Alt+Enter is also an ordinary send');
     await draft('keep this unsent draft');
     await waitFor(ctx, "document.querySelectorAll('#cell-0 .slot-chat-send-now').length === 2", 'both provider-queued rows have Send now');
+    const helperRow = await session.eval(`(() => {
+      const row = [...document.querySelectorAll('#cell-0 .slot-chat-row.is-user')]
+        .find(el => el.textContent.includes('review with em before we implement'));
+      return { visible: !!row && getComputedStyle(row).display !== 'none',
+        queued: !!row?.querySelector('.slot-chat-send-status.is-queued') };
+    })()`);
+    report.ok('helper-shaped operator send stays visible with its queued receipt', helperRow.visible && helperRow.queued, helperRow);
     const working = await session.eval(probe('cell-0'));
     report.ok('a working agent has no chooser and keeps Stop and Send with a draft', !working.mode && working.stop && working.send && !working.sendDisabled, working);
     const sends = await session.eval('window.__normalSends.map(args => ({ text: args.text, urgent: "urgent" in args }))');
