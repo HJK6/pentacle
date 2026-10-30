@@ -1996,6 +1996,9 @@ async def _operator_envelope_rpc(config: Config, payload: dict[str, Any], *,
                 await asyncio.wait_for(send_uncredentialed(ws, {"type": "pong"}, compact=False),
                                        timeout=max(0.0, deadline - time.monotonic()))
                 continue
+            if frame.get("type") == "working.state":
+                # This asynchronous push can arrive between authentication and ready.
+                continue
             if frame.get("type") != "ready":
                 raise PermissionError("operator credential RPC admission refused")
             break
