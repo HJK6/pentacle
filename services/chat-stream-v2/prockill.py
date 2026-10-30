@@ -169,8 +169,13 @@ async def process_records() -> dict[int, dict[str, Any]]:
     except (asyncio.TimeoutError, OSError):
         await terminate_and_reap(proc)
         return {}
+    return parse_process_records((out or b"").decode("utf-8", "replace"))
+
+
+def parse_process_records(output: str) -> dict[int, dict[str, Any]]:
+    """Shared identity parser for async lifecycle and synchronous host helpers."""
     records: dict[int, dict[str, Any]] = {}
-    for line in (out or b"").decode("utf-8", "replace").splitlines():
+    for line in output.splitlines():
         parts = line.strip().split(None, 10)
         if len(parts) < 10:
             continue

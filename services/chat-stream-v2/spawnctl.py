@@ -3226,7 +3226,10 @@ class SpawnCtl:
                     time.monotonic() + SPAWN_SUBMISSION_PROOF_BOUND_S
                 )
                 initial_proof_timeout_s = SPAWN_SUBMISSION_PROOF_BOUND_S
-                await tmux.paste(name, brief)
+                input_runtime=getattr(self,"account_runtime",None)
+                async with (input_runtime.input_guard({**open_flds,"host":host,"stream_id":stream_id})
+                            if input_runtime is not None else nullcontext()):
+                    await tmux.paste(name, brief)
             finally:
                 self._delivery_critical.discard(delivery_task)
             self._submission_attempts[stream_id] = 1
@@ -4780,7 +4783,10 @@ class SpawnCtl:
             nonce=str(resume.get("nonce") or ""),
         ):
             return ("indeterminate", "live_pane_unproven", "spawn_fence_lost before resumed delivery"), receipt
-        await tmux.paste(name, brief)
+        input_runtime=getattr(self,"account_runtime",None)
+        async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {})
+                    if input_runtime is not None else nullcontext()):
+            await tmux.paste(name, brief)
         log.info("adoption pasted the never-delivered brief once for %s", stream_id)
         return None, receipt
 
@@ -4901,6 +4907,10 @@ class SpawnCtl:
     ) -> dict[str, Any]:
         """Freeze admission on `host` for `ttl_s` seconds (deploy window). New
         spawns are refused with `spawn_frozen` until cleared or expiry."""
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is not None:
+            from provider_cli_maintenance import legacy
+            return await legacy(runtime,host,reason=reason,ttl=float(ttl_s))
         held_until = time.time() + float(ttl_s)
         await self.store.set_spawn_admission_hold(host, held_until=held_until, reason=reason)
         return {
@@ -4909,6 +4919,10 @@ class SpawnCtl:
         }
 
     async def clear_spawn_freeze(self, host: str) -> dict[str, Any]:
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is not None:
+            from provider_cli_maintenance import legacy
+            return await legacy(runtime,host,clear=True)
         await self.store.clear_spawn_admission_hold(host)
         return {"type": "spawn_freeze.ok", "ok": True, "host": host, "held_until": None, "reason": None}
 

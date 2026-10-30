@@ -23,6 +23,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Initial fleet CLI pin activation prepares and proves every serving home before enforcing the pair, preserving compatible running seats. Home-scoped maintenance fences survive restarts and expiry, with authenticated proof-backed recovery and managed launcher attribution.
 - Oversized retained exchange receipts no longer crash daemon startup; repair processes each oversized receipt in its own checkpointed transaction.
 - Assistant backing sessions stay out of the normal chat list across spawn, resume and recovery while their composite chat remains available.
 - Central Codex usage collection follows the host's healthy default account after account switches and redeploys, retaining stale data honestly when the default is unavailable.

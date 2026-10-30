@@ -55,16 +55,16 @@ def test_retained_enrollment_fences_policy_off(tmp_path, launch_request):
     asyncio.run(run())
 
 
-def test_authenticated_fd_can_initialize_pair_by_cas():
+def test_authenticated_fd_still_requires_initial_serving_cell_readiness():
     async def run():
         store, runtime = await setup(initialize_pin=False)
         try:
-            result = await runtime.operation({"action": "pin-set", "pin": release_pair(),
-                "expected_revision": 0, "operation_id": "initialize-pair", "reason": "reviewed release",
-                "_auth_context": AUTH})
-            assert result["pin"]["revision"] == 1
+            with pytest.raises(VerbError,match="provider_cli_initial_readiness_required"):
+                await runtime.operation({"action": "pin-set", "pin": release_pair(),
+                    "expected_revision": 0, "operation_id": "initialize-pair", "reason": "reviewed release",
+                    "_auth_context": AUTH})
             status = await runtime.operation({"action": "pin-status", "_auth_context": AUTH})
-            assert status["pin"]["revision"] == 1
+            assert status["pin"] is None and status["mode"]=="pre_enforcement"
         finally:
             store.stop()
     asyncio.run(run())
@@ -160,18 +160,18 @@ def test_admin_dead_fd_recovery_uses_raw_and_high_water_cas(damage):
 def test_pin_commit_failure_is_atomic():
     import sqlite3
     async def run():
-        store,runtime=await setup(initialize_pin=False)
+        store,runtime=await setup()
         def trigger(a):
             a.conn.execute("CREATE TRIGGER stop_pin BEFORE INSERT ON kv WHEN NEW.k='provider_cli.release_pin' BEGIN SELECT RAISE(ABORT,'fixture-crash'); END")
             a.conn.commit()
         try:
             await runtime.run(trigger)
             with pytest.raises(sqlite3.IntegrityError):
-                await runtime.operation({"action":"pin-set","pin":release_pair(),"expected_revision":0,
+                await runtime.operation({"action":"pin-set","pin":dict(release_pair(),revision=2),"expected_revision":1,
                     "operation_id":"crash","reason":"fixture","_auth_context":AUTH})
             assert await runtime.run(lambda a:a.conn.execute("SELECT count(*) FROM v2_account_recovery WHERE binding_key=?",("provider-cli-pin:crash",)).fetchone()[0])==0
             status=await runtime.operation({"action":"pin-status","_auth_context":AUTH})
-            assert status["pin"] is None and not status["receipt_ids"]
+            assert status["pin"]["revision"]==1 and status["receipt_ids"]==["fixture-pin-1"]
         finally: store.stop()
     asyncio.run(run())
 
@@ -311,35 +311,34 @@ def test_real_remote_creation_after_pin_move_keeps_old_admission(tmp_path):
 
 
 def test_dead_fd_admin_recovery_through_real_authenticated_socket(tmp_path,monkeypatch):
-    import local_admin
-    from account_runtime import AccountRuntime
-    from types import SimpleNamespace
-    from test_loopback_privileged_rpc import scratch_daemon,rpc
+    from test_provider_cli_maintenance import ready_daemon
+    from test_loopback_privileged_rpc import rpc
     async def run():
-        async with scratch_daemon(tmp_path,monkeypatch) as (daemon,store,ctl,token_path):
-            runtime=AccountRuntime(store,daemon.sessions,policy={"enabled":True})
-            runtime.attach(daemon,ctl,SimpleNamespace())
-            account=binding(host="fixture-host")
-            await runtime.run(lambda a:a.register(account))
-            await runtime.run(lambda a:a.set_default(host=account.host,provider=account.provider,alias=account.alias))
-            first=await rpc(daemon,"account",action="pin-set",pin=release_pair(),expected_revision=0,
-                operation_id="initialize",reason="reviewed fixture",local_admin_token=local_admin.read(token_path))
+        async with ready_daemon(tmp_path,monkeypatch) as (daemon,store,runtime,host,account,row,request):
+            from provider_cli_initial import prepare
+            target=release_pair()
+            from provider_cli_artifact import resource_digest
+            for artifact in target["providers"][account.provider]["artifacts"].values():
+                artifact.update(native_sha256=account.executable_sha256,resource_sha256=resource_digest(account.executable))
+            admin=request["local_admin_token"]
+            first=await rpc(daemon,"account",action="pin-set",pin=target,expected_revision=0,
+                operation_id="initialize",reason="reviewed fixture",local_admin_token=admin)
             assert first["type"]=="account.ok"
             def corrupt(a):
                 a.conn.execute("UPDATE kv SET v=? WHERE k=?",("invalid-primary{","provider_cli.release_pin"));a.conn.commit()
             await runtime.run(corrupt)
             spoofed=await rpc(daemon,"account",action="pin-status",_auth_context={"operator_authenticated":True,"local_admin_verified":True,"peer_loopback":True})
             assert spoofed["type"]=="account.error" and spoofed["error_code"]=="account_control_unauthorized"
-            status=await rpc(daemon,"account",action="pin-status",local_admin_token=local_admin.read(token_path))
+            status=await rpc(daemon,"account",action="pin-status",local_admin_token=admin)
             assert status["pin"] is None and status["raw_digest"]!="absent"
             result=await rpc(daemon,"account",action="pin-set",recover_receipt="initialize",expected_raw_digest=status["raw_digest"],
-                expected_high_water_revision=1,operation_id="recover",reason="approved FD pair",local_admin_token=local_admin.read(token_path))
+                expected_high_water_revision=1,operation_id="recover",reason="approved FD pair",local_admin_token=admin)
             assert result["type"]=="account.ok" and result["pin"]["revision"]==2
             assert "invalid-primary" not in json.dumps(result)
             chosen=await runtime.choose_launch(host=account.host,provider=account.provider,model="fixture",effort="high",message={})
             assert chosen.key==account.key
             unrelated=await rpc(daemon,"account",action="default-set",host=account.host,provider=account.provider,account=account.alias,
-                local_admin_token=local_admin.read(token_path))
+                local_admin_token=admin)
             assert unrelated["type"]=="account.error" and unrelated["error_code"]=="account_control_unauthorized"
     asyncio.run(run())
 

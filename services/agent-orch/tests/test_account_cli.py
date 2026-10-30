@@ -144,3 +144,36 @@ def test_local_admin_pin_transport_does_not_depend_on_stale_seat_identity(monkey
     assert "from_stream_id" not in payload and "stream_token" not in payload
     assert options["infer_from_env"] is False
     assert payload["local_admin_token"]=="fixture-admin"
+
+
+@pytest.mark.parametrize("action",["repin","pin-status","pin-set"])
+def test_initial_activation_pair_and_readiness_inputs_reach_existing_transport(tmp_path,monkeypatch,action):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    calls=[]
+    async def rpc(config,payload,**options):calls.append((payload,options));return {"type":"account.ok"}
+    monkeypatch.setattr(wsclient,"account_once",rpc)
+    pair=tmp_path/"pair.json";pair.write_text(json.dumps({"schema":1,"revision":1}))
+    parked=tmp_path/"parked.json";parked.write_text("[]")
+    argv=["account",action,"--host","fixture-host"]
+    if action=="repin":argv += ["--target-pin-file",str(pair),"--expected-pin-revision","0"]
+    else:argv += ["--pin-file",str(pair),"--initial-parked-cells-file",str(parked),"--expected-readiness-digest","a"*64]
+    args=cli.build_parser().parse_args(argv)
+    assert args.func(args)==0
+    payload,options=calls[0]
+    assert payload["target_pin" if action=="repin" else "pin"]=={"schema":1,"revision":1}
+    assert options["timeout"]==330
+    assert not {"home","executable","profile_ref","binding"}&payload.keys()
+    if action!="repin":assert payload["initial_parked_cells"]==[] and payload["expected_readiness_digest"]=="a"*64
+
+
+def test_active_repin_refuses_pre_enforcement_target_file_before_rpc(tmp_path,monkeypatch):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,"load_config",lambda:object())
+    monkeypatch.setattr(stream_id,"discover_leader_stream_id_short",lambda _:"fixture-host:front-desk")
+    async def forbidden(*args,**kwargs):pytest.fail("active repin sent an initial target")
+    monkeypatch.setattr(wsclient,"account_once",forbidden)
+    pair=tmp_path/"pair.json";pair.write_text('{}')
+    args=cli.build_parser().parse_args(["account","repin","--target-pin-file",str(pair),"--expected-pin-revision","1"])
+    assert args.func(args)==2

@@ -4042,6 +4042,17 @@ class Server:
 
     async def _on_spawn_freeze(self, msg: dict[str, Any]) -> dict[str, Any]:
         host = str(msg.get("host") or self.local_host).strip()
+        runtime=getattr(self,"account_runtime",None)
+        from provider_cli_maintenance import FIELDS,freeze,legacy
+        if FIELDS & msg.keys():
+            if runtime is None:raise VerbError("provider_cli_maintenance_unavailable","account runtime required")
+            from provider_accounts import AccountError
+            try:return await freeze(runtime,msg,host)
+            except AccountError as exc:raise VerbError(str(exc),str(exc),**exc.context) from None
+        if runtime is not None:
+            from provider_accounts import AccountError
+            try:return await legacy(runtime,host,reason=str(msg.get("reason") or ""),ttl=float(msg.get("ttl_s") or 900))
+            except AccountError as exc:raise VerbError(str(exc),str(exc),**exc.context) from None
         return await self.spawnctl.set_spawn_freeze(
             host, reason=str(msg.get("reason") or ""),
             ttl_s=float(msg.get("ttl_s") or 900.0),
@@ -4049,7 +4060,18 @@ class Server:
 
     async def _on_spawn_unfreeze(self, msg: dict[str, Any]) -> dict[str, Any]:
         host = str(msg.get("host") or self.local_host).strip()
-        receipt = await self.spawnctl.clear_spawn_freeze(host)
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is not None:
+            from provider_cli_maintenance import slot,unfreeze,legacy
+            from provider_accounts import AccountError
+            try:
+                scoped=any(k in msg for k in ("maintenance_id","expected_maintenance_digest","expected_hold_digest")) or await runtime.run(lambda a:slot(a,host)) is not None
+                receipt=await unfreeze(runtime,msg,host) if scoped else await legacy(runtime,host,clear=True)
+            except AccountError as exc:raise VerbError(str(exc),str(exc),**exc.context) from None
+        else:
+            if any(k in msg for k in ("maintenance_id","expected_maintenance_digest","expected_hold_digest","recover_expired_maintenance")):
+                raise VerbError("provider_cli_maintenance_unavailable","account runtime required")
+            receipt = await self.spawnctl.clear_spawn_freeze(host)
         if self.lane_rulings is not None:
             await self.lane_rulings.tick()
         return receipt

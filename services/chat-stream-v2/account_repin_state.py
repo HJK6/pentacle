@@ -121,6 +121,9 @@ def origin(a,value):
 def hold(a,value,now):
     row=a.conn.execute("SELECT * FROM v2_spawn_admission_hold WHERE host=?",(value["host"],)).fetchone()
     if not row or row["held_until"]<=now:raise AccountError("account_upgrade_hold_required")
+    from provider_cli_maintenance import require_mutation
+    selected=a._cell(value["host"],value["provider"],value["account"])
+    if selected is not None:require_mutation(a,Binding(**json.loads(selected["data"])),now)
     return dict(row)
 
 
@@ -292,11 +295,19 @@ def public_status(a,value,remote,now):
         "generation_intents":{k:digest(v) for k,v in generation_intents(a,value).items()}}
     try:canonical_tail=tail(a,value)
     except AccountError:canonical_tail=None
+    recovery_target=None
+    if pin is None and canonical_tail:
+        from account_repin import target_pin
+        addressed=next((s for s in attempts.values() if s["arguments"].get("operation_id")==canonical_tail),None)
+        if addressed:
+            try:recovery_target=target_pin(a,addressed["arguments"])
+            except AccountError:pass
     fences=causes(a,value)
     missing=("host/source verification" if not remote or remote.get("mutation_clearance_required") is not True else
-        "real admission hold" if not held or held["held_until"]<=now else "valid current pin" if pin is None else None)
+        "real admission hold" if not held or held["held_until"]<=now else
+        "valid current pin or immutable pre-enforcement target" if pin is None and recovery_target is None else None)
     return {**cell(value),"snapshot_digest":digest(snapshot),"origin_digest":digest(origins),"canonical_tail":canonical_tail,
-        "fence_causes":fences,"dispositions":list(dispositions.values()),"current_pin":pin,
+        "fence_causes":fences,"dispositions":list(dispositions.values()),"current_pin":pin,"recovery_target_pin":recovery_target,
         "missing_prerequisite":missing,"next_action":"repair "+missing if missing else
             "FD reconcile canonical tail or explicitly relogin with supersede_repin" if fences else "ordinary current-pin work",
         "_snapshot":snapshot}
@@ -314,8 +325,10 @@ async def recovery_status(runtime,value):
 
 async def permit(executor,old,action,operation,generation,remote,intent):
     if remote.get("mutation_clearance_required") is not True:raise AccountError("account_mutation_clearance_required")
+    launchers=await executor.launcher_descriptors(old.host,old.provider)
     context={"action":action,"expected_generation":old.generation,"generation":generation,
-        "clearance_id":digest({"intent":intent,"operation":operation}),"host_binding":remote["binding"],
+        "clearance_id":digest({"intent":intent,"operation":operation,"managed_launchers":launchers}),"host_binding":remote["binding"],
+        "managed_launchers":launchers,
         "central_intent":digest(intent),"reserved_at_ns":intent.get("reserved_at_ns",0)}
     result=await executor.execute(old,"mutation-reserve",operation,generation,reconcile=context)
     if result.get("outcome")!="ok" or result.get("permit")!=dict(context,provider=old.provider,alias=old.alias):
@@ -326,9 +339,8 @@ async def permit(executor,old,action,operation,generation,remote,intent):
 def snapshot(a,value,now):
     origins=origin(a,value);old=healthy_origin(origins)
     if old.generation!=value["login_generation"]:raise AccountError("account_login_generation_stale")
-    pin=current(a)
-    if (pin["revision"],digest(pin))!=(value["expected_pin_revision"],value["expected_pin_digest"]):
-        raise AccountError("provider_cli_pin_stale")
+    from account_repin import target_pin
+    pin=target_pin(a,value)
     from provider_cli_artifact import code_identity
     return {"binding":asdict(old),"health_revision":origins["health_revision"],"default":origins["default"],
         "policy":origins["policy"],"origin":origins,"hold":hold(a,value,now),"pin":pin,"consumer_code_identity":code_identity()}
@@ -507,8 +519,8 @@ async def repin(executor,message,auth):
         elif not known:
             def maintenance(a):
                 if Binding(**origin(a,value)["binding"]).generation!=value["login_generation"]:raise AccountError("account_login_generation_stale")
-                pin=current(a)
-                if (pin["revision"],digest(pin))!=(value["expected_pin_revision"],value["expected_pin_digest"]):raise AccountError("provider_cli_pin_stale")
+                from account_repin import target_pin
+                target_pin(a,value)
                 hold(a,value,runtime.clock())
             await runtime.run(maintenance)
         capability_old=await runtime.run(lambda a:Binding(**origin(a,value)["binding"]))
@@ -548,6 +560,12 @@ async def repin(executor,message,auth):
                 if disposition:return {"outcome":"settled","operation_id":value["operation_id"],"historical":True}
                 receipt=await runtime.run(lambda a:_read(a,value).get("host_receipt"))
                 if not receipt:raise AccountError("account_repin_execution_unresolved")
+                # Recovery may have just persisted the authenticated historical
+                # host receipt in this same attempt. Adopt only that exact
+                # write; every origin/hold/argument and other field stays CASed.
+                refreshed=await runtime.run(lambda a:_read(a,value))
+                if refreshed!={**state,"host_receipt":receipt}:raise AccountError("account_repin_state_changed")
+                state=refreshed
             else:
                 await runtime.run(lambda a:_pre_dispatch(a,state,runtime.clock()))
                 remote=await host_status(executor,old)
@@ -624,10 +642,12 @@ async def diagnostic_lineage(executor,value,auth):
     return {"root":asdict(old),"links":links,"host_binding":base.public(),"canonical_tail":address}
 
 
-def reserve_generation(a,account,operation,generation,kind):
+def reserve_generation(a,account,operation,generation,kind,*,now=None):
     value={"host":account.host,"provider":account.provider,"account":account.alias}
     with transaction(a.conn):
         require_generation_clear(a,value)
+        from provider_cli_maintenance import require_mutation
+        require_mutation(a,account,time.time() if now is None else now)
         key=_prefix(MUTATION,value)+operation
         prior=get(a,key)
         if prior:return prior

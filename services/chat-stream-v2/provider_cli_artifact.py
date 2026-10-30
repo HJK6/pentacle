@@ -48,7 +48,7 @@ def resource_digest(root):
 
 def code_identity():
     root=Path(__file__).parent
-    files=("account_repin.py","provider_cli_artifact.py","provider_account_host.py","provider_account_native.py","provider_accounts.py","provider_account_mutation.py","account_repin_state.py","account_repin_hatch.py")
+    files=("account_repin.py","provider_cli_artifact.py","provider_account_host.py","provider_account_native.py","provider_accounts.py","provider_account_mutation.py","account_repin_state.py","account_repin_hatch.py","provider_cli_occupancy.py","provider_cli_maintenance.py","prockill.py")
     inputs={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
     inputs["provider_cli_release.py"]=hashlib.sha256((root.parent/"_shared/provider_cli_release.py").read_bytes()).hexdigest()
     return digest(inputs)
@@ -75,8 +75,11 @@ def verify(binding,cell,pin,*,run=subprocess.run,native_platform=None):
             "pin_revision":pin["revision"],"pin_digest":digest(pin),"code_identity":code_identity()}
 
 
-def assert_drained(binding,*,run=subprocess.run):
+def assert_drained(binding,*,run=subprocess.run,host=None,launchers=None):
     """Same-uid native processes are ambiguous without reading their credential-bearing environment."""
+    if host is not None:
+        from provider_cli_occupancy import assert_drained as home_drained
+        return home_drained(host,binding,launchers or [])
     try:
         result=run(["ps","-U",str(os.getuid()),"-o","pid=,comm=,args="],capture_output=True,text=True,timeout=10)
         if result.returncode: raise OSError()

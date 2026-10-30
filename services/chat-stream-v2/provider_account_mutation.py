@@ -93,6 +93,8 @@ def inspect(host,provider,alias,operation,context,*,seal=False):
     if not isinstance(context,dict) or not isinstance(context.get("arguments"),dict):
         raise AccountError("account_repin_receipt_invalid")
     args=context["arguments"];pin=context["pin"];base=Binding(**context["base"])
+    from account_repin import target_matches
+    if not target_matches(args,pin):raise AccountError("account_repin_receipt_invalid")
     identity={"provider":provider,"alias":alias,"expected_generation":args["login_generation"],
         "generation":args["new_generation"],"pin_revision":pin["revision"],"pin_digest":digest(pin)}
     if (base.host!=host.config["host"] or (base.provider,base.alias)!=(provider,alias)
@@ -171,7 +173,7 @@ def supersede(host,provider,alias,operation,context):
     if not isinstance(context,dict) or selected(host,provider,alias)!=context.get("host_binding"):
         raise AccountError("account_repin_state_changed")
     active=host.registry.active(provider,alias,host.config["host"])
-    if active:assert_drained(active,run=host.run)
+    if active:assert_drained(active,run=host.run,host=host,launchers=context.get("managed_launchers",[]))
     prior=read(host,"supersessions",operation)
     if prior:
         if prior["snapshot_digest"]!=context.get("snapshot_digest"):raise AccountError("account_operation_conflict")

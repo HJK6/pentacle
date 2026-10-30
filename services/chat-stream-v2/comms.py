@@ -472,7 +472,8 @@ class Comms:
                     current_pane = await tmux.capture(name)
                     if (claude_command_exactly_in_active_draft(current_pane, command)
                             and await tmux.input_mode_clear(name)):
-                        await tmux.send_enter_compact(name)
+                        async with self._account_input_guard(stream_id,phase="enter_failed"):
+                            await tmux.send_enter_compact(name)
                         proof = await self._durable_submission_evidence(
                             stream_id, command, watermark=watermark,
                         )
@@ -485,7 +486,8 @@ class Comms:
                     return {"outcome": "pending_input", "reason": type(exc).__name__}
 
             try:
-                await tmux.paste_compact(name, command)
+                async with self._account_input_guard(stream_id):
+                    await tmux.paste_compact(name, command)
             except VerbError as exc:
                 phase = str(exc.extra.get("phase") or "body_maybe_pasted")
                 if phase == "not_started":
@@ -1004,6 +1006,12 @@ class Comms:
         row = await self.store.fetch_session(host, name)
         if row is None:
             row = self.sessions.get(target)
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is not None and row is not None:
+            from provider_accounts import AccountError
+            try:await runtime.maintenance_input(row)
+            except AccountError as exc:
+                raise VerbError(str(exc),str(exc),**exc.context) from None
         if row is not None and str(row.get("status") or "") == "open":
             raw_body = msg.get("message") if "message" in msg else msg.get("text")
             await self._assert_codex_input_allowed(
@@ -1362,14 +1370,16 @@ class Comms:
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(stream_id, before)
         if urgent:
-            await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+            async with self._account_input_guard(stream_id):
+                await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
             if provider == "codex":
                 before = await tmux.capture(name)
                 await self._assert_codex_pane_input_safe(stream_id, before)
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            await tmux.paste(name, body)
+            async with self._account_input_guard(stream_id):
+                await tmux.paste(name, body)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(body), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
@@ -1384,7 +1394,8 @@ class Comms:
             watermark = EventWatermark(stream_id, legacy_watermark, "reachable")
         if before_paste is not None:
             await before_paste(watermark)
-        await tmux.paste(name, body)
+        async with self._account_input_guard(stream_id):
+            await tmux.paste(name, body)
         if durable_proof:
             proof = await self._durable_submission_evidence(
                 stream_id, body, watermark=watermark,
@@ -1413,7 +1424,15 @@ class Comms:
         )
         if not in_draft:
             return False, 1, False, proof, watermark
-        await self._send_enter(tmux, name)
+        try:
+            async with self._account_input_guard(stream_id,phase="enter_failed"):
+                await self._send_enter(tmux, name)
+        except VerbError as exc:
+            if exc.code!="provider_cli_input_maintenance":raise
+            # The first paste is durable input custody. Record its pending
+            # truth so a same-ID retry can never paste the body a second time.
+            return False,1,True,EventProof("pending",stream_id,watermark.daemon_seq,
+                reason="provider_cli_input_maintenance"),watermark
         if durable_proof:
             proof = await self._durable_submission_evidence(
                 stream_id, body, watermark=watermark,
@@ -1676,6 +1695,9 @@ class Comms:
             async with runtime.input_guard(await self.store.fetch_session(host,name) or {}):
                 yield
         except AccountError as exc:
+            if str(exc)=="provider_cli_input_maintenance" and phase!="not_started":
+                exc.context.update(delivery="pasted_unsubmitted",attempts=1,action_committed=True,
+                                   confirmation_pending=True,do_not_resubmit=True)
             raise VerbError(str(exc),str(exc),phase=phase,**exc.context) from None
 
     async def _attempt_send_delivery(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:

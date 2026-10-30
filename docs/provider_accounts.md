@@ -418,13 +418,132 @@ agent-orch account pin-set --pin-file /absolute/reviewed-pair.json \
   --expected-revision 0 --operation-id initial-pair --reason reviewed-release
 ```
 
-First initialization uses absent revision 0; the snapshot supplies revision 1.
+First initialization uses revision 0 only on a pristine installation: no pin,
+initialized marker or pin-history rows. The snapshot supplies revision 1.
 Every later move, including rollback, supplies the next revision and both
 providers. An unchanged provider retains its artifact map. The receiver commits
 the pair, prior record and immutable receipt atomically. Identical operation-ID
 replay returns its historical receipt; changed payload or stale CAS refuses.
-A missing or corrupt pin parks managed admission, independently of account-policy
-OFF. Minimum-only installer manifests never attest exact managed admission.
+After initialization, a missing or corrupt pin parks managed admission,
+independently of account-policy OFF. Partial marker/history states never become
+pristine. Minimum-only installer manifests never attest exact managed admission.
+
+### Prepare serving homes before first enforcement
+
+Pristine installations keep ordinary managed launch and input available under
+their existing account policy, health and enrollment checks. There is no
+preparation RPC, lease or flag. Historical admissions record `pre_enforcement`;
+later read-only artifact observations do not rewrite their original attribution.
+Enrolled/OFF and raw-command refusals still apply.
+
+Under the deployment owner's separate window, the authenticated front desk may
+prepare a same-home successor before the first pin exists:
+
+```sh
+agent-orch account repin --host host-a --provider codex --account primary \
+  --login-generation current-generation --new-generation prepared-successor \
+  --operation-id prepare-one --expected-pin-revision 0 \
+  --target-pin-file /absolute/reviewed-pair.json \
+  --expected-pin-digest EXACT_REVIEWED_PAIR_SHA256 --reason reviewed-release
+```
+
+This requires the complete revision-one pair, its exact digest, current FD
+authority, required-clearance consumers, a real unchanged host hold and the same
+native/home/identity proofs as an active-pin repin. The immutable repin row owns
+its target and recovery history. Active-pin requests reject `target_pin`.
+Historical success, non-split settlement, canonical tails, restart and expired
+window recovery retain their existing rules, anchored to that row's target.
+A no-op creates no unused generation. First enforcement cannot bypass an
+unresolved attempt or silently accept preparation for a different pair.
+
+Readiness is server-derived on the existing privileged status/set controls:
+
+```sh
+agent-orch account pin-status --pin-file /absolute/reviewed-pair.json
+agent-orch account pin-set --pin-file /absolute/reviewed-pair.json \
+  --expected-revision 0 --expected-readiness-digest READINESS_DIGEST \
+  --operation-id initial-pair --reason reviewed-release
+```
+
+`candidate_pin` and `initial_readiness` are separate from the absent active pin.
+The optional readiness digest compares a census; it grants no authority. The
+first set refreshes native/resource and managed-launcher proofs (at most120
+seconds old), consumer identity, bindings, health, policy and defaults. It pauses
+new reservations and waits outside global locks for already-dispatched creation.
+Unknown/late creation, starting or misrouted seats, unresolved account work,
+maintenance fences, uncertain input and untransferred closed-parent custody
+refuse promotion. Compatible existing input remains available during the wait.
+The final short input-order boundary and database transaction compare the same
+snapshot and commit pin, history, marker and observations together. Failure
+releases only its owned admission pause and leaves pristine service available.
+An owned daemon restart aborts the old pause without forgetting late reservations.
+
+An explicit initial parking decision can be supplied with
+`--initial-parked-cells-file`: a JSON array whose entries contain exactly `host`,
+`provider`, `account`, `generation`, `reason` and `decision_ref`. Every retained
+cell stays counted; omission never parks a cell. A parked cell must have no
+running or queued managed obligation. Its exact generation refuses managed
+admission/input after first enforcement, even if its bytes happen to match.
+Only a later authorized catch-up can lift that disposition. Status reports it
+as pending/parked, never fleet convergence. The caller must obtain the explicit
+capacity-loss decision before sending this file.
+
+### Home-scoped maintenance input fence
+
+The existing privileged spawn freeze can also fence physical input to one
+server-derived home. Supply all five scope fields together:
+
+```sh
+agent-orch spawn-freeze --host host-a --reason reviewed-home-slot --ttl 600 \
+  --input-provider codex --input-account primary \
+  --expected-login-generation current-generation --maintenance-id slot-one \
+  --expected-hold-digest absent
+```
+
+The authenticated operator/local-admin boundary is unchanged. The daemon
+derives the home and captures current binding/session generations, creates the
+real host admission hold plus a durable input slot atomically, then settles
+dispatched creation outside locks. It never overwrites another slot or hold.
+The home writer orders after an in-flight physical action; every later paste,
+Escape, Enter, compaction or resumed brief rechecks the durable fence. Other
+homes' existing work stays available; the host hold still refuses ordinary new
+launches on that host. Management, checkpoint/report and close remain available.
+
+Frozen ingress, including a temporarily closed target, returns
+`provider_cli_input_maintenance`, `not_landed`, zero attempts and
+`retry_after_maintenance`. It stores no refused body or background replay queue.
+The sender retains that body/logical ID. Already accepted or possibly pasted
+work keeps its original receipt/custody; an Enter blocked after a tell paste
+records `pasted_unsubmitted` and same-ID replay never pastes again. Reconcile
+unknown/pasted work from evidence instead of resending it.
+
+Read slot and hold digests from `account pin-status` (`input_maintenance`) or the
+freeze response. Repeated identical IDs replay their receipt; changed arguments
+conflict, and a cleared ID never rearms a fence. The slot survives restart and
+hold expiry. Authenticated proof-backed clear uses:
+
+```sh
+agent-orch spawn-unfreeze --host host-a --maintenance-id slot-one \
+  --expected-maintenance-digest EXACT_SLOT_SHA256 \
+  --expected-hold-digest EXACT_CURRENT_HOLD_SHA256
+```
+
+The current hold digest is an optional additional comparison. Clear proves
+current host/central agreement in the same home, native identity and no pending
+host/coordinator mutation or creation, outside locks. It then compares origin,
+slot and hold under the short home writer/store transaction. This works after
+expiry without acquiring a hold solely for read-only clearing. It deletes only
+the original matching slot-owned hold; a newer/foreign hold is preserved and
+reported. Plain unfreeze cannot discard a scoped slot.
+
+If unresolved account work requires Addendum B recovery after expiry, use the
+ordinary authenticated `spawn-freeze --host ... --reason ... --ttl ...` route
+to acquire a fresh real hold first. Its creation receipt is tied to the unchanged
+slot; a foreign live hold cannot be replaced. Reconcile under that actual hold,
+then proof-clear the old input slot and separately release the retained fresh
+hold. Expiry alone never authorizes mutation or clears an uncertain cause.
+Release matching input/admission fences before ordinary resume/replacement
+admission; holds have no implicit launch exemption.
 
 Deploy compatible enforcing consumers on every participating host before initial
 activation. In the named fleet window, stage official immutable artifacts beside
@@ -456,8 +575,14 @@ home, transcript root, profile, provider/pool identity and saved default. It pro
 native bytes/resources, subscription identity and one minimal turn, then reads
 identity and artifacts again. It never logs in, copies credentials or changes a
 home's authentication storage. The host lock and journal serialize proof and
-activation. Same-user native processes sharing the provider executable are
-ambiguous occupancy and must be drained; process environments are never read.
+activation. Authenticated launcher proof joins the current managed session
+generation/binding to tmux pane identity and process tree, PID birth, boot, uid
+and native executable. Proved managed processes in another home may continue.
+Affected-home processes must be drained through authorized managed lifecycle;
+any same-user provider process without complete launcher proof blocks the whole
+host/provider. PID reuse, unknown descendants and stale/missing records are not
+exclusions. Process environments and credentials are never read for attribution;
+unmanaged/operator processes are never torn down by this guard.
 The central import compares the pin, health, default and exact hold tuple. A host
 success with failed central import remains parked: reconcile that same operation
 under a valid hold, without repeating its native turn. Auth, network, quota and

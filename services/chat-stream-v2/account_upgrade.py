@@ -62,6 +62,8 @@ def _snapshot(ledger, payload, now):
     hold = ledger.conn.execute("SELECT * FROM v2_spawn_admission_hold WHERE host=?", (old.host,)).fetchone()
     if not hold or hold["held_until"] <= now:
         raise AccountError("account_upgrade_hold_required")
+    from provider_cli_maintenance import require_mutation
+    require_mutation(ledger,old,now)
     return dict(binding=asdict(old), health_revision=row["health_revision"],
         default=dict(default) if default else None, hold=dict(hold))
 
