@@ -17,6 +17,37 @@ python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evid
 
 Targets are the closed list in `scripts/gate-env.json` (`v2-unit`, `v2-smoke`, `v2-merge`, `v2-merge-capacity`, `v2-pytest --select tests/test_x.py`, `npm-test --select test/x.test.js`); `prepare` (optionally with `--target`, to provision and preflight just that target) runs the same setup and never launches a subject or accepts `--select`; the focused `v2-pytest` target refuses to run without at least one `--select` (it never defaults to the full suite — use `v2-unit`/`v2-merge` for that). Every invocation writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before any setup, so failures, cancellation and crashes stay visible; `EVIDENCE/test-attempts.v1.json` is a derived index. The daemon targets run `run_gate.py` under a finite `--deadline-seconds` envelope (tier limits, smoke preflight and reserve) and fold its `primary_outcome` and secondary outcomes into the receipt. A changed requirement, lockfile or profile selects a new prepared cache; a drifted cache is refused until `--rebuild` (which removes only that owned directory). Exit codes: 0 pass, 1 subject failure, 3 setup failure, 130 cancelled. Running `run_gate.py` or `pytest` directly remains possible but is not the supported route. Self-test: `python3 scripts/test_gate_env.py`.
 
+Focused `v2-pytest` always includes the four existing repository invariants in
+`tests/test_capabilities.py`: changed-test skip confinement, original assertion
+pins, fixture manifest hashes and portability scope completeness. Selecting the
+whole module already covers that floor; nodes are not added twice. The requested
+selection and effective selection remain separate in the attempt receipts.
+Fixture-only edits therefore receive the same cheap metadata checks without a
+changed-file detector or regenerating metadata automatically. Select affected
+behavior modules separately, including `test_h2_portable_fixtures.py` when its
+behavior changes; the invariant floor does not replace those tests.
+
+Explicitly select the Chrome interrupt contract; it is outside npm's defaults:
+
+```bash
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target npm-test --select test/e2e/web_gate_interrupt.test.js \
+  --select test/e2e/web_wrap_paste_gate.test.js --select test/e2e/web_wrap_paste_served.test.js \
+  --select test/e2e/lib/render_proofs.test.js \
+  --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+```
+
+These selected web integration files (including supported wildcard selections)
+reuse web-gate's builds and Chrome preflight; the interrupt contract additionally
+reuses its Python dependencies, tmux and capabilities. Ordinary npm selections
+retain their existing preparation. The integration file budget uses the existing
+finite web-gate run budget rather than npm's ordinary 60-second file bound.
+Missing Chrome or build is setup failure, not a skipped acceptance PASS. Retain
+actual case counts, browser PID audits, file cleanup and the terminal receipt.
+`--keep` now retains debug files only: the existing owner always stops its Chrome
+group, on success, failure and supported signals. Unknown process inspection is
+failed cleanup. It does not handle an uncatchable kill by claiming a finally ran.
+
 The gate owner manifest compares process start identities before recording or
 reaping children. On macOS, its `ps` probe uses `TZ=UTC0` and `LC_ALL=C`, so an
 empty parent `TZ` and an unset child `TZ` identify the same process. These values

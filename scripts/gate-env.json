@@ -133,6 +133,12 @@
             "root": "services/chat-stream-v2",
             "pattern": "^tests/test_[A-Za-z0-9_]+\\.py(::[A-Za-z0-9_]+)*$"
           },
+          "required_select": [
+            "tests/test_capabilities.py::test_changed_test_skip_calls_are_confined_to_requires",
+            "tests/test_capabilities.py::test_original_assertions_and_tracked_skip_are_unchanged",
+            "tests/test_capabilities.py::test_fixture_manifest_is_explicitly_synthetic_and_hash_pinned",
+            "tests/test_capabilities.py::test_scope_manifest_covers_all_new_portability_tests"
+          ],
           "timeout_s": 900,
           "max_timeout_s": 7200
         },

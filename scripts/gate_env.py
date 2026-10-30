@@ -15,6 +15,7 @@ Stdlib only; runs on any python3 >= 3.9, the prepared venv carries 3.13.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -92,6 +93,9 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                     problems.append("capability set of " + tname)
                 if target.get("npm_build") and (not isinstance(target["npm_build"], list) or any(b not in ("prestart", "build:web") for b in target["npm_build"])):
                     problems.append("npm_build of " + tname)
+                required = target.get("required_select", [])
+                if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
+                    problems.append("required_select of " + tname)
                 limits = target.get("tier_timeouts")
                 if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
                     problems.append("tier_timeouts of " + tname)
@@ -254,7 +258,10 @@ def build_env(config: Dict[str, Any], profile: Dict[str, Any], target: Dict[str,
         env["PENTACLE_PYTHON"] = str(venv / "bin" / "python") if venv else ""
         env["PENTACLE_WEB_GATE_REPORT_ROOT"] = str(evidence / "gate" / "web")
     if target["kind"] == "npm_test":
-        env["PENTACLE_TEST_FILE_TIMEOUT_MS"] = "60000"
+        env["PENTACLE_TEST_FILE_TIMEOUT_MS"] = str(target.get("test_file_timeout_ms", 60000))
+        if venv is not None:
+            env["PENTACLE_PYTHON"] = str(venv / "bin" / "python")
+            env["PENTACLE_WEB_GATE_REPORT_ROOT"] = str(evidence / "gate" / "web")
         env["PENTACLE_TEST_RUN_TIMEOUT_MS"] = str(int(target["timeout_s"]) * 1000)
     allowed = set(target.get("pass_env", []))
     for name, value in pass_env.items():
@@ -470,14 +477,16 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
     pattern = re.compile(spec["pattern"])
     out = []
     root = checkout / spec.get("root", "")
-    for item in select:
+    for item in [*select, *target.get("required_select", [])]:
         if item.startswith("-") or ".." in Path(item).parts or item.startswith("/") or not pattern.match(item):
             raise SetupFailure([fail("selection", "selector %r does not match the target's declared pattern" % item, "")])
         file_part = item.split("::", 1)[0]
         declared_directory = file_part in target.get("directory_select", []) and (root / file_part).is_dir()
         if "*" not in file_part and not (root / file_part).is_file() and not declared_directory:
             raise SetupFailure([fail("selection", "selector %r names no existing file" % item, "")])
-        out.append(item)
+        if not any(item == chosen or item.startswith(chosen + "::")
+                   or ((root / chosen).is_dir() and item.startswith(chosen + "/")) for chosen in out):
+            out.append(item)
     return out
 
 
@@ -779,6 +788,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise SetupFailure([fail("selection", "--timeout-seconds %d exceeds the target maximum %d" % (timeout_s, target["max_timeout_s"]))])
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
         resolved_selection = list(selection)  # retained even when setup fails before prepared
+        # This explicitly selected integration file boots the same fixture as web-gate.
+        # Reuse its declared prerequisites before preparing the exact child context.
+        interrupt_selected = target["kind"] == "npm_test" and any(
+            fnmatch.fnmatchcase("test/e2e/web_gate_interrupt.test.js", pattern) for pattern in selection)
+        web_selected = target["kind"] == "npm_test" and any(
+            fnmatch.fnmatchcase(file, pattern) for file in (
+                "test/e2e/web_gate_interrupt.test.js", "test/e2e/web_wrap_paste_gate.test.js",
+                "test/e2e/web_wrap_paste_served.test.js") for pattern in selection)
+        if web_selected:
+            web = profile["targets"]["web-gate"]
+            target = dict(target, npm_build=web["npm_build"], test_file_timeout_ms=web["timeout_s"] * 1000)
+        if interrupt_selected:
+            target = dict(target, **{key: web[key] for key in ("needs", "capabilities", "npm_build")},
+                          test_file_timeout_ms=web["timeout_s"] * 1000)
         pass_env = {}
         for name in args.pass_env:
             if name not in os.environ:
@@ -838,6 +861,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 failures += check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
         if target.get("process_listing"):
             failures += check_process_listing(subprocess.run, env)
+        if args.command == "run" and web_selected:
+            probe = subprocess.run(["node", "-e", "require('./test/e2e/web_gate').resolveChrome()"],
+                                   cwd=str(checkout), env=env, capture_output=True, text=True, timeout=30)
+            if probe.returncode or not (checkout / "renderer/dist/web/web.html").is_file():
+                failures.append(fail("dependencies", "selected web integration needs Chrome and the web build: " + probe.stderr[-400:]))
         if target.get("preflight_script") and not failures:
             failures += run_preflight_script(subprocess.run, checkout / target["preflight_script"], env)
         if failures:
