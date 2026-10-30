@@ -161,16 +161,32 @@ async function stopOwnedProcess(proc, graceMs = 3000) {
   return { pid: proc.pid, exited: true, forced, exit_code: proc.exitCode, signal: proc.signalCode };
 }
 
-function groupAlive(pgid) {
+function groupAlive(pgid, inspection) {
   try { process.kill(-pgid, 0); return true; } catch (error) {
     if (error.code === 'ESRCH') return false;
-    throw new Error(`CLEANUP_FAIL: cannot inspect owned process group ${pgid}: ${error.message}`);
+    if (error.code === 'EPERM') {
+      const observed = { pgid, probe_error: { code: error.code, message: error.message }, probe_observed_at: new Date().toISOString() };
+      // Darwin's existing bounded inspector must parse the COMPLETE table. This
+      // is observation only: any member (including Z) or scan error still fails.
+      // No witness authorizes another signal or reconstructs historical absence.
+      if (process.platform === 'darwin') {
+        observed.scan_started_at = new Date().toISOString();
+        try { observed.members = require('../../scripts/lib/test-runner').groupMembers(pgid); }
+        catch (scanError) { observed.scan_error = scanError.message; }
+        observed.scan_finished_at = new Date().toISOString();
+      }
+      inspection.push(observed);
+      if (Array.isArray(observed.members) && observed.members.length === 0) return false;
+    }
+    const failure = new Error(`CLEANUP_FAIL: cannot inspect owned process group ${pgid}: ${error.message}`);
+    failure.inspection = inspection;
+    throw failure;
   }
 }
 
-async function groupEmpty(pgid, timeoutMs) {
+async function groupEmpty(pgid, timeoutMs, inspection) {
   const deadline = Date.now() + timeoutMs;
-  while (groupAlive(pgid)) {
+  while (groupAlive(pgid, inspection)) {
     if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -183,17 +199,18 @@ async function groupEmpty(pgid, timeoutMs) {
 async function stopOwnedGroup(proc, graceMs = 3000) {
   if (!proc || !proc.pid) return { pid: null, exited: true, forced: false };
   const pgid = proc.pid;
+  const inspection = [];
   let forced = false;
-  if (groupAlive(pgid)) {
+  if (groupAlive(pgid, inspection)) {
     try { process.kill(-pgid, 'SIGTERM'); } catch { /* verified below */ }
-    if (!await groupEmpty(pgid, graceMs)) {
+    if (!await groupEmpty(pgid, graceMs, inspection)) {
       forced = true;
       try { process.kill(-pgid, 'SIGKILL'); } catch { /* verified below */ }
-      if (!await groupEmpty(pgid, graceMs)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
+      if (!await groupEmpty(pgid, graceMs, inspection)) throw new Error(`CLEANUP_FAIL: owned process group ${pgid} survived SIGKILL`);
     }
   }
   await onceExit(proc, graceMs);
-  return { pid: pgid, exited: true, forced };
+  return { pid: pgid, exited: true, forced, ...(inspection.length ? { inspection } : {}) };
 }
 
 // server/index.js main() installs SIGINT/SIGTERM listeners that process.exit(0) and are never
@@ -360,7 +377,8 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     let chromeCleanupError = null;
     try { runtime.chromeCleanup = await stopOwnedGroup(chrome); } catch (e) {
       chromeCleanupError = e;
-      runtime.chromeCleanup = { pid: chrome && chrome.pid, exited: false, error: e.message };
+      runtime.chromeCleanup = { pid: chrome && chrome.pid, exited: false, error: e.message,
+        ...(e.inspection?.length ? { inspection: e.inspection } : {}) };
     }
     try { if (runtime.tmuxSession) tmux(['kill-session', '-t', `=${runtime.tmuxSession}`], { stdio: 'ignore' }); } catch {}
     try { if (runtime.freezeTmux) tmux(['kill-session', '-t', `=${runtime.freezeTmux}`], { stdio: 'ignore' }); } catch {}

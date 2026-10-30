@@ -11,6 +11,26 @@ const root = path.resolve(__dirname, '..');
 const fixture = name => `test/fixtures/root_runner/${name}`;
 const quiet = { write() {} };
 
+test('Darwin group inspector rejects an incomplete row before claiming an empty group', () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(root, 'scripts/lib/test-runner.js'), 'utf8');
+  for (const output of ['', '1 1 Ss\ninvalid row\n', '1 not-a-pgid Ss\n', '1 1\n', '1 1 unknown\n', '9007199254740992 1 S\n']) {
+    const loaded = { exports: {} };
+    vm.runInNewContext(source, { module: loaded, process: { platform: 'darwin' },
+      require: name => name === 'node:child_process' ? { execFileSync: () => output } : require(name) });
+    assert.throws(() => loaded.exports.groupMembers(424242), /malformed|incomplete/);
+  }
+  const loaded = { exports: {} };
+  vm.runInNewContext(source, { module: loaded, process: { platform: 'darwin' },
+    require: name => name === 'node:child_process' ? { execFileSync: () => '1 1 Ss\n22 99 Z\n' } : require(name) });
+  assert.equal(loaded.exports.groupMembers(424242).length, 0, 'a foreign group is observation only');
+  assert.equal(loaded.exports.groupMembers(99)[0].state, 'Z', 'zombies remain visible to the caller');
+  const unavailable = { exports: {} };
+  vm.runInNewContext(source, { module: unavailable, process: { platform: 'darwin' },
+    require: name => name === 'node:child_process' ? { execFileSync: () => { throw Object.assign(new Error('scan timeout'), { code: 'ETIMEDOUT' }); } } : require(name) });
+  assert.throws(() => unavailable.exports.groupMembers(424242), /inspection unavailable.*ETIMEDOUT/);
+});
+
 // Pass-expected fixtures get a generous per-file budget so a loaded host cannot turn them into false
 // timeouts; cases that must time out pass a short budget explicitly (later flags win).
 const SHORT = ['--file-timeout-ms', '1500'];
@@ -56,10 +76,11 @@ test('hang is named, bounded, retains tail and does not block a subsequent pass'
 });
 
 test('ordinary pass and assertion failure retain exit-code semantics', () => {
-  assert.equal(invoke([fixture('pass.js')]).status, 0);
+  const healthy = invoke([fixture('pass.js')]);
+  assert.equal(healthy.status, 0, JSON.stringify(healthy.summary));
   const result = invoke([fixture('fail.js'), fixture('pass.js')]);
   assert.equal(result.status, 1);
-  assert.deepEqual(result.summary.files.map(row => row.status), ['fail', 'pass']);
+  assert.deepEqual(result.summary.files.map(row => row.status), ['fail', 'pass'], JSON.stringify(result.summary));
 });
 
 test('TypeScript syntax failure remains build_failed, never skipped or hidden', () => {

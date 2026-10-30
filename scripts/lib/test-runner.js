@@ -73,8 +73,16 @@ function groupMembers(pgid) {
     let output;
     try { output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: 250, maxBuffer: 4 * 1024 * 1024 }); }
     catch (error) { throw new Error(`owned process inspection unavailable (${error.code || error.name})`); }
-    return output.trim().split('\n').filter(Boolean).map(line => line.trim().split(/\s+/))
-      .filter(row => Number(row[1]) === pgid).map(row => ({ pid: Number(row[0]), state: row[2][0] }));
+    const lines = output.trim().split('\n').filter(line => line.trim());
+    if (!output.trim()) throw new Error('owned process inspection unavailable (incomplete ps output)');
+    return lines.map(line => {
+      const row = line.trim().split(/\s+/);
+      if (row.length !== 3 || !row.slice(0, 2).every(value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)))
+          || !/^[A-Z][A-Za-z+<>]*$/.test(row[2])) {
+        throw new Error('owned process inspection unavailable (malformed ps row)');
+      }
+      return { pid: Number(row[0]), pgid: Number(row[1]), state: row[2][0] };
+    }).filter(row => row.pgid === pgid).map(({ pid, state }) => ({ pid, state }));
   }
   throw new Error('requires: POSIX owned process-group inspection');
 }

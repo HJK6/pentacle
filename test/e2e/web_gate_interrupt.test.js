@@ -136,7 +136,7 @@ for (const failPage of [false, true]) {
     const sentinelPort = await freePort();
     const sentinel = spawn(resolveChrome(), [...headlessChromeArgs(), `--remote-debugging-port=${sentinelPort}`,
       `--user-data-dir=${sentinelDir}`, 'about:blank'], { stdio: 'ignore', detached: true });
-    let sentinelPage, page, marker, gate;
+    let sentinelPage, page, marker, gate, primaryError;
     let output = '';
     try {
       sentinelPage = await cdp.connect(sentinelPort, { match: /about:blank/ });
@@ -167,16 +167,27 @@ for (const failPage of [false, true]) {
       assert.equal(alive(marker.daemonPid), false);
       assert.ok(alive(sentinel.pid), 'foreign Chrome sentinel remains alive');
       assert.equal((await sentinelPage.send('Browser.getVersion')).product.startsWith('Chrome/'), true);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
       page?.close(); sentinelPage?.close();
       tearDownMarked(marker);
       if (gate && gate.exitCode === null && gate.signalCode === null) {
         gate.kill('SIGKILL'); await waitForExit(gate, 5000);
       }
-      await stopOwnedGroup(sentinel);
-      assert.deepEqual(processTable().filter(p => p.command.includes(`--user-data-dir=${sentinelDir}`)), [], 'sentinel cleanup complete');
-      fs.rmSync(sentinelDir, { recursive: true, force: true });
-      audit(`after --keep ${failPage ? 'failure' : 'success'}`);
+      try {
+        const cleanup = await stopOwnedGroup(sentinel);
+        console.log(`WEB_GATE_SENTINEL_CLEANUP ${JSON.stringify(cleanup)}`);
+        assert.deepEqual(processTable().filter(p => p.command.includes(`--user-data-dir=${sentinelDir}`)), [], 'sentinel cleanup complete');
+      } catch (error) {
+        console.error(`WEB_GATE_SECONDARY_CLEANUP ${JSON.stringify({ primary: primaryError?.message || null,
+          cleanup: { message: error.message, inspection: error.inspection || [] } })}`);
+        if (!primaryError) throw error;
+      } finally {
+        fs.rmSync(sentinelDir, { recursive: true, force: true });
+        audit(`after --keep ${failPage ? 'failure' : 'success'}`);
+      }
     }
   });
 }
