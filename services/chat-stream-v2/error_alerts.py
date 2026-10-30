@@ -50,6 +50,8 @@ EXPECTED_CODES = {
 POLICY = {"effective_delivery_mode": "immediate"}
 VOICE = "voice_operation.v1"
 WORK_LANE = "work_lane.v1"
+OPERATOR_NOTIFICATION = "operator_notification.v1"
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 LANE_DIGEST = {"effective_delivery_mode": "digest"}
 
 
@@ -207,7 +209,7 @@ class ErrorAlerts:
     async def start(self):
         self.cutover_at = await self.notify._db.call("error_cutover")
 
-    async def emit(self, fact, *, principal=None):
+    async def emit(self, fact, *, principal=None, source_notification_id=None):
         """Record one typed fact from error_adapters; delivery follows reconcile."""
         principal = principal or "daemon:" + str(self.server.local_host)
         if not isinstance(fact, ErrorFact) or not (
@@ -234,20 +236,23 @@ class ErrorAlerts:
                     "subsystem=error_alerts family=%s action=episode_closed", fact.family
                 )
                 return nid
+            context = {
+                "version": 1,
+                "family": fact.family,
+                "principal": principal,
+                "episode_id": fact.episode_id,
+                "operation_revision": (ctx["operation_revision"] if ctx else 0) + 1,
+                "condition": fact.condition,
+                "code": fact.code,
+                "stage": fact.stage,
+                "cutover_at": self.cutover_at,
+            }
+            if source_notification_id is not None:
+                context["source_notification_id"] = str(source_notification_id)
             row = await self.notify._db.call(
                 "error_upsert",
                 error_key=key,
-                context={
-                    "version": 1,
-                    "family": fact.family,
-                    "principal": principal,
-                    "episode_id": fact.episode_id,
-                    "operation_revision": (ctx["operation_revision"] if ctx else 0) + 1,
-                    "condition": fact.condition,
-                    "code": fact.code,
-                    "stage": fact.stage,
-                    "cutover_at": self.cutover_at,
-                },
+                context=context,
                 title="Work update" if fact.family == WORK_LANE else "Error alert needs review",
                 now=iso(),
             )
@@ -775,8 +780,22 @@ class ErrorAlerts:
             return
         if (not lane and self.mode() != "on") or policy["effective_delivery_mode"] == "muted":
             if ctx["desired_notice_revision"] == ctx["enqueued_notice_revision"]:
-                await self.notify._db.call("error_patch", nid, {"disposition": "muted"})
+                await self.notify._db.call(
+                    "error_patch", nid,
+                    {"disposition": "muted", "muted_revision": ctx["operation_revision"]})
             return
+        if ctx.get("disposition") == "muted":
+            # Activation gate: a fact muted before the mode turned on stays
+            # muted; only a newer emit for its episode delivers. Legacy muted
+            # rows without a revision are adopted at their current revision.
+            muted = ctx.get("muted_revision")
+            if muted is None:
+                await self.notify._db.call(
+                    "error_patch", nid, {"muted_revision": ctx["operation_revision"]},
+                    expected_operation_revision=ctx["operation_revision"])
+                return
+            if ctx["operation_revision"] <= muted:
+                return
         intent = ctx.get("notice_intent")
         desired = ctx["desired_notice_revision"]
         enqueued = ctx["enqueued_notice_revision"]
@@ -919,6 +938,21 @@ class ErrorAlerts:
         spec = self._notice_spec(
             row, ctx, binding, now, predecessor=predecessor, awareness=awareness
         )
+        if ctx["family"] == OPERATOR_NOTIFICATION and ctx.get("source_notification_id"):
+            # Name the producer and title from the stored card, never the request.
+            card = await self.notify._db.call("get_notification", ctx["source_notification_id"])
+            if card is not None:
+                intent = ctx["notice_intent"]
+                prefix = "BLOCKER" if intent["kind"] == "initial" and not awareness else "Error alert update"
+                producer = _CONTROL.sub("", str(card.get("producer") or ""))[:64]
+                title = _CONTROL.sub("", str(card.get("title") or ""))[:200]
+                spec["body"] = (
+                    f"{prefix} {intent['code']} from {producer}: {title} "
+                    f"alert={row['notification_id']} card={card['notification_id']} "
+                    f"first={intent['first_at']} count={intent['count']}"
+                    + (" prior_submission=unconfirmed" if awareness else "")
+                    + "; the FD decides, no auto-repair."
+                )
 
         def op(conn):
             with conn:

@@ -51,9 +51,10 @@ class Recorder:
     def __init__(self):
         self.calls = []
 
-    async def emit(self, fact, principal=None):
+    async def emit(self, fact, principal=None, source_notification_id=None):
         await asyncio.sleep(0)
-        self.calls.append((fact, principal))
+        self.calls.append((fact, principal) if source_notification_id is None
+                          else (fact, principal, source_notification_id))
         return 'synthetic-notification-id'
 
 
@@ -81,6 +82,24 @@ class MapperTests(unittest.TestCase):
                 else:
                     changed[key] = str(changed[key]) + '2'
                 self.assertNotEqual(first.episode_id, adapt(kind, changed).episode_id)
+
+    def test_operator_notification_maps_severity_and_producer_slug(self):
+        fields = {'producer': 'Scheduling-Census Runtime 2', 'severity': 'critical',
+                  'dedup_key': 'census|2026-01-15', 'title': 'Census failed'}
+        fact = adapt('operator_notification', fields)
+        self.assertEqual((fact.family, fact.code, fact.condition, fact.stage),
+                         ('operator_notification.v1', 'critical', 'active', 'scheduling_census_runtime__'))
+        self.assertEqual(fact.episode_id, expected_episode(
+            'critical', {'producer': fields['producer'], 'key': 'census|2026-01-15'}, ('producer', 'key')))
+        self.assertEqual(adapt('operator_notification', {**fields, 'severity': 'warning'}).code, 'warning')
+        untitled = adapt('operator_notification', {**fields, 'dedup_key': None})
+        self.assertEqual(untitled.episode_id, expected_episode(
+            'critical', {'producer': fields['producer'], 'key': 'Census failed'}, ('producer', 'key')))
+        self.assertEqual(adapt('operator_notification', {**fields, 'producer': 'x' * 40}).stage, 'x' * 32)
+        for bad in ({'severity': 'info'}, {'severity': None}, {'producer': ''}, {'producer': None},
+                    {'dedup_key': None, 'title': ''}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(adapt('operator_notification', {**fields, **bad}))
 
     def test_A4_quiet_kinds_are_not_registered(self):
         for kind in ('operator_offline_close', 'close_deferred', 'reconciler_session_survivors', 'unlisted'):

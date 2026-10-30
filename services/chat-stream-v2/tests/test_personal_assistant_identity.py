@@ -70,6 +70,7 @@ def test_exception_defaults_off_and_qualified_provenance_must_be_well_formed():
     assert _configured_spec_authorized(row, cfg.rebind_authorized_spec_ids)
     for fields in [
         {"parent_stream_id": "local:parent"}, {"visibility": "hidden"},
+        {"visibility": "subagent"}, {"visibility": "visible"},
         {"qualified_spec_ids": json.dumps({SPEC: True})},
         {"qualified_spec_ids": json.dumps(["spec_other"])},
         {"spec_binding_provenance": "{}"}, {"spec_binding_provenance": "[]"},
@@ -82,6 +83,11 @@ def test_exception_defaults_off_and_qualified_provenance_must_be_well_formed():
                                                  "granting_principal": ""}])},
     ]:
         assert not _configured_spec_authorized({**row, **fields}, cfg.rebind_authorized_spec_ids)
+    hidden = {**row, "visibility": "hidden"}
+    assert _configured_spec_authorized(hidden, cfg.rebind_authorized_spec_ids, allow_hidden=True)
+    for visibility in ("subagent", "visible"):
+        assert not _configured_spec_authorized({**row, "visibility": visibility},
+                                               cfg.rebind_authorized_spec_ids, allow_hidden=True)
 
 
 def test_exception_policy_is_trusted_and_replay_survives_restart_and_revocation(tmp_path):
