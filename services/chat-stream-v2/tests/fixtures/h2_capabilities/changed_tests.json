@@ -86,6 +86,11 @@
     "test_error_adapters_operator_notification.py::test_pending_notice_rebinds_to_new_fd_generation",
     "test_error_adapters_operator_notification.py::test_fixed_actor_declined_critical_reaches_fd",
     "test_error_adapters_operator_notification.py::test_fixed_actor_declined_warning_stays_card",
+    "test_assistant_composite_summary_advance.py::test_reply_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_work_lane_publication_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_operator_input_admission_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_mirror_projection_advances_preview",
+    "test_assistant_composite_summary_advance.py::test_unruled_ruling_status_advances_preview",
     "test_deploy_script.py::test_web_reload_requires_positive_unloaded_state",
     "test_deploy_script.py::test_web_reload_refuses_descriptor_identity_before_mutation"
   ]

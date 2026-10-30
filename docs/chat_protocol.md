@@ -70,7 +70,12 @@ remain in the transcript. `last_event_at` still advances for other durable
 activity, so its timestamp can be newer than the preview message.
 
 Visible messages are ordered by event timestamp, then durable `daemon_seq`.
-The live inventory preserves that result across metadata refreshes and clears
+The assistant composite stream's rows reach the store without a provider ingest
+event, so `AssistantComposite` advances its registry preview itself after each
+committed row: reply publication, work-lane publication, operator input
+admission, the mirror/turn-final projection and the authority-unavailable
+ruling status line. The composite's `last_text`
+therefore tracks its latest visible message without a daemon restart. The live inventory preserves that result across metadata refreshes and clears
 it when a session generation changes. Startup reconstructs each open session's
 preview from at most its newest 500 lifecycle-matched durable events, using the
 same projection as live ingest. Existing chats therefore gain previews without
@@ -96,7 +101,9 @@ Markdown message. The chat view keeps full Markdown.
 
 The captured synthetic provider-ingestion fixture is
 `pentacle-chat-core/tests/fixtures/summary-fallback-frames.json`. Core tests replay
-it before and after backfill; the `summary-fallback-formatting` web gate scenario
+it before and after backfill; `composite-summary-fallback-frames.json` holds real
+composite rows (operator input, reply publication, mirror) for the same check
+against the composite's now-live `last_text`; the `summary-fallback-formatting` web gate scenario
 also records DOM mutations across idle/working inventory updates, checking both
 Markdown structure and the absence of a transient duplicate bubble.
 
