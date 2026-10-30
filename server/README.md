@@ -372,6 +372,12 @@ after navigating away and back. This cache is local to the page and is not
 synchronized to other tabs or devices. The existing active-pane text reload
 restore remains; switched-away drafts and attachments do not survive a reload.
 
+Pasting exposed PNG/JPEG clipboard images uses the same attachment flow as the
+picker and drop target, with the existing five-image and 25 MiB limits. Mixed
+plain text replaces the current selection; text-only paste keeps native behavior.
+Long message prose, links and inline code wrap within the chat width; fenced
+code scrolls horizontally inside its block.
+
 ## Closed chat slots
 
 When a previously known managed chat disappears from a connected daemon inventory
@@ -398,11 +404,24 @@ retained conservatively.
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
 | `test/closed_chat_slots.test.js` | retirement deadline, connection authority, generation replacement and slot isolation |
+| `test/renderer_clipboard_paste.test.js` | clipboard item precedence, files fallback, native text passthrough, selection replacement and single input update |
+| `test/e2e/web_wrap_paste_gate.cjs` | desktop/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
 | `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
 
 The hermetic web gate also creates two isolated durable questions, self-closes one
 seeded chat, and checks slot/portal retirement with survivor preservation. Fixture
 self-tokens stay in private scratch files and are removed with the isolated daemon.
 The destructive fixture scenario is skipped for external `--profile` runs.
+
+After `npm run prestart && npm run build:web`, run the focused regression with
+`PENTACLE_RUNTIME_DIR=/tmp/paste-runtime node test/e2e/web_wrap_paste_gate.cjs /tmp/paste-evidence`.
+Set `PENTACLE_TEST_BROWSER` to the Chrome executable when it is not `google-chrome`.
+Use fresh owned scratch paths. To prove RED against an unchanged baseline build,
+set `PENTACLE_WRAP_PASTE_ROOT` to that checkout and append `--expect-red`; the same
+geometry and mixed-paste measurements must reproduce both defects. The runner
+owns its browser profile, ports, web hosts and daemon fixtures and closes them.
+Synthetic clipboard cases establish handler behavior; native Mac/Windows keyboard
+proof separately records trusted paste MIME/items, previews and sent media under
+an allocated clipboard window. Neither isolated check establishes deployment.
 
 Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.

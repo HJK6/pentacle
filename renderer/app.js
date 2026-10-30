@@ -3149,10 +3149,27 @@ function ensureSlotChatSurface(slot) {
 	    updateSendControls(slot);
 	  });
 	  inputEl.addEventListener('paste', (event) => {
-	    const files = Array.from(event.clipboardData?.files || []);
+	    const clipboard = event.clipboardData;
+	    const files = Array.from(clipboard?.items || [])
+	      .filter(item => item.kind === 'file' && item.type.toLowerCase().startsWith('image/'))
+	      .map(item => item.getAsFile()).filter(Boolean);
+	    if (!files.length) files.push(...Array.from(clipboard?.files || [])
+	      .filter(file => file.type.toLowerCase().startsWith('image/')));
 	    if (!files.length) return;
 	    event.preventDefault();
 	    const owner = captureComposer(slot);
+	    const text = clipboard.getData('text/plain');
+	    if (text) {
+          // The browser editing command preserves native undo and emits input.
+          // Fall back to selection-aware insertion with exactly one input update.
+	      if (!document.execCommand('insertText', false, text)) {
+	        inputEl.setRangeText(text, inputEl.selectionStart, inputEl.selectionEnd, 'end');
+	        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+	      }
+	    }
+	    window.PentacleHarness?.emit?.('composer:paste-images', { data: {
+	      subsystem: 'chat', bug_ref: 'spec_pentacle__web_wrap_image_paste_2026_10', count: files.length,
+	    } });
 	    addSlotAttachmentFiles(slot, files, owner).catch(error => { if (composerMounted(slot, owner)) setSlotSendError(slot, error?.message || 'Attachment failed.'); });
 	  });
   inputEl.addEventListener('keydown', (e) => {

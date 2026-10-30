@@ -22,7 +22,7 @@ const extraSessions = [1, 2].map(index => ({ ...target,
   session_name: `history-extra-${index}`, stream_id: `mock-host:history-extra-${index}`,
   display_name: `Disposable history extra ${index}` }));
 
-async function startDaemon({ artifactsDir, includeReport = false, omitAssistant = false }) {
+async function startDaemon({ artifactsDir, includeReport = false, omitAssistant = false, directAssistant = true }) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await new Promise(resolve => server.once('listening', resolve));
   const authDir = path.join(artifactsDir, 'fixture-auth');
@@ -32,7 +32,7 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
   const baseConfig = writeDesktopConfig({ dir: artifactsDir,
     wsUrl: `ws://127.0.0.1:${server.address().port}`, tokenPath });
   const configFile = path.join(artifactsDir, 'assistant-direct.private.config.js');
-  fs.writeFileSync(configFile, `const base = require(${JSON.stringify(baseConfig)});\nmodule.exports = { ...base, features: { ...base.features, assistantDirectTarget: ${JSON.stringify({ sourceStreamId: sourceId, streamId: targetId, generation })} } };\n`);
+  fs.writeFileSync(configFile, `const base = require(${JSON.stringify(baseConfig)});\nmodule.exports = { ...base, features: { ...base.features, assistantDirectTarget: ${JSON.stringify(directAssistant ? { sourceStreamId: sourceId, streamId: targetId, generation } : null)} } };\n`);
   const requests = [];
   const events = [];
   const assistantEvents = [];
@@ -41,6 +41,7 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
   let historyPressure = false;
   const uploads = new Map();
   const blobs = new Map();
+  let uploadFailure = false;
   let durableQuestion = null;
   let targetHistoryReplyDelayMs = 0;
   // Daemon-faithful history window (server.py request_stream_events): the newest
@@ -115,6 +116,10 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
         if (msg.stream_id === targetId && targetHistoryReplyDelayMs > 0) setTimeout(reply, targetHistoryReplyDelayMs);
         else reply();
       } else if (msg.type === 'upload_blob_init') {
+        if (uploadFailure) {
+          send(socket, { type: 'upload_blob.error', request_id: msg.request_id, error: 'Disposable upload failure' });
+          return;
+        }
         uploads.set(msg.request_id, []);
         send(socket, { type: 'upload_blob.init.ok', request_id: msg.request_id });
       } else if (msg.type === 'upload_blob_chunk') {
@@ -150,19 +155,24 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
           inventory();
         }
       } else if (msg.type === 'send') {
-        if (msg.host !== target.host || msg.session_name !== target.session_name) {
+        const composite = !directAssistant && msg.stream_id === sourceId;
+        if (!composite && (msg.host !== target.host || msg.session_name !== target.session_name)) {
           send(socket, { type: 'send.result', request_id: msg.request_id, stream_id: sourceId,
             ok: false, error: 'Composite fallback forbidden' });
           return;
         }
-        const user = event('USER', msg.text, { optimistic_id: msg.optimistic_id,
+        const stream = composite ? source : target;
+        const rows = composite ? assistantEvents : events;
+        const text = composite ? msg.message : msg.text;
+        const optimisticId = composite ? msg.msg_id : msg.optimistic_id;
+        const user = event('USER', text, { ...stream, optimistic_id: optimisticId,
           reply_to_message_id: msg.reply_to_message_id, attachments: msg.attachments });
-        events.push(user);
-        send(socket, { type: 'send.result', request_id: msg.request_id, optimistic_id: msg.optimistic_id,
-          stream_id: targetId, action_committed: true, delivery: 'committed_pending', message_id: user.message_id });
+        rows.push(user);
+        send(socket, { type: 'send.result', request_id: msg.request_id, optimistic_id: optimisticId,
+          stream_id: stream.stream_id, action_committed: true, delivery: 'committed_pending', message_id: user.message_id });
         send(socket, { type: 'chat.event', event: user });
-        const answer = event('ASSIST_TEXT', `Echo: ${msg.text || '[image]'}`, { reply_to_message_id: user.message_id });
-        events.push(answer);
+        const answer = event('ASSIST_TEXT', `Echo: ${text || '[image]'}`, { ...stream, reply_to_message_id: user.message_id });
+        rows.push(answer);
         send(socket, { type: 'chat.event', event: answer });
       } else if (msg.request_id) {
         send(socket, { type: `${msg.type}.ok`, request_id: msg.request_id,
@@ -204,6 +214,7 @@ async function startDaemon({ artifactsDir, includeReport = false, omitAssistant 
       }
     },
     setTargetHistoryReplyDelay(ms) { targetHistoryReplyDelayMs = Math.max(0, Number(ms) || 0); },
+    setUploadFailure(value) { uploadFailure = value; },
     setTargetSummary(fields, broadcast = true) { Object.assign(target, fields); if (broadcast) inventory(); },
     emitFrame(frame) { for (const socket of server.clients) send(socket, frame); },
     setGeneration(value) { target.session_generation = value; inventory(); },
