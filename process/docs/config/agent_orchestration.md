@@ -93,7 +93,7 @@ agent-orch spawn --parent "$AGENT_ORCH_STREAM_ID" \
 
 The parent reads the typed report and closes the seat. `await-spawn` handles spawn creation and prompt delivery, not completion.
 
-Ask for user input only when a missing decision or action uniquely belongs to the user. A visible seat uses `agent-orch prompt ask` for an asynchronous durable question and continues independent work. Under a coordinator, workers route questions to it. An operator action uses Done / Not yet; a decision offers choices that change the next action. Silence and elapsed time provide no authority.
+Ask for user input only for a decision, fact or action that the user alone can supply and that the work cannot proceed without. A notice, status or refresh request is not a question, and a login or unlock the fleet can resolve itself is resolved first. A visible seat uses `agent-orch prompt ask` for an asynchronous durable question and continues independent work; it answers or cancels its stale questions before opening another. Under a coordinator, workers route questions to it. An operator action uses Done / Not yet only for a step the user alone can perform; a decision offers choices that change the next action. Silence and elapsed time provide no authority.
 
 Never close another seat or use a report's terminate option without the corresponding grant. A successor handoff includes the current spec and evidence, and a named owner. Avoid blocking waits when independent work remains; use durable completion notifications and bounded retrieval.
 
