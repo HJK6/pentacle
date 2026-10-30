@@ -20,6 +20,9 @@ def register(subparsers):
     parser.add_argument("--expected-executable-sha256")
     parser.add_argument("--expected-revision", type=int)
     parser.add_argument("--pin-file", help="reviewed exact pair JSON snapshot")
+    parser.add_argument("--target-pin-file", help="immutable revision-one target for a pre-enforcement repin")
+    parser.add_argument("--initial-parked-cells-file", help="explicit initial-only cell decisions JSON array")
+    parser.add_argument("--expected-readiness-digest")
     parser.add_argument("--expected-pin-revision", type=int)
     parser.add_argument("--expected-pin-digest")
     parser.add_argument("--reconcile-of")
@@ -59,20 +62,27 @@ def execute(args):
                "request_id": "account-" + uuid.uuid4().hex}
     for field in ("provider", "account", "host", "reason", "kind", "login_generation", "operation_id", "expected_revision",
                   "new_generation", "expected_version", "expected_executable_sha256", "expected_pin_revision",
-                  "expected_pin_digest", "reconcile_of", "expected_origin_digest", "supersede_repin", "recover_receipt", "expected_raw_digest", "expected_high_water_revision"):
+                  "expected_pin_digest", "reconcile_of", "expected_origin_digest", "supersede_repin", "recover_receipt", "expected_raw_digest", "expected_high_water_revision","expected_readiness_digest"):
         value = getattr(args, field, None)
         if value is not None: payload[field] = value
     try:
         from pathlib import Path
+        def unique(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result: raise ValueError()
+                result[key]=value
+            return result
         if getattr(args,"pin_file",None):
-            if args.action!="pin-set": raise ValueError()
-            def unique(pairs):
-                result={}
-                for key,value in pairs:
-                    if key in result: raise ValueError()
-                    result[key]=value
-                return result
+            if args.action not in {"pin-set","pin-status"}: raise ValueError()
             payload["pin"]=json.loads(Path(args.pin_file).read_text(),object_pairs_hook=unique)
+        if getattr(args,"target_pin_file",None):
+            if args.action!="repin" or args.expected_pin_revision!=0:raise ValueError()
+            payload["target_pin"]=json.loads(Path(args.target_pin_file).read_text(),object_pairs_hook=unique)
+        if getattr(args,"initial_parked_cells_file",None):
+            if args.action not in {"pin-set","pin-status"}:raise ValueError()
+            payload["initial_parked_cells"]=json.loads(Path(args.initial_parked_cells_file).read_text(),object_pairs_hook=unique)
+            if not isinstance(payload["initial_parked_cells"],list):raise ValueError()
         if getattr(args,"local_admin_token_file",None):
             if args.action not in {"pin-set","pin-status"}: raise ValueError()
             import os,stat
@@ -88,7 +98,8 @@ def execute(args):
     if args.action not in {"status","pin-status","pin-set"}:
         payload.setdefault("login_generation", "active")
     try:
-        timeout = args.timeout if args.timeout is not None else (330 if args.action in {"repin","relogin"} else 210 if args.action in {"probe", "revalidate-health", "upgrade"} else 30)
+        timeout = args.timeout if args.timeout is not None else (330 if args.action in {"repin","relogin"} or
+            (args.action in {"pin-set","pin-status"} and "pin" in payload) else 210 if args.action in {"probe", "revalidate-health", "upgrade"} else 30)
         reply = asyncio.run(account_once(config, payload, timeout=timeout))
     except Exception as exc:
         reply, code, _ = _direct_rpc_transport_error("account", payload["request_id"], exc)

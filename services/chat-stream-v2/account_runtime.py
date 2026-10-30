@@ -70,6 +70,26 @@ class AccountRuntime:
         self._health_epoch=uuid.uuid4().hex; self._health_started=False
         self.pin_lock=asyncio.Lock()
         self.pin_inputs=_PinInputBarrier()
+        self._home_inputs={}
+
+    def home_inputs(self,binding):
+        from provider_cli_maintenance import scope
+        return self._home_inputs.setdefault(scope(binding),_PinInputBarrier())
+
+    async def maintenance_input(self,row):
+        from provider_cli_maintenance import assert_input
+        await self.run(lambda a:assert_input(a,row))
+
+    @asynccontextmanager
+    async def maintenance_guard(self,row):
+        @asynccontextmanager
+        async def home_read():
+            if row.get("account_binding"):
+                async with self.home_inputs(Binding.from_public(row["account_binding"])).read():yield
+            else:yield
+        async with home_read():
+            await self.maintenance_input(row)
+            yield
 
     def attach(self,server,spawnctl,comms):
         self.server,self.spawnctl,self.comms=server,spawnctl,comms
@@ -84,6 +104,8 @@ class AccountRuntime:
         # This is the owned daemon-start boundary, not a Store connection open.
         # OFF only terminalizes old audit intents; it never restores health.
         if not self._health_started:
+            from provider_cli_initial import startup as initial_startup
+            await self.run(lambda ledger:initial_startup(ledger,self._health_epoch),settle_on_cancel=True)
             await self.run(lambda ledger:interrupt_pending(ledger,self._health_epoch,now=self.clock()))
             self._health_started=True
         if self.policy.get("enabled") is not True: return
@@ -162,8 +184,10 @@ class AccountRuntime:
         from provider_cli_pin import check, digest, canonical,consumer_current
         binding=Binding.from_public(row["account_binding"])
         pin=await self.run(lambda a:check(a,binding))
-        if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
-        proof=await self.executor.verify_artifact(binding,pin)
+        proof=None
+        if pin is not None:
+            if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
+            proof=await self.executor.verify_artifact(binding,pin)
         async with self.pin_lock:
             def commit(a):
                 from account_store import transaction
@@ -185,13 +209,19 @@ class AccountRuntime:
                             raise AccountError("account_default_stale")
                     a._bind_session(row)
                     key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
-                    data={"revision":pin["revision"],"digest":digest(pin),"artifact":proof,
-                          "binding_key":binding.key}
+                    data=({"revision":pin["revision"],"digest":digest(pin),"artifact":proof,
+                           "binding_key":binding.key} if pin is not None else
+                          {"mode":"pre_enforcement","mode_epoch":self._health_epoch,"binding_key":binding.key})
                     prior=a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone()
+                    if prior and pin is None:
+                        historical=json.loads(prior[0])
+                        if historical.get("mode")=="pre_enforcement" and historical.get("binding_key")==binding.key:
+                            data=historical  # Recheck now; retain its original creator epoch.
                     if prior and json.loads(prior[0])!=data: raise AccountError("provider_cli_pin_stale")
                     a.conn.execute("INSERT OR IGNORE INTO kv VALUES (?,?)",(key,canonical(data)))
-                    a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+binding.key,
-                        canonical({"proof":proof,"verified_at":self.clock()})))
+                    if proof is not None:
+                        a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+binding.key,
+                            canonical({"proof":proof,"verified_at":self.clock()})))
             await self.run(commit,settle_on_cancel=True)
 
     @staticmethod
@@ -217,6 +247,7 @@ class AccountRuntime:
         return matched
 
     async def before_input(self,row,*,verify=True):
+        await self.maintenance_input(row)
         # Rollback can disable new launches while existing bound agents drain.
         if not row.get("account_binding") and await self.enrolled(row.get("host"),row.get("provider")):
             raise AccountError("provider_cli_pin_unavailable",reason="binding_unknown")
@@ -225,8 +256,11 @@ class AccountRuntime:
             from provider_cli_pin import check
             binding=Binding.from_public(row["account_binding"])
             pin=await self.run(lambda a:check(a,binding))
+            if pin is None: return
             key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
             receipt=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone())
+            if receipt and json.loads(receipt[0]).get("mode")=="pre_enforcement":
+                receipt=None  # Keep that historical admission; observe current bytes separately.
             if not receipt:
                 # Pre-enforcement seats keep their historical admission unknown.
                 # A separate read-only observation proves current bytes without
@@ -257,11 +291,12 @@ class AccountRuntime:
     async def input_guard(self,row):
         # Remote preparation must never hold the fleet pin decision lock/barrier.
         await self.before_input(row)
-        async with self.pin_inputs.read():
-            async with self.pin_lock:
-                # Recheck after preparation and barrier admission; this path cannot invoke SSH.
-                await self.before_input(row,verify=False)
-            yield  # The caller scopes this to one physical action, never evidence waiting.
+        async with self.maintenance_guard(row):
+            async with self.pin_inputs.read():
+                async with self.pin_lock:
+                    # Recheck after preparation and barrier admission; this path cannot invoke SSH.
+                    await self.before_input(row,verify=False)
+                yield  # The caller scopes this to one physical action, never evidence waiting.
 
     async def _front_desk(self,auth):
         composite=self.server.assistant_composite if self.server else None
@@ -303,23 +338,28 @@ class AccountRuntime:
         if action=="upgrade":
             allowed.discard("kind")
             allowed.update({"new_generation","expected_version","expected_executable_sha256","prepare_enrollment"})
-        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest","reconcile_of","expected_origin_digest"})
+        if action=="repin": allowed.update({"new_generation","expected_pin_revision","expected_pin_digest","reconcile_of","expected_origin_digest","target_pin"})
         if action=="relogin":allowed.add("supersede_repin")
         if action in {"pin-set","pin-status"}:
-            allowed.update({"local_admin_token","pin","expected_revision","recover_receipt","expected_raw_digest","expected_high_water_revision"})
+            allowed.update({"local_admin_token","pin","expected_revision","recover_receipt","expected_raw_digest","expected_high_water_revision",
+                            "initial_parked_cells","expected_readiness_digest"})
         if action=="observation": allowed.add("observation")
         if action=="revalidate-health": allowed.add("expected_revision")
         if any(not str(k).startswith("_") and k not in allowed for k in message): raise AccountError("account_request_invalid")
         if action in {"pin-set","pin-status"}:
             from provider_cli_pin import privileged,set_pin,status
             if action=="pin-set":
-                async with self.pin_inputs.write():
-                    async with self.pin_lock:
-                        receipt=await self.run(lambda a:set_pin(a,message,recovery_principal=privileged(auth)),settle_on_cancel=True)
+                from provider_cli_initial import set_pair
+                receipt=await set_pair(self,message,recovery_principal=privileged(auth))
                 public_receipt={k:v for k,v in receipt.items() if k!="previous"}
                 return {"type":"account.ok","pin":receipt["pin"],"receipt":public_receipt,
                         **(await self.pin_status())}
-            return {"type":"account.ok",**(await self.pin_status())}
+            result={"type":"account.ok",**(await self.pin_status())}
+            if "pin" in message:
+                from provider_cli_initial import prepare
+                _,readiness=await prepare(self,message)
+                result.update(candidate_pin=message["pin"],initial_readiness=readiness)
+            return result
         if action=="status":
             result=await self.run(lambda a:a.readback(now=self.clock()))
             filters={"host":message.get("host"),"provider":message.get("provider"),"alias":message.get("account")}
@@ -391,9 +431,14 @@ class AccountRuntime:
         return {"type":"account.ok","accepted":True,"host":host,"provider":provider,"account":alias}
 
     async def pin_status(self):
-        from provider_cli_pin import status,version,consumer_current
+        from provider_cli_pin import status,version,consumer_current,initial_parked
         from provider_cli_artifact import code_identity
         result=await self.run(status)
+        from provider_cli_maintenance import PREFIX,status as maintenance_status
+        def maintenance(a):
+            return {row[0][len(PREFIX):]:maintenance_status(a,row[0][len(PREFIX):]) for row in a.conn.execute(
+                "SELECT k FROM kv WHERE substr(k,1,?)=?",(len(PREFIX),PREFIX))}
+        result["input_maintenance"]=await self.run(maintenance)
         readback=await self.run(lambda a:a.readback(now=self.clock()))
         def outstanding(a):
             from account_repin import _resolved
@@ -443,11 +488,15 @@ class AccountRuntime:
             except AccountError: source_current=False
             matches=bool(expected and observed==expected["version"] and any(
                 a["native_sha256"]==row.get("executable_sha256") for a in expected["artifacts"].values()))
+            initially_parked=bool(pin and row.get("active") and await self.run(
+                lambda a,key=binding_key:initial_parked(a,a.bound(key))))
             split=any(all(p["arguments"].get(k)==row.get(rk) for k,rk in (("host","host"),("provider","provider"),("account","alias"))) for p in pending)
-            reason=("repin_reconciliation_pending" if split else "no_active_binding" if not row.get("active") else "disabled" if not row["enabled"] else "offline" if not online else
+            reason=("repin_reconciliation_pending" if split else "no_active_binding" if not row.get("active") else
+                    "initial_activation_parked" if initially_parked else "disabled" if not row["enabled"] else "offline" if not online else
                     "account_policy_off" if not self.manages(row["host"],row["provider"]) else
                     "satellite_not_current" if not source_current else
-                    row["health"] if row["health"]!="healthy" else "pin_absent_or_corrupt" if not pin else
+                    row["health"] if row["health"]!="healthy" else "pre_enforcement" if result["mode"]=="pre_enforcement" else
+                    "pin_absent_or_corrupt" if not pin else
                     "ready" if matches and proof_current else "artifact_verification_pending" if matches else "pin_mismatch")
             old_seats=[]
             for seat in seats:
@@ -460,14 +509,19 @@ class AccountRuntime:
                     admission_key="provider_cli.admission:"+seat["stream_id"]+":"+str(seat.get("session_generation") or "")
                     admitted=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(admission_key,)).fetchone())
                     if admitted:
-                        observed_artifact=json.loads(admitted[0])["artifact"]
+                        data=json.loads(admitted[0])
+                        if data.get("mode")=="pre_enforcement":
+                            observation_key="provider_cli.observed:"+seat["stream_id"]+":"+str(seat.get("session_generation") or "")
+                            observation=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(observation_key,)).fetchone())
+                            data=json.loads(observation[0]) if observation else {}
+                        observed_artifact=data.get("artifact",{})
                         old=observed_artifact.get("artifact")!=expected["artifacts"].get(observed_artifact.get("platform"))
                 if old: old_seats.append({"stream_id":seat["stream_id"],"generation":seat.get("session_generation"),
                                          "creation_pending":bool(seat.get("creation_pending"))})
             cells.append({"host":row["host"],"provider":row["provider"],"account":row["alias"],
                 "generation":row["generation"],"expected_version":expected["version"] if expected else None,
                 "observed_version":observed,"online":online,"observation":row.get("observation"),
-                "state":"parked" if not row["enabled"] else "ready" if reason=="ready" and not old_seats else "pending","reason":reason,"old_seats":old_seats,
+                "state":"parked" if not row["enabled"] or initially_parked else "ready" if reason=="ready" and not old_seats else "pending","reason":reason,"old_seats":old_seats,
                 "verified_at":verified.get("verified_at"),"proof_current":proof_current,
                 "pending_operations":[p["arguments"]["operation_id"] for p in pending if all(
                     p["arguments"].get(k)==row.get(rk) for k,rk in (("host","host"),("provider","provider"),("account","alias")))]})

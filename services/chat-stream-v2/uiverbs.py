@@ -38,6 +38,7 @@ the honest level v2 can support this increment:
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import asynccontextmanager
 
 from store_qa import spec_binding_source, SpecInputsUnavailable
 
@@ -193,7 +194,24 @@ class UIVerbs:
 
     # -- functional-degraded ----------------------------------------------
 
+    @asynccontextmanager
+    async def _maintenance_guard(self,host,name):
+        runtime=getattr(self.spawnctl,"account_runtime",None)
+        if runtime is None:
+            yield
+            return
+        from provider_accounts import AccountError
+        try:
+            row=await self.store.fetch_session(host,name) or {"host":host,"stream_id":host+":"+name}
+            async with runtime.maintenance_guard(row):yield
+        except AccountError as exc:raise VerbError(str(exc),str(exc),**exc.context) from None
+
     async def send_interrupt(self, msg: dict[str, Any]) -> dict[str, Any]:
+        host=str(msg.get("host") or "").strip();name=str(msg.get("session_name") or "").strip()
+        # Refuse ingress before queue/capacity policy changes, then recheck at
+        # the physical key boundary after any remote identity preparation.
+        if host and name:
+            async with self._maintenance_guard(host,name):pass
         if msg.get("queued_send_now") is not None:
             if getattr(self, "queued_send_now", None) is None:
                 raise VerbError("queued_send_now_unsupported", "Queued Send now is unavailable on this daemon")
@@ -250,7 +268,8 @@ class UIVerbs:
         # `Interrupted` landing marker is scraped from the transcript by the
         # mirror (lane 4); without it v2 reports the honest `interrupt_unconfirmed`
         # rather than claiming a confirmed landing.
-        await tmux.run("send-keys", "-t", f"={name}:", "Escape")
+        async with self._maintenance_guard(host,name):
+            await tmux.run("send-keys", "-t", f"={name}:", "Escape")
         return {"type": "send.interrupt.ok", "request_id": rid, "host": host, "session_name": name,
                 "interrupted": True, "landed": False, "confirm": "interrupt_unconfirmed", "coalesced": False}
 
@@ -318,7 +337,8 @@ class UIVerbs:
         if not await row_matches(stored_pid):
             return error("stale_session_generation", "selected session changed before interrupt")
         try:
-            rc, output = await tmux.run("send-keys", "-t", str(identity["pane_id"]), "Escape")
+            async with self._maintenance_guard(host,name):
+                rc, output = await tmux.run("send-keys", "-t", str(identity["pane_id"]), "Escape")
         except VerbError as exc:
             return error(exc.code, str(exc))
         if rc != 0:

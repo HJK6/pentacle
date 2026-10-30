@@ -72,6 +72,50 @@ class AccountExecutor:
         except AccountError: raise
         except Exception: raise AccountError("provider_cli_verification_unavailable") from None
 
+    async def launcher_descriptors(self,host,provider):
+        from provider_cli_occupancy import descriptors
+        return await descriptors(self.runtime,host,provider)
+
+    async def verify_launchers(self,account):
+        from provider_cli_artifact import code_identity
+        from provider_cli_pin import digest
+        launchers=await self.launcher_descriptors(account.host,account.provider)
+        value=await self.execute(account,"launcher-status",uuid.uuid4().hex,
+                                 reconcile={"managed_launchers":launchers})
+        if (value.get("outcome")!="ok" or value.get("host")!=account.host
+                or value.get("provider")!=account.provider or value.get("manifest_digest")!=digest(launchers)
+                or value.get("code_identity")!=code_identity() or not isinstance(value.get("managed"),list)
+                or not isinstance(value.get("unmanaged"),list) or value.get("missing")!=[]
+                or value.get("pending_mutations")!=[]):
+            raise AccountError("provider_cli_verification_unavailable",reason="launcher_unverified")
+        expected={row["stream_id"]:row for row in launchers}
+        seen=set()
+        for row in value["managed"]:
+            if not isinstance(row,dict):
+                raise AccountError("provider_cli_verification_unavailable",reason="launcher_unverified")
+            sid=row.get("stream_id")
+            if not isinstance(sid,str):raise AccountError("provider_cli_verification_unavailable",reason="launcher_unverified")
+            original=expected.get(sid)
+            process=row.get("process") or {};root=row.get("pane_root") or {}
+            from _shared.provider_cli_release import SHA256
+            def complete(proof):
+                return (isinstance(proof,dict) and proof.get("version")==2 and proof.get("host")==account.host
+                        and type(proof.get("pid")) is int and proof["pid"]>0
+                        and type(proof.get("uid")) is int and proof["uid"]>=0
+                        and bool(proof.get("boot_id")) and bool(proof.get("start_id"))
+                        and isinstance(proof.get("command_fingerprint"),str)
+                        and SHA256.fullmatch(proof["command_fingerprint"]))
+            if (sid in seen or not original or row.get("binding")!=original["binding"]
+                    or row.get("session_generation")!=original["session_generation"]
+                    or not complete(process) or not complete(root)
+                    or str(root.get("pid"))!=original["pane_pid"]
+                    or root.get("boot_id")!=process.get("boot_id") or root.get("uid")!=process.get("uid")
+                    or root.get("start_id")!=__import__('prockill').canonical_start(original["pane_started_at"])):
+                raise AccountError("provider_cli_verification_unavailable",reason="launcher_unverified")
+            seen.add(sid)
+        if seen!=set(expected):raise AccountError("provider_cli_verification_unavailable",reason="launcher_unverified")
+        return value
+
     async def observe(self, account):
         async with self._host_locks.setdefault(account.host, asyncio.Lock()):
             return await self._observe_locked(account)
@@ -87,6 +131,7 @@ class AccountExecutor:
                     proof=result["artifact_proof"]
                     def record(a):
                         pin=check(a,account)
+                        if pin is None:raise AccountError("provider_cli_pin_mismatch",reason="unexpected_pristine_artifact")
                         if proof.get("pin_digest")!=digest(pin): raise AccountError("provider_cli_pin_mismatch")
                         with transaction(a.conn):
                             a.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)",("provider_cli.verified:"+account.key,
@@ -164,7 +209,7 @@ class AccountExecutor:
             return {"outcome": "recovery_cooldown"}
         from account_repin_state import reserve_generation,mutation_status
         await mutation_status(self,account)
-        intent=await self.runtime.run(lambda a:reserve_generation(a,account,operation_id,uuid.uuid4().hex,"enroll"),settle_on_cancel=True)
+        intent=await self.runtime.run(lambda a:reserve_generation(a,account,operation_id,uuid.uuid4().hex,"enroll",now=self.runtime.clock()),settle_on_cancel=True)
         state.update(inflight=operation_id,new_generation=intent["arguments"]["generation"],human_stop=False,
             mutation_intent=intent,mutation_stage="prepared")
         await self.runtime.run(lambda a:self._save_recovery(a,account.key,state),settle_on_cancel=True)
@@ -184,6 +229,8 @@ class AccountExecutor:
             def started(a):
                 with transaction(a.conn):
                     require_generation_clear(a,{"host":account.host,"provider":account.provider,"account":account.alias})
+                    from provider_cli_maintenance import require_mutation
+                    require_mutation(a,account,self.runtime.clock())
                     row=a._cell(account.host,account.provider,account.alias)
                     if row is None or Binding(**json.loads(row["data"])).public()!=account.public():raise AccountError("account_login_generation_stale")
                     key="cell:"+":".join((account.host,account.provider,account.alias))

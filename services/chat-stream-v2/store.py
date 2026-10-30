@@ -456,6 +456,10 @@ def _admission_held(conn: sqlite3.Connection, host: str, now: float) -> bool:
     return row is not None and float(row["held_until"]) >= now
 
 
+def _initial_admission_paused(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM kv WHERE k=?",("provider_cli.initial_admission_pause",)).fetchone() is not None
+
+
 def _insert_stream_reservation(
     conn: sqlite3.Connection, *, host: str, session_name: str, request_id: str,
     expires_at: float, nonce: str, owner_instance_id: str,
@@ -3687,6 +3691,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         def _op(conn: sqlite3.Connection) -> bool:
             host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             now = time.time()
+            if _initial_admission_paused(conn):
+                conn.commit()
+                return False
             # The keyless path is always a NEW admission (no replay), so a live
             # hold refuses it in this same serialized txn.
             if refuse_if_held and _admission_held(conn, host, now):
@@ -4468,7 +4475,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # serialized txn that would otherwise claim it (QA cycle-3 astra-[3]);
             # the already-admitted-key replay resolved above is unaffected, so an
             # interrupted caller's retry still gets its seat during a deploy hold.
-            if refuse_if_held and _admission_held(conn, host, now):
+            if _initial_admission_paused(conn) or (refuse_if_held and _admission_held(conn, host, now)):
                 conn.commit()
                 return {"status": "frozen"}
             # No prior claim for this key (or keyless): reserve exactly as

@@ -50,6 +50,14 @@ def history(ledger):
     return receipts
 
 
+def pristine(ledger):
+    """Only a consistently never-initialized fleet has no release constraint."""
+    if raw(ledger) is not None:
+        return False
+    marker = ledger.conn.execute("SELECT v FROM kv WHERE k=?", (INITIALIZED,)).fetchone()
+    return marker is None and not history(ledger)
+
+
 def current(ledger):
     value = raw(ledger)
     if value is None: raise AccountError("provider_cli_pin_unavailable", reason="pin_absent")
@@ -59,6 +67,9 @@ def current(ledger):
     except (ValueError, TypeError):
         raise AccountError("provider_cli_pin_unavailable", reason="pin_corrupt") from None
     receipts=history(ledger)
+    marker=ledger.conn.execute("SELECT v FROM kv WHERE k=?",(INITIALIZED,)).fetchone()
+    if marker is None or marker[0]!="1":
+        raise AccountError("provider_cli_pin_unavailable",reason="receipt_history_lost")
     high_water=max((r["pin"]["revision"] for r in receipts.values()),default=0)
     if not any(r["pin"]==pin for r in receipts.values()) or pin["revision"]!=high_water:
         raise AccountError("provider_cli_pin_unavailable",reason="receipt_history_lost")
@@ -68,7 +79,11 @@ def current(ledger):
 def check(ledger, binding):
     from account_repin import fenced
     if fenced(ledger,binding): raise AccountError("account_repin_reconciliation_required")
+    if pristine(ledger): return None
     pin = current(ledger)
+    if initial_parked(ledger,binding):
+        raise AccountError("provider_cli_cell_parked",host=binding.host,provider=binding.provider,
+                           account=binding.alias,next_action="FD catch-up repin under a real hold")
     try: observed = version(binding.provider, binding.version)
     except ValueError: observed = binding.version
     expected = pin["providers"][binding.provider]
@@ -84,6 +99,37 @@ def check(ledger, binding):
     return pin
 
 
+def initial_parked(ledger,binding):
+    parked=False;revision=0
+    for receipt in history(ledger).values():
+        entries=receipt.get("arguments",{}).get("initial_parked_cells") or []
+        if not isinstance(entries,list) or any(not isinstance(entry,dict) for entry in entries):
+            raise AccountError("provider_cli_pin_unavailable",reason="parking_history_corrupt")
+        if any((row.get("host"),row.get("provider"),row.get("account"),row.get("generation"))==
+               (binding.host,binding.provider,binding.alias,binding.generation) for row in entries):
+            parked=True;revision=max(revision,receipt["pin"]["revision"])
+    if not parked:return False
+    prefix="repin:"+":".join((binding.host,binding.provider,binding.alias))+":"
+    for row in ledger.conn.execute("SELECT data FROM v2_account_recovery WHERE state='done' AND substr(binding_key,1,?)=?",
+                                   (len(prefix),prefix)):
+        try:
+            from account_repin import _successor
+            from provider_accounts import Binding
+            state=json.loads(row["data"]);arguments=state["arguments"];result=state["result"]
+            if (state.get("status")!="done" or type(arguments["expected_pin_revision"]) is not int
+                    or arguments["expected_pin_revision"]<revision or result.get("outcome")!="no_op"):
+                continue
+            snapshot=state["snapshot"]
+            successor,no_op=_successor(Binding(**snapshot["binding"]),arguments,state["host_receipt"],
+                snapshot["pin"],consumer_identity=snapshot["consumer_code_identity"])
+            if (no_op and dict(successor.public(),default_revision=0)==dict(binding.public(),default_revision=0)
+                    and result["binding"]==successor.public()):
+                return False
+        except (AccountError,KeyError,TypeError,ValueError):
+            continue
+    return True
+
+
 def consumer_current(ledger,host,local_host,now):
     if host==local_host: return
     target=ledger.conn.execute("SELECT v FROM kv WHERE k=?",("event_push.target_sha",)).fetchone()
@@ -97,16 +143,26 @@ def consumer_current(ledger,host,local_host,now):
         raise AccountError("provider_cli_verification_unavailable",host=host,reason="satellite_not_current") from None
 
 
-def set_pin(ledger, message, *, recovery_principal=False):
+def operation_identity(message):
     operation_id, reason = message.get("operation_id"), message.get("reason")
     if any(not isinstance(x, str) or not 1 <= len(x) <= 160 or not x.strip()
            or any(ord(c) < 32 or ord(c) > 126 for c in x) for x in (operation_id, reason)):
         raise AccountError("provider_cli_pin_request_invalid")
+    return operation_id,reason
+
+
+def set_pin(ledger, message, *, recovery_principal=False, initial_check=None, initial_readiness=None):
+    operation_id,reason=operation_identity(message)
     recovery = message.get("recover_receipt") is not None
     allowed = ({"recover_receipt", "expected_raw_digest", "expected_high_water_revision"} if recovery else {"pin", "expected_revision"})
     if any(k in message for k in ({"pin", "expected_revision", "recover_receipt", "expected_raw_digest", "expected_high_water_revision"} - allowed)):
         raise AccountError("provider_cli_pin_request_invalid")
     arguments = {k: message.get(k) for k in sorted(allowed | {"operation_id", "reason"})}
+    initial_fields={"initial_parked_cells","expected_readiness_digest"}&message.keys()
+    if initial_fields:
+        if recovery or type(message.get("expected_revision")) is not int or message["expected_revision"]!=0:
+            raise AccountError("provider_cli_pin_request_invalid")
+        arguments.update({k:message[k] for k in sorted(initial_fields)})
     with transaction(ledger.conn):
         receipts = history(ledger)
         prior = receipts.get(operation_id)
@@ -139,12 +195,16 @@ def set_pin(ledger, message, *, recovery_principal=False):
             try: pin = validate(message.get("pin"))
             except ValueError: raise AccountError("provider_cli_pin_request_invalid") from None
             if pin["revision"] != revision + 1: raise AccountError("provider_cli_pin_stale")
+            if revision==0 and initial_check is not None:
+                initial_check(ledger)
         previous=None
         if record is not None:
             try: previous=loads(record)
             except (ValueError,TypeError,UnicodeError): pass
         receipt = {"operation_id": operation_id, "arguments": arguments, "pin": pin, "digest": digest(pin),
                    "previous": previous, "previous_raw_digest": raw_digest(record), "outcome": "pin_set"}
+        if initial_readiness is not None:
+            receipt["initial_readiness"]=initial_readiness
         ledger.conn.execute("INSERT INTO v2_account_recovery VALUES (?,?,?)",
                             (PREFIX + operation_id, "done", canonical(receipt)))
         ledger.conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (KEY, canonical(pin)))
@@ -158,6 +218,12 @@ def status(ledger):
     receipts = history(ledger)
     try: pin = current(ledger)
     except AccountError: pin = None
-    return {"pin": pin, "pin_digest": digest(pin) if pin else None, "raw_digest": raw_digest(value),
+    try: mode="pre_enforcement" if pristine(ledger) else "active" if pin else "unavailable"
+    except AccountError: mode="unavailable"
+    paused=ledger.conn.execute("SELECT v FROM kv WHERE k=?",("provider_cli.initial_admission_pause",)).fetchone()
+    try: pause=json.loads(paused[0]) if paused else None
+    except (TypeError,ValueError):pause={"reason":"promotion_pause_corrupt"}
+    return {"pin": pin, "mode":mode,"initial_admission_pause":pause,
+            "pin_digest": digest(pin) if pin else None, "raw_digest": raw_digest(value),
             "receipt_ids": sorted(receipts),
             "high_water_revision": max((r["pin"]["revision"] for r in receipts.values()), default=0)}

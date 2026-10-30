@@ -251,6 +251,7 @@ async def hatch(executor,message,auth):
                         "enrollment":{"operation_id":hashlib.sha256(("hatch:"+origin["arguments"]["operation_id"]).encode()).hexdigest(),
                             "receipt":candidate["enrollment_receipt"],"pin":origin["snapshot"]["pin"],
                             "consumer_code_identity":origin["snapshot"]["host"]["code_identity"]}}
+                context["managed_launchers"]=await executor.launcher_descriptors(old.host,old.provider)
                 sealed=await executor.execute(old,"repin-supersede","hatch:"+value["operation_id"],state["generation"],reconcile=context)
                 await runtime._front_desk(auth)
                 state=await runtime.run(lambda a:_superseded(a,state,sealed,retained,runtime.clock()),settle_on_cancel=True)

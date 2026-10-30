@@ -9,7 +9,7 @@ from account_store import transaction
 from account_upgrade import _snapshot
 from account_revalidation import _valid_observation
 from provider_accounts import AccountError,Binding,_component
-from provider_cli_pin import canonical,current,digest,check
+from provider_cli_pin import canonical,current,digest,check,pristine
 
 PREFIX="repin:"
 LINEAGE="repin-lineage:"
@@ -28,10 +28,19 @@ def _payload(message):
     for k in ("host","account","login_generation","new_generation"): _component(value[k])
     if (value["provider"] not in {"claude","codex"} or value["login_generation"]=="active"
             or value["new_generation"] in {"active",value["login_generation"]}
-            or type(value["expected_pin_revision"]) is not int or value["expected_pin_revision"]<1):
+            or type(value["expected_pin_revision"]) is not int or value["expected_pin_revision"]<0):
         raise AccountError("account_repin_request_invalid")
     from _shared.provider_cli_release import SHA256
     if not isinstance(value["expected_pin_digest"],str) or not SHA256.fullmatch(value["expected_pin_digest"]):
+        raise AccountError("account_repin_request_invalid")
+    if value["expected_pin_revision"]==0:
+        from _shared.provider_cli_release import validate
+        try: target=validate(message.get("target_pin"))
+        except (ValueError,TypeError): raise AccountError("account_repin_request_invalid") from None
+        if target["revision"]!=1 or digest(target)!=value["expected_pin_digest"]:
+            raise AccountError("account_repin_request_invalid")
+        value["target_pin"]=target
+    elif "target_pin" in message:
         raise AccountError("account_repin_request_invalid")
     for k in ("operation_id","reason"):
         if (not isinstance(value[k],str) or not 1<=len(value[k])<=160 or not value[k].strip()
@@ -42,6 +51,31 @@ def _payload(message):
             raise AccountError("account_repin_request_invalid")
         value["expected_origin_digest"]=expected
     return value
+
+
+def target_pin(ledger,value):
+    """The immutable attempt is the recovery anchor before first enforcement."""
+    if value["expected_pin_revision"]==0:
+        if not pristine(ledger): raise AccountError("provider_cli_pin_stale")
+        return value["target_pin"]
+    pin=current(ledger)
+    if (pin["revision"],digest(pin))!=(value["expected_pin_revision"],value["expected_pin_digest"]):
+        raise AccountError("provider_cli_pin_stale")
+    return pin
+
+
+def target_matches(value,pin):
+    """Historical pre-pin links carry revision-zero intent and a revision-one pair."""
+    from provider_cli_pin import validate
+    try:
+        pin=validate(pin)
+        if value.get("expected_pin_digest")!=digest(pin):return False
+        revision=value.get("expected_pin_revision")
+        if type(revision) is not int:return False
+        if revision==0:
+            return pin["revision"]==1 and validate(value.get("target_pin"))==pin
+        return revision==pin["revision"] and "target_pin" not in value
+    except (TypeError,ValueError):return False
 
 
 def _key(value):

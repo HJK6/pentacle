@@ -559,6 +559,22 @@ def test_spawn_freeze_and_unfreeze_verbs(monkeypatch, tmp_path: Path, capsys) ->
     assert calls[1]["type"] == "spawn_unfreeze"
 
 
+def test_scoped_freeze_and_proof_clear_cli_use_existing_privileged_verbs(monkeypatch,tmp_path,capsys):
+    calls=[]
+    monkeypatch.setattr(cli,"load_config",lambda:_config(tmp_path))
+    async def once(_config,payload,timeout):calls.append(payload);return {"type":"spawn_freeze.ok"}
+    monkeypatch.setattr(cli,"spawn_freeze_once",once)
+    assert cli.main(["spawn-freeze","--host","fixture-host","--reason","home slot","--ttl","120",
+        "--input-provider","codex","--input-account","primary","--expected-login-generation","initial",
+        "--maintenance-id","slot-one","--expected-hold-digest","absent"])==0
+    assert calls[0]["input_provider"]=="codex" and calls[0]["expected_hold_digest"]=="absent"
+    assert calls[0]["maintenance_id"]=="slot-one" and calls[0]["ttl_s"]==120
+    assert not {"home","binding","executable"}&calls[0].keys()
+    assert cli.main(["spawn-unfreeze","--host","fixture-host","--maintenance-id","slot-one",
+        "--expected-maintenance-digest","a"*64,"--expected-hold-digest","b"*64])==0
+    assert calls[1]["type"]=="spawn_unfreeze" and calls[1]["expected_maintenance_digest"]=="a"*64
+
+
 def test_spawn_direct_defaults_parent_to_caller_without_wrapper_workspace(monkeypatch, tmp_path: Path, capsys) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))

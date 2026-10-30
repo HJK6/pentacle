@@ -73,6 +73,7 @@ class OperatorBrowser:
 class NativeHost:
     def __init__(self, config, *, run=subprocess.run, login=native_login, observation=None, operator_browser=None):
         self.config, self.run, self.login = config, native_run if run is subprocess.run else run, login
+        self._managed_launchers=[]
         adopted = {}
         for owner, cell in config.get("cells", {}).items():
             if not isinstance(cell, dict) or not cell.get("adopt_home"): continue
@@ -189,7 +190,7 @@ class NativeHost:
                 result={**identity,"state":"done","outcome":"no_op","binding":active.public(),"proof":current_proof}
                 self._save_operation(operation_id,result)
                 return result
-        assert_drained(active,run=self.run)
+        assert_drained(active,run=self.run,host=self,launchers=self._managed_launchers)
         state={**identity,"state":"started","outcome":"execution_unresolved","started_at_ns":__import__("time").time_ns()}
         self._save_operation(operation_id,state)
         try:
@@ -199,7 +200,7 @@ class NativeHost:
             after=self.observation(target)
             if not _valid_observation(target,after): raise AccountError("account_repin_identity_invalid")
             proof=verify(target,cell,pin,run=self.run)
-            assert_drained(active,run=self.run)
+            assert_drained(active,run=self.run,host=self,launchers=self._managed_launchers)
             state.update(proof=proof,observation=after)
             self._save_operation(operation_id,state)
             self.registry.repin(active,target)
@@ -249,8 +250,9 @@ class NativeHost:
             identity={"kind":"repin","provider":old.provider,"alias":old.alias,
                 "expected_generation":old.generation,"generation":args["new_generation"],
                 "pin_revision":pin["revision"],"pin_digest":digest(pin)}
-            if (any(args.get(k)!=v for k,v in {"host":old.host,"provider":old.provider,"account":old.alias,
-                    "login_generation":old.generation,"expected_pin_revision":pin["revision"],"expected_pin_digest":digest(pin)}.items())
+            from account_repin import target_matches
+            if (not target_matches(args,pin) or any(args.get(k)!=v for k,v in {"host":old.host,"provider":old.provider,"account":old.alias,
+                    "login_generation":old.generation}.items())
                     or any(receipt.get(k)!=v for k,v in identity.items())
                     or self._read_operation(link["operation_id"])!=receipt):
                 raise AccountError("account_repin_lineage_invalid")
@@ -295,7 +297,7 @@ class NativeHost:
         if action=="repin-reconcile-status" and target_receipt is None:
             return prior
         base=self._validate_repin_links(context,cell,require_active=target_receipt is None)
-        assert_drained(base,run=self.run)
+        assert_drained(base,run=self.run,host=self,launchers=self._managed_launchers)
         links=context["links"]
         try:base_proof=verify(base,cell,pin,run=self.run)
         except AccountError:base_proof=None
@@ -327,6 +329,7 @@ class NativeHost:
         clearance=context.pop("_clearance",None)
         reconcile=context or None
         with self.registry.lock():
+            self._managed_launchers=[]
             from provider_account_mutation import status,reserve,inspect,supersede,authorize,read as mutation_read
             if action=="recovery-status":return status(self,provider,alias)
             if action=="mutation-reserve":return reserve(self,provider,alias,operation_id,reconcile)
@@ -335,9 +338,14 @@ class NativeHost:
             if action=="repin-supersede":return supersede(self,provider,alias,operation_id,reconcile)
             cell = self._cell(provider, alias)
             active = self.registry.active(provider, alias, self.config["host"])
+            if action=="launcher-status":
+                from provider_cli_occupancy import status as launcher_status
+                if active is None:raise AccountError("account_login_generation_unknown")
+                return launcher_status(self,active,(reconcile or {}).get("managed_launchers",[]))
             if action in {"enroll","adopt","repin","repin-reconcile"}:
                 authorize(self,action,{"provider":provider,"alias":alias,
                     "expected_generation":expected_generation,"generation":generation},operation_id,clearance)
+                self._managed_launchers=(mutation_read(self,"permits",operation_id) or {}).get("managed_launchers",[])
                 if action=="repin-reconcile" and mutation_read(self,"seals",operation_id+"-target"):
                     raise AccountError("account_operation_sealed")
             if action in {"verify-artifact","repin","repin-status","repin-reconcile","repin-reconcile-status","repin-reconcile-verify"}:
@@ -445,7 +453,7 @@ class NativeHost:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("observe", "observe-bound", "observe-lineage", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status", "repin-reconcile", "repin-reconcile-status", "repin-reconcile-verify", "recovery-status", "mutation-reserve", "repin-inspect", "repin-settle", "repin-supersede"))
+    parser.add_argument("action", choices=("observe", "observe-bound", "observe-lineage", "enroll", "adopt", "status", "verify-artifact", "repin", "repin-status", "repin-reconcile", "repin-reconcile-status", "repin-reconcile-verify", "recovery-status", "mutation-reserve", "repin-inspect", "repin-settle", "repin-supersede", "launcher-status"))
     parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--login-generation", required=True)
