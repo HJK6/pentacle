@@ -185,3 +185,57 @@ def test_total_deadline(protocol, monkeypatch, stage):
     assert time.monotonic() - started < .3
     if stage != "connect":
         assert socket.closed
+
+
+@pytest.mark.parametrize("verb", ["status", "acquire", "renew", "release"])
+def test_working_state_before_ready_preserves_screen_rpc(protocol, monkeypatch, verb):
+    cfg, socket = protocol
+    if verb != "status":
+        monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "fixture:seat")
+        monkeypatch.setenv("AGENT_ORCH_STREAM_TOKEN", "synthetic-seat-token")
+    original_send = socket.send
+    async def send(raw):
+        await original_send(raw)
+        if json.loads(raw)["type"] == "hello":
+            # The real daemon authenticated the connection, then delivered a
+            # working.state broadcast before its RPC ready frame.
+            socket.queue.insert(0, {"type": "working.state", "stream_id": "fixture:other"})
+    monkeypatch.setattr(socket, "send", send)
+    response = asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease." + verb}))
+    assert response["type"] == "screen.lease." + verb + ".ok"
+    requests = [frame for frame in socket.frames if frame["type"].startswith("screen.lease.")]
+    assert len(requests) == 1
+    assert requests[0].get("stream_token") == ("synthetic-seat-token" if verb != "status" else None)
+    assert socket.ready and socket.closed
+
+
+@pytest.mark.parametrize("frame_type", ["auth.error", "hello.error", "hosts.stats", "session.inventory", "snapshot", "unknown"])
+def test_other_pre_ready_frames_still_refuse(protocol, monkeypatch, frame_type):
+    cfg, socket = protocol
+    original_send = socket.send
+    async def send(raw):
+        await original_send(raw)
+        if json.loads(raw)["type"] == "hello":
+            socket.queue.insert(0, {"type": frame_type})
+    monkeypatch.setattr(socket, "send", send)
+    with pytest.raises(PermissionError, match="operator credential RPC admission refused"):
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.renew"}))
+    assert not any(frame["type"].startswith("screen.lease.") for frame in socket.frames)
+    assert socket.closed
+
+
+def test_working_state_stream_does_not_extend_readiness_deadline(protocol, monkeypatch):
+    import time
+    cfg, socket = protocol
+    original_recv = socket.recv
+    async def recv():
+        if not socket.frames:
+            return await original_recv()
+        return json.dumps({"type": "working.state"})
+    monkeypatch.setattr(socket, "recv", recv)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(wsclient.screen_lease_once(cfg, {"type": "screen.lease.acquire"}, timeout=.03))
+    assert time.monotonic() - started < .3
+    assert [frame["type"] for frame in socket.frames] == ["hello"]
+    assert socket.closed
