@@ -633,7 +633,11 @@ class EntrypointReceipts(Tmp):
         self.assertEqual((a["primary_outcome"], a["history"], a["purpose"]), ("setup_failure", "first_observed", "acceptance"))
 
     def test_resolved_default_scope_survives_setup_failure_without_prepared(self):
-        with mock.patch.multiple(ge, resolve_toolchain=lambda *a, **k: ({}, [ge.fail("toolchain", "fixture setup failure")]),
+        default_needs = []
+        def default_tools(config, needs):
+            default_needs.append(needs)
+            return {}, [ge.fail("toolchain", "fixture setup failure")]
+        with mock.patch.multiple(ge, resolve_toolchain=default_tools,
                                  pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
             code = self.run_main("--target", "npm-test", "--spec", "s", "--series", "x", "--purpose", "negative_control")
         self.assertEqual(code, 3)
@@ -641,6 +645,7 @@ class EntrypointReceipts(Tmp):
         events = [json.loads(p.read_text()) for p in files]
         self.assertEqual([e["state"] for e in events], ["started", "terminal"])
         self.assertEqual(events[-1]["effective_selection"], REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["default_patterns"])
+        self.assertEqual(default_needs, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["npm-test"]["needs"]])
         interrupt = self.tmp / "co/test/e2e/web_gate_interrupt.test.js"
         interrupt.parent.mkdir(parents=True)
         interrupt.write_text("")
@@ -653,6 +658,11 @@ class EntrypointReceipts(Tmp):
             self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/web_gate_interrupt.test.js",
                                            "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
         self.assertEqual(observed, [REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"]])
+        with mock.patch.multiple(ge, resolve_toolchain=toolchain,
+                                 pick_locale=lambda *a, **k: ("en_US.UTF-8", None), check_layout=lambda *a, **k: []):
+            self.assertEqual(self.run_main("--target", "npm-test", "--select", "test/e2e/*.test.js",
+                                           "--spec", "s", "--series", "x", "--purpose", "negative_control"), 3)
+        self.assertEqual(observed[-1], REAL_CONFIG["profiles"]["pentacle"]["targets"]["web-gate"]["needs"])
 
     def test_unresolved_config_failure_never_fabricates_scope(self):
         self.run_main("--target", "npm-test", patch_load=ge.SetupFailure([ge.fail("config", "fixture malformed config")]))

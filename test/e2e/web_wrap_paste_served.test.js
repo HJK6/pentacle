@@ -50,4 +50,3 @@ test('served adapter uses actual shortened source and refuses a dirty chat befor
     fs.rmSync(out, { recursive: true, force: true });
   }
 });
-

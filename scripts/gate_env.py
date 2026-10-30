@@ -15,7 +15,7 @@ Stdlib only; runs on any python3 >= 3.9, the prepared venv carries 3.13.
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import glob
 import hashlib
 import json
 import os
@@ -790,12 +790,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         resolved_selection = list(selection)  # retained even when setup fails before prepared
         # This explicitly selected integration file boots the same fixture as web-gate.
         # Reuse its declared prerequisites before preparing the exact child context.
-        interrupt_selected = target["kind"] == "npm_test" and any(
-            fnmatch.fnmatchcase("test/e2e/web_gate_interrupt.test.js", pattern) for pattern in selection)
-        web_selected = target["kind"] == "npm_test" and any(
-            fnmatch.fnmatchcase(file, pattern) for file in (
-                "test/e2e/web_gate_interrupt.test.js", "test/e2e/web_wrap_paste_gate.test.js",
-                "test/e2e/web_wrap_paste_served.test.js") for pattern in selection)
+        selected_files = {str(Path(file).relative_to(checkout))
+                          for pattern in selection for file in glob.glob(str(checkout / pattern), recursive=True)} if target["kind"] == "npm_test" else set()
+        interrupt_selected = "test/e2e/web_gate_interrupt.test.js" in selected_files
+        web_selected = bool(selected_files & {
+            "test/e2e/web_gate_interrupt.test.js", "test/e2e/web_wrap_paste_gate.test.js",
+            "test/e2e/web_wrap_paste_served.test.js"})
         if web_selected:
             web = profile["targets"]["web-gate"]
             target = dict(target, npm_build=web["npm_build"], test_file_timeout_ms=web["timeout_s"] * 1000)
