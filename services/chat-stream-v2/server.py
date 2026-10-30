@@ -3259,7 +3259,14 @@ class Server:
             and session.get("stream_id") == config.direct_primary_stream_id
             and session.get("session_generation") == config.direct_primary_generation
         )
-        if bound_daff or (policy is not None and policy.is_daff_backend(session)):
+        primary = getattr(self, "assistant_composite", None)
+        primary_config = getattr(primary, "config", None)
+        bound_front_desk = bool(
+            getattr(primary, "enabled", False) and primary_config is not None and primary_config.direct_primary
+            and session.get("stream_id") == primary_config.direct_primary_stream_id
+            and session.get("session_generation") == primary_config.direct_primary_generation
+        )
+        if bound_daff or bound_front_desk or (policy is not None and policy.is_daff_backend(session)):
             # Reuse hidden-seat presentation, including legacy persisted defaults.
             # Diagnostic inventories retain these rows; direct access is unchanged.
             projected["visibility"] = "hidden"

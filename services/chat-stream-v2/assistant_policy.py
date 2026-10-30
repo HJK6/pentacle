@@ -31,6 +31,9 @@ class AssistantPolicy:
             if len(daff_role) > 40 or not re.fullmatch(r"[a-z0-9_-]+", daff_role):
                 raise ValueError("PENTACLE_ASSISTANT_DAFF_ROLE must be a short role slug")
             self.extra_roles.add(daff_role)
+        # The primary assistant composite, wired by main: its in-memory binding
+        # names the front-desk seat without a store read.
+        self.front_desk = None
         self.lock = asyncio.Lock()
         # Fleet lifecycle authority: designate/transfer/revoke/handoff-carry and a
         # manager close/reparent from admission through effect all hold this
@@ -50,6 +53,23 @@ class AssistantPolicy:
     def is_daff_backend(self, row):
         return bool(row and row.get("host") == self.local_host
                     and row.get("role") in self.extra_roles)
+
+    def is_front_desk_seat(self, stream_id, fields):
+        """True for a parentless local seat that is, or is becoming, the bound front desk.
+
+        Independent of the role env: a handoff from the bound stream, the bound
+        stream itself (resume/restore), or a seat carrying a configured rebind spec.
+        """
+        composite = self.front_desk
+        if (composite is None or not composite.enabled or fields.get("parent_stream_id")
+                or str(stream_id).partition(":")[0] != self.local_host):
+            return False
+        bound = composite.config.direct_primary_stream_id
+        if bound and bound in (stream_id, fields.get("handoff_from_stream_id")):
+            return True
+        qualified = fields.get("qualified_spec_ids")
+        return bool(isinstance(qualified, (list, tuple))
+                    and composite.env_config.rebind_authorized_spec_ids.intersection(qualified))
 
     @staticmethod
     def _error(code, message):
