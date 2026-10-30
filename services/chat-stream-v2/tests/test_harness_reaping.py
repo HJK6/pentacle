@@ -708,14 +708,13 @@ def test_owned_group_exit_between_identity_check_and_registration(tmp_path: Path
 
 
 @pytest.mark.requires("tmux usable", "process start identity readable")
-@pytest.mark.parametrize("boundary", ["initial", "registered-absent-root"])
+@pytest.mark.parametrize("boundary", ["initial"] +
+    (["registered-absent-root"] if sys.platform.startswith("linux") else []))
 def test_socket_exit_during_identity_read_is_terminal(tmp_path: Path, monkeypatch, boundary):
     """Real exit/reap between the old exists probe and identity observation."""
     from tests.soak.harness import TmuxNamespace
     from tools import gate_owner_manifest as owner
 
-    if boundary == "registered-absent-root" and not sys.platform.startswith("linux"):
-        pytest.skip("the reproduced absent-root registration branch uses Linux pidfd")
     namespace = TmuxNamespace(tmp_path)
     server = subprocess.Popen(
         [namespace.real_tmux, "-D", "-f", "/dev/null", "-S", namespace.socket],
