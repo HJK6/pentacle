@@ -201,6 +201,80 @@ const directWorker = (generation = 'g1') => ({ ...ordinary('worker'), session_ge
 const inventory = (h, sessions) => vm.runInContext(`applyChatStreamState(${JSON.stringify({ connected: true, sessions })})`, h.context);
 const savedBindings = h => JSON.parse(h.dom.window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).bindings;
 
+const unmappedComposite = extra => composite('assistant', {
+  host: 'composite-host', stream_id: 'composite-host:assistant', ...extra,
+});
+const legacyWorkspace = (bindings = [{ name: 'assistant', hostId: 'local', mode: 'chat', draft: 'Unsent composite draft' }]) => ({
+  [WORKSPACE_STORAGE_KEY]: JSON.stringify({ paneCount: 2, activeSlot: 1, visibleSlots: [1, 3],
+    bindings: [null, ...bindings] }),
+});
+
+test('legacy composite bindings retain slot identity, chat and draft across reloads', async () => {
+  for (const source of [composite(), unmappedComposite()]) {
+    let storage = legacyWorkspace();
+    for (let reload = 0; reload < 3; reload++) {
+      const h = installRenderer({ questionOverride: null, storage,
+        features: { assistantDirectTarget: { ...directTarget, sourceStreamId: source.stream_id } },
+        initialSessions: [source, directWorker()] });
+      await settle();
+      assert.equal(vm.runInContext('chatSessionStateForSession(state.slots[1])?.stream_id', h.context), source.stream_id);
+      assert.equal(vm.runInContext('state.slots[1]?.assistantDirect', h.context), null, 'legacy binding stays composite');
+      assert.equal(vm.runInContext('state.slotViewModes[1]', h.context), 'chat');
+      assert.equal(vm.runInContext('JSON.stringify(state.workspace.visibleSlots)', h.context), '[1,3]');
+      assert.equal(vm.runInContext('state.workspace.activeSlot', h.context), 1);
+      assert.equal(vm.runInContext('state.workspace.paneCount', h.context), 2);
+      assert.equal(vm.runInContext('state.slots.filter(Boolean).length', h.context), 1);
+      assert.equal(h.dom.window.document.querySelector('#cell-1 .slot-chat-compose-input').value, 'Unsent composite draft');
+      assert.ok(h.dom.window.document.querySelector('#cell-1 .slot-chat-list').textContent.trim());
+      assert.deepEqual(savedBindings(h)[1], { name: 'assistant', hostId: 'local', mode: 'chat', draft: 'Unsent composite draft' });
+      storage = { [WORKSPACE_STORAGE_KEY]: h.dom.window.localStorage.getItem(WORKSPACE_STORAGE_KEY) };
+      assert.equal(h.sendCalls.length, 0);
+      assert.equal(h.closeCalls.length, 0);
+    }
+  }
+});
+
+test('composite restore rejects missing, hidden, closed and ambiguous inventory', async () => {
+  for (const sessions of [
+    [], [unmappedComposite({ visibility: 'hidden' })], [unmappedComposite({ visibility: 'unknown' })],
+    [composite('assistant', { visibility: 'hidden' })], [composite('assistant', { status: 'closed' })],
+    [unmappedComposite({ status: 'closed' })], [unmappedComposite({ closed_at: '2026-01-01' })],
+    ...[{}, { visibility: 'hidden' }, { status: 'closed' }].map(extra => [unmappedComposite(),
+      composite('assistant', { host: 'other-composite', stream_id: 'other-composite:assistant', ...extra })]),
+    [composite(), unmappedComposite({ visibility: 'hidden' })],
+    [ordinary('assistant')].map(session => ({ ...session, host: 'unmapped', stream_id: 'unmapped:assistant' })),
+  ]) {
+    const h = installRenderer({ questionOverride: null, storage: legacyWorkspace(),
+      initialSessions: [...sessions, ordinary('control')] });
+    await settle();
+    assert.equal(vm.runInContext('state.slots.filter(Boolean).length', h.context), 0, JSON.stringify(sessions));
+    assert.equal(savedBindings(h)[1], null);
+  }
+});
+
+test('duplicate legacy composite bindings open only once', async () => {
+  const binding = { name: 'assistant', hostId: 'local', mode: 'chat' };
+  const h = installRenderer({ questionOverride: null, initialSessions: [unmappedComposite()],
+    storage: legacyWorkspace([binding, binding]) });
+  await settle();
+  assert.equal(vm.runInContext('chatSessionStateForSession(state.slots[1])?.stream_id', h.context), 'composite-host:assistant');
+  assert.equal(vm.runInContext('state.slots.filter(Boolean).length', h.context), 1);
+  assert.equal(savedBindings(h)[2], null);
+});
+
+test('an explicit unmapped assistant source still validates its direct target generation', async () => {
+  for (const generation of ['g1', 'g2']) {
+    const source = unmappedComposite();
+    const h = installRenderer({ questionOverride: null, initialSessions: [source, directWorker(generation)],
+      features: { assistantDirectTarget: { ...directTarget, sourceStreamId: source.stream_id } },
+      storage: legacyWorkspace([{ name: 'worker', hostId: 'local', mode: 'chat', assistantSourceId: source.stream_id }]) });
+    await settle();
+    assert.equal(vm.runInContext('chatSessionStateForSession(state.slots[1])?.stream_id', h.context),
+      generation === 'g1' ? directTarget.streamId : undefined);
+    assert.equal(savedBindings(h)[1]?.assistantSourceId, generation === 'g1' ? source.stream_id : undefined);
+  }
+});
+
 test('first visit opens a configured direct assistant exactly as its sidebar row does', async () => {
   const h = installRenderer({ questionOverride: null, freshWorkspace: true,
     features: { assistantDirectTarget: directTarget }, initialSessions: [composite(), directWorker()] });
