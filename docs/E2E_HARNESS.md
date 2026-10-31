@@ -6,7 +6,9 @@ The public harness is provider-free and uses a disposable local daemon. It valid
 
 Use the [behavior coverage map](TEST_COVERAGE.md) to find existing protection,
 real/fake boundaries and unresolved selection; send retry to durable receipt
-is the first bounded reference flow.
+is the first bounded reference flow. The map also holds the
+[working testing standard](TEST_COVERAGE.md#working-testing-standard) for
+new or materially changed tests within existing reviews and gates.
 
 [Advisory test selection](TEST_SELECTION.md) reports affected boundaries and
 coverage gaps for an exact baseline and proposed head. It runs no tests and

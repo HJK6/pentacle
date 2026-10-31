@@ -11,6 +11,57 @@ or a certification of every assertion or installed client/provider combination.
 [Test selection](TEST_SELECTION.md) and [selective release](SELECTIVE_RELEASE.md)
 own advisory change selection. CI, merge and deployment gates remain required.
 
+## Working testing standard
+
+A good test protects intended behavior with enough realism to catch a meaningful regression and no more machinery than that protection needs. Keep existing good tests; this standard guides new/changed tests and gradual improvements.
+
+| Property | What to establish |
+|---|---|
+| **Locatable and clear** | Identify the behavior/failure protected, locate its test in the existing structure or flow map, and find its intended invocation. Confirm that runner includes it, or document a deliberate opt-in runner and its limits. |
+| **Effective** | Assertions observe the promised result or invariant and would reject a meaningful wrong outcome. Expected values are independent of the implementation logic being checked. Several assertions may protect one coherent scenario. |
+| **Controlled and isolated** | Establish relevant state/order deliberately; bound completion; control data and outbound effects; release owned resources on every exit. Wait on an observable condition where available. A bounded absence-observation window or real-clock test may be justified, with its reason, tolerance and limits stated. |
+| **Right-sized real boundary** | Keep the behavior under examination real and control unrelated dependencies. State what the test does not prove. Cases, parameter dimensions and expensive setup should protect distinct risks; similar-looking tests may exercise different boundaries. |
+
+A shared flow map improves navigation; its unfinished state is organization work, not by itself a defect in each test. For a negative side-effect claim, establish how the test would detect the prohibited effect at its chosen boundary, or state the narrower proof. A missing spy alone does not prove a gap: inspect guards and existing failure paths.
+
+Clock reads do not automatically justify sleeps: inspect existing clock/patching seams and ordering tolerances before judging them necessary or defective. A polling observation of process snapshots has blind spots; an acceptable bounded design is not proof that every prohibited call is observable. Deliberate opt-in means documented intended coverage, not exemption from required release checks.
+
+### Assess with evidence
+
+For each named scenario/property, record **supported**, **specific shortcoming**, **unknown**, or **not applicable**, with a short reason and source citation. Record evidence kind separately: **static**, **retained-run**, or **controlled-red**. Supported/static means the inspected structure supports the stated property; it is not a runtime pass or a flake-rate claim. A known static defect must name the failure mechanism. Uninspected tests remain unassessed.
+
+Retained execution counts only after checking the actual result and its source/harness/scope identity; an existing log or JUnit file alone is insufficient. Controlled-red includes a verified applied regression and its expected assertion failure, with restored GREEN. Use that proof when oracle strength is uncertain or materially rewritten; do not require a mutation for every test.
+
+Label findings as **weak test**, **coverage gap within the inspected scope**, **organization debt**, **candidate duplication**, or **necessary complexity**. Missing evidence is not itself a test failure. Similar names, elapsed duration and case counts do not establish bloat. Report measured cost at its actual scope, including setup and grouped subcases where relevant; do not compare unlike nodes as equivalent work. No summed score, file grade or suite-wide compliance percentage from a sample.
+
+### Preserve and refine
+
+Assess the reference flow with the same rubric as other flows; it need not fail to validate the rubric. Preserve unique assertions/failure modes when changing tests. Test-to-test imports are fixture dependencies: inspect all importers before a move or shared-helper change. Use focused checks while repairing and existing final-candidate gates. Classify product, harness and cleanup failures before changing an oracle.
+
+Existing focused daemon runs already include capability/assertion/skip guards. Their assertion and skip preservation checks cover the tests named in the H2 manifests; they are not a suite-wide semantic-preservation guarantee. Keep their current behavior and scope.
+
+Refine a rule when a concrete counterexample demonstrates ambiguity, unnecessary complexity or missing protection, even if only one flow exposes it. Preserve versions and recheck affected assessment rows after a meaning change. Prefer improving or retaining an existing example over adding a parallel suite.
+
+### Adoption
+
+Use this initially as guidance inside existing reviews and gates for new or materially changed tests. An unrelated legacy deficiency does not block a scoped change. Do not discard coverage, weaken assertions, add skips, enlarge timeouts or restructure the whole suite to claim compliance. No mandatory per-test form or universal fixture/test-layer template.
+
+Keep one repo-local documentation home, linked to existing runner/selection authorities. Broader blocking enforcement or new automated checks require a separate reviewed proposal defining the objective rule, scope and demonstrated benefit. This version adds no gate, registry, service, approval hop or change to existing release requirements.
+
+### Assessment scope and examples
+
+A static assessment at `1e3c3241445fcdfa4b88575c18082f8632d16cab` inspected
+22 named scenarios, rather than the whole suite. Client reconciliation, CLI
+payload and owned-cleanup examples have positive static support. Its rotated
+receipt and forced-overlap shortcomings are addressed by the reference below;
+they are historical findings, not additional open repairs. Process snapshots
+can miss brief prohibited descendants. Late-proof no-resend discrimination,
+disconnect ordering, some clock/cleanup questions and required-gate inclusion
+of standalone client tests remain unproved. The source-bound assessment is
+retained with the planning evidence; it supplies neither runtime reliability
+proof nor a suite compliance score. Remaining findings stay with the existing
+work owner for bounded, change-relevant follow-up.
+
 ## Reading the map
 
 **Inspected** means the named assertion/call path was read. **UNKNOWN** means
