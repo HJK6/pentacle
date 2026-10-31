@@ -319,9 +319,20 @@ class BlobStore:
             size = up.size
             self._uploads.pop(rid, None)
             self._drop_owner(rid, up)
+            await self._kick_outbound(msg, sha)
             return {"type": flavor.upload_ok, "request_id": rid,
                     flavor.sha_field: sha, "size_bytes": size,
                     **(managed_receipt or {})}
+
+    async def _kick_outbound(self, msg, sha):
+        """A committed blob may complete a server-owned send; never fails the upload."""
+        finisher = getattr(self.error_alerts, "finisher", None)
+        if finisher is None:
+            return
+        try:
+            await finisher.kick_blob(await self.error_alerts.principal(msg), sha)
+        except Exception:  # noqa: BLE001 - agents/anonymous callers own no mandate
+            pass
 
     async def _finish_voice(self, up):
         sha = await self.attachment_store.complete_unmanaged_upload(

@@ -25,6 +25,10 @@ def test_removed_send_delivery_shapes_do_not_reappear():
         "services/chat-stream-v2/error_adapters.py",
         "services/chat-stream-v2/error_alerts.py",
         "services/chat-stream-v2/tests/test_error_alerts.py",
+        # The committed-outbound finisher's terminal code (same alert enum).
+        "services/chat-stream-v2/outbound_finisher.py",
+        "services/chat-stream-v2/docs/committed-outbound-send.md",
+        "services/chat-stream-v2/tests/test_outbound_finisher.py",
     }
     result = subprocess.run(
         [

@@ -39,6 +39,9 @@ VALIDATORS = {
 INTENT_VALIDATOR = Draft202012Validator(
     SCHEMA["$defs"]["voice_operation"], format_checker=FormatChecker()
 )
+MANDATE_VALIDATOR = Draft202012Validator(
+    SCHEMA["$defs"]["send_mandate"], format_checker=FormatChecker()
+)
 EXPECTED_CODES = {
     "no_speech",
     "too_long",
@@ -115,6 +118,31 @@ def evaluate_implicit(operation, now):
     return "unknown", None, "transcribe"
 
 
+def evaluate_mandate(d, now):
+    """Server-owned units (send mandate); None defers to the evidence rules."""
+    state = d.get("state")
+    if state == "failed":
+        code = d.get("server_finish_failed_code")
+        if code in EXPECTED_CODES:
+            return "cancelled", code, "transcribe"
+        stage = "transcribe" if code in ("transcribe_unavailable", "transcribe_failed", "too_long") else "send"
+        return "active", "server_finish_failed", stage
+    if state == "cancelled":
+        return "cancelled", "operation_cancelled", "send"
+    if state in ("pending", "running"):
+        if d.get("ready_at"):
+            if (not d.get("transcribe_started") and not d.get("send_attempted")
+                    and now >= epoch(d["ready_at"]) + 60):
+                return "unknown", "server_finish_stalled", "upload"
+        elif now >= epoch(d["server_mandate_at"]) + 600:
+            return "unknown", "server_finish_stalled", "upload"
+    if state == "submitting" and not d.get("send_committed"):
+        if now >= epoch(d["send_attempted"]) + 60:
+            return "unknown", "send_unconfirmed", "send"
+        return "unknown", None, "send"
+    return None
+
+
 def evaluate(operation, now):
     """Project evidence, never turn a missing milestone into definite failure."""
     if operation["operation_kind"].startswith("implicit_"):
@@ -132,6 +160,10 @@ def evaluate(operation, now):
             if now >= epoch(d["send_committed"]) + 60
             else ("unknown", None, "send")
         )
+    if d.get("server_mandate"):
+        projected = evaluate_mandate(d, now)
+        if projected is not None:
+            return projected
     if e.get("outcome") == "cancelled" or e.get("code") in EXPECTED_CODES:
         return (
             "cancelled",
@@ -193,6 +225,7 @@ class ErrorAlerts:
         self.queue = queue
         self._facts_lock = asyncio.Lock()
         self.cutover_at = None
+        self.finisher = None  # OutboundFinisher, composed by Server.configure_error_alerts
         queue.error_alerts = self
         queue.register_kind(
             "error_alert", guard=self.guard, lock_factory=self.delivery_lock
@@ -326,6 +359,19 @@ class ErrorAlerts:
                     raise ValueError("invalid_request")
                 async with self._facts_lock:
                     result = await self.store.voice_report(principal, msg)
+            elif self.finisher is None:
+                raise ValueError("unavailable")
+            elif verb == "outbound.commit":
+                intent = msg["voice_operation"]
+                self.finisher.validate(intent, msg["send_mandate"])
+                await self.store.voice_register(principal, intent)
+                await self.finisher.register(principal, intent, msg["send_mandate"])
+                result = {"operation_id": intent["operation_id"], "server_send": True}
+            elif verb == "outbound.cancel":
+                result = {"operation_id": msg["operation_id"],
+                          "state": await self.finisher.cancel(principal, msg["operation_id"])}
+            elif verb == "outbound.get":
+                result = await self.finisher.get(principal, msg["operation_id"])
             else:
                 raise ValueError("invalid_request")
             return {"type": verb + ".ok", "request_id": rid, **result}
@@ -366,6 +412,12 @@ class ErrorAlerts:
                 principal, intent, upload_request_id=msg["request_id"]
             )
         return principal, intent["operation_id"]
+
+    def validate_mandate(self, intent, mandate, upload_audio):
+        """Protocol-2 init carrier: schema + semantics before anything is stored."""
+        if self.finisher is None or list(MANDATE_VALIDATOR.iter_errors(mandate)):
+            raise ValueError("invalid_request")
+        self.finisher.validate(intent, mandate, upload_audio=upload_audio)
 
     async def _implicit(self, msg, kind, origin, generation, *parts):
         """Register an installed-client voice operation, or None. Never blocks."""
@@ -619,6 +671,11 @@ class ErrorAlerts:
 
     async def reconcile(self, now=None):
         now = time.time() if now is None else now
+        if self.finisher is not None:
+            try:
+                await self.finisher.reconcile_pass(now)
+            except Exception:
+                log.warning("subsystem=error_alerts bug_ref=outbound_commit_v1 action=finisher_pass_failed")
         # No new records are backfilled from old native outbox/legacy rows.
         for operation in await self.store.voice_list():
             operation = await self._reconcile_send(operation)

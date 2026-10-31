@@ -64,7 +64,7 @@ class VoiceUploadStore:
     @staticmethod
     def _validate(msg, init):
         common = {"type", "request_id", "protocol", "upload_id"}
-        allowed = common | ({"total_bytes", "sha256", "mime", "voice_operation", "purpose"} if init else
+        allowed = common | ({"total_bytes", "sha256", "mime", "voice_operation", "purpose", "send_mandate"} if init else
                             {"offset", "data_b64", "chunk_sha256", "final"})
         if (set(k for k in msg if not k.startswith("_")) - allowed
                 or type(msg.get("protocol")) is not int or msg["protocol"] != 2
@@ -101,7 +101,8 @@ class VoiceUploadStore:
             return {"type": "upload_blob.init.ok" if init else "upload_blob.ok",
                     "request_id": rid, "protocol": 2, "upload_id": state["upload_id"],
                     "next_offset": state["next_offset"], "complete": state["complete"],
-                    **({"blob_sha": state["sha256"]} if state["complete"] else {})}
+                    **({"blob_sha": state["sha256"]} if state["complete"] else {}),
+                    **({"server_send": True} if init and "send_mandate" in msg else {})}
         except UploadError as exc:
             code = exc.code
         except OSError:
@@ -132,8 +133,19 @@ class VoiceUploadStore:
         finally:
             lock.release()
 
+    @staticmethod
+    def _audio(msg):
+        return {"sha256": msg["sha256"], "mime": msg["mime"], "bytes": msg["total_bytes"]}
+
     async def _init(self, msg, principal):
         path = self._path(principal, msg["upload_id"])
+        if "send_mandate" in msg:
+            # Validated before anything is registered; the mandate is optional.
+            try:
+                self.blobs.error_alerts.validate_mandate(
+                    msg["voice_operation"], msg["send_mandate"], self._audio(msg))
+            except (ValueError, KeyError, TypeError):
+                raise UploadError("invalid_request") from None
         async with self._catalog_lock:
             busy = {self._path(p, u) for (p, u), lock in list(self._locks.items()) if lock.locked()}
             await self.blobs._run_joined(self._reap, busy)
@@ -158,6 +170,14 @@ class VoiceUploadStore:
                         "upload_conflict" if code in ("event_conflict", "origin_mismatch") else "invalid_request") from None
                 if operation != (principal, msg["voice_operation"].get("operation_id")):
                     raise UploadError("upload_forbidden")
+                if "send_mandate" in msg:
+                    try:
+                        await self.blobs.error_alerts.finisher.register(
+                            principal, msg["voice_operation"], msg["send_mandate"],
+                            upload_audio=self._audio(msg))
+                    except ValueError as exc:
+                        raise UploadError("upload_conflict" if str(exc) == "event_conflict"
+                                          else "invalid_request") from None
                 if state is None:
                     state = {"version": 2, "principal": principal, "upload_id": msg["upload_id"],
                              **{k: msg[k] for k in ("total_bytes", "sha256", "mime", "voice_operation")},
@@ -213,6 +233,9 @@ class VoiceUploadStore:
             await self.blobs.error_alerts.store.voice_milestone(
                 state["principal"], state["voice_operation"]["operation_id"],
                 "upload_committed", blob_sha=sha)
+            finisher = self.blobs.error_alerts.finisher
+            if finisher is not None:
+                finisher.kick(state["principal"], state["voice_operation"]["operation_id"])
             complete = {**state, "complete": True, "blob_sha": sha, "last_activity": time.time()}
             await self.blobs._run_joined(self._save, path, complete)
             return complete

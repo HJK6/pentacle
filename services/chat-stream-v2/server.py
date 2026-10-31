@@ -3759,7 +3759,9 @@ class Server:
             # target after a reconnect. Old daemons simply omit this field.
             "capabilities": {
                 "close_expected_generation": True,
-                **({"error_alerts_v1": True} if self.error_alerts is not None
+                **({"error_alerts_v1": True,
+                    **({"outbound_commit_v1": True} if self.error_alerts.finisher is not None else {})}
+                   if self.error_alerts is not None
                    and self._operator_authenticated(websocket)
                    and not (msg.get("_auth_context") or {}).get("token_verified") else {}),
                 **({"consent_enrollment_offer_v1": True, "consent_open_v1": True} if (
@@ -4762,6 +4764,10 @@ class Server:
                     code = str(exc) if str(exc) in {"operator_required", "credential_revoked", "invalid_request", "operation_forbidden", "blob_forbidden", "origin_mismatch", "event_conflict"} else "invalid_request"
                     raise VerbError(code, code) from None
             self.handlers[verb] = wrapped
+        from outbound_finisher import OutboundFinisher
+        # Composed after the wrapped send so server-owned sends bind receipts.
+        self.error_alerts.finisher = OutboundFinisher(self, self.error_alerts)
+        await self.error_alerts.finisher.start()
 
     async def _on_transcribe_blob(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Transcribe an uploaded audio blob on the managed mic backend.

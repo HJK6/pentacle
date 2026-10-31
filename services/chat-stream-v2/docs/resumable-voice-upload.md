@@ -31,6 +31,9 @@ An init supplies:
 - `mime`: `audio/mp4` or `audio/wav`
 - `voice_operation`: the existing six-field object below
 - Optional `purpose: "generic"`
+- Optional `send_mandate` when the daemon advertises `outbound_commit_v1`; the
+  daemon then transcribes and sends after `upload_committed` and the ACK
+  carries `server_send: true` ([committed outbound send](committed-outbound-send.md))
 
 The frozen `voice_operation` fields are `version: 1`, `operation_id` (the
 recording UUID), `origin_stream_id`, `origin_generation`, `operation_kind`

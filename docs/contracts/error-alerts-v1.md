@@ -1,6 +1,6 @@
 # Error Alerts v1
 
-The executable wire schema is `error-alerts-v1.schema.json`: the optional `voice_operation` intent on `upload_blob_init`/`transcribe_blob` and the one `error.report` verb. There are no list, detail, mark or settings verbs.
+The executable wire schema is `error-alerts-v1.schema.json`: the optional `voice_operation` intent on `upload_blob_init`/`transcribe_blob`, the one `error.report` verb, and the committed-outbound `send_mandate` with `outbound.commit`/`outbound.cancel`/`outbound.get` ([committed outbound send](../../services/chat-stream-v2/docs/committed-outbound-send.md)). There are no list, detail, mark or settings verbs.
 
 ## Facts and delivery
 
