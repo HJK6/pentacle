@@ -285,6 +285,7 @@ def claude_observation(binding: Binding, *, collect_usage, run=subprocess.run, n
     for key, window in usage.items():
         # Billing/breakdown metadata shares this cache with timed quotas.
         if not isinstance(window, dict) or "resets_at" not in window: continue
+        if key == "extra_usage" and window["resets_at"] is None and "utilization" in window and window["utilization"] is None: continue
         if not isinstance(window["resets_at"], str): raise AccountError("provider_windows_invalid")
         try:
             reset = datetime.fromisoformat(window["resets_at"].replace("Z", "+00:00")).timestamp()

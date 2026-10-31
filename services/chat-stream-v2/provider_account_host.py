@@ -194,10 +194,10 @@ class NativeHost:
         state={**identity,"state":"started","outcome":"execution_unresolved","started_at_ns":__import__("time").time_ns()}
         self._save_operation(operation_id,state)
         try:
-            before=self.observation(target)
+            before=self._probe_observation(target)
             if not _valid_observation(target,before): raise AccountError("account_repin_identity_invalid")
             minimal_turn(target,model=cell["model"],effort=cell["effort"],cwd=cell["cwd"],run=self.run)
-            after=self.observation(target)
+            after=self._probe_observation(target)
             if not _valid_observation(target,after): raise AccountError("account_repin_identity_invalid")
             proof=verify(target,cell,pin,run=self.run)
             assert_drained(active,run=self.run,host=self,launchers=self._managed_launchers)

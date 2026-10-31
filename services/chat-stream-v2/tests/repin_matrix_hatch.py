@@ -22,7 +22,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
     import provider_cli_artifact
     from account_repin import _host_id,_key,_read,_write,_payload
     store,runtime,host,old,request,calls,native,logins,cell,pin=j
-    execute=runtime.executor.execute;save=host._save_operation;observe=host.observation
+    execute=runtime.executor.execute;save=host._save_operation;observe=host._probe_observation
     verify=provider_cli_artifact.verify;settle=state._settle;expected_logins=len(logins)
     historical=await store.open_session(old.host,"hatch-prior-session",provider=old.provider,
         session_generation="hatch-old-attribution",account_binding=old.public())
@@ -67,14 +67,14 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             save(operation,data)
             if data.get("state")=="started" and data.get("kind")=="repin":raise AccountError("account_host_unreachable")
         if variant in {"N1","R1"}:mp.setattr(provider_cli_artifact,"verify",refused)
-        elif variant=="N2":host.observation=failed
+        elif variant=="N2":host._probe_observation=failed
         elif variant=="U0":runtime.executor.execute=outage_after_admission(execute)
         elif variant=="U1":host._save_operation=stopped
         try:
             with pytest.raises(VerbError):await runtime.operation(node)
         finally:
             mp.setattr(state,"_settle",settle);mp.setattr(provider_cli_artifact,"verify",verify)
-            host.observation=observe;host._save_operation=save;runtime.executor.execute=execute
+            host._probe_observation=observe;host._save_operation=save;runtime.executor.execute=execute
         parent=node["operation_id"]
     elif variant=="N3":
         # First agree the current pair, then lose a genuinely successful no-op.

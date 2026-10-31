@@ -328,14 +328,14 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             attempt=fresh(request,current,"transport-fault",reconcile_of=parent)
         before=host.registry.active(old.provider,old.alias,old.host)
         boundary={"offline":False,"hit":False}
-        original=runtime.executor.hosts.run_command;save=host._save_operation;observe=host.observation
+        original=runtime.executor.hosts.run_command;save=host._save_operation;observe=host._probe_observation
         def started(op,data):
             save(op,data)
             if data.get("state")=="started" and data.get("kind") in {"repin","repin-reconcile"}:
                 raise AccountError("account_host_unreachable")
         def failed(_):raise AccountError("provider_transport_failed")
         if effect=="started":host._save_operation=started
-        if effect=="failed":host.observation=failed
+        if effect=="failed":host._probe_observation=failed
         async def broken(hostname,*argv,timeout):
             if boundary["offline"]:raise OSError("fixture offline")
             if argv[2] in {"repin","repin-reconcile"}:
@@ -356,7 +356,7 @@ async def prepare(case,j,mp,current,parent,tmp_path,attempt):
             if effect in {"absent","started","failed","no-op"}:
                 assert host.registry.active(old.provider,old.alias,old.host).public()==before.public()
         finally:
-            host._save_operation=save;host.observation=observe;runtime.executor.hosts.run_command=original
+            host._save_operation=save;host._probe_observation=observe;runtime.executor.hosts.run_command=original
         return {"current":current,"parent":attempt["operation_id"],"expected_logins":expected_logins}
     if case.row=="B-generation-exclusion":
         if case.variant=="repin-first":
