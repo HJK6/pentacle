@@ -55,6 +55,17 @@ async function questionFreeText({ session, report, fixture, runtime, cdp, timeou
     const status = await fixtureRequest(runtime, fixture.streamId, { type:'prompt.status', question_id:questionId });
     report.ok(`${mode} durable answer resolved once to its producer`, status.question?.state === 'answered' && status.question?.producer_stream_id === fixture.streamId,
       { state:status.question?.state, answer:status.question?.answer, producer:status.question?.producer_stream_id });
+    const answer = status.question?.answer;
+    const expected = ['answer-0', 'answer-1', 'answer-2', 'answer-3'][index];
+    const textField = mode === 'free_text' ? 'text' : 'custom_text';
+    const otherTextField = mode === 'free_text' ? 'custom_text' : 'text';
+    const detail = { index, mode, expected: { [textField]: expected, selections: [] }, actual: answer };
+    report.ok(`${mode} index ${index} durable ${textField} matches typed answer`,
+      answer?.[textField] === expected, detail);
+    report.ok(`${mode} index ${index} durable ${otherTextField} has no answer`,
+      answer?.[otherTextField] == null || answer[otherTextField] === '', detail);
+    report.ok(`${mode} index ${index} durable selections are empty`,
+      Array.isArray(answer?.selections) && answer.selections.length === 0, detail);
     await session.waitFor(`!document.querySelector(${JSON.stringify(card)})`);
     await reloadDashboardPage({ session, cdp, timeoutMs });
     // The reloaded page loads its session list asynchronously; focusStreamId
