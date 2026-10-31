@@ -6114,10 +6114,22 @@ function restoreWorkspaceBinding(slot, binding) {
     }, { slot, quiet: true }) !== slot) return null;
     if (binding.mode && binding.mode !== state.slotViewModes[slot]) updateSlotViewMode(slot, binding.mode);
   } else {
-    const session = findSession(binding.name, binding.hostId);
-    if (!session || openElsewhere(binding.name, binding.hostId)) return null;
-    opened = attachSession(slot, binding.name, session.display_name || binding.name, binding.hostId,
-      { viewMode: binding.mode, activate: false });
+    let session = findSession(binding.name, binding.hostId);
+    if (!session || isCompositeAssistant(session)) {
+      const composite = canonicalChatSessionStateForNameHost(binding.name, binding.hostId);
+      if (!isCompositeAssistant(composite) || composite.status === 'closed' || composite.closed_at != null
+        || !['default', 'visible'].includes(composite.visibility)) return null;
+      if (state.chatStream.sessions.filter(candidate => isCompositeAssistant(candidate)
+        && [candidate.stream_id, candidate.session_name, candidate.session_id, candidate.name].includes(binding.name)).length !== 1) return null;
+      session = sidebarSessionForStream(composite.stream_id);
+    }
+    if (!session) return null;
+    const hostId = session.hostId || binding.hostId;
+    if (openElsewhere(session.name, hostId)) return null;
+    // Legacy bindings keep the composite itself, even when its sidebar entry
+    // now has a direct target. Only assistantSourceId opts into that routing.
+    opened = attachSession(slot, session.name, session.display_name || session.name, hostId,
+      { viewMode: binding.mode, activate: false, draftStreamId: sidebarStreamIdForSession(session) });
   }
   // The chat surface exists once attachSession's synchronous part has run; the
   // draft must not wait for (or depend on) the terminal PTY. Never copy it over
@@ -6153,6 +6165,10 @@ async function restoreWorkspaceSessions() {
         state.workspaceRestoring = false;
         applyWorkspaceLayout();
         persistWorkspace();
+        window.PentacleHarness?.emit?.('workspace:restore', { data: {
+          subsystem: 'workspace', bug_ref: 'web_reload_composite_restore',
+          requested: bindings.filter(Boolean).length, restored: state.slots.filter(Boolean).length,
+        } });
       }
     }
   }

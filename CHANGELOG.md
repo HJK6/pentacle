@@ -23,6 +23,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- Saved assistant composite chats keep their pane and conversation after a web reload.
 - Initial CLI pin readiness excludes verified closed or missing input holders while preserving live and unknown obligations; durable tell custody prevents promotion across an unrecorded paste.
 - Same-ID tell retries can settle late native input proof without sending the message again; missing or ambiguous original proof stays pending.
 - The front-desk seat now stays hidden through every handoff, resume, restore and rebind: the daemon hides the bound seat and any parentless seat carrying the configured recovery work item, and a hidden qualified front-desk seat may rebind the primary assistant.
