@@ -103,10 +103,10 @@ async def _flood_tells(store: Store, count: int) -> None:
         )
 
 
-async def _put_tell(store: Store, tell_id: str, *, delivered: bool = False) -> None:
+async def _put_tell(store: Store, tell_id: str) -> None:
     await store.put_tell_delivery(
         tell_id,
-        {"payload_digest": "d", "reply": {"delivery_status": "delivered" if delivered else "committed_pending_proof"}, "delivery": None},
+        {"payload_digest": "d", "reply": {"delivery_status": "committed_pending_proof"}, "delivery": None},
     )
 
 
@@ -142,8 +142,7 @@ def test_retention_keeps_tells_of_unsettled_notices_of_any_kind_and_prunes_settl
                     if kind == NOTICE_KIND_NOTIFICATION_ANSWER:
                         extra["metadata"] = {"producer_session_generation": "g"}
                     await _enqueue_kind(queue, tell_id, kind, **extra)
-                await _put_tell(store, tell_id, delivered=tell_id in {
-                    "t-delivered-report", "t-terminal-report", "t-delivered-answer", "t-none"})
+                await _put_tell(store, tell_id)
             await store.submit(lambda conn: (
                 conn.execute("UPDATE v2_outbound_notices SET delivered_at='2026-10-21T00:00:00Z' "
                              "WHERE tell_id IN ('t-delivered-report','t-delivered-answer')"),
@@ -164,7 +163,8 @@ def test_retention_keeps_tells_of_unsettled_notices_of_any_kind_and_prunes_settl
         "t-delivered-report": False,
         "t-terminal-report": False,
         "t-delivered-answer": True,
-        "t-none": False,
+        # Ordinary pending custody survives independently of notice settlement.
+        "t-none": True,
     }
 
 

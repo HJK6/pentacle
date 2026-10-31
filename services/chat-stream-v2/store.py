@@ -4056,12 +4056,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if isinstance(delivery, dict):
                 store_exchange.append(conn, delivery.get("exchange"))
                 conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
-            # Unresolved tells keep their original no-second-paste custody.
-            # Delivered rows remain bounded unless a notice/exchange owns them.
+            # Unresolved ordinary tells keep their no-second-paste custody.
+            # Notice-owned rows retain their existing settlement/retention rules.
             conn.execute(
                 "DELETE FROM v2_tell_deliveries WHERE "
-                "json_extract(reply,'$.reply.delivery_status')='delivered' "
-                "AND COALESCE(json_extract(reply,'$.delivery.delivery_status'),'delivered')='delivered' "
+                "((json_extract(reply,'$.reply.delivery_status')='delivered' "
+                "AND COALESCE(json_extract(reply,'$.delivery.delivery_status'),'delivered')='delivered') "
+                "OR EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id)) "
                 "AND NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
                 "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id "
                 "AND (n.kind IN ('notification_answer','error_alert') OR (n.terminal_at IS NULL AND n.delivered_at IS NULL))) "
