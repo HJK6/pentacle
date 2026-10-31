@@ -102,7 +102,19 @@ for (const [label, overrides, id] of [
   const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 2, id }, deps);
   await take.run();
   assert.deepEqual(deps.calls.map(c => c[0]), ['upload', 'transcribe', 'send']);
+  assert.equal(Object.hasOwn(deps.calls[2][1], 'identity'), false, 'refused commit keeps the client ids');
   assert.equal(take.snapshot().status, 'sent');
+});
+test('discard while the commit is in flight cancels the stored mandate and never uploads', async () => {
+  let reply; const cancelled = [];
+  const deps = committedIo(['committed'], { commit: () => new Promise(r => { reply = r; }), cancel: async id => { cancelled.push(id); return { ok: true, state: 'cancelled' }; } });
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  const running = take.run();
+  while (!reply) await flush();
+  take.discard(); reply({ ok: true, server_send: true }); await running; await flush();
+  assert.deepEqual(cancelled, [TAKE]);
+  assert.equal(deps.calls.length, 0);
+  assert.equal(take.snapshot().status, 'discarded');
 });
 test('ambiguous commit fails for Retry, which repeats the identical commit', async () => {
   let attempts = 0; const units = [];

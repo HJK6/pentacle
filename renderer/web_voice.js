@@ -83,9 +83,11 @@ function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupt
     if (!origin?.generation) return false;
     const unit = await voiceCommit({ id, streamId, generation: origin.generation, composite: !!origin.composite, clientBuild: io.clientBuild || 'pentacle-web',
       audio: { sha256: await sha256Hex(await blob.arrayBuffer()), mime: blob.type, bytes: blob.size }, durationS });
-    identity = { requestId: unit.send_mandate.request_id, optimisticId: unit.send_mandate.optimistic_id };
     const reply = await io.commit(unit);
-    if (reply?.ok && reply.server_send === true) return true;
+    if (reply?.ok && reply.server_send === true) {
+      identity = { requestId: unit.send_mandate.request_id, optimisticId: unit.send_mandate.optimistic_id };
+      return true;
+    }
     if (reply == null || NOT_COMMITTED.has(reply.error_code)) return false; // null: no bridge, no frame
     throw { code: 'upload_failed' };
   }
@@ -113,6 +115,7 @@ function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupt
       running = true; emit({ status: 'transcribing', error: '' }); beacon('transcribing');
       try {
         if (committed === undefined) committed = await commit();
+        if (discarded) { if (committed) Promise.resolve(io.cancel?.(id)).catch(() => {}); return; }
         if (!blobSha) {
           let uploaded;
           try { uploaded = await io.upload(blob); }
