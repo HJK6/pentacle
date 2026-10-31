@@ -104,6 +104,12 @@ def isolated_tmux_env(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_smoke_notify(tmp_path, monkeypatch):
+    """A real smoke failure raises a live notification; tests never reach the live CLI."""
+    monkeypatch.setenv("PENTACLE_SMOKE_AGENT_ORCH", str(tmp_path / "no-live-agent-orch"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_chat_checkpoint(tmp_path, monkeypatch):
     import satellite
     monkeypatch.setattr(satellite, "DEFAULT_CHAT_CHECKPOINT_PATH", str(tmp_path / "satellite-chat.json"))
