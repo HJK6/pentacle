@@ -118,13 +118,13 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 | Daemon `tests/smoke/`; `tests/soak/` | 8; 3 | Same runner: smoke explicitly selects its directory; soak is opt-in with `-m soak`. Merge is unit + smoke, not soak or exhaustive repin. |
 | `services/agent-orch/tests/` | 81 | `cli-pytest --select tests`; separate Public checks contracts partition. |
 | `services/_shared/tests/` | 8 | `shared-pytest --select tests`; separate from daemon tiers. |
-| Root `test/` | 205 | Root npm shallow globs select 203 JS/TS tests. `test/test_specs_parser.py` and `test/test_voice_reply.py` are outside those globs: invocation UNKNOWN. |
+| Root `test/` | 205 | Root npm shallow globs select 203 JS/TS tests. `test/test_specs_parser.py` and `test/test_voice_reply.py` are outside those globs; their focused commands are documented in [public boundary](public_boundary.md) and [room microphone conversation](room_mic_conversation.md), respectively. These explicit entries do not establish required-CI inclusion. |
 | `test/e2e/terminal_interaction_runtime/` | 3 | Its `*.test.js` files join root npm tests; `npm run test:terminal-interactions` separately launches the owned Electron harness. |
 | `test/e2e/`; `test/e2e/lib/`; `test/e2e/scenarios/` | 7; 7; 31 | Outside root npm shallow globs. Explicit npm selections can run nested tests. Default browser invocation uses the registry below, not a recursive scenario-directory glob. |
 | `pentacle-chat-core/tests/` | 44 | Public checks frontend runs `npm --prefix pentacle-chat-core test`: TS tests plus `typecheck:test`. `typeContracts.ts` is typecheck support, not an executed `.test.ts` file. |
 | `mic-server/test/` | 24 | Public checks contracts explicitly runs `PYTHONPATH=mic-server python3 -m pytest mic-server/test`. |
 | `scripts/` | 6 | CI explicitly runs `test_check_public_residue.py` and `test_ci_required_aggregate.py`; `test_gate_env.py`, `test_select_tests.py` and two pushguard shell proofs have separate entries, not blanket CI inclusion. |
-| Other | 2 | `services/_shared/test_resource_ledger.py` and `services/chat-stream-v2/tools/test_attempt_metrics.py`: default invocation UNKNOWN. |
+| Other | 2 | The filename candidates `services/_shared/test_resource_ledger.py` and `services/chat-stream-v2/tools/test_attempt_metrics.py` are support modules, not standalone test suites. The former is imported by CLI conftest/tests; the latter is tested by daemon `tests/test_test_attempt_metrics.py` and used by `tools/usage_rollup.py`. Historical filename counts remain unchanged. |
 | `vendor/dashboard-library/tests/` | 1 | Vendor `npm test`, explicitly invoked by Public checks frontend. |
 
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
