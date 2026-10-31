@@ -42,7 +42,11 @@ reopens through it, so it binds only a currently valid target. A saved pane
 whose session is gone, whose direct target is offline or on another
 generation, or whose session is already open in another pane stays empty, and
 its saved draft is dropped; a session is never opened twice.
-Appearance and feature choices remain in `pentacle.settings.v1`.
+Appearance and feature choices remain in `pentacle.settings.v1`. In web Settings,
+**Chat width** sets the shared maximum for the transcript and composer: **Narrow**
+(600px), **Default** (760px), or **Wide** (1000px). It applies immediately and
+restores on reload, including newly opened chat popouts. Smaller panes fit the
+available space. Electron keeps its 760px maximum.
 
 These preferences are local to each browser profile, not synced across devices.
 Unsent drafts are stored in that profile's local storage, so do not use a
@@ -63,6 +67,15 @@ a restyled transcript. Every rule is scoped to `html.chat-first-style`
 unchanged. Layout and behaviour are the same either way.
 
 ## Validation
+
+`node --test test/renderer_settings_chat_width.test.js` covers Chat width
+normalization, Settings interactions, storage failures and the Electron fallback.
+After `npm run prestart && npm run build:web`, run
+`node test/e2e/web_chat_width_gate.cjs <artifact-directory>` for Chromium layout,
+draft, reload, split-pane and popout checks against an owned disposable web host
+and daemon fixture. Use `PENTACLE_PLAYWRIGHT` for an installed Playwright module
+and `PENTACLE_TEST_BROWSER` for a browser executable override; the runner releases
+its browser, web host and daemon and keeps measurements/screenshots in that directory.
 
 `npm test` includes `test/chat_first_workspace.test.js` (renderer DOM: bounded
 preferences, placement, first-visit default for one, zero and several

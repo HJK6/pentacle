@@ -200,6 +200,7 @@ function normalizeAppearance(raw = {}) {
   const density = raw.density === 'compact' ? 'compact' : 'comfortable';
   return {
     theme, density,
+    chatWidth: raw.chatWidth === 'narrow' || raw.chatWidth === 'wide' ? raw.chatWidth : 'default',
     ...(raw.gridColSplit !== undefined ? { gridColSplit: normalizeSplit(raw.gridColSplit) } : {}),
     gridColSplitTop: normalizeSplit(raw.gridColSplitTop === undefined ? raw.gridColSplit : raw.gridColSplitTop),
     gridColSplitBottom: normalizeSplit(raw.gridColSplitBottom === undefined ? raw.gridColSplit : raw.gridColSplitBottom),
@@ -259,8 +260,12 @@ const themeVarMap = {
   userLine: '--pc-user-line',
 };
 
-function applyAppearanceSettings({ emit = false } = {}) {
+function applyAppearanceSettings({ emit = false, changedKey } = {}) {
   state.appearance = normalizeAppearance(state.appearance || loadAppearanceSettings());
+  if (window.__PENTACLE_CONFIG__) {
+    const caps = { narrow: 600, default: 760, wide: 1000 };
+    document.documentElement.style.setProperty('--chat-content-max-width', `${caps[state.appearance.chatWidth]}px`);
+  }
   const palettes = chatFirstStyleEnabled() ? CHAT_FIRST_THEME_VARS : DESIGN_THEME_VARS;
   const palette = palettes[state.appearance.theme] || palettes.dark;
   document.documentElement.dataset.theme = state.appearance.theme;
@@ -281,8 +286,9 @@ function applyAppearanceSettings({ emit = false } = {}) {
     }
   }
   renderSidebar();
-  window.PentacleHarness?.emit?.('settings:appearance', { data: { ...state.appearance } });
-  if (emit) window.PentacleHarness?.emit?.('settings:toggle', { data: { key: 'appearance', value: { ...state.appearance } } });
+  const evidence = changedKey === 'chatWidth' ? { subsystem: 'settings', bug_ref: 'web_chat_max_width_setting' } : {};
+  window.PentacleHarness?.emit?.('settings:appearance', { data: { ...state.appearance, ...evidence } });
+  if (emit) window.PentacleHarness?.emit?.('settings:toggle', { data: { key: 'appearance', value: { ...state.appearance }, ...evidence } });
 }
 
 function terminalThemeForAppearance() {
@@ -9099,7 +9105,7 @@ function setupSettingsPanel() {
     row.innerHTML =
       `<div class="settings-row-text">
         <div class="settings-row-label">${esc(label)}</div>
-        <div class="settings-row-desc">${esc(desc)}</div>
+        ${desc ? `<div class="settings-row-desc">${esc(desc)}</div>` : ''}
       </div>
       <div class="settings-segment" role="group" aria-label="${esc(label)}">
         ${options.map((option) => `<button class="settings-segment-btn" type="button" data-value="${esc(option.value)}" aria-pressed="false">${esc(option.label)}</button>`).join('')}
@@ -9110,7 +9116,7 @@ function setupSettingsPanel() {
         state.appearance = normalizeAppearance({ ...state.appearance, [key]: next });
         saveAppearanceSetting(key, state.appearance[key]);
         setSegment(row, state.appearance[key]);
-        applyAppearanceSettings({ emit: true });
+        applyAppearanceSettings({ emit: true, changedKey: key });
       });
     });
     setSegment(row, state.appearance[key]);
@@ -9125,6 +9131,14 @@ function setupSettingsPanel() {
     { value: 'comfortable', label: 'Comfortable' },
     { value: 'compact', label: 'Compact' },
   ]);
+
+  if (window.__PENTACLE_CONFIG__) {
+    buildAppearanceRow('chatWidth', 'Chat width', '', [
+      { value: 'narrow', label: 'Narrow' },
+      { value: 'default', label: 'Default' },
+      { value: 'wide', label: 'Wide' },
+    ]);
+  }
 
   // Default view chooser (replaces the removed "Chat UI" enable/disable toggle).
   // Chat view is always available; this only picks what a newly-opened session
