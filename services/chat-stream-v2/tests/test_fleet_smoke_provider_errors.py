@@ -251,3 +251,67 @@ def test_matrix_and_cli_preserve_throttled_cell_as_nonpass(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "UNTESTED" and payload["ok"] is False
     assert payload["untested"][0]["reason"] == "provider_throttled"
+
+
+@pytest.mark.parametrize("error, expect_live", [
+    (smoke.ProviderTurnError("provider_error", "fixture progress"), True),
+    (smoke.ProviderTurnError("provider_throttled", "fixture progress"), False),
+], ids=["failure-notifies", "untested-stays-disposable"])
+def test_only_real_cell_failure_raises_live_notification(monkeypatch, error, expect_live):
+    _calls, callbacks = cell_callbacks(error)
+
+    @contextmanager
+    def connection(*_args):
+        yield (callbacks["rpc"], callbacks["wait_ready"], callbacks["wait_event"],
+               callbacks["register_owned"], callbacks["close_owned"])
+
+    live = []
+    monkeypatch.setattr(smoke, "_operator_connection", connection)
+    monkeypatch.setattr(smoke, "publish_smoke_card", lambda payload: {"cleaned_up": True})
+    monkeypatch.setattr(smoke, "notify_operator_failure", lambda payload: live.append(payload) or {})
+    (row,) = smoke.run_matrix("ws://fixture", Path("unused"), 180, (("satellite", "codex", "promptless"),))
+    if expect_live:
+        (card,) = live
+        assert (card["producer"], card["severity"]) == ("spawn-fleet-smoke", "critical")
+        assert card["title"] == f"Spawn smoke failed: satellite/codex/{row['stage']}"
+        assert card["dedup_key"] == f"spawn-fleet-smoke:satellite:codex:promptless:{row['stage']}"
+        assert "operator_notify" in row
+    else:
+        assert live == [] and "operator_notify" not in row
+
+
+def test_live_notification_is_dated_and_carries_no_seat_identity(monkeypatch, tmp_path):
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(argv=argv, env=kwargs["env"])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("AGENT_ORCH_STREAM_ID", "fixture:seat")
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    result = smoke.notify_operator_failure({
+        "producer": "spawn-fleet-smoke", "severity": "critical", "title": "Spawn smoke failed: h/p/s",
+        "body": "fixture", "dedup_key": "spawn-fleet-smoke:h:p:m:s"})
+    today = smoke.dt.datetime.now(smoke.dt.timezone.utc).date().isoformat()
+    assert result == {"dedup_key": f"spawn-fleet-smoke:h:p:m:s:{today}", "returncode": 0}
+    argv = seen["argv"]
+    assert argv[0] == str(tmp_path / "no-live-agent-orch") and argv[1] == "notify"
+    assert argv[argv.index("--severity") + 1] == "critical"
+    assert argv[argv.index("--dedup-key") + 1] == result["dedup_key"]
+    assert "AGENT_ORCH_STREAM_ID" not in seen["env"]
+
+
+def test_connection_failure_raises_live_notification(monkeypatch):
+    @contextmanager
+    def connection(*_args):
+        raise RuntimeError("fixture handshake failed")
+        yield
+
+    live = []
+    monkeypatch.setattr(smoke, "_operator_connection", connection)
+    monkeypatch.setattr(smoke, "notify_operator_failure", lambda payload: live.append(payload) or {})
+    (row,) = smoke.run_matrix("ws://fixture", Path("unused"), 180, (("satellite", "codex", "promptless"),))
+    assert row["class"] == "failure"
+    (card,) = live
+    assert (card["severity"], card["title"]) == ("critical", f"Spawn smoke failed: satellite/codex/{row['stage']}")
+    assert "operator_notify" in row
