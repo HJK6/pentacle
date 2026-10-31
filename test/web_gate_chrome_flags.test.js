@@ -15,6 +15,7 @@ const INVENTORY = {
   'own_assistant_bootstrap_browser.cjs': 1, 'web_assistant_direct_entry_gate.cjs': 2,
   'web_chat_history_paging_gate.cjs': 1, 'web_chat_history_retention_gate.cjs': 1,
   'web_chat_history_transport_gate.cjs': 1, 'web_default_pane_gate.cjs': 1,
+  'web_chat_width_gate.cjs': 1,
   'web_gate.js': 1, 'web_popouts_gate.cjs': 1, 'web_sidebar_resize_gate.cjs': 1,
   'web_wrap_paste_gate.test.js': 1,
 };

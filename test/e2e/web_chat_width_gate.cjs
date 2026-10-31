@@ -9,6 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { startDaemon } = require('./scenarios/assistant_direct');
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 const { chromium } = require(process.env.PENTACLE_PLAYWRIGHT || 'playwright');
 const out = path.resolve(process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-chat-width-')));
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -61,7 +62,7 @@ async function run() {
     process.env.PENTACLE_CONFIG = daemon.configFile;
     web = await require('../../server').main(['--profile', daemon.configFile, '--bind', '127.0.0.1', '--port', '0']);
     browser = await chromium.launch({ headless: true,
-      executablePath: process.env.PENTACLE_TEST_BROWSER || process.env.PENTACLE_CHROME, args: ['--no-sandbox'] });
+      executablePath: process.env.PENTACLE_TEST_BROWSER || process.env.PENTACLE_CHROME, args: headlessChromeArgs(['--no-sandbox'], { playwright: true }) });
     const context = await browser.newContext({ viewport: { width: 1800, height: 1000 } });
     const page = await context.newPage();
     await page.goto(web.url);
