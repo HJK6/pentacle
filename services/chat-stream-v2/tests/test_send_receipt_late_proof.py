@@ -60,8 +60,17 @@ async def add_proof(store, key, *, archive_only=False):
             "DELETE FROM session_event_tail WHERE identity=?", (identity,)), c.commit()))
 
 
-async def read_receipt(store, key, proof):
-    server = Server(store=store, sessions=_VisibleSessions())
+class _RecordingComms:
+    def __init__(self):
+        self.calls = []
+
+    async def send(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        raise AssertionError("Receipt lookup must not send")
+
+
+async def read_receipt(store, key, proof, comms=None):
+    server = Server(store=store, sessions=_VisibleSessions(), comms=comms)
     msg = {"type": "send.receipt.get", "to_stream_id": TARGET, "request_id": key}
     if proof is not None:
         msg["original_request"] = proof
@@ -76,14 +85,17 @@ def test_late_provider_proof_promotes_without_resending(tmp_path, archive_only):
         store, key, proof = await setup_receipt(tmp_path)
         try:
             await add_proof(store, key, archive_only=archive_only)
-            row = await read_receipt(store, key, proof)
+            comms = _RecordingComms()
+            row = await read_receipt(store, key, proof, comms=comms)
+            assert comms.calls == []
             assert row["state"] == "landed"
             assert row["submission_confirmed"] is True
             history = await store.submit(lambda c: c.execute(
                 "SELECT state FROM v2_send_receipts WHERE request_id=? ORDER BY rowid",
                 (key,)).fetchall())
             assert [r[0] for r in history] == ["accepted", "landed"]
-            await read_receipt(store, key, proof)
+            await read_receipt(store, key, proof, comms=comms)
+            assert comms.calls == []
             count = await store.submit(lambda c: c.execute(
                 "SELECT COUNT(*) FROM v2_send_receipts WHERE request_id=?", (key,)).fetchone()[0])
             assert count == 2
