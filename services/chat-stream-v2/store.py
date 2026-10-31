@@ -6328,7 +6328,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         prior = await self.get_tell_delivery(tell_id)
         if (prior is not None and isinstance(prior.get("delivery"), dict)
                 and isinstance(prior.get("payload_digest"), str)
-                and prior["delivery"].get("delivery_status") in {"committed_pending_proof", "proof_pending"}
+                and prior["delivery"].get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES
+                and not (prior["delivery"].get("delivery_status") == "proof_unavailable"
+                         and prior["delivery"].get("submission_attempts") == 0)
                 and not prior["delivery"].get("notification_answer_generation")
                 and prior["delivery"].get("to_stream_id") == event.get("stream_id")):
             await self.promote_tell_delivery(tell_id, prior["payload_digest"], reconcile=True)

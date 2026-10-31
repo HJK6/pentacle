@@ -11,8 +11,10 @@ from test_tell_late_proof_controls import setup
 
 
 @pytest.mark.parametrize("ingress", ["single", "batch"])
-@pytest.mark.parametrize("case", ["matching", "wrong-id", "wrong-text", "wrong-generation", "missing-anchor", "absent"])
-def test_ingest_records_only_exact_original_tell_proof(monkeypatch, ingress, case):
+@pytest.mark.parametrize("case, state", [(case, "committed_pending_proof") for case in
+    ["matching", "wrong-id", "wrong-text", "wrong-generation", "missing-anchor", "absent"]]
+    + [("matching", "proof_pending"), ("matching", "proof_unavailable")])
+def test_ingest_records_only_exact_original_tell_proof(monkeypatch, ingress, case, state):
     monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
     monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
 
@@ -24,13 +26,14 @@ def test_ingest_records_only_exact_original_tell_proof(monkeypatch, ingress, cas
             first = await comms.tell(request)
             assert first["delivery_status"] == "committed_pending_proof"
             original = await store.get_tell_delivery(request["tell_id"])
-            if case in {"missing-anchor", "wrong-generation"}:
+            if case in {"missing-anchor", "wrong-generation"} or state != "committed_pending_proof":
                 def change(conn):
                     import json
                     value = json.loads(conn.execute("SELECT reply FROM v2_tell_deliveries WHERE tell_id=?",
                         (request["tell_id"],)).fetchone()[0])
+                    value["reply"]["delivery_status"] = value["delivery"]["delivery_status"] = state
                     if case == "missing-anchor": value["delivery"].pop("proof_generation")
-                    else: value["delivery"]["proof_generation"] = "different-generation"
+                    elif case == "wrong-generation": value["delivery"]["proof_generation"] = "different-generation"
                     conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
                                  (json.dumps(value), request["tell_id"]))
                     conn.commit()
