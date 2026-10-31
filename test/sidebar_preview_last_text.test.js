@@ -18,10 +18,6 @@ const COMPOSITE_ROW = {
   visibility: 'visible', preview: '', last_text: "Got it. Pinning now.", last_kind: 'ASSIST_TEXT',
 };
 
-// Phase 1 (web ahead of the daemon): the composite shows nothing. The follow-up web
-// release that removes the gate changes this one value to COMPOSITE_ROW.last_text.
-const COMPOSITE_EXPECTED = '';
-
 const shown = (rows) => projectChatStreamSessionsToDesktop(rows, () => 'local')
   .map((p) => [p.stream_id, sanitizeSidebarDetail(p.preview)]);
 
@@ -42,6 +38,6 @@ test('markdown in last_text renders as its words', () => {
     [['local:row-claude', 'Result Gate passed with code']]);
 });
 
-test('composite row follows the phase gate', () => {
-  assert.deepEqual(shown([COMPOSITE_ROW]), [['local:assistant', COMPOSITE_EXPECTED]]);
+test('composite row previews its last_text like any other row', () => {
+  assert.deepEqual(shown([COMPOSITE_ROW]), [['local:assistant', COMPOSITE_ROW.last_text]]);
 });
