@@ -299,3 +299,19 @@ def test_live_notification_is_dated_and_carries_no_seat_identity(monkeypatch, tm
     assert argv[argv.index("--severity") + 1] == "critical"
     assert argv[argv.index("--dedup-key") + 1] == result["dedup_key"]
     assert "AGENT_ORCH_STREAM_ID" not in seen["env"]
+
+
+def test_connection_failure_raises_live_notification(monkeypatch):
+    @contextmanager
+    def connection(*_args):
+        raise RuntimeError("fixture handshake failed")
+        yield
+
+    live = []
+    monkeypatch.setattr(smoke, "_operator_connection", connection)
+    monkeypatch.setattr(smoke, "notify_operator_failure", lambda payload: live.append(payload) or {})
+    (row,) = smoke.run_matrix("ws://fixture", Path("unused"), 180, (("satellite", "codex", "promptless"),))
+    assert row["class"] == "failure"
+    (card,) = live
+    assert (card["severity"], card["title"]) == ("critical", f"Spawn smoke failed: satellite/codex/{row['stage']}")
+    assert "operator_notify" in row

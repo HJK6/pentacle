@@ -93,6 +93,23 @@ def notify_operator_failure(payload: dict) -> dict:
         env=env, capture_output=True, text=True, timeout=30)
     return {"dedup_key": dedup_key, "returncode": proc.returncode}
 
+
+def _failure_card(host: str, provider: str, prompt_mode: str, stage: str, exc: Exception) -> dict:
+    return {
+        "producer": "spawn-fleet-smoke",
+        "severity": "critical",
+        "title": f"Spawn smoke failed: {host}/{provider}/{stage}",
+        "body": f"prompt_mode={prompt_mode}; {exc}",
+        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{prompt_mode}:{stage}",
+    }
+
+
+def _notify_failure(row: dict, card: dict) -> None:
+    try:
+        row["operator_notify"] = notify_operator_failure(card)
+    except Exception as notify_error:
+        row["operator_notify_error"] = str(notify_error)
+
 def smoke_plan() -> dict[str, object]:
     """Resolve the scheduled matrix from the daemon's explicit machine file."""
     raw_path = os.environ.get("PENTACLE_MACHINES_FILE", "").strip()
@@ -948,21 +965,12 @@ def run_matrix(
                         except Exception as card_error:
                             row["smoke_card_error"] = str(card_error)
                         continue
-                    card = {
-                        "producer": "spawn-fleet-smoke",
-                        "severity": "critical",
-                        "title": f"Spawn smoke failed: {host}/{provider}/{stage}",
-                        "body": f"prompt_mode={prompt_mode}; {exc}",
-                        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{prompt_mode}:{stage}",
-                    }
+                    card = _failure_card(host, provider, prompt_mode, stage, exc)
                     try:
                         row["smoke_card"] = publish_smoke_card(card)
                     except Exception as card_error:
                         row["smoke_card_error"] = str(card_error)
-                    try:
-                        row["operator_notify"] = notify_operator_failure(card)
-                    except Exception as notify_error:
-                        row["operator_notify_error"] = str(notify_error)
+                    _notify_failure(row, card)
         except Exception as exc:
             # Connection or handshake failure still counts as a red in the
             # returned JSON/log evidence.
@@ -976,6 +984,8 @@ def run_matrix(
             failures.append(row)
             if evidence is not None and classification["class"] == "untested":
                 evidence.append({"outcome": "UNTESTED", **row})
+            if classification["class"] == "failure":
+                _notify_failure(row, _failure_card(host, provider, prompt_mode, row["stage"], exc))
     return failures
 
 

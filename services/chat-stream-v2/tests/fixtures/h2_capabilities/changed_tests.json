@@ -94,6 +94,7 @@
     "test_deploy_script.py::test_web_reload_requires_positive_unloaded_state",
     "test_deploy_script.py::test_web_reload_refuses_descriptor_identity_before_mutation",
     "test_fleet_smoke_provider_errors.py::test_only_real_cell_failure_raises_live_notification",
-    "test_fleet_smoke_provider_errors.py::test_live_notification_is_dated_and_carries_no_seat_identity"
+    "test_fleet_smoke_provider_errors.py::test_live_notification_is_dated_and_carries_no_seat_identity",
+    "test_fleet_smoke_provider_errors.py::test_connection_failure_raises_live_notification"
   ]
 }
