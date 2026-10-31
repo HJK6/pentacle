@@ -70,3 +70,53 @@ def test_ingest_records_only_exact_original_tell_proof(monkeypatch, ingress, cas
         finally:
             store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("ingress", ["single", "batch"])
+@pytest.mark.parametrize("timing", ["during-paste", "before-finalization"])
+def test_early_native_proof_preserves_final_delivery_metadata(monkeypatch, ingress, timing):
+    monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(comms_module, "SUBMISSION_EVIDENCE_POLL_S", 0.001)
+
+    async def run():
+        store, sessions, comms, tmux, request = await setup()
+        sender = "localhost:v2-sender"
+        request.update(from_stream_id=sender, _auth_context={"stream_id": sender, "token_verified": True})
+        async def ingest():
+            event = normalize_codex_rollout_record({"type": "response_item", "timestamp": "2026-10-31T22:00:00Z",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": tmux.pastes[0]}]}},
+                host="localhost", session_name="v2-late-proof", session_id="native-session")[0]
+            if ingress == "single":
+                await store.append_session_event(request["stream_id"], event, identity="early-native", limit=500)
+            else:
+                await store.append_session_events_lifecycle_cas([{"stream_id": request["stream_id"],
+                    "event": event, "identity": "early-native"}], limit=500)
+        if timing == "during-paste":
+            paste = tmux.paste
+            async def immediate(name, text):
+                await paste(name, text)
+                await ingest()
+            tmux.paste = immediate
+        else:
+            promote = store.promote_tell_delivery
+            async def before_finalize(*args, **kwargs):
+                if kwargs.get("prepared_result") is not None:
+                    await ingest()
+                return await promote(*args, **kwargs)
+            store.promote_tell_delivery = before_finalize
+        try:
+            reply = await comms.tell(request)
+            saved = await store.get_tell_delivery(request["tell_id"])
+            delivery = saved["delivery"]
+            assert reply["delivery_status"] == "delivered"
+            assert delivery["original_to_stream_id"] == request["stream_id"]
+            assert delivery["route_hops"] == [request["stream_id"]]
+            assert delivery["enqueued_at"] and "exchange" in delivery
+            assert delivery["delivery_attempts"] == delivery["submission_attempts"] == 1
+            assert delivery["request_payload_hash"] == saved["payload_digest"]
+            assert delivery["proof_generation"] and type(delivery["proof_watermark"]) is int
+            assert (await comms.tell(request))["duplicate"]
+            assert len(tmux.pastes) == 1 and tmux.enter_only == 0
+        finally:
+            store.stop()
+    asyncio.run(run())

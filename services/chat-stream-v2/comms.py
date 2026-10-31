@@ -949,6 +949,10 @@ class Comms:
                 # A stale/corrupt completion cannot overwrite original custody.
                 finalized = await self.store.get_tell_delivery(tell_id)
                 self._assert_same_payload(tell_id, digest, finalized)
+            # Ingest may have recorded proof while this was still a preparation
+            # row. Finalize its route/exchange metadata before reconciling it.
+            if finalized["reply"].get("delivery_status") == COMMITTED_PENDING_PROOF:
+                finalized = (await self.store.promote_tell_delivery(tell_id, digest, reconcile=True)) or finalized
             return finalized["reply"]
         reply["ledger_row_id"] = await self.store.put_tell_delivery(tell_id, envelope)
         return reply
