@@ -67,7 +67,8 @@ def test_codex_unverified_or_changed_identity_never_returns_quota(tmp_path, case
     with pytest.raises(AccountError): codex_observation(binding(tmp_path), rpc_factory=RPC)
 
 
-@pytest.mark.parametrize("case", ["plain", "metadata", "null_reset", "numeric_reset", "invalid_reset"])
+@pytest.mark.parametrize("case", ["plain", "metadata", "null_extra_usage", "extra_usage_nonnull_utilization",
+    "extra_usage_missing_utilization", "null_reset", "numeric_reset", "invalid_reset"])
 def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path, case):
     account = binding(tmp_path, "claude")
     def run(argv, **kwargs):
@@ -88,6 +89,12 @@ def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path, case):
                 "seven_day_breakdown": {"as_of": "2026-01-01T00:00:00Z", "rows": []},
                 "limits": [], "member_dashboard_available": False,
             })
+        elif case == "null_extra_usage":
+            usage["extra_usage"] = {"utilization": None, "resets_at": None}
+        elif case == "extra_usage_nonnull_utilization":
+            usage["extra_usage"] = {"utilization": 12, "resets_at": None}
+        elif case == "extra_usage_missing_utilization":
+            usage["extra_usage"] = {"resets_at": None}
         elif case != "plain":
             usage["five_hour"]["resets_at"] = {
                 "null_reset": None, "numeric_reset": 1234, "invalid_reset": "not-a-timestamp",
@@ -99,7 +106,7 @@ def test_claude_all_windows_from_one_fresh_named_home_cache(tmp_path, case):
     # Native login account cache exists before quota collection.
     collect(account, {"CLAUDE_CONFIG_DIR": str(tmp_path)})
     ticks = iter([1000, 1001])
-    if case not in {"plain", "metadata"}:
+    if case not in {"plain", "metadata", "null_extra_usage"}:
         with pytest.raises(AccountError, match="provider_windows_invalid"):
             claude_observation(account, collect_usage=collect, run=run, now=lambda: next(ticks))
         return

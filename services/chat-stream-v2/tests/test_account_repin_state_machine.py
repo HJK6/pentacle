@@ -575,7 +575,7 @@ def test_b_non_split_auth_settlement_then_authorized_recovery_uses_real_transpor
         store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch,transport=True)
         observe=host.observation
         def expired(_):raise AccountError("provider_auth_failed")
-        host.observation=expired
+        host._probe_observation=expired
         try:
             with pytest.raises(VerbError):await runtime.operation(request)
             host.observation=observe;host._probe_observation=expired

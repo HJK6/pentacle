@@ -80,13 +80,13 @@ def test_host_success_central_stale_recovery_uses_immutable_target(tmp_path,monk
 def test_pre_pin_confirmed_non_split_failure_does_not_become_a_permanent_fence(tmp_path,monkeypatch,provider,platform):
     async def run():
         store,runtime,host,old,request,calls,native,logins,cell,pin=await journey(tmp_path,monkeypatch,provider,platform)
-        observe=host.observation
+        observe=host._probe_observation
         def network(_):raise AccountError("provider_transport_failed")
-        host.observation=network
+        host._probe_observation=network
         try:
             with pytest.raises(VerbError):await runtime.operation(request)
             assert host.registry.active(provider,old.alias,old.host).key==old.key
-            host.observation=observe
+            host._probe_observation=observe
             fresh=dict(request,operation_id="fresh-after-pre-pin-failure",new_generation="fresh-successor")
             result=(await runtime.operation(fresh))["result"]
             assert result["binding"]["generation"]=="fresh-successor"

@@ -203,8 +203,8 @@ def test_native_repin_failure_never_logs_in_or_imports_successor(tmp_path,monkey
         original_run=host.run
         if failure in {"auth","network"}:
             def observation_error(_): raise AccountError("provider_auth_failed" if failure=="auth" else "provider_transport_failed")
-            host.observation=observation_error
-        if failure=="identity": host.observation=lambda b:dict(observation(b),provider_id="foreign")
+            host._probe_observation=observation_error
+        if failure=="identity": host._probe_observation=lambda b:dict(observation(b),provider_id="foreign")
         if failure=="resource": Path(cell["resource_root"]).write_text("tampered")
         if failure=="symlink":
             linked=tmp_path/"linked";linked.symlink_to(cell["executable"]);cell["executable"]=str(linked)
@@ -628,7 +628,7 @@ def test_reconcile_failed_or_unreachable_host_is_parked(tmp_path,monkeypatch,cas
         store,runtime,host,old,original,calls,native,logins,cell,_=j
         execute=runtime.executor.execute
         if case=="tamper": Path(cell["resource_root"]).write_text("tampered")
-        if case=="auth": host.observation=lambda b:(_ for _ in ()).throw(AccountError("provider_auth_failed"))
+        if case=="auth": host._probe_observation=lambda b:(_ for _ in ()).throw(AccountError("provider_auth_failed"))
         if case=="incompatible-home": Path(old.home).chmod(0o777)
         async def fail(*args,**kwargs):
             if args[1]=="repin-reconcile":

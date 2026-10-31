@@ -176,7 +176,7 @@ async def run(case,tmp_path,mp):
     store,runtime,host,old,request,calls,native,logins,cell,pin=j
     runtime._matrix_trace=[]
     before=await snapshot(j);outcome="failed";admitted=None
-    execute=runtime.executor.execute;original_run=host.run;observe=host.observation
+    execute=runtime.executor.execute;original_run=host.run;observe=host.observation;probe=host._probe_observation
     import provider_cli_artifact
     verify=provider_cli_artifact.verify;registry_repin=host.registry.repin
     current=pin;parent=None;attempt=request;late_dispatch=None;reanchor=False
@@ -227,9 +227,9 @@ async def run(case,tmp_path,mp):
         elif case.row in {"B-origin-reanchor","B-combined-liveness","B-S1-settled-tail","B-S1-mixed","B-fence-union"}:
             if case.row=="B-combined-liveness" and not need_split:
                 def failed_identity(_):raise AccountError("provider_auth_failed")
-                host.observation=failed_identity
+                host._probe_observation=failed_identity
                 with pytest.raises(VerbError):await runtime.operation(request)
-                host.observation=observe
+                host._probe_observation=probe
                 assert not (await recovery(runtime,old))["fence_causes"]
                 await runtime.record_failure(old,"auth")
                 host._probe_observation=failed_identity
@@ -327,7 +327,7 @@ async def run(case,tmp_path,mp):
                 if case.row.endswith("before") or case.row=="B-S1-failed" or (case.row.endswith("after") and counter["n"]==2):
                     raise AccountError("provider_transport_failed")
                 return observe(account)
-            host.observation=observation
+            host._probe_observation=observation
             if case.row.endswith("turn"):
                 def fail_turn(argv,**kw):
                     if "Reply exactly OK" in argv:
@@ -400,7 +400,7 @@ async def run(case,tmp_path,mp):
             parent=None
         else:raise AssertionError("unimplemented matrix row "+case.row)
         await checkpoint(j,"named-row-boundary")
-        runtime.executor.execute=execute;host.run=original_run;host.observation=observe;host.registry.repin=registry_repin
+        runtime.executor.execute=execute;host.run=original_run;host.observation=observe;host._probe_observation=probe;host.registry.repin=registry_repin
         mp.setattr(provider_cli_artifact,"verify",verify)
         if late_dispatch and case.row=="B-Z-late":
             baseline=list(native)
