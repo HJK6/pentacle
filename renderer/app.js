@@ -3223,8 +3223,15 @@ function ensureSlotChatSurface(slot) {
         },
         upload: blob => uploadVoiceBlob(window.cc, blob),
         transcribe: payload => window.cc.chatTranscribeBlob(payload),
-        send: ({ streamId, text, meta }) => window.PentacleChatStore.sendTurn(streamId, text, [], { meta }),
+        send: ({ streamId, text, meta, identity }) => window.PentacleChatStore.sendTurn(streamId, text, [], { meta, identity }),
         telemetry: (event, tags) => window.PentacleChatCore?.logTelemetry?.(event, tags),
+        commit: unit => window.cc.chatOutboundCommit?.(unit),
+        outcome: operationId => window.cc.chatOutboundGet?.(operationId),
+        cancel: operationId => window.cc.chatOutboundCancel?.(operationId),
+        origin: streamId => {
+          const session = window.PentacleChatStore?.getState?.()?.sessions?.find(item => item.stream_id === streamId);
+          return session ? { generation: session.session_generation, composite: session.session_kind === 'assistant_composite' } : null;
+        },
       });
 	  fileInputEl.addEventListener('change', () => {
 	    const owner = captureComposer(slot);

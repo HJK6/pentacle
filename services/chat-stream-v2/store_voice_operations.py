@@ -412,12 +412,13 @@ class VoiceOperationsStoreMixin:
         return await self.submit(op)
 
     async def outbound_rows(self):
-        """Operations carrying a server send mandate (bounded by voice_prune)."""
+        """Mandate operations the finisher still owns; terminal rows are never scanned."""
         return await self.submit(
             lambda conn: [
                 decode(r)
                 for r in conn.execute(
                     "SELECT * FROM voice_operations WHERE json_extract(data,'$.server_mandate') IS NOT NULL "
+                    "AND json_extract(data,'$.state') IN ('pending','running','submitting') "
                     "ORDER BY created_at,operation_id"
                 )
             ]

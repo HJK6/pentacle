@@ -10,6 +10,7 @@ const { runGridSplit } = require('./grid_split_scenario');
 const { publicChatRendererContracts } = require('./public_chat_renderer_contracts');
 const { micPanelAnswerWindow } = require('./mic_panel_scenario');
 const { webVoice } = require('./web_voice_scenario');
+const { webVoiceReloadAfterCommit } = require('./web_voice_reload_scenario');
 const { micSourceSelector } = require('./mic_source_scenario');
 const { chatFileDelivery } = require('./chat_file_delivery_scenario');
 const { webDashboardsRevamp, reloadDashboardPage } = require('./dashboard_scenario');
@@ -556,6 +557,7 @@ const SCENARIOS = [
   ['chat-file-delivery', chatFileDelivery],
   ['web-wrap-paste', wrapPasteProof],
   ['web-chat-voice', webVoice],
+  ['web-voice-reload-after-commit', webVoiceReloadAfterCommit],
   ['public-chat-renderer-contracts', publicChatRendererContracts],
   // Self-contained: appends and removes its own probe node; renders the shipped
   // mic-state view model against status fixtures (answer window + silent toggle).

@@ -336,6 +336,16 @@ the pending row is observed, and the provider send is captured. No physical
 microphone or live provider is used, and no live transcription backend is
 contacted.
 
+`web-chat-voice` refuses `chat-stream:outbound-commit` so it keeps covering the
+client path. `web-voice-reload-after-commit`
+([web_voice_reload_scenario.js](../test/e2e/lib/web_voice_reload_scenario.js))
+covers the committed path against the real loopback daemon. Its ASR backend is
+an in-process fixture in [web_gate_daemon.py](../test/e2e/lib/web_gate_daemon.py)
+that holds until the scenario writes a release file. The page reloads after the
+daemon starts transcription, and delivery is read from the daemon's send
+receipts. A reload before the commit is the control, and it loses the take on
+every build.
+
 The scenario retains recording duration/accessible Cancel, visible
 `backend_unavailable` with Retry, stable transcription identity, one text row,
 media-track release and the assertion **chat mic leaves room mic untouched**.

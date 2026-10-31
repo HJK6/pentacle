@@ -7,7 +7,7 @@ Once the bytes are on the daemon, it finishes the send: it transcribes a voice t
 The snapshot advertises `capabilities.outbound_commit_v1: true` to an authenticated v2 operator connection (the same gate as `error_alerts_v1`). Clients send mandates only when it is advertised. Without a mandate, nothing changes: no finisher runs and installed builds keep their client-owned transcribe and send.
 
 - Mobile voice: an optional `send_mandate` on the protocol-2 `upload_blob_init` (see [resumable-voice-upload.md](resumable-voice-upload.md)). Clients send it on every init of the take. The init ACK carries `server_send: true` when the mandate is stored. The mandate's audio descriptor is the init's own `sha256`/`mime`/`total_bytes`.
-- Photo messages and web voice: `outbound.commit {request_id, voice_operation, send_mandate}` returns `outbound.commit.ok {operation_id, server_send: true}`. `voice_operation.operation_kind` is `message` for a photo message. The client then uploads with ordinary protocol-1 `upload_blob_*`. Web voice includes `send_mandate.audio`.
+- Photo messages and web voice: `outbound.commit {request_id, voice_operation, send_mandate}` returns `outbound.commit.ok {operation_id, server_send: true}`. `voice_operation.operation_kind` is `message` for a photo message. The client then uploads with ordinary protocol-1 `upload_blob_*`. Web voice includes `send_mandate.audio`. The web chat composer (`renderer/web_voice.js`) commits each take this way and polls `outbound.get`; see [chat_protocol.md](../../../docs/chat_protocol.md).
 
 ## Mandate
 

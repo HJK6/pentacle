@@ -716,6 +716,18 @@ async def test_u10_missing_image_stays_running_and_stalls_without_sending(voice_
 
 
 @pytest.mark.asyncio
+async def test_u3d_finished_mandate_rows_leave_the_reconcile_scan(voice_harness):
+    """QA F4: committed-never-proved rows stay for alerts but are not rescanned."""
+    h = voice_harness
+    m = voice_meta(h)
+    await upload_voice(h, m, voice_mandate(m["voice_operation"]))
+    oid = m["voice_operation"]["operation_id"]
+    done = await settle(h, oid)
+    assert done["data"]["state"] in ("committed", "proved")
+    assert oid not in [r["operation_id"] for r in await h.server.store.outbound_rows()]
+
+
+@pytest.mark.asyncio
 async def test_u10_web_voice_commit_then_protocol1_audio_sends_once(voice_harness):
     h = voice_harness
     origin = h.origin["session_generation"]

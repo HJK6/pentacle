@@ -86,6 +86,21 @@ def epoch(value):
     )
 
 
+def send_committed(result):
+    """A send reply that proves the message was accepted for the origin."""
+    return bool(
+        result.get("action_committed")
+        or result.get("submission_confirmed")
+        or result.get("delivery") in ("landed", "persisted", "accepted")
+    )
+
+
+def _server_request_ids(data):
+    return data.get("server_send_request_ids") or (
+        [data["server_send_request_id"]] if data.get("server_send_request_id") else []
+    )
+
+
 def fingerprint(ctx):
     return hashlib.sha256(
         "\0".join((ctx["principal"], ctx["family"], ctx.get("stage") or "", ctx["code"])).encode()
@@ -508,12 +523,7 @@ class ErrorAlerts:
                 await self._quiet(m(principal, oid, "send_failed", request_id=rid))
             raise
         if bound:
-            committed = (
-                result.get("action_committed")
-                or result.get("submission_confirmed")
-                or result.get("delivery") in ("landed", "persisted", "accepted")
-            )
-            await self._quiet(m(principal, oid, "send_committed" if committed else "send_failed", request_id=rid))
+            await self._quiet(m(principal, oid, "send_committed" if send_committed(result) else "send_failed", request_id=rid))
             if result.get("submission_confirmed") is True:
                 await self._quiet(m(principal, oid, "send_proved", request_id=rid))
         return result
@@ -577,11 +587,7 @@ class ErrorAlerts:
         result = await handler(
             {**msg, "_voice_operation_generation": op["origin_generation"]}
         )
-        if (
-            result.get("action_committed")
-            or result.get("submission_confirmed")
-            or result.get("delivery") in ("landed", "persisted", "accepted")
-        ):
+        if send_committed(result):
             await self.store.voice_milestone(
                 principal, oid, "send_committed", request_id=msg["request_id"]
             )
@@ -730,43 +736,44 @@ class ErrorAlerts:
 
     async def _reconcile_send(self, operation):
         data = operation["data"]
-        if data.get("send_proved"):
+        if data.get("send_proved") or not _server_request_ids(data):
             return operation
-        request_ids = data.get("server_send_request_ids") or (
-            [data["server_send_request_id"]]
-            if data.get("server_send_request_id")
-            else []
-        )
-        for request_id in request_ids:
+        await self.send_receipts(operation)
+        return await self.store.voice_get(operation["principal"], operation["operation_id"])
+
+    async def send_receipts(self, operation):
+        """Record server-bound send receipts as milestones (client-reported ids
+        are never consulted); returns proved, committed, not_landed or None."""
+        outcome = None
+        for request_id in _server_request_ids(operation["data"]):
             receipt = await self.store.reconcile_send_receipt(
                 operation["origin_stream_id"],
                 request_id,
                 original_generation=operation["origin_generation"],
             )
-            if receipt and receipt.get("state") != "not_landed":
+            if not receipt:
+                continue
+            if receipt.get("state") == "not_landed":
+                outcome = outcome or "not_landed"
+                continue
+            await self.store.voice_milestone(
+                operation["principal"],
+                operation["operation_id"],
+                "send_committed",
+                request_id=request_id,
+                now=receipt.get("created_at"),
+            )
+            if receipt.get("submission_confirmed") is True:
                 await self.store.voice_milestone(
                     operation["principal"],
                     operation["operation_id"],
-                    "send_committed",
+                    "send_proved",
                     request_id=request_id,
                     now=receipt.get("created_at"),
                 )
-                if receipt.get("submission_confirmed") is True:
-                    await self.store.voice_milestone(
-                        operation["principal"],
-                        operation["operation_id"],
-                        "send_proved",
-                        request_id=request_id,
-                        now=receipt.get("created_at"),
-                    )
-                    break
-        return (
-            await self.store.voice_get(
-                operation["principal"], operation["operation_id"]
-            )
-            if request_ids
-            else operation
-        )
+                return "proved"
+            outcome = "committed"
+        return outcome
 
     async def _reconcile_fact(self, row, now):
         ctx = row["error_context"]

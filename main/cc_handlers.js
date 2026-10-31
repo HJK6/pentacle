@@ -263,6 +263,16 @@ function createCcHandlers({
       try { return { ...(await chatStreamClient.transcribeBlob(payload || {})), ok: true }; }
       catch (error) { return { ok: false, error_code: error?.error_code || error?.code || normalizeChatStreamError(error) }; }
     });
+    for (const [channel, call] of [
+      ['chat-stream:outbound-commit', payload => chatStreamClient.outboundCommit(payload || {})],
+      ['chat-stream:outbound-get', operationId => chatStreamClient.outboundGet(operationId)],
+      ['chat-stream:outbound-cancel', operationId => chatStreamClient.outboundCancel(operationId)],
+    ]) {
+      target.handle(channel, async (_event, arg) => {
+        try { return { ...(await call(arg)), ok: true }; }
+        catch (error) { return { ok: false, error_code: error?.error_code || error?.code || normalizeChatStreamError(error) }; }
+      });
+    }
     target.handle('chat-stream:fetch-blob', (_event, blobSha) => fetchBlobReply(chatStreamClient, blobSha));
 
     registerAssetIpcHandlers(target, chatStreamClient, normalizeChatStreamError, assetPopouts);

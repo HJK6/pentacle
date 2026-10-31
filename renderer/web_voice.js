@@ -25,23 +25,94 @@ function failureMessage(error) {
   if (code === 'upload_failed' || code === 'upload') return 'Audio upload failed.';
   if (code === 'too_long') return 'That recording is too long to transcribe.';
   if (code === 'server_overloaded') return 'Server is busy. Retry when ready.';
+  if (code === 'transcribe_unavailable') return 'Transcription is unavailable right now.';
+  if (code === 'no_speech') return 'Nothing was recognized.';
+  if (code === 'origin_unavailable') return 'Originating chat is unavailable.';
   return String(code || 'Voice recording failed.');
+}
+
+const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const COMMIT_POLL_MS = 1000;
+const COMMIT_POLL_MAX = 1800;
+// Definite refusals: the daemon stored no mandate, so the take keeps the
+// client-owned path. Anything else may have stored one; Retry repeats the
+// identical (idempotent) commit instead.
+const NOT_COMMITTED = new Set(['unsupported', 'unsupported_in_v2', 'invalid_request', 'operator_required', 'credential_revoked', 'operation_forbidden']);
+
+async function sha256Hex(data) {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+// The daemon's voice-v1 derivation (receipt_proof.verified_original_generation).
+async function voiceRequestId(logicalId, target, generation, sequence) {
+  const packed = new TextEncoder().encode(JSON.stringify([logicalId, target, generation, sequence]));
+  return `voice-send-${(await sha256Hex(packed)).slice(0, 40)}`;
+}
+
+// docs/committed-outbound-send.md: the mandate a web voice take commits before its upload.
+async function voiceCommit({ id, streamId, generation, composite, clientBuild, audio, durationS }) {
+  const sequence = 1;
+  const optimisticId = `voice-${id}`;
+  const requestId = await voiceRequestId(id, streamId, generation, sequence);
+  return {
+    voice_operation: { version: 1, operation_id: id, origin_stream_id: streamId, origin_generation: generation, operation_kind: 'voice_chat', client_build: clientBuild },
+    send_mandate: {
+      version: 1, request_id: requestId, optimistic_id: optimisticId, ...(composite ? { msg_id: optimisticId } : {}), sequence,
+      meta: { voice: { duration_s: durationS } }, client_build: clientBuild,
+      original_request: { protocol: 'voice-v1', logical_id: id, target: streamId, generation, sequence },
+      audio,
+    },
+  };
 }
 
 // Own the audio until transcription succeeds. Once a text frame can leave,
 // ordinary optimistic-send reconciliation and Retry own delivery instead.
+// With outbound_commit_v1 the take commits its send before uploading, so the
+// daemon finishes it even if this page goes away; a refused or failed commit
+// falls back to the client-owned path with the same identity.
 function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupted = false }, io) {
   let state = { status: 'ready', durationS, streamId, id, levels, interrupted };
   let running = false; let discarded = false; let blobSha; let transcript;
+  let committed; let identity; // committed: undefined (not tried), true (daemon owns it), false (client owns it)
   const emit = patch => { state = { ...state, ...patch }; io.onState?.(state); };
   const beacon = outcome => io.telemetry?.('chat_voice_send_outcome', { subsystem: 'web_voice', bug_ref: BUG_REF, stream_id: streamId, recording_id: id, duration_s: durationS, outcome });
+  const sleep = io.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  async function commit() {
+    const origin = io.commit && UUID.test(id) && ['audio/wav', 'audio/mp4'].includes(blob.type) ? io.origin?.(streamId) : null;
+    if (!origin?.generation) return false;
+    const unit = await voiceCommit({ id, streamId, generation: origin.generation, composite: !!origin.composite, clientBuild: io.clientBuild || 'pentacle-web',
+      audio: { sha256: await sha256Hex(await blob.arrayBuffer()), mime: blob.type, bytes: blob.size }, durationS });
+    identity = { requestId: unit.send_mandate.request_id, optimisticId: unit.send_mandate.optimistic_id };
+    const reply = await io.commit(unit);
+    if (reply?.ok && reply.server_send === true) return true;
+    if (reply == null || NOT_COMMITTED.has(reply.error_code)) return false; // null: no bridge, no frame
+    throw { code: 'upload_failed' };
+  }
+  async function outcome() {
+    for (let polls = 0; polls < COMMIT_POLL_MAX && !discarded; polls++) {
+      const reply = await io.outcome(id);
+      if (reply?.ok && (reply.state === 'committed' || reply.state === 'proved')) return 'sent';
+      if (reply?.ok && reply.state === 'cancelled') return 'cancelled';
+      if (reply?.ok && reply.state === 'failed') { committed = false; throw { code: reply.milestones?.server_finish_failed_code || 'send_failed' }; }
+      if (reply?.error_code === 'operation_forbidden') { committed = false; throw { code: 'upload_failed' }; }
+      await sleep(COMMIT_POLL_MS);
+    }
+    if (!discarded) throw { code: 'send_unconfirmed' };
+    return 'cancelled';
+  }
   return {
     snapshot: () => state,
-    discard() { discarded = true; blob = null; emit({ status: 'discarded' }); beacon('discarded'); },
+    discard() {
+      discarded = true; blob = null; emit({ status: 'discarded' }); beacon('discarded');
+      // Never implies landed: a send already in flight still arrives as an ordinary row.
+      if (committed === true) Promise.resolve(io.cancel?.(id)).catch(() => {});
+    },
     async run() {
       if (running || discarded || state.status === 'sent') return;
       running = true; emit({ status: 'transcribing', error: '' }); beacon('transcribing');
       try {
+        if (committed === undefined) committed = await commit();
         if (!blobSha) {
           let uploaded;
           try { uploaded = await io.upload(blob); }
@@ -50,6 +121,11 @@ function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupt
           blobSha = uploaded.blob_sha;
         }
         if (discarded) return;
+        if (committed) {
+          if (await outcome() === 'sent') { blob = null; emit({ status: 'sent', optimisticId: identity.optimisticId }); beacon('dispatched'); }
+          else if (!discarded) { discarded = true; blob = null; emit({ status: 'discarded' }); beacon('discarded'); }
+          return;
+        }
         if (!transcript) {
           const result = await io.transcribe({ request_id: `transcribe-${id}`, blob_sha: blobSha, mime: blob.type });
           if (!result || result.ok === false) throw result || new Error('Transcription failed.');
@@ -57,7 +133,7 @@ function createVoiceTake({ streamId, blob, durationS, id, levels = [], interrupt
         }
         if (discarded) return;
         if (!transcript) throw new Error('Nothing was recognized.');
-        const optimisticId = io.send({ streamId, text: transcript, meta: { voice: { duration_s: durationS } } });
+        const optimisticId = io.send({ streamId, text: transcript, meta: { voice: { duration_s: durationS } }, ...(identity ? { identity } : {}) });
         if (!optimisticId) throw new Error('Originating chat is unavailable.');
         blob = null;
         emit({ status: 'sent', optimisticId }); beacon('dispatched');
@@ -189,7 +265,7 @@ function createBrowserRecorder(env = globalThis, { getDeviceId = () => null, onD
 }
 
 let captureOwner = null;
-function bindComposerMic({ web, env = globalThis, button, panel, composer = button.closest('.slot-chat-compose'), takeMount, roomToggle, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry }) {
+function bindComposerMic({ web, env = globalThis, button, panel, composer = button.closest('.slot-chat-compose'), takeMount, roomToggle, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry, commit, outcome, cancel: cancelCommit, origin: originOf, clientBuild }) {
   if (!web) { button.addEventListener('click', roomToggle); return; }
   button.setAttribute('aria-label', 'Record voice message'); button.title = 'Record voice message';
   button.innerHTML = '<svg class="voice-mic-glyph" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
@@ -334,7 +410,7 @@ function bindComposerMic({ web, env = globalThis, button, panel, composer = butt
       if (gen !== generation) { reset(); return; }
       if (captureOwner === owner) captureOwner = null;
       take = createVoiceTake({ ...audio, levels: recordedLevels, interrupted: pending.interrupted, streamId: origin, id: env.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }, {
-        upload, transcribe, send, telemetry,
+        upload, transcribe, send, telemetry, commit, outcome, cancel: cancelCommit, origin: originOf, clientBuild,
         onState: state => {
           if (gen !== generation) return;
           phase = state.status;
@@ -355,4 +431,4 @@ async function uploadVoiceBlob(cc, blob) {
   let binary = ''; for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   return cc.chatUploadBlob({ dataBase64: btoa(binary), sizeHintBytes: bytes.length });
 }
-module.exports = { createVoiceTake, createBrowserRecorder, audioConstraint, bindComposerMic, uploadVoiceBlob, encodeWav, MAX_DURATION_S };
+module.exports = { createVoiceTake, voiceRequestId, createBrowserRecorder, audioConstraint, bindComposerMic, uploadVoiceBlob, encodeWav, MAX_DURATION_S };
