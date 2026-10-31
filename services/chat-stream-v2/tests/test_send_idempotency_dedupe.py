@@ -12,6 +12,10 @@ window, and coalesces any re-submission of the same physical request_id at any
 age. Intentional identical messages get a fresh optimistic_id (the client counter
 increments) and remain deliverable; a post-restart identical send (counter reset
 to _1) outside the window is a NEW logical message and is delivered.
+
+These are in-process component tests with real Comms/Store/Sessions/SpawnCtl
+and fake transport, hosts and blobs. See docs/TEST_COVERAGE.md for the separate
+receipt reconciliation, disconnect and client boundaries.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ async def _open_claude(sessions) -> None:
     await sessions.open(HOST, NAME, provider="claude")
 
 
+# Retry identity and admission: sequential replay, then held-flight overlap.
 def test_rotated_request_id_retry_collapses_to_one_delivery(tmp_path: Path) -> None:
     """The exact incident: four retry-<ms> request_ids sharing one optimistic_id
     and body must produce ONE physical paste, and every request_id still gets its
@@ -50,10 +55,20 @@ def test_rotated_request_id_retry_collapses_to_one_delivery(tmp_path: Path) -> N
             results = [await comms.send({**base, "request_id": rid}) for rid in rids]
             assert len(tmux.pastes) == 1, f"expected ONE delivery, got {len(tmux.pastes)}"
             assert results[0]["submission_confirmed"] is True
-            # Per-request receipt correlation preserved: each request_id resolves.
+            for result in results[1:]:
+                assert result["coalesced"] is True
+                assert result["do_not_resubmit"] is True
+            # Each request owns its correlation and mirrors the landed outcome.
+            # A replay can point at another replay, rather than the first ID.
             for rid in rids:
                 rec = await store.get_send_receipt(STREAM, rid)
                 assert rec is not None, f"missing correlated receipt for {rid}"
+                assert rec["request_id"] == rid
+                assert rec["to_stream_id"] == STREAM
+                assert rec["optimistic_id"] == base["optimistic_id"]
+                assert rec["state"] == "landed", (rid, rec)
+                assert rec["delivery"] == "landed", (rid, rec)
+                assert rec["submission_confirmed"] is True, (rid, rec)
         finally:
             store.stop()
 
@@ -61,22 +76,58 @@ def test_rotated_request_id_retry_collapses_to_one_delivery(tmp_path: Path) -> N
 
 
 def test_concurrent_overlapping_retries_coalesce(tmp_path: Path) -> None:
-    """Two overlapping sends of the same logical message must coalesce before
-    either finishes admission: only one physical paste."""
+    """Retry while the winning paste is held: coalesce without awaiting delivery.
+
+    The replay mirrors the latest accepted pre-paste receipt. Finishing the
+    winner does not itself reconcile that replay receipt to landed.
+    """
     async def go() -> None:
-        tmux = FakeTmux()
+        class HeldPasteTmux(FakeTmux):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def paste(self, name: str, text: str) -> None:
+                self.entered.set()
+                await asyncio.wait_for(self.release.wait(), timeout=5)
+                await super().paste(name, text)
+
+        tmux = HeldPasteTmux()
         comms, store, sessions = _new_comms(tmux, tmp_path)
+        tasks = []
         try:
             await _open_claude(sessions)
             base = {"stream_id": STREAM, "text": BODY,
                     "optimistic_id": "optimistic_concurrent_1", "_auth_context": AUTH}
-            await asyncio.gather(
-                comms.send({**base, "request_id": "retry-a"}),
-                comms.send({**base, "request_id": "retry-b"}),
-            )
+            winner = asyncio.create_task(comms.send({**base, "request_id": "retry-a"}))
+            tasks.append(winner)
+            await asyncio.wait_for(tmux.entered.wait(), timeout=2)
+            retry = asyncio.create_task(comms.send({**base, "request_id": "retry-b"}))
+            tasks.append(retry)
+            result = await asyncio.wait_for(asyncio.shield(retry), timeout=2)
+            assert not winner.done(), "retry must finish while the winning paste is held"
+            assert tmux.pastes == []
+            assert result["coalesced"] is True
+            assert result["do_not_resubmit"] is True
+            assert result["delivery"] == "accepted"
+            assert result["submission_confirmed"] is False
+            tmux.release.set()
+            landed = await asyncio.wait_for(asyncio.shield(winner), timeout=2)
+            assert landed["submission_confirmed"] is True
             assert len(tmux.pastes) == 1, f"expected ONE delivery, got {len(tmux.pastes)}"
+            for rid in ("retry-a", "retry-b"):
+                rec = await store.get_send_receipt(STREAM, rid)
+                assert rec is not None, f"missing correlated receipt for {rid}"
+                assert rec["request_id"] == rid
+                assert rec["to_stream_id"] == STREAM
+                assert rec["optimistic_id"] == base["optimistic_id"]
         finally:
-            store.stop()
+            tmux.release.set()
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2)
+            finally:
+                store.stop()
 
     _run(go())
 
@@ -91,6 +142,7 @@ async def _preinsert_receipt(store, *, optimistic_id, request_id, state, deliver
     )
 
 
+# Intentional sends and failed attempts remain eligible for physical delivery.
 def test_new_optimistic_id_same_text_is_delivered(tmp_path: Path) -> None:
     """Intentional identical messages carry a fresh optimistic_id (the client
     counter increments): both must be delivered, no text dedupe."""
@@ -260,6 +312,7 @@ def test_mobile_launch_id_scheme_unaffected(tmp_path: Path) -> None:
     _run(go())
 
 
+# Provider-native queue state survives first and chained replay independently.
 def test_coalesced_replay_of_provider_queued_send_keeps_queued(tmp_path: Path) -> None:
     """A rotated retry (e.g. a reconnect replay) of a send the provider still
     holds in its native queue must keep reporting provider_queued, or the client

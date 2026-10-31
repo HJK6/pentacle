@@ -106,6 +106,11 @@ WSL, microphone, dashboard and remote-daemon integrations opt-in; see the
 
 ## 7. Run validation
 
+Find the behavior's existing tests, runners and real/fake boundaries in the
+[coverage map](TEST_COVERAGE.md), starting with send retry to durable receipt.
+Use its [working testing standard](TEST_COVERAGE.md#working-testing-standard)
+when reviewing new or materially changed tests.
+
 ```bash
 npm test
 python3 services/chat-stream-v2/tools/run_gate.py unit
