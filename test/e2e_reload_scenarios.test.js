@@ -26,6 +26,12 @@ function questionScenario() {
     fixtureRequest: async (_runtime, streamId, message) => ({ ok: true, question: {
       notification_id: message.envelope?.question_id || message.question_id,
       state: 'answered', producer_stream_id: streamId,
+      answer: {
+        'web-free-text-0': { text: 'answer-0', selections: [] },
+        'web-free-text-1': { text: 'answer-1', selections: [] },
+        'web-free-text-2': { custom_text: 'answer-2', selections: [] },
+        'web-free-text-3': { custom_text: 'answer-3', selections: [] },
+      }[message.envelope?.question_id || message.question_id],
     } }),
   } : ordinaryRequire(id);
   mod._compile(fs.readFileSync(filename, 'utf8'), filename);
