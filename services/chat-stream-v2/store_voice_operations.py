@@ -385,6 +385,44 @@ class VoiceOperationsStoreMixin:
 
         return await self.submit(op)
 
+    async def voice_mutate(self, principal, operation_id, mutate, *, now=None):
+        """Apply one server-owned change atomically; mutate(row) edits row['data'].
+
+        Saved only when the data changed. Missing row -> operation_forbidden.
+        """
+        now = now or iso()
+
+        def op(conn):
+            with conn:
+                row = decode(
+                    conn.execute(
+                        "SELECT * FROM voice_operations WHERE principal=? AND operation_id=?",
+                        (principal, operation_id),
+                    ).fetchone()
+                )
+                if row is None:
+                    raise ValueError("operation_forbidden")
+                before = json.dumps(row["data"], sort_keys=True)
+                result = mutate(row)
+                if json.dumps(row["data"], sort_keys=True) != before:
+                    row["revision"] += 1
+                    _save(conn, row, now)
+                return row if result is None else result
+
+        return await self.submit(op)
+
+    async def outbound_rows(self):
+        """Operations carrying a server send mandate (bounded by voice_prune)."""
+        return await self.submit(
+            lambda conn: [
+                decode(r)
+                for r in conn.execute(
+                    "SELECT * FROM voice_operations WHERE json_extract(data,'$.server_mandate') IS NOT NULL "
+                    "ORDER BY created_at,operation_id"
+                )
+            ]
+        )
+
     async def voice_prune(self, retained, now_epoch):
         """Preserve every retained alert's source evidence, including overdue rows."""
 
@@ -405,6 +443,7 @@ class VoiceOperationsStoreMixin:
                         or data.get("client_event", {}).get("outcome")
                         in ("cancelled", "recovered")
                         or not data.get("upload_committed")
+                        or data.get("state") in ("failed", "cancelled")
                     )
                     if not terminal:
                         continue

@@ -849,6 +849,9 @@ class AssistantComposite:
             voice_answers=voice_answers,
             direct_binding=direct_binding,
             binding_env=self._env_binding(),
+            # Server-owned (finisher) sends only; installed clients are unchanged.
+            expected_origin_generation=msg.get("_voice_operation_generation")
+            if (msg.get("_auth_context") or {}).get("outbound_finisher") is True else None,
         )
         receipt_id = record.get("receipt_id")
         await self.refresh_activity()
