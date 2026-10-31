@@ -304,7 +304,7 @@ class OutboundFinisher:
             data = row["data"]
             if data.get("state") != "running" or (data.get("worker") or {}).get("id") != me:
                 return  # cancelled (or superseded) before submission
-            landed = await self._receipts(row)
+            landed = await self.alerts.send_receipts(row)
             if landed not in (None, "not_landed"):
                 return await self._record(principal, operation_id, landed, me=me)
             if not await self._origin_ok(row):
@@ -336,9 +336,8 @@ class OutboundFinisher:
         except Exception:
             outcome = None
         else:
-            committed = (result.get("action_committed") or result.get("submission_confirmed")
-                         or result.get("delivery") in ("landed", "persisted", "accepted"))
-            outcome = ("proved" if result.get("submission_confirmed") is True else "committed") if committed else None
+            from error_alerts import send_committed
+            outcome = ("proved" if result.get("submission_confirmed") is True else "committed") if send_committed(result) else None
         if outcome is None:
             return  # ambiguous: stays submitting for the receipt reconcile pass
         async with self._lock(principal, operation_id):
@@ -367,7 +366,7 @@ class OutboundFinisher:
             if data.get("state") != "submitting":
                 return
             attempt_id = (data.get("attempt") or {}).get("attempt_id")
-            landed = await self._receipts(row)
+            landed = await self.alerts.send_receipts(row)
             if landed == "not_landed":
                 landed = ("failed", "not_landed")
             elif landed is None:
@@ -376,28 +375,6 @@ class OutboundFinisher:
                     return
                 landed = ("failed", "send_unconfirmed")
             await self._record(principal, operation_id, landed, attempt_id=attempt_id)
-
-    async def _receipts(self, row):
-        """Server-bound attempts only; client-reported ids are never consulted."""
-        data = row["data"]
-        ids = data.get("server_send_request_ids") or (
-            [data["server_send_request_id"]] if data.get("server_send_request_id") else [])
-        seen_not_landed = False
-        for request_id in ids:
-            receipt = await self.store.reconcile_send_receipt(
-                row["origin_stream_id"], request_id, original_generation=row["origin_generation"])
-            if not receipt:
-                continue
-            if receipt.get("state") == "not_landed":
-                seen_not_landed = True
-                continue
-            m = self.store.voice_milestone
-            await m(row["principal"], row["operation_id"], "send_committed", request_id=request_id)
-            if receipt.get("submission_confirmed") is True:
-                await m(row["principal"], row["operation_id"], "send_proved", request_id=request_id)
-                return "proved"
-            return "committed"
-        return "not_landed" if seen_not_landed else None
 
     # -- helpers --------------------------------------------------------------
 

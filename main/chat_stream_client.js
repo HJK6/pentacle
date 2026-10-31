@@ -776,6 +776,21 @@ try {
     return this.sendCommand({ type: 'transcribe_blob', blob_sha, mime }, 'transcribe_blob', { requestId: request_id, timeoutMs: 120000 });
   }
 
+  // Committed outbound send (docs/committed-outbound-send.md). A daemon that
+  // does not advertise outbound_commit_v1 gets no frame: the caller keeps its own path.
+  outboundCommit({ voice_operation, send_mandate } = {}) {
+    if (this._capabilities.outbound_commit_v1 !== true) return Promise.reject({ error_code: 'unsupported' });
+    return this.sendCommand({ type: 'outbound.commit', voice_operation, send_mandate }, 'outbound.commit');
+  }
+
+  outboundGet(operationId) {
+    return this.sendCommand({ type: 'outbound.get', operation_id: operationId }, 'outbound.get');
+  }
+
+  outboundCancel(operationId) {
+    return this.sendCommand({ type: 'outbound.cancel', operation_id: operationId }, 'outbound.cancel');
+  }
+
   async uploadBlob({ data, sizeHintBytes, requestId, timeoutMs = 120000 } = {}) {
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
     const uploadRequestId = typeof requestId === 'string' && requestId ? requestId : this._requestId('upload');

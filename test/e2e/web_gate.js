@@ -305,6 +305,8 @@ async function startDaemon(args, scratch, runtime, fixtures = [
   execFileSync(args.python, [DAEMON, scratch, '--issue'], { cwd: ROOT });
   runtime.fixtureOperatorTokenPath = path.join(scratch, 'operator-auth', 'token');
   runtime.fixtureScratch = scratch;
+  // Hermetic ASR: the daemon never reaches a real mic backend (web_gate_daemon.py).
+  fs.writeFileSync(path.join(scratch, 'asr-stub.json'), JSON.stringify({ text: 'Hermetic server transcript' }));
   // Seed BEFORE boot: the daemon rebuilds its inventory purely from this DB.
   runtime.fixtureTokens = {};
   const seed = fixtures.map(fixture => {

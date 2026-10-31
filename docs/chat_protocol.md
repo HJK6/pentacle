@@ -410,7 +410,18 @@ is not a playback control. Pending bars are 2.5 px wide with 2 px gaps, height
 `max(2, round(l * 22))` and opacity `0.4 + 0.6 * l`; a take without samples uses
 30 fallback levels of 0.2. The pending spinner respects reduced motion too.
 
-The path remains **upload_blob → transcribe_blob → ordinary send**. The browser
+When the daemon advertises `outbound_commit_v1`, the chat composer commits the
+take before uploading it (`chat-stream:outbound-commit`, see
+[committed-outbound-send.md](../services/chat-stream-v2/docs/committed-outbound-send.md)):
+the daemon transcribes and sends once the audio arrives, even if the page is
+reloaded or closed. The take polls `chat-stream:outbound-get` until the send
+commits. A server failure shows its reason; Retry then takes the client path
+below with the committed request and optimistic ids, so receipts coalesce.
+Discard calls `chat-stream:outbound-cancel`, which never implies the message
+landed. A definite commit refusal (no capability, older daemon, invalid
+mandate) uses the client path directly; voice answers always do.
+
+The client path is **upload_blob → transcribe_blob → ordinary send**. The browser
 uses `chat-stream:upload-blob`, then the authenticated
 `chat-stream:transcribe-blob` bridge to the daemon's existing `transcribe_blob`
 verb. It does not introduce a second backend. A nonempty trimmed transcript

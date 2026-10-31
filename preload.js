@@ -131,6 +131,9 @@ window.cc = {
   chatSendCorrelated: (hostId, sessionName, text, requestId, optimisticId, attachments, reply) => ipcRenderer.invoke('chat-stream:send', hostId || 'local', sessionName, text, requestId, optimisticId, attachments, reply),
   chatTranscribeBlob: (payload) => ipcRenderer.invoke('chat-stream:transcribe-blob', payload || {}),
   chatUploadBlob: (payload) => ipcRenderer.invoke('chat-stream:upload-blob', payload || {}),
+  chatOutboundCommit: (payload) => ipcRenderer.invoke('chat-stream:outbound-commit', payload || {}),
+  chatOutboundGet: (operationId) => ipcRenderer.invoke('chat-stream:outbound-get', operationId),
+  chatOutboundCancel: (operationId) => ipcRenderer.invoke('chat-stream:outbound-cancel', operationId),
   chatFetchBlob: (blobSha) => ipcRenderer.invoke('chat-stream:fetch-blob', blobSha),
   // B3 (chat_send_turn_lifecycle_batch2): interrupt/cancel the latest in-flight
   // turn (daemon injects Escape into the agent pane).

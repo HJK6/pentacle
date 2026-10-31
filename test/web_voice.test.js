@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
-const { createVoiceTake, createBrowserRecorder, bindComposerMic } = require('../renderer/web_voice');
+const { createVoiceTake, createBrowserRecorder, bindComposerMic, voiceRequestId } = require('../renderer/web_voice');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function io(overrides = {}) {
   const calls = []; const states = [];
@@ -54,6 +54,94 @@ test('discard during transcription prevents sending', async () => {
   let resolve; const deps = io({ transcribe: () => new Promise(r => { resolve = r; }) });
   const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['x']), durationS: 1, id: 'cancel' }, deps);
   const running = take.run(); await flush(); take.discard(); resolve({ ok: true, text: 'late' }); await running;
+  assert.equal(deps.calls.some(c => c[0] === 'send'), false);
+});
+// Committed outbound send (docs/committed-outbound-send.md): the take commits
+// its mandate before uploading and the daemon finishes the send.
+const TAKE = '0d5e8c52-6a0e-4f0e-9a43-2b1f5d0c7e11';
+function committedIo(states, overrides = {}) {
+  const outcomes = [...states];
+  return io({ origin: () => ({ generation: 'gen-7f3a', composite: false }), sleep: async () => {},
+    commit: async unit => { committedIo.last = unit; return { ok: true, operation_id: TAKE, server_send: true }; },
+    outcome: async id => { const state = outcomes.length > 1 ? outcomes.shift() : outcomes[0]; return typeof state === 'string' ? { ok: true, operation_id: id, state } : state; },
+    cancel: async id => ({ ok: true, operation_id: id, state: 'cancelled' }), ...overrides });
+}
+test('voice-v1 request id matches the daemon derivation (receipt_proof)', async () => {
+  assert.equal(await voiceRequestId(TAKE, 'local:web-gate-1', 'gen-7f3a', 1), 'voice-send-1843db2d2fcb69c5c38b0e2464b536a0a4f9f6f1');
+});
+test('committed take commits before uploading and never transcribes or sends itself', async () => {
+  const order = []; const deps = committedIo(['running', 'committed']);
+  const commit = deps.commit; deps.commit = async unit => { order.push('commit'); return commit(unit); };
+  const upload = deps.upload; deps.upload = async blob => { order.push('upload'); return upload(blob); };
+  const take = createVoiceTake({ streamId: 'local:web-gate-1', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 2, id: TAKE }, deps);
+  await take.run();
+  assert.deepEqual(order, ['commit', 'upload']);
+  assert.equal(deps.calls.some(c => c[0] === 'transcribe' || c[0] === 'send'), false);
+  const { voice_operation: op, send_mandate: m } = committedIo.last;
+  assert.deepEqual(op, { version: 1, operation_id: TAKE, origin_stream_id: 'local:web-gate-1', origin_generation: 'gen-7f3a', operation_kind: 'voice_chat', client_build: 'pentacle-web' });
+  assert.equal(m.request_id, 'voice-send-1843db2d2fcb69c5c38b0e2464b536a0a4f9f6f1');
+  assert.equal(m.msg_id, undefined);
+  assert.deepEqual(m.original_request, { protocol: 'voice-v1', logical_id: TAKE, target: 'local:web-gate-1', generation: 'gen-7f3a', sequence: 1 });
+  assert.deepEqual(m.audio, { sha256: require('crypto').createHash('sha256').update('audio').digest('hex'), mime: 'audio/wav', bytes: 5 });
+  assert.deepEqual(m.meta, { voice: { duration_s: 2 } });
+  assert.equal(take.snapshot().status, 'sent'); assert.equal(take.snapshot().optimisticId, m.optimistic_id);
+});
+test('composite origin carries msg_id equal to optimistic_id', async () => {
+  const deps = committedIo(['proved'], { origin: () => ({ generation: 'g', composite: true }) });
+  await createVoiceTake({ streamId: 'home:assistant', blob: new Blob(['a'], { type: 'audio/mp4' }), durationS: 1, id: TAKE }, deps).run();
+  assert.equal(committedIo.last.send_mandate.msg_id, committedIo.last.send_mandate.optimistic_id);
+});
+for (const [label, overrides, id] of [
+  ['no commit bridge', { commit: undefined }, TAKE],
+  ['daemon without outbound_commit_v1', { commit: async () => ({ ok: false, error_code: 'unsupported' }) }, TAKE],
+  ['older daemon verb refusal', { commit: async () => ({ ok: false, error_code: 'unsupported_in_v2' }) }, TAKE],
+  ['unknown origin generation', { origin: () => ({ generation: '' }) }, TAKE],
+  ['non-UUID take id', {}, 'web-123-abc'],
+]) test(`${label} keeps the client-owned path unchanged`, async () => {
+  const deps = committedIo(['committed'], overrides);
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 2, id }, deps);
+  await take.run();
+  assert.deepEqual(deps.calls.map(c => c[0]), ['upload', 'transcribe', 'send']);
+  assert.equal(take.snapshot().status, 'sent');
+});
+test('ambiguous commit fails for Retry, which repeats the identical commit', async () => {
+  let attempts = 0; const units = [];
+  const deps = committedIo(['committed'], { commit: async unit => { units.push(unit); return ++attempts === 1 ? { ok: false, error_code: 'timed_out' } : { ok: true, server_send: true }; } });
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  await take.run();
+  assert.equal(take.snapshot().status, 'failed'); assert.equal(deps.calls.length, 0);
+  await take.run();
+  assert.deepEqual(units[0], units[1]);
+  assert.equal(take.snapshot().status, 'sent');
+});
+test('server failure shows the reason; Retry sends once through the client path with the committed identity', async () => {
+  const deps = committedIo([{ ok: true, state: 'failed', milestones: { server_finish_failed_code: 'transcribe_unavailable' } }]);
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  await take.run();
+  assert.equal(take.snapshot().status, 'failed'); assert.match(take.snapshot().error, /Transcription is unavailable/);
+  await take.run();
+  const sends = deps.calls.filter(c => c[0] === 'send');
+  assert.equal(sends.length, 1); assert.equal(deps.calls.filter(c => c[0] === 'upload').length, 1);
+  assert.deepEqual(sends[0][1].identity, { requestId: committedIo.last.send_mandate.request_id, optimisticId: committedIo.last.send_mandate.optimistic_id });
+});
+test('a lost mandate (operation_forbidden) hands the take back to the client path', async () => {
+  const deps = committedIo([{ ok: false, error_code: 'operation_forbidden' }]);
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  await take.run(); assert.equal(take.snapshot().status, 'failed');
+  await take.run(); assert.equal(deps.calls.filter(c => c[0] === 'send').length, 1);
+});
+test('transport errors while polling keep waiting for the daemon outcome', async () => {
+  const deps = committedIo([{ ok: false, error_code: 'timed_out' }, 'submitting', 'committed']);
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  await take.run(); assert.equal(take.snapshot().status, 'sent');
+});
+test('discard after commit cancels on the daemon and stops polling', async () => {
+  let release; let polling; const polled = new Promise(r => { polling = r; }); const cancelled = [];
+  const deps = committedIo(['running'], { sleep: () => new Promise(r => { release = r; polling(); }), cancel: async id => { cancelled.push(id); return { ok: true, state: 'cancelled' }; } });
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['audio'], { type: 'audio/wav' }), durationS: 1, id: TAKE }, deps);
+  const running = take.run(); await polled;
+  take.discard(); release(); await running;
+  assert.deepEqual(cancelled, [TAKE]); assert.equal(take.snapshot().status, 'discarded');
   assert.equal(deps.calls.some(c => c[0] === 'send'), false);
 });
 function ui(web, recorder, env = { isSecureContext: true, navigator: { mediaDevices: { getUserMedia() {} } } }) {

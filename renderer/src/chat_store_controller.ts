@@ -714,7 +714,7 @@ export class ChatStoreController {
    *      the visible running turn.
    * Returns the optimistic_id ('' only on empty/invalid input).
    */
-  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta } = {}): string {
+  sendTurn(streamId: string, text: string, attachments: ChatAttachment[] = [], reply: { reply_to_message_id?: string; reply_to_question_id?: string; meta?: VoiceMeta; identity?: { requestId: string; optimisticId: string } } = {}): string {
     const literal = String(text || '');
     const composite = this.state.sessions.find(item => item.stream_id === streamId)?.session_kind === 'assistant_composite';
     if (this.disposed) return '';
@@ -722,8 +722,9 @@ export class ChatStoreController {
     const sendAttachments = Array.isArray(attachments) ? structuredClone(attachments.filter((item) => item && item.key && item.mime)) : [];
     if (!streamId || (!sendText.trim() && sendAttachments.length === 0)) return '';
 
-    const optimisticId = this.nextOptimisticId(streamId);
-    const requestId = this.nextRequestId('send');
+    // A committed outbound unit the daemon gave back keeps its identity, so receipts coalesce.
+    const optimisticId = reply.identity?.optimisticId || this.nextOptimisticId(streamId);
+    const requestId = reply.identity?.requestId || this.nextRequestId('send');
     const now = Date.now();
     const generation = this.socketGeneration;
     const beginTurn = this.getTurnPhase(streamId) === 'idle';

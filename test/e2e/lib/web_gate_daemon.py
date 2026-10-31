@@ -114,6 +114,26 @@ else:
         household.Household.__init__ = fixture_household_init
     # END HOUSEHOLD FIXTURE
 
+    # BEGIN ASR FIXTURE: test-only, in-process; the product backend is never called.
+    # The stub records each call, then holds until the scenario writes the release file.
+    asr_manifest = scratch / 'asr-stub.json'
+    if asr_manifest.exists():
+        import asyncio
+        import transcribe
+        asr = json.loads(asr_manifest.read_text())
+
+        async def fixture_call_backend(self, *, data, mime):
+            with (scratch / 'asr-calls.log').open('a') as calls:
+                calls.write(mime + '\n')
+            for _ in range(1200):
+                if (scratch / 'asr-release').exists():
+                    return {'text': asr['text'], 'duration_s': 1.0, 'model': 'fixture', 'vocabulary_version': ''}
+                await asyncio.sleep(0.05)
+            raise transcribe.VerbError('backend_unavailable', 'fixture ASR was never released')
+
+        transcribe.Transcriber._call_backend = fixture_call_backend
+    # END ASR FIXTURE
+
     operator_auth.OperatorCredentialRegistry = FixtureRegistry
 
     # The existing isolated daemon owns this synthetic input driver. It calls

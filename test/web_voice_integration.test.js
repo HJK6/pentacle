@@ -33,3 +33,17 @@ test('transcription bridge preserves request identity and reports backend errors
   const reply = await collector.table['chat-stream:transcribe-blob'].handler({}, {});
   assert.equal(reply.ok, false); assert.equal(reply.error_code, 'backend_unavailable');
 });
+test('outbound commit bridge sends only to a daemon advertising outbound_commit_v1', async () => {
+  const fake = Object.create(client); const frames = []; fake.sendCommand = async (p, type) => { frames.push([type, p]); return { type: `${type}.ok`, server_send: true }; };
+  fake._capabilities = {};
+  await assert.rejects(fake.outboundCommit({ voice_operation: {}, send_mandate: {} }), { error_code: 'unsupported' });
+  assert.equal(frames.length, 0);
+  fake._capabilities = { outbound_commit_v1: true };
+  await fake.outboundCommit({ voice_operation: { operation_id: 'op' }, send_mandate: { request_id: 'r' } });
+  await fake.outboundGet('op'); await fake.outboundCancel('op');
+  assert.deepEqual(frames.map(f => [f[0], f[1].type, f[1].operation_id]), [['outbound.commit', 'outbound.commit', undefined], ['outbound.get', 'outbound.get', 'op'], ['outbound.cancel', 'outbound.cancel', 'op']]);
+  const collector = createCollector();
+  createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: { outboundCommit: async () => { throw { error_code: 'unsupported' }; }, outboundGet: async () => ({ state: 'committed' }) } }).register(collector);
+  assert.deepEqual(await collector.table['chat-stream:outbound-commit'].handler({}, {}), { ok: false, error_code: 'unsupported' });
+  assert.deepEqual(await collector.table['chat-stream:outbound-get'].handler({}, 'op'), { state: 'committed', ok: true });
+});
