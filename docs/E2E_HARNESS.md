@@ -4,6 +4,10 @@ The public harness is provider-free and uses a disposable local daemon. It valid
 
 ## Supported entry: `scripts/gate_env.py`
 
+Use the [behavior coverage map](TEST_COVERAGE.md) to find existing protection,
+real/fake boundaries and unresolved selection; send retry to durable receipt
+is the first bounded reference flow.
+
 [Advisory test selection](TEST_SELECTION.md) reports affected boundaries and
 coverage gaps for an exact baseline and proposed head. It runs no tests and
 does not change required gates.

@@ -1,0 +1,187 @@
+# Test coverage by behavior
+
+Start with the behavior below, then follow its existing tests and runner. Paths
+stay in place because discovery, test-to-test imports and selection depend on
+them. This is a navigation map and bounded inspection, not a coverage percentage
+or a certification of every assertion or installed client/provider combination.
+
+[E2E harness](E2E_HARNESS.md) owns environment setup and gates;
+[test runner](TEST_RUNNER.md) owns npm discovery and cleanup;
+[capabilities](TEST_CAPABILITIES.md) owns capability/skip classification.
+[Test selection](TEST_SELECTION.md) and [selective release](SELECTIVE_RELEASE.md)
+own advisory change selection. CI, merge and deployment gates remain required.
+
+## Reading the map
+
+**Inspected** means the named assertion/call path was read. **UNKNOWN** means
+assertions or invocation have not been established in the stated inspection.
+**GAP** requires a specific expected behavior and inspected absence within a
+bounded scope. Candidate **BLOAT** needs demonstrated overlap and cost; similar
+names or repeated state checks alone do not justify removal. No test here is
+proposed for removal, and no candidate BLOAT is established by this tranche.
+
+The structural snapshot is public source
+`2fc273a8b5fcc23af1634ea3e481bcbcbc03f41a` (2026-10-31). Discovery reads every
+tracked root/nested `package.json`, pytest configuration,
+[`gate-env.json`](../scripts/gate-env.json),
+[`test-selection.json`](../scripts/test-selection.json) and
+[`Public checks`](../.github/workflows/predeploy-tests.yml), then reconciles
+literal paths/globs, runner imports and the browser scenario registry. The
+source-pinned census and method are retained with the implementation evidence;
+they are not a second maintained registry. Reproduction uses `git ls-tree -r`
+and `git archive` at that SHA, static Python ASTs and local JS import/path
+resolution, without importing or executing subject code.
+Behavior examples combine the planning inspection with the reference-flow
+implementation; structural discovery does not audit the other assertions.
+
+The filename population is `test_*.py`, `*.test/spec.{js,ts,tsx,mjs,cjs}`,
+`test/e2e/scenarios/*.js`, E2E `*_gate.py`, and the two pushguard shell proofs.
+Additional tracked JS/TS/Python/shell candidates have a test directory or
+test/gate/smoke/soak/scenario/proof/harness/replay/fixture/runner filename.
+Each path has one primary census entry; cross-flow links below do not add counts.
+Helpers, fixtures, runner files and production dependencies are separated.
+Literal references can be conditional or fixture strings and do not prove
+runtime invocation. Computed imports/commands, environment-selected profiles,
+pytest-generated nodes, optional dependencies and manual scripts outside this
+filename scope remain UNKNOWN; no exhaustive manual-script or assertion audit
+is claimed.
+
+Filename hints leave 250 primary candidates behaviorally unclassified, retained
+explicitly in the census. The behavior table inspects examples within families;
+it does not relabel that unknown population as semantically covered.
+
+## Runner reachability and structural exceptions
+
+The snapshot has **896 primary candidate files** and **174 additional script
+candidates**. Following runner/configuration references adds 200 dependency
+files: the reconciled union is 1,270 distinct paths, partitioned as 896 primary
+candidates, 13 runners, 77 helper/fixture candidates, 84 additional candidates
+with unresolved role, and 200 dependency boundaries. These are file counts,
+not functions, parameter cells or executed nodes. Relative to planning source
+`1e3c3241`, the new candidates are `test/renderer_settings_chat_width.test.js`
+and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
+
+| Primary population (disjoint paths) | Files | Actual entry and limits |
+| --- | ---: | --- |
+| `services/chat-stream-v2/tests/`, excluding smoke/soak | 466 | [`run_gate.py`](../services/chat-stream-v2/tools/run_gate.py) unit selects `tests`, ignores smoke/soak and excludes `soak`/`repin_exhaustive`. Markers, plugins and capabilities still affect nodes. |
+| Daemon `tests/smoke/`; `tests/soak/` | 8; 3 | Same runner: smoke explicitly selects its directory; soak is opt-in with `-m soak`. Merge is unit + smoke, not soak or exhaustive repin. |
+| `services/agent-orch/tests/` | 81 | `cli-pytest --select tests`; separate Public checks contracts partition. |
+| `services/_shared/tests/` | 8 | `shared-pytest --select tests`; separate from daemon tiers. |
+| Root `test/` | 205 | Root npm shallow globs select 203 JS/TS tests. `test/test_specs_parser.py` and `test/test_voice_reply.py` are outside those globs: invocation UNKNOWN. |
+| `test/e2e/terminal_interaction_runtime/` | 3 | Its `*.test.js` files join root npm tests; `npm run test:terminal-interactions` separately launches the owned Electron harness. |
+| `test/e2e/`; `test/e2e/lib/`; `test/e2e/scenarios/` | 7; 7; 31 | Outside root npm shallow globs. Explicit npm selections can run nested tests. Default browser invocation uses the registry below, not a recursive scenario-directory glob. |
+| `pentacle-chat-core/tests/` | 44 | Standalone `npm --prefix pentacle-chat-core test`: TS tests plus `typecheck:test`. `typeContracts.ts` is typecheck support, not an executed `.test.ts` file. |
+| `mic-server/test/` | 24 | Public checks contracts explicitly runs `PYTHONPATH=mic-server python3 -m pytest mic-server/test`. |
+| `scripts/` | 6 | CI explicitly runs `test_check_public_residue.py` and `test_ci_required_aggregate.py`; `test_gate_env.py`, `test_select_tests.py` and two pushguard shell proofs have separate entries, not blanket CI inclusion. |
+| Other | 2 | `services/_shared/test_resource_ledger.py` and `services/chat-stream-v2/tools/test_attempt_metrics.py`: default invocation UNKNOWN. |
+| `vendor/dashboard-library/tests/` | 1 | Vendor `npm test`, explicitly invoked by Public checks frontend. |
+
+[`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
+the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
+every requested selection; it does not substitute for the full merge gate.
+`v2-merge-capacity` retains unit 1200s / smoke 900s; CI uses its separately
+declared `v2-merge-ci` profile. The shell smoke/soak wrappers call the same
+`run_gate.py`; their existence does not add tests to merge.
+
+[`gate_web.py`](../scripts/gate_web.py) invokes
+[`web_gate.js`](../test/e2e/web_gate.js) and the separate interrupt test.
+The browser gate uses the 39 registered names in
+[`lib/web_scenarios.js`](../test/e2e/lib/web_scenarios.js); imported scenario
+helpers are support/registered behavior, not independent test nodes. It also
+uses `lib/seed_web_gate.py` and `lib/web_gate_daemon.py`. After a successful
+unfiltered run with its owned profile, it additionally invokes
+`web_chat_history_retention_gate.cjs`, `web_chat_history_paging_gate.cjs` and
+`web_default_pane_gate.cjs`. External profiles and scenario filters bypass those
+three follow-ons. `test/e2e/scenarios/*.js` is a separate legacy population;
+matching names alone do not establish default execution.
+
+Other E2E entries such as `grid_split_gate.js`, `send_refusal_gate.cjs`,
+`web_host_recovery_gate.cjs`, `web_assistant_direct_entry_gate.cjs`,
+`web_chat_history_transport_gate.cjs`, `web_popouts_gate.cjs`,
+`web_sidebar_resize_gate.cjs`, `web_chat_width_gate.cjs`,
+`own_assistant_bootstrap_gate.py` and `report_selection_copy_gate.py` are
+separately invocable. No default browser-wrapper invocation was established for
+them. Their fixture/assets directories, `configs/`, `file_delivery/`, daemon
+`tests/cosmo_e2e/` support and conftests are not extra passing tests. In the
+reconciliation, 427 paths have no established top-level selection rule;
+that includes support/dependency files, not 427 missing tests.
+
+## Find a behavior
+
+Patterns below are navigation hints within the structural population, not claims
+that every matching file has been semantically audited. Unless stated otherwise,
+assertion completeness, uninspected fake boundaries and runtime cost are UNKNOWN.
+
+| Behavior / purpose | Existing protection and reachability | Boundaries, inspected protection and remaining uncertainty |
+| --- | --- | --- |
+| Send retry → durable receipt | [`test_send_idempotency_dedupe.py`](../services/chat-stream-v2/tests/test_send_idempotency_dedupe.py), [`test_send_semantics.py`](../services/chat-stream-v2/tests/test_send_semantics.py); daemon unit / focused `v2-pytest` | Real Comms, Store, Sessions, SpawnCtl; fake tmux/hosts/blob transport. Inspected: single paste, logical identity, failed retry eligibility, queued and pending replay. Reference below; no real provider/socket/browser proof. |
+| Receipt projection and late proof | [`test_send_receipts.py`](../services/chat-stream-v2/tests/test_send_receipts.py), [`test_send_receipt_late_proof.py`](../services/chat-stream-v2/tests/test_send_receipt_late_proof.py); daemon unit / focused | Real store projection and direct Server dispatch with synthetic records/events. Inspected: metadata correlation, event stamping, proof reconciliation/race/ambiguity and access checks. Distinct from physical-send and client protections. |
+| Disconnect and client reconciliation | [`test_send_survives_disconnect.py`](../services/chat-stream-v2/tests/test_send_survives_disconnect.py); [`optimisticReconciliation.test.ts`](../pentacle-chat-core/tests/optimisticReconciliation.test.ts) | Server handler tasks survive fake-websocket disconnect with delayed fake send; no Comms delivery. Client reducers/selectors use synthetic state/events: identity, live/snapshot replay, status ordering and caption lattice. Client suite runs separately. One complete real send/disconnect/consumer journey remains UNKNOWN across the repo, not a proven absent test. |
+| Provider/account startup and recovery | Daemon `test_provider_*.py`, `test_account_*.py`, especially [`test_account_repin_state_machine.py`](../services/chat-stream-v2/tests/test_account_repin_state_machine.py); daemon unit / selector `provider_startup` | Inspected repin examples preserve generation, one native proof/login, no sealed-op replay and superseded bindings with injected refusals; table wrappers expand subcases. Exhaustive marker is excluded from merge. Provider/native account and launch-environment fixtures are not live authentication/quota qualification; see selection's explicit limits. |
+| Consent and operator questions | CLI [`test_consent_cli.py`](../services/agent-orch/tests/test_consent_cli.py); daemon/CLI `test_consent*`, `test_question*`, `test_prompt*`; root/UI counterparts | Inspected CLI parsing includes revision/generation, local-admin ceremony and emergency-revoke claims; lifecycle/transport/token calls monkeypatched. Daemon admission and browser question registry are different boundaries; complete cross-layer assertion audit UNKNOWN. |
+| Session lifecycle and work coordination | Daemon/CLI `test_session*`, `test_spawn*`, `test_close*`, `test_work*`, `test_report*`; root `test/work*` | Existing daemon/CLI/root runners, and browser `web-work-lanes`, `scheduled-section`, closed-slot/reconnect scenarios. File families locate lifecycle, dispatch and work obligations; assertion semantics and real/fake dependencies outside the inspected send fixtures UNKNOWN. |
+| Client rendering, history and workspace | Root `test/chat*`, `test/renderer*`, `test/sidebar*`; chat-core tests; browser registry/history follow-ons | Root component/DOM tests, standalone core and real-browser served candidate fixture journeys protect different boundaries. Selector `client_wire_render` names its inspected seam and version limitations. Actual provider turn round trip, arbitrary installed versions and native/mobile rendering are not certified here. |
+| Satellite transport and pin transitions | Daemon `test_satellite*`, `test_event_push*`, `test_account_satellite_roots.py`; selector `satellite_transition` | Selector documents controlled-peer retry/dedupe and exact-pin fixtures. Real deployment/update/restart/rollback on installed hosts is a separate gate; individual assertions/fake boundaries outside cited selection evidence UNKNOWN. |
+| Release/deploy invocation | Daemon `test_deploy*`, `test_release_selection.py`; selector `deploy_invocation`; root hook tests | Selector records subprocess invocation, refusal/evidence and rollback fixture checks. Source fixtures do not activate installed services or prove host health. Root [`pre_push_hook.test.js`](../test/pre_push_hook.test.js) protects hook behavior separately. |
+| Voice, audio and microphone | `mic-server/test/`, daemon `test_voice*`, root `test/*voice*`/`test/*mic*`, browser voice/mic registry | Separate contracts pytest, daemon, root and browser entries. Synthetic audio/state/service fixtures do not establish physical microphone or remote ASR behavior. Per-file assertion/fake-boundary audit UNKNOWN. |
+| Selection, environment and cleanup | [`test_select_tests.py`](../scripts/test_select_tests.py), [`test_gate_env.py`](../scripts/test_gate_env.py), daemon [`test_harness_reaping.py`](../services/chat-stream-v2/tests/test_harness_reaping.py); explicit self-tests / daemon unit | Inspected selector tests use real disposable Git objects and synthetic files to check mapping, rename/shared/missing-evidence fallback and invalid input refusal. Reaping tests inspect real owned processes, identity-safe refusal and a 60s hermetic isolation observation. That intentional cost alone is not BLOAT. |
+| Dashboard and optional adapters | Vendor [`public_boards.test.js`](../vendor/dashboard-library/tests/public_boards.test.js), browser dashboard registry; other convention candidates in census | Vendor package/CI and browser entries are distinct. Optional integrations and unclassified filenames remain UNKNOWN until assertions and dependencies are inspected. |
+
+**Concrete selection GAP:** root npm-test does not select the 44 standalone
+chat-core `.test.ts` files or its typecheck. Inspection scope: root package
+scripts, shallow npm runner, gate-env target map and Public checks workflow.
+Run the existing standalone package test when that surface changes; no new
+runner is introduced. This is a selection limitation, not proof the suite is
+never run elsewhere. Other filename similarities do not establish gaps.
+
+## Reference: send retry to receipt
+
+Keep the existing test module, node names and shared fixtures. A text send uses
+real `Comms.send` → `Store.claim_or_coalesce_send` → fake paste → durable receipt.
+An optimistic ID identifies one logical message within recency; request IDs
+identify attempts. Retries may mirror another replay's receipt, so the contract
+does not require a direct link to the first request. Read-only contract sources:
+[`comms.py`](../services/chat-stream-v2/comms.py) (`send`,
+`_coalesced_send_result`) and [`store.py`](../services/chat-stream-v2/store.py)
+(`claim_or_coalesce_send`, `get_send_receipt`).
+
+The following existing nodes in `test_send_idempotency_dedupe.py` retain all
+prior assertions. Only the first two gain assertions/interleaving control.
+
+| Existing node | Failure protection retained; reference increment |
+| --- | --- |
+| `test_rotated_request_id_retry_collapses_to_one_delivery` | Four rotated request IDs: one paste, initial confirmation and every receipt exists. Added: each receipt's own request/target/optimistic identity, landed state/delivery and confirmation; each retry returns coalesced/do-not-resubmit. |
+| `test_concurrent_overlapping_retries_coalesce` | One paste for overlapping retries. A local fake-transport subclass now holds winning paste with bounded events; retry must finish coalesced/accepted/unconfirmed while winner is held. Release/join tasks in `finally`; after release, assert one paste and both correlated receipts. No guessed sleep or requirement that replay updates to landed. |
+| `test_new_optimistic_id_same_text_is_delivered` | Fresh optimistic identity preserves two intentional identical sends. |
+| `test_post_restart_same_text_after_window_is_delivered` | Expired recency permits a new landed send, without coalescing. |
+| `test_prior_not_landed_does_not_block_retry` | A genuinely failed attempt remains retryable with a fresh paste. |
+| `test_committed_pending_proof_prior_replays_not_resubmit` | An in-flight committed send is replayed, with no paste and a correlated replay reason. |
+| `test_failed_preclaim_superseded_by_not_landed_allows_retry` | Latest failure supersedes a stale accepted claim; both store claims remain noncoalesced. |
+| `test_attachment_failure_then_recovery_retry_delivers` | Failed blob fetch makes no paste; recovery retry delivers once and does not coalesce. |
+| `test_mobile_launch_id_scheme_unaffected` | Distinct launch optimistic identities each deliver (component test, not mobile execution). |
+| `test_coalesced_replay_of_provider_queued_send_keeps_queued` | First replay retains provider-queued state/reason, no paste. |
+| `test_chained_coalesced_replays_of_provider_queued_send_stay_queued` | Both chained replays retain queued marker and receipt suffix, no paste. |
+
+Focused validation uses the supported `v2-pytest` target with these five files:
+`test_send_idempotency_dedupe.py`, `test_send_semantics.py`,
+`test_send_receipts.py`, `test_send_receipt_late_proof.py`,
+`test_send_survives_disconnect.py` (each prefixed `tests/`). The invariant floor
+is added by the wrapper. Baseline/candidate each executed 111 nodes with the
+same Python 3.13 toolchain; observed pytest times were 3.51s / 3.34s on one
+host, not a performance claim or whole-suite acceptance.
+The reference file is currently unmapped in the advisory selector: its actual
+change selects conservative broad fallback, including the full daemon merge
+gate. The existing selection policy is preserved.
+
+Two disposable-copy controls use the rotated-request node: bypassing the
+coalesced return must fail the paste-count assertion; corrupting replay
+state/confirmation while retaining one delivery must fail its landed receipt
+assertion. Restore original product bytes and require focused GREEN. A setup
+failure or timeout is not that RED. See the harness for receipts, final merge
+and npm gates; the unchanged client/browser suites are indexed, not certified
+by this focused flow.
+
+Later bounded work can inspect client reconciliation, provider/account recovery
+and the unclassified/manual entries before selecting another reference. The
+current map/reference owner hands those priorities back with the work item;
+this page does not commission conversion, physical moves or coverage reduction.
