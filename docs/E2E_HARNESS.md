@@ -16,6 +16,11 @@ does not change required gates.
 
 QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
 
+Public checks frontend also runs `npm --prefix pentacle-chat-core test` after
+the supported root npm tests, reusing the root installation. This native command
+runs the client-core TS tests and `typecheck:test`; either failure blocks the
+required frontend result and aggregate checks.
+
 ```bash
 python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
   --target v2-unit --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST

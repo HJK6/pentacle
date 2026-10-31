@@ -156,7 +156,7 @@
       ],
       "missing_coverage": [
         "Installed versions require evidence-backed build/source inventory, isolated pinned web assets via PENTACLE_WEB_GATE_CONSUMER_ROOT and explicit same-run mobile transport/model replay receipts. The default selection covers candidate web only; no native rendering, mobile auth/timing or arbitrary historical-version matrix is certified.",
-        "Root npm-test does not run pentacle-chat-core/tests or its standalone test/typecheck scripts; no gate-env target for that standalone suite is declared here.",
+        "Root npm-test does not run pentacle-chat-core/tests or its test/typecheck scripts; Public checks frontend runs npm --prefix pentacle-chat-core test in a separate required step. No gate-env target for that native suite is declared here.",
         "Selected tests do not establish every changed renderer assertion or every producer/consumer combination."
       ]
     },
