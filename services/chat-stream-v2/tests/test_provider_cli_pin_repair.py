@@ -19,10 +19,10 @@ def test_confirmed_non_split_failure_is_recoverable(tmp_path,monkeypatch,recover
     from types import SimpleNamespace
     async def run():
         store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
-        observe,execute=host.observation,host.run
+        observe,execute=host._probe_observation,host.run
         if failure=="network":
             def error(_): raise AccountError("provider_transport_failed")
-            host.observation=error
+            host._probe_observation=error
         else:
             def busy(argv,**kwargs):
                 if argv[0]=="ps": return SimpleNamespace(returncode=0,stdout="123 codex /fixture/native")
@@ -33,7 +33,7 @@ def test_confirmed_non_split_failure_is_recoverable(tmp_path,monkeypatch,recover
             except VerbError: pass
             assert host.registry.active(old.provider,old.alias,old.host).key==old.key
             journals={p.name:p.read_bytes() for p in host.journal.glob("*.json")}
-            host.observation,host.run=observe,execute
+            host._probe_observation,host.run=observe,execute
             if recovery=="fresh":
                 result=(await runtime.operation(dict(request,operation_id="fresh-after-failure",new_generation="fresh-successor")))["result"]
                 assert result["binding"]["generation"]=="fresh-successor"
@@ -72,9 +72,9 @@ def test_non_split_resolution_requires_exact_proof_origin_and_current_authority(
     from account_repin import fenced
     async def run():
         store,runtime,host,old,request,calls,native,logins,cell,pin=await host_journey(tmp_path,monkeypatch)
-        observe=host.observation;execute=runtime.executor.execute;fresh=False
+        observe=host._probe_observation;execute=runtime.executor.execute;fresh=False
         def fail(_): raise AccountError("provider_transport_failed")
-        host.observation=fail
+        host._probe_observation=fail
         async def uncertain(account,action,*args,**kwargs):
             result=await execute(account,action,*args,**kwargs)
             if action in {"repin-inspect","repin-settle"}:
@@ -88,7 +88,7 @@ def test_non_split_resolution_requires_exact_proof_origin_and_current_authority(
         try:
             with pytest.raises(VerbError): await runtime.operation(request)
             assert await runtime.run(lambda a:fenced(a,old))
-            host.observation=observe;fresh=True
+            host._probe_observation=observe;fresh=True
             if case=="central-health": await runtime.record_failure(old,"identity")
             auth={} if case=="auth" else AUTH
             with pytest.raises(VerbError):
