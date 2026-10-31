@@ -56,7 +56,7 @@ payload and owned-cleanup examples have positive static support. Its rotated
 receipt and forced-overlap shortcomings are addressed by the reference below;
 they are historical findings, not additional open repairs. Process snapshots
 can miss brief prohibited descendants. Late-proof no-resend discrimination,
-disconnect ordering, some clock/cleanup questions and required-gate inclusion
+ordering in the sampled disconnect case, some clock/cleanup questions and required-gate inclusion
 of standalone client tests remain unproved. The source-bound assessment is
 retained with the planning evidence; it supplies neither runtime reliability
 proof nor a suite compliance score. Remaining findings stay with the existing
@@ -167,7 +167,7 @@ assertion completeness, uninspected fake boundaries and runtime cost are UNKNOWN
 | --- | --- | --- |
 | Send retry → durable receipt | [`test_send_idempotency_dedupe.py`](../services/chat-stream-v2/tests/test_send_idempotency_dedupe.py), [`test_send_semantics.py`](../services/chat-stream-v2/tests/test_send_semantics.py); daemon unit / focused `v2-pytest` | Real Comms, Store, Sessions, SpawnCtl; fake tmux/hosts/blob transport. Inspected: single paste, logical identity, failed retry eligibility, queued and pending replay. Reference below; no real provider/socket/browser proof. |
 | Receipt projection and late proof | [`test_send_receipts.py`](../services/chat-stream-v2/tests/test_send_receipts.py), [`test_send_receipt_late_proof.py`](../services/chat-stream-v2/tests/test_send_receipt_late_proof.py); daemon unit / focused | Real store projection and direct Server dispatch with synthetic records/events. Inspected: metadata correlation, event stamping, proof reconciliation/race/ambiguity and access checks. Distinct from physical-send and client protections. |
-| Disconnect and client reconciliation | [`test_send_survives_disconnect.py`](../services/chat-stream-v2/tests/test_send_survives_disconnect.py); [`optimisticReconciliation.test.ts`](../pentacle-chat-core/tests/optimisticReconciliation.test.ts) | Server handler tasks survive fake-websocket disconnect with delayed fake send; no Comms delivery. Client reducers/selectors use synthetic state/events: identity, live/snapshot replay, status ordering and caption lattice. Client suite runs separately. One complete real send/disconnect/consumer journey remains UNKNOWN across the repo, not a proven absent test. |
+| Disconnect and client reconciliation | [`test_send_survives_disconnect.py`](../services/chat-stream-v2/tests/test_send_survives_disconnect.py); [`test_inbound_admission_bounds.py`](../services/chat-stream-v2/tests/test_inbound_admission_bounds.py) (reference examples below); [`optimisticReconciliation.test.ts`](../pentacle-chat-core/tests/optimisticReconciliation.test.ts) | Server handler/task-lifetime tests use fake sockets and send handlers; no Comms delivery. Client reducers/selectors use synthetic state/events: identity, live/snapshot replay, status ordering and caption lattice. Client suite runs separately. One complete real send/disconnect/consumer journey remains UNKNOWN across the repo, not a proven absent test. |
 | Provider/account startup and recovery | Daemon `test_provider_*.py`, `test_account_*.py`, especially [`test_account_repin_state_machine.py`](../services/chat-stream-v2/tests/test_account_repin_state_machine.py); daemon unit / selector `provider_startup` | Inspected repin examples preserve generation, one native proof/login, no sealed-op replay and superseded bindings with injected refusals; table wrappers expand subcases. Exhaustive marker is excluded from merge. Provider/native account and launch-environment fixtures are not live authentication/quota qualification; see selection's explicit limits. |
 | Consent and operator questions | CLI [`test_consent_cli.py`](../services/agent-orch/tests/test_consent_cli.py); daemon/CLI `test_consent*`, `test_question*`, `test_prompt*`; root/UI counterparts | Inspected CLI parsing includes revision/generation, local-admin ceremony and emergency-revoke claims; lifecycle/transport/token calls monkeypatched. Daemon admission and browser question registry are different boundaries; complete cross-layer assertion audit UNKNOWN. |
 | Session lifecycle and work coordination | Daemon/CLI `test_session*`, `test_spawn*`, `test_close*`, `test_work*`, `test_report*`; root `test/work*` | Existing daemon/CLI/root runners, and browser `web-work-lanes`, `scheduled-section`, closed-slot/reconnect scenarios. File families locate lifecycle, dispatch and work obligations; assertion semantics and real/fake dependencies outside the inspected send fixtures UNKNOWN. |
@@ -177,6 +177,20 @@ assertion completeness, uninspected fake boundaries and runtime cost are UNKNOWN
 | Voice, audio and microphone | `mic-server/test/`, daemon `test_voice*`, root `test/*voice*`/`test/*mic*`, browser voice/mic registry | Separate contracts pytest, daemon, root and browser entries. Synthetic audio/state/service fixtures do not establish physical microphone or remote ASR behavior. Per-file assertion/fake-boundary audit UNKNOWN. |
 | Selection, environment and cleanup | [`test_select_tests.py`](../scripts/test_select_tests.py), [`test_gate_env.py`](../scripts/test_gate_env.py), daemon [`test_harness_reaping.py`](../services/chat-stream-v2/tests/test_harness_reaping.py); explicit self-tests / daemon unit | Inspected selector tests use real disposable Git objects and synthetic files to check mapping, rename/shared/missing-evidence fallback and invalid input refusal. Reaping tests inspect real owned processes, identity-safe refusal and a 60s hermetic isolation observation. That intentional cost alone is not BLOAT. |
 | Dashboard and optional adapters | Vendor [`public_boards.test.js`](../vendor/dashboard-library/tests/public_boards.test.js), browser dashboard registry; other convention candidates in census | Vendor package/CI and browser entries are distinct. Optional integrations and unclassified filenames remain UNKNOWN until assertions and dependencies are inspected. |
+
+Two additional disconnect/task-lifetime references in
+[`test_inbound_admission_bounds.py`](../services/chat-stream-v2/tests/test_inbound_admission_bounds.py)
+were inspected outside the 22-scenario assessment sample, at `1e3c3241` and
+unchanged on this candidate. `test_detached_sends_keep_credit_until_terminal`
+holds two accepted sends on an Event, closes and joins the client handler,
+asserts both detached tasks remain and credit rejects another send, then
+releases them and checks the exact effects plus renewed admission.
+`test_detached_send_outlives_cancelled_hello_barrier` holds hello, pipelines a
+send, closes the client handler, then checks the detached task is not cancelled,
+its exact send effect and released durable credit. Both exercise real Server
+task/admission code with fake sockets/handlers, not Comms or durable receipt
+delivery. They use the existing daemon unit/focused runner; this static index
+adds neither runtime proof nor rows to the original assessment.
 
 **Concrete selection GAP:** root npm-test does not select the 44 standalone
 chat-core `.test.ts` files or its typecheck. Inspection scope: root package
