@@ -42,14 +42,23 @@ def _epoch(stamp):
 
 
 def unattended_work_conn(conn, *, now: float | None = None) -> dict:
+    from work_owed import disposition_spec_ids_conn
     state = _state_conn(conn)
     owners = assigned_owners_conn(conn)
+    referenced = set(owners) | disposition_spec_ids_conn(conn)
+    for lane in conn.execute("SELECT members_json FROM v2_assistant_composite_lanes "
+                             "WHERE work_state IS NOT NULL AND work_state!='done'"):
+        referenced.update(json.loads(lane[0] or "[]"))
     items, omitted = [], []
     for raw in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations ORDER BY spec_id"):
         record = _observed_record(json.loads(raw[1]), state)
         member = record["member"]
         observation = member.get("observation") or {}
         if not state["available"] or observation.get("quality") != "fresh":
+            if (state["available"] and observation.get("quality") == "missing"
+                    and (record.get("last_good") or {}).get("status") != "in_progress"
+                    and raw[0] not in referenced):
+                continue
             omitted.append({"spec_id": raw[0], "quality": observation.get("quality", "unknown"),
                             "error": observation.get("error")})
             continue

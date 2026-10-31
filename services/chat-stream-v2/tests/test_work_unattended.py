@@ -35,6 +35,157 @@ async def notices(store):
         "SELECT * FROM v2_outbound_notices WHERE kind='lane_digest' ORDER BY created_at")])
 
 
+async def missing_record(store, identity, former=None, *, quality="missing", settled=True):
+    """Replay producer observations; keep the diagnostic row in the isolated Store."""
+    from _shared.work_observations import advance_observation
+    previous = None
+    if former:
+        previous, _ = advance_observation(identity, None, {"quality": "fresh", "path": "/fixture/item",
+            "source_hash": "former", "facts": {"status": former}}, now=100, settle_s=10, sweep=True)
+    record, _ = advance_observation(identity, previous, {"quality": quality},
+                                    now=101, settle_s=10, sweep=True)
+    if settled:
+        record, _ = advance_observation(identity, record, {"quality": quality},
+                                        now=112, settle_s=10, sweep=True)
+    def save(conn):
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+                         (identity, json.dumps(record)))
+    await store.submit(save)
+    return record
+
+
+def test_irrelevant_missing_shapes_do_not_degrade_but_rows_remain():
+    async def run():
+        store = Store(); store.start()
+        try:
+            await cached(store)  # genuine ownerless active positive control
+            for i, former in enumerate([None, None, "analysis"]):
+                await missing_record(store, f"spec_demo__orphan_{i}", former)
+            before = await store.submit(lambda c: list(c.execute(
+                "SELECT spec_id,record_json FROM v2_work_item_observations ORDER BY spec_id")))
+            projection = await store.work_unattended()
+            assert projection["count"] == 1 and projection["omitted_count"] == 0
+            assert projection["quality"] == "fresh"
+            after = await store.submit(lambda c: list(c.execute(
+                "SELECT spec_id,record_json FROM v2_work_item_observations ORDER BY spec_id")))
+            assert [tuple(r) for r in before] == [tuple(r) for r in after]
+            await missing_record(store, "spec_demo__unknown", quality="ambiguous")
+            partial = await store.work_unattended()
+            assert partial["quality"] == "partial" and partial["omitted_count"] == 1
+            assert partial["omitted"][0]["spec_id"] == "spec_demo__unknown"
+            await store.mark_work_index_pending()
+            unavailable = await store.work_unattended()
+            assert unavailable["quality"] == "unavailable" and unavailable["omitted_count"] == 5
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("former,quality,settled,omitted", [
+    (None, "missing", False, False),  # never-good first sweep: no extra grace
+    ("analysis", "missing", False, True),  # formerly-good producer grace
+    ("in_progress", "missing", True, True),
+    ("analysis", "missing", True, False),
+    ("completed", "missing", True, False),
+    ("backlog", "missing", True, False),
+    (None, "ambiguous", True, True),
+    ("analysis", "stale", True, True),
+])
+def test_missing_relevance_preserves_quality_and_active_history(former, quality, settled, omitted):
+    async def run():
+        store = Store(); store.start()
+        try:
+            await cached(store)
+            await missing_record(store, "spec_demo__missing", former, quality=quality, settled=settled)
+            work = await store.work_unattended()
+            assert work["omitted_count"] == int(omitted)
+            assert work["quality"] == ("partial" if omitted else "fresh")
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reference", ["owner", "lane", "episode", "owed"])
+@pytest.mark.parametrize("settled", [False, True])
+def test_current_reference_restores_missing_omission_without_recreating_record(reference, settled):
+    from test_work_lanes import run
+    from work_owed import STATE_KEY
+    identity = "spec_demo__missing"
+    async def body(env):
+        store = env.store
+        await cached(store)
+        record = await missing_record(store, identity, settled=settled)
+        assert (await store.work_unattended())["omitted_count"] == 0
+        if reference == "owner":
+            await store.open_session("host-a", "explicit", role="nexus", assigned_spec_id="",
+                spec_ids=[identity], spec_binding_provenance=[{"spec_id": identity,
+                    "provenance": "operator_v2", "granting_principal": "operator",
+                    "granted_at": "2026-10-26T00:00:00Z"}])
+        elif reference == "lane":
+            lane_id = (await env.adopt(state="paused", lead=False, owner="operator", members=[identity]))["lane"]["lane_id"]
+        else:
+            def add(conn):
+                with conn:
+                    state = json.loads(conn.execute("SELECT state_json FROM v2_work_index_state").fetchone()[0])
+                    registry = state.setdefault(STATE_KEY, {"episodes": {}, "owed": {}})
+                    registry["episodes" if reference == "episode" else "owed"]["legacy"] = {"spec_id": identity}
+                    conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(state),))
+            await store.submit(add)
+        assert (await store.work_unattended())["omitted_count"] == 1
+        # Remove the reference without scanning or changing the observation.
+        def remove(conn):
+            with conn:
+                if reference == "owner":
+                    conn.execute("UPDATE sessions SET status='closed' WHERE session_name='explicit'")
+                elif reference == "lane":
+                    conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='done' WHERE lane_id=?", (lane_id,))
+                else:
+                    state = json.loads(conn.execute("SELECT state_json FROM v2_work_index_state").fetchone()[0])
+                    state[STATE_KEY]["episodes" if reference == "episode" else "owed"].clear()
+                    conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(state),))
+        await store.submit(remove)
+        assert (await store.work_unattended())["omitted_count"] == 0
+        saved = await store.submit(lambda c: json.loads(c.execute(
+            "SELECT record_json FROM v2_work_item_observations WHERE spec_id=?", (identity,)).fetchone()[0]))
+        assert saved == record
+    run(body)
+
+
+@pytest.mark.parametrize("settled_status", ["completed", "deprecated", "backlog"])
+def test_real_source_move_and_last_owner_loss(tmp_path, settled_status):
+    import time
+    root_path = tmp_path / "memory"
+    folder = root_path / "work/in_progress/demo__journey"
+    folder.mkdir(parents=True)
+    identity = "spec_demo__journey"
+    (folder / "spec.md").write_text(f"---\nid: {identity}\ntitle: Journey\n---\n")
+    (folder / "summary.md").write_text("Working.\n")
+    source = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda _: None,
+                            memory_root=str(root_path))
+    async def run():
+        store = Store(); store.start()
+        try:
+            now = time.time() + 1
+            await store.reconcile_work_observations(source.scan_work_observations(now=now), settle_s=0, sweep=True)
+            for name in ("first", "second"):
+                await store.open_session("host-a", name, role="nexus", assigned_spec_id=identity)
+            assert (await store.work_unattended())["count"] == 0
+            await store.update_session("host-a", "first", status="closed")
+            assert (await store.work_unattended())["count"] == 0
+            await store.update_session("host-a", "second", status="closed")
+            assert (await store.work_unattended())["count"] == 1
+            target = root_path / "work" / settled_status / folder.name
+            target.parent.mkdir()
+            folder.rename(target)
+            await store.reconcile_work_observations(source.scan_work_observations(now=now + 1), settle_s=0, sweep=True)
+            assert (await store.work_unattended())["count"] == 0
+            assert (await store.work_owed())["total"] == 0
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_zero_lane_real_cached_ingest_digest(tmp_path, monkeypatch):
     monkeypatch.setenv("PENTACLE_LANE_DIGEST_S", "5")
     folder = tmp_path / "memory/work/in_progress/demo__recent"
@@ -76,6 +227,7 @@ def test_read_only_rpc_whole_board_without_lanes(tmp_path):
         await env.store.grant_stream_token("fixture-root", "visible", hashlib.sha256(b"fixture-token").hexdigest(),
                                            STREAM_TOKEN_HASH_VERSION)
         await cached(env.store, count=10)
+        await missing_record(env.store, "spec_demo__irrelevant", "analysis")
         sessions = Sessions(env.store, tmux=None, local_host="fixture-root")
         await sessions.refresh()
         server = Server(port=0, store=env.store, sessions=sessions, local_host="fixture-root")
@@ -106,6 +258,8 @@ def test_read_only_rpc_whole_board_without_lanes(tmp_path):
             response = await rpc("work.unattended")
             assert response["type"] == "work.unattended.ok", response
             assert len(response["unattended_work"]["items"]) == 10
+            assert response["unattended_work"]["quality"] == "fresh"
+            assert response["unattended_work"]["omitted_count"] == 0
             proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", "work", "unattended", "--json",
                 env=child_env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             try:

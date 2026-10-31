@@ -74,6 +74,28 @@ def test_ledger_fallback_context_and_report_dedupe():
 import pytest
 
 
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+def test_unchanged_settled_source_predicts_no_debt_in_actual_report_notice(status):
+    from test_work_owed import end
+    async def run():
+        store = Store(); store.start()
+        try:
+            sessions = await setup(store)
+            await cached(store, status=status, now=101)
+            await store.update_session("host-a", "reporter", role="lead", assigned_spec_id="spec_demo__item_00")
+            ledger = Ledger(store, sessions=sessions)
+            snapshot = await ledger._report_routing_snapshot("host-a:reporter")
+            await store.put_report(payload("settled-report", completion_kind="tracked"), routing_snapshot=snapshot)
+            notice = match_message_envelope((await report_notices(store))[0]["body"])
+            assert notice["disposition_context"]["items"][0]["status"] == status
+            assert notice["owes_disposition_on_close"] is False
+            await end(store, await store.fetch_session("host-a", "reporter"))
+            assert (await store.work_owed())["total"] == 0
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("status", ["done", "error", "aborted"])
 @pytest.mark.parametrize("role,verdict", [("lead", None), ("nexus", None), ("worker", None),
                                           ("planner", None), ("qa", "accept"), ("qa", "reject")])
