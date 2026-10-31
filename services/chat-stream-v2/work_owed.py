@@ -17,6 +17,12 @@ def _registry(state):
     return copy.deepcopy(state.get(STATE_KEY) or {"episodes": {}, "owed": {}})
 
 
+def disposition_spec_ids_conn(conn):
+    """Current episode/debt references, read within the caller's transaction."""
+    registry = _registry(_state_conn(conn))
+    return {entry["spec_id"] for kind in ("episodes", "owed") for entry in registry[kind].values()}
+
+
 def _save(conn, state, registry):
     if registry == state.get(STATE_KEY):
         return
@@ -72,8 +78,9 @@ def _advance(episode, observation):
 
 
 def _disposed(episode, observation):
-    return bool(episode.get("disposition") and observation["known"]
-                and observation["status"] != "in_progress")
+    return bool(observation["known"] and (
+        observation["status"] in {"completed", "deprecated", "backlog"}
+        or (episode.get("disposition") and observation["status"] != "in_progress")))
 
 
 def reconcile_dispositions_conn(conn, now):
@@ -198,7 +205,7 @@ def owes_on_close_conn(conn, stream, generation):
             continue
         observation = _observation(conn, state, spec)
         episode = _registry(state)["episodes"].get(key)
-        if not episode or not _disposed(episode, observation):
+        if not _disposed(episode or {}, observation):
             return True
     return False
 

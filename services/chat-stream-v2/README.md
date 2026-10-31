@@ -181,6 +181,21 @@ does not resume a task, switch models, or produce a completion report.
 
 ## Pending lane digests
 
+`agent-orch work owed --json` clears assignment debt on the normal accepted
+observation scan when source is fresh, has a revision, and is `completed`,
+`deprecated` or `backlog`, including work already settled before assignment.
+Backlog is deferred work. Other dispositions still require the existing
+witnessed transition or changed valid blocked declaration. Unusable source
+cannot clear debt from cached status; a later healthy scan can repair it.
+
+`agent-orch work unattended --json` lists fresh `in_progress` work without a
+qualifying live lead or Nexus. Missing records do not degrade this list when
+their last-good state was absent or inactive and no current owner, open lane,
+assignment episode or debt references them. The observation rows remain for
+diagnostics. Missing former active work and stale, ambiguous, referenced or
+unavailable observations remain omissions. CLI and lane digest share these
+projections; scan and delivery cadence are unchanged.
+
 An old `lane_digest` with committed-pending submission proof is reconciled by
 the existing notice retry loop after both its retry and proof-age bounds.
 Positive proof completes the original delivery. Otherwise, a complete ordered

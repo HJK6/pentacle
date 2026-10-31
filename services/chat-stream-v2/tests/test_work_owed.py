@@ -1,5 +1,6 @@
-"""Owed dispositions follow witnessed assignment episodes, never board status alone."""
+"""Owed dispositions follow accepted source and witnessed assignment episodes."""
 import asyncio
+import json
 
 import pytest
 
@@ -29,6 +30,109 @@ async def lead(store, name="lead", **fields):
 async def end(store, row, kind="operator_close"):
     return await store.mark_closed(HOST, row["session_name"], closed_at="2026-10-25T02:00:00Z",
         pane_status="pane_dead", expected_generation=row["session_generation"], close_kind=kind)
+
+
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("arrival", ["before_assignment", "during_assignment", "after_close"])
+def test_fresh_settled_source_prevents_or_clears_debt(status, known, arrival):
+    from work_owed import owes_on_close_conn
+    async def run():
+        store = Store(); store.start()
+        try:
+            if known:
+                await observe(store, "blocked", "baseline", 90)
+            if arrival == "before_assignment":
+                await observe(store, status, "settled", 100)
+            owner = await lead(store)
+            if arrival == "during_assignment":
+                await observe(store, status, "settled", 101)
+            predicted = await store.submit(lambda c: owes_on_close_conn(
+                c, f"{HOST}:lead", owner["session_generation"]))
+            assert predicted is (arrival == "after_close")
+            await end(store, owner)
+            assert (await store.work_owed())["total"] == int(arrival == "after_close")
+            await observe(store, status, "settled", 102)
+            assert (await store.work_owed())["total"] == 0
+            await observe(store, status, "settled", 103)
+            assert (await store.work_owed())["quality"] == "fresh"
+            # A genuine reopening is a new episode and may owe again.
+            await observe(store, "in_progress", "reopened", 104)
+            reopened = await lead(store)
+            await end(store, reopened)
+            assert (await store.work_owed())["total"] == 1
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("known", [False, True])
+def test_old_registry_repairs_on_unchanged_healthy_scan_after_restart(tmp_path, status, known):
+    from work_owed import STATE_KEY
+    path = str(tmp_path / "legacy.db")
+    async def seed():
+        store = Store(path); store.start()
+        try:
+            await observe(store, status, "unchanged-source", 100)
+            await lead(store)
+            def legacy(conn):
+                with conn:
+                    state = json.loads(conn.execute("SELECT state_json FROM v2_work_index_state").fetchone()[0])
+                    registry = state[STATE_KEY]
+                    key, episode = next(iter(registry["episodes"].items()))
+                    episode.update(baseline_known=known, disposition=None, closed_at="2026-10-25T02:00:00Z")
+                    registry["owed"][key] = registry["episodes"].pop(key)
+                    conn.execute("UPDATE sessions SET status='closed' WHERE session_name='lead'")
+                    conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(state),))
+            await store.submit(legacy)
+            assert (await store.work_owed())["total"] == 1  # read queries cannot repair storage
+        finally:
+            store.stop()
+    async def repair():
+        store = Store(path); store.start()
+        try:
+            await observe(store, status, "unchanged-source", 101)
+            assert (await store.work_owed())["total"] == 0
+            persisted = await store.submit(lambda c: json.loads(c.execute(
+                "SELECT state_json FROM v2_work_index_state").fetchone()[0]))
+            assert persisted[STATE_KEY]["owed"] == {}
+            await observe(store, status, "unchanged-source", 102)
+            assert (await store.work_owed())["total"] == 0
+        finally:
+            store.stop()
+    asyncio.run(seed()); asyncio.run(repair())
+
+
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("quality", ["stale", "missing", "ambiguous", "unavailable", "no_revision"])
+def test_cached_settled_status_cannot_clear_unusable_source(status, quality):
+    async def run():
+        store = Store(); store.start()
+        try:
+            await lead(store)  # unknown baseline must remain degraded until real recovery
+            def uncertain(conn):
+                from _shared.work_observations import advance_observation
+                record, _ = advance_observation(SPEC, None, {"quality": "fresh", "path": "/fixture/item",
+                    "source_hash": "cached", "facts": {"status": status}}, now=100, settle_s=0, sweep=True)
+                if quality != "no_revision":
+                    record["member"]["observation"]["quality"] = quality
+                else:
+                    record["source_hash"] = None
+                with conn:
+                    conn.execute("INSERT INTO v2_work_item_observations VALUES (?,?)", (SPEC, json.dumps(record)))
+                    state = json.loads(conn.execute("SELECT state_json FROM v2_work_index_state").fetchone()[0])
+                    state["available"] = quality != "unavailable"
+                    conn.execute("UPDATE v2_work_index_state SET state_json=?", (json.dumps(state),))
+            await store.submit(uncertain)
+            await end(store, await store.fetch_session(HOST, "lead"))
+            owed = await store.work_owed()
+            assert owed["total"] == owed["unknown_count"] == 1
+            await observe(store, status, "recovered", 110)
+            assert (await store.work_owed())["total"] == 0
+        finally:
+            store.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("baseline,park,changes,owed", [
@@ -61,7 +165,7 @@ def test_accepted_revision_counterexamples(baseline, park, changes, owed):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("status", ["backlog", "blocked"])
+@pytest.mark.parametrize("status", ["backlog", "blocked", "analysis", "ready_for_dev", "needs_qa"])
 def test_untouched_work_has_no_assignment_debt(status):
     async def run():
         store = Store(); store.start()
@@ -70,7 +174,22 @@ def test_untouched_work_has_no_assignment_debt(status):
             assert (await store.work_owed())["total"] == 0
             owner = await lead(store)
             await end(store, owner, "session_close")
-            assert (await store.work_owed())["total"] == 1
+            assert (await store.work_owed())["total"] == int(status != "backlog")
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["blocked", "analysis", "ready_for_dev", "needs_qa"])
+def test_other_dispositions_still_require_witnessed_status_transition(status):
+    async def run():
+        store = Store(); store.start()
+        try:
+            await observe(store, "in_progress", "baseline", 100)
+            owner = await lead(store)
+            await observe(store, status, "accepted-transition", 101)
+            await end(store, owner)
+            assert (await store.work_owed())["total"] == 0
         finally:
             store.stop()
     asyncio.run(run())
@@ -185,6 +304,39 @@ def test_owed_digest_recurrence_inflight_clear_disabled_and_root_generation(monk
             assert len(await notices(store)) == len(rows)
             monkeypatch.setenv("PENTACLE_LANE_DIGEST_S", "0")
             assert (await store.work_owed())["digest_delivery"] == "disabled"
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_digest_uses_post_reconcile_debt_and_relevance_projection(monkeypatch):
+    from test_work_unattended import missing_record
+    monkeypatch.setenv("PENTACLE_LANE_DIGEST_S", "5")
+    async def run():
+        store = Store(); store.start()
+        try:
+            _, binding, presence = await root(store)
+            await observe(store, "in_progress", "active", 100)
+            await end(store, await lead(store))
+            for i, former in enumerate([None, None, "analysis"]):
+                await missing_record(store, f"spec_demo__orphan_{i}", former)
+            await store.evaluate_watch_wake(presence, now=100, root_binding=binding)
+            await store.evaluate_watch_wake(presence, now=105, root_binding=binding)
+            first = match_message_envelope((await notices(store))[0]["body"])
+            assert first["owed_dispositions"] == await store.work_owed(root_binding=binding)
+            work = await store.work_unattended(now=105)
+            assert first["unattended_work"] == {k: v for k, v in work.items() if k != "omitted"}
+            assert work["count"] == 1 and work["omitted_count"] == 0
+            await observe(store, "backlog", "settled", 106)
+            await store.evaluate_watch_wake(presence, now=110, root_binding=binding)
+            rows = await notices(store)
+            assert len(rows) == 2
+            cleared = match_message_envelope(rows[-1]["body"])
+            assert cleared["owed_dispositions"]["total"] == 0
+            assert cleared["unattended_work"]["count"] == cleared["unattended_work"]["omitted_count"] == 0
+            assert cleared["unattended_work"]["quality"] == "fresh"
+            await store.evaluate_watch_wake(presence, now=115, root_binding=binding)
+            assert len(await notices(store)) == 2
         finally:
             store.stop()
     asyncio.run(run())
@@ -310,19 +462,24 @@ def test_readonly_work_owed_rpc_and_real_cli_transport(tmp_path):
                 "AGENT_ORCH_WS_URL": f"ws://127.0.0.1:{port}", "AGENT_ORCH_HOST_ID": HOST,
                 "AGENT_ORCH_STREAM_ID": f"{HOST}:reader", "AGENT_ORCH_STREAM_TOKEN": "owed-read-token",
                 "AGENT_ORCH_TOKEN": "", "AGENT_ORCH_RUNTIME_DIR": str(tmp_path / "cli")}
-            proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", "work", "owed", "--json",
-                env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            try:
-                out, err = await asyncio.wait_for(proc.communicate(), 10)
-            finally:
-                if proc.returncode is None:
-                    proc.kill(); await proc.wait()
-            assert proc.returncode == 0, err.decode()
-            response = json.loads(out)
+            async def cli():
+                proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", "work", "owed", "--json",
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    out, err = await asyncio.wait_for(proc.communicate(), 10)
+                finally:
+                    if proc.returncode is None:
+                        proc.kill(); await proc.wait()
+                assert proc.returncode == 0, err.decode()
+                return json.loads(out)
+            response = await cli()
             assert response["type"] == "work.owed.ok"
             owed = response["owed_dispositions"]
             assert owed["total"] == 1 and owed["counts_by_repo"] == {"demo": 1}
             assert owed["items"][0]["session_generation"] == owner["session_generation"]
+            await observe(store, "completed", "settled", 101)
+            assert (await cli())["owed_dispositions"] == await store.work_owed()
+            assert (await store.work_owed())["total"] == 0
         finally:
             await server.close()
             store.stop()
