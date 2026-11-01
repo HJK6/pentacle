@@ -345,6 +345,9 @@ that holds until the scenario writes a release file. The page reloads after the
 daemon starts transcription, and delivery is read from the daemon's send
 receipts. A reload before the commit is the control, and it loses the take on
 every build.
+If the journey fails, its detail records the voice operation's state, failure
+code and milestone times, the origin session's status and generation, and the
+scenario's own step times. It never records message text.
 
 The scenario retains recording duration/accessible Cancel, visible
 `backend_unavailable` with Retry, stable transcription identity, one text row,
