@@ -703,6 +703,32 @@ async def test_u10_message_waits_for_every_digest_then_sends_once(voice_harness)
 
 
 @pytest.mark.asyncio
+async def test_u10_blob_committed_during_readiness_write_still_sends(voice_harness):
+    """The last blob lands while the commit-time worker records it missing: its kick is not lost."""
+    h = voice_harness
+    image = b"\xff\xd8 late synthetic jpeg"
+    finisher = h.server.error_alerts.finisher
+    held, release, inner = asyncio.Event(), asyncio.Event(), finisher._mine
+
+    async def mine(*args, **kwargs):
+        if not held.is_set():
+            held.set()
+            await release.wait()
+        return await inner(*args, **kwargs)
+    finisher._mine = mine
+    intent = await message_intent(h)
+    oid = intent["operation_id"]
+    async with h.client() as c:
+        await commit(h, c, intent, message_mandate(oid, "late photo", [hashlib.sha256(image).hexdigest()]))
+    await asyncio.wait_for(held.wait(), 5)
+    await upload_blob(h, image)  # kick_blob while the first worker is still running
+    release.set()
+    done = await settle(h, oid, timeout=5)  # no reconcile pass runs in this window
+    assert done["data"]["state"] in ("committed", "proved")
+    assert (await user_rows(h, "fixture:assistant"))[-1]["text"] == "late photo"
+
+
+@pytest.mark.asyncio
 async def test_u10_missing_image_stays_running_and_stalls_without_sending(voice_harness):
     h = voice_harness
     intent = await message_intent(h)
