@@ -2004,6 +2004,25 @@ def test_fd_self_send_and_send_to_protected_assistant_seat_are_not_held(tmp_path
             assert len(tmux.pastes) == 2
             assert await store.submit(lambda c: c.execute(
                 "SELECT count(*) FROM v2_assistant_lane_rulings WHERE action='send'").fetchone()[0]) == 0
+            # The base version has no covered rows; this continuation exercises
+            # role changes only once the additive column exists.
+            columns = await store.submit(lambda c: {r[1] for r in c.execute("PRAGMA table_info(v2_assistant_lane_rulings)")})
+            if "covered" not in columns:
+                return
+            await server.sessions.open("localhost", "pending-role", provider="claude", role="worker",
+                                       assigned_spec_id="spec_demo__linked")
+            msg = {"type": "send", "to_stream_id": "localhost:pending-role", "msg_id": 82,
+                   "request_id": "before-role-change", "text": "Commission held before role change",
+                   "from_stream_id": desk_id, "_auth_context": auth}
+            held = await server._on_send(msg)
+            assert held["reason"] == "pending_ruling" and len(tmux.pastes) == 2
+            await store.update_session("localhost", "pending-role", role="assistant")
+            retried = await server._on_send({**msg, "request_id": "after-role-change"})
+            assert retried["ruling_request_id"] == held["ruling_request_id"]
+            assert retried["reason"] == "pending_ruling" and len(tmux.pastes) == 2
+            typed_retry = await server._on_send({**msg, "request_id": "after-typed-change",
+                                                 "qa_spec_id": "spec_demo__linked"})
+            assert typed_retry["ruling_request_id"] == held["ruling_request_id"] and len(tmux.pastes) == 2
         finally:
             store.stop()
     asyncio.run(go())

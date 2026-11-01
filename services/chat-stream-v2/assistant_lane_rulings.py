@@ -271,13 +271,23 @@ class AssistantLaneRulings:
                 if key not in {"stream_token", "_auth_context", "_ruling_release",
                                "_ruling_report", "_ruling_report_waiver"}}
 
+    async def _known_covered(self, key: str, auth: dict[str, Any]) -> bool:
+        if not auth.get("token_verified"):
+            return False
+        row = await self.store.submit(lambda conn: conn.execute(
+            "SELECT requester_stream_id,requester_generation,covered FROM v2_assistant_lane_rulings WHERE request_key=?",
+            (key,)).fetchone())
+        return bool(row and row["covered"] and (row["requester_stream_id"], row["requester_generation"]) ==
+                    (auth.get("stream_id"), auth.get("session_generation")))
+
     async def request_spawn(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         from spawnctl import new_work_commission
         composite = self._composite()
-        if composite is None or not composite.enabled or not composite.config.direct_primary:
-            return None
         auth = msg.get("_auth_context") or {}
-        if (not new_work_commission(msg, resume=msg.get("resume_session_id") is not None)
+        key = str(msg.get("idempotency_key") or msg.get("request_id") or "")
+        known = await self._known_covered("spawn:" + key, auth) if key else False
+        if not known and (composite is None or not composite.enabled or not composite.config.direct_primary
+                or not new_work_commission(msg, resume=msg.get("resume_session_id") is not None)
                 or str(msg.get("role") or "").lower() == "qa"
                 or (auth.get("stream_id"), auth.get("session_generation")) != (
                     composite.config.direct_primary_stream_id,
@@ -298,7 +308,6 @@ class AssistantLaneRulings:
                 raise ValueError(error)
             message["objective"] = objective
             message["objective_source"] = source
-        key = str(message.get("idempotency_key") or message.get("request_id") or "")
         if not key:
             raise ValueError("assistant_ruling_spawn_key_required")
         # A CLI retry carries a fresh RPC request ID. Keep the daemon intent
@@ -308,13 +317,11 @@ class AssistantLaneRulings:
             message["session_name"] = "v2-" + hashlib.sha256(key.encode()).hexdigest()[:12]
         target = f"{message.get('host') or self.server.local_host}:{message['session_name']}"
         # R4: item (1)'s task link is checked when a new ruling request is admitted, not at release.
-        known = await self.store.submit(lambda conn: conn.execute(
-            "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)).fetchone())
-        if binding["state"] == "disabled" and known is None:
+        if binding["state"] == "disabled" and not known:
             return None
         spawnctl = self.server.spawnctl
         spec_id = str(message.get("spec_id") or "")
-        if known is None:
+        if not known:
             if hasattr(spawnctl, "_work_link_refusal"):
                 host, name = target.split(":", 1)
                 authenticated = {**message, "_auth_context": {**auth, "covered_admission": True}}
@@ -358,28 +365,26 @@ class AssistantLaneRulings:
         from store import effective_assignment
         composite = self._composite()
         auth = msg.get("_auth_context") or {}
-        if (composite is None or not composite.enabled or not composite.config.direct_primary
+        host, _, name = target.partition(":")
+        seat = await self.store.fetch_session(host, name)
+        if not seat:
+            return None
+        generation = str(seat.get("session_generation") or "")
+        key = f"send:{target}:{generation}:{msg.get('msg_id', 0)}"
+        known = await self._known_covered(key, auth)
+        policy = getattr(self.server.sessions, "assistant", None)
+        if not known and (composite is None or not composite.enabled or not composite.config.direct_primary
                 or auth.get("ruled_release") or msg.get("qa_spec_id") is not None
-                or not auth.get("token_verified")
+                or not auth.get("token_verified") or seat.get("status") != "open"
+                or target == auth.get("stream_id") or (policy is not None and policy.protects(seat))
                 or (auth.get("stream_id"), auth.get("session_generation")) != (
                     composite.config.direct_primary_stream_id, composite.config.direct_primary_generation)):
             return None
         binding = await self.binding()
-        host, _, name = target.partition(":")
-        seat = await self.store.fetch_session(host, name)
-        if not seat or seat.get("status") != "open":
+        if binding["state"] == "disabled" and not known:
             return None
-        policy = getattr(self.server.sessions, "assistant", None)
-        if target == auth.get("stream_id") or (policy is not None and policy.protects(seat)):
-            return None
-        generation = str(seat.get("session_generation") or "")
-        key = f"send:{target}:{generation}:{msg.get('msg_id', 0)}"
-        known = await self.store.submit(lambda conn: conn.execute(
-            "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", (key,)).fetchone())
-        if binding["state"] == "disabled" and known is None:
-            return None
-        spec_id = effective_assignment(seat) if known is None else None
-        if known is None and not spec_id:
+        spec_id = effective_assignment(seat) if not known else None
+        if not known and not spec_id:
             raise VerbError("work_assignment_required", f"{target} requires an assigned spec")
         if "text" in msg and "message" in msg and msg["text"] != msg["message"]:
             raise VerbError("assistant_ruling_send_body_ambiguous", "assistant_ruling_send_body_ambiguous")
