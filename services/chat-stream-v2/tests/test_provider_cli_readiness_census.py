@@ -274,3 +274,63 @@ def test_known_input_admission_refusal_creates_no_possible_input_receipt(tmp_pat
             assert await store.get_tell_delivery("known-no-input") is None
         finally: store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("verb", ["tell", "send"])
+@pytest.mark.parametrize("material", [None, "health_revision", "executable_sha256"])
+def test_gap_obligation_is_logged_without_hiding_material_change(tmp_path, monkeypatch, verb, material):
+    import provider_cli_initial
+    from provider_cli_pin import history
+    async def run():
+        store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
+        saved = []
+        entered = []
+        try:
+            initial = (await runtime.operation(status(target)))["initial_readiness"]
+            assert initial["missing"] == []
+            verify = runtime.executor.verify_artifact
+            async def arrived(*args, **kwargs):
+                proof = await verify(*args, **kwargs)
+                await pending(store, row["stream_id"], verb=verb, key="new-during-cas")
+                saved.append(await receipts(store))
+                return proof
+            runtime.executor.verify_artifact = arrived
+            commit = provider_cli_initial.commit
+            def witnessed(a, *args, **kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                if material == "health_revision":
+                    a.conn.execute("UPDATE v2_account_bindings SET health_revision=health_revision+1 WHERE binding_key=?", (selected.key,))
+                elif material == "executable_sha256":
+                    data = json.loads(a._cell(selected.host, selected.provider, selected.alias)["data"])
+                    data[material] = "0" * 64
+                    a.conn.execute("UPDATE v2_account_bindings SET data=? WHERE binding_key=?", (json.dumps(data), selected.key))
+                return commit(a, *args, **kwargs)
+            monkeypatch.setattr(provider_cli_initial, "commit", witnessed)
+            request = promote(target, expected_readiness_digest=initial["digest"])
+            if material:
+                with pytest.raises(VerbError) as refused:
+                    await runtime.operation(request)
+                assert refused.value.extra["reason"] == "readiness_state_changed"
+                assert refused.value.extra["next_action"] == "Inspect changed fields: " + material
+                assert await runtime.run(pristine)
+                assert await runtime.run(history) == {}
+            else:
+                result = await runtime.operation(request)
+                assert result["pin"] == target
+                expected = {"to_stream_id": row["stream_id"], "delivery": "committed_pending_proof", "tell_id": "new-during-cas"}
+                if verb == "send":
+                    expected = {"to_stream_id": row["stream_id"], "request_id": "new-during-cas", "state": "accepted", "delivery": "accepted"}
+                logged = result["receipt"]["initial_readiness"]["input_obligations"]
+                assert logged == {"prepare": [], "commit": [expected], "added": [expected], "removed": []}
+                assert "fixture input" not in json.dumps(logged)
+            assert entered == [True]
+            assert saved and await receipts(store) == saved[0]
+            if not material:
+                # Later traffic cannot rewrite the original idempotent receipt.
+                runtime.executor.verify_artifact = verify
+                await pending(store, row["stream_id"], key="after-pin")
+                assert (await runtime.operation(request))["receipt"] == result["receipt"]
+                assert await store.get_tell_delivery("after-pin") is not None
+        finally: store.stop()
+    asyncio.run(run())

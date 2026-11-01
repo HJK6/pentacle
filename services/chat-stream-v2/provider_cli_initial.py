@@ -16,15 +16,10 @@ def _rows(conn, query, arguments=()):
 
 
 def snapshot(a, now, *, composite_for=None, counts=None):
-    """No message text, credentials, or time-varying quota projections."""
+    """Body-free census and input custody; readiness uses one comparison projection."""
     if not pristine(a):
         raise AccountError("provider_cli_pin_stale")
     accounts = a.readback(now=now)
-    for account in accounts["accounts"]:
-        if isinstance(account.get("observation"),dict):
-            # Quota collection/freshness/counters have their own admission check; keep identity.
-            account["observation"]={k:v for k,v in account["observation"].items()
-                                    if k not in {"observed_at","windows","collection"}}
     before = {
         "accounts": accounts["accounts"], "defaults": accounts["defaults"],
         "policy": json.loads(canonical(a.policy)),
@@ -65,6 +60,18 @@ def snapshot(a, now, *, composite_for=None, counts=None):
     if counts is not None:
         counts.update(blocking=len(blocking), not_open=not_open)
     return before
+
+
+def _readiness_projection(value):
+    projected={k:v for k,v in value.items() if k!="input_obligations"}
+    projected["accounts"]=[]
+    for account in value["accounts"]:
+        row=dict(account)
+        if isinstance(row.get("observation"),dict):
+            row["observation"]={k:v for k,v in row["observation"].items()
+                                if k not in {"observed_at","windows","collection"}}
+        projected["accounts"].append(row)
+    return projected
 
 
 def input_obligations(a):
@@ -224,9 +231,10 @@ async def prepare(runtime, message):
             except (AccountError,AttributeError) as exc:
                 missing.append({**cell,"reason":str(exc) if isinstance(exc,AccountError)
                                 else "launcher_verification_unavailable"})
-    ready = {"target_digest":digest(pin),"snapshot_digest":digest(before),
+    ready = {"target_digest":digest(pin),"snapshot_digest":digest(_readiness_projection(before)),
              "proofs":proofs,"parked_cells":list(parked.values()),"missing":missing,
-             "input_obligation_counts":counts}
+             "input_obligation_counts":counts,
+             "input_obligations":{"prepare":before["input_obligations"]}}
     ready["digest"] = digest({k:ready[k] for k in ("target_digest","snapshot_digest","parked_cells")})
     if expected is not None and expected != ready["digest"]:
         ready["missing"].append({"reason":"readiness_digest_changed"})
@@ -272,8 +280,12 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
     if ready["missing"]:
         raise _readiness_refusal(ready["missing"])
     after=snapshot(a,now,composite_for=composite_for)
-    if after != before:
-        raise _readiness_refusal([_snapshot_change(before,after)])
+    projected_before,projected_after=_readiness_projection(before),_readiness_projection(after)
+    if projected_after != projected_before:
+        raise _readiness_refusal([_snapshot_change(projected_before,projected_after)])
+    ready["input_obligations"].update(commit=after["input_obligations"],
+        added=[row for row in after["input_obligations"] if row not in before["input_obligations"]],
+        removed=[row for row in before["input_obligations"] if row not in after["input_obligations"]])
     pin = validate(message["pin"])
     if ready["target_digest"] != digest(pin):
         raise AccountError("provider_cli_initial_readiness_required",reason="target_changed")
