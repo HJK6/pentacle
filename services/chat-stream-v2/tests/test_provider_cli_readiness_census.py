@@ -65,8 +65,37 @@ def test_verified_not_open_obligations_do_not_block_first_pin_or_change_receipts
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("verb", ["tell", "send"])
+def test_obligation_after_readiness_before_prepare_is_logged(tmp_path, monkeypatch, verb):
+    import provider_cli_initial
+    async def run():
+        store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
+        entered = []
+        try:
+            initial = (await runtime.operation(status(target)))["initial_readiness"]
+            assert initial["missing"] == []
+            await pending(store, row["stream_id"], verb=verb, key="after-readiness")
+            saved = await receipts(store)
+            commit = provider_cli_initial.commit
+            def witnessed(a, *args, **kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                return commit(a, *args, **kwargs)
+            monkeypatch.setattr(provider_cli_initial, "commit", witnessed)
+            result = await runtime.operation(promote(target, expected_readiness_digest=initial["digest"]))
+            assert result["pin"] == target and entered == [True]
+            expected = {"to_stream_id": row["stream_id"], "tell_id": "after-readiness", "delivery": "committed_pending_proof"}
+            if verb == "send":
+                expected = {"to_stream_id": row["stream_id"], "request_id": "after-readiness", "state": "accepted", "delivery": "accepted"}
+            assert result["receipt"]["initial_readiness"]["input_obligations"] == {
+                "prepare": [expected], "commit": [expected], "added": [], "removed": []}
+            assert await receipts(store) == saved
+        finally: store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("kind", ["open", "open-unbound", "invalid", "no-target", "composite", "malformed"])
-def test_open_and_unverifiable_obligations_keep_blocking(tmp_path, monkeypatch, kind):
+def test_ordinary_obligations_are_logged_but_unknown_custody_refuses(tmp_path, monkeypatch, kind):
     async def run():
         store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
         try:
@@ -86,12 +115,23 @@ def test_open_and_unverifiable_obligations_keep_blocking(tmp_path, monkeypatch, 
                 await store.submit(corrupt)
             result = await runtime.operation(status(target))
             missing = result["initial_readiness"]["missing"]
-            assert any(v["reason"] == "input_submission_unresolved" for v in missing)
             saved = await receipts(store)
-            with pytest.raises(VerbError) as refused:
-                await runtime.operation(promote(target))
-            assert refused.value.code == "provider_cli_initial_readiness_required"
-            assert await runtime.run(pristine)
+            if kind == "open":
+                assert missing == []
+                after = await runtime.operation(promote(target))
+                logged = after["receipt"]["initial_readiness"]["input_obligations"]
+                assert logged["prepare"] == logged["commit"] == result["initial_readiness"]["input_obligations"]["prepare"]
+                assert len(logged["prepare"]) == 1 and logged["added"] == logged["removed"] == []
+            else:
+                if kind == "open-unbound":
+                    assert not any(v["reason"] == "input_submission_unresolved" for v in missing)
+                    assert {"stream_id": holder, "reason": "seat_binding_unverified"} in missing
+                else:
+                    assert any(v["reason"] == "input_submission_unresolved" for v in missing)
+                with pytest.raises(VerbError) as refused:
+                    await runtime.operation(promote(target))
+                assert refused.value.code == "provider_cli_initial_readiness_required"
+                assert await runtime.run(pristine)
             assert await receipts(store) == saved
         finally: store.stop()
     asyncio.run(run())
@@ -168,7 +208,9 @@ def test_latest_send_terminal_proof_supersedes_its_pending_receipt(tmp_path, mon
         try:
             await pending(store, row["stream_id"], verb="send")
             first = (await runtime.operation(status(target)))["initial_readiness"]
-            assert any(v["reason"] == "input_submission_unresolved" for v in first["missing"])
+            assert first["missing"] == []
+            assert first["input_obligations"]["prepare"] == [{"to_stream_id": row["stream_id"],
+                "request_id": "pending-one", "state": "accepted", "delivery": "accepted"}]
             await store.append_send_receipt(to_stream_id=row["stream_id"], request_id="pending-one",
                 receipt_id="pending-one", state="landed", delivery="landed", submission_confirmed=True,
                 wire_text="fixture input", display_text="fixture input", attachments=[])
@@ -179,7 +221,7 @@ def test_latest_send_terminal_proof_supersedes_its_pending_receipt(tmp_path, mon
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_first_cas_cannot_pass_a_pasted_tell_whose_receipt_is_still_in_flight(tmp_path, monkeypatch, cancel):
+def test_first_cas_logs_a_pasted_tell_whose_receipt_is_still_in_flight(tmp_path, monkeypatch, cancel):
     async def run():
         store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
         tmux = StoreTailProofCodex(store, row["stream_id"], append_on_paste=False)
@@ -201,18 +243,19 @@ def test_first_cas_cannot_pass_a_pasted_tell_whose_receipt_is_still_in_flight(tm
                 sending.cancel()
                 await asyncio.sleep(0)
             moving = asyncio.create_task(runtime.operation(promote(target)))
-            with pytest.raises(VerbError) as refused:
-                await asyncio.wait_for(moving, 1)
-            assert refused.value.code == "provider_cli_initial_readiness_required"
-            assert await runtime.run(pristine)
-            # Unknown pre-input custody is already durable while proof waits.
+            result = await asyncio.wait_for(moving, 1)
+            assert result["pin"] == target
+            logged = result["receipt"]["initial_readiness"]["input_obligations"]
+            assert logged["prepare"] == logged["commit"] and len(logged["commit"]) == 1
+            assert logged["commit"][0]["tell_id"] == "paste-receipt-race"
+            # Pinning logs uncertainty without claiming the input was delivered.
             saved = await store.get_tell_delivery("paste-receipt-race")
             assert saved is not None and not saved["reply"]["submission_confirmed"]
             release.set()
             if cancel:
                 with pytest.raises(asyncio.CancelledError): await sending
             else: await sending
-            assert await runtime.run(pristine)
+            assert not await runtime.run(pristine)
             saved = await store.get_tell_delivery("paste-receipt-race")
             assert saved["reply"]["delivery_status"] == ("proof_unavailable" if cancel else "committed_pending_proof")
             assert len(tmux.pastes) == 1 and tmux.enter_only == 0
@@ -242,9 +285,12 @@ def test_proof_reader_failure_after_paste_keeps_durable_input_custody(tmp_path, 
                                   "message": "one uncertain native input"})
             assert len(tmux.pastes) == 1
             result = await runtime.operation(status(target))
-            assert any(item["reason"] == "input_submission_unresolved"
-                       for item in result["initial_readiness"]["missing"]), result["initial_readiness"]
-            assert await runtime.run(pristine)
+            assert result["initial_readiness"]["missing"] == []
+            after = await runtime.operation(promote(target))
+            logged = after["receipt"]["initial_readiness"]["input_obligations"]
+            assert logged["prepare"] == logged["commit"] and len(logged["commit"]) == 1
+            assert logged["commit"][0]["tell_id"] == "proof-reader-failed"
+            assert logged["commit"][0]["delivery"] == "proof_unavailable"
         finally: store.stop()
     asyncio.run(run())
 
@@ -332,5 +378,78 @@ def test_gap_obligation_is_logged_without_hiding_material_change(tmp_path, monke
                 await pending(store, row["stream_id"], key="after-pin")
                 assert (await runtime.operation(request))["receipt"] == result["receipt"]
                 assert await store.get_tell_delivery("after-pin") is not None
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["before-prepare", "before-commit"])
+@pytest.mark.parametrize("kind", ["invalid", "no-target", "composite", "malformed"])
+def test_unknown_obligation_in_either_gap_still_refuses(tmp_path, monkeypatch, phase, kind):
+    from provider_cli_pin import history
+    async def run():
+        store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
+        saved = []
+        try:
+            initial = (await runtime.operation(status(target)))["initial_readiness"]
+            async def unknown():
+                holder = {"invalid": "not-a-stream", "no-target": None,
+                          "composite": "host-a:logical", "malformed": row["stream_id"]}[kind]
+                if kind == "composite":
+                    runtime.server._composite_for = lambda value: object() if value == holder else None
+                await pending(store, holder, key="unknown-in-gap")
+                if kind == "malformed":
+                    def corrupt(conn):
+                        conn.execute("UPDATE v2_tell_deliveries SET reply='broken-json' WHERE tell_id='unknown-in-gap'")
+                        conn.commit()
+                    await store.submit(corrupt)
+                saved.append(await receipts(store))
+            if phase == "before-prepare":
+                await unknown()
+            else:
+                verify = runtime.executor.verify_artifact
+                async def arrived(*args, **kwargs):
+                    proof = await verify(*args, **kwargs)
+                    await unknown()
+                    return proof
+                runtime.executor.verify_artifact = arrived
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation(promote(target, expected_readiness_digest=initial["digest"]))
+            assert refused.value.code == "provider_cli_initial_readiness_required"
+            assert refused.value.extra["reason"] == "input_submission_unresolved"
+            assert await runtime.run(pristine) and await runtime.run(history) == {}
+            assert saved and await receipts(store) == saved[0]
+        finally: store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("drift", ["expired", "artifact"])
+def test_ordinary_obligation_does_not_hide_commit_proof_drift(tmp_path, monkeypatch, drift):
+    import provider_cli_initial
+    from provider_cli_pin import history
+    async def run():
+        store, runtime, host, selected, target, row, native = await ready_fixture(tmp_path, monkeypatch)
+        try:
+            initial = (await runtime.operation(status(target)))["initial_readiness"]
+            await pending(store, row["stream_id"], key="ordinary-before-prepare")
+            saved = await receipts(store)
+            commit = provider_cli_initial.commit
+            def changed(a, message, before, ready, now, **kwargs):
+                assert a.conn.in_transaction
+                proof = ready["proofs"][selected.key]
+                if drift == "expired":
+                    proof["verified_at"] = now - 121
+                else:
+                    proof["artifact"]["pin_digest"] = "0" * 64
+                return commit(a, message, before, ready, now, **kwargs)
+            monkeypatch.setattr(provider_cli_initial, "commit", changed)
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation(promote(target, expected_readiness_digest=initial["digest"]))
+            if drift == "expired":
+                assert refused.value.code == "provider_cli_initial_readiness_required"
+                assert refused.value.extra["reason"] == "proof_expired"
+            else:
+                assert refused.value.code == "account_repin_receipt_invalid"
+            assert await runtime.run(pristine) and await runtime.run(history) == {}
+            assert await receipts(store) == saved
         finally: store.stop()
     asyncio.run(run())
