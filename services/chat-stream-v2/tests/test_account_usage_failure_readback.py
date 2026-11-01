@@ -63,10 +63,13 @@ def test_failed_probe_keeps_last_good_stale_and_exposes_actual_code(tmp_path, ra
             clock[0] += 1
             assert (await executor.observe(account))["outcome"] == "ok"
             recovered = (await runtime.run(lambda ledger: ledger.readback(now=clock[0])))["quota_pools"][0]
-            assert recovered["fresh"] is (code != "provider_auth_failed")
+            assert recovered["fresh"] is True
             assert recovered["error_codes"] == {}
             assert recovered["observation"] is not None
             assert recovered["observation"].get("error_code") is None
+            if code == "provider_auth_failed":
+                with pytest.raises(AccountError, match="account_unavailable"):
+                    await runtime.run(lambda ledger: ledger.ensure_available(account.key))
         finally:
             store.stop()
 

@@ -244,7 +244,7 @@ class AccountStore:
             conflict=any(a["health"]=="identity_conflict" for a in sources)
             pools.append({"provider":provider,"pool_id":pool,"sources":[a["host"]+":"+a["generation"] for a in sources],
                 "source_binding":best["host"]+":"+provider+":"+best["alias"]+":"+best["generation"] if best else None,
-                "observation":data,"age_seconds":age,"fresh":bool(complete and best["health"]=="healthy" and data.get("collection")=="ok" and not conflict and age is not None and number(max_age) and 0<=age<=max_age),
+                "observation":data,"age_seconds":age,"fresh":bool(complete and data.get("collection")=="ok" and not conflict and age is not None and number(max_age) and 0<=age<=max_age),
                 "error_codes":{a["host"]+":"+provider+":"+a["alias"]+":"+a["generation"]:a["observation"]["error_code"]
                     for a in sources if isinstance(a["observation"],dict) and a["observation"].get("error_code")},
                 "identity_conflict":conflict,
