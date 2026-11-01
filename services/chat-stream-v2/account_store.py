@@ -8,6 +8,7 @@ import contextlib
 from dataclasses import asdict, replace
 import json
 import math
+import re
 import sqlite3
 
 from provider_accounts import AccountError, Binding, _component
@@ -176,6 +177,17 @@ class AccountStore:
             self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
                 "health_revision=health_revision+1 WHERE binding_key=?",(key,))
             allowed["collection"]="identity_conflict"
+        if allowed["collection"]=="failed":
+            code=observation.get("error_code")
+            if isinstance(code,str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}",code):
+                allowed["error_code"]=code
+            raw=self.conn.execute("SELECT data FROM v2_account_observations WHERE binding_key=?",(key,)).fetchone()
+            previous=json.loads(raw[0]) if raw else {}
+            if (all(previous.get(k)==allowed[k] for k in ("provider_id","pool_id","auth_mode"))
+                    and previous.get("collection") in {"ok","failed"}
+                    and number(previous.get("observed_at")) and previous.get("windows")):
+                # Keep the upstream timestamp: a failed fetch never refreshes quota.
+                allowed.update(observed_at=previous["observed_at"],windows=previous["windows"])
         # A quota probe never clears an auth failure or identity conflict.
         self.conn.execute("INSERT OR REPLACE INTO v2_account_observations VALUES (?,?,?)",(key,json.dumps(allowed),now))
         return allowed["collection"]!="identity_conflict"
@@ -215,6 +227,10 @@ class AccountStore:
             measured=[a for a in sources if a["health"]=="healthy" and isinstance(a["observation"],dict)
                 and a["observation"].get("collection")=="ok" and number(a["observation"].get("observed_at"))]
             best=max(measured,key=lambda a:a["observation"]["observed_at"],default=None)
+            if best is None:
+                retained=[a for a in sources if a["health"]=="healthy" and isinstance(a["observation"],dict)
+                    and a["observation"].get("collection")=="failed" and number(a["observation"].get("observed_at"))]
+                best=max(retained,key=lambda a:a["observation"]["observed_at"],default=None)
             data=best["observation"] if best else None
             age=now-data["observed_at"] if data else None
             # Freshness is informational and uses the collector's existing cadence;
@@ -228,7 +244,9 @@ class AccountStore:
             conflict=any(a["health"]=="identity_conflict" for a in sources)
             pools.append({"provider":provider,"pool_id":pool,"sources":[a["host"]+":"+a["generation"] for a in sources],
                 "source_binding":best["host"]+":"+provider+":"+best["alias"]+":"+best["generation"] if best else None,
-                "observation":data,"age_seconds":age,"fresh":bool(complete and not conflict and age is not None and number(max_age) and 0<=age<=max_age),
+                "observation":data,"age_seconds":age,"fresh":bool(complete and data.get("collection")=="ok" and not conflict and age is not None and number(max_age) and 0<=age<=max_age),
+                "error_codes":{a["host"]+":"+provider+":"+a["alias"]+":"+a["generation"]:a["observation"]["error_code"]
+                    for a in sources if isinstance(a["observation"],dict) and a["observation"].get("error_code")},
                 "identity_conflict":conflict,
                 "cap":self.policy.get("account_caps",{}).get(provider,{}).get(pool)})
         return {"accounts":accounts,"quota_pools":pools,"defaults":self.defaults(),"enabled":self.policy.get("enabled") is True}

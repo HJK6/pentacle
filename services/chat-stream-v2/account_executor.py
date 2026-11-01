@@ -150,16 +150,17 @@ class AccountExecutor:
                     "provider_identity_changed": "identity", "provider_identity_or_cache_unverified": "identity"}.get(result["outcome"])
             if kind:
                 await self.runtime.record_failure(account, kind)
-            await self._failed_observation(account)
+            await self._failed_observation(account, result["outcome"])
             return {"outcome": result["outcome"], "host": account.host, "provider": account.provider, "account": account.alias}
         except AccountError as exc:
-            await self._failed_observation(account)
+            await self._failed_observation(account, str(exc))
             return {"outcome": str(exc), "host": account.host, "provider": account.provider, "account": account.alias}
 
-    async def _failed_observation(self, account):
+    async def _failed_observation(self, account, code):
         await self.runtime.run(lambda ledger: ledger.observe(account.key, {
             "provider_id": account.provider_id, "pool_id": account.pool_id, "auth_mode": "subscription",
-            "collection": "failed", "observed_at": None, "windows": {}}, now=self.runtime.clock()))
+            "collection": "failed", "error_code": code,
+            "observed_at": None, "windows": {}}, now=self.runtime.clock()))
 
     async def revalidate_health(self, message, auth):
         return await revalidate_health(self,message,auth)

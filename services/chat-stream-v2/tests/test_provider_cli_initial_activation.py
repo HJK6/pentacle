@@ -228,19 +228,19 @@ def test_first_pin_collector_fetch_failure_reaches_commit_and_preserves_quota(tm
                 entered.append(True)
                 return commit(a,*args,**kwargs)
             monkeypatch.setattr(provider_cli_initial,"commit",witnessed)
-            if when=="before-cas":await runtime.executor._failed_observation(selected)
+            if when=="before-cas":await runtime.executor._failed_observation(selected,"provider_cache_stale")
             else:
                 verify=runtime.executor.verify_artifact
                 async def failed_collection(account,pin):
                     proof=await verify(account,pin)
-                    await runtime.executor._failed_observation(selected)
+                    await runtime.executor._failed_observation(selected,"provider_cache_stale")
                     return proof
                 runtime.executor.verify_artifact=failed_collection
             result=await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
                 "operation_id":"collector-fetch-failed","reason":"fixture",
                 "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
             assert result["pin"]==target and entered==[True]
-            # Only the fingerprint changes: stored quota is still failed/unusable.
+            # A failed fetch stays unusable, including its retained meter and error code.
             stored=await runtime.run(lambda a:a.readback(now=NOW))
             assert stored["accounts"][0]["observation"]["collection"]=="failed"
             assert all(pool["fresh"] is False for pool in stored["quota_pools"])

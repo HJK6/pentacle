@@ -74,7 +74,7 @@ def _readiness_projection(value):
         row=dict(account)
         if isinstance(row.get("observation"),dict):
             row["observation"]={k:v for k,v in row["observation"].items()
-                                if k not in {"observed_at","windows","collection"}}
+                                if k not in {"observed_at","windows","collection","error_code"}}
         projected["accounts"].append(row)
     return projected
 
