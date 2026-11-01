@@ -26,7 +26,8 @@ class RemoteSocket:
 
 @asynccontextmanager
 async def harness(tmp_path):
-    with patch.dict(os.environ, {"PENTACLE_FRONT_DESK_DIGEST_ENABLED":"1", "PENTACLE_FRONT_DESK_DIGEST_S":"3600"}):
+    with patch.dict(os.environ, {"PENTACLE_FRONT_DESK_DIGEST_ENABLED":"1", "PENTACLE_FRONT_DESK_DIGEST_S":"3600",
+                                 "PENTACLE_MEMORY_ROOT": str(tmp_path / "memory")}):
         async with _harness(tmp_path) as value:
             yield value
 
@@ -43,6 +44,16 @@ async def _harness(tmp_path):
         provider.paste = targeted_paste
         generation = sessions.get(DESK)["session_generation"]
         await store.update_session(HOST, "v2-test", pane_pid="4242")
+        fixture_work = tmp_path / "memory" / "work" / "in_progress" / "fixture__ingress"
+        fixture_work.mkdir(parents=True)
+        (fixture_work / "spec.md").write_text("---\nid: spec_fixture__ingress\ntitle: Ingress fixture\nstatus: in_progress\n---\n## Goal\nExercise ingress.\n")
+        await store.update_session(HOST, "v2-test", assigned_spec_id="spec_fixture__ingress")
+        await store.submit(lambda c: c.execute(
+            "INSERT INTO v2_assistant_composite_lanes "
+            "(lane_id,stream_id,phase,created_at,updated_at,work_state,title,members_json) "
+            "VALUES (?,?,?,?,?,?,?,?)", ("fixture-ingress-lane", ASSISTANT, "execution",
+            "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "paused", "Fixture ingress",
+            '["spec_fixture__ingress"]')))
         tokens = {}
         for alias, name in [("desk", "v2-test"), ("peer", "peer"), ("advisor", "advisor"), ("child", "child")]:
             token = "synthetic-th-h4-" + alias
@@ -132,7 +143,7 @@ async def replay(case, tmp_path):
         if kind == "lane_ruling":
             request = await dispatch({"type":"spawn","host":HOST,"session_name":"synthetic-lane",
                 "role":"lead","request_id":"setup-"+case["id"],"idempotency_key":"setup-"+case["id"],
-                "objective":"Synthetic approved lane"}, "desk")
+                "spec_id":"spec_fixture__ingress", "objective":"Synthetic approved lane"}, "desk")
             assert request["type"] == "spawn.pending_ruling", request
             frame["ruling_request_id"] = request["ruling_request_id"]
         first = await dispatch(frame, principal)

@@ -10,13 +10,10 @@ lane-ruling authority seat is lost (closed, pane dead, or no such seat): it is
 sent once per continuous loss of that seat generation, also with no request
 pending, and again only after the authority was seen ready or was rebound. A
 seat whose state is merely unknown, as right after a daemon start, is not
-reported. The daemon does not rebind the authority; requests keep being
-released without a ruling until you rebind or replace it. Pending requests for
-the lost authority stream and generation expire on the next worker tick as
-`authority_unavailable`, using the same release and operator mirror as a new
-request made while the authority is unavailable. The chat line and the
-deadline notice for a request that went unruled state what the release did:
-`admitted unruled`, or `not released, blocked (<code>)` when nothing launched. The
+reported. The daemon does not automatically rebind the authority. Covered new
+work remains pending through authority loss and deadlines; non-covered actions
+retain their existing unruled release behavior. Explicit authority disable is
+the audited override and mirrors the resulting release to the operator. The
 requester's structured result notice still follows. Successful unchanged-scope spawn
 approvals produce no front-desk tell. Tree-idle and child context-advisory notices
 are dropped; their facts remain available through `agent-orch list` and `inspect`.
@@ -75,6 +72,54 @@ An unproven compact input can retry after `PENTACLE_CONTEXT_COMPACT_COOLDOWN_S`
 when the seat remains over threshold, idle and has a proven-empty composer.
 Late proof prevents a repaste; a real draft still defers. A successful compact
 whose proof was missed can be repeated after the cooldown on an old high reading.
+
+## Advisor admission of new work
+
+A token-verified direct-primary front desk needs an advisor approval for a new
+spawn except QA, handoff, service release and resume, and for an ordinary send
+to an existing open seat unless it is a typed QA dispatch or targets the
+requester's own seat or a protected assistant seat. Tells, composite,
+Dot and scoped sends and work commissioned by other seats retain their existing
+paths. Covered spawns require an assigned work item; covered sends use the
+target's current assignment. Typed QA still passes its own admission checks.
+
+The spawn identity is its idempotency key; send identity is target, target
+generation and message id. Retries of the same identity and intent reuse the
+ruling. Changed intent is refused. Send body normalization applies `message`
+precedence and sanitization before hashing, notice and delivery; conflicting
+`text` and `message` values are refused. Ordered validated attachment descriptors
+are part of the identity. A held send reports `not_landed`,
+`queued_for_redelivery`, and `pending_ruling`; do not resend as a new commission.
+Read a held spawn with `agent-orch await-spawn --stream-id <target>` or
+`--request-id <spawn-request-id>` and a held send with `agent-orch inspect <target>`.
+
+A deadline produces overdue notices; it never approves covered work. A late
+approval still counts. An unavailable or missing authority leaves the request
+pending. Binding a new authority retargets pending covered notices and fences
+old authority generations. A stale send target cannot be approved but can be
+denied or revised. Explicit `agent-orch assistant authority --disable` releases
+pending work under the audited override and mirrors the result. Close and other
+non-covered actions keep their previous expiry and release behavior.
+
+An approved send uses the single logical request id `ruled-send:<ruling-id>`.
+A landed receipt completes it; a not-landed receipt blocks release. An accepted
+receipt without delivery proof remains approved while checked, then becomes
+`release_blocked` with `delivery_unproven` after the ruling SLA. It is not
+submitted again. Reconcile it with `agent-orch send-receipt <target>
+ruled-send:<ruling-id>`. A covered column is added to existing ruling tables at
+startup; older rows default to non-covered.
+
+The advisor packet identifies the linked work item and separates its agent
+Goal from the recorded operator quote. Authors record that quote in Tracking as
+`- Operator request (<message id>): "<verbatim>"`; other quoted notes are not
+operator origin. A missing origin is explicitly identified.
+
+Before rollback, pause new covered commissions; have the authority rule every
+pending covered row, deny work that should not run, and let approved rows reach
+`done` or `release_blocked`. Verify `SELECT count(*) FROM
+v2_assistant_lane_rulings WHERE covered=1 AND state IN ('pending','approved')`
+returns zero before switching builds. If the authority cannot be recovered,
+the explicit disable override releases pending work and must be recorded.
 
 ## Compact ruling results
 

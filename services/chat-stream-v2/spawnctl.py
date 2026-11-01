@@ -625,7 +625,7 @@ class SpawnCtl:
         if ":" in caller_id:
             caller = await self.store.fetch_session(*caller_id.split(":", 1))
         policy = getattr(self.sessions, "assistant", None)
-        if caller_id.endswith(":assistant") or (policy is not None and policy.protects(caller)):
+        if not auth.get("covered_admission") and (caller_id.endswith(":assistant") or (policy is not None and policy.protects(caller))):
             return None  # A2/R5: protected assistant and composite seats are exempt
         spec_id = binding.get("assigned_spec_id")
         if not spec_id:

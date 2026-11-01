@@ -4524,6 +4524,13 @@ class Server:
         # A scoped client may send ONLY to its own scope stream (the composite).
         if auth.get("scoped_principal"):
             raise VerbError(SCOPE_DENIED_CODE, "scoped client may send only to its own stream")
+        if self.lane_rulings is not None:
+            try:
+                pending = await self.lane_rulings.request_send(msg, target=stream_id)
+            except ValueError as exc:
+                raise VerbError(str(exc), str(exc)) from exc
+            if pending is not None:
+                return pending
         # Wire callers cannot suppress ordinary QA/progress admission with the
         # private daemon-only backend marker.  Only main's composite dispatcher
         # reaches ``Comms.send_assistant_backend`` directly.
