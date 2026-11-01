@@ -314,6 +314,13 @@ def public_status(a,value,remote,now):
 
 
 async def recovery_status(runtime,value):
+    if runtime.executor and await runtime.run(lambda a:bool(causes(a,value))):
+        async with runtime.executor._host_locks.setdefault(value["host"],asyncio.Lock()):
+            return await _recovery_status_locked(runtime,value)
+    return await runtime.run(lambda a:public_status(a,value,None,runtime.clock()))
+
+
+async def _recovery_status_locked(runtime,value):
     old=await runtime.run(lambda a:Binding(**origin(a,value)["binding"]))
     remote=None
     needs_host=await runtime.run(lambda a:bool(causes(a,value)))

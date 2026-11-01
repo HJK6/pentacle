@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import re
 import time
 import uuid
 
@@ -43,7 +44,8 @@ class AccountExecutor:
         except AccountError: raise
         except TimeoutError: raise AccountError("provider_timeout") from None
         except Exception: raise AccountError("account_host_unreachable") from None
-        if not isinstance(result, dict) or not isinstance(result.get("outcome"), str):
+        if (not isinstance(result, dict) or not isinstance(result.get("outcome"), str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", result["outcome"]) is None):
             raise AccountError("account_host_response_invalid")
         if code and result["outcome"] not in {
             "provider_auth_failed", "provider_quota_blocked", "provider_capacity", "provider_transport_failed",
@@ -52,7 +54,7 @@ class AccountExecutor:
             "provider_executable_changed", "provider_version_changed", "provider_cache_unavailable", "provider_cache_stale", "provider_windows_invalid",
             "account_login_generation_stale", "provider_cli_pin_mismatch", "provider_cli_pin_unavailable",
             "provider_cli_verification_unavailable", "account_repin_home_busy", "account_repin_occupancy_unavailable"}:
-            raise AccountError("account_host_failed")
+            raise AccountError(result["outcome"])
         return result
 
     async def verify_artifact(self,account,pin):
