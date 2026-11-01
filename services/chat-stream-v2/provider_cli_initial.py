@@ -40,19 +40,12 @@ def snapshot(a, now, *, composite_for=None, counts=None):
             "WHERE child.status='open' AND parent.status='closed' AND parent.account_binding IS NOT NULL "
             "ORDER BY child.host,child.session_name"),
     }
-    from sessions import Sessions
     open_ids = {row["host"] + ":" + row["session_name"] for row in before["sessions"]}
     blocking = []
     not_open = 0
     for obligation in before["input_obligations"]:
         target = obligation.get("to_stream_id")
-        concrete = False
-        if isinstance(target, str):
-            host, name = Sessions.split(target)
-            concrete = bool(host and name and ":" not in name
-                and not any(c.isspace() or ord(c) < 32 for c in target)
-                and not (composite_for and composite_for(target) is not None))
-        if (not concrete or obligation.get("delivery") == "unverifiable" or target in open_ids):
+        if not _verifiable_obligation(obligation, composite_for) or target in open_ids:
             blocking.append(obligation)
         else:
             not_open += 1
@@ -60,6 +53,18 @@ def snapshot(a, now, *, composite_for=None, counts=None):
     if counts is not None:
         counts.update(blocking=len(blocking), not_open=not_open)
     return before
+
+
+def _verifiable_obligation(obligation, composite_for=None):
+    """Reuse the census distinction between ordinary input and unknown custody."""
+    from sessions import Sessions
+    target = obligation.get("to_stream_id")
+    if not isinstance(target, str) or obligation.get("delivery") == "unverifiable":
+        return False
+    host, name = Sessions.split(target)
+    return bool(host and name and ":" not in name
+        and not any(c.isspace() or ord(c) < 32 for c in target)
+        and not (composite_for and composite_for(target) is not None))
 
 
 def _readiness_projection(value):
@@ -128,7 +133,7 @@ def parking(value, cells):
     return result
 
 
-def structural(a, before, pin, parked, now):
+def structural(a, before, pin, parked, now, *, composite_for=None):
     from account_repin_state import causes, generation_intents
     missing = []
     cells = population(before)
@@ -139,8 +144,9 @@ def structural(a, before, pin, parked, now):
         missing.append({"reason": "admission_hold"})
     if before["maintenance"]:
         missing.append({"reason": "input_maintenance_pending"})
-    if before["input_obligations"]:
-        missing.append({"reason":"input_submission_unresolved","obligations":before["input_obligations"]})
+    unknown = [row for row in before["input_obligations"] if not _verifiable_obligation(row, composite_for)]
+    if unknown:
+        missing.append({"reason":"input_submission_unresolved","obligations":unknown})
     if before["closed_parent_obligations"]:
         missing.append({"reason":"custody_transfer_unresolved","children":before["closed_parent_obligations"]})
     for key, row in cells.items():
@@ -200,7 +206,8 @@ async def prepare(runtime, message):
         composite_for=getattr(runtime.server,"_composite_for",None), counts=counts))
     cells = population(before)
     parked = parking(message.get("initial_parked_cells"), cells)
-    missing = await runtime.run(lambda a:structural(a,before,pin,parked,runtime.clock()))
+    missing = await runtime.run(lambda a:structural(a,before,pin,parked,runtime.clock(),
+        composite_for=getattr(runtime.server,"_composite_for",None)))
     proofs = {}
     if not missing:
         from account_repin_state import host_status
@@ -291,7 +298,7 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
         raise AccountError("provider_cli_initial_readiness_required",reason="target_changed")
     cells = population(before)
     parked = parking(message.get("initial_parked_cells"),cells)
-    missing = structural(a,before,pin,parked,now)
+    missing = structural(a,after,pin,parked,now,composite_for=composite_for)
     if missing:
         raise _readiness_refusal(missing)
     for key,row in cells.items():

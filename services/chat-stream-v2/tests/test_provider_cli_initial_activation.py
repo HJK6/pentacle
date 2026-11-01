@@ -367,7 +367,7 @@ def test_first_pin_refuses_same_uid_native_process_without_launcher_record(tmp_p
 
 
 @pytest.mark.parametrize("missing",["health","clearance","offline","artifact","consumer","seat-binding","stale-seat",
-    "parked-seat","bootstrap","routing","pending-send","pending-tell","late-reservation","generation-intent","closed-parent"])
+    "parked-seat","bootstrap","routing","late-reservation","generation-intent","closed-parent"])
 def test_first_pin_refuses_each_missing_readiness_predicate_without_stranding_pristine_service(tmp_path,monkeypatch,missing):
     from provider_accounts import AccountError
     from dataclasses import replace
@@ -394,12 +394,6 @@ def test_first_pin_refuses_each_missing_readiness_predicate_without_stranding_pr
             elif missing=="routing":await store.update_session(selected.host,"current-ready",routing_integrity="mismatch")
             elif missing=="parked-seat":request["initial_parked_cells"]=[{"host":selected.host,"provider":selected.provider,
                 "account":selected.alias,"generation":selected.generation,"reason":"explicit park","decision_ref":"fixture"}]
-            elif missing=="pending-send":
-                await store.append_send_receipt(to_stream_id=row["stream_id"],request_id="pending",receipt_id="pending-receipt",
-                    state="accepted",wire_text="fixture",display_text="fixture",attachments=[],delivery="committed_pending_proof",submission_confirmed=False)
-            elif missing=="pending-tell":
-                await store.put_tell_delivery("pending-tell",{"reply":{"delivery_status":"pasted_unsubmitted"},
-                    "delivery":{"to_stream_id":row["stream_id"],"delivery_status":"pasted_unsubmitted"}})
             elif missing=="late-reservation":await store.reserve_stream_id(selected.host,"late",ttl_s=600,refuse_if_held=False)
             elif missing=="generation-intent":
                 from account_repin_state import reserve_generation
