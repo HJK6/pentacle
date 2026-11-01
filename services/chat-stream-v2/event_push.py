@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Any, Awaitable, Callable, Mapping
 
 from usage_admission import iso_ms
@@ -73,8 +74,7 @@ WIRE_VERSION = 2
 #: cap keeps it well under this; a batch over the cap is rejected, not truncated.
 MAX_BATCH = 2000
 
-#: Minimum seconds between pin-drift alerts for one host, so repeated reconcile
-#: ticks do not become their own alert storm.
+#: Minimum seconds between repeated alerts for one host.
 STALE_ALERT_MIN_INTERVAL_S = 300.0
 
 _FULL_GIT_SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
@@ -135,6 +135,7 @@ class EventPush:
         #: `usage_provenance.ProvenanceSink`; metadata only, never token admission.
         self.provenance = provenance
         self._last_alert: dict[tuple[str, str], float] = {}
+        self._pin_drift_lock = asyncio.Lock()
         # A rejected tail cannot offer an event proving that its row opened
         # again.  Keep its observed lifecycle only until that transition, then
         # return the stream in an ack for the satellite to unfreeze.  This is
@@ -1013,28 +1014,50 @@ class EventPush:
             return False
         return frozenset(streams)
 
-    async def _version_verdict(self, _host: str, satellite_sha: str) -> dict:
-        """Accept only the exact durable pin; every other SHA must update."""
+    async def _version_verdict(self, host: str, satellite_sha: str) -> dict:
+        """Accept the deploy-owned pin; alert only on an authenticated rejection."""
         target = await self._target_sha()
-        if not target:
-            return {"status": "ok", "target_sha": None}
-        if satellite_sha == target:
-            return {"status": "ok", "target_sha": target}
-        return {"status": "update_required", "target_sha": target}
+        mismatch = bool(target and satellite_sha != target)
+        if host and _FULL_GIT_SHA.fullmatch(self.daemon_sha):
+            await self._record_pin_drift(host, target, mismatch)
+        return {"status": "update_required" if mismatch else "ok", "target_sha": target}
+
+    async def _record_pin_drift(self, host: str | None, target: str | None, mismatch: bool) -> None:
+        if self.alerts is None:
+            return
+        prefix = "pin_drift:" + (hashlib.sha256(host.encode()).hexdigest()[:16] + ":" if host else "")
+        sink = getattr(self.alerts, "sink", None)
+        async with self._pin_drift_lock:
+            rows = await sink._error_rows() if sink is not None else []
+            active = [row["error_context"] for row in rows
+                      if row["error_context"]["family"] == "integrity"
+                      and row["error_context"]["code"] == "pin_drift"
+                      and row["error_context"]["condition"] == "active"
+                      and row["error_context"]["principal"] == "daemon:" + str(sink.server.local_host)
+                      and row["error_context"]["episode_id"].startswith(prefix)]
+            fields = {"pinned_sha": target, "daemon_sha": self.daemon_sha}
+            if mismatch:
+                identity = hashlib.sha256(f"{target}\0{self.daemon_sha}".encode()).hexdigest()[:40]
+                episode = active[0]["episode_id"] if active else prefix + identity + ":" + uuid.uuid4().hex
+                await self._maybe_alert("pin_drift", host, episode_id=episode, **fields)
+            else:
+                for ctx in active:
+                    # Equality clears a changed pin, not a still-rejected peer at that pin.
+                    if host is None and ":" + hashlib.sha256(f"{target}\0{self.daemon_sha}".encode()).hexdigest()[:40] + ":" in ctx["episode_id"]:
+                        continue
+                    await self.alerts.record("pin_drift", host=host or "daemon", condition="recovered",
+                                             episode_id=ctx["episode_id"], **fields)
+                    self._last_alert.pop(("pin_drift", ctx["episode_id"]), None)
 
     async def check_pin_drift(self) -> bool:
-        """Alert (never repair) when the durable pin differs from boot-time HEAD."""
-        if _FULL_GIT_SHA.fullmatch(self.daemon_sha) is None:
-            return False
-        pinned = await self._target_sha()
-        if pinned == self.daemon_sha:
-            return False
-        await self._maybe_alert("pin_drift", "daemon", pinned_sha=pinned, daemon_sha=self.daemon_sha)
-        return True
+        """Separate daemon/satellite releases are expected; clear on pin convergence."""
+        if _FULL_GIT_SHA.fullmatch(self.daemon_sha) and await self._target_sha() == self.daemon_sha:
+            await self._record_pin_drift(None, self.daemon_sha, False)
+        return False
 
     async def _maybe_alert(self, kind: str, host: str, **fields: object) -> None:
         now = time.time()
-        key = (kind, host or "?")
+        key = (kind, str(fields.get("episode_id") or host or "?"))
         last = self._last_alert.get(key, 0.0)
         if now - last < STALE_ALERT_MIN_INTERVAL_S:
             return

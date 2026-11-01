@@ -50,12 +50,20 @@ def expected_episode(code, fields, keys):
 class Recorder:
     def __init__(self):
         self.calls = []
+        from types import SimpleNamespace
+        self.server = SimpleNamespace(local_host="fixture")
 
     async def emit(self, fact, principal=None, source_notification_id=None):
         await asyncio.sleep(0)
         self.calls.append((fact, principal) if source_notification_id is None
                           else (fact, principal, source_notification_id))
         return 'synthetic-notification-id'
+
+    async def _error_rows(self):
+        rows = {}
+        for fact, _principal, *rest in self.calls:
+            rows[fact.episode_id] = {"error_context": {**fact.__dict__, "principal": "daemon:fixture"}}
+        return list(rows.values())
 
 
 class MapperTests(unittest.TestCase):
@@ -315,11 +323,14 @@ async def test_A1_pin_detector_awaits_sink():
     try:
         await store.put('event_push.target_sha', 'a'*40)
         event_push = EventPush(store, AsyncMock(), alerts, recent_limit=20, daemon_sha='b'*40)
-        result, fact = await asserted_await(event_push.check_pin_drift(), recorder, 'pin_drift')
-        assert result
-        assert fact.episode_id == expected_episode('pin_drift', {'host': 'daemon', 'pinned_sha': 'a'*40, 'daemon_sha': 'b'*40}, ('host', 'pinned_sha', 'daemon_sha'))
-        assert await event_push.check_pin_drift()
+        result, fact = await asserted_await(event_push._version_verdict('fixture-peer', 'c'*40), recorder, 'pin_drift')
+        assert result['status'] == 'update_required'
+        assert fact.episode_id.startswith('pin_drift:' + hashlib.sha256(b'fixture-peer').hexdigest()[:16] + ':')
+        assert (await event_push._version_verdict('fixture-peer', 'c'*40))['status'] == 'update_required'
         assert len(recorder.calls) == 1
+        await event_push._version_verdict('fixture-peer', 'a'*40)
+        assert recorder.calls[-1][0].condition == 'recovered'
+        assert recorder.calls[-1][0].episode_id == fact.episode_id
     finally:
         store.stop()
 

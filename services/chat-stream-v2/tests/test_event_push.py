@@ -32,6 +32,9 @@ from store import Store  # noqa: E402
 class _Alerts:
     def __init__(self) -> None:
         self.emitted: list[tuple[str, dict]] = []
+        self.sink = self
+        from types import SimpleNamespace
+        self.server = SimpleNamespace(local_host="fixture")
 
     def emit(self, kind: str, **fields: object) -> None:
         self.emitted.append((kind, dict(fields)))
@@ -39,6 +42,15 @@ class _Alerts:
     async def record(self, kind: str, **fields: object) -> None:
         self.emitted.append((kind, dict(fields)))
         return None
+
+    async def _error_rows(self):
+        from error_adapters import adapt
+        rows = {}
+        for kind, fields in self.emitted:
+            if kind == "pin_drift":
+                fact = adapt(kind, fields)
+                rows[fact.episode_id] = {"error_context": {**fact.__dict__, "principal": "daemon:fixture"}}
+        return list(rows.values())
 
 
 class _RoutingObserver:
@@ -1002,32 +1014,68 @@ def test_version_verdict_only_accepts_the_exact_configured_pin() -> None:
     _run(_go())
 
 
-def test_pin_drift_is_rate_limited_and_never_writes() -> None:
+def test_daemon_only_deploy_keeps_admitted_satellite_pin_silent() -> None:
     async def _go() -> None:
         store = Store(":memory:"); store.start()
         try:
-            ep, _casts, alerts = _sink(store, daemon_sha=TARGET_SHA)
-            writes: list[tuple[str, str]] = []
-            put = store.put
-
-            async def traced_put(key: str, value: str) -> None:
-                writes.append((key, value))
-                await put(key, value)
-
-            store.put = traced_put  # type: ignore[method-assign]
-            await store.put("event_push.target_sha", f"  {TARGET_SHA}\n")
-            writes.clear()
-            assert await ep.check_pin_drift() is False
-            assert (await ep._version_verdict("hostc", TARGET_SHA))["status"] == "ok"
             await store.put("event_push.target_sha", SATELLITE_SHA)
-            writes.clear()
-            assert await ep.check_pin_drift() is True
-            assert await ep.check_pin_drift() is True
-            assert [kind for kind, _fields in alerts.emitted] == ["pin_drift"]
-            assert writes == [], "drift detection is observe-and-alert only"
+            # Boot the next daemon while the independently deployed satellite stays pinned.
+            ep, _casts, alerts = _sink(store, daemon_sha=TARGET_SHA)
+            assert await ep.check_pin_drift() is False
+            reply = await ep.handle_push(_push(ep, [], sha=SATELLITE_SHA))
+            assert reply["type"] == "event.push.ok"
+            assert alerts.emitted == []
+            assert await store.get("event_push.target_sha") == SATELLITE_SHA
         finally:
             store.stop()
+    _run(_go())
 
+
+def test_authenticated_pin_mismatch_alerts_then_matching_push_recovers() -> None:
+    async def _go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.put("event_push.target_sha", TARGET_SHA)
+            ep, _casts, alerts = _sink(store, daemon_sha=TARGET_SHA)
+            rejected = _push(ep, [], sha=SATELLITE_SHA)
+            assert (await ep.handle_push(rejected))["error"] == "satellite_version_mismatch"
+            assert (await ep.handle_push(rejected))["error"] == "satellite_version_mismatch"
+            assert len(alerts.emitted) == 1
+            kind, opening = alerts.emitted[0]
+            assert kind == "pin_drift"
+            accepted = await ep.handle_push(_push(ep, [], sha=TARGET_SHA))
+            assert accepted["type"] == "event.push.ok"
+            assert len(alerts.emitted) == 2
+            kind, recovered = alerts.emitted[-1]
+            assert kind == "pin_drift" and recovered["condition"] == "recovered"
+            from error_adapters import adapt
+            assert adapt(kind, opening).episode_id == adapt(kind, recovered).episode_id
+            assert adapt(kind, recovered).condition == "recovered"
+            assert await store.get("event_push.target_sha") == TARGET_SHA
+        finally:
+            store.stop()
+    _run(_go())
+
+
+def test_pin_equality_tick_recovers_original_mismatch_episode() -> None:
+    async def _go() -> None:
+        store = Store(":memory:"); store.start()
+        try:
+            await store.put("event_push.target_sha", SATELLITE_SHA)
+            ep, _casts, alerts = _sink(store, daemon_sha=TARGET_SHA)
+            await ep.handle_push(_push(ep, [], sha=SATELLITE_AHEAD_SHA))
+            opening = alerts.emitted[0][1]
+            await store.put("event_push.target_sha", TARGET_SHA)
+            assert await ep.check_pin_drift() is False
+            assert len(alerts.emitted) == 2
+            from error_adapters import adapt
+            recovered = adapt("pin_drift", alerts.emitted[-1][1])
+            assert recovered.condition == "recovered"
+            assert recovered.episode_id == adapt("pin_drift", opening).episode_id
+            await ep.check_pin_drift()
+            assert len(alerts.emitted) == 2
+        finally:
+            store.stop()
     _run(_go())
 
 
