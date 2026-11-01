@@ -213,7 +213,7 @@ async def hatch(executor,message,auth):
         old=await runtime.run(lambda a:Binding(**recovery.origin(a,value)["binding"]))
         if previous:state=previous
         else:
-            status=await recovery.recovery_status(runtime,value)
+            status=await recovery._recovery_status_locked(runtime,value)
             await runtime._front_desk(auth)
             state,_=await runtime.run(lambda a:_begin(a,value,status,auth,runtime.clock()),settle_on_cancel=True)
         receipt=None

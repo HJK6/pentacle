@@ -187,7 +187,8 @@ class AccountRuntime:
         proof=None
         if pin is not None:
             if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
-            proof=await self.executor.verify_artifact(binding,pin)
+            async with self.executor._host_locks.setdefault(binding.host,asyncio.Lock()):
+                proof=await self.executor.verify_artifact(binding,pin)
         async with self.pin_lock:
             def commit(a):
                 from account_store import transaction
@@ -276,7 +277,8 @@ class AccountRuntime:
                 if not receipt:
                     if not verify: raise AccountError("provider_cli_verification_unavailable")
                     if self.executor is None: raise AccountError("provider_cli_verification_unavailable")
-                    proof=await self.executor.verify_artifact(binding,pin)
+                    async with self.executor._host_locks.setdefault(binding.host,asyncio.Lock()):
+                        proof=await self.executor.verify_artifact(binding,pin)
                     from provider_cli_pin import canonical,consumer_current
                     def record(a):
                         from account_store import transaction

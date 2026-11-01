@@ -62,6 +62,13 @@ receipts become interrupted, including while policy is off, without changing
 health or defaults. A new explicitly chosen operation ID can proceed through
 the existing host locks. Store connections alone do not interrupt requests.
 
+Launch admission, first-input artifact checks and recovery-status host probes
+share the collector's per-host mutex. Coordinator-only status reads remain
+available while host work is running. A failed host command preserves its
+bounded scalar error code, such as `account_busy` or
+`provider_executable_missing`; provider output and arbitrary context are not
+copied into that error. A separate process can still hold the registry flock.
+
 The default RPC deadline is 210 seconds, as for a probe; explicit shorter
 deadlines are honored. Host queue time can exceed a caller's deadline. Read the
 same operation's receipt/status instead of blindly repeating provider work.
