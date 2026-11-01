@@ -16,7 +16,7 @@ def _rows(conn, query, arguments=()):
 
 
 def snapshot(a, now, *, composite_for=None, counts=None):
-    """No message text, credentials, or time-varying quota projections."""
+    """Body-free census and input custody; readiness uses one comparison projection."""
     if not pristine(a):
         raise AccountError("provider_cli_pin_stale")
     accounts = a.readback(now=now)
@@ -40,19 +40,12 @@ def snapshot(a, now, *, composite_for=None, counts=None):
             "WHERE child.status='open' AND parent.status='closed' AND parent.account_binding IS NOT NULL "
             "ORDER BY child.host,child.session_name"),
     }
-    from sessions import Sessions
     open_ids = {row["host"] + ":" + row["session_name"] for row in before["sessions"]}
     blocking = []
     not_open = 0
     for obligation in before["input_obligations"]:
         target = obligation.get("to_stream_id")
-        concrete = False
-        if isinstance(target, str):
-            host, name = Sessions.split(target)
-            concrete = bool(host and name and ":" not in name
-                and not any(c.isspace() or ord(c) < 32 for c in target)
-                and not (composite_for and composite_for(target) is not None))
-        if (not concrete or obligation.get("delivery") == "unverifiable" or target in open_ids):
+        if not _verifiable_obligation(obligation, composite_for) or target in open_ids:
             blocking.append(obligation)
         else:
             not_open += 1
@@ -60,6 +53,30 @@ def snapshot(a, now, *, composite_for=None, counts=None):
     if counts is not None:
         counts.update(blocking=len(blocking), not_open=not_open)
     return before
+
+
+def _verifiable_obligation(obligation, composite_for=None):
+    """Reuse the census distinction between ordinary input and unknown custody."""
+    from sessions import Sessions
+    target = obligation.get("to_stream_id")
+    if not isinstance(target, str) or obligation.get("delivery") == "unverifiable":
+        return False
+    host, name = Sessions.split(target)
+    return bool(host and name and ":" not in name
+        and not any(c.isspace() or ord(c) < 32 for c in target)
+        and not (composite_for and composite_for(target) is not None))
+
+
+def _readiness_projection(value):
+    projected={k:v for k,v in value.items() if k!="input_obligations"}
+    projected["accounts"]=[]
+    for account in value["accounts"]:
+        row=dict(account)
+        if isinstance(row.get("observation"),dict):
+            row["observation"]={k:v for k,v in row["observation"].items()
+                                if k not in {"observed_at","windows","collection"}}
+        projected["accounts"].append(row)
+    return projected
 
 
 def input_obligations(a):
@@ -116,7 +133,7 @@ def parking(value, cells):
     return result
 
 
-def structural(a, before, pin, parked, now):
+def structural(a, before, pin, parked, now, *, composite_for=None):
     from account_repin_state import causes, generation_intents
     missing = []
     cells = population(before)
@@ -127,8 +144,9 @@ def structural(a, before, pin, parked, now):
         missing.append({"reason": "admission_hold"})
     if before["maintenance"]:
         missing.append({"reason": "input_maintenance_pending"})
-    if before["input_obligations"]:
-        missing.append({"reason":"input_submission_unresolved","obligations":before["input_obligations"]})
+    unknown = [row for row in before["input_obligations"] if not _verifiable_obligation(row, composite_for)]
+    if unknown:
+        missing.append({"reason":"input_submission_unresolved","obligations":unknown})
     if before["closed_parent_obligations"]:
         missing.append({"reason":"custody_transfer_unresolved","children":before["closed_parent_obligations"]})
     for key, row in cells.items():
@@ -188,7 +206,8 @@ async def prepare(runtime, message):
         composite_for=getattr(runtime.server,"_composite_for",None), counts=counts))
     cells = population(before)
     parked = parking(message.get("initial_parked_cells"), cells)
-    missing = await runtime.run(lambda a:structural(a,before,pin,parked,runtime.clock()))
+    missing = await runtime.run(lambda a:structural(a,before,pin,parked,runtime.clock(),
+        composite_for=getattr(runtime.server,"_composite_for",None)))
     proofs = {}
     if not missing:
         from account_repin_state import host_status
@@ -196,35 +215,64 @@ async def prepare(runtime, message):
         for key,row in cells.items():
             cell = {"host":key[0],"provider":key[1],"account":key[2]}
             try:
-                verified_at=runtime.clock()
                 if runtime.executor is None or not row.get("active"):
                     raise AccountError("provider_cli_verification_unavailable")
-                bound = await runtime.run(lambda a,key=key:(
-                    Binding(**json.loads(a._cell(*key)["data"])) if key in parked
-                    else a._available(a._cell(*key))))
-                remote = await host_status(runtime.executor,bound)
-                if (remote.get("mutation_clearance_required") is not True
-                        or remote.get("binding") != bound.public()):
-                    raise AccountError("account_mutation_clearance_required")
-                await runtime.run(lambda a,key=key:consumer_current(a,key[0],
-                    getattr(runtime.sessions,"local_host",None),runtime.clock()))
-                launchers = await runtime.executor.verify_launchers(bound)
-                proofs[bound.key]={"launchers":launchers,"verified_at":verified_at}
-                if key not in parked:
-                    proof = await runtime.executor.verify_artifact(bound,pin)
-                    if launchers.get("unmanaged"):
-                        raise AccountError("account_repin_home_busy")
-                    proofs[bound.key]["artifact"]=proof
+                async with runtime.executor._host_locks.setdefault(key[0],asyncio.Lock()):
+                    verified_at=runtime.clock()
+                    bound = await runtime.run(lambda a,key=key:(
+                        Binding(**json.loads(a._cell(*key)["data"])) if key in parked
+                        else a._available(a._cell(*key))))
+                    remote = await host_status(runtime.executor,bound)
+                    if (remote.get("mutation_clearance_required") is not True
+                            or remote.get("binding") != bound.public()):
+                        raise AccountError("account_mutation_clearance_required")
+                    await runtime.run(lambda a,key=key:consumer_current(a,key[0],
+                        getattr(runtime.sessions,"local_host",None),runtime.clock()))
+                    launchers = await runtime.executor.verify_launchers(bound)
+                    proofs[bound.key]={"launchers":launchers,"verified_at":verified_at}
+                    if key not in parked:
+                        proof = await runtime.executor.verify_artifact(bound,pin)
+                        if launchers.get("unmanaged"):
+                            raise AccountError("account_repin_home_busy")
+                        proofs[bound.key]["artifact"]=proof
             except (AccountError,AttributeError) as exc:
                 missing.append({**cell,"reason":str(exc) if isinstance(exc,AccountError)
                                 else "launcher_verification_unavailable"})
-    ready = {"target_digest":digest(pin),"snapshot_digest":digest(before),
+    ready = {"target_digest":digest(pin),"snapshot_digest":digest(_readiness_projection(before)),
              "proofs":proofs,"parked_cells":list(parked.values()),"missing":missing,
-             "input_obligation_counts":counts}
+             "input_obligation_counts":counts,
+             "input_obligations":{"prepare":before["input_obligations"]}}
     ready["digest"] = digest({k:ready[k] for k in ("target_digest","snapshot_digest","parked_cells")})
     if expected is not None and expected != ready["digest"]:
         ready["missing"].append({"reason":"readiness_digest_changed"})
     return before,ready
+
+
+def _readiness_refusal(missing):
+    first=missing[0]
+    return AccountError("provider_cli_initial_readiness_required",**{
+        k:first[k] for k in ("reason","host","provider","account","next_action") if k in first})
+
+
+def _snapshot_change(before,after):
+    identity=lambda row:tuple(row.get(k) for k in ("host","provider","alias","generation"))
+    left={identity(row):row for row in before["accounts"]}
+    right={identity(row):row for row in after["accounts"]}
+    for key in dict.fromkeys([*left,*right]):
+        old,new=left.get(key),right.get(key)
+        if old==new:continue
+        row=old or new
+        fields=["population"] if old is None or new is None else [
+            k for k in old.keys()|new.keys() if k not in old or k not in new or old[k]!=new[k]]
+        if ("observation" in fields and isinstance(old.get("observation"),dict)
+                and isinstance(new.get("observation"),dict)):
+            fields.remove("observation")
+            a,b=old.get("observation") or {},new.get("observation") or {}
+            fields.extend("observation."+k for k in a.keys()|b.keys() if k not in a or k not in b or a[k]!=b[k])
+        return {"reason":"readiness_state_changed","host":row["host"],"provider":row["provider"],
+                "account":row["alias"],"next_action":"Inspect changed fields: "+",".join(sorted(fields))}
+    sections=sorted(k for k in before.keys()|after.keys() if before.get(k)!=after.get(k))
+    return {"reason":"readiness_state_changed","next_action":"Inspect changed sections: "+",".join(sections)}
 
 
 def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_for=None):
@@ -236,17 +284,23 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
     except (ValueError,TypeError):owner_matches=False
     if not owner_matches:
         raise AccountError("provider_cli_initial_readiness_required",reason="promotion_pause_changed")
-    if ready["missing"] or snapshot(a,now,composite_for=composite_for) != before:
-        raise AccountError("provider_cli_initial_readiness_required",missing=ready["missing"] or
-                           [{"reason":"readiness_state_changed"}])
+    if ready["missing"]:
+        raise _readiness_refusal(ready["missing"])
+    after=snapshot(a,now,composite_for=composite_for)
+    projected_before,projected_after=_readiness_projection(before),_readiness_projection(after)
+    if projected_after != projected_before:
+        raise _readiness_refusal([_snapshot_change(projected_before,projected_after)])
+    ready["input_obligations"].update(commit=after["input_obligations"],
+        added=[row for row in after["input_obligations"] if row not in before["input_obligations"]],
+        removed=[row for row in before["input_obligations"] if row not in after["input_obligations"]])
     pin = validate(message["pin"])
     if ready["target_digest"] != digest(pin):
         raise AccountError("provider_cli_initial_readiness_required",reason="target_changed")
     cells = population(before)
     parked = parking(message.get("initial_parked_cells"),cells)
-    missing = structural(a,before,pin,parked,now)
+    missing = structural(a,after,pin,parked,now,composite_for=composite_for)
     if missing:
-        raise AccountError("provider_cli_initial_readiness_required",missing=missing)
+        raise _readiness_refusal(missing)
     for key,row in cells.items():
         consumer_current(a,key[0],local_host,now)
         bound=Binding(**json.loads(a._cell(*key)["data"]))
@@ -330,7 +384,7 @@ async def set_pair(runtime,message,*,recovery_principal):
                 await asyncio.wait(tasks,timeout=30)
             before,ready=await prepare(runtime,message)
             if ready["missing"]:
-                raise AccountError("provider_cli_initial_readiness_required",missing=ready["missing"])
+                raise _readiness_refusal(ready["missing"])
         async with runtime.pin_inputs.write():
             async with runtime.pin_lock:
                 return await runtime.run(lambda a:set_pin(a,message,recovery_principal=recovery_principal,

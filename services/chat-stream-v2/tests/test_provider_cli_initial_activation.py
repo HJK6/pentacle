@@ -58,6 +58,93 @@ async def ready_fixture(tmp_path, monkeypatch, *, serving_seat=True,provider="co
     return store,runtime,host,selected,target,row,native
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_readiness_waits_for_same_host_collector_and_dates_proofs_after_wait(tmp_path,monkeypatch,provider):
+    from dataclasses import replace
+    from provider_accounts import AccountError
+    from test_account_rotation import NOW, observation
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(
+            tmp_path,monkeypatch,serving_seat=False,provider=provider)
+        entered=asyncio.Event();release=asyncio.Event();queued=asyncio.Event()
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():queued.set()
+                return await super().acquire()
+        lock=ObservedLock();runtime.executor._host_locks[selected.host]=lock
+        actual=runtime.executor.execute;busy=False;calls=[];tasks=[]
+        other=replace(selected,host="other-host")
+        clock=[NOW];runtime.clock=lambda:clock[0]
+        async def execute(account,action,*args,**kwargs):
+            nonlocal busy
+            if account.host==other.host:
+                return {"outcome":"ok","binding_key":other.key,"observation":observation(other)}
+            calls.append(action)
+            if action=="observe":
+                busy=True;entered.set()
+                try:await release.wait()
+                finally:busy=False
+            elif busy:
+                raise AccountError("account_busy")
+            return await actual(account,action,*args,**kwargs)
+        runtime.executor.execute=execute
+        try:
+            # Exercise the executor's real observation lock.
+            collector=asyncio.create_task(runtime.executor.observe(selected));tasks.append(collector)
+            await asyncio.wait_for(entered.wait(),1)
+            request={"action":"pin-status","pin":target,
+                "_auth_context":{"peer_loopback":True,"local_admin_verified":True}}
+            readiness=asyncio.create_task(runtime.operation(request));tasks.append(readiness)
+            queued_wait=asyncio.create_task(queued.wait());tasks.append(queued_wait)
+            done,_=await asyncio.wait((queued_wait,readiness),timeout=1,return_when=asyncio.FIRST_COMPLETED)
+            missing=readiness.result()["initial_readiness"]["missing"] if readiness.done() else None
+            assert queued_wait in done and queued.is_set(),f"readiness bypassed collector mutex: {missing}"
+            assert not readiness.done() and calls==["observe"]
+            # Add the control after the readiness snapshot: another host's
+            # observation must progress while this host is still held.
+            await runtime.run(lambda a:a.register(other))
+            assert (await asyncio.wait_for(runtime.executor.observe(other),1))["outcome"]=="ok"
+            clock[0]+=121
+            release.set()
+            assert (await collector)["outcome"]=="ok"
+            result=(await asyncio.wait_for(readiness,2))["initial_readiness"]
+            assert result["missing"]==[]
+            assert result["proofs"][selected.key]["verified_at"]==clock[0]
+            assert calls==["observe","recovery-status","launcher-status","verify-artifact"]
+            assert not lock.locked()
+        finally:
+            release.set();queued.set()
+            await asyncio.gather(*tasks,return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_cancelled_readiness_waiter_does_not_release_collector_lock(tmp_path,monkeypatch):
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(
+            tmp_path,monkeypatch,serving_seat=False)
+        queued=asyncio.Event()
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():queued.set()
+                return await super().acquire()
+        lock=ObservedLock();runtime.executor._host_locks[selected.host]=lock
+        await lock.acquire()
+        task=asyncio.create_task(runtime.operation({"action":"pin-status","pin":target,
+            "_auth_context":{"peer_loopback":True,"local_admin_verified":True}}))
+        try:
+            await asyncio.wait_for(queued.wait(),1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):await task
+            assert lock.locked(),"a cancelled waiter must not release another owner's lock"
+        finally:
+            if not task.done():task.cancel()
+            await asyncio.gather(task,return_exceptions=True)
+            if lock.locked():lock.release()
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("provider,platform",[("codex","macos"),("codex","wsl"),("claude","macos"),("claude","wsl")])
 def test_first_pin_cas_preserves_a_proved_serving_seat_and_replays(tmp_path,monkeypatch,provider,platform):
     from types import SimpleNamespace
@@ -82,6 +169,159 @@ def test_first_pin_cas_preserves_a_proved_serving_seat_and_replays(tmp_path,monk
             assert (await runtime.choose_launch(host="host-a",provider=provider,model="fixture",effort="high",message={})).key==selected.key
         finally:
             store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+@pytest.mark.parametrize("field", ["observed_at", "windows"])
+def test_first_pin_accepts_fresh_volatile_observation(tmp_path,monkeypatch,provider,when,field):
+    from test_account_rotation import NOW
+    admin={"peer_loopback":True,"local_admin_verified":True}
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,provider=provider)
+        try:
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            async def refresh():
+                current=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+                if field=="observed_at":current[field]+=1
+                else:
+                    # A new quota sample, still within the separately checked cap.
+                    window=next(iter(current["windows"].values()))
+                    window["pct"]+=1
+                assert await runtime.record_observation(selected,current)
+            if when=="before-cas":await refresh()
+            else:
+                verify=runtime.executor.verify_artifact
+                async def refreshed(account,pin):
+                    proof=await verify(account,pin)
+                    await refresh()
+                    return proof
+                runtime.executor.verify_artifact=refreshed
+            result=await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                "operation_id":"volatile-refresh","reason":"fixture",
+                "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert result["pin"]==target and result["receipt"]["outcome"]=="pin_set"
+            assert result["receipt"]["initial_readiness"]["digest"]==status["initial_readiness"]["digest"]
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+def test_first_pin_collector_fetch_failure_reaches_commit_and_preserves_quota(tmp_path,monkeypatch,when):
+    import provider_cli_initial
+    from test_account_rotation import NOW
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,provider="claude")
+        try:
+            observation=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+            observation["ordinary_usage_allowed"]=None
+            await runtime.record_observation(selected,observation)
+            admin={"peer_loopback":True,"local_admin_verified":True}
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            entered=[]
+            commit=provider_cli_initial.commit
+            def witnessed(a,*args,**kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                return commit(a,*args,**kwargs)
+            monkeypatch.setattr(provider_cli_initial,"commit",witnessed)
+            if when=="before-cas":await runtime.executor._failed_observation(selected)
+            else:
+                verify=runtime.executor.verify_artifact
+                async def failed_collection(account,pin):
+                    proof=await verify(account,pin)
+                    await runtime.executor._failed_observation(selected)
+                    return proof
+                runtime.executor.verify_artifact=failed_collection
+            result=await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                "operation_id":"collector-fetch-failed","reason":"fixture",
+                "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert result["pin"]==target and entered==[True]
+            # Only the fingerprint changes: stored quota is still failed/unusable.
+            stored=await runtime.run(lambda a:a.readback(now=NOW))
+            assert stored["accounts"][0]["observation"]["collection"]=="failed"
+            assert all(pool["fresh"] is False for pool in stored["quota_pools"])
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["health_revision", "executable_sha256", "last_failure"])
+def test_first_pin_names_material_change_inside_cas_transaction(tmp_path,monkeypatch,field):
+    import provider_cli_initial
+    from provider_cli_pin import pristine
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch)
+        try:
+            admin={"peer_loopback":True,"local_admin_verified":True}
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            commit=provider_cli_initial.commit
+            entered=[]
+            def changed(a,*args,**kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                if field=="health_revision":
+                    a.conn.execute("UPDATE v2_account_bindings SET health_revision=health_revision+1 WHERE binding_key=?",(selected.key,))
+                elif field=="last_failure":
+                    a.conn.execute("INSERT OR REPLACE INTO v2_account_failures VALUES (?,?,?)",(selected.key,"network",12345))
+                else:
+                    data=json.loads(a._cell(selected.host,selected.provider,selected.alias)["data"])
+                    data[field]="0"*64
+                    a.conn.execute("UPDATE v2_account_bindings SET data=? WHERE binding_key=?",(json.dumps(data),selected.key))
+                return commit(a,*args,**kwargs)
+            monkeypatch.setattr(provider_cli_initial,"commit",changed)
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                    "operation_id":"material-in-transaction","reason":"fixture",
+                    "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert entered==[True] and refused.value.extra["reason"]=="readiness_state_changed"
+            assert {k:refused.value.extra[k] for k in ["host","provider","account"]}=={
+                "host":selected.host,"provider":selected.provider,"account":selected.alias}
+            assert refused.value.extra["next_action"]=="Inspect changed fields: "+field
+            assert await runtime.run(pristine)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+@pytest.mark.parametrize("field", ["provider_id", "ordinary_usage_allowed"])
+def test_first_pin_still_refuses_material_observation_change(tmp_path,monkeypatch,when,field):
+    from test_account_rotation import NOW
+    from provider_cli_pin import pristine
+    admin={"peer_loopback":True,"local_admin_verified":True}
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch)
+        try:
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            async def change():
+                current=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+                current[field]={"collection":"failed","provider_id":"different-identity",
+                                "ordinary_usage_allowed":False}[field]
+                await runtime.record_observation(selected,current)
+            if when=="before-cas":await change()
+            else:
+                verify=runtime.executor.verify_artifact
+                async def changed(account,pin):
+                    proof=await verify(account,pin)
+                    await change()
+                    return proof
+                runtime.executor.verify_artifact=changed
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                    "operation_id":"material-refresh","reason":"fixture",
+                    "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert refused.value.code=="provider_cli_initial_readiness_required"
+            expected=("readiness_state_changed" if when=="during-proof" else
+                      "cell_unavailable" if field=="provider_id" else "readiness_digest_changed")
+            assert refused.value.extra["reason"]==expected
+            if when=="before-cas" and field=="provider_id":
+                assert {k:refused.value.extra[k] for k in ["host","provider","account"]}=={
+                    "host":selected.host,"provider":selected.provider,"account":selected.alias}
+            assert await runtime.run(pristine)
+        finally:store.stop()
     asyncio.run(run())
 
 
@@ -127,7 +367,7 @@ def test_first_pin_refuses_same_uid_native_process_without_launcher_record(tmp_p
 
 
 @pytest.mark.parametrize("missing",["health","clearance","offline","artifact","consumer","seat-binding","stale-seat",
-    "parked-seat","bootstrap","routing","pending-send","pending-tell","late-reservation","generation-intent","closed-parent"])
+    "parked-seat","bootstrap","routing","late-reservation","generation-intent","closed-parent"])
 def test_first_pin_refuses_each_missing_readiness_predicate_without_stranding_pristine_service(tmp_path,monkeypatch,missing):
     from provider_accounts import AccountError
     from dataclasses import replace
@@ -154,12 +394,6 @@ def test_first_pin_refuses_each_missing_readiness_predicate_without_stranding_pr
             elif missing=="routing":await store.update_session(selected.host,"current-ready",routing_integrity="mismatch")
             elif missing=="parked-seat":request["initial_parked_cells"]=[{"host":selected.host,"provider":selected.provider,
                 "account":selected.alias,"generation":selected.generation,"reason":"explicit park","decision_ref":"fixture"}]
-            elif missing=="pending-send":
-                await store.append_send_receipt(to_stream_id=row["stream_id"],request_id="pending",receipt_id="pending-receipt",
-                    state="accepted",wire_text="fixture",display_text="fixture",attachments=[],delivery="committed_pending_proof",submission_confirmed=False)
-            elif missing=="pending-tell":
-                await store.put_tell_delivery("pending-tell",{"reply":{"delivery_status":"pasted_unsubmitted"},
-                    "delivery":{"to_stream_id":row["stream_id"],"delivery_status":"pasted_unsubmitted"}})
             elif missing=="late-reservation":await store.reserve_stream_id(selected.host,"late",ttl_s=600,refuse_if_held=False)
             elif missing=="generation-intent":
                 from account_repin_state import reserve_generation

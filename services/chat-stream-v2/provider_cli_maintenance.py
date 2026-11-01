@@ -15,6 +15,9 @@ PREFIX="provider_cli.maintenance_input:"
 RECEIPT="provider-cli-maintenance:"
 HOLD_RECEIPT="provider-cli-maintenance-hold:"
 FIELDS={"input_provider","input_account","expected_login_generation","maintenance_id","expected_hold_digest"}
+# Queueing plus the existing proof-age window fits the unchanged 240s client.
+CLEAR_MUTEX_WAIT_SECONDS=90
+CLEAR_PROOF_SECONDS=120
 
 
 def scope(binding):
@@ -218,6 +221,26 @@ def _clear_snapshot(a,value):
 
 
 async def unfreeze(runtime,message,host):
+    if runtime.executor is None:
+        return await _unfreeze_locked(runtime,message,host)
+    mutex=runtime.executor._host_locks.setdefault(host,asyncio.Lock())
+    try:
+        await asyncio.wait_for(mutex.acquire(),timeout=CLEAR_MUTEX_WAIT_SECONDS)
+    except TimeoutError:
+        raise AccountError("provider_timeout") from None
+    try:
+        # Read slot, hold and binding only after queued observations finish.
+        # Direct execute calls below do not re-enter this non-reentrant mutex.
+        try:
+            async with asyncio.timeout(CLEAR_PROOF_SECONDS):
+                return await _unfreeze_locked(runtime,message,host)
+        except TimeoutError:
+            raise AccountError("provider_timeout") from None
+    finally:
+        mutex.release()
+
+
+async def _unfreeze_locked(runtime,message,host):
     from account_repin_state import host_status
     from account_revalidation import _valid_observation
     allowed={"type","request_id","protocol","host","local_admin_token","stream_id","from_stream_id","stream_token",
