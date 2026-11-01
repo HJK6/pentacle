@@ -97,6 +97,13 @@ recording a provider error. If login expires or `/usage` changes, retain the
 last good value with its stale/error status; inspect the current UI and repair
 the probe. Do not fabricate zero or repeatedly rebuild clients.
 
+For named accounts, `agent-orch usage --account <alias> --json` retains the
+same binding's last successful quota windows and upstream timestamp after a
+failed collection. That observation has `collection: "failed"` and `fresh: false`;
+it cannot satisfy a fresh-quota admission guard. Each failed source carries its
+safe `error_code`, also exposed by binding key in the pool's `error_codes`.
+A successful collection clears the code; new generations inherit no old meter.
+
 ## Machine stats
 
 The daemon samples its local host every 30 seconds without provider login:
