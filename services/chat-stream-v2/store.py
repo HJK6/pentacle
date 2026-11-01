@@ -4056,11 +4056,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if isinstance(delivery, dict):
                 store_exchange.append(conn, delivery.get("exchange"))
                 conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?", (json.dumps(payload, separators=(",", ":")), tell_id))
-            # Keep every tell an unsettled notice (any kind) can still read back, so
-            # a retry never finds its proof row pruned; answer/alert rows stay
-            # protected after delivery as before.
+            # Unresolved ordinary tells keep their no-second-paste custody.
+            # Notice-owned rows retain their existing settlement/retention rules.
             conn.execute(
-                "DELETE FROM v2_tell_deliveries WHERE NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
+                "DELETE FROM v2_tell_deliveries WHERE "
+                "((json_extract(reply,'$.reply.delivery_status')='delivered' "
+                "AND COALESCE(json_extract(reply,'$.delivery.delivery_status'),'delivered')='delivered') "
+                "OR EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id)) "
+                "AND NOT EXISTS (SELECT 1 FROM v2_child_exchange e WHERE e.kind='tell' AND e.ref_id=v2_tell_deliveries.tell_id) "
                 "AND NOT EXISTS (SELECT 1 FROM v2_outbound_notices n WHERE n.tell_id=v2_tell_deliveries.tell_id "
                 "AND (n.kind IN ('notification_answer','error_alert') OR (n.terminal_at IS NULL AND n.delivered_at IS NULL))) "
                 "AND tell_id NOT IN"
@@ -5608,7 +5611,12 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 conn.rollback()
                 raise
 
-        return await self.submit(_op)
+        inserted = await self.submit(_op)
+        if inserted is not None:
+            for entry, result in zip(entries, inserted):
+                if result is not ENTRY_DROPPED:
+                    await self._reconcile_ingested_tell(entry["event"])
+        return inserted
 
     # -- durable send receipts -------------------------------------------
 
@@ -6302,7 +6310,30 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             except BaseException:
                 conn.rollback()
                 raise
-        return await self.submit(transaction)
+        event_id = await self.submit(transaction)
+        await self._reconcile_ingested_tell(event)
+        return event_id
+
+    async def _reconcile_ingested_tell(self, event: dict[str, Any]) -> None:
+        """Late native peer input uses the existing same-ID proof transition.
+
+        Run on durable replays too, so a crash after append cannot strand proof.
+        The promotion rechecks original text, digest, watermark and generation;
+        an ingest envelope alone never establishes delivery.
+        """
+        raw = event.get("raw")
+        tell_id = raw.get("tell_id") if event.get("kind") == "TELL" and isinstance(raw, dict) else None
+        if not isinstance(tell_id, str) or not tell_id:
+            return
+        prior = await self.get_tell_delivery(tell_id)
+        if (prior is not None and isinstance(prior.get("delivery"), dict)
+                and isinstance(prior.get("payload_digest"), str)
+                and prior["delivery"].get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES
+                and not (prior["delivery"].get("delivery_status") == "proof_unavailable"
+                         and prior["delivery"].get("submission_attempts") == 0)
+                and not prior["delivery"].get("notification_answer_generation")
+                and prior["delivery"].get("to_stream_id") == event.get("stream_id")):
+            await self.promote_tell_delivery(tell_id, prior["payload_digest"], reconcile=True)
 
     async def tell_event_identity(
         self, stream_id: str, identity: str, event: dict[str, Any] | None = None,

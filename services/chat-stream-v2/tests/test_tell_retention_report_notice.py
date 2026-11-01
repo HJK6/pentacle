@@ -163,7 +163,8 @@ def test_retention_keeps_tells_of_unsettled_notices_of_any_kind_and_prunes_settl
         "t-delivered-report": False,
         "t-terminal-report": False,
         "t-delivered-answer": True,
-        "t-none": False,
+        # Ordinary pending custody survives independently of notice settlement.
+        "t-none": True,
     }
 
 
