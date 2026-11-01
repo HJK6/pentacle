@@ -58,6 +58,93 @@ async def ready_fixture(tmp_path, monkeypatch, *, serving_seat=True,provider="co
     return store,runtime,host,selected,target,row,native
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_readiness_waits_for_same_host_collector_and_dates_proofs_after_wait(tmp_path,monkeypatch,provider):
+    from dataclasses import replace
+    from provider_accounts import AccountError
+    from test_account_rotation import NOW, observation
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(
+            tmp_path,monkeypatch,serving_seat=False,provider=provider)
+        entered=asyncio.Event();release=asyncio.Event();queued=asyncio.Event()
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():queued.set()
+                return await super().acquire()
+        lock=ObservedLock();runtime.executor._host_locks[selected.host]=lock
+        actual=runtime.executor.execute;busy=False;calls=[];tasks=[]
+        other=replace(selected,host="other-host")
+        clock=[NOW];runtime.clock=lambda:clock[0]
+        async def execute(account,action,*args,**kwargs):
+            nonlocal busy
+            if account.host==other.host:
+                return {"outcome":"ok","binding_key":other.key,"observation":observation(other)}
+            calls.append(action)
+            if action=="observe":
+                busy=True;entered.set()
+                try:await release.wait()
+                finally:busy=False
+            elif busy:
+                raise AccountError("account_busy")
+            return await actual(account,action,*args,**kwargs)
+        runtime.executor.execute=execute
+        try:
+            # Exercise the executor's real observation lock.
+            collector=asyncio.create_task(runtime.executor.observe(selected));tasks.append(collector)
+            await asyncio.wait_for(entered.wait(),1)
+            request={"action":"pin-status","pin":target,
+                "_auth_context":{"peer_loopback":True,"local_admin_verified":True}}
+            readiness=asyncio.create_task(runtime.operation(request));tasks.append(readiness)
+            queued_wait=asyncio.create_task(queued.wait());tasks.append(queued_wait)
+            done,_=await asyncio.wait((queued_wait,readiness),timeout=1,return_when=asyncio.FIRST_COMPLETED)
+            missing=readiness.result()["initial_readiness"]["missing"] if readiness.done() else None
+            assert queued_wait in done and queued.is_set(),f"readiness bypassed collector mutex: {missing}"
+            assert not readiness.done() and calls==["observe"]
+            # Add the control after the readiness snapshot: another host's
+            # observation must progress while this host is still held.
+            await runtime.run(lambda a:a.register(other))
+            assert (await asyncio.wait_for(runtime.executor.observe(other),1))["outcome"]=="ok"
+            clock[0]+=121
+            release.set()
+            assert (await collector)["outcome"]=="ok"
+            result=(await asyncio.wait_for(readiness,2))["initial_readiness"]
+            assert result["missing"]==[]
+            assert result["proofs"][selected.key]["verified_at"]==clock[0]
+            assert calls==["observe","recovery-status","launcher-status","verify-artifact"]
+            assert not lock.locked()
+        finally:
+            release.set();queued.set()
+            await asyncio.gather(*tasks,return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_cancelled_readiness_waiter_does_not_release_collector_lock(tmp_path,monkeypatch):
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(
+            tmp_path,monkeypatch,serving_seat=False)
+        queued=asyncio.Event()
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():queued.set()
+                return await super().acquire()
+        lock=ObservedLock();runtime.executor._host_locks[selected.host]=lock
+        await lock.acquire()
+        task=asyncio.create_task(runtime.operation({"action":"pin-status","pin":target,
+            "_auth_context":{"peer_loopback":True,"local_admin_verified":True}}))
+        try:
+            await asyncio.wait_for(queued.wait(),1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):await task
+            assert lock.locked(),"a cancelled waiter must not release another owner's lock"
+        finally:
+            if not task.done():task.cancel()
+            await asyncio.gather(task,return_exceptions=True)
+            if lock.locked():lock.release()
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("provider,platform",[("codex","macos"),("codex","wsl"),("claude","macos"),("claude","wsl")])
 def test_first_pin_cas_preserves_a_proved_serving_seat_and_replays(tmp_path,monkeypatch,provider,platform):
     from types import SimpleNamespace

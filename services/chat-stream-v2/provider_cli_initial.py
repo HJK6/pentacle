@@ -196,25 +196,26 @@ async def prepare(runtime, message):
         for key,row in cells.items():
             cell = {"host":key[0],"provider":key[1],"account":key[2]}
             try:
-                verified_at=runtime.clock()
                 if runtime.executor is None or not row.get("active"):
                     raise AccountError("provider_cli_verification_unavailable")
-                bound = await runtime.run(lambda a,key=key:(
-                    Binding(**json.loads(a._cell(*key)["data"])) if key in parked
-                    else a._available(a._cell(*key))))
-                remote = await host_status(runtime.executor,bound)
-                if (remote.get("mutation_clearance_required") is not True
-                        or remote.get("binding") != bound.public()):
-                    raise AccountError("account_mutation_clearance_required")
-                await runtime.run(lambda a,key=key:consumer_current(a,key[0],
-                    getattr(runtime.sessions,"local_host",None),runtime.clock()))
-                launchers = await runtime.executor.verify_launchers(bound)
-                proofs[bound.key]={"launchers":launchers,"verified_at":verified_at}
-                if key not in parked:
-                    proof = await runtime.executor.verify_artifact(bound,pin)
-                    if launchers.get("unmanaged"):
-                        raise AccountError("account_repin_home_busy")
-                    proofs[bound.key]["artifact"]=proof
+                async with runtime.executor._host_locks.setdefault(key[0],asyncio.Lock()):
+                    verified_at=runtime.clock()
+                    bound = await runtime.run(lambda a,key=key:(
+                        Binding(**json.loads(a._cell(*key)["data"])) if key in parked
+                        else a._available(a._cell(*key))))
+                    remote = await host_status(runtime.executor,bound)
+                    if (remote.get("mutation_clearance_required") is not True
+                            or remote.get("binding") != bound.public()):
+                        raise AccountError("account_mutation_clearance_required")
+                    await runtime.run(lambda a,key=key:consumer_current(a,key[0],
+                        getattr(runtime.sessions,"local_host",None),runtime.clock()))
+                    launchers = await runtime.executor.verify_launchers(bound)
+                    proofs[bound.key]={"launchers":launchers,"verified_at":verified_at}
+                    if key not in parked:
+                        proof = await runtime.executor.verify_artifact(bound,pin)
+                        if launchers.get("unmanaged"):
+                            raise AccountError("account_repin_home_busy")
+                        proofs[bound.key]["artifact"]=proof
             except (AccountError,AttributeError) as exc:
                 missing.append({**cell,"reason":str(exc) if isinstance(exc,AccountError)
                                 else "launcher_verification_unavailable"})
