@@ -20,6 +20,11 @@ def snapshot(a, now, *, composite_for=None, counts=None):
     if not pristine(a):
         raise AccountError("provider_cli_pin_stale")
     accounts = a.readback(now=now)
+    for account in accounts["accounts"]:
+        if isinstance(account.get("observation"),dict):
+            # Quota freshness/counters have their own admission check; keep identity/status.
+            account["observation"]={k:v for k,v in account["observation"].items()
+                                    if k not in {"observed_at","windows"}}
     before = {
         "accounts": accounts["accounts"], "defaults": accounts["defaults"],
         "policy": json.loads(canonical(a.policy)),
@@ -228,6 +233,12 @@ async def prepare(runtime, message):
     return before,ready
 
 
+def _readiness_refusal(missing):
+    first=missing[0]
+    return AccountError("provider_cli_initial_readiness_required",**{
+        k:first[k] for k in ("reason","host","provider","account") if k in first})
+
+
 def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_for=None):
     """Called inside the same transaction as the initial pin write."""
     from provider_cli_artifact import validate_proof
@@ -238,8 +249,7 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
     if not owner_matches:
         raise AccountError("provider_cli_initial_readiness_required",reason="promotion_pause_changed")
     if ready["missing"] or snapshot(a,now,composite_for=composite_for) != before:
-        raise AccountError("provider_cli_initial_readiness_required",missing=ready["missing"] or
-                           [{"reason":"readiness_state_changed"}])
+        raise _readiness_refusal(ready["missing"] or [{"reason":"readiness_state_changed"}])
     pin = validate(message["pin"])
     if ready["target_digest"] != digest(pin):
         raise AccountError("provider_cli_initial_readiness_required",reason="target_changed")
@@ -247,7 +257,7 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
     parked = parking(message.get("initial_parked_cells"),cells)
     missing = structural(a,before,pin,parked,now)
     if missing:
-        raise AccountError("provider_cli_initial_readiness_required",missing=missing)
+        raise _readiness_refusal(missing)
     for key,row in cells.items():
         consumer_current(a,key[0],local_host,now)
         bound=Binding(**json.loads(a._cell(*key)["data"]))
@@ -331,7 +341,7 @@ async def set_pair(runtime,message,*,recovery_principal):
                 await asyncio.wait(tasks,timeout=30)
             before,ready=await prepare(runtime,message)
             if ready["missing"]:
-                raise AccountError("provider_cli_initial_readiness_required",missing=ready["missing"])
+                raise _readiness_refusal(ready["missing"])
         async with runtime.pin_inputs.write():
             async with runtime.pin_lock:
                 return await runtime.run(lambda a:set_pin(a,message,recovery_principal=recovery_principal,
