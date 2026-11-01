@@ -22,9 +22,9 @@ def snapshot(a, now, *, composite_for=None, counts=None):
     accounts = a.readback(now=now)
     for account in accounts["accounts"]:
         if isinstance(account.get("observation"),dict):
-            # Quota freshness/counters have their own admission check; keep identity/status.
+            # Quota collection/freshness/counters have their own admission check; keep identity.
             account["observation"]={k:v for k,v in account["observation"].items()
-                                    if k not in {"observed_at","windows"}}
+                                    if k not in {"observed_at","windows","collection"}}
     before = {
         "accounts": accounts["accounts"], "defaults": accounts["defaults"],
         "policy": json.loads(canonical(a.policy)),
@@ -236,7 +236,28 @@ async def prepare(runtime, message):
 def _readiness_refusal(missing):
     first=missing[0]
     return AccountError("provider_cli_initial_readiness_required",**{
-        k:first[k] for k in ("reason","host","provider","account") if k in first})
+        k:first[k] for k in ("reason","host","provider","account","next_action") if k in first})
+
+
+def _snapshot_change(before,after):
+    identity=lambda row:tuple(row.get(k) for k in ("host","provider","alias","generation"))
+    left={identity(row):row for row in before["accounts"]}
+    right={identity(row):row for row in after["accounts"]}
+    for key in dict.fromkeys([*left,*right]):
+        old,new=left.get(key),right.get(key)
+        if old==new:continue
+        row=old or new
+        fields=["population"] if old is None or new is None else [
+            k for k in old.keys()|new.keys() if k not in old or k not in new or old[k]!=new[k]]
+        if ("observation" in fields and isinstance(old.get("observation"),dict)
+                and isinstance(new.get("observation"),dict)):
+            fields.remove("observation")
+            a,b=old.get("observation") or {},new.get("observation") or {}
+            fields.extend("observation."+k for k in a.keys()|b.keys() if k not in a or k not in b or a[k]!=b[k])
+        return {"reason":"readiness_state_changed","host":row["host"],"provider":row["provider"],
+                "account":row["alias"],"next_action":"Inspect changed fields: "+",".join(sorted(fields))}
+    sections=sorted(k for k in before.keys()|after.keys() if before.get(k)!=after.get(k))
+    return {"reason":"readiness_state_changed","next_action":"Inspect changed sections: "+",".join(sections)}
 
 
 def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_for=None):
@@ -248,8 +269,11 @@ def commit(a, message, before, ready, now, *, local_host,owner_epoch,composite_f
     except (ValueError,TypeError):owner_matches=False
     if not owner_matches:
         raise AccountError("provider_cli_initial_readiness_required",reason="promotion_pause_changed")
-    if ready["missing"] or snapshot(a,now,composite_for=composite_for) != before:
-        raise _readiness_refusal(ready["missing"] or [{"reason":"readiness_state_changed"}])
+    if ready["missing"]:
+        raise _readiness_refusal(ready["missing"])
+    after=snapshot(a,now,composite_for=composite_for)
+    if after != before:
+        raise _readiness_refusal([_snapshot_change(before,after)])
     pin = validate(message["pin"])
     if ready["target_digest"] != digest(pin):
         raise AccountError("provider_cli_initial_readiness_required",reason="target_changed")

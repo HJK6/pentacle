@@ -209,7 +209,84 @@ def test_first_pin_accepts_fresh_volatile_observation(tmp_path,monkeypatch,provi
 
 
 @pytest.mark.parametrize("when", ["before-cas", "during-proof"])
-@pytest.mark.parametrize("field", ["collection", "provider_id", "ordinary_usage_allowed"])
+def test_first_pin_collector_fetch_failure_reaches_commit_and_preserves_quota(tmp_path,monkeypatch,when):
+    import provider_cli_initial
+    from test_account_rotation import NOW
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,provider="claude")
+        try:
+            observation=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+            observation["ordinary_usage_allowed"]=None
+            await runtime.record_observation(selected,observation)
+            admin={"peer_loopback":True,"local_admin_verified":True}
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            entered=[]
+            commit=provider_cli_initial.commit
+            def witnessed(a,*args,**kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                return commit(a,*args,**kwargs)
+            monkeypatch.setattr(provider_cli_initial,"commit",witnessed)
+            if when=="before-cas":await runtime.executor._failed_observation(selected)
+            else:
+                verify=runtime.executor.verify_artifact
+                async def failed_collection(account,pin):
+                    proof=await verify(account,pin)
+                    await runtime.executor._failed_observation(selected)
+                    return proof
+                runtime.executor.verify_artifact=failed_collection
+            result=await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                "operation_id":"collector-fetch-failed","reason":"fixture",
+                "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert result["pin"]==target and entered==[True]
+            # Only the fingerprint changes: stored quota is still failed/unusable.
+            stored=await runtime.run(lambda a:a.readback(now=NOW))
+            assert stored["accounts"][0]["observation"]["collection"]=="failed"
+            assert all(pool["fresh"] is False for pool in stored["quota_pools"])
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["health_revision", "executable_sha256", "last_failure"])
+def test_first_pin_names_material_change_inside_cas_transaction(tmp_path,monkeypatch,field):
+    import provider_cli_initial
+    from provider_cli_pin import pristine
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch)
+        try:
+            admin={"peer_loopback":True,"local_admin_verified":True}
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            commit=provider_cli_initial.commit
+            entered=[]
+            def changed(a,*args,**kwargs):
+                assert a.conn.in_transaction
+                entered.append(True)
+                if field=="health_revision":
+                    a.conn.execute("UPDATE v2_account_bindings SET health_revision=health_revision+1 WHERE binding_key=?",(selected.key,))
+                elif field=="last_failure":
+                    a.conn.execute("INSERT OR REPLACE INTO v2_account_failures VALUES (?,?,?)",(selected.key,"network",12345))
+                else:
+                    data=json.loads(a._cell(selected.host,selected.provider,selected.alias)["data"])
+                    data[field]="0"*64
+                    a.conn.execute("UPDATE v2_account_bindings SET data=? WHERE binding_key=?",(json.dumps(data),selected.key))
+                return commit(a,*args,**kwargs)
+            monkeypatch.setattr(provider_cli_initial,"commit",changed)
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                    "operation_id":"material-in-transaction","reason":"fixture",
+                    "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert entered==[True] and refused.value.extra["reason"]=="readiness_state_changed"
+            assert {k:refused.value.extra[k] for k in ["host","provider","account"]}=={
+                "host":selected.host,"provider":selected.provider,"account":selected.alias}
+            assert refused.value.extra["next_action"]=="Inspect changed fields: "+field
+            assert await runtime.run(pristine)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+@pytest.mark.parametrize("field", ["provider_id", "ordinary_usage_allowed"])
 def test_first_pin_still_refuses_material_observation_change(tmp_path,monkeypatch,when,field):
     from test_account_rotation import NOW
     from provider_cli_pin import pristine
