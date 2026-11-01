@@ -11,7 +11,7 @@
       "path": "tests/front_desk_ingress_replay.py",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "a97e489f5e51ea11290dd8b0d30a02078d7ab276af78154824228a3ff8ba6858"
+      "sha256": "bc1fb51a958fcb5d0f23928356bda1dea54ca97c4916c9fa1c45431628da436d"
     },
     {
       "path": "tests/test_front_desk_ingress_replay.py",

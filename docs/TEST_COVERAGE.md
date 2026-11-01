@@ -25,12 +25,17 @@ real Comms and Store with synthetic seats and fake pane transport.
 | `test_covered_fd_spawn_without_spec_is_refused_work_assignment_required` | New covered spawn requires a work assignment. |
 | `test_covered_fd_send_waits_and_deny_delivers_nothing` | Send approval lands once; denial and absent assignment do not deliver. |
 | `test_typed_qa_send_tell_and_non_fd_send_are_not_held` | Typed QA, tell and non-front-desk controls retain ordinary behavior. |
+| `test_fd_self_send_and_send_to_protected_assistant_seat_are_not_held` | Self-addressed and protected-assistant reports retain ordinary delivery. |
 | `test_covered_request_stays_pending_past_deadline_and_accepts_late_approval` | Overdue work remains held and accepts a late ruling. |
 | `test_covered_request_holds_when_authority_unavailable_or_unconfigured` | Covered work holds across authority loss or missing binding. |
 | `test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule` | Rebinding retargets notices and fences former authority generations. |
 | `test_explicit_disable_releases_covered_pending_and_mirrors_once` | Explicit disable releases and mirrors once. |
 | `test_same_key_identical_digest_reuses_row_and_changed_digest_is_refused` | Retry identity and changed intent are distinguished for spawn and send. |
 | `test_completed_same_key_send_returns_recorded_outcome_after_assignment_removal` | Completed retry remains idempotent after assignment removal and disable. |
+| `test_completed_same_key_spawn_returns_recorded_outcome_after_assignment_removal` | A completed spawn retry does not recheck a removed assignment. |
+| `test_approved_send_replay_returns_recorded_unproven_outcome` | Approved retries preserve the durable unproven receipt outcome. |
+| `test_noncovered_original_authority_can_still_deny_after_rebind` | An ordinary close remains bound to its original authority after a rebind. |
+| `test_final_send_notice_exposes_delivery_and_receipt` | Final notices retain the send delivery and receipt identity. |
 | `test_covered_send_payload_is_normalized_before_digest_packet_and_release` | Body aliases and ordered attachment descriptors remain consistent. |
 | `test_covered_send_deny_is_accepted_when_target_generation_is_stale` | Stale targets can be denied but cannot be approved. |
 | `test_covered_column_is_added_to_an_existing_database_once` | Legacy and fresh stores have the additive column. |

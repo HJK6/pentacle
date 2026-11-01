@@ -6,6 +6,7 @@ import json
 import pytest
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+from assistant_lane_rulings import AssistantLaneRulings
 from server import Server
 from sessions import Sessions
 from store import Store
@@ -1345,23 +1346,33 @@ def test_covered_fd_send_waits_and_deny_delivers_nothing(tmp_path):
 
 def test_covered_send_deny_is_accepted_when_target_generation_is_stale(tmp_path):
     async def go():
-        store, root, advisor, _target, server, tmux = await _covered_send_rig(tmp_path)
+        store, root, advisor, target, server, tmux = await _covered_send_rig(tmp_path)
         try:
             one = await server._on_send(_covered_send_msg(root, 10))
             rid = one["ruling_request_id"]
-            await store.submit(lambda c: c.execute(
-                "UPDATE v2_session_generations SET generation='replacement' WHERE host='localhost' AND session_name='covered-target'"))
+            close = await server.lane_rulings._create(action="session_close", key="stale-close-control",
+                intent={"type": "close"}, requester=ROOT, requester_generation=root["session_generation"],
+                binding=await server.lane_rulings.binding(), target="localhost:covered-target",
+                target_generation=target["session_generation"])
+            await store.submit(lambda c: (c.execute(
+                "UPDATE v2_session_generations SET generation='replacement' WHERE host='localhost' AND session_name='covered-target'"), c.commit()))
             auth = {"token_verified": True, "stream_id": ADVISOR,
                     "session_generation": advisor["session_generation"]}
             with pytest.raises(VerbError, match="assistant_ruling_target_generation_changed"):
                 await server._on_assistant_ruling({"ruling_request_id": rid, "request_id": "stale-approve",
                                                    "ruling": "approve", "_auth_context": auth})
+            changed = await store.fetch_session("localhost", "covered-target")
+            assert changed["session_generation"] != (await server.lane_rulings._fetch(rid))["target_generation"]
             result = await server._on_assistant_ruling({"ruling_request_id": rid, "request_id": "stale-deny",
                                                         "ruling": "deny", "reason": "replaced", "_auth_context": auth})
             assert result["state"] == "denied" and tmux.pastes == []
             count = await store.submit(lambda c: c.execute(
                 "SELECT count(*) FROM v2_assistant_lane_rulings WHERE covered=1 AND state IN ('pending','approved')").fetchone()[0])
             assert count == 0
+            with pytest.raises(ValueError, match="assistant_ruling_target_generation_changed"):
+                await server.lane_rulings.ruling({"ruling_request_id": close["ruling_request_id"],
+                    "request_id": "stale-close-deny", "ruling": "deny", "reason": "replaced"},
+                    actor_stream_id=ADVISOR, actor_generation=advisor["session_generation"])
         finally:
             store.stop()
     asyncio.run(go())
@@ -1438,6 +1449,37 @@ def test_covered_request_holds_when_authority_unavailable_or_unconfigured():
                 store.stop()
     asyncio.run(go())
 
+    async def configure_pending(value):
+        store = Store(":memory:"); store.start()
+        try:
+            root, _advisor, server, spawned = await _rulings_rig(store, spawnctl=LinkCheckingSpawn())
+            await store.update_session("fixture-root", "primary", pane_status="pane_alive")
+            covered = await server._on_spawn({**_spawn_msg(root, "configure-held"), "spec_id": "spec_demo__linked"})
+            lane = await store.open_session("fixture-chat", "close-control", provider="codex", role="lead",
+                                            parent_stream_id=ROOT, pane_status="pane_alive")
+            await server.lane_rulings._record_ownership({"requester_stream_id": ROOT,
+                "requester_generation": root["session_generation"], "ruling_request_id": "earlier"},
+                "fixture-chat:close-control", lane["session_generation"])
+            async def report(*args, **kwargs):
+                return {"report_id": "report", "summary": "done", "qa_verdict": "accept"}
+            store.find_report = report
+            closed = []
+            async def close(*args, **kwargs):
+                closed.append(True)
+                return {"already_closed": False, "session": lane, "reap_status": "done"}
+            server.sessions.close = close
+            close_reply = await server._on_close({"type": "close", "host": "fixture-chat", "session_name": "close-control",
+                "request_id": "close-on-rebind", "_auth_context": {"token_verified": True, "stream_id": ROOT,
+                "session_generation": root["session_generation"]}})
+            await server.lane_rulings.configure(value, actor_stream_id=ROOT, actor_generation=root["session_generation"])
+            assert (await server.lane_rulings._fetch(covered["ruling_request_id"]))["state"] == "pending"
+            assert (await server.lane_rulings._fetch(close_reply["ruling_request_id"]))["state"] == "done"
+            assert spawned.calls == [] and closed == [True]
+        finally:
+            store.stop()
+    asyncio.run(configure_pending(""))
+    asyncio.run(configure_pending(ROOT))
+
 
 def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
     from assistant_lane_rulings import AssistantLaneRulings
@@ -1451,6 +1493,8 @@ def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
             original_id = f"assistant-lane-ruling:{rid}:{advisor['session_generation']}"
             body = await store.submit(lambda c: c.execute(
                 "SELECT body FROM v2_outbound_notices WHERE notice_id=?", (original_id,)).fetchone()[0])
+            await store.submit(lambda c: (c.execute(
+                "UPDATE v2_outbound_notices SET delivered_at='2026-11-01T00:00:00Z' WHERE notice_id=?", (original_id,)), c.commit()))
             await server.lane_rulings.configure("fixture-advisor:new", actor_stream_id=ROOT,
                                                  actor_generation=root["session_generation"])
             row = await server.lane_rulings._fetch(rid)
@@ -1458,8 +1502,10 @@ def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
                 "fixture-advisor:new", new["session_generation"])
             new_id = f"assistant-lane-ruling:{rid}:{new['session_generation']}"
             rebound = await store.submit(lambda c: c.execute(
-                "SELECT body FROM v2_outbound_notices WHERE notice_id=?", (new_id,)).fetchone()[0])
-            assert rebound == body
+                "SELECT body,dedupe_key,tell_id FROM v2_outbound_notices WHERE notice_id=?", (new_id,)).fetchone())
+            assert tuple(rebound) == (body, new_id, new_id)
+            assert await store.submit(lambda c: c.execute(
+                "SELECT delivered_at FROM v2_outbound_notices WHERE notice_id=?", (original_id,)).fetchone()[0])
             with pytest.raises(VerbError, match="assistant_ruling_authority_unverified"):
                 await server._on_assistant_ruling({"ruling_request_id": rid, "request_id": "old-authority",
                     "ruling": "approve", "_auth_context": {"token_verified": True, "stream_id": ADVISOR,
@@ -1469,16 +1515,16 @@ def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
             count = await store.submit(lambda c: c.execute(
                 "SELECT count(*) FROM v2_outbound_notices WHERE notice_id=?", (new_id,)).fetchone()[0])
             assert count == 1
-            await store.submit(lambda c: c.execute(
-                "UPDATE v2_session_generations SET generation='new-generation' WHERE host='fixture-advisor' AND session_name='new'"))
+            await store.submit(lambda c: (c.execute(
+                "UPDATE v2_session_generations SET generation='new-generation' WHERE host='fixture-advisor' AND session_name='new'"), c.commit()))
             await server.lane_rulings.configure("fixture-advisor:new", actor_stream_id=ROOT,
                                                  actor_generation=root["session_generation"])
             row = await server.lane_rulings._fetch(rid)
             assert row["authority_generation"] == "new-generation"
-            fresh_body = await store.submit(lambda c: c.execute(
-                "SELECT body FROM v2_outbound_notices WHERE notice_id=?",
-                (f"assistant-lane-ruling:{rid}:new-generation",)).fetchone()[0])
-            assert fresh_body == body
+            fresh_id = f"assistant-lane-ruling:{rid}:new-generation"
+            fresh = await store.submit(lambda c: c.execute(
+                "SELECT body,dedupe_key,tell_id FROM v2_outbound_notices WHERE notice_id=?", (fresh_id,)).fetchone())
+            assert tuple(fresh) == (body, fresh_id, fresh_id)
             with pytest.raises(VerbError, match="assistant_ruling_authority_unverified"):
                 await server._on_assistant_ruling({"ruling_request_id": rid, "request_id": "old-generation",
                     "ruling": "approve", "_auth_context": {"token_verified": True, "stream_id": "fixture-advisor:new",
@@ -1662,8 +1708,10 @@ def test_approved_send_release_has_one_logical_identity_and_truthful_delivery_st
             rid3 = held3["ruling_request_id"]
             await store.submit(lambda c: c.execute(
                 "UPDATE v2_assistant_lane_rulings SET state='approved', ruling='approve' WHERE ruling_request_id=?", (rid3,)))
-            await store.submit(lambda c: c.execute(
-                "UPDATE v2_session_generations SET generation='replacement' WHERE host='localhost' AND session_name='covered-target'"))
+            await store.submit(lambda c: (c.execute(
+                "UPDATE v2_session_generations SET generation='replacement' WHERE host='localhost' AND session_name='covered-target'"), c.commit()))
+            changed = await store.fetch_session("localhost", "covered-target")
+            assert changed["session_generation"] != (await restarted._fetch(rid3))["target_generation"]
             await restarted.tick()
             row3 = await restarted._fetch(rid3)
             assert row3["state"] == "release_blocked"
@@ -1692,8 +1740,13 @@ Agent interpretation of the work.
 ''')
     monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(tmp_path))
     async def go():
-        store, root, _advisor, _target, server, _tmux = await _covered_send_rig(tmp_path)
+        store, root, _advisor, target, server, _tmux = await _covered_send_rig(tmp_path)
         try:
+            other = tmp_path / "work" / "in_progress" / "demo__other"
+            other.mkdir(parents=True)
+            (other / "spec.md").write_text("---\nid: spec_demo__other\ntitle: Attached only\nstatus: in_progress\n---\n## Goal\nOther goal\n")
+            await store.update_session("localhost", "covered-target", spec_ids=["spec_demo__linked", "spec_demo__other"],
+                                       assigned_spec_id="spec_demo__linked")
             held = await server._on_send(_covered_send_msg(root, 50))
             rid = held["ruling_request_id"]
             body = await store.submit(lambda c: c.execute(
@@ -1702,6 +1755,7 @@ Agent interpretation of the work.
             packet = json.loads(body.split("\n", 1)[1])
             assert packet["covered"] is True and packet["requester"] == ROOT
             assert packet["target"] == "localhost:covered-target" and packet["msg_id"] == 50
+            assert packet["target_generation"] == target["session_generation"]
             assert packet["prompt_excerpt"] == "Implement the approved task"
             item = packet["work_item"]
             assert item["spec_id"] == "spec_demo__linked" and item["title"] == "Fixture work"
@@ -1710,6 +1764,20 @@ Agent interpretation of the work.
             assert item["origin"] == "Fix send retries without adding a service"
             assert item["origin_line"] == '- Operator request (message 12): "Fix send retries without adding a service"'
             assert item["origin_missing"] is False
+            original_spec = (work / "spec.md").read_text()
+            (work / "spec.md").write_text('---\nid: spec_demo__linked\ntitle: Fixture work\nstatus: in_progress\n---\n'
+                '## Tracking\n- Operator request (message 13): "' + 'o' * 800 + '"\n\n## Goal\n' + 'g' * 800 + '\n')
+            long_msg = {**_covered_send_msg(root, 53), "text": "p" * 2000}
+            long_held = await server._on_send(long_msg)
+            long_body = await store.submit(lambda c: c.execute(
+                "SELECT body FROM v2_outbound_notices WHERE notice_id LIKE ?",
+                (f"assistant-lane-ruling:{long_held['ruling_request_id']}:%",)).fetchone()[0])
+            long_packet = json.loads(long_body.split("\n", 1)[1])
+            assert len(long_packet["prompt_excerpt"]) == 1600
+            assert len(long_packet["work_item"]["origin"]) == 600
+            assert len(long_packet["work_item"]["origin_line"]) <= 600
+            assert len(long_packet["work_item"]["agent_authored_goal"]) == 600
+            (work / "spec.md").write_text(original_spec)
             (work / "spec.md").write_text((work / "spec.md").read_text().replace(
                 '- Operator request (message 12): "Fix send retries without adding a service"\n', ''))
             missing = await server._on_send(_covered_send_msg(root, 51))
@@ -1735,7 +1803,12 @@ Agent interpretation of the work.
             unreadable_body = await store.submit(lambda c: c.execute(
                 "SELECT body FROM v2_outbound_notices WHERE notice_id LIKE ?",
                 (f"assistant-lane-ruling:{unreadable_rid}:%",)).fetchone()[0])
-            assert json.loads(unreadable_body.split("\n", 1)[1])["work_item_error"]
+            unreadable_packet = json.loads(unreadable_body.split("\n", 1)[1])
+            assert unreadable_packet["work_item_error"]
+            assert unreadable_packet["work_item"]["title"] == ""
+            assert unreadable_packet["work_item"]["status"] == ""
+            assert unreadable_packet["work_item"]["agent_authored_goal"] == ""
+            assert unreadable_packet["work_item"]["origin"] is None
         finally:
             store.stop()
     asyncio.run(go())
@@ -1831,6 +1904,130 @@ def test_completed_same_key_send_returns_recorded_outcome_after_assignment_remov
             disabled_replay = await server._on_send({**msg, "request_id": "retry-after-disable"})
             assert disabled_replay["ruling_request_id"] == rid and disabled_replay["delivery"] == "landed"
             assert len(tmux.pastes) == 1
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_noncovered_original_authority_can_still_deny_after_rebind():
+    async def go():
+        store = Store(':memory:'); store.start()
+        try:
+            root, advisor, server, _ = await _rulings_rig(store)
+            request = await server.lane_rulings._create(
+                action='session_close', key='qa-close', intent={'reason':'fixture'},
+                requester=ROOT, requester_generation=root['session_generation'],
+                binding=await server.lane_rulings.binding(), target=ROOT,
+                target_generation=root['session_generation'])
+            await store.open_session('fixture-advisor', 'replacement', provider='codex', pane_status='pane_alive')
+            await server.lane_rulings.configure('fixture-advisor:replacement',
+                actor_stream_id=ROOT, actor_generation=root['session_generation'])
+            result = await server.lane_rulings.ruling(
+                {'ruling_request_id':request['ruling_request_id'], 'request_id':'qa-deny',
+                 'ruling':'deny', 'reason':'do not close'},
+                actor_stream_id=ADVISOR, actor_generation=advisor['session_generation'])
+            assert result['state'] == 'denied'
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+def test_approved_send_replay_returns_recorded_unproven_outcome(tmp_path, monkeypatch):
+    async def go():
+        store, root, advisor, _, server, tmux = await _covered_send_rig(tmp_path)
+        try:
+            msg = _covered_send_msg(root, 900)
+            held = await server._on_send(msg)
+            rid = held['ruling_request_id']
+            class Interrupted(BaseException): pass
+            real = server.comms._materialize_send_plan
+            async def interrupt(_plan): raise Interrupted()
+            monkeypatch.setattr(server.comms, '_materialize_send_plan', interrupt)
+            with pytest.raises(Interrupted):
+                await server.lane_rulings.ruling(
+                    {'ruling_request_id':rid,'request_id':'qa-approve','ruling':'approve'},
+                    actor_stream_id=ADVISOR, actor_generation=advisor['session_generation'])
+            monkeypatch.setattr(server.comms, '_materialize_send_plan', real)
+            restarted = AssistantLaneRulings(server)
+            await restarted.tick()
+            row = await restarted._fetch(rid)
+            recorded = json.loads(row['outcome_json'])
+            assert row['state'] == 'approved' and recorded['receipt_id']
+            replay = await server._on_send({**msg,'request_id':'qa-retry'})
+            assert tmux.pastes == []
+            assert replay == {**recorded,'ruling_request_id':rid}
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+def test_final_send_notice_exposes_delivery_and_receipt(tmp_path):
+    async def go():
+        store, root, advisor, _, server, _ = await _covered_send_rig(tmp_path)
+        try:
+            held = await server._on_send(_covered_send_msg(root,901))
+            rid = held['ruling_request_id']
+            await server.lane_rulings.ruling(
+                {'ruling_request_id':rid,'request_id':'qa-land','ruling':'approve'},
+                actor_stream_id=ADVISOR, actor_generation=advisor['session_generation'])
+            body = await store.submit(lambda c:c.execute(
+                'SELECT body FROM v2_outbound_notices WHERE notice_id=?',
+                ('assistant-lane-ruling-result:'+rid,)).fetchone()[0])
+            outcome = json.loads(body.split('] ',1)[1])['outcome']
+            assert outcome.get('delivery') == 'landed' and outcome.get('receipt_id')
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_fd_self_send_and_send_to_protected_assistant_seat_are_not_held(tmp_path, monkeypatch):
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
+    async def go():
+        store, _root, _advisor, desk, server, tmux = await _covered_send_rig(tmp_path)
+        try:
+            desk_id = "localhost:covered-target"
+            await store.update_session("localhost", "covered-target", assigned_spec_id="")
+            await server.sessions.open("localhost", "protected", provider="claude", role="assistant")
+            config = AssistantCompositeConfig.from_env({
+                "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": "fixture-chat:assistant",
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": desk_id,
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": desk["session_generation"],
+                "PENTACLE_ASSISTANT_AUTHORITY_STREAM_ID": ADVISOR,
+            })
+            server.assistant_composite = AssistantComposite(store, config=config)
+            auth = {"token_verified": True, "stream_id": desk_id,
+                    "session_generation": desk["session_generation"]}
+            for target, key in ((desk_id, 80), ("localhost:protected", 81)):
+                result = await server._on_send({"type": "send", "to_stream_id": target, "msg_id": key,
+                    "request_id": f"self-control-{key}", "text": f"REPORT daily-retro control {key}",
+                    "from_stream_id": desk_id, "_auth_context": auth})
+                assert result["delivery"] == "landed"
+            assert len(tmux.pastes) == 2
+            assert await store.submit(lambda c: c.execute(
+                "SELECT count(*) FROM v2_assistant_lane_rulings WHERE action='send'").fetchone()[0]) == 0
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_completed_same_key_spawn_returns_recorded_outcome_after_assignment_removal():
+    async def go():
+        store = Store(":memory:"); store.start()
+        try:
+            root, advisor, server, spawned = await _rulings_rig(store, spawnctl=LinkCheckingSpawn())
+            await store.update_session("fixture-root", "primary", assigned_spec_id="spec_demo__linked")
+            msg = {**_spawn_msg(root, "spawn-after-assignment-removal"), "spec_id": "spec_demo__linked"}
+            held = await server._on_spawn(msg)
+            rid = held["ruling_request_id"]
+            await server._on_assistant_ruling({"ruling_request_id": rid, "request_id": "approve-removal-spawn",
+                "ruling": "approve", "_auth_context": {"token_verified": True, "stream_id": ADVISOR,
+                "session_generation": advisor["session_generation"]}})
+            await store.update_session("fixture-root", "primary", assigned_spec_id="")
+            async def unexpected_check(*args, **kwargs):
+                raise AssertionError("retry rechecked assignment or work link")
+            spawned._resolve_spec_binding = unexpected_check
+            spawned._work_link_refusal = unexpected_check
+            replay = await server._on_spawn({**msg, "request_id": "retry-after-removal-spawn"})
+            assert replay["ruling_request_id"] == rid and len(spawned.calls) == 1
         finally:
             store.stop()
     asyncio.run(go())

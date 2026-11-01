@@ -77,7 +77,8 @@ whose proof was missed can be repeated after the cooldown on an old high reading
 
 A token-verified direct-primary front desk needs an advisor approval for a new
 spawn except QA, handoff, service release and resume, and for an ordinary send
-to an existing open seat unless it is a typed QA dispatch. Tells, composite,
+to an existing open seat unless it is a typed QA dispatch or targets the
+requester's own seat or a protected assistant seat. Tells, composite,
 Dot and scoped sends and work commissioned by other seats retain their existing
 paths. Covered spawns require an assigned work item; covered sends use the
 target's current assignment. Typed QA still passes its own admission checks.
@@ -96,7 +97,7 @@ A deadline produces overdue notices; it never approves covered work. A late
 approval still counts. An unavailable or missing authority leaves the request
 pending. Binding a new authority retargets pending covered notices and fences
 old authority generations. A stale send target cannot be approved but can be
-denied or revised. Explicit `assistant authority configure disabled` releases
+denied or revised. Explicit `agent-orch assistant authority --disable` releases
 pending work under the audited override and mirrors the result. Close and other
 non-covered actions keep their previous expiry and release behavior.
 

@@ -13,7 +13,7 @@ import pytest
 
 from assistant_composite import AssistantComposite
 from ingest import broadcast_assistant_mirror
-from sessions import Sessions
+from sessions import Sessions, VerbError
 from store import Store
 from test_assistant_prose_mirror import ASSISTANT, ROOT, _config, _normalized_turn_event
 from test_assistant_lane_rulings import BlockedSpawn, RecordingSpawn, _chat_lines, _rulings_rig, _spawn_msg
@@ -137,7 +137,24 @@ def test_unruled_ruling_status_advances_preview(spawnctl):
             before = _row(server.sessions)
             assert not before.get("last_text")
             await asyncio.sleep(0.01)
-            await server._on_spawn(_spawn_msg(root, "unruled"))
+            lane = await store.open_session("fixture-chat", "close-preview", provider="codex", role="lead",
+                                            parent_stream_id=root["stream_id"], pane_status="pane_alive")
+            async def report(*args, **kwargs):
+                return {"report_id": "preview-report", "summary": "done", "qa_verdict": "accept"}
+            store.find_report = report
+            async def close(*args, **kwargs):
+                if spawnctl is BlockedSpawn:
+                    raise VerbError("spec_unresolved", "fixture close blocked")
+                return {"already_closed": False, "session": lane, "reap_status": "done"}
+            server.sessions.close = close
+            await server.lane_rulings._create(action="session_close", key="close:preview",
+                intent={"type": "close", "host": "fixture-chat", "session_name": "close-preview",
+                        "request_id": "close-preview", "expected_generation": lane["session_generation"],
+                        "_ruling_report": {"report_id": "preview-report"}},
+                requester=root["stream_id"], requester_generation=root["session_generation"],
+                binding=await server.lane_rulings.binding(), target="fixture-chat:close-preview",
+                target_generation=lane["session_generation"])
+            await server.lane_rulings.tick()
             lines = await _chat_lines(store)
             assert len(lines) == 1
             _assert_advanced(server.sessions, before, text=lines[0], kind="ASSIST_TEXT")

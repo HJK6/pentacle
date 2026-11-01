@@ -91,6 +91,9 @@ def _compact_outcome(outcome: Any) -> dict[str, Any] | None:
     fields = ("type", "ok", "state", "stream_id", "error", "error_code", "reason",
               "already_closed", "admitted_count", "admitted_scope", "admitted_set_authoritative")
     compact = {key: outcome[key] for key in fields if key in outcome}
+    if outcome.get("type") == "send.result":
+        compact.update({key: outcome[key] for key in ("delivery", "receipt_id", "request_id", "reconcile")
+                        if key in outcome})
     if isinstance(outcome.get("admitted_sessions"), list):
         compact["admitted_sessions"] = [
             seat if isinstance(seat, str) else seat["stream_id"]
@@ -366,6 +369,9 @@ class AssistantLaneRulings:
         seat = await self.store.fetch_session(host, name)
         if not seat or seat.get("status") != "open":
             return None
+        policy = getattr(self.server.sessions, "assistant", None)
+        if target == auth.get("stream_id") or (policy is not None and policy.protects(seat)):
+            return None
         generation = str(seat.get("session_generation") or "")
         key = f"send:{target}:{generation}:{msg.get('msg_id', 0)}"
         known = await self.store.submit(lambda conn: conn.execute(
@@ -399,7 +405,7 @@ class AssistantLaneRulings:
         if request["state"] == "bypassed":
             return None
         rid = request["ruling_request_id"]
-        if request["state"] == "done" and request.get("outcome_json"):
+        if request["state"] in {"approved", "done"} and request.get("outcome_json"):
             return {**json.loads(request["outcome_json"]), "ruling_request_id": rid}
         if request["state"] in {"denied", "revised", "release_blocked"}:
             return {"type": "send.ruling_refused", "ruling_request_id": rid,
@@ -794,9 +800,11 @@ class AssistantLaneRulings:
                 ).fetchone())
         try:
             async with self._authority_lock:
-                binding = await self.binding()
-                if (actor_stream_id, actor_generation) != (binding["stream_id"], binding["generation"]):
-                    raise ValueError("assistant_ruling_authority_unverified")
+                row = await self._fetch(rid)
+                if row is not None and row.get("covered"):
+                    binding = await self.binding()
+                    if (actor_stream_id, actor_generation) != (binding["stream_id"], binding["generation"]):
+                        raise ValueError("assistant_ruling_authority_unverified")
                 request = await self.store.submit(op)
         except ValueError as exc:
             await self._audit(rid, "refused", actor_stream_id, actor_generation, str(exc))
