@@ -341,10 +341,14 @@ client path. `web-voice-reload-after-commit`
 ([web_voice_reload_scenario.js](../test/e2e/lib/web_voice_reload_scenario.js))
 covers the committed path against the real loopback daemon. Its ASR backend is
 an in-process fixture in [web_gate_daemon.py](../test/e2e/lib/web_gate_daemon.py)
-that holds until the scenario writes a release file. The page reloads after the
-daemon starts transcription, and delivery is read from the daemon's send
-receipts. A reload before the commit is the control, and it loses the take on
-every build.
+that holds until the scenario writes a release file. The page requires the real
+commit ACK, then reloads after the daemon starts transcription; delivery is read
+from the daemon's send receipts.
+The fixture waits for the owned daemon's existing post-configuration
+`awaiter-resolution` startup log before starting the web host. A TCP listener
+alone can precede finisher setup and leave the host's initial capability cache
+on the legacy path. The log wait starts at that process's spawn byte offset. A
+reload before the commit is the control, and it loses the take on every build.
 If the journey fails, its detail records the voice operation's state, failure
 code and milestone times, the origin session's status and generation, and the
 scenario's own step times. It never records message text.

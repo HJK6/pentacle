@@ -329,6 +329,7 @@ async function startDaemon(args, scratch, runtime, fixtures = [
     assertNotStopping(runtime);
     const port = await freePort();
     assertNotStopping(runtime);
+    const startupLogOffset = fs.fstatSync(daemonLog).size;
     const proc = spawn(args.python, [DAEMON, scratch,
       '--host', '127.0.0.1', '--port', String(port), '--local-host', 'local',
       '--db', db,
@@ -346,6 +347,17 @@ async function startDaemon(args, scratch, runtime, fixtures = [
     proc.once('exit', () => { dead = true; });
     try {
       await waitForListen(port, args.timeoutMs, () => dead);
+      // Bind-first bootstrap can serve a snapshot before error-alerts/finisher
+      // setup. This fixture needs the committed path, not the legacy fallback.
+      // The existing startup line follows configure_error_alerts; the byte
+      // offset prevents a previous owned process's log from satisfying readiness.
+      const readyDeadline = Date.now() + args.timeoutMs;
+      while (!fs.readFileSync(path.join(scratch, 'daemon.log')).subarray(startupLogOffset)
+        .includes(Buffer.from('awaiter-resolution: every'))) {
+        if (dead) throw new Error('owned daemon exited before outbound setup');
+        if (Date.now() >= readyDeadline) throw new Error('owned daemon outbound setup timed out');
+        await cdp.sleep(50);
+      }
       return { proc, port, seed: seed.trim() };
     } catch (e) {
       lastErr = e;

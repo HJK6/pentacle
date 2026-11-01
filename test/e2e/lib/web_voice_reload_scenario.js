@@ -54,6 +54,14 @@ async function webVoiceReloadAfterCommit(ctx) {
         const oscillator = context.createOscillator(); const destination = context.createMediaStreamDestination();
         oscillator.connect(destination); oscillator.start(); return destination.stream;
       };
+      const originalCommit = window.cc.chatOutboundCommit;
+      window.cc.chatOutboundCommit = async unit => {
+        const result = await originalCommit(unit);
+        window.__reloadVoice.commit = { operationId: unit.voice_operation.operation_id,
+          origin: unit.voice_operation.origin_stream_id, generation: unit.voice_operation.origin_generation,
+          ok: result?.ok === true, serverSend: result?.server_send === true, error: result?.error_code };
+        return result;
+      };
       if (${holdBeforeCommit}) for (const name of ['chatUploadBlob', 'chatOutboundCommit']) {
         if (typeof window.cc[name] === 'function') window.cc[name] = () => { window.__reloadVoice.held.push(name); return new Promise(() => {}); };
       }
@@ -89,6 +97,9 @@ async function webVoiceReloadAfterCommit(ctx) {
     await record(false);
     await untilFile(calls, 'daemon ASR to start');
     times.asrCalled = fs.statSync(calls).mtime.toISOString();
+    const commit = await session.eval('window.__reloadVoice.commit || null');
+    report.ok('the real commit ACK precedes reload', commit?.ok === true && commit.serverSend === true
+      && commit.origin === streamId, commit);
     await reset(); await open();
     times.reopened = new Date().toISOString();
     fs.writeFileSync(release, '');
