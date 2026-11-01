@@ -173,6 +173,82 @@ def test_first_pin_cas_preserves_a_proved_serving_seat_and_replays(tmp_path,monk
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+@pytest.mark.parametrize("field", ["observed_at", "windows"])
+def test_first_pin_accepts_fresh_volatile_observation(tmp_path,monkeypatch,provider,when,field):
+    from test_account_rotation import NOW
+    admin={"peer_loopback":True,"local_admin_verified":True}
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,provider=provider)
+        try:
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            async def refresh():
+                current=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+                if field=="observed_at":current[field]+=1
+                else:
+                    # A new quota sample, still within the separately checked cap.
+                    window=next(iter(current["windows"].values()))
+                    window["pct"]+=1
+                assert await runtime.record_observation(selected,current)
+            if when=="before-cas":await refresh()
+            else:
+                verify=runtime.executor.verify_artifact
+                async def refreshed(account,pin):
+                    proof=await verify(account,pin)
+                    await refresh()
+                    return proof
+                runtime.executor.verify_artifact=refreshed
+            result=await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                "operation_id":"volatile-refresh","reason":"fixture",
+                "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert result["pin"]==target and result["receipt"]["outcome"]=="pin_set"
+            assert result["receipt"]["initial_readiness"]["digest"]==status["initial_readiness"]["digest"]
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("when", ["before-cas", "during-proof"])
+@pytest.mark.parametrize("field", ["collection", "provider_id", "ordinary_usage_allowed"])
+def test_first_pin_still_refuses_material_observation_change(tmp_path,monkeypatch,when,field):
+    from test_account_rotation import NOW
+    from provider_cli_pin import pristine
+    admin={"peer_loopback":True,"local_admin_verified":True}
+    async def run():
+        store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch)
+        try:
+            status=await runtime.operation({"action":"pin-status","pin":target,"_auth_context":admin})
+            assert status["initial_readiness"]["missing"]==[]
+            async def change():
+                current=await runtime.run(lambda a:a.readback(now=NOW)["accounts"][0]["observation"])
+                current[field]={"collection":"failed","provider_id":"different-identity",
+                                "ordinary_usage_allowed":False}[field]
+                await runtime.record_observation(selected,current)
+            if when=="before-cas":await change()
+            else:
+                verify=runtime.executor.verify_artifact
+                async def changed(account,pin):
+                    proof=await verify(account,pin)
+                    await change()
+                    return proof
+                runtime.executor.verify_artifact=changed
+            with pytest.raises(VerbError) as refused:
+                await runtime.operation({"action":"pin-set","pin":target,"expected_revision":0,
+                    "operation_id":"material-refresh","reason":"fixture",
+                    "expected_readiness_digest":status["initial_readiness"]["digest"],"_auth_context":admin})
+            assert refused.value.code=="provider_cli_initial_readiness_required"
+            expected=("readiness_state_changed" if when=="during-proof" else
+                      "cell_unavailable" if field=="provider_id" else "readiness_digest_changed")
+            assert refused.value.extra["reason"]==expected
+            if when=="before-cas" and field=="provider_id":
+                assert {k:refused.value.extra[k] for k in ["host","provider","account"]}=={
+                    "host":selected.host,"provider":selected.provider,"account":selected.alias}
+            assert await runtime.run(pristine)
+        finally:store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
 def test_first_pin_refuses_same_uid_native_process_without_launcher_record(tmp_path,monkeypatch,provider):
     import os
     from types import SimpleNamespace
