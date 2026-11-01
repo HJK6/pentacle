@@ -14,11 +14,11 @@ from test_loopback_privileged_rpc import scratch_daemon, rpc
 
 
 @asynccontextmanager
-async def ready_daemon(tmp_path,monkeypatch,*,serving_seat=False):
+async def ready_daemon(tmp_path,monkeypatch,*,serving_seat=False,provider="codex"):
     from test_provider_cli_initial_activation import ready_fixture
     from server import Server
     from spawnctl import SpawnCtl
-    store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,serving_seat=serving_seat)
+    store,runtime,host,selected,target,row,native=await ready_fixture(tmp_path,monkeypatch,serving_seat=serving_seat,provider=provider)
     token_path=tmp_path/"admin.token"
     local_admin.initialize(token_path)
     monkeypatch.setattr(local_admin.verify,"__defaults__",(token_path,))
@@ -41,6 +41,159 @@ def clear_request(request,result,**changes):
     return {"host":request["host"],"local_admin_token":request["local_admin_token"],
         "maintenance_id":request["maintenance_id"],"expected_maintenance_digest":result["maintenance_digest"],
         "expected_hold_digest":result["hold_digest"],**changes}
+
+
+@pytest.mark.parametrize("provider",["codex","claude"])
+def test_clear_serializes_with_observation_without_blocking_other_hosts(tmp_path,monkeypatch,provider):
+    """A clear must queue before dispatch, then keep its three proofs together."""
+    async def run():
+        async with ready_daemon(tmp_path,monkeypatch,provider=provider) as (daemon,store,runtime,host,selected,row,request):
+            frozen=await rpc(daemon,"spawn_freeze",**request)
+            assert frozen["type"]=="spawn_freeze.ok"
+            other=replace(selected,host="other-host")
+            await runtime.run(lambda a:a.register(other))
+            actual=runtime.executor.execute
+            entered=asyncio.Event();release=asyncio.Event();queued=asyncio.Event()
+            class ObservedLock(asyncio.Lock):
+                async def acquire(self):
+                    if self.locked():queued.set()
+                    return await super().acquire()
+            runtime.executor._host_locks[selected.host]=ObservedLock()
+            calls=[];busy=False;first=True;tasks=[]
+            async def execute(account,action,*args,**kwargs):
+                nonlocal busy,first
+                if account.host==other.host:
+                    return {"outcome":"ok","binding_key":other.key,"observation":observation(other)}
+                calls.append(action)
+                if action=="observe" and first:
+                    first=False;busy=True;entered.set()
+                    try:await release.wait()
+                    finally:busy=False
+                elif busy:
+                    raise AccountError("account_busy")
+                return await actual(account,action,*args,**kwargs)
+            runtime.executor.execute=execute
+            try:
+                collector=asyncio.create_task(runtime.executor.observe(selected));tasks.append(collector)
+                await asyncio.wait_for(entered.wait(),1)
+                clearing=asyncio.create_task(rpc(daemon,"spawn_unfreeze",**clear_request(request,frozen)));tasks.append(clearing)
+                queued_wait=asyncio.create_task(queued.wait());tasks.append(queued_wait)
+                done,_=await asyncio.wait((queued_wait,clearing),timeout=1,return_when=asyncio.FIRST_COMPLETED)
+                assert queued_wait in done and queued.is_set(),"clear must join the collector's existing host mutex"
+                assert not clearing.done(),"clear must wait for the existing host mutex"
+                assert calls==["observe"],"queued clear must dispatch no host proof"
+                next_observe=asyncio.create_task(runtime.executor.observe(selected));tasks.append(next_observe)
+                other_result=await asyncio.wait_for(runtime.executor.observe(other),1)
+                assert other_result["outcome"]=="ok"
+                release.set()
+                assert (await collector)["outcome"]=="ok"
+                result=await asyncio.wait_for(clearing,2)
+                assert result["type"]=="spawn_freeze.ok"
+                assert result["receipt"]["state"]=="cleared"
+                assert (await next_observe)["outcome"]=="ok"
+                assert calls==["observe","recovery-status","observe-bound","launcher-status","observe"]
+                assert not runtime.executor._host_locks[selected.host].locked()
+            finally:
+                release.set()
+                queued.set()
+                await asyncio.gather(*tasks,return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case",["slot","hold","binding","timeout","cancel"])
+def test_queued_clear_rereads_state_and_never_dispatches_on_refusal(tmp_path,monkeypatch,case):
+    import json
+    import provider_cli_maintenance as maintenance
+    async def run():
+        async with ready_daemon(tmp_path,monkeypatch) as (daemon,store,runtime,host,selected,row,request):
+            frozen=await rpc(daemon,"spawn_freeze",**request)
+            clear=clear_request(request,frozen)
+            lock=runtime.executor._host_locks.setdefault(selected.host,asyncio.Lock())
+            await lock.acquire()
+            calls=[]
+            actual=runtime.executor.execute
+            async def execute(*args,**kwargs):
+                calls.append(args[1])
+                return await actual(*args,**kwargs)
+            runtime.executor.execute=execute
+            if case=="timeout":monkeypatch.setattr(maintenance,"CLEAR_MUTEX_WAIT_SECONDS",0.01,raising=False)
+            task=asyncio.create_task(maintenance.unfreeze(runtime,clear,selected.host))
+            try:
+                for _ in range(8):await asyncio.sleep(0)
+                if case=="timeout":
+                    with pytest.raises(AccountError,match="^provider_timeout$"):
+                        await asyncio.wait_for(task,1)
+                elif case=="cancel":
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):await task
+                else:
+                    assert not task.done(),"clear must not snapshot or dispatch before mutex acquisition"
+                    if case=="slot":
+                        def change(a):
+                            value=maintenance.slot(a,selected.host)
+                            value["arguments"]["reason"]="changed while waiting"
+                            a.conn.execute("UPDATE kv SET v=? WHERE k=?",(json.dumps(value),maintenance.PREFIX+selected.host))
+                        await runtime.run(change)
+                    elif case=="hold":
+                        await store.set_spawn_admission_hold(selected.host,held_until=NOW+1000,reason="changed owner")
+                    else:
+                        def change(a):
+                            bound=replace(selected,home=selected.home+"-changed")
+                            from dataclasses import asdict
+                            a.conn.execute("UPDATE v2_account_bindings SET data=? WHERE binding_key=?",(json.dumps(asdict(bound)),selected.key))
+                        await runtime.run(change)
+                    lock.release()
+                    error={"slot":"provider_cli_maintenance_compare_required","hold":"provider_cli_maintenance_hold_stale",
+                           "binding":"provider_cli_maintenance_home_changed"}[case]
+                    with pytest.raises(AccountError,match="^"+error+"$"):
+                        await asyncio.wait_for(task,1)
+                assert calls==[]
+                assert await runtime.run(lambda a:maintenance.slot(a,selected.host)) is not None
+                if lock.locked():lock.release()
+                async with asyncio.timeout(1):
+                    async with lock:pass
+            finally:
+                if lock.locked():lock.release()
+                if not task.done():task.cancel()
+                await asyncio.gather(task,return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case",["cancel","timeout"])
+def test_clear_proof_interruption_retains_maintenance_and_releases_host_mutex(tmp_path,monkeypatch,case):
+    import provider_cli_maintenance as maintenance
+    async def run():
+        async with ready_daemon(tmp_path,monkeypatch) as (daemon,store,runtime,host,selected,row,request):
+            frozen=await rpc(daemon,"spawn_freeze",**request)
+            entered=asyncio.Event();finish=asyncio.Event();calls=[]
+            actual=runtime.executor.execute
+            async def execute(account,action,*args,**kwargs):
+                calls.append(action)
+                if action=="observe-bound":
+                    entered.set();await finish.wait()
+                return await actual(account,action,*args,**kwargs)
+            runtime.executor.execute=execute
+            if case=="timeout":monkeypatch.setattr(maintenance,"CLEAR_PROOF_SECONDS",0.01,raising=False)
+            task=asyncio.create_task(maintenance.unfreeze(runtime,clear_request(request,frozen),selected.host))
+            try:
+                await asyncio.wait_for(entered.wait(),1)
+                if case=="cancel":
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):await task
+                else:
+                    with pytest.raises(AccountError,match="^provider_timeout$"):
+                        await asyncio.wait_for(task,1)
+                assert calls==["recovery-status","observe-bound"]
+                assert await runtime.run(lambda a:maintenance.slot(a,selected.host))==frozen["slot"]
+                lock=runtime.executor._host_locks[selected.host]
+                assert not lock.locked()
+                async with asyncio.timeout(1):
+                    async with lock:pass
+            finally:
+                finish.set()
+                if not task.done():task.cancel()
+                await asyncio.gather(task,return_exceptions=True)
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("case",["normal","restart","expired","foreign","slot-stale","hold-stale","host-offline","pending"])
