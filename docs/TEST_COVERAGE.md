@@ -11,6 +11,34 @@ or a certification of every assertion or installed client/provider combination.
 [Test selection](TEST_SELECTION.md) and [selective release](SELECTIVE_RELEASE.md)
 own advisory change selection. CI, merge and deployment gates remain required.
 
+## Advisor admission cases
+
+All cases below are in `services/chat-stream-v2/tests/test_assistant_lane_rulings.py`.
+They run in the daemon unit and focused `v2-pytest` selections; delivery uses
+real Comms and Store with synthetic seats and fake pane transport.
+
+| Test | Behavior |
+|---|---|
+| `test_covered_fd_spawn_of_any_non_qa_role_waits_for_approval` | Planner and untyped covered spawns wait for approval. |
+| `test_fd_qa_commission_lead_owned_worker_and_handoff_are_not_held` | QA, lead-owned and handoff controls retain ordinary admission. |
+| `test_fd_resume_is_not_held` | A front-desk resume is not held. |
+| `test_covered_fd_spawn_without_spec_is_refused_work_assignment_required` | New covered spawn requires a work assignment. |
+| `test_covered_fd_send_waits_and_deny_delivers_nothing` | Send approval lands once; denial and absent assignment do not deliver. |
+| `test_typed_qa_send_tell_and_non_fd_send_are_not_held` | Typed QA, tell and non-front-desk controls retain ordinary behavior. |
+| `test_covered_request_stays_pending_past_deadline_and_accepts_late_approval` | Overdue work remains held and accepts a late ruling. |
+| `test_covered_request_holds_when_authority_unavailable_or_unconfigured` | Covered work holds across authority loss or missing binding. |
+| `test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule` | Rebinding retargets notices and fences former authority generations. |
+| `test_explicit_disable_releases_covered_pending_and_mirrors_once` | Explicit disable releases and mirrors once. |
+| `test_same_key_identical_digest_reuses_row_and_changed_digest_is_refused` | Retry identity and changed intent are distinguished for spawn and send. |
+| `test_completed_same_key_send_returns_recorded_outcome_after_assignment_removal` | Completed retry remains idempotent after assignment removal and disable. |
+| `test_covered_send_payload_is_normalized_before_digest_packet_and_release` | Body aliases and ordered attachment descriptors remain consistent. |
+| `test_covered_send_deny_is_accepted_when_target_generation_is_stale` | Stale targets can be denied but cannot be approved. |
+| `test_covered_column_is_added_to_an_existing_database_once` | Legacy and fresh stores have the additive column. |
+| `test_approved_send_release_has_one_logical_identity_and_truthful_delivery_state` | Receipt reconciliation distinguishes landed, not landed and unproven delivery. |
+| `test_covered_notice_carries_work_item_origin_and_send_context` | Packet distinguishes operator origin and agent goal, including missing origin. |
+| `test_non_covered_actions_keep_deadline_release` | Non-covered close retains deadline behavior. |
+| `test_unrelated_approved_work_continues_while_another_is_pending` | An unrelated pending ruling does not block an approved request. |
+
 ## Working testing standard
 
 A good test protects intended behavior with enough realism to catch a meaningful regression and no more machinery than that protection needs. Keep existing good tests; this standard guides new/changed tests and gradual improvements.
@@ -165,6 +193,7 @@ assertion completeness, uninspected fake boundaries and runtime cost are UNKNOWN
 
 | Behavior / purpose | Existing protection and reachability | Boundaries, inspected protection and remaining uncertainty |
 | --- | --- | --- |
+| Advisor new-work admission | [`test_assistant_lane_rulings.py`](../services/chat-stream-v2/tests/test_assistant_lane_rulings.py); daemon unit / focused `v2-pytest` | Covered spawn and send admission, late ruling, authority loss and rebind, identity and normalized payload, stale targets, migration, and interrupted receipt reconciliation. Uses real Store, Sessions and Comms with fake pane transport; live provider and deployed readbacks remain separate. |
 | Send retry → durable receipt | [`test_send_idempotency_dedupe.py`](../services/chat-stream-v2/tests/test_send_idempotency_dedupe.py), [`test_send_semantics.py`](../services/chat-stream-v2/tests/test_send_semantics.py); daemon unit / focused `v2-pytest` | Real Comms, Store, Sessions, SpawnCtl; fake tmux/hosts/blob transport. Inspected: single paste, logical identity, failed retry eligibility, queued and pending replay. Reference below; no real provider/socket/browser proof. |
 | Receipt projection and late proof | [`test_send_receipts.py`](../services/chat-stream-v2/tests/test_send_receipts.py), [`test_send_receipt_late_proof.py`](../services/chat-stream-v2/tests/test_send_receipt_late_proof.py); daemon unit / focused | Real store projection and direct Server dispatch with synthetic records/events. Inspected: metadata correlation, event stamping, proof reconciliation/race/ambiguity and access checks. Distinct from physical-send and client protections. |
 | Disconnect and client reconciliation | [`test_send_survives_disconnect.py`](../services/chat-stream-v2/tests/test_send_survives_disconnect.py); [`test_inbound_admission_bounds.py`](../services/chat-stream-v2/tests/test_inbound_admission_bounds.py) (reference examples below); [`optimisticReconciliation.test.ts`](../pentacle-chat-core/tests/optimisticReconciliation.test.ts) | Server handler/task-lifetime tests use fake sockets and send handlers; no Comms delivery. Client reducers/selectors use synthetic state/events: identity, live/snapshot replay, status ordering and caption lattice. Client suite runs in its own required frontend step. One complete real send/disconnect/consumer journey remains UNKNOWN across the repo, not a proven absent test. |

@@ -282,8 +282,6 @@ class AssistantLaneRulings:
                 )):
             return None
         binding = await self.binding()
-        if binding["state"] == "disabled":
-            return None
         message = self._safe_intent(msg)
         if not str(message.get("objective") or "").strip():
             brief_reader = getattr(self.server.spawnctl, "_brief_from_message", None)
@@ -309,6 +307,8 @@ class AssistantLaneRulings:
         # R4: item (1)'s task link is checked when a new ruling request is admitted, not at release.
         known = await self.store.submit(lambda conn: conn.execute(
             "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)).fetchone())
+        if binding["state"] == "disabled" and known is None:
+            return None
         spawnctl = self.server.spawnctl
         spec_id = str(message.get("spec_id") or "")
         if known is None:
@@ -362,15 +362,18 @@ class AssistantLaneRulings:
                     composite.config.direct_primary_stream_id, composite.config.direct_primary_generation)):
             return None
         binding = await self.binding()
-        if binding["state"] == "disabled":
-            return None
         host, _, name = target.partition(":")
         seat = await self.store.fetch_session(host, name)
         if not seat or seat.get("status") != "open":
             return None
         generation = str(seat.get("session_generation") or "")
-        spec_id = effective_assignment(seat)
-        if not spec_id:
+        key = f"send:{target}:{generation}:{msg.get('msg_id', 0)}"
+        known = await self.store.submit(lambda conn: conn.execute(
+            "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", (key,)).fetchone())
+        if binding["state"] == "disabled" and known is None:
+            return None
+        spec_id = effective_assignment(seat) if known is None else None
+        if known is None and not spec_id:
             raise VerbError("work_assignment_required", f"{target} requires an assigned spec")
         if "text" in msg and "message" in msg and msg["text"] != msg["message"]:
             raise VerbError("assistant_ruling_send_body_ambiguous", "assistant_ruling_send_body_ambiguous")
@@ -386,9 +389,10 @@ class AssistantLaneRulings:
         intent = {"to_stream_id": target, "target_generation": generation, "msg_id": msg.get("msg_id", 0),
                   "body": body, "inbox": msg.get("inbox"), "attachments": attachments,
                   "from_stream_id": str(msg.get("from_stream_id") or auth["stream_id"])}
-        item, error = _work_item(str(spec_id))
-        item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
-        request = await self._create(action="send", key=f"send:{target}:{generation}:{intent['msg_id']}",
+        item, error = _work_item(str(spec_id)) if spec_id else (None, None)
+        if item is not None:
+            item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
+        request = await self._create(action="send", key=key,
             intent=intent, requester=str(auth["stream_id"]), requester_generation=str(auth["session_generation"]),
             binding=binding, target=target, target_generation=generation, covered=True, work_item=item,
             work_item_error=error)
@@ -634,7 +638,10 @@ class AssistantLaneRulings:
         async with self._authority_lock:
             binding = await self.binding()
             if binding["state"] == "disabled" or (not covered and binding["state"] in {"unconfigured", "same_primary"}):
-                return {"state": "bypassed"}
+                existing = await self.store.submit(lambda conn: conn.execute(
+                    "SELECT 1 FROM v2_assistant_lane_rulings WHERE request_key=?", (key,)).fetchone())
+                if existing is None:
+                    return {"state": "bypassed"}
             if covered and binding["state"] in {"unconfigured", "same_primary"}:
                 binding = {**binding, "stream_id": "", "generation": ""}
             request = await self.store.submit(op)
