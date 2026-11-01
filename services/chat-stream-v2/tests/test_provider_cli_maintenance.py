@@ -173,7 +173,14 @@ def test_clear_proof_interruption_retains_maintenance_and_releases_host_mutex(tm
                     entered.set();await finish.wait()
                 return await actual(account,action,*args,**kwargs)
             runtime.executor.execute=execute
-            if case=="timeout":monkeypatch.setattr(maintenance,"CLEAR_PROOF_SECONDS",0.01,raising=False)
+            deadlines=[]
+            if case=="timeout":
+                actual_timeout=asyncio.timeout
+                def captured_timeout(seconds):
+                    context=actual_timeout(seconds)
+                    if seconds==maintenance.CLEAR_PROOF_SECONDS:deadlines.append(context)
+                    return context
+                monkeypatch.setattr(maintenance.asyncio,"timeout",captured_timeout)
             task=asyncio.create_task(maintenance.unfreeze(runtime,clear_request(request,frozen),selected.host))
             try:
                 await asyncio.wait_for(entered.wait(),1)
@@ -181,6 +188,8 @@ def test_clear_proof_interruption_retains_maintenance_and_releases_host_mutex(tm
                     task.cancel()
                     with pytest.raises(asyncio.CancelledError):await task
                 else:
+                    assert len(deadlines)==1
+                    deadlines[0].reschedule(asyncio.get_running_loop().time())
                     with pytest.raises(AccountError,match="^provider_timeout$"):
                         await asyncio.wait_for(task,1)
                 assert calls==["recovery-status","observe-bound"]
