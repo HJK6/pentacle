@@ -22,7 +22,7 @@ def test_failed_probe_keeps_last_good_stale_and_exposes_actual_code(tmp_path, ra
         store.start()
         clock = [NOW]
         runtime = AccountRuntime(store, Sessions(store), policy=policy(), clock=lambda: clock[0])
-        account = binding("ours", "thoth", "claude")
+        account = binding("ours", "host-a", "claude")
         failure = [False]
         calls = []
 
