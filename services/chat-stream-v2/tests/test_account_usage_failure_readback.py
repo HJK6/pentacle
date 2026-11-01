@@ -12,8 +12,10 @@ from store import Store
 from test_account_rotation import NOW, binding, inventory, observation, policy
 
 
-@pytest.mark.parametrize("raised", [False, True])
-@pytest.mark.parametrize("code", ["provider_cache_stale", "account_busy"])
+@pytest.mark.parametrize("code,raised", [
+    ("provider_cache_stale", False), ("provider_cache_stale", True),
+    ("account_busy", False), ("account_busy", True), ("provider_auth_failed", False),
+])
 def test_failed_probe_keeps_last_good_stale_and_exposes_actual_code(tmp_path, raised, code):
     async def run():
         store = Store(str(tmp_path / "accounts.db"))
@@ -52,12 +54,18 @@ def test_failed_probe_keeps_last_good_stale_and_exposes_actual_code(tmp_path, ra
             assert pool["error_codes"] == {account.key: code}
             assert status["accounts"][0]["observation"]["error_code"] == code
             assert status["accounts"][0]["generation"] == account.generation
+            if code == "provider_auth_failed":
+                assert status["accounts"][0]["health"] == "auth_unhealthy"
+                with pytest.raises(AccountError, match="account_unavailable"):
+                    await runtime.run(lambda ledger: ledger.ensure_available(account.key))
             assert calls == ["observe", "observe"]
             failure[0] = False
             clock[0] += 1
             assert (await executor.observe(account))["outcome"] == "ok"
             recovered = (await runtime.run(lambda ledger: ledger.readback(now=clock[0])))["quota_pools"][0]
-            assert recovered["fresh"] and recovered["error_codes"] == {}
+            assert recovered["fresh"] is (code != "provider_auth_failed")
+            assert recovered["error_codes"] == {}
+            assert recovered["observation"] is not None
             assert recovered["observation"].get("error_code") is None
         finally:
             store.stop()
