@@ -116,6 +116,8 @@ else:
 
     # BEGIN ASR FIXTURE: test-only, in-process; the product backend is never called.
     # The stub records each call, then holds until the scenario writes the release file.
+    # It holds up to 300 s, well past any scenario wait, so a slow reload can never
+    # become a fixture-made transcription failure.
     asr_manifest = scratch / 'asr-stub.json'
     if asr_manifest.exists():
         import asyncio
@@ -125,7 +127,7 @@ else:
         async def fixture_call_backend(self, *, data, mime):
             with (scratch / 'asr-calls.log').open('a') as calls:
                 calls.write(mime + '\n')
-            for _ in range(1200):
+            for _ in range(6000):
                 if (scratch / 'asr-release').exists():
                     return {'text': asr['text'], 'duration_s': 1.0, 'model': 'fixture', 'vocabulary_version': ''}
                 await asyncio.sleep(0.05)

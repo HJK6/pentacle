@@ -30,6 +30,21 @@ async function webVoiceReloadAfterCommit(ctx) {
   const db = path.join(runtime.fixtureScratch, 'sessions.db');
   const sends = () => Number(execFileSync('sqlite3', ['-readonly', db,
     `SELECT count(DISTINCT request_id) FROM v2_send_receipts WHERE to_stream_id='${streamId}' AND display_text='${TEXT}'`], { encoding: 'utf8' }).trim());
+  const query = sql => JSON.parse(execFileSync('sqlite3', ['-readonly', '-json', db, sql], { encoding: 'utf8' }).trim() || '[]');
+  // Failure-only evidence: state, codes and milestone times; never mandate or transcript text.
+  function finisherEvidence(since) {
+    const operations = query(`SELECT operation_id, created_at, json_extract(data,'$.state') AS state,
+      json_extract(data,'$.server_finish_failed_code') AS failed_code, json_extract(data,'$.worker.started_at') AS worker_started,
+      json_extract(data,'$.ready_at') AS ready_at, json_extract(data,'$.upload_committed') AS upload_committed,
+      json_extract(data,'$.transcribe_started') AS transcribe_started, json_extract(data,'$.transcribe_result') AS transcribe_result,
+      json_extract(data,'$.transcribe_failed') AS transcribe_failed, json_extract(data,'$.send_attempted') AS send_attempted,
+      json_extract(data,'$.send_committed') AS send_committed, json_extract(data,'$.server_finish_failed') AS failed_at,
+      origin_generation FROM voice_operations WHERE origin_stream_id='${streamId}' AND created_at >= '${since}'`);
+    const [host, name] = [streamId.slice(0, streamId.indexOf(':')), streamId.slice(streamId.indexOf(':') + 1)];
+    const session = query(`SELECT * FROM sessions WHERE host='${host}' AND session_name='${name}'`)[0] || {};
+    const origin = Object.fromEntries(Object.entries(session).filter(([key]) => /^(status|.*generation.*)$/.test(key)));
+    return { operations, origin };
+  }
   async function record(holdBeforeCommit) {
     await reset(); await open();
     await session.eval(`(() => {
@@ -69,14 +84,20 @@ async function webVoiceReloadAfterCommit(ctx) {
 
     // Journey: the audio is on the daemon and ASR has started when the page reloads.
     fs.rmSync(release, { force: true });
+    const since = new Date().toISOString().slice(0, 19);
+    const times = { recordStarted: new Date().toISOString() };
     await record(false);
     await untilFile(calls, 'daemon ASR to start');
+    times.asrCalled = fs.statSync(calls).mtime.toISOString();
     await reset(); await open();
+    times.reopened = new Date().toISOString();
     fs.writeFileSync(release, '');
+    times.released = new Date().toISOString();
     const deadline = Date.now() + 20000;
     while (sends() === 0 && Date.now() < deadline) await cdp.sleep(200);
     await cdp.sleep(2000);
     const journey = { sends: sends(), asrCalls: fs.readFileSync(calls, 'utf8').trim().split('\n').length };
+    if (journey.sends !== 1) Object.assign(journey, { times, ...finisherEvidence(since) });
     report.ok('reload after the audio reaches the daemon: exactly one send carries the transcript', journey.sends === 1, journey);
   } finally {
     fs.writeFileSync(release, '');
