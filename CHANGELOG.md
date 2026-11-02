@@ -13,6 +13,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+## 2026-11-02
+
 ### Added
 
 - Opt-in release seam admission unions installed baselines, rejects stale or incomplete proof, and keeps affected canary invocation and verdict scopes aligned. One finite client wire/render/model tuple is registered; other surfaces remain unqualified.
@@ -23,6 +25,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Fixed
 
+- The literal `assistant` CLI destination reaches the current assistant when the daemon also has a configured assistant name.
 - Saved assistant composite chats keep their pane and conversation after a web reload.
 - Initial CLI pin readiness excludes verified closed or missing input holders while preserving live and unknown obligations; durable tell custody prevents promotion across an unrecorded paste.
 - Same-ID tell retries can settle late native input proof without sending the message again; missing or ambiguous original proof stays pending.
