@@ -709,3 +709,22 @@ def test_recovered_holder_can_open_new_episode_for_later_loss(tmp_path):
             assert second['state'] == 'spawning' and len(fake.calls) == 2
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_internal_bind_fences_changed_primary(tmp_path):
+    from assistant_authority_restore import SERVICE_CAPABILITY
+    async def run():
+        store, root, advisor, server, fake, restore, now, brief = await restore_rig(tmp_path)
+        try:
+            episode = await restore.current(ADVISOR, advisor['session_generation'])
+            await store.open_session('fixture-advisor', 'would-bind', provider='codex', pane_status='pane_alive',
+                bootstrap_state='ready', session_generation=episode['attempt_generation'])
+            with pytest.raises(ValueError, match='assistant_authority_primary_changed'):
+                await server.lane_rulings.configure('fixture-advisor:would-bind', actor_stream_id='daemon:authority-restore',
+                    actor_generation=episode['attempt_generation'], service=SERVICE_CAPABILITY, brief_file=str(brief),
+                    expected_old=(ADVISOR, advisor['session_generation']), frozen_brief_sha='known',
+                    restore_episode=episode, expected_primary=(ROOT, 'stale-generation'))
+            assert (await server.lane_rulings.binding())['stream_id'] == ADVISOR
+            assert (await restore.current(ADVISOR, advisor['session_generation']))['state'] == 'spawning'
+        finally: store.stop()
+    asyncio.run(run())

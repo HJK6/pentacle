@@ -359,10 +359,14 @@ class AuthorityRestore:
         proof = delivered and delivered.get('stream_id') == successor
         if proof and is_open and alive and seat.get('bootstrap_state') in ('ready', 'started'):
             try:
+                primary = await self.primary()
+                if not primary:
+                    return 'still_unresolved'
                 await self.server.lane_rulings.configure(successor, actor_stream_id=ACTOR,
                     actor_generation=episode['attempt_generation'], service=SERVICE_CAPABILITY,
                     brief_file=(await self.shape())['brief_path'], expected_old=(episode['stream_id'], episode['generation']),
-                    frozen_brief_sha=hashlib.sha256(payload['initial_prompt'].encode()).hexdigest(), restore_episode=episode)
+                    frozen_brief_sha=hashlib.sha256(payload['initial_prompt'].encode()).hexdigest(), restore_episode=episode,
+                    expected_primary=(primary['stream_id'], primary['generation']))
             except ValueError:
                 log.exception('authority restore bind failed')
                 return 'still_unresolved'

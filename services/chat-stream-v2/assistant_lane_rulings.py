@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from store_assistant_binding import _seat_conn
+from store_assistant_binding import _binding_conn, _seat_conn
 from store_lifecycle_authority import MAX_REASON, scrub
 from store_watch_wake import coalesce_notice_conn
 from _shared.spawn_objective import resolve_objective
@@ -254,7 +254,8 @@ class AssistantLaneRulings:
                         brief_file: str | None = None, service: object = None,
                         expected_old: tuple[str, str] | None = None,
                         frozen_brief_sha: str | None = None,
-                        restore_episode: dict | None = None) -> dict[str, Any]:
+                        restore_episode: dict | None = None,
+                        expected_primary: tuple[str, str] | None = None) -> dict[str, Any]:
         from assistant_authority_restore import SERVICE_CAPABILITY
         is_service = service is SERVICE_CAPABILITY
         composite = self._composite()
@@ -285,6 +286,10 @@ class AssistantLaneRulings:
             def configure_conn(conn: sqlite3.Connection) -> None:
                 with conn:
                     if is_service:
+                        primary = _binding_conn(conn, composite._env_binding(), name=composite.env_config.name,
+                                                include_target=False)
+                        if not expected_primary or (primary.get('stream_id'), primary.get('generation')) != expected_primary:
+                            raise ValueError('assistant_authority_primary_changed')
                         current = conn.execute("SELECT v FROM kv WHERE k='assistant.authority.stream_id'").fetchone()
                         selected = current[0] if current else composite.env_config.authority_stream_id
                         old = _seat_conn(conn, expected_old[0]) if expected_old else None
