@@ -59,6 +59,7 @@ class OutboundFinisher:
         self._clock = clock
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._workers: dict[tuple[str, str], asyncio.Task] = {}
+        self._rekick: set[tuple[str, str]] = set()
 
     # -- contract ---------------------------------------------------------
 
@@ -160,6 +161,8 @@ class OutboundFinisher:
         key = (principal, operation_id)
         task = self._workers.get(key)
         if task is not None and not task.done():
+            # The running worker may already be past its readiness read; run once more after it.
+            self._rekick.add(key)
             return task
         task = asyncio.create_task(self._run(principal, operation_id))
         self._workers[key] = task
@@ -198,6 +201,9 @@ class OutboundFinisher:
     def _finished(self, key, task):
         if self._workers.get(key) is task:
             del self._workers[key]
+            if key in self._rekick:
+                self._rekick.discard(key)
+                self.kick(*key)
         if not task.cancelled() and task.exception() is not None:
             # Row stays running; the next pass re-kicks it. Never log content.
             log.warning("subsystem=outbound_finisher action=worker_failed kind=%s",

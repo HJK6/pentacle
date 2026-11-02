@@ -851,6 +851,7 @@ class Server:
         self._client_opened_by_host_ids: dict[Any, frozenset[str] | None] = {}
         self._client_exclude_event_types: dict[Any, frozenset[str]] = {}
         self._client_events_mode: dict[Any, str] = {}
+        self._client_snapshot_requested: dict[Any, bool] = {}
         self._client_assistant_composite_v1: dict[Any, bool] = {}
         self._client_work_lanes_v1: dict[Any, bool] = {}
         #: Per-client last-sent digest, keyed by coalescing key, of the most
@@ -2023,6 +2024,7 @@ class Server:
         self._client_opened_by_host_ids.pop(websocket, None)
         self._client_exclude_event_types.pop(websocket, None)
         self._client_events_mode.pop(websocket, None)
+        self._client_snapshot_requested.pop(websocket, None)
         self._client_assistant_composite_v1.pop(websocket, None)
         self._client_work_lanes_v1.pop(websocket, None)
         self._client_last_sent_digest.pop(websocket, None)
@@ -2250,6 +2252,18 @@ class Server:
                                 await websocket.send(payload)
                     else:
                         for frame in ((frames,) if isinstance(frames, str) else frames):
+                            # Snapshot assembly can await storage while the finisher
+                            # starts. Resolve its capabilities under the same send
+                            # lock as the refresh so an older greeting cannot undo it.
+                            if (isinstance(frame, dict) and frame.get("type") == "snapshot"
+                                    and self.error_alerts is not None
+                                    and self.error_alerts.finisher is not None
+                                    and self._operator_authenticated(websocket)
+                                    and websocket not in self._client_authenticated_streams):
+                                frame = {**frame, "capabilities": {
+                                    **frame.get("capabilities", {}),
+                                    "error_alerts_v1": True, "outbound_commit_v1": True,
+                                }, "error_reporting_credential_id": self._connection_trust[websocket].credential_id}
                             payload = frame if isinstance(frame, str) else _encode_frame(frame)
                             with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
                                 await websocket.send(payload)
@@ -3625,7 +3639,7 @@ class Server:
             self._diag_auth_finish(decision)
             _CONN_AUTH.reset(token)
 
-    async def _on_hello_inner(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _on_hello_inner(self, msg: dict[str, Any], *, refresh: bool = False) -> list[dict[str, Any]]:
         """Apply hello.subscribe before constructing the connection's frames."""
         subscribe = msg.get("subscribe") if isinstance(msg.get("subscribe"), dict) else {}
         try:
@@ -3646,7 +3660,7 @@ class Server:
         ).lower() != "rpc"
         websocket = msg.get("_client_websocket")
         consent_ready = True
-        if websocket is not None:
+        if websocket is not None and not refresh:
             auth_started = _monotonic() if websocket in self._connection_diagnostics else None
             error_code = self._authenticate_operator_hello(websocket, msg)
             decision = _CONN_AUTH.get()
@@ -3673,6 +3687,7 @@ class Server:
             self._client_opened_by_host_ids[websocket] = opened_by_host_ids
             self._client_exclude_event_types[websocket] = exclude_event_types
             self._client_events_mode[websocket] = events_mode
+            self._client_snapshot_requested[websocket] = snapshot_requested
             self._client_assistant_composite_v1[websocket] = self._client_wants_assistant_composite(msg)
             self._client_work_lanes_v1[websocket] = self._client_wants_work_lanes(msg)
             self._diag_admitted(websocket, msg, events_mode, snapshot_requested)
@@ -4779,6 +4794,29 @@ class Server:
         # Composed after the wrapped send so server-owned sends bind receipts.
         self.error_alerts.finisher = OutboundFinisher(self, self.error_alerts)
         await self.error_alerts.finisher.start()
+        # bind/bootstrap precedes this composition. Refresh the same authenticated
+        # snapshot consumers once, preserving their existing projection/subscription.
+        for websocket in tuple(self._clients):
+            if not self._operator_authenticated(websocket) or not self._client_snapshot_requested.get(websocket):
+                continue
+            if websocket in self._client_authenticated_streams:
+                continue
+            opened = self._client_opened_by_host_ids.get(websocket)
+            frames = await self._on_hello_inner({
+                "_client_websocket": websocket,
+                "_auth_context": await self._auth_context(websocket, {}),
+                "subscribe": {
+                    "events_mode": self._client_events_mode.get(websocket, "full"),
+                    "include_subagents": self._client_include_subagents.get(websocket, False),
+                    **({"opened_by_host_ids": sorted(opened)} if opened is not None else {}),
+                    "exclude_event_types": sorted(self._client_exclude_event_types.get(websocket, ())),
+                },
+                "capabilities": {
+                    "assistant_composite_v1": self._client_assistant_composite_v1.get(websocket, False),
+                    "work_lanes_v1": self._client_work_lanes_v1.get(websocket, False),
+                },
+            }, refresh=True)
+            await self._send_direct(websocket, [frame for frame in frames if frame.get("type") == "snapshot"])
 
     async def _on_transcribe_blob(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Transcribe an uploaded audio blob on the managed mic backend.

@@ -703,6 +703,32 @@ async def test_u10_message_waits_for_every_digest_then_sends_once(voice_harness)
 
 
 @pytest.mark.asyncio
+async def test_u10_blob_committed_during_readiness_write_still_sends(voice_harness):
+    """The last blob lands while the commit-time worker records it missing: its kick is not lost."""
+    h = voice_harness
+    image = b"\xff\xd8 late synthetic jpeg"
+    finisher = h.server.error_alerts.finisher
+    held, release, inner = asyncio.Event(), asyncio.Event(), finisher._mine
+
+    async def mine(*args, **kwargs):
+        if not held.is_set():
+            held.set()
+            await release.wait()
+        return await inner(*args, **kwargs)
+    finisher._mine = mine
+    intent = await message_intent(h)
+    oid = intent["operation_id"]
+    async with h.client() as c:
+        await commit(h, c, intent, message_mandate(oid, "late photo", [hashlib.sha256(image).hexdigest()]))
+    await asyncio.wait_for(held.wait(), 5)
+    await upload_blob(h, image)  # kick_blob while the first worker is still running
+    release.set()
+    done = await settle(h, oid, timeout=5)  # no reconcile pass runs in this window
+    assert done["data"]["state"] in ("committed", "proved")
+    assert (await user_rows(h, "fixture:assistant"))[-1]["text"] == "late photo"
+
+
+@pytest.mark.asyncio
 async def test_u10_missing_image_stays_running_and_stalls_without_sending(voice_harness):
     h = voice_harness
     intent = await message_intent(h)
@@ -790,3 +816,155 @@ async def test_u11_voice_with_images_sends_attachments_once(voice_harness):
     assert len(rows) == before + 1
     assert rows[-1]["text"] == "look\n" + TRANSCRIPT
     assert [a["key"] for a in rows[-1]["attachments"]] == [key]
+
+
+@pytest.mark.asyncio
+async def test_u6_early_operator_gets_capability_snapshot_after_finisher_setup(tmp_path, monkeypatch):
+    """Actual authenticated connection precedes production composition; no reconnect."""
+    from error_alerts_fixture import ErrorAlertsHarness
+    from error_alerts_security_scenario import peer
+    from server import Server
+
+    monkeypatch.setenv("PENTACLE_CONFIG_ROOT", str(tmp_path / "config"))
+    monkeypatch.setenv("PENTACLE_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", "record-only")
+    configure = Server.configure_error_alerts
+
+    async def defer_setup(self, queue, alerts=None):
+        pass
+
+    monkeypatch.setattr(Server, "configure_error_alerts", defer_setup)
+    h = ErrorAlertsHarness(tmp_path)
+    try:
+        await h.start()
+        async with peer(h, h.envelope) as (socket, _, frames):
+            first = next(f for f in frames if f["type"] == "snapshot")
+            assert not first["capabilities"].get("outbound_commit_v1")
+            await configure(h.server, h.queue, h.alerts)
+            async with asyncio.timeout(2):
+                while True:
+                    refreshed = json.loads(await socket.recv())
+                    if refreshed.get("type") == "snapshot":
+                        break
+            assert refreshed["capabilities"]["outbound_commit_v1"] is True
+            assert refreshed["sessions"] == first["sessions"]
+            assert refreshed["events_mode"] == first["events_mode"]
+            # The same authenticated connection remains useful.
+            reply = await rpc_socket(socket, {"type": "ping", "request_id": "same-socket"})
+            assert reply["type"] == "pong"
+    finally:
+        await h.stop()
+        assert h.cleanup["errors"] == []
+
+
+async def rpc_socket(socket, frame):
+    await socket.send(json.dumps(frame))
+    async with asyncio.timeout(2):
+        while True:
+            result = json.loads(await socket.recv())
+            if result.get("request_id") == frame["request_id"]:
+                return result
+
+
+@pytest.mark.asyncio
+async def test_u6_inflight_old_snapshot_cannot_overwrite_refreshed_capability(tmp_path, monkeypatch):
+    from error_alerts_fixture import ErrorAlertsHarness
+    from error_alerts_security_scenario import peer
+    from server import Server
+
+    monkeypatch.setenv("PENTACLE_CONFIG_ROOT", str(tmp_path / "config"))
+    monkeypatch.setenv("PENTACLE_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", "record-only")
+    configure = Server.configure_error_alerts
+
+    async def defer_setup(self, queue, alerts=None):
+        pass
+
+    monkeypatch.setattr(Server, "configure_error_alerts", defer_setup)
+    h = ErrorAlertsHarness(tmp_path)
+    held, release = asyncio.Event(), asyncio.Event()
+    context = None
+    entering = None
+    try:
+        await h.start()
+        original = h.notify.snapshot_notifications
+        calls = 0
+
+        async def hold_first(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                held.set()
+                await release.wait()
+            return await original(**kwargs)
+
+        monkeypatch.setattr(h.notify, "snapshot_notifications", hold_first)
+        context = peer(h, h.envelope)
+        entering = asyncio.create_task(context.__aenter__())
+        await asyncio.wait_for(held.wait(), 2)
+        await configure(h.server, h.queue, h.alerts)
+        socket, _, frames = await asyncio.wait_for(entering, 2)
+        assert next(f for f in frames if f["type"] == "snapshot")["capabilities"]["outbound_commit_v1"]
+        release.set()
+        async with asyncio.timeout(2):
+            while True:
+                frame = json.loads(await socket.recv())
+                if frame.get("type") == "snapshot":
+                    break
+        assert frame["capabilities"].get("outbound_commit_v1") is True
+    finally:
+        release.set()
+        if entering is not None and not entering.done():
+            entering.cancel()
+            await asyncio.gather(entering, return_exceptions=True)
+        if context is not None and entering is not None and entering.done() and not entering.cancelled():
+            await context.__aexit__(None, None, None)
+        await h.stop()
+
+
+@pytest.mark.asyncio
+async def test_u6_configure_refresh_excludes_scoped_and_rpc_clients(tmp_path, monkeypatch):
+    from error_alerts_fixture import ErrorAlertsHarness
+    from error_alerts_security_scenario import peer
+    from server import Server
+    import operator_auth
+
+    monkeypatch.setenv("PENTACLE_CONFIG_ROOT", str(tmp_path / "config"))
+    monkeypatch.setenv("PENTACLE_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("PENTACLE_ERROR_ALERTS_MODE", "record-only")
+    configure = Server.configure_error_alerts
+
+    async def defer_setup(self, queue, alerts=None):
+        pass
+
+    monkeypatch.setattr(Server, "configure_error_alerts", defer_setup)
+    h = ErrorAlertsHarness(tmp_path)
+    try:
+        await h.start()
+        _, scoped = h.server.operator_credential_registry.issue(
+            "pentacle-mobile", label="synthetic-scoped", scope={"stream": "fixture:v2-test"})
+        async with peer(h, scoped) as (scoped_socket, _, scoped_frames), peer(h) as (rpc_peer, welcome, _):
+            assert not next(f for f in scoped_frames if f["type"] == "snapshot")["capabilities"].get("outbound_commit_v1")
+            identity = operator_auth.decode_envelope(h.envelope)
+            nonce = welcome["auth"]["operator"]["nonce"]
+            await rpc_peer.send(json.dumps({"type": "hello", "client": identity["client_kind"],
+                "subscribe": {"snapshot": False, "mode": "rpc"}, "auth_v2": {
+                    "scheme": operator_auth.AUTH_SCHEME, "credential_id": identity["credential_id"],
+                    "proof": operator_auth.make_proof(identity["proof_key"], nonce,
+                        identity["credential_id"], identity["client_kind"]),
+                }}))
+            assert json.loads(await asyncio.wait_for(rpc_peer.recv(), 2))["type"] == "ready"
+            await configure(h.server, h.queue, h.alerts)
+            # A ping orders everything already queued on each same connection.
+            # Neither restricted client should receive a refreshed fleet snapshot.
+            for socket in (scoped_socket, rpc_peer):
+                await socket.send(json.dumps({"type": "ping", "request_id": "after-configure"}))
+                async with asyncio.timeout(2):
+                    while True:
+                        frame = json.loads(await socket.recv())
+                        assert frame.get("type") != "snapshot"
+                        if frame.get("request_id") == "after-configure":
+                            break
+    finally:
+        await h.stop()
+        assert h.cleanup["errors"] == []
