@@ -173,7 +173,7 @@ class CdpSession {
     const ex = details.exception || {};
     const entry = { ts: Date.now(), type: 'exception', text: ex.description || ex.value || details.text || '',
       url: details.url || '', line: details.lineNumber ?? null,
-      stack_head: ex.description || details.stackTrace?.callFrames?.[0]?.functionName || '' };
+      stack_head: (ex.description || details.stackTrace?.callFrames?.[0]?.functionName || '').split('\n').slice(0, 2).join('\n') };
     if (Buffer.byteLength(JSON.stringify(entry)) > 8192) { entry.text = '[truncated]'; entry.stack_head = '[truncated]'; entry.url = '[truncated]'; }
     this._queueConsole(entry, async () => {});
   }
