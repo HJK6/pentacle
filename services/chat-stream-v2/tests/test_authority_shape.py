@@ -486,7 +486,8 @@ def test_delivered_restoration_retargets_pending_and_notifies_once(tmp_path):
             assert json.loads(loss.split('] ', 1)[1])['restore']['state'] == 'restoring'
             episode = await restore.current(ADVISOR, advisor['session_generation'])
             await store.open_session('fixture-advisor', 'successor', provider='codex', pane_status='pane_alive',
-                bootstrap_state='started', session_generation=episode['attempt_generation'])
+                bootstrap_state='started', session_generation=episode['attempt_generation'],
+                account_binding={'alias': 'default-account', 'provider': 'codex', 'host': 'fixture-advisor'})
             fake.outcomes = [{'idempotency_key': episode['spawn_key'], 'stream_id': 'fixture-advisor:successor',
                 'state': 'delivered', 'request_payload_hash': fake._spawn_payload_hash(fake.calls[0])}]
             await restore.run(); await restore.run()
@@ -497,6 +498,8 @@ def test_delivered_restoration_retargets_pending_and_notifies_once(tmp_path):
             assert await store.submit(lambda c: c.execute('SELECT 1 FROM v2_outbound_notices WHERE notice_id=?', (packet_id,)).fetchone())
             assert await store.submit(lambda c: c.execute("SELECT count(*) FROM v2_outbound_notices WHERE notice_id LIKE 'authority-restore:authority_restored:%'").fetchone()[0]) == 1
             assert (await restore.shape())['stream_id'] == 'fixture-advisor:successor'
+            audit = await store.submit(lambda c: c.execute("SELECT detail FROM v2_authority_restore_audit WHERE event='adopted'").fetchone()[0])
+            assert json.loads(audit)['account_binding']['alias'] == 'default-account'
             assert await store.submit(lambda c: c.execute('SELECT count(*) FROM v2_assistant_lane_rulings').fetchone()[0]) == 1
         finally: store.stop()
     asyncio.run(run())
