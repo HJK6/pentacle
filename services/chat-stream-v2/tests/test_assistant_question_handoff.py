@@ -97,6 +97,9 @@ def test_handoff_before_approved_release_blocks_old_generation(tmp_path):
 def test_concurrent_authority_change_and_fresh_question_do_not_deadlock(tmp_path, value_kind):
     from assistant_composite import AssistantComposite, AssistantCompositeConfig
 
+    brief = tmp_path / 'advisor-brief.md'
+    brief.write_text('Synthetic advisor brief for authority rebind.\n')
+
     async def exercise(value_kind):
         async with environment() as (store, sessions, ctl, server, tmux, opened):
             source = await store.fetch_session(HOST, 'source')
@@ -138,7 +141,7 @@ def test_concurrent_authority_change_and_fresh_question_do_not_deadlock(tmp_path
                 rulings.binding = paused_binding
                 target = 'disabled' if value_kind == 'disable' else replacement['stream_id']
                 configure_task = asyncio.create_task(rulings.configure(target, actor_stream_id=SOURCE,
-                                                     actor_generation=source['session_generation']))
+                                                     actor_generation=source['session_generation'], brief_file=str(brief)))
                 tasks.append(configure_task)
                 await asyncio.wait_for(paused.wait(), 2)
                 original_create = rulings._create

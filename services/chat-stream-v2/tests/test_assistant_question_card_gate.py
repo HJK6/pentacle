@@ -15,6 +15,8 @@ from store import Store, STREAM_TOKEN_HASH_VERSION
 
 
 def test_direct_primary_prompt_ask_is_held_over_websocket(tmp_path):
+    brief = tmp_path / 'advisor-brief.md'
+    brief.write_text('Synthetic advisor brief for authority rebind.\n')
     async def run():
         store = Store(str(tmp_path / 'sessions.db'))
         store.start()
@@ -188,10 +190,10 @@ def test_direct_primary_prompt_ask_is_held_over_websocket(tmp_path):
                 assert row['linked_from'] is None
                 ask_rebind = {**ask2, 'envelope': {**ask2['envelope'], 'question_id': 'fixture-rebind', 'dedup_key': 'fixture-rebind'}}
                 rebound = await notify.prompt(ask_rebind)
-                await server.lane_rulings.configure('fixture-advisor:other', actor_stream_id='fixture-root:primary', actor_generation=root['session_generation'])
+                await server.lane_rulings.configure('fixture-advisor:other', actor_stream_id='fixture-root:primary', actor_generation=root['session_generation'], brief_file=str(brief))
                 rebound_row = await server.lane_rulings._fetch(rebound['ruling_request_id'])
                 assert (rebound_row['authority_stream_id'], rebound_row['authority_generation']) == ('fixture-advisor:other', advisor2['session_generation'])
-                await server.lane_rulings.configure('fixture-advisor:astra', actor_stream_id='fixture-root:primary', actor_generation=root['session_generation'])
+                await server.lane_rulings.configure('fixture-advisor:astra', actor_stream_id='fixture-root:primary', actor_generation=root['session_generation'], brief_file=str(brief))
                 assert (await notify.prompt({'type': 'prompt.cancel', 'question_id': 'fixture-rebind', '_auth_context': auth}))['state'] == 'withdrawn'
                 await store.update_session('fixture-advisor', 'astra', pane_status='pane_dead')
                 ask_unavailable = {**ask2, 'envelope': {**ask2['envelope'], 'question_id': 'fixture-unavailable', 'dedup_key': 'fixture-unavailable'}}
