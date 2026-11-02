@@ -541,9 +541,10 @@ async function advisorQuestionRendered({ session, report, fixture, timeoutMs }) 
   if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
   const questionId = process.env.PENTACLE_CARD_PROBE_ID;
   const screenshot = process.env.PENTACLE_CARD_PROBE_SCREENSHOT;
-  if (!questionId || !screenshot) throw new Error('PENTACLE_CARD_PROBE_ID and PENTACLE_CARD_PROBE_SCREENSHOT are required');
+  const stream = process.env.PENTACLE_CARD_PROBE_STREAM;
+  if (!questionId || !screenshot || !stream) throw new Error('PENTACLE_CARD_PROBE_ID, PENTACLE_CARD_PROBE_SCREENSHOT and PENTACLE_CARD_PROBE_STREAM are required');
   await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
-  await session.waitFor("window.focusStreamId('bart:assistant') === true", { timeoutMs });
+  await session.waitFor(`window.focusStreamId(${JSON.stringify(stream)}) === true`, { timeoutMs });
   await session.waitFor("!!document.querySelector('#cell-0 .slot-chat-question-open')", { timeoutMs });
   await session.click('#cell-0 .slot-chat-question-open');
   const expression = `Array.from(document.querySelectorAll('[data-notification-id]')).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
