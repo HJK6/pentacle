@@ -260,6 +260,16 @@ def test_tell_literal_alias_emits_raw_target_at_transport(monkeypatch, capsys, t
     assert json.loads(capsys.readouterr().out)["type"] == "tell.ok"
 
 
+def test_literal_assistant_is_preserved_when_cli_has_a_configured_primary(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "ASSISTANT_ALIAS", "example")
+    sent = _capture_transport(monkeypatch, tmp_path, {"type": "tell.ok"})
+    parser = cli.build_parser()
+    for target in ("assistant", "example"):
+        args = parser.parse_args(["tell", target, "synthetic status"])
+        assert args.func(args) == 0
+    assert [row["payload"]["to_stream_id"] for row in sent] == ["assistant", "example"]
+
+
 def test_tell_alias_is_exact_literal_only(monkeypatch, capsys, tmp_path):
     sent = _capture_transport(monkeypatch, tmp_path, {"type": "tell.ok"})
     parser = cli.build_parser()

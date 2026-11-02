@@ -47,6 +47,17 @@ def test_composite_map_alias_and_digest_follow_primary_name(env, name):
     assert second == "('s:1', 'g') None"
 
 
+def test_stable_literal_routes_with_a_nondefault_primary_name():
+    out = run(
+        "import sys, tempfile\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path('services/chat-stream-v2/tests').resolve()))\n"
+        "from test_assistant_composite_addressing import test_literal_assistant_uses_configured_primary_without_changing_admission as check\n"
+        "with tempfile.TemporaryDirectory() as directory:\n"
+        "    check(Path(directory).resolve())\n"
+        "print('configured literal routing and unchanged admission passed')\n", CONFIGURED)
+    assert out == 'configured literal routing and unchanged admission passed'
+
+
 @pytest.mark.parametrize("env,name", [({}, "assistant"), (CONFIGURED, "zed")])
 def test_binding_seed_readers_and_legacy_mirror_key_follow_primary_name(env, name):
     out = run(

@@ -176,8 +176,10 @@ Success response:
 
 ### Addressing the assistant by alias
 
-`tell` and `send` (only these two verbs) also accept one literal, case-sensitive
-alias: the name of the primary assistant composite (set by `PENTACLE_ASSISTANT_PRIMARY_NAME`, default `assistant`). It means "that
+`tell` and `send` (only these two verbs) accept the stable, case-sensitive
+literal `assistant` and the configured primary name (`PENTACLE_ASSISTANT_PRIMARY_NAME`,
+default `assistant`). Both select the same primary composite, even when the
+CLI and daemon have different primary-name environments. They mean "that
 composite's current binding" and is for agent peers: a verified seat stream token and an explicit
 sender claim (`from_stream_id`, always sent by the CLI) naming the same seat are required. Operator-only
 callers receive `assistant_tell_unauthorized` / `assistant_send_unauthorized`, Dot and scoped clients keep their scope errors, and
@@ -192,7 +194,7 @@ agent-orch send assistant 101 'review the parser change'
 ```
 
 The CLI keeps the alias raw on the wire. `tell` sets `to_stream_id` to the
-alias. `send` sets both `to_stream_id` and inline `inbox.to` to the alias, with
+exact supplied alias. `send` sets both `to_stream_id` and inline `inbox.to` to the alias, with
 no `host`/`session_name` split and no optimistic ID. The daemon refuses an extra
 target member, or an inline INBOX `to` other than the alias, as `bad_request`.
 A daemon without alias support refuses the raw alias as `bad_request` before

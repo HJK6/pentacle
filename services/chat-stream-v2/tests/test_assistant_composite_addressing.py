@@ -155,6 +155,20 @@ def test_alias_tell_reaches_a_then_fresh_work_reaches_b(tmp_path):
     _run(tmp_path, body)
 
 
+def test_literal_assistant_uses_configured_primary_without_changing_admission(tmp_path):
+    async def body(h):
+        first = await h.tell(to_stream_id="assistant", tell_id="stable-one")
+        assert first["type"] == "tell.ok" and h.inputs_at(SEAT_A) == 1
+        await h.move_to_b()
+        second = await h.tell(to_stream_id="assistant", tell_id="stable-two")
+        assert second["type"] == "tell.ok" and h.inputs_at(SEAT_B) == 1
+        # Named alias remains usable, and operator-only authority does not grow.
+        await h.tell(tell_id="named-three")
+        await _refused(h.tell(to_stream_id="assistant", tell_id="operator-four",
+                             _auth_context={"operator_authenticated": True}), "assistant_tell_unauthorized")
+    _run(tmp_path, body)
+
+
 def test_alias_tell_changed_body_same_key_conflicts(tmp_path):
     async def body(h):
         await h.tell(tell_id="tell-example-1")
@@ -433,7 +447,7 @@ def test_legacy_server_handlers_reject_new_cli_alias_wire(tmp_path, monkeypatch)
     async def body(h):
         h.comms.assistant_ingress_policy = h.composite.suppress_routine_backend_ingress
         h.comms.front_desk_digest = h.composite.front_desk_digest
-        monkeypatch.setattr(server_module, "ASSISTANT_ALIAS", "\0legacy-daemon")
+        monkeypatch.setattr(server_module, "_is_primary_alias", lambda target: False)
         # Exact new-CLI wire shapes (see the agent-orch CLI wire tests).
         await _refused(h.server._on_send({
             "type": "send", "to_stream_id": ALIAS, "text": BODY, "msg_id": 101,
