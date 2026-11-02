@@ -793,6 +793,7 @@ class Server:
         self.reconciler = reconciler
         #: Owner of the primary composite's bound-seat restore (wired by main).
         self.assistant_restore: Any = None
+        self.authority_restore: Any = None
         #: Assigned by `main.py` after construction — the ledger needs
         #: `broadcast`, which only exists once the server does.
         self.ledger = ledger
@@ -3982,6 +3983,9 @@ class Server:
             "existing_report": existing_report,
             "close_audit": close_audit,
             "lane_ruling": (await self.lane_rulings.latest_for_target(stream_id)) if self.lane_rulings else None,
+            "restore": (await self.authority_restore.status()) if (
+                self.authority_restore and self.assistant_composite and
+                stream_id == self.assistant_composite.config.direct_primary_stream_id) else None,
             "deferred_reap": await self.store.get_deferred_reap(stream_id),
             "usage_provenance": usage_provenance,
         }
@@ -5077,15 +5081,25 @@ class Server:
         action = str(msg.get("action") or "read")
         try:
             if action == "read":
-                return {"type": "assistant.authority.ok", **await self.lane_rulings.binding()}
+                return {"type": "assistant.authority.ok", **await self.lane_rulings.binding(),
+                        "shape": await self.authority_restore.shape() if self.authority_restore else None,
+                        "restore": await self.authority_restore.status() if self.authority_restore else None}
+            if action in {"restore", "retry"}:
+                composite = self.assistant_composite
+                if (not auth.get("token_verified") or not composite or not self.authority_restore or
+                    (auth.get("stream_id"), auth.get("session_generation")) !=
+                    (composite.config.direct_primary_stream_id, composite.config.direct_primary_generation)):
+                    raise ValueError("assistant_authority_unauthorized")
+                return {"type": "assistant.authority.ok", "restore": await self.authority_restore.manual(action, brief_file=msg.get("brief_file"))}
             if action != "set" or not auth.get("token_verified"):
                 raise ValueError("assistant_authority_unauthorized")
             return await self.lane_rulings.configure(
                 str(msg.get("value") or ""), actor_stream_id=str(auth.get("stream_id") or ""),
                 actor_generation=str(auth.get("session_generation") or ""),
+                brief_file=msg.get("brief_file"),
             )
         except ValueError as exc:
-            raise VerbError(str(exc), str(exc)) from exc
+            raise VerbError(str(exc).split(':', 1)[0], str(exc)) from exc
 
     async def _on_assistant_ruling(self, msg: dict[str, Any]) -> dict[str, Any]:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
