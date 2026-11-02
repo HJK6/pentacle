@@ -29,7 +29,7 @@ DDL = '''CREATE TABLE IF NOT EXISTS v2_authority_restore_episode (
  budget_used INTEGER NOT NULL DEFAULT 0, spawn_key TEXT, attempt_generation TEXT,
  payload TEXT, brief_sha256 TEXT, brief_bytes_ref TEXT, attempt_started_at REAL, next_attempt_at REAL, successor TEXT,
  last_error TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL,
- updated_at REAL NOT NULL, UNIQUE(stream_id,generation))'''
+ updated_at REAL NOT NULL)'''
 AUDIT_DDL = '''CREATE TABLE IF NOT EXISTS v2_authority_restore_audit (
  id INTEGER PRIMARY KEY AUTOINCREMENT, episode_id INTEGER, attempt_seq INTEGER,
  event TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL)'''
@@ -83,7 +83,7 @@ class AuthorityRestore:
 
     async def current(self, stream: str, generation: str) -> dict | None:
         row = await self.store.submit(lambda conn: conn.execute(
-            'SELECT * FROM v2_authority_restore_episode WHERE stream_id=? AND generation=?',
+            'SELECT * FROM v2_authority_restore_episode WHERE stream_id=? AND generation=? ORDER BY episode_id DESC LIMIT 1',
             (stream, generation)).fetchone())
         return dict(row) if row else None
 
@@ -217,11 +217,14 @@ class AuthorityRestore:
         now = self.clock()
         def op(conn):
             with conn:
-                conn.execute('INSERT OR IGNORE INTO v2_authority_restore_episode '
-                    '(stream_id,generation,state,trigger,created_at,updated_at) VALUES(?,?,\'pending\',?,?,?)',
-                    (stream, generation, trigger, now, now))
-                row = conn.execute('SELECT * FROM v2_authority_restore_episode WHERE stream_id=? AND generation=?',
+                row = conn.execute('SELECT * FROM v2_authority_restore_episode WHERE stream_id=? AND generation=? ORDER BY episode_id DESC LIMIT 1',
                                    (stream, generation)).fetchone()
+                if not row or row['state'] in ('superseded', 'restored'):
+                    cursor = conn.execute('INSERT INTO v2_authority_restore_episode '
+                        '(stream_id,generation,state,trigger,created_at,updated_at) VALUES(?,?,\'pending\',?,?,?)',
+                        (stream, generation, trigger, now, now))
+                    row = conn.execute('SELECT * FROM v2_authority_restore_episode WHERE episode_id=?',
+                                       (cursor.lastrowid,)).fetchone()
                 return dict(row) if row else None
         return await self.store.submit(op)
 
@@ -261,7 +264,7 @@ class AuthorityRestore:
             if episode['trigger'] == 'auto' and (not self.enabled or self.inhibited()):
                 return
             previous = await self.store.submit(lambda conn: [json.loads(r[0]) for r in conn.execute(
-                "SELECT detail FROM v2_authority_restore_audit WHERE episode_id=? AND event='attempt_started'", (episode['episode_id'],))])
+                "SELECT detail FROM v2_authority_restore_audit WHERE event='attempt_started'")])
             for attempt in previous:
                 generation = attempt.get('attempt_generation')
                 if not generation:

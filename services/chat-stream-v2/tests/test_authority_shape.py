@@ -686,3 +686,23 @@ def test_authority_read_and_fd_inspect_expose_restore_state(tmp_path):
             assert read['restore']['episode_id'] == inspect['restore']['episode_id']
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_recovered_holder_can_open_new_episode_for_later_loss(tmp_path):
+    from test_assistant_lane_rulings import _set_seat
+    async def run():
+        store, root, advisor, server, fake, restore, now, brief = await restore_rig(tmp_path)
+        try:
+            first = await restore.current(ADVISOR, advisor['session_generation'])
+            await _set_seat(store, 'astra', pane_status='pane_alive')
+            await server.lane_rulings._check_authority_loss()
+            await _set_seat(store, 'astra', pane_status='pane_dead')
+            await server.lane_rulings._check_authority_loss()
+            now[0] += 61
+            await server.lane_rulings._check_authority_loss()
+            if restore.task: await restore.task
+            second = await restore.current(ADVISOR, advisor['session_generation'])
+            assert second['episode_id'] != first['episode_id']
+            assert second['state'] == 'spawning' and len(fake.calls) == 2
+        finally: store.stop()
+    asyncio.run(run())
