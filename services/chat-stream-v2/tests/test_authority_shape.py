@@ -737,3 +737,59 @@ def test_internal_bind_fences_changed_primary(tmp_path):
             assert (await restore.current(ADVISOR, advisor['session_generation']))['state'] == 'spawning'
         finally: store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('hold', ['inhibit', 'disabled'])
+def test_authenticated_manual_restore_promotes_pending_auto_episode(tmp_path, hold):
+    async def run():
+        store, root, advisor, server, fake, restore, now, brief = await restore_rig(tmp_path)
+        try:
+            first = await restore.current(ADVISOR, advisor['session_generation'])
+            fake.outcomes = [{'idempotency_key': first['spawn_key'], 'state': 'failed'}]
+            await restore.run()
+            fake.outcomes = []
+            pending = await restore.current(ADVISOR, advisor['session_generation'])
+            assert pending['state'] == 'pending' and pending['trigger'] == 'auto'
+            if hold == 'inhibit':
+                restore.inhibit_path.write_text('hold')
+            else:
+                restore.enabled = False
+            now[0] += 61
+            auth = {'token_verified': True, 'stream_id': ROOT, 'session_generation': root['session_generation']}
+            reply = await server._on_assistant_authority({'action': 'restore', '_auth_context': auth})
+            assert reply['type'] == 'assistant.authority.ok'
+            if restore.task: await restore.task
+            current = await restore.current(ADVISOR, advisor['session_generation'])
+            assert current['episode_id'] == pending['episode_id'] and current['trigger'] == 'manual'
+            assert current['attempt_seq'] == pending['attempt_seq'] + 1
+            assert current['budget_epoch'] == pending['budget_epoch'] and current['budget_used'] == pending['budget_used'] + 1
+            assert len(fake.calls) == 2
+        finally:
+            if restore.task: await restore.task
+            store.stop()
+    asyncio.run(run())
+
+
+def test_present_dead_row_without_generation_never_uses_shape_fallback(tmp_path):
+    from assistant_authority_restore import AuthorityRestore
+    from test_assistant_lane_rulings import _set_seat
+    async def run():
+        store = Store(':memory:'); store.start()
+        try:
+            root, advisor, server, fake = await _rulings_rig(store, spawnctl=RestoreSpawn())
+            server.local_host = 'fixture-advisor'; server.sessions.tmux = AlivePane()
+            brief = tmp_path / 'present-row'; brief.write_text('brief')
+            await server.lane_rulings.configure(ADVISOR, actor_stream_id=ROOT,
+                actor_generation=root['session_generation'], brief_file=str(brief))
+            now = [1000.]; restore = AuthorityRestore(server, inhibit_path=None, clock=lambda: now[0])
+            server.authority_restore = restore; await restore.initialize()
+            await _set_seat(store, 'astra', pane_status='pane_dead')
+            await store.submit(lambda c: (c.execute("DELETE FROM v2_session_generations WHERE host='fixture-advisor' AND session_name='astra'"), c.commit()))
+            await server.lane_rulings._check_authority_loss(); now[0] += 61
+            await server.lane_rulings._check_authority_loss()
+            if restore.task: await restore.task
+            assert not fake.calls and (await restore.status())['state'] == 'ineligible'
+            body = await store.submit(lambda c: c.execute("SELECT body FROM v2_outbound_notices WHERE notice_id LIKE 'authority-restore:authority_restore_ineligible:%'").fetchone()[0])
+            assert json.loads(body.split('] ', 1)[1])['reason'] == 'shape_generation_mismatch'
+        finally: store.stop()
+    asyncio.run(run())

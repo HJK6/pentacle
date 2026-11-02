@@ -121,7 +121,10 @@ class AuthorityRestore:
     async def status(self) -> dict:
         binding = await self.server.lane_rulings.binding()
         shape = await self.shape()
-        generation = binding.get('generation') or ((shape or {}).get('generation') if (shape or {}).get('stream_id') == binding.get('stream_id') else '')
+        stream = binding.get('stream_id', '')
+        host, sep, name = stream.partition(':')
+        seat = await self.store.fetch_session(host, name) if sep else None
+        generation = binding.get('generation') or ((shape or {}).get('generation') if seat is None and (shape or {}).get('stream_id') == stream else '')
         episode = await self.current(binding.get('stream_id', ''), generation or '')
         state = self.last_state
         if episode and episode['state'] in ('pending', 'spawning', 'unresolved', 'exhausted'):
@@ -139,7 +142,7 @@ class AuthorityRestore:
 
     async def observe(self, stream: str, generation: str, evidence: str, seat: dict | None) -> None:
         shape = await self.shape()
-        if not generation and shape and shape.get('stream_id') == stream:
+        if seat is None and not generation and shape and shape.get('stream_id') == stream:
             generation = str(shape.get('generation') or '')
         key = (stream, generation)
         if self.loss != key:
@@ -429,7 +432,7 @@ class AuthorityRestore:
             if not evidence:
                 raise ValueError('assistant_authority_loss_unproven')
             shape = await self.shape()
-            generation = binding['generation'] or ((shape or {}).get('generation') if (shape or {}).get('stream_id') == stream else '')
+            generation = binding['generation'] or ((shape or {}).get('generation') if seat is None and (shape or {}).get('stream_id') == stream else '')
             if brief_file:
                 if not seat:
                     raise ValueError('shape_row_unavailable')
@@ -458,6 +461,9 @@ class AuthorityRestore:
                     'budget_epoch': episode['budget_epoch'] + 1, 'budget_used': 0,
                     'next_attempt_at': None}, 'retry')
             else:
-                await self.create(stream, generation, 'manual')
+                if episode and episode['state'] == 'pending' and episode['trigger'] == 'auto':
+                    await self.update(episode, {'trigger': 'manual'}, 'manual_restore')
+                else:
+                    await self.create(stream, generation, 'manual')
         self.schedule()
         return await self.status()

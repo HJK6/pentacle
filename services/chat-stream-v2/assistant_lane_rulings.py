@@ -1122,7 +1122,7 @@ class AssistantLaneRulings:
             await restore.observe(stream_id, generation, evidence, seat)
             if not await restore.primary():
                 return
-            if not generation:
+            if seat is None and not generation:
                 shape = await restore.shape()
                 if shape and shape.get('stream_id') == stream_id:
                     generation = shape.get('generation') or ''
