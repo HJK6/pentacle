@@ -782,7 +782,7 @@ def test_pending_rulings_expire_on_authority_loss_without_waiting_for_deadline(l
             requests = [await server._on_spawn(_spawn_msg(root, key)) for key in ("pending-one", "pending-two")]
             replacement = await store.open_session("fixture-advisor", "second", provider="codex", pane_status="pane_alive")
             await server.lane_rulings.configure("fixture-advisor:second", actor_stream_id=ROOT,
-                                                 actor_generation=root["session_generation"])
+                                                 actor_generation=root["session_generation"], brief_file=__file__)
             for reply in requests:
                 row = await server.lane_rulings._fetch(reply["ruling_request_id"])
                 assert row["authority_generation"] == replacement["session_generation"]
@@ -1471,7 +1471,7 @@ def test_covered_request_holds_when_authority_unavailable_or_unconfigured():
             close_reply = await server._on_close({"type": "close", "host": "fixture-chat", "session_name": "close-control",
                 "request_id": "close-on-rebind", "_auth_context": {"token_verified": True, "stream_id": ROOT,
                 "session_generation": root["session_generation"]}})
-            await server.lane_rulings.configure(value, actor_stream_id=ROOT, actor_generation=root["session_generation"])
+            await server.lane_rulings.configure(value, actor_stream_id=ROOT, actor_generation=root["session_generation"], brief_file=__file__)
             assert (await server.lane_rulings._fetch(covered["ruling_request_id"]))["state"] == "pending"
             assert (await server.lane_rulings._fetch(close_reply["ruling_request_id"]))["state"] == "done"
             assert spawned.calls == [] and closed == [True]
@@ -1496,7 +1496,7 @@ def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
             await store.submit(lambda c: (c.execute(
                 "UPDATE v2_outbound_notices SET delivered_at='2026-11-01T00:00:00Z' WHERE notice_id=?", (original_id,)), c.commit()))
             await server.lane_rulings.configure("fixture-advisor:new", actor_stream_id=ROOT,
-                                                 actor_generation=root["session_generation"])
+                                                 actor_generation=root["session_generation"], brief_file=__file__)
             row = await server.lane_rulings._fetch(rid)
             assert (row["authority_stream_id"], row["authority_generation"]) == (
                 "fixture-advisor:new", new["session_generation"])
@@ -1518,7 +1518,7 @@ def test_pending_covered_request_follows_rebind_and_old_authority_cannot_rule():
             await store.submit(lambda c: (c.execute(
                 "UPDATE v2_session_generations SET generation='new-generation' WHERE host='fixture-advisor' AND session_name='new'"), c.commit()))
             await server.lane_rulings.configure("fixture-advisor:new", actor_stream_id=ROOT,
-                                                 actor_generation=root["session_generation"])
+                                                 actor_generation=root["session_generation"], brief_file=__file__)
             row = await server.lane_rulings._fetch(rid)
             assert row["authority_generation"] == "new-generation"
             fresh_id = f"assistant-lane-ruling:{rid}:new-generation"
@@ -1921,7 +1921,7 @@ def test_noncovered_original_authority_can_still_deny_after_rebind():
                 target_generation=root['session_generation'])
             await store.open_session('fixture-advisor', 'replacement', provider='codex', pane_status='pane_alive')
             await server.lane_rulings.configure('fixture-advisor:replacement',
-                actor_stream_id=ROOT, actor_generation=root['session_generation'])
+                actor_stream_id=ROOT, actor_generation=root['session_generation'], brief_file=__file__)
             result = await server.lane_rulings.ruling(
                 {'ruling_request_id':request['ruling_request_id'], 'request_id':'qa-deny',
                  'ruling':'deny', 'reason':'do not close'},

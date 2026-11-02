@@ -166,6 +166,56 @@ Repeating a `request_id` returns `duplicate: true` and does nothing. There is no
 
 **Records.** `v2_assistant_restore_episode` holds one row per restore (including the grant it recorded and what the bind did with it) and `v2_assistant_restore_audit` one row per step (created, each attempt and its outcome, bound, routing completed, exhausted, superseded, budget reset, operator request). The journeys are exercised on a disposable daemon by `PENTACLE_FORCE_LIVE_DAEMON=1 python3 -m pytest tests/soak/test_assistant_auto_restore.py` (in `services/chat-stream-v2`), with a stand-in provider. Before enabling this on an installation, the front-desk enablement gate requires one real-provider restore on a disposable daemon; the journeys above use a stand-in provider and do not establish that proof. The option stays off by default, no client button exists, and the state is readable through the API only.
 
+### Automatic restore of the ruling authority
+
+The direct primary records the live authority and its instructions together:
+
+```sh
+agent-orch assistant authority --set <stream-id> --brief-file <absolute-path>
+agent-orch assistant authority
+```
+
+The recorded shape includes the seat's provider, model, effort, role, visibility,
+spec, generation and brief hash. The observed account is audit information; a
+replacement uses the current host/provider default. Keep the brief available on
+the daemon host. `--set` requires the brief unless disabling the authority.
+
+After a recorded authority is continuously lost for 60 seconds, the daemon
+spawns a replacement on the local host. It binds only after the attempt's own
+delivered outcome, matching generation, open session and live pane are proven;
+the session must be `ready`, or `started` with that delivered outcome. Pending
+covered work is retargeted. Three attempts per budget epoch use 60- and
+180-second backoffs; no more than six replacement spawns start in 24 hours.
+The daemon reconciles an interrupted attempt before making another: the
+dispositions are `adopted`, `attempt_failed`, `never_admitted`, and
+`still_unresolved`. An unresolved attempt never causes a second spawn while its
+outcome remains uncertain.
+
+`agent-orch assistant authority` and `agent-orch inspect <front-desk>` show
+restore state: `healthy`, `restoring`, `unresolved`, `exhausted`, `ineligible`,
+`inhibited`, or `disabled`. Notices include `authority_unavailable`,
+`authority_restore_ineligible`, `authority_restore_inhibited`,
+`authority_restore_unresolved`, `authority_restore_exhausted`,
+`authority_restore_rate_limited`, and `authority_restored`.
+
+The direct primary can run `agent-orch assistant authority --restore` to skip
+the debounce, or `--restore --brief-file <path>` to record or replace a stale
+shape from the present dead row. `--retry` reconciles the prior attempt and
+starts a fresh budget only when it has failed; an uncertain attempt is refused
+with `attempt_unresolved`. A manual `--set` supersedes recovery. `--disable` is
+an audited last resort that releases pending covered work unruled.
+
+Automatic recovery is enabled by default; `PENTACLE_AUTHORITY_RESTORE=0`
+disables new automatic episodes. The file
+`authority-restore.inhibit` in the daemon state directory inhibits automatic
+recovery; manual recovery still runs. If the dead authority row is absent and
+no usable shape exists, keep the marker in place while an already-authorized
+non-front-desk owner spawns a successor. The front desk then sets the live
+successor with its brief, reads back `state ready`, and removes the marker.
+Authority recovery waits for a bound front desk. Automatic recovery of an
+absent front desk depends on the bound-seat restore being configured and
+eligible; otherwise restore the front desk manually first.
+
 For reproducible installation evidence, run [the portable first-turn gate](developer_onboarding.md#7-run-validation). It exercises the actual bootstrap, daemon, tmux, native-format counterpart's own candidate publish CLI and real browser, including duplicate publish, stale-generation refusal and restart readback. It does not establish paid-provider login, mobile hardware, microphone or private runtime activation.
 
 ## Activation and context

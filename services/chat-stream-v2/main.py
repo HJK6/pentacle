@@ -827,6 +827,15 @@ async def run(args: argparse.Namespace) -> int:
     # episodes on its own only when PENTACLE_ASSISTANT_AUTO_RESTORE=1.
     if assistant_composite.config.enabled:
         import assistant_restore as _assistant_restore
+        from assistant_authority_restore import AuthorityRestore
+
+        authority_flag = os.environ.get('PENTACLE_AUTHORITY_RESTORE', '1').strip()
+        if authority_flag not in ('0', '1'):
+            raise ValueError('PENTACLE_AUTHORITY_RESTORE must be 0 or 1')
+        server.authority_restore = AuthorityRestore(
+            server, enabled=authority_flag == '1',
+            inhibit_path=Path(args.db).with_name('authority-restore.inhibit') if args.db != ':memory:' else None,
+        )
 
         async def _deliver_restore_notice(composite, text: str, tell_id: str) -> None:
             from sessions import VerbError as _VerbError
@@ -910,6 +919,8 @@ async def run(args: argparse.Namespace) -> int:
     startup_phase_started = time.monotonic()
     store.start()
     log.info("startup phase=store_start duration_s=%.6f", time.monotonic() - startup_phase_started)
+    if server.authority_restore is not None:
+        await server.authority_restore.initialize()
     await store.mark_work_index_pending()
     await account_runtime.start()
     startup_phase_started = time.monotonic()
@@ -1142,6 +1153,8 @@ async def shutdown(budget: ShutdownBudget, *, server, spawnctl, tasks, composite
         await budget.step("composite", composite.stop(), cap=2.0)
     if lane_rulings is not None:
         await budget.step("lane-rulings", lane_rulings.stop(), cap=2.0)
+    if getattr(server, 'authority_restore', None) and server.authority_restore.task:
+        await budget.step('authority-restore', asyncio.gather(server.authority_restore.task, return_exceptions=True), cap=2.0)
     # Server.close's own waits end a little before its step does, so a stalled
     # wait still leaves time to close both listeners rather than be abandoned.
     server_s = budget.remaining(8.0)

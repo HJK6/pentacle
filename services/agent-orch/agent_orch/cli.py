@@ -1964,10 +1964,12 @@ def assistant_authority(args: argparse.Namespace) -> int:
     value = "disabled" if args.disable else args.set
     payload: dict[str, object] = {
         "type": "assistant.authority", "request_id": args.request_id or f"assistant-authority-{uuid.uuid4()}",
-        "action": "set" if value is not None else "read",
+        "action": "restore" if args.restore else "retry" if args.retry else "set" if value is not None else "read",
     }
     if value is not None:
         payload["value"] = value
+    if args.brief_file:
+        payload["brief_file"] = args.brief_file
     return _assistant_call(args, payload)
 
 
@@ -5822,6 +5824,9 @@ def build_parser() -> argparse.ArgumentParser:
     authority_change = assistant_authority_parser.add_mutually_exclusive_group()
     authority_change.add_argument("--set", metavar="STREAM_ID")
     authority_change.add_argument("--disable", action="store_true")
+    authority_change.add_argument("--restore", action="store_true")
+    authority_change.add_argument("--retry", action="store_true")
+    assistant_authority_parser.add_argument("--brief-file")
     assistant_authority_parser.add_argument("--request-id")
     assistant_authority_parser.add_argument("--timeout", type=float, default=30.0)
     assistant_authority_parser.set_defaults(func=assistant_authority)

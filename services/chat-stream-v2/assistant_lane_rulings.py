@@ -16,9 +16,10 @@ import re
 import sqlite3
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
-from store_assistant_binding import _seat_conn
+from store_assistant_binding import _binding_conn, _seat_conn
 from store_lifecycle_authority import MAX_REASON, scrub
 from store_watch_wake import coalesce_notice_conn
 from _shared.spawn_objective import resolve_objective
@@ -219,14 +220,61 @@ class AssistantLaneRulings:
         return {"state": "ready" if available else "unavailable", "source": source,
                 "stream_id": selected, "generation": generation}
 
-    async def configure(self, value: str, *, actor_stream_id: str, actor_generation: str) -> dict[str, Any]:
+    async def record_dead_shape(self, stream: str, generation: str, seat: dict, brief_file: str,
+                                *, recorded_by: str = '') -> None:
+        try:
+            digest = hashlib.sha256(Path(brief_file).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ValueError('assistant_authority_brief_unreadable') from exc
+        def op(conn):
+            with conn:
+                current = _seat_conn(conn, stream)
+                if current is None:
+                    raise ValueError('shape_row_unavailable')
+                if current.get('session_generation') != generation or self._authority_loss_evidence(current) is None:
+                    raise ValueError('shape_generation_conflict')
+                account = current.get('account_binding')
+                if isinstance(account, str):
+                    try:
+                        account = json.loads(account)
+                    except ValueError:
+                        account = None
+                shape = {'stream_id': stream, 'generation': generation, 'provider': current.get('provider'),
+                    'model': current.get('effective_model') or current.get('requested_model'),
+                    'effort': current.get('effective_effort') or current.get('requested_effort'),
+                    'role': current.get('role'), 'visibility': current.get('visibility'),
+                    'spec_id': current.get('spec_id'), 'account_observed':
+                    ({k: account.get(k) for k in ('alias','provider','host')} if isinstance(account, dict) else None),
+                    'parent_mode': 'assistant', 'brief_path': brief_file, 'brief_sha256': digest,
+                    'recorded_at': time.time(), 'recorded_by': recorded_by}
+                conn.execute('INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)', ('assistant.authority.shape', _canonical(shape)))
+        await self.store.submit(op)
+
+    async def configure(self, value: str, *, actor_stream_id: str, actor_generation: str,
+                        brief_file: str | None = None, service: object = None,
+                        expected_old: tuple[str, str] | None = None,
+                        frozen_brief_sha: str | None = None,
+                        restore_episode: dict | None = None,
+                        expected_primary: tuple[str, str] | None = None) -> dict[str, Any]:
+        from assistant_authority_restore import SERVICE_CAPABILITY
+        is_service = service is SERVICE_CAPABILITY
         composite = self._composite()
-        if composite is None or (actor_stream_id, actor_generation) != (
+        if composite is None or (not is_service and (actor_stream_id, actor_generation) != (
             composite.config.direct_primary_stream_id, composite.config.direct_primary_generation,
-        ):
+        )):
             raise ValueError("assistant_authority_config_unauthorized")
         if value != "disabled" and value and not _STREAM_RE.fullmatch(value):
             raise ValueError("assistant_authority_stream_id_invalid")
+        if value != "disabled" and not brief_file:
+            raise ValueError("assistant_authority_brief_required: agent-orch assistant authority --set <stream_id> --brief-file <path>")
+        brief_sha = ""
+        if is_service and frozen_brief_sha:
+            brief_sha = frozen_brief_sha
+        elif brief_file:
+            try:
+                brief_sha = hashlib.sha256(Path(brief_file).read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ValueError("assistant_authority_brief_unreadable") from exc
         if value and value != "disabled":
             host, _, name = value.partition(":")
             seat = await self.store.fetch_session(host, name)
@@ -237,6 +285,20 @@ class AssistantLaneRulings:
         async with self._authority_lock:
             def configure_conn(conn: sqlite3.Connection) -> None:
                 with conn:
+                    if is_service:
+                        primary = _binding_conn(conn, composite._env_binding(), name=composite.env_config.name,
+                                                include_target=False)
+                        if not expected_primary or (primary.get('stream_id'), primary.get('generation')) != expected_primary:
+                            raise ValueError('assistant_authority_primary_changed')
+                        current = conn.execute("SELECT v FROM kv WHERE k='assistant.authority.stream_id'").fetchone()
+                        selected = current[0] if current else composite.env_config.authority_stream_id
+                        old = _seat_conn(conn, expected_old[0]) if expected_old else None
+                        if (not expected_old or selected != expected_old[0] or
+                            (old and (old.get('session_generation') != expected_old[1] or
+                                      self._authority_loss_evidence(old) is None))):
+                            raise ValueError('binding_moved')
+                    elif conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
+                        conn.execute("UPDATE v2_authority_restore_episode SET state='superseded',last_error='binding_moved',updated_at=? WHERE state IN ('pending','spawning','unresolved','exhausted')", (time.time(),))
                     conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)",
                                  ("assistant.authority.stream_id", value))
                     if value and value != "disabled" and value != composite.config.direct_primary_stream_id:
@@ -245,6 +307,45 @@ class AssistantLaneRulings:
                                 or authority.get("pane_status") != "pane_alive" or not authority.get("session_generation")):
                             raise ValueError("assistant_authority_target_unavailable")
                         generation = authority["session_generation"]
+                        if is_service and generation != actor_generation:
+                            raise ValueError('assistant_authority_target_generation_changed')
+                        account = authority.get("account_binding")
+                        if isinstance(account, str):
+                            try:
+                                account = json.loads(account)
+                            except ValueError:
+                                account = None
+                        observed = ({k: account.get(k) for k in ("alias", "provider", "host")}
+                                    if isinstance(account, dict) else None)
+                        shape = {"stream_id": value, "generation": generation,
+                                 "provider": authority.get("provider"),
+                                 "model": authority.get("effective_model") or authority.get("requested_model"),
+                                 "effort": authority.get("effective_effort") or authority.get("requested_effort"),
+                                 "role": authority.get("role"), "visibility": authority.get("visibility"),
+                                 "spec_id": authority.get("spec_id"), "account_observed": observed,
+                                 "parent_mode": "assistant", "brief_path": brief_file,
+                                 "brief_sha256": brief_sha, "recorded_at": time.time(),
+                                 "recorded_by": actor_stream_id}
+                        conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)",
+                                     ("assistant.authority.shape", _canonical(shape)))
+                        if is_service:
+                            if not restore_episode:
+                                raise ValueError('assistant_authority_restore_episode_required')
+                            episode_id, seq = restore_episode['episode_id'], restore_episode['attempt_seq']
+                            changed = conn.execute("UPDATE v2_authority_restore_episode SET state='restored',successor=?,last_error=NULL,updated_at=? WHERE episode_id=? AND attempt_seq=? AND state IN ('spawning','unresolved')",
+                                (value, time.time(), episode_id, seq)).rowcount
+                            if not changed:
+                                raise ValueError('assistant_authority_restore_episode_changed')
+                            conn.execute("INSERT INTO v2_authority_restore_audit(episode_id,attempt_seq,event,detail,created_at) VALUES(?,?,'adopted',?,?)",
+                                (episode_id, seq, _canonical({'account_binding': account, 'generation': generation}), time.time()))
+                            notice_id = f'authority-restore:authority_restored:{episode_id}'
+                            notice = dict(notice_id=notice_id, kind='assistant_lane_ruling_result', dedupe_key=notice_id,
+                                recipient_stream_id=composite.config.direct_primary_stream_id, tell_id=notice_id,
+                                source_stream_id=actor_stream_id, episode_id=None, created_at=None,
+                                body='[Assistant lane ruling] ' + _canonical({'event': 'authority_restored',
+                                    'old': expected_old[0], 'new': value, 'generation': generation, 'attempt_seq': seq}),
+                                metadata={'authority_generation': composite.config.direct_primary_generation})
+                            coalesce_notice_conn(conn, notice, None)
                         rows = list(conn.execute("SELECT * FROM v2_assistant_lane_rulings WHERE covered=1 AND state='pending'"))
                         for raw in rows:
                             row = dict(raw)
@@ -1002,14 +1103,29 @@ class AssistantLaneRulings:
             await self.store.submit(unconfigured)
             return
         if binding["state"] != "unavailable":
+            if getattr(self.server, "authority_restore", None):
+                await self.server.authority_restore.recovered()
             if told.get("open"):
                 await self.store.put(_AUTHORITY_LOSS_KEY, _canonical({**told, "open": False}))
             return
         stream_id, generation = binding["stream_id"], binding["generation"]
         host, _, name = stream_id.partition(":")
-        evidence = self._authority_loss_evidence(await self.store.fetch_session(host, name))
+        seat = await self.store.fetch_session(host, name)
+        evidence = self._authority_loss_evidence(seat)
         if evidence is None:
+            restore = getattr(self.server, "authority_restore", None)
+            if restore:
+                restore.clear_loss()
             return
+        restore = getattr(self.server, "authority_restore", None)
+        if restore:
+            await restore.observe(stream_id, generation, evidence, seat)
+            if not await restore.primary():
+                return
+            if seat is None and not generation:
+                shape = await restore.shape()
+                if shape and shape.get('stream_id') == stream_id:
+                    generation = shape.get('generation') or ''
         pending = await self.store.submit(lambda conn: [row[0] for row in conn.execute(
             "SELECT ruling_request_id FROM v2_assistant_lane_rulings "
             "WHERE state='pending' AND authority_stream_id=? AND authority_generation=?",
@@ -1029,6 +1145,7 @@ class AssistantLaneRulings:
                 "event": "authority_unavailable", "authority": stream_id, "generation": generation,
                 "evidence": evidence,
                 "effect": "covered new work remains pending; other lane actions may release unruled",
+                "restore": await restore.status() if restore else {"state": "disabled", "episode_id": None, "next_attempt_at": None},
             }),
             metadata={"authority_generation": composite.config.direct_primary_generation},
         )
