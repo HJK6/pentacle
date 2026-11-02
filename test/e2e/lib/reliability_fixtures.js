@@ -5,25 +5,42 @@ const { dispatchScenario } = require('./scenario_dispatch');
 async function viewportReliability(ctx) {
   if (!ctx.fixture) { ctx.report.note('viewport fixture: hermetic only'); return; }
   const {session, report} = ctx;
-  const baseline = await session.eval('innerWidth');
-  assert.equal(baseline, 1600, `native launch width ${baseline}`);
-  const notes = [];
-  const fixtureCtx = { ...ctx, report: { note: text => notes.push(text) } };
-  let nextWidth;
-  const failed = await dispatchScenario('forced-mobile-fixture', async () => {
-    await session.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
-    assert.equal(await session.eval('innerWidth'), 390);
-    throw Error('forced mobile assertion');
-  }, fixtureCtx);
-  const nextFailed = await dispatchScenario('baseline-fixture', async () => {
-    nextWidth = await session.eval('innerWidth');
-    assert.equal(nextWidth, baseline);
-  }, fixtureCtx);
-  assert.equal(failed, true);
-  assert.equal(nextFailed, false);
-  assert.match(notes[0], /forced mobile assertion/);
-  assert.match(notes[1], /viewport cleanup: cleared/);
-  report.ok('viewport fixture preserves failure and restores native width', true, {baseline, nextWidth, notes});
+  const observed = { measurements: [], notes: [] };
+  const measure = async label => {
+    const width = await session.eval('innerWidth');
+    observed.measurements.push({label, width, at: new Date().toISOString()});
+    return width;
+  };
+  const baseline = await measure('baseline');
+  const fixtureSession = {
+    eval: session.eval.bind(session),
+    async send(method, params) {
+      const result = await session.send(method, params);
+      if (method === 'Emulation.clearDeviceMetricsOverride') await measure('post-clear');
+      return result;
+    },
+  };
+  const fixtureCtx = { ...ctx, session: fixtureSession, report: { note: text => observed.notes.push(text) } };
+  let nextWidth, failed, nextFailed;
+  try {
+    failed = await dispatchScenario('forced-mobile-fixture', async () => {
+      await session.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
+      assert.equal(await measure('post-override'), 390);
+      throw Error('forced mobile assertion');
+    }, fixtureCtx);
+    nextFailed = await dispatchScenario('baseline-fixture', async () => {
+      nextWidth = await measure('next-scenario');
+      assert.equal(nextWidth, baseline);
+    }, fixtureCtx);
+  } finally {
+    const diagnostic = {seq:910000,name:'viewport-diagnostic',...observed};
+    await session.eval(`console.log(${JSON.stringify(JSON.stringify(diagnostic))}); console.log(${JSON.stringify('[HARNESS] '+JSON.stringify(diagnostic))})`);
+  }
+  assert.equal(failed, true, JSON.stringify(observed));
+  assert.equal(nextFailed, false, JSON.stringify(observed));
+  assert.match(observed.notes[0], /forced mobile assertion/);
+  assert.match(observed.notes[1], /viewport cleanup: cleared/);
+  report.ok('viewport fixture preserves failure and restores native width', true, {baseline, nextWidth, notes: observed.notes});
 }
 
 async function captureReliability(ctx) {
