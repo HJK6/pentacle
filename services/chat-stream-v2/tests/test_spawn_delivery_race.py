@@ -225,6 +225,9 @@ class CodexCollapsedEnterLostTmux:
     screen, so a text-only draft check is blind to it; the receipt must still
     refuse to confirm this idle pane."""
 
+    def __init__(self) -> None:
+        self.inputs: list[tuple] = []
+
     async def has_session(self, name: str) -> bool:
         return True
 
@@ -238,12 +241,13 @@ class CodexCollapsedEnterLostTmux:
         return "OpenAI Codex\n─────────\n› [Pasted Content 2148 chars]\n  gpt-5-codex high"
 
     async def paste(self, name: str, text: str) -> None:
-        pass
+        self.inputs.append(("paste", name, text))
 
     async def send_enter(self, name: str) -> None:
-        pass
+        self.inputs.append(("send_enter", name))
 
     async def run(self, *args: str, **kw) -> tuple[int, str]:
+        self.inputs.append(("run", args, kw))
         return 0, ""
 
 
@@ -258,6 +262,7 @@ def test_codex_collapsed_enter_lost_is_not_confirmed(monkeypatch: pytest.MonkeyP
     ctl = _ctl(tmux)
     confirmed = asyncio.run(ctl._confirm_brief_delivery("s", long_brief, "", "codex", tmux))
     assert confirmed is False
+    assert tmux.inputs == [], "confirmation must not provoke paste, Enter or run input"
 
 
 def test_transcript_change_does_not_authorize_enter_or_confirm(
