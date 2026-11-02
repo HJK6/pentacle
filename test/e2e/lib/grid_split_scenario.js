@@ -198,6 +198,8 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
 }
 
 async function runGridSplitWidths({session,report}) {
+  let primaryError;
+  try {
   await drag(session,.7); await drag(session,.3,1);
   const initial=await session.eval(geometry),saved=initial.saved,savedBottom=initial.savedBottom;
   for(const density of ['comfortable','compact']) {
@@ -220,5 +222,15 @@ async function runGridSplitWidths({session,report}) {
   await session.send('Emulation.clearDeviceMetricsOverride');await settle(session);
   const restored=await session.eval(geometry);
   report.ok('wide viewport restores preferred fraction',Math.abs(restored.cells[0].width/(restored.grid.width-restored.gap)-saved)<.005&&Math.abs(restored.cells[2].width/(restored.grid.width-restored.gap)-savedBottom)<.005,restored);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    try { await session.send('Emulation.clearDeviceMetricsOverride'); }
+    catch (error) {
+      if (primaryError) {
+        const message = `grid viewport cleanup FAILED: ${error.message}`;
+        if (report.note) report.note(message); else console.error(message);
+      } else throw error;
+    }
+  }
 }
 module.exports={geometry,mouse,drag,doubleTap,settle,runGridSplit,runGridSplitTerminals,runGridSplitWidths};

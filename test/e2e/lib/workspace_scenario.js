@@ -162,8 +162,9 @@ async function paneJourney(ctx, [fixtureName, survivor, secondHost]) {
   report.ok('the choice is persisted', JSON.parse(restored.saved || '{}').paneCount === 2, restored.saved);
 
   // Phone width: one readable pane; the sidebar is a drawer behind the toggle.
-  await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 860, deviceScaleFactor: 1, mobile: true });
+  let viewportError;
   try {
+    await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 860, deviceScaleFactor: 1, mobile: true });
     await waitFor(ctx, "document.body.classList.contains('web-sidebar-narrow')", 'narrow layout');
     const sidebarShown = () => ctx.session.eval("getComputedStyle(document.querySelector('.sidebar')).display !== 'none'");
     const closed = await sidebarShown();
@@ -175,8 +176,9 @@ async function paneJourney(ctx, [fixtureName, survivor, secondHost]) {
     const narrow = await ctx.session.eval(layoutProbe());
     report.ok('phone width: drawer closed by default, opens from the toggle, Escape closes it', !closed && opened && !escaped, { closed, opened, escaped });
     report.ok('phone width shows one pane', narrow.cells.filter(c => c.shown).length === 1, narrow.cells);
-  } finally {
-    await ctx.session.send('Emulation.clearDeviceMetricsOverride', {});
+  } catch (error) { viewportError = error; throw error; } finally {
+    try { await ctx.session.send('Emulation.clearDeviceMetricsOverride', {}); }
+    catch (error) { if (viewportError) report.note(`pane-count viewport cleanup FAILED: ${error.message}`); else throw error; }
   }
 
   // Two visible panes, both full: a selection replaces the focused pane, never
@@ -305,9 +307,11 @@ const CHAT_FIRST = { dark: '#22221f', light: '#fcfbf8' };
 async function chatFirstStyle(ctx) {
   const { report } = ctx;
   const observed = [];
+  let primaryError;
   try {
-    await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    let viewportError;
     try {
+      await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
       for (const theme of ['dark', 'light']) for (const density of ['comfortable', 'compact']) {
         await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: JSON.stringify({ appearance: { theme, density }, features: {} }) });
         const off = await ctx.session.eval(styleProbe());
@@ -317,8 +321,9 @@ async function chatFirstStyle(ctx) {
           && off.empty === 'Click a session or bot to attach' && !off.brand && !off.footer, off);
         await flagOffAgainstMain(ctx, theme, density);
       }
-    } finally {
-      await ctx.session.send('Emulation.clearDeviceMetricsOverride', {});
+    } catch (error) { viewportError = error; throw error; } finally {
+      try { await ctx.session.send('Emulation.clearDeviceMetricsOverride', {}); }
+      catch (error) { if (viewportError) report.note(`chat-first viewport cleanup FAILED: ${error.message}`); else throw error; }
     }
     await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: JSON.stringify({ features: { chatFirstStyle: true } }) });
     const fresh = await ctx.session.eval(styleProbe());
@@ -335,9 +340,10 @@ async function chatFirstStyle(ctx) {
         && on.density === density && on.bg === CHAT_FIRST[theme], on);
       if (theme === 'dark' && density === 'comfortable') await screenshot(ctx, 'style-on-dark');
     }
-  } finally {
+  } catch (error) { primaryError = error; throw error; } finally {
     fs.writeFileSync(path.join(ctx.report.dir, 'chat-first-style-observations.json'), JSON.stringify(observed, null, 2));
-    await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: null });
+    try { await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: null }); }
+    catch (error) { if (primaryError) report.note(`chat-first state cleanup FAILED: ${error.message}`); else throw error; }
   }
 }
 

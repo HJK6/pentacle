@@ -628,6 +628,8 @@ const SCENARIOS = [
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.
   ['host-restart-restores-input', hostRestartRestoresInput],
+  ['reliability-viewport-fixture', require('./reliability_fixtures').viewportReliability],
+  ['reliability-capture-fixture', require('./reliability_fixtures').captureReliability],
 ];
 
 module.exports = {

@@ -28,6 +28,7 @@ const { spawn, execFileSync } = require('child_process');
 const cdp = require('./lib/cdp');
 const { daemonLogTail } = require('./lib/daemon_log_tail');
 const scenarios = require('./lib/web_scenarios');
+const { dispatchScenario } = require('./lib/scenario_dispatch');
 const { REBIND_HOST } = require('./lib/cross_origin_scenario');
 
 // Chrome honours only the last --host-resolver-rules flag, so fold the
@@ -662,12 +663,13 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     for (const [name, fn] of scenarios.SCENARIOS.filter(([name]) => !args.scenarios?.length || args.scenarios.includes(name))) {
       if (runtime.stopping) break;
       console.log(`\n▸ ${name}`);
-      try { await fn(ctx); } catch (e) { failed += 1; report.note(`scenario ${name} FAILED: ${e && e.message}`); }
+      if (await dispatchScenario(name, fn, ctx)) failed += 1;
     }
 
     assertNotStopping(runtime);
     fs.writeFileSync(path.join(report.dir, 'chrome.log'), chromeLog.join(''));
-    fs.writeFileSync(path.join(report.dir, 'console.log'), (session.consoleLines || []).join('\n'));
+    await session.drainConsole();
+    fs.writeFileSync(path.join(report.dir, 'console.log'), (session.consoleLines || []).map((entry) => JSON.stringify(entry)).join('\n'));
     const verdict = report.write({ url, fixture, daemonPort: daemon && daemon.port, failedScenarios: failed });
     console.log(`\n◀ web_gate: ${verdict.status}\n  artifacts: ${report.dir}`);
     return verdict.status === 'PASS' && failed === 0 ? 0 : 1;

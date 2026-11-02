@@ -77,7 +77,7 @@ async function wrapPasteProof(ctx) {
         observed.records.length === 3 && observed.records.every(row => row.chars >= 300 && row.fits && row.lines > 1 && row.copyExact)
           && observed.hrefExact && observed.pageFits, observed);
     }
-    await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await session.send('Emulation.clearDeviceMetricsOverride');
     const caption = `wrap-paste ${identity.fixtureId}`;
     const image = await session.eval(`(${pasteFixture.toString()})(${JSON.stringify({ draft: 'before SELECT after', selection: [7, 13], text: caption, expected: 'before ' + caption + ' after' })})`);
     report.ok('mixed clipboard image/text preserves selection replacement and caret',
@@ -111,6 +111,8 @@ async function wrapPasteProof(ctx) {
     primaryError = error;
     throw error;
   } finally {
+    try { await session.send('Emulation.clearDeviceMetricsOverride'); }
+    catch (error) { if (primaryError) report.note(`wrap viewport cleanup FAILED: ${error.message}`); else primaryError = error; }
     try {
       if (!wrapProof) {
         result.cleanup = { workspaceReset: false };
@@ -118,12 +120,13 @@ async function wrapPasteProof(ctx) {
         result.cleanup.workspaceReset = true;
       }
     } catch (error) {
+      result.cleanup ||= {};
       result.cleanup.error = error.message;
-      if (primaryError) throw new AggregateError([primaryError, error], 'wrap proof failed; workspace reset also failed');
-      throw error;
+      if (primaryError) { report.note(`wrap workspace cleanup FAILED: ${error.message}`); } else throw error;
     } finally {
       fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2));
     }
+    if (primaryError && result.status === 'PASS') throw primaryError;
   }
 }
 module.exports = { wrapPasteProof };
