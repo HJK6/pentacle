@@ -141,16 +141,22 @@ async function branding(ctx) {
     }
     report.ok('declared icons avoid the browser favicon.ico fallback', observations.fallbackRequests.length === 0, observations.fallbackRequests);
   } catch (error) { primaryError = error; throw error; } finally {
+    let cleanupError;
+    const cleanup = async (label, action) => {
+      try { await action(); }
+      catch (error) {
+        if (primaryError || cleanupError) report.note(`branding ${label} cleanup FAILED: ${error.message}`);
+        else cleanupError = error;
+      }
+    };
     session.ws.off('message', network);
-    fs.writeFileSync(path.join(report.dir, 'branding-observations.json'), JSON.stringify(observations, null, 2));
-    try { await session.send('Emulation.clearDeviceMetricsOverride'); }
-    catch (error) { if (primaryError) report.note(`branding viewport cleanup FAILED: ${error.message}`); else throw error; }
-    try {
-      await session.eval(`document.documentElement.classList.toggle('chat-first-style',${before.style});
-        document.querySelector('[data-setting="theme"] [data-value="${before.theme}"]').click();
-        document.getElementById('web-refresh-btn').hidden=${before.refreshHidden};
-        document.getElementById('settings-close').click()`);
-    } catch (error) { if (primaryError) report.note(`branding state cleanup FAILED: ${error.message}`); else throw error; }
+    await cleanup('viewport', () => session.send('Emulation.clearDeviceMetricsOverride'));
+    await cleanup('state', () => session.eval(`document.documentElement.classList.toggle('chat-first-style',${before.style});
+      document.querySelector('[data-setting="theme"] [data-value="${before.theme}"]').click();
+      document.getElementById('web-refresh-btn').hidden=${before.refreshHidden};
+      document.getElementById('settings-close').click()`));
+    await cleanup('artifact', () => fs.writeFileSync(path.join(report.dir, 'branding-observations.json'), JSON.stringify(observations, null, 2)));
+    if (cleanupError) throw cleanupError;
   }
 }
 

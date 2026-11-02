@@ -341,9 +341,12 @@ async function chatFirstStyle(ctx) {
       if (theme === 'dark' && density === 'comfortable') await screenshot(ctx, 'style-on-dark');
     }
   } catch (error) { primaryError = error; throw error; } finally {
-    fs.writeFileSync(path.join(ctx.report.dir, 'chat-first-style-observations.json'), JSON.stringify(observed, null, 2));
+    let cleanupError;
+    try { fs.writeFileSync(path.join(ctx.report.dir, 'chat-first-style-observations.json'), JSON.stringify(observed, null, 2)); }
+    catch (error) { if (primaryError) report.note(`chat-first artifact cleanup FAILED: ${error.message}`); else cleanupError = error; }
     try { await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: null }); }
-    catch (error) { if (primaryError) report.note(`chat-first state cleanup FAILED: ${error.message}`); else throw error; }
+    catch (error) { if (primaryError || cleanupError) report.note(`chat-first state cleanup FAILED: ${error.message}`); else cleanupError = error; }
+    if (cleanupError) throw cleanupError;
   }
 }
 

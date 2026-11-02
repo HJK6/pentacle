@@ -124,7 +124,8 @@ async function wrapPasteProof(ctx) {
       result.cleanup.error = error.message;
       if (primaryError) { report.note(`wrap workspace cleanup FAILED: ${error.message}`); } else throw error;
     } finally {
-      fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2));
+      try { fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2)); }
+      catch (error) { if (primaryError) report.note(`wrap artifact cleanup FAILED: ${error.message}`); else throw error; }
     }
     if (primaryError && result.status === 'PASS') throw primaryError;
   }

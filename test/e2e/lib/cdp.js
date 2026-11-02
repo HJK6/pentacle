@@ -121,17 +121,35 @@ class CdpSession {
           function walk(v, depth) {
             if (--budget < 0) return '[truncated]';
             if (typeof v === 'string') { budget -= v.length; return budget < 0 ? '[truncated]' : v; }
+            if (typeof v === 'function' || typeof v === 'symbol' || typeof v === 'undefined') return '[unavailable]';
             if (v === null || typeof v !== 'object') return typeof v === 'bigint' ? String(v) : v;
             if (seen.has(v)) return '[cyclic]';
             if (depth >= 3) return '[truncated]';
             seen.add(v);
-            const out = Array.isArray(v) ? [] : {};
+            const array = Array.isArray(v);
+            const out = array ? [] : Object.create(null);
+            if (array) Object.setPrototypeOf(out, null);
             try {
-              for (const key of Object.keys(v)) {
-                budget -= key.length + 4;
-                if (budget < 0) { out['[truncated]'] = '[truncated]'; break; }
-                if (secrets.has(key.toLowerCase())) out[key] = '[redacted]';
-                else { try { out[key] = walk(v[key], depth + 1); } catch (_) { out[key] = '[unavailable]'; } }
+              if (array) {
+                const length = Math.min(v.length, 256);
+                let index = 0;
+                for (; index < length; index++) {
+                  budget -= 4;
+                  if (budget < 0 || !Object.prototype.hasOwnProperty.call(v, index)) break;
+                  const descriptor = Object.getOwnPropertyDescriptor(v, String(index));
+                  out[index] = descriptor && 'value' in descriptor ? walk(descriptor.value, depth + 1) : '[unavailable]';
+                }
+                if (index < v.length) out[index] = '[truncated]';
+              } else {
+                for (const key of Object.keys(v)) {
+                  budget -= key.length + 4;
+                  if (budget < 0) { out['[truncated]'] = '[truncated]'; break; }
+                  if (secrets.has(key.toLowerCase())) out[key] = '[redacted]';
+                  else {
+                    const descriptor = Object.getOwnPropertyDescriptor(v, key);
+                    out[key] = descriptor && 'value' in descriptor ? walk(descriptor.value, depth + 1) : '[unavailable]';
+                  }
+                }
               }
             } catch (_) { return '[unavailable]'; }
             return out;
