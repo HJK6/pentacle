@@ -156,16 +156,17 @@ class SerialLineTmux:
         self.active = 0
         self.peak = 0
         self.pastes: list[str] = []
+        self.first_input = asyncio.Event()
+        self.release = asyncio.Event()
 
     async def capture(self, name: str) -> str:
-        await asyncio.sleep(0.001)
         return ""
 
     async def paste(self, name: str, text: str) -> None:
         self.pastes.append(text)
         self.active += 1
         self.peak = max(self.peak, self.active)
-        await asyncio.sleep(0.001)
+        self.first_input.set()
 
     async def run(self, *args: str, **kw) -> tuple[int, str]:
         return 0, ""
@@ -176,7 +177,7 @@ class SerialLineSpawn:
         self.tmux = tmux
 
     async def _await_marker(self, *args: object, **kwargs: object) -> bool:
-        await asyncio.sleep(0.001)
+        await self.tmux.release.wait()
         self.tmux.active -= 1
         return True
 
@@ -577,41 +578,78 @@ def test_final_poll_submission_event_is_confirmed(monkeypatch: pytest.MonkeyPatc
 
 
 def test_one_comms_pane_lock_serializes_tell_tell_and_send() -> None:
-    async def go() -> tuple[list[dict], SerialLineTmux, Store, Comms]:
+    """Observe real lock contention while the first physical input is held."""
+    async def go() -> None:
+        from contextlib import asynccontextmanager
+
         tmux = SerialLineTmux()
         spawn = SerialLineSpawn(tmux)
         store = Store(":memory:")
+        tasks: list[asyncio.Task] = []
         store.start()
-        sessions = Sessions(store, tmux=tmux, local_host=HOST)
-        await sessions.open(HOST, NAME, provider="shell")
-        comms = Comms(store, sessions, spawn)
-        replies = await asyncio.gather(
-            comms.tell({
+        try:
+            sessions = Sessions(store, tmux=tmux, local_host=HOST)
+            await sessions.open(HOST, NAME, provider="shell")
+            comms = Comms(store, sessions, spawn)
+            real_lookup = comms._pane_input_lock
+            attempts = 0
+            competing = asyncio.Event()
+
+            @asynccontextmanager
+            async def observed_lock(target: str):
+                nonlocal attempts
+                lock = real_lookup(target)
+                attempts += 1
+                if attempts == 3:
+                    competing.set()
+                # Observation delegates to the actual lookup/acquisition; it
+                # supplies neither a replacement lock nor serialization.
+                async with lock:
+                    yield
+
+            comms._pane_input_lock = observed_lock
+            tasks.append(asyncio.create_task(comms.tell({
                 "stream_id": f"{HOST}:{NAME}",
                 "message": "tell one",
                 "tell_id": "serial-1",
-            }),
-            comms.tell({
-                "stream_id": f"{HOST}:{NAME}",
-                "message": "tell two",
-                "tell_id": "serial-2",
-            }),
-            comms.send({
-                "stream_id": f"{HOST}:{NAME}",
-                "message": "send three",
-                "msg_id": "serial-3",
-            }),
-        )
-        return replies, tmux, store, comms
+            })))
+            await asyncio.wait_for(tmux.first_input.wait(), 2)
+            tasks.extend([
+                asyncio.create_task(comms.tell({
+                    "stream_id": f"{HOST}:{NAME}",
+                    "message": "tell two",
+                    "tell_id": "serial-2",
+                })),
+                asyncio.create_task(comms.send({
+                    "stream_id": f"{HOST}:{NAME}",
+                    "message": "send three",
+                    "msg_id": "serial-3",
+                })),
+            ])
+            await asyncio.wait_for(competing.wait(), 2)
+            assert tmux.peak == 1
+            tmux.release.set()
+            replies = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+            assert all(reply.get("submission_confirmed") is True for reply in replies)
+            assert len(tmux.pastes) == 3
+            for message in ("tell one", "tell two", "send three"):
+                assert sum(message in paste for paste in tmux.pastes) == 1, tmux.pastes
+            assert list(comms._pane_input_locks) == [f"{HOST}:{NAME}"]
+        finally:
+            tmux.release.set()
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=2)
+                for task in pending:
+                    task.cancel()
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                pending, outcomes = set(), []
+            stopped = store.stop()
+            assert stopped, "store thread did not stop"
+            assert not pending, "owned comms tasks did not finish after release"
+            assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
 
-    replies, tmux, store, comms = asyncio.run(go())
-    try:
-        assert all(reply.get("submission_confirmed") is True for reply in replies)
-        assert tmux.peak == 1
-        assert len(tmux.pastes) == 3
-        assert list(comms._pane_input_locks) == [f"{HOST}:{NAME}"]
-    finally:
-        store.stop()
+    asyncio.run(go())
 
 
 def test_legacy_held_tell_table_is_not_created_at_boot() -> None:

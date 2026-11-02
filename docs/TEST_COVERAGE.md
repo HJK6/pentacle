@@ -89,7 +89,7 @@ payload and owned-cleanup examples have positive static support. Its rotated
 receipt and forced-overlap shortcomings are addressed by the reference below;
 they are historical findings, not additional open repairs. Process snapshots
 can miss brief prohibited descendants. Late-proof no-resend discrimination,
-ordering in the sampled disconnect case, some clock/cleanup questions and required-gate inclusion
+some clock/cleanup questions outside the bounded references and required-gate inclusion
 of standalone client tests remain unproved. The source-bound assessment is
 retained with the planning evidence; it supplies neither runtime reliability
 proof nor a suite compliance score. Remaining findings stay with the existing
@@ -163,7 +163,7 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
 the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
 every requested selection; it does not substitute for the full merge gate.
-`v2-merge-capacity` retains unit 1200s / smoke 900s; CI uses its separately
+`v2-merge-capacity` retains unit 1800s / smoke 900s; CI uses its separately
 declared `v2-merge-ci` profile. The shell smoke/soak wrappers call the same
 `run_gate.py`; their existence does not add tests to merge.
 
@@ -202,9 +202,12 @@ assertion completeness, uninspected fake boundaries and runtime cost are UNKNOWN
 | Send retry → durable receipt | [`test_send_idempotency_dedupe.py`](../services/chat-stream-v2/tests/test_send_idempotency_dedupe.py), [`test_send_semantics.py`](../services/chat-stream-v2/tests/test_send_semantics.py); daemon unit / focused `v2-pytest` | Real Comms, Store, Sessions, SpawnCtl; fake tmux/hosts/blob transport. Inspected: single paste, logical identity, failed retry eligibility, queued and pending replay. Reference below; no real provider/socket/browser proof. |
 | Receipt projection and late proof | [`test_send_receipts.py`](../services/chat-stream-v2/tests/test_send_receipts.py), [`test_send_receipt_late_proof.py`](../services/chat-stream-v2/tests/test_send_receipt_late_proof.py); daemon unit / focused | Real store projection and direct Server dispatch with synthetic records/events. Inspected: metadata correlation, event stamping, proof reconciliation/race/ambiguity and access checks. Distinct from physical-send and client protections. |
 | Disconnect and client reconciliation | [`test_send_survives_disconnect.py`](../services/chat-stream-v2/tests/test_send_survives_disconnect.py); [`test_inbound_admission_bounds.py`](../services/chat-stream-v2/tests/test_inbound_admission_bounds.py) (reference examples below); [`optimisticReconciliation.test.ts`](../pentacle-chat-core/tests/optimisticReconciliation.test.ts) | Server handler/task-lifetime tests use fake sockets and send handlers; no Comms delivery. Client reducers/selectors use synthetic state/events: identity, live/snapshot replay, status ordering and caption lattice. Client suite runs in its own required frontend step. One complete real send/disconnect/consumer journey remains UNKNOWN across the repo, not a proven absent test. |
+| Tell/tell/send input serialization | [`test_tell_immediate_delivery.py`](../services/chat-stream-v2/tests/test_tell_immediate_delivery.py), serialization reference below; daemon unit / focused | Real Comms/Store/Sessions and pane locks; synthetic shell transport/marker. Observed competing acquisitions, peak input and exact messages; no installed provider concurrency proof. |
+| Spawn submission evidence and raw command PATH | [`test_spawn_delivery_race.py`](../services/chat-stream-v2/tests/test_spawn_delivery_race.py), [`test_raw_command_path.py`](../services/chat-stream-v2/tests/test_raw_command_path.py); daemon unit / focused | Real confirmation/launch/SpawnCtl paths, synthetic panes/executables/tmux. Input-free negative and target PATH examples below; installed CLI/SSH behavior UNKNOWN. |
+| Fleet CLI pin admission | [`test_provider_cli_pin.py`](../services/chat-stream-v2/tests/test_provider_cli_pin.py); daemon unit / focused | Real durable AccountRuntime/Store/SpawnCtl; synthetic releases/executor/remote tmux. Pin-change reference below retains existing tests; no installed fleet activation claim. |
 | Provider/account startup and recovery | Daemon `test_provider_*.py`, `test_account_*.py`, especially [`test_account_repin_state_machine.py`](../services/chat-stream-v2/tests/test_account_repin_state_machine.py); daemon unit / selector `provider_startup` | Inspected repin examples preserve generation, one native proof/login, no sealed-op replay and superseded bindings with injected refusals; table wrappers expand subcases. Exhaustive marker is excluded from merge. Provider/native account and launch-environment fixtures are not live authentication/quota qualification; see selection's explicit limits. |
 | Consent and operator questions | CLI [`test_consent_cli.py`](../services/agent-orch/tests/test_consent_cli.py); daemon/CLI `test_consent*`, `test_question*`, `test_prompt*`; root/UI counterparts | Inspected CLI parsing includes revision/generation, local-admin ceremony and emergency-revoke claims; lifecycle/transport/token calls monkeypatched. Daemon admission and browser question registry are different boundaries; complete cross-layer assertion audit UNKNOWN. |
-| Session lifecycle and work coordination | Daemon/CLI `test_session*`, `test_spawn*`, `test_close*`, `test_work*`, `test_report*`; root `test/work*` | Existing daemon/CLI/root runners, and browser `web-work-lanes`, `scheduled-section`, closed-slot/reconnect scenarios. File families locate lifecycle, dispatch and work obligations; assertion semantics and real/fake dependencies outside the inspected send fixtures UNKNOWN. |
+| Session lifecycle and work coordination | Daemon/CLI `test_session*`, `test_spawn*`, `test_close*`, `test_work*`, `test_report*`; root `test/work*` | Existing daemon/CLI/root runners, and browser `web-work-lanes`, `scheduled-section`, closed-slot/reconnect scenarios. File families locate lifecycle, dispatch and work obligations; assertion semantics and real/fake dependencies outside the named send/spawn/pin references UNKNOWN. |
 | Client rendering, history and workspace | Root `test/chat*`, `test/renderer*`, `test/sidebar*`; chat-core tests; browser registry/history follow-ons | Root component/DOM tests, standalone core and real-browser served candidate fixture journeys protect different boundaries. Selector `client_wire_render` names its inspected seam and version limitations. Actual provider turn round trip, arbitrary installed versions and native/mobile rendering are not certified here. |
 | Satellite transport and pin transitions | Daemon `test_satellite*`, `test_event_push*`, `test_account_satellite_roots.py`; selector `satellite_transition` | Selector documents controlled-peer retry/dedupe and exact-pin fixtures. Real deployment/update/restart/rollback on installed hosts is a separate gate; individual assertions/fake boundaries outside cited selection evidence UNKNOWN. |
 | Release/deploy invocation | Daemon `test_deploy*`, `test_release_selection.py`; selector `deploy_invocation`; root hook tests | Selector records subprocess invocation, refusal/evidence and rollback fixture checks. Source fixtures do not activate installed services or prove host health. Root [`pre_push_hook.test.js`](../test/pre_push_hook.test.js) protects hook behavior separately. |
@@ -225,6 +228,57 @@ its exact send effect and released durable credit. Both exercise real Server
 task/admission code with fake sockets/handlers, not Comms or durable receipt
 delivery. They use the existing daemon unit/focused runner; this static index
 adds neither runtime proof nor rows to the original assessment.
+
+## References: disconnect, tell, spawn and pin
+
+These bounded inspections start at public source
+`76ac3a2e8762f135e6f40afc7b0fce0ac650f6fd`; the three revised examples
+retain their paths, nodes, parameter cells and prior assertions. **Supported**
+below applies only to the named property. **Retained-run** records focused
+execution; **controlled-red** records the separate applied defect, intended
+assertion failure and restored GREEN. Neither certifies a live provider journey.
+
+| Existing scenario / property | Before → after; evidence and boundary |
+| --- | --- |
+| `test_send_survives_submitter_disconnect_v2` in [disconnect tests](../services/chat-stream-v2/tests/test_send_survives_disconnect.py) | Specific shortcoming → supported / controlled-red: all three handlers enter and remain event-held; socket exhaustion and client exit precede release; exactly `r0`, `r1`, `r2` complete. D1 adds accepted tasks to connection cancellation as well as daemon tracking and fails the survival assertion. Real Server dispatch/task lifetime; fake socket/send, no durable receipt or physical-delivery claim. |
+| `test_held_connection_send_still_delivers_result_v2` in the same file | Specific shortcoming → supported / controlled-red: socket stays open until its parsed result event; completion, request correlation and landed delivery are observed before release. D2 suppresses only `send.result` at Server output and fails the diagnostic missing-result assertion after handler completion. No frame-order promise. Both cases release/join owned tasks on failure and bound waits. |
+| `test_one_comms_pane_lock_serializes_tell_tell_and_send` in [tell tests](../services/chat-stream-v2/tests/test_tell_immediate_delivery.py) | Specific shortcoming → supported / controlled-red: first input is held; a local observation wrapper delegates lookup/acquisition to the real pane lock and observes both contenders before release. Peak=1, three pastes, confirmations, one lock key and each expected message once are checked; setup/execution share store/task cleanup. T1 returns distinct real locks and fails peak overlap, preserving the key shape. Real Comms/Store/Sessions, fake shell marker/transport; no native-provider concurrency qualification. |
+| `test_codex_collapsed_enter_lost_is_not_confirmed` in [spawn tests](../services/chat-stream-v2/tests/test_spawn_delivery_race.py) | Specific shortcoming → supported / controlled-red: real confirmation returns False without a durable USER event; the local double records paste, Enter and run, all asserted absent. S1 performs Enter then continues original proof logic: unchanged baseline passes, candidate fails input-count assertion while False remains true. Same collapsed composer and long brief; no recovery behavior added. |
+| Neighboring spawn negatives in that file | Supported / static, retained-run: `test_echo_is_not_submission_proof` separates visible draft echo from submission; `test_enter_lost_pane_does_not_authorize_retry_or_proof` counts paste/Enter; `test_transcript_change_does_not_authorize_enter_or_confirm` rejects transcript-only proof/input; `test_collapsed_viewport_is_not_authoritative_without_user_event` covers advisory Claude history. Synthetic panes/transcript, not installed CLI coverage; the last case's False alone makes no additional side-effect claim. |
+| Pin launch/admission in [pin tests](../services/chat-stream-v2/tests/test_provider_cli_pin.py) | Previously unassessed here → supported / static, retained-run, unchanged tests: `test_wrong_fleet_release_refuses_real_launch_resolution` checks refusal/no session; `test_retained_enrollment_fences_policy_off` preserves provider/raw-command fences; `test_final_admission_rechecks_pin_after_async_host_preparation` rejects a moved pin/no binding or session. Real durable AccountRuntime/Store/SpawnCtl, synthetic artifacts/executor. |
+| Pin historical admission in the same file | Previously unassessed → supported / static, retained-run: `test_committed_old_admission_is_enumerated_and_new_work_is_fenced` preserves binding and rejects new input; `test_existing_compliant_seat_gets_readonly_proof_without_relabeling_admission` separates observed proof from admission; `test_real_remote_creation_after_pin_move_keeps_old_admission` preserves revision 1 during synthetic remote creation, then fences input/enumerates old seat. No installed version/auth/deployment/fleet activation proof. |
+
+Pin validation/CAS/restart, initial readiness, unprivileged/local-admin recovery,
+atomic failure, inactive retained cells and resource-tree tamper checks in that
+same file retain their assertions and focused invocation. Its authenticated
+recovery scenario uses a real in-process socket with fixture credentials;
+release artifacts and executor remain synthetic. No pin test rewrite or new
+pin state was needed. Other lifecycle/pin files remain UNKNOWN here.
+
+### Bounded UNKNOWN changes
+
+Historical populations above remain snapshots, not adjusted current totals.
+The older `1e3c3241` planning census had 895 primary / 173 additional candidates;
+it is distinct from the retained `2fc273a8` 896 / 174 structural snapshot and its
+250 primary behavioral UNKNOWNs. Only these explicit path deltas are claimed:
+
+| Inspected path | Before → after, reason and limits |
+| --- | --- |
+| [test_inbound_admission_bounds.py](../services/chat-stream-v2/tests/test_inbound_admission_bounds.py) | Primary filename UNKNOWN → supported / static, retained-run for admission/disconnect scenarios. Besides the two credit/barrier references above: global/parked/shared-principal budgets, connection admission before writer allocation, UTF-8/refusal bounds, cancel/error credit return, hello task/byte transfer and recheck, preauth/bootstrap limits, reserved cancel, repeated-burst accounting, binding removal, real-auth follower cells and ordinary/explicit cancellation. Batched-ping/probe helpers check their exact refusal/drain fixtures. Real Server, fake sockets/handlers and local Store where used; no network/provider certification. |
+| [test_raw_command_path.py](../services/chat-stream-v2/tests/test_raw_command_path.py) | Primary filename UNKNOWN → supported / static, retained-run for launch PATH. Four local/peer × explicit/default envelope cells, configured precedence/preserved PATH through real shell stubs for Claude/Codex, stripped-PATH fallback, Codex sibling precedence, and two raw SpawnCtl explicit/default cells. Real launch/SpawnCtl/Store and subprocess shell; fake provider executables/tmux/remote host. Real SSH and installed binaries UNKNOWN. |
+| [tell_proof.py](../services/chat-stream-v2/tell_proof.py) | Additional-script role UNKNOWN → production proof dependency / static. [Store reconciliation](../services/chat-stream-v2/store.py) imports `finalize_prepared` and `retained_proof` inside promotion transactions. It is not a separately collected test: role resolution does not qualify its assertions. Existing tell replay/post-watermark tests in [tell tests](../services/chat-stream-v2/tests/test_tell_immediate_delivery.py) are distinct from the physical-input serialization reference. Other unresolved scripts keep their prior state. |
+
+The four reference files and two bounded UNKNOWN test files use unchanged
+`run_gate.py` unit discovery and focused `v2-pytest`; smoke/soak and
+`soak`/`repin_exhaustive` exclusions are unchanged. A six-file selection uses
+`tests/` before each filename and the wrapper adds its four invariant nodes.
+Baseline/candidate collection and preservation compare the same scope, including
+parameter cells; no suite-wide recollection or semantic census is inferred.
+Same-scope baseline/candidate runs each passed 103 pytest nodes, including
+parameter cells and invariant floor, in 7.54s / 6.56s. These are single-run
+observations with setup recorded separately, not a speed or coverage target.
+The advisory selector retains conservative broad fallback for these unmapped
+paths. Full merge and npm gates remain required; focused results are no waiver.
 
 **Concrete selection GAP:** root npm-test does not select the 44 standalone
 chat-core `.test.ts` files or its typecheck. Inspection scope: root package
