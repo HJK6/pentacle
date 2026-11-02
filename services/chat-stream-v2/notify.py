@@ -824,6 +824,28 @@ class Notify:
         try:
             await self._await_ready()
             if verb == "prompt.ask":
+                # A known replay is resolved before the producer lifecycle lock:
+                # publication holds that lock, and an approved replay must still
+                # return its in-flight state without waiting for publication.
+                auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+                raw = msg.get("envelope")
+                if (self._lane_rulings is not None and isinstance(raw, dict)
+                        and auth.get("token_verified") is True
+                        and auth.get("stream_id") == raw.get("producer_stream_id") == msg.get("from_stream_id")
+                        and auth.get("session_generation")
+                        and not raw.get("_assistant_composite_question_proxy")
+                        and not auth.get("assistant_composite_question_proxy")):
+                    envelope, actions = self._validate_prompt_envelope_and_actions(raw, msg.get("actions"))
+                    row = await self._lane_rulings.question_row(str(auth["stream_id"]), str(auth["session_generation"]), str(envelope.get("question_id") or ""))
+                    if row:
+                        original = json.loads(row["intent_json"])["envelope"]
+                        if not envelope.get("spec_id"):
+                            envelope = {**envelope, "spec_id": original.get("spec_id")}
+                        frozen = {"envelope": envelope, "actions": actions, "severity": str(msg.get("severity") or "info")}
+                        from assistant_lane_rulings import _question_digest
+                        if _question_digest(frozen) != row["intent_digest"]:
+                            return self._prompt_error(request_id, "assistant_ruling_intent_changed", question_id=str(envelope.get("question_id") or ""))
+                        return {**self._lane_rulings.question_reply(row), "request_id": request_id}
                 # Ask admission cannot slip behind a handoff's transfer/close.
                 producer = str((msg.get("envelope") or {}).get("producer_stream_id") or "") if isinstance(msg.get("envelope"), dict) else ""
                 lock = getattr(self._sessions, "_lifecycle_lock", None)

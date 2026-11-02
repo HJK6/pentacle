@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from store_host_transfer import effective_ruling
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import json
 import logging
@@ -448,7 +449,8 @@ class AssistantLaneRulings:
             target=producer, target_generation="", covered=True, work_item=item, work_item_error=error,
             recent_cards=recent)
         if request["state"] == "bypassed":
-            await self._release(request)
+            # prompt.ask holds the producer lifecycle lock throughout admission.
+            await self._release(request, lifecycle_locked=True)
             request = await self._fetch(request["ruling_request_id"])
         elif request["state"] == "pending":
             await self._enqueue_notice(request)
@@ -1296,7 +1298,22 @@ class AssistantLaneRulings:
                 conn.execute("UPDATE v2_assistant_lane_rulings SET mirror_sent=1 WHERE ruling_request_id=?", (rid,))
         await self.store.submit(mark)
 
-    async def _release(self, request: dict[str, Any]) -> None:
+    async def _release(self, request: dict[str, Any], *, lifecycle_locked: bool = False) -> None:
+        # A question must be published while its producer is still the current
+        # open generation. Handoff/close hold this same lock across question
+        # transfer and retirement. Take it before the release lock: an immediate
+        # bypass already holds it in prompt.ask, so reversing the order deadlocks.
+        lifecycle = nullcontext()
+        if request["action"] == "question" and not lifecycle_locked:
+            sessions = self.server.sessions
+            lock_factory = getattr(sessions, "_lifecycle_lock", None)
+            producer = str(request["requester_stream_id"])
+            if callable(lock_factory) and ":" in producer:
+                lifecycle = lock_factory(*producer.split(":", 1))
+        async with lifecycle:
+            await self._release_serial(request)
+
+    async def _release_serial(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
         async with lock:
@@ -1326,6 +1343,8 @@ class AssistantLaneRulings:
             try:
                 if current["action"] == "question":
                     intent.pop("_auth_context", None)
+                    # Ruling recovery starts alongside the notification store.
+                    await self.server.notify._await_ready()
                     result = await self.server.notify._prompt_publish(intent, request_id=f"ruled-question:{rid}")
                     if result.get("type") != "prompt.ask.ok":
                         await self._mark(rid, "release_blocked", result)

@@ -537,19 +537,31 @@ async function settingsVersionLine(ctx) {
 }
 
 // External-daemon proof: the probe body must include its exact question ID.
-async function advisorQuestionRendered({ session, report, fixture, timeoutMs }) {
+async function advisorQuestionRendered({ session, report, fixture, timeoutMs, cdp }) {
   if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
   const questionId = process.env.PENTACLE_CARD_PROBE_ID;
   const screenshot = process.env.PENTACLE_CARD_PROBE_SCREENSHOT;
   const stream = process.env.PENTACLE_CARD_PROBE_STREAM;
-  if (!questionId || !screenshot || !stream) throw new Error('PENTACLE_CARD_PROBE_ID, PENTACLE_CARD_PROBE_SCREENSHOT and PENTACLE_CARD_PROBE_STREAM are required');
+  const host = process.env.PENTACLE_CARD_PROBE_HOST;
+  if (!questionId || !screenshot || !stream || !host) throw new Error('PENTACLE_CARD_PROBE_ID, PENTACLE_CARD_PROBE_SCREENSHOT, PENTACLE_CARD_PROBE_STREAM and PENTACLE_CARD_PROBE_HOST are required');
   await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
   await session.waitFor(`window.focusStreamId(${JSON.stringify(stream)}) === true`, { timeoutMs });
-  await session.waitFor("!!document.querySelector('#cell-0 .slot-chat-question-open')", { timeoutMs });
-  await session.click('#cell-0 .slot-chat-question-open');
-  const expression = `Array.from(document.querySelectorAll('[data-notification-id]')).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
-  await session.waitFor(expression, { timeoutMs });
-  report.ok('probe question ID rendered in assistant card', await session.eval(expression), { questionId });
+  const slot = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(s => { const target=(s.sessions || []).find(item => item.stream_id === ${JSON.stringify(stream)}); const saved=JSON.parse(localStorage.getItem('pentacle.workspace.v1') || '{}'); return target ? (saved.bindings || []).findIndex(item => item && item.name === (target.session_name || target.name) && item.hostId === ${JSON.stringify(host)}) : -1; })`, (value) => Number.isInteger(value) && value >= 0,
+    { timeoutMs, label: 'assistant stream bound to a slot' });
+  await session.click(`#header-${slot} [data-mode="chat"]`);
+  await session.waitFor(`!!document.querySelector('#cell-${slot} .slot-chat-question-open')`, { timeoutMs });
+  await session.click(`#cell-${slot} .slot-chat-question-open`);
+  const portal = `#desktop-question-portal-${stream.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  await session.waitFor(`!!document.querySelector(${JSON.stringify(portal + ' [data-notification-id]')})`, { timeoutMs });
+  const expression = `Array.from(document.querySelectorAll(${JSON.stringify(portal + ' [data-notification-id]')})).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
+  const count = await session.eval(`document.querySelectorAll(${JSON.stringify(portal + ' .desktop-question-dot')}).length`);
+  let found = await session.eval(expression);
+  for (let index = 0; !found && index < count; index++) {
+    await session.click(`${portal} .desktop-question-dot:nth-child(${index + 1})`);
+    found = await session.eval(expression);
+  }
+  report.ok('probe question ID rendered in assistant card', found, { questionId });
   await session.screenshot(screenshot);
 }
 
