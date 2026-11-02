@@ -198,3 +198,125 @@ def test_unavailable_when_tail_missing_or_generation_changed_v8():
         rows = await env.store.work_lane_rows()
         assert rows[0]["lane_id"] == lid and rows[0]["_chat_available"] == "unavailable"
     run(body)
+
+# Full-input presentation: the display slices are deliberately not the oracle.
+def _working_lane(count=1, owner="fd", state="paused", reason="fd"):
+    return {"lane_id": "wl-test", "work_state": state, "work_state_reason": reason,
+            "owner_kind": owner, "version": 1, "bound_stream_id": "host:old",
+            "bound_generation": "old", "_qualifies": False, "_lead_row": {"status": "closed"},
+            "_members": [{"spec_id": f"spec_demo__item{i}", "status": "in_progress"} for i in range(count)]}
+
+
+def _working_seat(spec="spec_demo__item0", **overrides):
+    return {"stream_id": "host:seat", "status": "open", "role": "lead", "visibility": "hidden",
+            "parent_stream_id": "host:parent", "assigned_spec_id": spec, **overrides}
+
+
+def _frame(lane, seats):
+    return build_frame([lane], {s["stream_id"]: s for s in seats}, now_iso="2026-11-02T00:00:00Z")
+
+
+def _assert_working(lane):
+    assert (lane["state"], lane["state_reason"]) == ("active", "members_working")
+
+
+@pytest.mark.parametrize("role", ["lead", "nexus"])
+def test_members_working_red_hidden(role):
+    frame = _frame(_working_lane(), [_working_seat(role=role)])
+    _assert_working(frame["lanes"][0])
+    assert frame["counts"]["active"] == 1
+
+
+def test_members_working_red_operator_parentless():
+    _assert_working(_frame(_working_lane(owner="operator"),
+                           [_working_seat(role="worker", visibility="default", parent_stream_id=None)])["lanes"][0])
+
+
+@pytest.mark.parametrize("beyond", ["member", "seat"])
+def test_members_working_red_caps_and_surfaces(beyond):
+    async def body(env):
+        specs = [f"spec_demo__item{i}" for i in range(10 if beyond == "member" else 1)]
+        lead = await env.seat("old-lead", role="lead", parent_stream_id=FD)
+        lid = (await env.adopt(key="stream:caps", state="paused", lead=lead, members=specs))["lane"]["lane_id"]
+        await env.store.mark_closed("host-a", "old-lead", closed_at="2026-11-02T00:00:00Z", pane_status="pane_dead")
+        if beyond == "seat":
+            for i in range(8):
+                await env.seat(f"a{i}", role="lead", visibility="hidden", parent_stream_id=FD,
+                               provider="composite", assigned_spec_id=specs[0])
+        await env.seat("z-eligible", role="lead", visibility="hidden", parent_stream_id=FD,
+                       assigned_spec_id=specs[-1])
+        sessions = Sessions(env.store, tmux=None, local_host="host-a")
+        await sessions.refresh()
+        server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
+        server.assistant_composite = env.composite
+        server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
+        auth = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+        inventory = await server.work_lanes.current()
+        listed = await server._on_work_lanes_list({"_auth_context": auth})
+        shown = await server._on_work_lanes_show({"lane_id": lid, "_auth_context": auth})
+        if beyond == "member":
+            assert len(inventory["lanes"][0]["members"]) == 8
+            assert specs[-1] not in [m["spec_id"] for m in inventory["lanes"][0]["members"]]
+        else:
+            member = inventory["lanes"][0]["members"][0]
+            assert member["seats_total"] == 9 and len(member["seats"]) == 8
+            assert all(s["stream_id"] != "host-a:z-eligible" for s in member["seats"])
+        for projection in (inventory["lanes"][0], listed["lanes"][0], shown["projection"]):
+            _assert_working(projection)
+    run(body)
+
+
+def test_members_working_red_last_seat_closes():
+    lane = _working_lane()
+    seat = _working_seat()
+    before = _frame(lane, [seat])
+    _assert_working(before["lanes"][0])
+    after = _frame(lane, [{**seat, "status": "closed"}])
+    assert after["lanes"][0]["state"] == "paused"
+
+
+def test_members_working_red_signature_flip():
+    from work_lanes_projection import frame_signature
+    lane, seat = _working_lane(), _working_seat()
+    before = _frame(lane, [seat])
+    _assert_working(before["lanes"][0])
+    after = _frame(lane, [{**seat, "status": "closed"}])
+    assert after["lanes"][0]["state"] == "paused"
+    assert frame_signature(before) != frame_signature(after)
+
+
+@pytest.mark.parametrize("seat", [
+    _working_seat(role="qa"), _working_seat(provider="composite"),
+    _working_seat(status="closed"), _working_seat(assigned_spec_id=""),
+    _working_seat(assigned_spec_id=None, spec_ids=["spec_demo__item0", "spec_demo__other"]),
+    _working_seat(role="worker", visibility="default"),
+])
+def test_members_working_control_ineligible(seat):
+    assert _frame(_working_lane(), [seat])["lanes"][0]["state"] == "paused"
+
+
+def test_members_working_control_hidden_operator_and_assignment():
+    from store_specs import effective_assignment
+    assert _frame(_working_lane(owner="operator"), [_working_seat()])["lanes"][0]["state"] == "paused"
+    assert effective_assignment(_working_seat(assigned_spec_id=None, spec_ids=["spec_demo__item0"])) == "spec_demo__item0"
+
+
+def test_members_working_control_precedence_and_signature():
+    from work_lanes_projection import frame_signature
+    seat = _working_seat()
+    assert _frame(_working_lane(state="blocked"), [seat])["lanes"][0]["state"] == "blocked"
+    assert _frame(_working_lane(state="done"), [seat])["lanes"] == []
+    lost = _frame(_working_lane(reason="lead_lost"), [seat])["lanes"][0]
+    assert (lost["state"], lost["state_reason"]) == ("active", "lead_lost")
+    assert frame_signature(_frame(_working_lane(), [{**seat, "last_activity": "a"}])) == frame_signature(
+        _frame(_working_lane(), [{**seat, "last_activity": "b"}]))
+
+
+def test_members_working_red_single_tag_legacy():
+    _assert_working(_frame(_working_lane(), [_working_seat(
+        assigned_spec_id=None, spec_ids=["spec_demo__item0"])])["lanes"][0])
+
+
+def test_members_working_control_protected(monkeypatch):
+    monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "lead")
+    assert _frame(_working_lane(), [_working_seat()])["lanes"][0]["state"] == "paused"
