@@ -309,6 +309,11 @@ DOT_SCOPE_DENIED_CODE = "dot_scope_denied"
 # current binding, recognized only by the tell/send entry branches (contract 3).
 ASSISTANT_ALIAS = primary_assistant_name()
 _ASSISTANT_ALIAS_TARGET_MEMBERS = ("stream_id", "host", "session_name")
+
+
+def _is_primary_alias(target: object) -> bool:
+    # Stable callers need not inherit the daemon's configured display name.
+    return target in ("assistant", ASSISTANT_ALIAS)
 #: Deny-by-default verb allowlist for a stream-scoped credential (the Cosmo
 #: client).  Every other registered handler denies with `scope_denied`.  Outbound
 #: server frames (welcome/snapshot/pong/chat.event/working.state/notification/
@@ -4225,7 +4230,7 @@ class Server:
         }
 
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
-        if msg.get("to_stream_id") == ASSISTANT_ALIAS:
+        if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_tell(msg)
         host, name = await self.sessions.resolve(msg)
         target_stream_id = f"{host}:{name}"
@@ -4406,7 +4411,7 @@ class Server:
         if any(key in msg for key in _ASSISTANT_ALIAS_TARGET_MEMBERS):
             raise VerbError("bad_request", "the assistant alias takes no other target member")
         if "inbox" in msg and (
-            not isinstance(msg.get("inbox"), dict) or msg["inbox"].get("to") != ASSISTANT_ALIAS
+            not isinstance(msg.get("inbox"), dict) or msg["inbox"].get("to") != msg.get("to_stream_id")
         ):
             raise VerbError("bad_request", "inbox.to must match the assistant alias target")
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
@@ -4475,7 +4480,7 @@ class Server:
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
         msg = desk_stamp.stamp_message(msg)
-        if msg.get("to_stream_id") == ASSISTANT_ALIAS:
+        if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
         stream_id = f"{host}:{name}"

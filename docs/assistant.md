@@ -287,8 +287,9 @@ work, owner or progress. Status summaries need correlated current evidence;
 when it is insufficient, the conversation backend requests authority review
 and the authority publishes its own response.
 
-Agent peers may also address the primary assistant composite by its literal
-name (`PENTACLE_ASSISTANT_PRIMARY_NAME`, default `assistant`), with
+Agent peers may address the primary assistant composite by stable literal
+`assistant` or its configured name (`PENTACLE_ASSISTANT_PRIMARY_NAME`, default
+`assistant`), with
 `agent-orch tell` or `agent-orch send`. Each attempt resolves the current
 binding once. A tell becomes the ordinary composite tell, and a send becomes
 one ordinary physical send to the bound seat. The alias carries no operator

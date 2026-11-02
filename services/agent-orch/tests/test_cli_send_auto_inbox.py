@@ -382,6 +382,16 @@ def test_send_literal_alias_emits_raw_target_and_inbox_to(monkeypatch, tmp_path,
     assert out[0]["to_stream_id"] == "example-host-a:seat-a"
 
 
+def test_send_stable_literal_preserves_wire_and_inbox_with_configured_primary(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "ASSISTANT_ALIAS", "example")
+    sent = _capture_send_transport(monkeypatch, tmp_path, [_LANDED_AT_A, _LANDED_AT_A])
+    parser = cli.build_parser()
+    for target in ("assistant", "example"):
+        assert cli.send(parser.parse_args(["send", target, "101", "synthetic task"])) == 0
+    assert [row["payload"]["to_stream_id"] for row in sent] == ["assistant", "example"]
+    assert [row["payload"]["inbox"]["to"] for row in sent] == ["assistant", "example"]
+
+
 def test_send_alias_displays_ordinary_committed_pending_guidance(monkeypatch, tmp_path, capsys) -> None:
     pending = {
         "type": "send.result", "delivery": "committed_pending_proof", "do_not_resubmit": True,

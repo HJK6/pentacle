@@ -1569,7 +1569,7 @@ def spawn_unfreeze(args: argparse.Namespace) -> int:
 
 
 def send(args: argparse.Namespace) -> int:
-    alias = args.stream_id == ASSISTANT_ALIAS
+    alias = args.stream_id in ("assistant", ASSISTANT_ALIAS)
     if not alias and not _require_stream_id("send", args.stream_id):
         return 2
     config = load_config()
@@ -1579,7 +1579,7 @@ def send(args: argparse.Namespace) -> int:
         return 2
     if alias:
         # Raw alias target only: no host/session split and no optimistic ID.
-        target_fields: dict[str, object] = {"to_stream_id": ASSISTANT_ALIAS}
+        target_fields: dict[str, object] = {"to_stream_id": args.stream_id}
     else:
         parsed_stream = args.stream_id.split(":", 1)
         if len(parsed_stream) != 2 or not parsed_stream[0] or not parsed_stream[1]:
@@ -1719,7 +1719,7 @@ def send_cancel(args: argparse.Namespace) -> int:
 
 
 def tell(args: argparse.Namespace) -> int:
-    if args.peer_stream_id != ASSISTANT_ALIAS and not _require_stream_id("tell", args.peer_stream_id):
+    if args.peer_stream_id not in ("assistant", ASSISTANT_ALIAS) and not _require_stream_id("tell", args.peer_stream_id):
         return 2
     ttl_seconds = int(args.ttl)
     if ttl_seconds < TELL_TTL_MIN_SECONDS or ttl_seconds > TELL_TTL_MAX_SECONDS:
