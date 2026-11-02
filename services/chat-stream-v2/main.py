@@ -836,7 +836,6 @@ async def run(args: argparse.Namespace) -> int:
             server, enabled=authority_flag == '1',
             inhibit_path=Path(args.db).with_name('authority-restore.inhibit') if args.db != ':memory:' else None,
         )
-        await server.authority_restore.initialize()
 
         async def _deliver_restore_notice(composite, text: str, tell_id: str) -> None:
             from sessions import VerbError as _VerbError
@@ -920,6 +919,8 @@ async def run(args: argparse.Namespace) -> int:
     startup_phase_started = time.monotonic()
     store.start()
     log.info("startup phase=store_start duration_s=%.6f", time.monotonic() - startup_phase_started)
+    if server.authority_restore is not None:
+        await server.authority_restore.initialize()
     await store.mark_work_index_pending()
     await account_runtime.start()
     startup_phase_started = time.monotonic()
