@@ -5,7 +5,7 @@ const { runGridSplitWidths, geometry } = require('./lib/grid_split_scenario');
 
 test('failed mobile scenario does not contaminate the next scenario', async () => {
   let width = 1600;
-  const session = { async send(method, params) {
+  const session = { async eval() { return {width,height:1000}; }, async send(method, params) {
     if (method === 'Emulation.setDeviceMetricsOverride') width = params.width;
     if (method === 'Emulation.clearDeviceMetricsOverride') width = 1600;
   } };
@@ -22,14 +22,14 @@ test('failed mobile scenario does not contaminate the next scenario', async () =
 test('standalone grid widths restores after a failing assertion', async () => {
   let width = 1600;
   const g = { handles: [{x:0,y:0,width:10,height:10},{x:0,y:0,width:10,height:10}], grid:{x:0,width:1000}, gap:10, cells:[{width:250},{width:250},{width:250},{width:250}], saved:.5, savedBottom:.5 };
-  const session = { async eval(expr) { return expr === geometry ? g : undefined; }, async send(method, params) { if(method === 'Emulation.setDeviceMetricsOverride') width=params.width; if(method === 'Emulation.clearDeviceMetricsOverride') width=1600; } };
+  const session = { async eval(expr) { return expr === geometry ? g : expr.includes('innerWidth') ? {width,height:1000} : undefined; }, async send(method, params) { if(method === 'Emulation.setDeviceMetricsOverride') width=params.width; if(method === 'Emulation.clearDeviceMetricsOverride') width=1600; } };
   await assert.rejects(runGridSplitWidths({session, report:{ok() {throw Error('forced grid assertion');}}}), /forced grid assertion/);
   assert.equal(width, 1600);
 });
 
 test('cleanup failure is recorded without replacing primary failure', async () => {
   const notes = [];
-  const ctx = { session: { async send() { throw Error('clear failed'); } }, report: { note: text => notes.push(text) } };
+  const ctx = { session: { async eval() { return {width:1600,height:1000}; }, async send() { throw Error('clear failed'); } }, report: { note: text => notes.push(text) } };
   const failed = await dispatchScenario('mobile', async () => { throw Error('primary assertion'); }, ctx);
   assert.equal(failed, true);
   assert.match(notes[0], /primary assertion/);

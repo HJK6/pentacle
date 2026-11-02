@@ -10,7 +10,8 @@ test('artifact write failure cannot mask assertion or prevent viewport cleanup',
   let evalCount = 0;
   const session = {
     ws: new EventEmitter(),
-    async eval() {
+    async eval(expression) {
+      if (expression.includes('innerWidth')) return {width:1600,height:1000};
       evalCount++;
       if (evalCount === 1) return {theme:'dark',style:false,refreshHidden:true};
       if (evalCount === 2) throw Error('primary assertion');

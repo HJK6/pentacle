@@ -1,4 +1,5 @@
 'use strict';
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 const fs = require('fs');
 const path = require('path');
 const { reloadDashboardPage } = require('./dashboard_scenario');
@@ -162,6 +163,7 @@ async function paneJourney(ctx, [fixtureName, survivor, secondHost]) {
   report.ok('the choice is persisted', JSON.parse(restored.saved || '{}').paneCount === 2, restored.saved);
 
   // Phone width: one readable pane; the sidebar is a drawer behind the toggle.
+  const viewportBaseline = await readViewport(ctx.session);
   let viewportError;
   try {
     await ctx.session.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 860, deviceScaleFactor: 1, mobile: true });
@@ -177,7 +179,7 @@ async function paneJourney(ctx, [fixtureName, survivor, secondHost]) {
     report.ok('phone width: drawer closed by default, opens from the toggle, Escape closes it', !closed && opened && !escaped, { closed, opened, escaped });
     report.ok('phone width shows one pane', narrow.cells.filter(c => c.shown).length === 1, narrow.cells);
   } catch (error) { viewportError = error; throw error; } finally {
-    try { await ctx.session.send('Emulation.clearDeviceMetricsOverride', {}); }
+    try { await clearAndSettle(ctx.session, viewportBaseline); }
     catch (error) { if (viewportError) report.note(`pane-count viewport cleanup FAILED: ${error.message}`); else throw error; }
   }
 
@@ -307,6 +309,7 @@ const CHAT_FIRST = { dark: '#22221f', light: '#fcfbf8' };
 async function chatFirstStyle(ctx) {
   const { report } = ctx;
   const observed = [];
+  const viewportBaseline = await readViewport(ctx.session);
   let primaryError;
   try {
     let viewportError;
@@ -322,7 +325,7 @@ async function chatFirstStyle(ctx) {
         await flagOffAgainstMain(ctx, theme, density);
       }
     } catch (error) { viewportError = error; throw error; } finally {
-      try { await ctx.session.send('Emulation.clearDeviceMetricsOverride', {}); }
+      try { await clearAndSettle(ctx.session, viewportBaseline); }
       catch (error) { if (viewportError) report.note(`chat-first viewport cleanup FAILED: ${error.message}`); else throw error; }
     }
     await reloadWith(ctx, { [WORKSPACE_KEY]: EMPTY_FOUR, [SETTINGS_KEY]: JSON.stringify({ features: { chatFirstStyle: true } }) });

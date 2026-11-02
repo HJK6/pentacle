@@ -62,7 +62,7 @@ for (const keep of [false, true]) {
             if (failure === 'setup') throw new Error('synthetic setup failure');
             return { port: 42420, close: async () => {} };
           } };
-          if (name === './lib/cdp') return { connect: async () => ({ consoleLines: [], async drainConsole() { drainCalls++; }, close() {} }), sleep: async () => {} };
+          if (name === './lib/cdp') return { connect: async () => ({ consoleLines: [], async eval() { return {width:1600,height:1000}; }, async drainConsole() { drainCalls++; }, close() {} }), sleep: async () => {} };
           if (name === './lib/web_scenarios') return { SCENARIOS: [['synthetic-restart', async ctx => {
             await ctx.restartHost();
             if (failure === 'scenario') throw new Error('synthetic scenario failure');

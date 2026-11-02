@@ -1,4 +1,5 @@
 'use strict';
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -26,6 +27,7 @@ async function waitForDocument(page, url, cdp) {
 async function branding(ctx) {
   const { session, report, cdp, cdpPort, url } = ctx;
   const observations = { assets: [], layouts: [], auxiliary: [], fallbackRequests: [] };
+  const baseline = await readViewport(session);
   const before = await session.eval(`({theme: document.documentElement.dataset.theme,
     style: document.documentElement.classList.contains('chat-first-style'),
     refreshHidden: document.getElementById('web-refresh-btn').hidden})`);
@@ -150,7 +152,7 @@ async function branding(ctx) {
       }
     };
     session.ws.off('message', network);
-    await cleanup('viewport', () => session.send('Emulation.clearDeviceMetricsOverride'));
+    await cleanup('viewport', () => clearAndSettle(session, baseline));
     await cleanup('state', () => session.eval(`document.documentElement.classList.toggle('chat-first-style',${before.style});
       document.querySelector('[data-setting="theme"] [data-value="${before.theme}"]').click();
       document.getElementById('web-refresh-btn').hidden=${before.refreshHidden};

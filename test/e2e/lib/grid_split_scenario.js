@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const { reloadDashboardPage } = require('./dashboard_scenario');
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 
 const geometry = `(() => {
   const grid = document.querySelector('.grid');
@@ -198,6 +199,7 @@ async function runGridSplitTerminals({session,report,fixtures,tmux,cdp}) {
 }
 
 async function runGridSplitWidths({session,report}) {
+  const baseline = await readViewport(session);
   let primaryError;
   try {
   await drag(session,.7); await drag(session,.3,1);
@@ -219,12 +221,12 @@ async function runGridSplitWidths({session,report}) {
   const narrow=await session.eval(geometry);
   report.ok('infeasible minimum falls back to equal positive halves without losing preference',narrow.cells.every(c=>c.width>0&&Math.abs(c.width-narrow.cells[0].width)<2)&&narrow.saved===saved&&narrow.savedBottom===savedBottom,narrow);
   report.ok('narrow grid introduces no page overflow',await session.eval('document.documentElement.scrollWidth<=innerWidth'));
-  await session.send('Emulation.clearDeviceMetricsOverride');await settle(session);
+  await clearAndSettle(session, baseline);await settle(session);
   const restored=await session.eval(geometry);
   report.ok('wide viewport restores preferred fraction',Math.abs(restored.cells[0].width/(restored.grid.width-restored.gap)-saved)<.005&&Math.abs(restored.cells[2].width/(restored.grid.width-restored.gap)-savedBottom)<.005,restored);
   } catch (error) { primaryError = error; throw error; }
   finally {
-    try { await session.send('Emulation.clearDeviceMetricsOverride'); }
+    try { await clearAndSettle(session, baseline); }
     catch (error) {
       if (primaryError) {
         const message = `grid viewport cleanup FAILED: ${error.message}`;

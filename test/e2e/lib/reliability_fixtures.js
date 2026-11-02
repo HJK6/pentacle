@@ -28,6 +28,10 @@ async function viewportReliability(ctx) {
       assert.equal(await measure('post-override'), 390);
       throw Error('forced mobile assertion');
     }, fixtureCtx);
+    await measure('post-settle');
+    const cleared = observed.measurements.find(item => item.label === 'post-clear');
+    const settled = observed.measurements.find(item => item.label === 'post-settle');
+    if (cleared && settled) observed.settleMs = Date.parse(settled.at) - Date.parse(cleared.at);
     nextFailed = await dispatchScenario('baseline-fixture', async () => {
       nextWidth = await measure('next-scenario');
       assert.equal(nextWidth, baseline);
