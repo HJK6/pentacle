@@ -310,9 +310,10 @@ returns `prompt.ask.ruled` (exit 76). `prompt status` shows the ruling state
 while held; a pending request may be withdrawn with `prompt cancel`. An
 in-flight approved release must finish before the posted question can be
 cancelled. `--await-answer` uses one timeout for the ruling and answer waits.
-Silence or lost advisor authority holds the card. Explicit authority disable is
-an audited override: pending and newly bypassed cards publish through the same
-release path and are recorded; restart recovery retries unfinished publication.
+Silence or lost advisor authority holds the card. If no authority is configured,
+new cards use the audited bypass and publish through the same release path.
+Explicit authority disable also publishes pending and newly bypassed cards;
+restart recovery retries unfinished publication.
 
 ## Progress and decisions
 

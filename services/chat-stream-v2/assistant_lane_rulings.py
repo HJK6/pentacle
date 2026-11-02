@@ -849,9 +849,9 @@ class AssistantLaneRulings:
                     (request_id, key, action, intent_digest, _canonical(stored_intent), requester,
                      requester_generation, binding["stream_id"], binding["generation"], target,
                      target_generation, prior_link or None, now, now + self.sla_s,
-                     "bypassed" if action == "question" and binding["state"] == "disabled" else "pending", int(covered)),
+                     "bypassed" if action == "question" and binding["state"] in {"disabled", "unconfigured"} else "pending", int(covered)),
                 )
-                if action == "question" and binding["state"] == "disabled":
+                if action == "question" and binding["state"] in {"disabled", "unconfigured"}:
                     conn.execute("UPDATE v2_assistant_lane_rulings SET reason='bypassed' WHERE ruling_request_id=?", (request_id,))
                     self._audit_conn(conn, request_id, "bypassed", requester, requester_generation)
                 self._audit_conn(conn, request_id, "request", requester, requester_generation, action)
