@@ -289,6 +289,7 @@ class AssistantLaneRulings:
                     or seat.get("pane_status") != "pane_alive"
                     or not seat.get("session_generation")):
                 raise ValueError("assistant_authority_target_unavailable")
+        disabled_rows = []
         async with self._authority_lock:
             def configure_conn(conn: sqlite3.Connection) -> None:
                 with conn:
@@ -369,7 +370,13 @@ class AssistantLaneRulings:
             await self.store.submit(configure_conn)
             result = await self.binding()
             if result["state"] in {"disabled", "unconfigured", "same_primary"}:
-                await self._disable_pending(include_covered=result["state"] == "disabled")
+                disabled_rows = await self._disable_pending(include_covered=result["state"] == "disabled")
+        # Publication acquires the producer lifecycle lock; never wait for it
+        # while holding the authority lock needed by a fresh ask.
+        for request in disabled_rows:
+            await self._release(request)
+            if request["action"] != "question":
+                await self._notify_unruled(request)
         self._ensure_worker()
         return {"type": "assistant.authority.ok", **result}
 
@@ -1479,7 +1486,7 @@ class AssistantLaneRulings:
             if request is not None:
                 await self._result_notice(request)
 
-    async def _disable_pending(self, *, include_covered: bool = True) -> None:
+    async def _disable_pending(self, *, include_covered: bool = True) -> list[dict[str, Any]]:
         def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             with conn:
                 eligible = "state='pending'" if include_covered else "state='pending' AND covered=0"
@@ -1491,10 +1498,7 @@ class AssistantLaneRulings:
                     self._audit_conn(conn, rid, "disabled", stream_id, generation)
                 return [effective_ruling(conn, row) for row in conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE state='unruled_disabled'")]
-        for request in await self.store.submit(op):
-            await self._release(request)
-            if request["action"] != "question":
-                await self._notify_unruled(request)
+        return await self.store.submit(op)
 
     async def tick(self) -> None:
         try:
