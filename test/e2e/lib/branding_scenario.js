@@ -1,4 +1,5 @@
 'use strict';
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -26,6 +27,7 @@ async function waitForDocument(page, url, cdp) {
 async function branding(ctx) {
   const { session, report, cdp, cdpPort, url } = ctx;
   const observations = { assets: [], layouts: [], auxiliary: [], fallbackRequests: [] };
+  const baseline = await readViewport(session);
   const before = await session.eval(`({theme: document.documentElement.dataset.theme,
     style: document.documentElement.classList.contains('chat-first-style'),
     refreshHidden: document.getElementById('web-refresh-btn').hidden})`);
@@ -37,6 +39,7 @@ async function branding(ctx) {
   };
   session.ws.on('message', network);
   await session.send('Network.enable');
+  let primaryError;
   try {
     // Observe a complete main-page navigation, including its initial favicon.
     await session.eval('window.__brandingNavigationPending = true');
@@ -139,14 +142,23 @@ async function branding(ctx) {
       await session.screenshot(path.join(report.dir, `branding-${style ? 'chat-first' : 'classic'}-${theme}-${width}.png`));
     }
     report.ok('declared icons avoid the browser favicon.ico fallback', observations.fallbackRequests.length === 0, observations.fallbackRequests);
-  } finally {
+  } catch (error) { primaryError = error; throw error; } finally {
+    let cleanupError;
+    const cleanup = async (label, action) => {
+      try { await action(); }
+      catch (error) {
+        if (primaryError || cleanupError) report.note(`branding ${label} cleanup FAILED: ${error.message}`);
+        else cleanupError = error;
+      }
+    };
     session.ws.off('message', network);
-    fs.writeFileSync(path.join(report.dir, 'branding-observations.json'), JSON.stringify(observations, null, 2));
-    await session.send('Emulation.clearDeviceMetricsOverride');
-    await session.eval(`document.documentElement.classList.toggle('chat-first-style',${before.style});
+    await cleanup('viewport', () => clearAndSettle(session, baseline));
+    await cleanup('state', () => session.eval(`document.documentElement.classList.toggle('chat-first-style',${before.style});
       document.querySelector('[data-setting="theme"] [data-value="${before.theme}"]').click();
       document.getElementById('web-refresh-btn').hidden=${before.refreshHidden};
-      document.getElementById('settings-close').click()`);
+      document.getElementById('settings-close').click()`));
+    await cleanup('artifact', () => fs.writeFileSync(path.join(report.dir, 'branding-observations.json'), JSON.stringify(observations, null, 2)));
+    if (cleanupError) throw cleanupError;
   }
 }
 

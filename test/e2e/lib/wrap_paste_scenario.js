@@ -4,11 +4,13 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const seeded = require('../fixtures/wrap-paste.json');
 const { reloadDashboardPage } = require('./dashboard_scenario');
+const { readViewport, clearAndSettle } = require('./viewport_settle');
 const { wrapSourceEvent, assertFreshWrapFixture, buildWrapSourceProofScript, pasteFixture } = require('./render_proofs');
 
 async function wrapPasteProof(ctx) {
   const { session, report, cdp, fixture, wrapProof, timeoutMs, url } = ctx;
   if (!fixture && !wrapProof) { report.note('wrap/paste needs its seeded fixture or an explicit served proof identity'); return; }
+  const baseline = await readViewport(session);
   const identity = wrapProof || seeded;
   const streamId = identity.streamId;
   const input = '#cell-0 .slot-chat-compose-input';
@@ -77,7 +79,7 @@ async function wrapPasteProof(ctx) {
         observed.records.length === 3 && observed.records.every(row => row.chars >= 300 && row.fits && row.lines > 1 && row.copyExact)
           && observed.hrefExact && observed.pageFits, observed);
     }
-    await session.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await clearAndSettle(session, baseline);
     const caption = `wrap-paste ${identity.fixtureId}`;
     const image = await session.eval(`(${pasteFixture.toString()})(${JSON.stringify({ draft: 'before SELECT after', selection: [7, 13], text: caption, expected: 'before ' + caption + ' after' })})`);
     report.ok('mixed clipboard image/text preserves selection replacement and caret',
@@ -111,6 +113,8 @@ async function wrapPasteProof(ctx) {
     primaryError = error;
     throw error;
   } finally {
+    try { await clearAndSettle(session, baseline); }
+    catch (error) { if (primaryError) report.note(`wrap viewport cleanup FAILED: ${error.message}`); else primaryError = error; }
     try {
       if (!wrapProof) {
         result.cleanup = { workspaceReset: false };
@@ -118,12 +122,14 @@ async function wrapPasteProof(ctx) {
         result.cleanup.workspaceReset = true;
       }
     } catch (error) {
+      result.cleanup ||= {};
       result.cleanup.error = error.message;
-      if (primaryError) throw new AggregateError([primaryError, error], 'wrap proof failed; workspace reset also failed');
-      throw error;
+      if (primaryError) { report.note(`wrap workspace cleanup FAILED: ${error.message}`); } else throw error;
     } finally {
-      fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2));
+      try { fs.writeFileSync(path.join(report.dir, 'wrap-paste-proof.json'), JSON.stringify(result, null, 2)); }
+      catch (error) { if (primaryError) report.note(`wrap artifact cleanup FAILED: ${error.message}`); else throw error; }
     }
+    if (primaryError && result.status === 'PASS') throw primaryError;
   }
 }
 module.exports = { wrapPasteProof };

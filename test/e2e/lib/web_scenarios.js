@@ -627,6 +627,8 @@ const SCENARIOS = [
   ['closed-chat-slot', closedChatSlot],
   // Host-restart walk runs LAST: it tears the host process (and briefly the
   // daemon) down, so it must not disturb the deterministic scenarios above.
+  ['reliability-viewport-fixture', require('./reliability_fixtures').viewportReliability],
+  ['reliability-capture-fixture', require('./reliability_fixtures').captureReliability],
   ['host-restart-restores-input', hostRestartRestoresInput],
 ];
 

@@ -72,6 +72,7 @@ class CdpSession {
     /** Raw console lines (for debugging / artifacts). */
     this.consoleLines = [];
     this._beaconListeners = new Set();
+    this._consolePending = new Set();
 
     ws.on('message', (raw) => {
       let msg;
@@ -89,25 +90,110 @@ class CdpSession {
         return;
       }
       if (msg.method === 'Runtime.consoleAPICalled') this._onConsole(msg.params);
+      if (msg.method === 'Runtime.exceptionThrown') this._onException(msg.params);
     });
   }
 
-  _onConsole(params) {
+  _queueConsole(entry, work) {
+    // Reserve the arrival position synchronously, even when handles resolve later.
+    this.consoleLines.push(entry);
+    const pending = Promise.resolve().then(work).catch(() => { entry.text = '[unavailable]'; });
+    this._consolePending.add(pending);
+    pending.finally(() => this._consolePending.delete(pending));
+  }
+
+  async drainConsole() {
+    while (this._consolePending.size) await Promise.all([...this._consolePending]);
+  }
+
+  async _consoleArg(arg) {
+    if (!arg) return '[unavailable]';
+    if ('value' in arg) return typeof arg.value === 'string' ? arg.value : String(arg.value);
+    if (arg.subtype === 'null') return 'null';
+    if (!arg.objectId) return arg.unserializableValue || arg.description || '[unavailable]';
     try {
-      const args = (params.args || []).map((a) => (a && 'value' in a ? a.value : a && a.description) || '');
-      const text = args.join(' ');
-      this.consoleLines.push({ ts: Date.now(), type: params.type, text });
-      // [HARNESS] beacons are emitted as a single string arg: "[HARNESS] {json}".
-      const first = typeof args[0] === 'string' ? args[0] : '';
-      if (first.startsWith('[HARNESS] ')) {
+      const result = await this.send('Runtime.callFunctionOn', {
+        objectId: arg.objectId, returnByValue: true, silent: true,
+        functionDeclaration: `function () {
+          const seen = new WeakSet();
+          let budget = 2048;
+          const secrets = new Set(['token','secret','password','dsn','authorization','cookie']);
+          function walk(v, depth) {
+            if (--budget < 0) return '[truncated]';
+            if (typeof v === 'string') { budget -= v.length; return budget < 0 ? '[truncated]' : v; }
+            if (typeof v === 'function' || typeof v === 'symbol' || typeof v === 'undefined') return '[unavailable]';
+            if (v === null || typeof v !== 'object') return typeof v === 'bigint' ? String(v) : v;
+            if (seen.has(v)) return '[cyclic]';
+            if (depth >= 3) return '[truncated]';
+            seen.add(v);
+            const array = Array.isArray(v);
+            const out = array ? [] : Object.create(null);
+            if (array) Object.setPrototypeOf(out, null);
+            try {
+              if (array) {
+                const length = Math.min(v.length, 256);
+                let index = 0;
+                for (; index < length; index++) {
+                  budget -= 4;
+                  if (budget < 0 || !Object.prototype.hasOwnProperty.call(v, index)) break;
+                  const descriptor = Object.getOwnPropertyDescriptor(v, String(index));
+                  out[index] = descriptor && 'value' in descriptor ? walk(descriptor.value, depth + 1) : '[unavailable]';
+                }
+                if (index < v.length) out[index] = '[truncated]';
+              } else {
+                for (const key of Object.keys(v)) {
+                  budget -= key.length + 4;
+                  if (budget < 0) { out['[truncated]'] = '[truncated]'; break; }
+                  if (secrets.has(key.toLowerCase())) out[key] = '[redacted]';
+                  else {
+                    const descriptor = Object.getOwnPropertyDescriptor(v, key);
+                    out[key] = descriptor && 'value' in descriptor ? walk(descriptor.value, depth + 1) : '[unavailable]';
+                  }
+                }
+              }
+            } catch (_) { return '[unavailable]'; }
+            return out;
+          }
+          return JSON.stringify(walk(this, 0));
+        }`,
+      });
+      if (result.exceptionDetails || !result.result || typeof result.result.value !== 'string') return '[unavailable]';
+      return Buffer.byteLength(result.result.value) > 2048 ? '[truncated]' : result.result.value;
+    } catch { return '[unavailable]'; }
+  }
+
+  _onConsole(params) {
+    const args = params.args || [];
+    const entry = { ts: Date.now(), type: params.type, text: args.map(arg => {
+      if (arg && 'value' in arg) return String(arg.value);
+      if (arg?.subtype === 'null') return 'null';
+      return '[unavailable]';
+    }).join(' ') };
+    // Beacon processing remains synchronous and independent of object extraction.
+    const first = args[0] && typeof args[0].value === 'string' ? args[0].value : '';
+    if (first.startsWith('[HARNESS] ')) {
+      try {
         const beacon = JSON.parse(first.slice('[HARNESS] '.length));
         beacon._arrivedAt = Date.now();
         this.beacons.push(beacon);
         for (const l of this._beaconListeners) l(beacon);
-      }
-    } catch {
-      /* never throw from the console pump */
+      } catch { /* malformed beacons are still recorded as console entries */ }
     }
+    this._queueConsole(entry, async () => {
+      const values = await Promise.all(args.map((arg) => this._consoleArg(arg)));
+      entry.text = values.join(' ');
+      if (Buffer.byteLength(JSON.stringify(entry)) > 8192) entry.text = '[truncated]';
+    });
+  }
+
+  _onException(params) {
+    const details = params.exceptionDetails || {};
+    const ex = details.exception || {};
+    const entry = { ts: Date.now(), type: 'exception', text: ex.description || ex.value || details.text || '',
+      url: details.url || '', line: details.lineNumber ?? null,
+      stack_head: (ex.description || details.stackTrace?.callFrames?.[0]?.functionName || '').split('\n').slice(0, 2).join('\n') };
+    if (Buffer.byteLength(JSON.stringify(entry)) > 8192) { entry.text = '[truncated]'; entry.stack_head = '[truncated]'; entry.url = '[truncated]'; }
+    this._queueConsole(entry, async () => {});
   }
 
   send(method, params = {}) {
