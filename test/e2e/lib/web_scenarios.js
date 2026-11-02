@@ -536,6 +536,43 @@ async function settingsVersionLine(ctx) {
   await session.eval(`document.getElementById('settings-close').click()`);
 }
 
+// Match the saved session name, not its UI host alias: a composite stream's
+// prefix can differ from the daemon host and focusStreamId can use a local alias.
+function advisorProbeSlot(bindings, sessionName) {
+  const slots = (bindings || []).map((binding, index) => binding && binding.name === sessionName ? index : -1).filter(index => index >= 0);
+  if (slots.length > 1) throw new Error('ambiguous probe session in workspace');
+  return slots.length ? slots[0] : -1;
+}
+
+// External-daemon proof: the probe body must include its exact question ID.
+async function advisorQuestionRendered({ session, report, fixture, timeoutMs, cdp }) {
+  if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
+  const questionId = process.env.PENTACLE_CARD_PROBE_ID;
+  const screenshot = process.env.PENTACLE_CARD_PROBE_SCREENSHOT;
+  const stream = process.env.PENTACLE_CARD_PROBE_STREAM;
+  const host = process.env.PENTACLE_CARD_PROBE_HOST;
+  if (!questionId || !screenshot || !stream || !host) throw new Error('PENTACLE_CARD_PROBE_ID, PENTACLE_CARD_PROBE_SCREENSHOT, PENTACLE_CARD_PROBE_STREAM and PENTACLE_CARD_PROBE_HOST are required');
+  await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
+  await session.waitFor(`window.focusStreamId(${JSON.stringify(stream)}) === true`, { timeoutMs });
+  const slot = await waitForValue(session, cdp,
+    `window.cc.getChatStreamState().then(s => { const target=(s.sessions || []).find(item => item.stream_id === ${JSON.stringify(stream)}); const saved=JSON.parse(localStorage.getItem('pentacle.workspace.v1') || '{}'); return target ? (${advisorProbeSlot.toString()})(saved.bindings, target.session_name || target.name) : -1; })`, (value) => Number.isInteger(value) && value >= 0,
+    { timeoutMs, label: 'assistant stream bound to a slot' });
+  await session.click(`#header-${slot} [data-mode="chat"]`);
+  await session.waitFor(`!!document.querySelector('#cell-${slot} .slot-chat-question-open')`, { timeoutMs });
+  await session.click(`#cell-${slot} .slot-chat-question-open`);
+  const portal = `#desktop-question-portal-${stream.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  await session.waitFor(`!!document.querySelector(${JSON.stringify(portal + ' [data-notification-id]')})`, { timeoutMs });
+  const expression = `Array.from(document.querySelectorAll(${JSON.stringify(portal + ' [data-notification-id]')})).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
+  const count = await session.eval(`document.querySelectorAll(${JSON.stringify(portal + ' .desktop-question-dot')}).length`);
+  let found = await session.eval(expression);
+  for (let index = 0; !found && index < count; index++) {
+    await session.click(`${portal} .desktop-question-dot:nth-child(${index + 1})`);
+    found = await session.eval(expression);
+  }
+  report.ok('probe question ID rendered in assistant card', found, { questionId });
+  await session.screenshot(screenshot);
+}
+
 const SCENARIOS = [
   // Must run first: it needs the gate's fresh browser profile (no saved
   // workspace) and leaves a saved classic four-pane choice for the rest.
@@ -569,6 +606,7 @@ const SCENARIOS = [
   // the page at both ends, so it neither depends on nor disturbs its neighbours.
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
+  ['advisor-question-rendered', advisorQuestionRendered],
   ['question-free-text', questionFreeText],
   ['question-partial-send', questionPartialSend],
   ['question-skip', questionSkip],
@@ -594,6 +632,7 @@ const SCENARIOS = [
 
 module.exports = {
   waitForValue,
+  advisorProbeSlot,
   pollUntil,
   transportAndConfig,
   settingsVersionLine,
