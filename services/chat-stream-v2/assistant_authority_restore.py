@@ -160,10 +160,10 @@ class AuthorityRestore:
             return
         existing = await self.current(stream, generation)
         if existing and existing['state'] == 'exhausted':
-            await self.notice('authority_restore_exhausted', str(existing['episode_id']),
+            await self.notice('authority_restore_exhausted', f"{existing['episode_id']}:{existing['budget_epoch']}",
                 {'episode': existing['episode_id'], 'errors': json.loads(existing['errors'])})
         if existing and existing['state'] == 'unresolved':
-            await self.notice('authority_restore_unresolved', str(existing['episode_id']),
+            await self.notice('authority_restore_unresolved', f"{existing['episode_id']}:{existing['budget_epoch']}",
                 {'spawn_key': existing['spawn_key'], 'stream': existing['successor'],
                  'evidence': existing['last_error']})
         if existing and existing['state'] in ('pending', 'spawning', 'unresolved'):
@@ -296,7 +296,7 @@ class AuthorityRestore:
                     'next_attempt_at': None if exhausted else self.clock() + (60 if used == 1 else 180)},
                     'attempt_failed', {'reason': 'brief_unreadable'})
                 if updated and exhausted:
-                    await self.notice('authority_restore_exhausted', str(episode['episode_id']),
+                    await self.notice('authority_restore_exhausted', f"{episode['episode_id']}:{episode['budget_epoch']}",
                                       {'episode': episode['episode_id'], 'errors': errors})
                 return
             seq = episode['attempt_seq'] + 1
@@ -329,7 +329,7 @@ class AuthorityRestore:
                   'errors': canonical(errors), 'next_attempt_at': None if exhausted else self.clock() + (60 if used <= 1 else 180)}
         updated = await self.update(episode, fields, 'attempt_failed', {'reason': reason})
         if updated and exhausted:
-            await self.notice('authority_restore_exhausted', str(episode['episode_id']),
+            await self.notice('authority_restore_exhausted', f"{episode['episode_id']}:{episode['budget_epoch']}",
                               {'episode': episode['episode_id'], 'errors': errors})
 
     async def reconcile(self, episode: dict) -> str:
@@ -412,7 +412,7 @@ class AuthorityRestore:
             changed = await self.update(episode, {'state': 'unresolved', 'successor': successor,
                 'last_error': reason}, 'still_unresolved', {'spawn_key': episode['spawn_key']})
             if changed:
-                await self.notice('authority_restore_unresolved', str(episode['episode_id']),
+                await self.notice('authority_restore_unresolved', f"{episode['episode_id']}:{episode['budget_epoch']}",
                     {'spawn_key': episode['spawn_key'], 'stream': successor, 'evidence': reason})
 
     async def manual(self, action: str, *, brief_file: str | None = None) -> dict:

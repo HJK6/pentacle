@@ -213,6 +213,15 @@ def test_failed_closed_row_backoffs_exhaust_and_retry_uses_fresh_keys(tmp_path):
             episode = await restore.current(ADVISOR, advisor['session_generation'])
             assert episode['budget_epoch'] == 2 and episode['attempt_seq'] == 4
             assert episode['spawn_key'] not in keys and len(set(keys)) == 3
+            for delay in (60, 180, None):
+                episode = await restore.current(ADVISOR, advisor['session_generation'])
+                fake.outcomes = [{'idempotency_key': episode['spawn_key'], 'state': 'failed'}]
+                await restore.run()
+                if delay:
+                    fake.outcomes = []; now[0] += delay
+                    await restore.run()
+            notices = await store.submit(lambda c: c.execute("SELECT count(*) FROM v2_outbound_notices WHERE notice_id LIKE 'authority-restore:authority_restore_exhausted:%'").fetchone()[0])
+            assert notices == 2
         finally: store.stop()
     asyncio.run(run())
 
