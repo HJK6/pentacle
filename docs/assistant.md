@@ -205,7 +205,8 @@ starts a fresh budget only when it has failed; an uncertain attempt is refused
 with `attempt_unresolved`. A manual `--set` supersedes recovery. `--disable` is
 an audited last resort that releases pending covered work unruled.
 
-`PENTACLE_AUTHORITY_RESTORE=0` disables new automatic episodes. The file
+Automatic recovery is enabled by default; `PENTACLE_AUTHORITY_RESTORE=0`
+disables new automatic episodes. The file
 `authority-restore.inhibit` in the daemon state directory inhibits automatic
 recovery; manual recovery still runs. If the dead authority row is absent and
 no usable shape exists, keep the marker in place while an already-authorized

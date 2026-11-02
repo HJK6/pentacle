@@ -27,7 +27,7 @@ DDL = '''CREATE TABLE IF NOT EXISTS v2_authority_restore_episode (
  generation TEXT NOT NULL, state TEXT NOT NULL, trigger TEXT NOT NULL,
  attempt_seq INTEGER NOT NULL DEFAULT 0, budget_epoch INTEGER NOT NULL DEFAULT 1,
  budget_used INTEGER NOT NULL DEFAULT 0, spawn_key TEXT, attempt_generation TEXT,
- payload TEXT, attempt_started_at REAL, next_attempt_at REAL, successor TEXT,
+ payload TEXT, brief_sha256 TEXT, brief_bytes_ref TEXT, attempt_started_at REAL, next_attempt_at REAL, successor TEXT,
  last_error TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL,
  updated_at REAL NOT NULL, UNIQUE(stream_id,generation))'''
 AUDIT_DDL = '''CREATE TABLE IF NOT EXISTS v2_authority_restore_audit (
@@ -308,6 +308,8 @@ class AuthorityRestore:
             episode = await self.update(episode, {'state': 'spawning', 'attempt_seq': seq,
                 'budget_used': episode['budget_used'] + 1, 'spawn_key': spawn_key,
                 'attempt_generation': payload['_session_generation'], 'payload': canonical(payload),
+                'brief_sha256': hashlib.sha256(content).hexdigest(),
+                'brief_bytes_ref': f"sqlite:v2_authority_restore_episode:{episode['episode_id']}:payload.initial_prompt",
                 'attempt_started_at': self.clock(), 'next_attempt_at': None}, 'attempt_started',
                 {'brief_sha256': hashlib.sha256(content).hexdigest(),
                  'spawn_key': spawn_key, 'attempt_generation': payload['_session_generation'],
@@ -442,7 +444,8 @@ class AuthorityRestore:
                     if disposition != 'attempt_failed':
                         raise ValueError('attempt_unresolved')
                     episode = await self.current(stream, generation)
-                if episode['state'] not in ('exhausted', 'pending') or not episode['last_error']:
+                if (episode['state'] not in ('exhausted', 'pending') or
+                    not episode['last_error'] or not episode['budget_used']):
                     raise ValueError('attempt_unresolved')
                 await self.update(episode, {'state': 'pending', 'trigger': 'manual',
                     'budget_epoch': episode['budget_epoch'] + 1, 'budget_used': 0,

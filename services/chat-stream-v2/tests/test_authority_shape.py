@@ -73,6 +73,8 @@ def test_restore_waits_for_delivered_outcome_and_adopts(tmp_path):
             episode = await restore.current(ADVISOR, advisor['session_generation'])
             assert episode['state'] == 'spawning'
             assert len(fake.calls) == 1 and fake.calls[0]['initial_prompt'] == 'advisor instructions'
+            assert episode['brief_sha256'] == hashlib.sha256(b'advisor instructions').hexdigest()
+            assert episode['brief_bytes_ref'].endswith(':payload.initial_prompt')
             assert 'account' not in fake.calls[0]
             await store.open_session('fixture-advisor', 'new', provider='codex', pane_status='pane_alive',
                 bootstrap_state='started', session_generation=episode['attempt_generation'])
