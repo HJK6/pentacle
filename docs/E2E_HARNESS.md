@@ -73,9 +73,9 @@ on the launching PATH, then use `--target v2-merge` for the serial closing gate;
 its child PATH and HOME come from the bootstrap rather than the launching shell.
 
 For a workstation with a measured unit overrun, the opt-in `v2-merge-capacity`
-target runs the same serial unit and smoke union with a 1,200-second unit limit
-and the unchanged 900-second smoke limit. Its runner deadline is 2,220 seconds,
-inside a 2,250-second outer subject bound. Qualify it with a complete supported
+target runs the same serial unit and smoke union with a 1,800-second unit limit
+and the unchanged 900-second smoke limit. Its runner deadline is 2,820 seconds,
+inside a 2,850-second outer subject bound. Qualify it with a complete supported
 gate on the intended host and retain the exact source, environment, node counts
 and timings. A pass establishes that observed window, not a timing guarantee.
 The default `v2-merge` and CI budgets are unchanged. The full 60-second hermetic

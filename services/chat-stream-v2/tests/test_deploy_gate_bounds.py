@@ -76,7 +76,7 @@ def test_inline_gate_uses_capacity_bounds(tmp_path: Path, monkeypatch: pytest.Mo
     for name in BOUND_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    assert _captured_bounds(tmp_path) == {"V2_UNIT_TIMEOUT_S": "1200", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert _captured_bounds(tmp_path) == {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def test_inline_gate_forwards_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,7 +110,7 @@ def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch:
         repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, deploy_mod._run
     )
 
-    assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": "1200", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def test_defaults_match_capacity_profile() -> None:
