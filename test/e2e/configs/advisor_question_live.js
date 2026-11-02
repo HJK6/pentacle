@@ -6,6 +6,6 @@ const host = process.env.PENTACLE_CARD_PROBE_HOST;
 if (!url || !tokenPath || !host) throw new Error('PENTACLE_CARD_PROBE_WS_URL, PENTACLE_CARD_PROBE_TOKEN_PATH and PENTACLE_CARD_PROBE_HOST are required');
 module.exports = {
   appName: 'Pentacle', features: { mic: false }, tmux: 'tmux',
-  hosts: { [host]: { kind: 'local' } }, agents: {},
-  chatStream: { url, localHost: host, hosts: [host], tokenPath },
+  hosts: { local: { kind: 'local' } }, agents: {},
+  chatStream: { url, localHost: host, hosts: ['local'], tokenPath },
 };

@@ -536,6 +536,14 @@ async function settingsVersionLine(ctx) {
   await session.eval(`document.getElementById('settings-close').click()`);
 }
 
+// Match the saved session name, not its UI host alias: a composite stream's
+// prefix can differ from the daemon host and focusStreamId can use a local alias.
+function advisorProbeSlot(bindings, sessionName) {
+  const slots = (bindings || []).map((binding, index) => binding && binding.name === sessionName ? index : -1).filter(index => index >= 0);
+  if (slots.length > 1) throw new Error('ambiguous probe session in workspace');
+  return slots.length ? slots[0] : -1;
+}
+
 // External-daemon proof: the probe body must include its exact question ID.
 async function advisorQuestionRendered({ session, report, fixture, timeoutMs, cdp }) {
   if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
@@ -547,7 +555,7 @@ async function advisorQuestionRendered({ session, report, fixture, timeoutMs, cd
   await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
   await session.waitFor(`window.focusStreamId(${JSON.stringify(stream)}) === true`, { timeoutMs });
   const slot = await waitForValue(session, cdp,
-    `window.cc.getChatStreamState().then(s => { const target=(s.sessions || []).find(item => item.stream_id === ${JSON.stringify(stream)}); const saved=JSON.parse(localStorage.getItem('pentacle.workspace.v1') || '{}'); return target ? (saved.bindings || []).findIndex(item => item && item.name === (target.session_name || target.name) && item.hostId === ${JSON.stringify(host)}) : -1; })`, (value) => Number.isInteger(value) && value >= 0,
+    `window.cc.getChatStreamState().then(s => { const target=(s.sessions || []).find(item => item.stream_id === ${JSON.stringify(stream)}); const saved=JSON.parse(localStorage.getItem('pentacle.workspace.v1') || '{}'); return target ? (${advisorProbeSlot.toString()})(saved.bindings, target.session_name || target.name) : -1; })`, (value) => Number.isInteger(value) && value >= 0,
     { timeoutMs, label: 'assistant stream bound to a slot' });
   await session.click(`#header-${slot} [data-mode="chat"]`);
   await session.waitFor(`!!document.querySelector('#cell-${slot} .slot-chat-question-open')`, { timeoutMs });
@@ -624,6 +632,7 @@ const SCENARIOS = [
 
 module.exports = {
   waitForValue,
+  advisorProbeSlot,
   pollUntil,
   transportAndConfig,
   settingsVersionLine,
