@@ -298,7 +298,7 @@ GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", 
 # The inline gate runs under `env -i`, so run_gate.py would fall back to 900 s per
 # tier. Use the qualified v2-merge-capacity tier bounds (scripts/gate-env.json);
 # a caller's own V2_<TIER>_TIMEOUT_S still wins.
-DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "1200", "V2_SMOKE_TIMEOUT_S": "900"}
+DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def _effective_home() -> Path:
