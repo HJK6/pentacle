@@ -296,6 +296,24 @@ authority, adds no ledger, receipt or hold migration, and keeps per-transport
 retry limits, so a resubmitted send after a move can deliver twice. See
 `services/agent-orch/README.md` (Addressing the assistant by alias).
 
+### Question-card rulings
+
+A `prompt.ask` from the authenticated bound direct primary is held after
+validation and producer admission, before a question is created. The advisor
+receives the frozen card and may approve, revise, or deny it. Approval publishes
+the same card; a revision or denial posts nothing and returns the reason. Use a
+fresh question ID for a changed card. Other visible producers and the unused
+composite `question.open` proxy are outside this gate.
+
+A held ask returns `prompt.ask.held` (exit 75); a terminal non-posting ruling
+returns `prompt.ask.ruled` (exit 76). `prompt status` shows the ruling state
+while held; a pending request may be withdrawn with `prompt cancel`. An
+in-flight approved release must finish before the posted question can be
+cancelled. `--await-answer` uses one timeout for the ruling and answer waits.
+Silence or lost advisor authority holds the card. Explicit authority disable is
+an audited override: pending and newly bypassed cards publish through the same
+release path and are recorded; restart recovery retries unfinished publication.
+
 ## Progress and decisions
 
 A currently bound lead can send a concise user-directed update through

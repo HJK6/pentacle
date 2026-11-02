@@ -536,6 +536,22 @@ async function settingsVersionLine(ctx) {
   await session.eval(`document.getElementById('settings-close').click()`);
 }
 
+// External-daemon proof: the probe body must include its exact question ID.
+async function advisorQuestionRendered({ session, report, fixture, timeoutMs }) {
+  if (fixture) { report.note('live advisor question probe excluded from fixture run'); return; }
+  const questionId = process.env.PENTACLE_CARD_PROBE_ID;
+  const screenshot = process.env.PENTACLE_CARD_PROBE_SCREENSHOT;
+  if (!questionId || !screenshot) throw new Error('PENTACLE_CARD_PROBE_ID and PENTACLE_CARD_PROBE_SCREENSHOT are required');
+  await session.waitFor("document.readyState === 'complete' && typeof window.focusStreamId === 'function'", { timeoutMs });
+  await session.waitFor("window.focusStreamId('bart:assistant') === true", { timeoutMs });
+  await session.waitFor("!!document.querySelector('#cell-0 .slot-chat-question-open')", { timeoutMs });
+  await session.click('#cell-0 .slot-chat-question-open');
+  const expression = `Array.from(document.querySelectorAll('[data-notification-id]')).some(el => el.getClientRects().length && el.innerText.includes(${JSON.stringify(questionId)}))`;
+  await session.waitFor(expression, { timeoutMs });
+  report.ok('probe question ID rendered in assistant card', await session.eval(expression), { questionId });
+  await session.screenshot(screenshot);
+}
+
 const SCENARIOS = [
   // Must run first: it needs the gate's fresh browser profile (no saved
   // workspace) and leaves a saved classic four-pane choice for the rest.
@@ -569,6 +585,7 @@ const SCENARIOS = [
   // the page at both ends, so it neither depends on nor disturbs its neighbours.
   ['slot-survives-cc-reconnect', slotSurvivesCcReconnect],
   ['slot-column-split', runGridSplit],
+  ['advisor-question-rendered', advisorQuestionRendered],
   ['question-free-text', questionFreeText],
   ['question-partial-send', questionPartialSend],
   ['question-skip', questionSkip],

@@ -607,6 +607,7 @@ async def run(args: argparse.Namespace) -> int:
         sessions=sessions,
         notice_store=store,
         assistant_binding=assistant_composite.binding if assistant_composite.enabled else None,
+        lane_rulings=server.lane_rulings,
         assistant_stream_id=assistant_composite.config.stream_id if assistant_composite.enabled else "",
     )
     server.notify = notify

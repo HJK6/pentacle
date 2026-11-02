@@ -2632,54 +2632,61 @@ def _prompt_envelope_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def prompt_ask(args: argparse.Namespace) -> int:
+    envelope = None
+    durable = None
+    ruling_request_id = None
     try:
         envelope = _prompt_envelope_from_args(args)
-        payload = {
-            "type": "prompt.ask",
-            "envelope": envelope,
-            "actions": prompt_protocol.notification_actions(envelope),
-            "severity": "info",
-        }
+        payload = {"type": "prompt.ask", "envelope": envelope,
+                   "actions": prompt_protocol.notification_actions(envelope), "severity": "info"}
         config = load_config()
         timeout = float(getattr(args, "timeout", 30.0) or 30.0)
+        deadline = time.monotonic() + timeout
         response = asyncio.run(prompt_ask_once(config, payload, timeout=timeout))
-        if response.get("type") != "prompt.ask.ok":
+        if response.get("type") in {"prompt.ask.held", "prompt.ask.ruled", "prompt.ask.ok"}:
+            durable = response
+            ruling_request_id = response.get("ruling_request_id")
+        kind = response.get("type")
+        if kind == "prompt.ask.ruled":
+            print(json.dumps(response, separators=(",", ":")))
+            return 76
+        if kind == "prompt.ask.held" and not getattr(args, "await_answer", False):
+            print(json.dumps(response, separators=(",", ":")))
+            return 75
+        while kind == "prompt.ask.held" and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            status = asyncio.run(prompt_status_once(config, str(envelope["question_id"]), timeout=remaining))
+            if status.get("type") != "prompt.status.ok":
+                raise RuntimeError(str(status.get("error_code") or "status_failed"))
+            if status.get("state") == "held":
+                response = {"type": "prompt.ask.held", **{k: v for k, v in status.items() if k not in {"type", "state", "ok", "request_id"}}}
+                if status.get("ruling_state") in {"denied", "revised", "withdrawn", "release_blocked"}:
+                    response["type"] = "prompt.ask.ruled"
+                durable = response
+            else:
+                response = asyncio.run(prompt_ask_once(config, payload, timeout=max(0.01, deadline - time.monotonic())))
+                durable = response
+            kind = response.get("type")
+        if kind == "prompt.ask.held":
+            print(json.dumps(response, separators=(",", ":")))
+            return 75
+        if kind == "prompt.ask.ruled":
+            print(json.dumps(response, separators=(",", ":")))
+            return 76
+        if kind != "prompt.ask.ok":
             error_code = str(response.get("error_code") or response.get("error") or "prompt_publish_failed")
-            if error_code in {"notification_store_unavailable", "notification_store_error"}:
-                fallback = prompt_protocol.fallback_response(
-                    envelope,
-                    error_code=error_code,
-                    message=str(response.get("message") or "durable prompt publish failed before creation"),
-                )
-                print(json.dumps(fallback, separators=(",", ":")))
-                print(fallback["inline_prompt"], file=sys.stderr)
-                return 0
             print(json.dumps(response, separators=(",", ":")))
             return 2 if error_code == "prompt_invalid" else 1
-        notice_delivery = (
-            response.get("notice_delivery")
-            if isinstance(response.get("notice_delivery"), dict)
-            else None
-        )
-        notice_target = str(
-            response.get("to_stream_id")
-            or (notice_delivery or {}).get("to_stream_id")
-            or ""
-        )
-        if notice_target and not (
-            notice_delivery is not None
-            and _notice_delivery_is_authoritative(
-                notice_delivery, to_stream_id=notice_target,
-            )
-        ):
+        notice_delivery = response.get("notice_delivery") if isinstance(response.get("notice_delivery"), dict) else None
+        notice_target = str(response.get("to_stream_id") or (notice_delivery or {}).get("to_stream_id") or "")
+        if notice_target and not (notice_delivery is not None and _notice_delivery_is_authoritative(notice_delivery, to_stream_id=notice_target)):
             print(json.dumps(response, separators=(",", ":")))
-            print(
-                "agent-orch prompt ask: live-session notice not delivered: "
-                f"{(notice_delivery or {}).get('error_code') or (notice_delivery or {}).get('delivery_status') or 'missing_notice_delivery'} "
-                f"to {notice_target} "
-                f"correlation {(notice_delivery or {}).get('tell_id') or 'unknown'}; reconcile with prompt status",
-                file=sys.stderr,
-            )
+            print("agent-orch prompt ask: live-session notice not delivered: "
+                  f"{(notice_delivery or {}).get('error_code') or (notice_delivery or {}).get('delivery_status') or 'missing_notice_delivery'} "
+                  f"to {notice_target} correlation {(notice_delivery or {}).get('tell_id') or 'unknown'}; reconcile with prompt status", file=sys.stderr)
             return 1
         if not getattr(args, "await_answer", False):
             print(json.dumps(response, separators=(",", ":")))
@@ -2689,38 +2696,32 @@ def prompt_ask(args: argparse.Namespace) -> int:
         if not notification_id:
             print(json.dumps(response, separators=(",", ":")))
             return 1
-        await_response = asyncio.run(
-            notification_await_once(config, notification_id, timeout=timeout)
-        )
-        if await_response.get("type") != "notification.await.ok":
-            print(json.dumps(await_response, separators=(",", ":")))
+        remaining = deadline - time.monotonic()
+        waited = asyncio.run(notification_await_once(config, notification_id, timeout=remaining)) if remaining > 0 else {"type": "notification.await.timeout"}
+        if waited.get("type") == "notification.await.timeout":
+            print(json.dumps({**response, "answer": None, "awaited": False}, separators=(",", ":")))
+            return 0
+        if waited.get("type") != "notification.await.ok":
+            print(json.dumps(waited, separators=(",", ":")))
             return 1
-        status_response = asyncio.run(
-            prompt_status_once(config, str(envelope["question_id"]), timeout=timeout)
-        )
-        print(json.dumps(status_response, separators=(",", ":")))
-        return 0 if status_response.get("type") == "prompt.status.ok" else 1
+        status = asyncio.run(prompt_status_once(config, str(envelope["question_id"]), timeout=max(0.01, deadline - time.monotonic())))
+        print(json.dumps(status, separators=(",", ":")))
+        return 0 if status.get("type") == "prompt.status.ok" else 1
     except prompt_protocol.PromptValidationError as exc:
-        response = {
-            "type": "prompt.error",
-            "ok": False,
-            "error_code": "prompt_invalid",
-            "error": "prompt_invalid",
-            "message": str(exc),
-        }
-        print(json.dumps(response, separators=(",", ":")))
+        print(json.dumps({"type": "prompt.error", "ok": False, "error_code": "prompt_invalid", "error": "prompt_invalid", "message": str(exc)}, separators=(",", ":")))
         print(f"agent-orch prompt ask: validation failed: {exc}", file=sys.stderr)
         return 2
     except ServiceCredentialUnavailable:
         raise
     except Exception as exc:
-        envelope = _prompt_envelope_from_args(args)
+        if durable is not None and envelope is not None:
+            print(json.dumps({"type": durable.get("type"), "question_id": envelope["question_id"],
+                "ruling_request_id": durable.get("ruling_request_id") or ruling_request_id, "wait_error": str(exc),
+                "reconcile": f"agent-orch prompt status {envelope['question_id']}"}, separators=(",", ":")))
+            return 75
+        envelope = envelope or _prompt_envelope_from_args(args)
         response, _exit_code, message = _direct_rpc_transport_error("prompt", None, exc)
-        fallback = prompt_protocol.fallback_response(
-            envelope,
-            error_code=str(response.get("error_code") or response.get("error") or "daemon_unreachable"),
-            message=message,
-        )
+        fallback = prompt_protocol.fallback_response(envelope, error_code=str(response.get("error_code") or response.get("error") or "daemon_unreachable"), message=message)
         print(json.dumps(fallback, separators=(",", ":")))
         print(fallback["inline_prompt"], file=sys.stderr)
         return 0

@@ -309,6 +309,7 @@ class Notify:
         notice_store: Any = None,
         outbound: Any = None,
         assistant_binding: Any = None,
+        lane_rulings: Any = None,
         assistant_stream_id: str = "",
         alerts: Any = None,
     ) -> None:
@@ -321,6 +322,7 @@ class Notify:
         self._notice_store = notice_store
         self._outbound = outbound
         self._assistant_binding = assistant_binding
+        self._lane_rulings = lane_rulings
         self._assistant_stream_id = str(assistant_stream_id or "")
         self._answer_recovery_after = ""
         if outbound is not None:
@@ -831,6 +833,14 @@ class Notify:
                 qid = str(msg.get("question_id") or "")
                 question = await self._db.call("get_agent_question", qid)
                 if question is None:
+                    auth = msg.get("_auth_context") or {}
+                    row = await self._lane_rulings.question_row(str(auth.get("stream_id") or ""), str(auth.get("session_generation") or ""), qid) if self._lane_rulings and auth.get("token_verified") else None
+                    if row is None and self._lane_rulings:
+                        row = await self._lane_rulings.question_row_by_id(qid)
+                    if row:
+                        held = self._lane_rulings.question_reply(row)
+                        return {"type": "prompt.status.ok", "request_id": request_id, "ok": True,
+                                "state": "held", **{k: v for k, v in held.items() if k not in {"type"}}}
                     return self._prompt_error(request_id, "question_not_found", question_id=qid)
                 question = await self._expire_if_stale(question)
                 return {"type": "prompt.status.ok", "request_id": request_id, "ok": True, "question": question}
@@ -930,6 +940,22 @@ class Notify:
             if assigned:
                 envelope = {**envelope, "spec_id": assigned}
 
+        frozen = {"envelope": envelope, "actions": actions, "severity": str(msg.get("severity") or "info")}
+        if self._lane_rulings is not None and not assistant_proxy:
+            try:
+                held = await self._lane_rulings.request_question(frozen, auth, spec_omitted=spec_omitted)
+            except ValueError as exc:
+                if str(exc) == "assistant_ruling_intent_changed":
+                    return self._prompt_error(request_id, str(exc), question_id=question_id)
+                raise
+            if held is not None:
+                return {**held, "request_id": request_id}
+        return await self._prompt_publish(frozen, request_id=request_id, spec_omitted=spec_omitted)
+
+    async def _prompt_publish(self, frozen: dict, request_id: str, *, spec_omitted: bool = False) -> dict:
+        envelope, actions = frozen["envelope"], frozen["actions"]
+        question_id = str(envelope.get("question_id") or "")
+        generation = envelope.get("producer_session_generation")
         existing = await self._db.call("get_agent_question", question_id)
         if isinstance(existing, dict):
             existing_envelope = (
@@ -969,7 +995,7 @@ class Notify:
 
         question = await self._db.call(
             "create_agent_question", envelope=envelope, actions=actions,
-            severity=str(msg.get("severity") or "info"),
+            severity=frozen["severity"],
         )
         notification = await self._db.call("get_notification", str(question.get("notification_id") or ""))
         client_notification = await self._serialize(notification)
@@ -1255,6 +1281,13 @@ class Notify:
                                       message="note must be a string")
         question = await self._db.call("get_agent_question", qid)
         if question is None:
+            auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
+            if self._lane_rulings and auth.get("token_verified"):
+                row = await self._lane_rulings.withdraw_question(str(auth.get("stream_id") or ""), str(auth.get("session_generation") or ""), qid)
+                if row:
+                    if row["state"] == "withdrawn" and row["_withdrawn_now"]:
+                        return {"type": "prompt.cancel.ok", "request_id": request_id, "ok": True, "held": True, "state": "withdrawn"}
+                    return self._prompt_error(request_id, "question_release_pending" if row["state"] == "approved" else "question_terminal_state", question_id=qid, state=row["state"])
             return self._prompt_error(request_id, "question_not_found", question_id=qid)
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         proxy_cancel = bool(
@@ -1323,6 +1356,24 @@ class Notify:
             limit=raw_limit if isinstance(raw_limit, int) else None,
         )
         questions = await self._sweep_stale_open_questions(questions)
+        if self._lane_rulings is not None:
+            auth = msg.get("_auth_context") or {}
+            producer = str(auth.get("stream_id") or "")
+            generation = str(auth.get("session_generation") or "")
+            if auth.get("token_verified") and producer and (not producer_stream_id or producer_stream_id == producer):
+                rows = await self._lane_rulings.store.submit(lambda conn: [dict(row) for row in conn.execute(
+                    "SELECT * FROM v2_assistant_lane_rulings WHERE action='question' AND requester_stream_id=? AND requester_generation=? AND state != 'done' ORDER BY created_at DESC",
+                    (producer, generation))])
+                for row in rows:
+                    intent = json.loads(row["intent_json"])
+                    if msg.get("spec_id") and intent["envelope"].get("spec_id") != msg["spec_id"]:
+                        continue
+                    if raw_open and row["state"] not in {"pending", "approved", "bypassed", "unruled_disabled"}:
+                        continue
+                    questions.append({"question_id": intent["envelope"].get("question_id"), "state": "held",
+                                      **{k: v for k, v in self._lane_rulings.question_reply(row).items() if k != "type"}})
+                if raw_limit is not None:
+                    questions = questions[:raw_limit]
         response = {"type": "prompt.list.ok", "request_id": request_id, "ok": True, "questions": questions}
         if scope is not None:
             response["producer_stream_ids"] = scope

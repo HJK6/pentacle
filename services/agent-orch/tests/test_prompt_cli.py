@@ -569,7 +569,8 @@ def test_prompt_ask_await_answer_reads_back_status(monkeypatch, capsys):
     response = json.loads(capsys.readouterr().out)
     assert response["type"] == "prompt.status.ok"
     assert response["question"]["answer"]["value"]["answer"] == "proceed"
-    assert calls == [("ask", "q-1", 7.0), ("await", "n-1", 7.0), ("status", "q-1", 7.0)]
+    assert [(kind, identity) for kind, identity, _ in calls] == [("ask", "q-1"), ("await", "n-1"), ("status", "q-1")]
+    assert 0 < calls[2][2] <= calls[1][2] <= calls[0][2] == 7.0
 
 
 def test_prompt_ask_accepts_free_text(monkeypatch, capsys):
@@ -828,3 +829,91 @@ def test_prompt_ask_loudly_surfaces_missing_authoritative_notice(monkeypatch, ca
     assert "live-session notice not delivered" in captured.err
     assert "hostb:codex-lead" in captured.err
     assert "correlation unknown" in captured.err
+
+
+def test_prompt_ask_held_and_ruled_exit_codes(monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'hostb:codex-a')
+    monkeypatch.setattr(cli, 'load_config', lambda: object())
+    replies = iter([{'type': 'prompt.ask.held', 'ruling_request_id': 'r1', 'ruling_state': 'pending'},
+                    {'type': 'prompt.ask.ruled', 'ruling_request_id': 'r1', 'ruling_state': 'denied', 'reason': 'answer'}])
+    async def ask(*_args, **_kwargs):
+        return next(replies)
+    monkeypatch.setattr(cli, 'prompt_ask_once', ask)
+    args = cli.build_parser().parse_args(['prompt', 'ask', '--question-id', 'q', '--title', 'Choose', '--body', 'Pick one', '--option', 'Yes=yes'])
+    assert cli.prompt_ask(args) == 75
+    assert json.loads(capsys.readouterr().out)['type'] == 'prompt.ask.held'
+    assert cli.prompt_ask(args) == 76
+    assert json.loads(capsys.readouterr().out)['reason'] == 'answer'
+
+
+def test_prompt_ask_held_wait_transport_loss_reconciles_without_fallback(monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'hostb:codex-a')
+    monkeypatch.setattr(cli, 'load_config', lambda: object())
+    async def ask(*_args, **_kwargs):
+        return {'type': 'prompt.ask.held', 'ruling_request_id': 'r1', 'ruling_state': 'pending'}
+    async def status(*_args, **_kwargs):
+        raise OSError('disconnected')
+    monkeypatch.setattr(cli, 'prompt_ask_once', ask)
+    monkeypatch.setattr(cli, 'prompt_status_once', status)
+    args = cli.build_parser().parse_args(['prompt', 'ask', '--question-id', 'q', '--title', 'Choose', '--body', 'Pick one', '--option', 'Yes=yes', '--await-answer'])
+    assert cli.prompt_ask(args) == 75
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)['reconcile'] == 'agent-orch prompt status q'
+    assert 'AGENT_QUESTION_V1' not in captured.out + captured.err
+
+
+def test_prompt_ask_published_unanswered_timeout_is_durable(monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'hostb:codex-a')
+    monkeypatch.setattr(cli, 'load_config', lambda: object())
+    async def ask(*_args, **_kwargs):
+        return {'type': 'prompt.ask.ok', 'question': {'question_id': 'q', 'notification_id': 'n'}}
+    async def await_answer(*_args, **_kwargs):
+        return {'type': 'notification.await.timeout'}
+    monkeypatch.setattr(cli, 'prompt_ask_once', ask)
+    monkeypatch.setattr(cli, 'notification_await_once', await_answer)
+    args = cli.build_parser().parse_args(['prompt', 'ask', '--question-id', 'q', '--title', 'Choose', '--body', 'Pick one', '--option', 'Yes=yes', '--await-answer'])
+    assert cli.prompt_ask(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['type'] == 'prompt.ask.ok' and result['answer'] is None and result['awaited'] is False
+
+
+def test_prompt_ask_waits_for_ruling_and_answer_with_one_timeout(monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'hostb:codex-a')
+    monkeypatch.setattr(cli, 'load_config', lambda: object())
+    calls = []
+    async def ask(*_args, **kwargs):
+        calls.append(('ask', kwargs['timeout']))
+        if len([c for c in calls if c[0] == 'ask']) == 1:
+            return {'type': 'prompt.ask.held', 'ruling_request_id': 'r', 'ruling_state': 'pending'}
+        return {'type': 'prompt.ask.ok', 'question': {'question_id': 'q', 'notification_id': 'n'}}
+    async def status(*_args, **kwargs):
+        calls.append(('status', kwargs['timeout']))
+        return {'type': 'prompt.status.ok', 'question': {'question_id': 'q', 'state': 'answered'}}
+    async def await_answer(*_args, **kwargs):
+        calls.append(('await', kwargs['timeout']))
+        return {'type': 'notification.await.ok', 'answer': {'text': 'yes'}}
+    monkeypatch.setattr(cli, 'prompt_ask_once', ask)
+    monkeypatch.setattr(cli, 'prompt_status_once', status)
+    monkeypatch.setattr(cli, 'notification_await_once', await_answer)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _seconds: None)
+    args = cli.build_parser().parse_args(['prompt', 'ask', '--question-id', 'q', '--title', 'Choose', '--body', 'Pick one', '--option', 'Yes=yes', '--await-answer', '--timeout', '7'])
+    assert cli.prompt_ask(args) == 0
+    assert json.loads(capsys.readouterr().out)['question']['state'] == 'answered'
+    assert [c[0] for c in calls] == ['ask', 'status', 'ask', 'await', 'status']
+    assert all(0 < c[1] <= 7 for c in calls)
+
+
+def test_prompt_ask_pending_timeout_keeps_hold_without_fallback(monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_ORCH_STREAM_ID', 'hostb:codex-a')
+    monkeypatch.setattr(cli, 'load_config', lambda: object())
+    async def ask(*_args, **_kwargs):
+        return {'type': 'prompt.ask.held', 'ruling_request_id': 'r', 'ruling_state': 'pending'}
+    monkeypatch.setattr(cli, 'prompt_ask_once', ask)
+    times = iter([0, 0, 1, 2, 3])
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: next(times, 3))
+    monkeypatch.setattr(cli.time, 'sleep', lambda _seconds: None)
+    args = cli.build_parser().parse_args(['prompt', 'ask', '--question-id', 'q', '--title', 'Choose', '--body', 'Pick one', '--option', 'Yes=yes', '--await-answer', '--timeout', '1'])
+    assert cli.prompt_ask(args) == 75
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)['type'] == 'prompt.ask.held'
+    assert 'AGENT_QUESTION_V1' not in captured.out + captured.err
