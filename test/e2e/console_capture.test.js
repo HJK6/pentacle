@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,7 +13,7 @@ const { captureReliability, viewportReliability } = require('./lib/reliability_f
 test('console fixture captures structured entries and exceptions', async () => {
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'console-capture-'));
-  const chrome = spawn(process.env.PENTACLE_CHROME || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome'), ['--headless=new', '--disable-gpu', '--window-size=1600,1000', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, pathToFileURL(path.join(__dirname, 'fixtures/console_capture.html')).href], {stdio:'ignore'});
+  const chrome = spawn(process.env.PENTACLE_CHROME || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome'), [...headlessChromeArgs(), '--disable-gpu', '--window-size=1600,1000', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, pathToFileURL(path.join(__dirname, 'fixtures/console_capture.html')).href], {stdio:'ignore'});
   let session;
   try {
     session = await connect(port, {match:/console_capture/, timeoutMs:15000});
