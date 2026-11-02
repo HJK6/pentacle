@@ -241,13 +241,17 @@ function assertNotStopping(runtime) {
 }
 
 class Report {
-  constructor(dir) { this.dir = dir; this.steps = []; fs.mkdirSync(dir, { recursive: true }); }
+  constructor(dir) { this.dir = dir; this.steps = []; this.diagnostics = []; fs.mkdirSync(dir, { recursive: true }); }
   ok(name, passed, detail = null) {
     this.steps.push({ name, ok: !!passed, detail });
     console.log(`   ${passed ? '✓' : '✗'} ${name}${passed ? '' : `  ${JSON.stringify(detail)}`}`);
     if (!passed) throw new Error(`assertion failed: ${name}`);
   }
   note(text) { console.log(`   · ${text}`); }
+  diagnostic(name, detail) {
+    this.diagnostics.push({ name, detail });
+    console.log(`   · ${name}: ${JSON.stringify(detail)}`);
+  }
   write(extra = {}) {
     const failedScenarios = extra.failedScenarios || 0;
     // A setup/teardown error (the catch path) is a FAIL even though no scenario
@@ -256,7 +260,7 @@ class Report {
     const verdict = {
       scenario: 'web_gate', at: new Date().toISOString(),
       status,
-      steps: this.steps, ...extra,
+      steps: this.steps, diagnostics: this.diagnostics, ...extra,
     };
     fs.writeFileSync(path.join(this.dir, 'verdict.json'), JSON.stringify(verdict, null, 2));
     return verdict;

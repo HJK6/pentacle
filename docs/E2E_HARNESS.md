@@ -349,9 +349,16 @@ The fixture waits for the owned daemon's existing post-configuration
 alone can precede finisher setup and leave the host's initial capability cache
 on the legacy path. The log wait starts at that process's spawn byte offset. A
 reload before the commit is the control, and it loses the take on every build.
-If the journey fails, its detail records the voice operation's state, failure
-code and milestone times, the origin session's status and generation, and the
-scenario's own step times. It never records message text.
+Correlated metadata is saved before the ACK and delivery assertions and again
+in `finally`, including pre-ACK timeout paths. It records the take/request and
+intended origin/generation, actual reply operation/RPC identity and ownership
+flags, and allowlisted refusal codes. `getChatStreamState` supplies the current
+snapshot-derived capability, connection/state version and runtime/build hashes;
+this is not a reconstruction of historical snapshot or welcome ordering.
+Read-only operation/receipt metadata is queried by that take/request identity,
+with the fixture DB path/device/inode recorded. No mandate, transcript, auth or
+free-form exception text is logged. The pre-commit loss control and the separate
+`web-chat-voice` client-owned fallback coverage remain unchanged.
 
 The scenario retains recording duration/accessible Cancel, visible
 `backend_unavailable` with Retry, stable transcription identity, one text row,
