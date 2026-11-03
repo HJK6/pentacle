@@ -1376,6 +1376,11 @@ try {
       this.connected = next;
       this._stateVersion += 1;
     }
+    if (!next && this._hostedDashboardPolicy !== null) {
+      this._hostedDashboardPolicy = null;
+      // Restart recovery preserves chat state, never hosted URL authority.
+      this._forwardFrame({ connected: this._restartRecoveryTimer !== null, hostedDashboardPolicy: null });
+    }
   }
 
   _setConnectionError(error) {
@@ -1588,7 +1593,9 @@ try {
         if (msg.type === 'snapshot') {
           this._completeHandshake(ws);
         } else if (snapshotDisabled && msg.type === 'ready' && msg.snapshot === false) {
+          this._hostedDashboardPolicy = msg.hostedDashboardPolicy || null;
           this._completeHandshake(ws);
+          this._forwardFrame({ ...msg, connected: true, hostedDashboardPolicy: this._hostedDashboardPolicy });
           this._flushHandshakeLimitsUpdate();
           return;
         } else {
@@ -1632,6 +1639,7 @@ try {
         this._forwardFrame({
           ...msg,
           connected: true,
+          hostedDashboardPolicy: this._hostedDashboardPolicy,
           events: this._events,
           schedules: this._schedules,
           recurring: this._recurring,

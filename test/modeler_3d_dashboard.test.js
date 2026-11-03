@@ -7,16 +7,18 @@ const { JSDOM } = require('jsdom');
 const api = require('../renderer/dashboards/catalog_loader');
 const fixtureUrl = 'https://viewer.example.ts.net:8444/modeler_viewer.html';
 const policy = { tailnetSuffix: 'example.ts.net', pentacleOrigin: 'https://pentacle.example.ts.net' };
-function setup({ url = fixtureUrl, cc, policyValue = policy } = {}) {
+function setup({ url = fixtureUrl, cc, policyValue = policy, currentState } = {}) {
  const dom = new JSDOM('<main></main>', { url: policy.pentacleOrigin });
  const root = dom.window; root.DASHBOARDS = []; root.DashboardCatalogLoader = api; root.cc = cc;
+ root.hostedDashboardPolicy = policyValue;
+ if (currentState) root.cc = { ...cc, getChatStreamState: currentState };
  root.fetch = async () => ({ ok: true, json: async () => ({ hostedDashboardAuthMode: 'identity' }) });
  const timers = new Map(); let serial = 0;
  const context = vm.createContext({ window: root, URL, module: { exports: {} },
   setTimeout(fn, ms) { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { timers.delete(id); } });
  vm.runInContext(fs.readFileSync(require.resolve('../renderer/dashboards/modeler-3d'), 'utf8'), context);
  const viewer = context.module.exports, container = root.document.querySelector('main');
- const refs = viewer.mount(container, { hostedUrl: url, name: '3D Modeler', getHostedPolicy: () => policyValue });
+ const refs = viewer.mount(container, { hostedUrl: url, name: '3D Modeler', ...(currentState ? {} : { getHostedPolicy: () => policyValue }) });
  return { root, container, refs, viewer, timers, frame: () => container.querySelector('iframe'),
   state: () => refs.shell.dataset.modelerState, reload: () => container.querySelector('[data-modeler-reload]').click(),
   timeout: () => [...timers.values()].forEach(({ fn }) => fn()), close: () => { viewer.unmount(refs); root.close(); } };
@@ -67,4 +69,36 @@ test('no legacy profile URL can authorize hosted opening', async t => {
  vm.runInContext(fs.readFileSync(require.resolve('../renderer/dashboards/modeler-3d'), 'utf8'), context);
  const refs = context.module.exports.mount(root.document.querySelector('main'), { config: { dashboards: { modeler3d: { url: fixtureUrl } }, hostedDashboardAuthMode: 'identity' } });
  await tick(); assert.equal(root.document.querySelector('iframe'), null); context.module.exports.unmount(refs);
+});
+
+test('Reload obtains current policy instead of a stale renderer cache', async t => {
+ let current = { connected: true, hostedDashboardPolicy: null }; let reads = 0;
+ const h = setup({ policyValue: null, currentState: async () => { reads++; return current; } });
+ t.after(h.close); await tick(); assert.equal(h.frame(), null);
+ current = { connected: true, hostedDashboardPolicy: policy };
+ h.reload(); await tick(); assert.equal(h.frame()?.src, fixtureUrl);
+ assert.equal(reads, 2);
+});
+for (const [label, current] of [
+ ['absent', { connected: true }], ['null', { connected: true, hostedDashboardPolicy: null }],
+ ['malformed', { connected: true, hostedDashboardPolicy: {} }],
+ ['refusing', { connected: true, hostedDashboardPolicy: { ...policy, tailnetSuffix: 'other.ts.net' } }],
+ ['disconnected', { connected: false, hostedDashboardPolicy: policy }],
+]) test('current policy refuses ' + label + ' despite admitting cache', async t => {
+ const h = setup({ currentState: async () => current }); t.after(h.close); await tick();
+ h.reload(); await tick(); assert.equal(h.frame(), null);
+ assert.match(h.container.textContent, /hosted URL policy is unconfigured or refuses this URL/);
+});
+
+for (const cancel of ['invalidate', 'unmount']) test('pending current policy cannot admit after ' + cancel, async t => {
+ let resolve;
+ const h = setup({ currentState: () => new Promise(r => { resolve = r; }) });
+ t.after(h.close); await tick();
+ if (cancel === 'unmount') h.viewer.unmount(h.refs);
+ else h.root.dispatchEvent(new h.root.Event('pentacle:hosted-dashboard-invalidate'));
+ resolve({ connected: true, hostedDashboardPolicy: policy }); await tick(); assert.equal(h.frame(), null);
+});
+test('failed current-state pull refuses without falling back to admitting cache', async t => {
+ const h = setup({ currentState: async () => { throw Error('unavailable'); } }); t.after(h.close);
+ await tick(); assert.equal(h.frame(), null); assert.match(h.container.textContent, /hosted URL policy/);
 });

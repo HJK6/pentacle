@@ -2146,6 +2146,7 @@ function applyChatStreamPayload(payload) {
     }
     applyChatStreamState({
       connected: payload.connected ?? state.chatStream.connected,
+      hostedDashboardPolicy: payload.hostedDashboardPolicy || null,
       state_version: payload.state_version,
       events: payload.events || [],
       drafts: payload.drafts || {},

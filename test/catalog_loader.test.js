@@ -179,6 +179,7 @@ function hostedViewer(h, timers) {
  const vm = require('node:vm'); h.root.DashboardCatalogLoader = api;
  h.root.fetch = async () => ({ ok: true, json: async () => ({ hostedDashboardAuthMode: 'identity' }) });
  h.root.hostedDashboardPolicy = cases.hosted_policy;
+ h.root.cc = { ...h.cc, getChatStreamState: async () => ({ connected: true, hostedDashboardPolicy: cases.hosted_policy }) };
  let serial = 0;
  const context = vm.createContext({ window: h.root, module: { exports: {} }, URL,
   setTimeout: timers ? fn => { timers.set(++serial, fn); return serial; } : setTimeout,
