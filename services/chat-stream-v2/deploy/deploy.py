@@ -1116,10 +1116,11 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
     failures: list[dict[str, str]] = []
     connection_failures: dict[str, int] = {}
     peer_4000_connections: list[str] = []
-    priority = {"1011_close": 1, "peer_liveness": 2, "overflow": 3}
+    priority = {"1011_close": 1, "keepalive_timeout": 2, "peer_liveness": 3, "overflow": 4}
+    keepalive_connections: set[str] = set()
     for raw_line in lines:
         raw_line = raw_line.rstrip("\r\n")
-        if len(connection_failures) + len(peer_4000_connections) + len(failures) > 100000:
+        if len(connection_failures) + len(peer_4000_connections) + len(failures) + len(keepalive_connections) > 100000:
             raise ValueError("diagnostic identity resource limit")
         line = raw_line.strip()
         if "conn_diag " in raw_line:
@@ -1146,6 +1147,9 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                 queue_depth_warnings += 1
             kind: str | None = None
             if event == "force_close":
+                if (record.get("initiator") == "server" and record.get("cause") == "liveness"
+                        and record.get("cause_source") == "protocol_close"):
+                    keepalive_connections.add(conn_id)
                 if record.get("initiator") == "server" and record.get("cause") == "slow_consumer":
                     kind = "overflow"
                 elif record.get("initiator") == "peer" and record.get("cause") == "liveness":
@@ -1155,6 +1159,10 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                     "close_code", "close_sent_code", "close_received_code",
                 )):
                     kind = "1011_close"
+                if kind == "1011_close" and (record.get("close_reason") == "keepalive_ping_timeout"
+                        or record.get("close_sent_reason") == "keepalive_ping_timeout"
+                        or conn_id in keepalive_connections):
+                    kind = "keepalive_timeout"
                 if (record.get("initiator") == "peer" and record.get("close_code") == 4000
                         and record.get("close_reason") not in (
                             "liveness_force_close", "focused_heartbeat_timeout",
@@ -1162,6 +1170,11 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                     peer_4000_connections.append(conn_id)
             if kind is not None:
                 row = {"kind": kind, "client": conn_id, "line": raw_line}
+                if kind == "keepalive_timeout":
+                    row["class"] = "liveness"
+                    for metric in ("queue_depth", "queue_max", "queue_peak", "queued_by_type", "queue_snapshot_age_ms"):
+                        if metric in record:
+                            row[metric] = record[metric]
                 if "transport" in record:
                     row["transport"] = record["transport"]
                 if max_examples is not None and len(failures) >= max_examples:
@@ -1206,8 +1219,11 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
     }
     peer_4000_other = sum(conn_id not in forced_connections for conn_id in peer_4000_connections)
     overflow_drops = sum(row["kind"] == "overflow" for row in failures)
+    kinds = {kind: sum(row["kind"] == kind for row in failures)
+             for kind in sorted({row["kind"] for row in failures})}
     return {
-        "class": "slow_consumer",
+        "class": "liveness" if kinds and set(kinds) == {"keepalive_timeout"} else "slow_consumer",
+        "kinds": kinds,
         "outcome": SLOW_CONSUMER_FAILED if failures else SLOW_CONSUMER_PASSED,
         "boot_marker_seen": boot_marker_seen,
         "queue_depth_warnings": queue_depth_warnings,
@@ -2158,11 +2174,12 @@ def main(argv: list[str] | None = None) -> int:
         })
         client_detail = ", ".join(clients) if clients else "unknown"
         print(
-            f"deploy applied; post-boot slow_consumer failure: client={client_detail}; "
+            f"deploy applied; post-boot {slow_consumer.get('class', 'slow_consumer')} failure: client={client_detail}; "
+            f"kinds={json.dumps(slow_consumer.get('kinds') or {}, sort_keys=True)}; "
             f"{json.dumps(failures, sort_keys=True)}",
             file=sys.stderr,
         )
-        print("The daemon is on the target SHA; investigate the slow consumer and do NOT retry the deploy.", file=sys.stderr)
+        print("The daemon is on the target SHA; investigate the reported connection failure kinds and do NOT retry the deploy.", file=sys.stderr)
         return EXIT_SLOW_CONSUMER_FAILED
     if slow_consumer:
         print(

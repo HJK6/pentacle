@@ -184,9 +184,10 @@ def events(root):
 
 async def wait_event(root,name,timeout=15,after=0):
     until=time.monotonic()+timeout
-    while time.monotonic()<until:
+    while True:
         matches=[e for e in events(root) if e['event']==name and e['mono_s']>=after]
         if matches:return matches[-1]
+        if time.monotonic()>=until:break
         await asyncio.sleep(.05)
     raise RuntimeError('missing_event_'+name)
 
