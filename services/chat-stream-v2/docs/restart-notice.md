@@ -95,7 +95,7 @@ front desk, advisor, checkpoint and resume lines are never cut.
 |---|---|---|
 | `PENTACLE_RESTART_NOTICE` | `1` | `0` skips the snapshot, compose, delivery and marker. Any other value fails startup. |
 | `PENTACLE_FD_CHECKPOINT_PATH` | `~/agent-workspace/agent-outputs/fd-checkpoint/checkpoint-current.md` | Checkpoint path reported in section 10. |
-| `PENTACLE_RESTART_NOTICE_PRINTER_CMD` | the Amaterasu `printer status` command | Command named in section 5. |
+| `PENTACLE_RESTART_NOTICE_PRINTER_CMD` | a pointer to `printer status` in `docs/abilities/printer_quest.md` | Command named in section 5; a host sets the literal command here (fleet hosts stay out of this public tree). |
 
 Rollback: set `PENTACLE_RESTART_NOTICE=0` in the LaunchAgent plist and
 `launchctl bootout`/`bootstrap` the daemon, or revert. The marker left in kv is

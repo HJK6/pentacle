@@ -36,10 +36,9 @@ LIST_LINES = 8
 TITLE_CHARS = 40
 FIELD_CHARS = 300
 BOOT_TIME_TOLERANCE_S = 2  # Linux btime can move by a second between reads.
-DEFAULT_PRINTER_CMD = (
-    "agent-orch ssh vamsh@100.104.128.92 "
-    "'/home/vamsh/repos/amaterasu-triforce/bin/printer status'"
-)
+# Fleet hosts stay out of the public tree: the default names the printer
+# ability record; a host sets the literal command in its environment.
+DEFAULT_PRINTER_CMD = "printer status, as given in docs/abilities/printer_quest.md"
 DEFAULT_CHECKPOINT = "~/agent-workspace/agent-outputs/fd-checkpoint/checkpoint-current.md"
 QUESTION_HELD_STATES = ("pending", "approved", "bypassed", "unruled_disabled")
 PRINT_SPEC = re.compile(r"^spec_printer__")
