@@ -85,6 +85,9 @@ five-second drain and file Store reopen with synthetic remote staging and a fake
 provider. It is not subprocess-restart or native-provider exactly-once proof;
 the test's 8.5-second elapsed bound is fixture tolerance, not a production SLA.
 
+After every start, the daemon also sends the front desk one notice that lists the
+work in progress; see [restart notice](restart-notice.md).
+
 ## What clients do
 
 - Retry-eligible verbs (`await`, `await-spawn`, `report`, `tell`, keyed `spawn`, the
