@@ -1362,13 +1362,13 @@ class _ManagedAppendedLogScanner:
 def _process_start(pid: int | None, runner: Runner) -> str | None:
     if type(pid) is not int or pid <= 0:
         return None
-    result = runner(("ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
+    result = runner(("env", "TZ=UTC0", "LC_ALL=C", "ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
     value = " ".join((result.stdout or "").split())
     return value if result.returncode == 0 and value else None
 
 
 def _prior_writer_exited(pid: int, start: str, runner: Runner) -> bool:
-    result = runner(("ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
+    result = runner(("env", "TZ=UTC0", "LC_ALL=C", "ps", "-p", str(pid), "-o", "lstart="), Path.cwd())
     value = " ".join((result.stdout or "").split())
     # ps uses rc=1 with empty output for an absent PID. Tooling errors and
     # blank successful answers cannot establish a writer's exit.
