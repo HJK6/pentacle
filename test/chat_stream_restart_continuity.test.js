@@ -119,3 +119,72 @@ test('cold start and non-shutdown socket failure are not hidden', t => {
   assert.equal(f.client.snapshot().connected, false);
   assert.equal(f.frames.some(frame => frame.connected === false), true);
 });
+
+const hostedUrl = 'https://viewer.example.ts.net:8444/';
+const hostedPolicy = { tailnetSuffix: 'example.ts.net', pentacleOrigin: 'https://chat.example.ts.net' };
+const { admitHostedUrl } = require('../renderer/dashboards/catalog_loader');
+function readyWithoutSnapshot(f, extra = {}) {
+ f.client._helloPayload = () => ({ subscribe: { snapshot: false } });
+ f.client._connect(); const next = f.open();
+ next.emit('message', JSON.stringify({ type: 'ready', snapshot: false, ...extra }));
+ return next;
+}
+test('snapshot without policy then reconnect ready publishes current hosted admission', t => {
+ const f = fixture(t); assert.equal(f.client.snapshot().hostedDashboardPolicy, null); f.drop();
+ readyWithoutSnapshot(f, { hostedDashboardPolicy: hostedPolicy });
+ assert.equal(admitHostedUrl(hostedUrl, f.client.snapshot().hostedDashboardPolicy), hostedUrl);
+ assert.deepEqual(f.frames.filter(x => Object.hasOwn(x, 'hostedDashboardPolicy')).at(-1).hostedDashboardPolicy, hostedPolicy);
+});
+for (const [label, value] of [['absent', undefined], ['null', null], ['malformed', {}],
+ ['refusing', { ...hostedPolicy, tailnetSuffix: 'other.ts.net' }]]) {
+ test('snapshot-less ready ' + label + ' cannot retain old admitting policy', t => {
+  const f = fixture(t);
+  f.socket.emit('message', JSON.stringify({ type: 'snapshot', hostedDashboardPolicy: hostedPolicy })); f.drop();
+  readyWithoutSnapshot(f, value === undefined ? {} : { hostedDashboardPolicy: value });
+  assert.equal(admitHostedUrl(hostedUrl, f.client.snapshot().hostedDashboardPolicy), null);
+ });
+}
+test('disconnect clears hosted policy even during graceful restart recovery', t => {
+ const f = fixture(t);
+ f.socket.emit('message', JSON.stringify({ type: 'snapshot', hostedDashboardPolicy: hostedPolicy })); f.drop();
+ assert.equal(f.client.snapshot().hostedDashboardPolicy, null);
+ assert.equal(f.frames.filter(x => Object.hasOwn(x, 'hostedDashboardPolicy')).at(-1).hostedDashboardPolicy, null);
+});
+
+test('snapshot missing policy publishes cleared policy to renderer', t => {
+ const f = fixture(t);
+ f.socket.emit('message', JSON.stringify({ type: 'snapshot', hostedDashboardPolicy: hostedPolicy }));
+ f.ready(f.socket);
+ assert.equal(f.client.snapshot().hostedDashboardPolicy, null);
+ assert.equal(f.frames.at(-1).hostedDashboardPolicy, null);
+});
+
+function rendererPolicyHarness() {
+ const fs = require('node:fs'), vm = require('node:vm');
+ const source = fs.readFileSync(require.resolve('../renderer/app.js'), 'utf8');
+ const context = { state: { chatStream: { connected: true, stateVersion: -1 }, currentView: 'chats' },
+  window: { hostedDashboardPolicy: hostedPolicy, Event: class {}, dispatchEvent() {} },
+  withSharedWorkingProjection: p => p, setDegradedMode() {},
+  applyVersionedConnectionState: require('../renderer/chat_stream_connection_state').applyVersionedConnectionState };
+ vm.createContext(context);
+ // Run the actual policy/state prefix and full dispatcher, without unrelated UI rendering.
+ vm.runInContext(source.slice(source.indexOf('function applyChatStreamState(data)'), source.indexOf('  // Lanes ride the same ordering gate')) + '\n}', context);
+ vm.runInContext(source.slice(source.indexOf('function applyChatStreamPayload(payload)'), source.indexOf('function chatEventsForSession(session)')), context);
+ return { context, apply: payload => { context.payload = payload; vm.runInContext('applyChatStreamPayload(payload)', context); } };
+}
+test('renderer consumes reconnect policy, snapshot replacement and recovery clearing', t => {
+ const f = fixture(t), renderer = rendererPolicyHarness();
+ f.drop(); readyWithoutSnapshot(f, { hostedDashboardPolicy: hostedPolicy });
+ const ready = f.frames.findLast(x => x.type === 'ready'); renderer.apply(ready);
+ assert.deepEqual(renderer.context.window.hostedDashboardPolicy, hostedPolicy);
+ renderer.apply({ type: 'snapshot', connected: true, state_version: ready.state_version });
+ assert.equal(renderer.context.window.hostedDashboardPolicy, null);
+ renderer.apply(ready);
+ const socket = f.Socket.instances.at(-1); socket.emit('close', 1001);
+ const cleared = f.frames.findLast(x => Object.hasOwn(x, 'hostedDashboardPolicy'));
+ assert.equal(cleared.connected, true, 'graceful restart must not show a disconnect banner');
+ assert.ok(cleared.state_version > ready.state_version);
+ renderer.apply(cleared);
+ assert.equal(renderer.context.window.hostedDashboardPolicy, null);
+ assert.equal(renderer.context.state.chatStream.connected, true);
+});
