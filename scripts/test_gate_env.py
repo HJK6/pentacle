@@ -856,6 +856,111 @@ class EntrypointReceipts(Tmp):
         self.assertEqual({a["primary_outcome"] for a in attempts}, {"setup_failure"})
 
 
+
+class WebTerminalPreflight(Tmp):
+    run_main = EntrypointReceipts.run_main
+
+    def case(self, target="web-gate", *, reused=False, probe_rc=1, web=False, timeout=False):
+        checkout = self.tmp / "co"
+        checkout.mkdir(exist_ok=True)
+        (checkout / "package-lock.json").write_text("{}")
+        installed = checkout / "node_modules/.package-lock.json"
+        installed.parent.mkdir()
+        installed.write_text("{}")
+        (checkout / "renderer/dist/web").mkdir(parents=True)
+        (checkout / "renderer/dist/web/web.html").write_text("fixture")
+        selected = "test/e2e/web_wrap_paste_gate.test.js" if web else "test/unit.test.js"
+        (checkout / selected).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / selected).touch()
+        prepared = self.tmp / "ws/prepared/fixture"
+        if reused:
+            prepared.mkdir(parents=True)
+            (prepared / "npm-ready.json").write_text(json.dumps({
+                "lock": ge.file_digest(checkout / "package-lock.json"),
+                "installed": ge.file_digest(installed)}))
+        calls, subjects = [], []
+        def runner(argv, **kw):
+            calls.append((argv, kw))
+            if argv == ["node", "-e", "require('node-pty')"]:
+                if timeout:
+                    raise subprocess.TimeoutExpired(argv, kw["timeout"], stderr="probe timed out")
+                return done(probe_rc, err="old diagnostic\n" * 100 + "Cannot find module 'node-pty'")
+            if argv == ["npm", "ci"]:
+                return done(out="old npm line\n" * 100 + "optional native install failed")
+            return done()
+        def subject(*a, **kw):
+            subjects.append(a)
+            return SimpleNamespace(pid=123456789, returncode=0, wait=lambda **k: 0, poll=lambda: 0)
+        with mock.patch.multiple(ge, resolve_toolchain=lambda *a: ({}, []),
+                pick_locale=lambda *a: ("C.UTF-8", None), check_layout=lambda *a: [],
+                prepared_key=lambda *a: "fixture", ensure_python_env=lambda *a: (None, {}, []),
+                build_env=lambda *a, **k: {}, check_scratch=lambda *a: [],
+                check_node_npm=lambda *a: [], check_process_listing=lambda *a: [],
+                run_preflight_script=lambda *a: [], group_alive=lambda *a: False,
+                build_command=lambda *a: (["synthetic-subject"], {"cwd": checkout,
+                    "classify": lambda rc, to: ("pass", None, {})})), \
+                mock.patch.object(ge.subprocess, "run", side_effect=runner), \
+                mock.patch.object(ge.subprocess, "Popen", side_effect=subject):
+            extra = ["--select", selected] if target == "npm-test" else []
+            code = self.run_main("--target", target, "--spec", "s", "--series", "terminal", *extra)
+        events = [json.loads(p.read_text()) for p in sorted((self.tmp / "ev/attempts").glob("*/*.json"))]
+        probes = [(argv, kw) for argv, kw in calls if argv == ["node", "-e", "require('node-pty')"]]
+        return code, subjects, events, calls, probes
+
+    def assert_missing(self, result, *, fresh):
+        code, subjects, events, calls, probes = result
+        self.assertEqual(code, 3)
+        self.assertEqual(subjects, [])
+        self.assertEqual([e["state"] for e in events], ["started", "terminal"])
+        terminal = events[-1]
+        self.assertEqual(terminal["outcome"], "setup_failure")
+        self.assertEqual(terminal["first_failure"]["code"], "dependencies")
+        failure = terminal["detail"]["failures"][0]["detail"]
+        self.assertIn("node-pty", failure)
+        self.assertIn("Cannot find module", failure)
+        self.assertLess(len(failure), 600)
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(probes[0][1]["cwd"], str(self.tmp / "co"))
+        self.assertLessEqual(probes[0][1]["timeout"], 30)
+        if fresh:
+            tail = terminal["detail"]["npm"]["ci_output_tail"]
+            self.assertIn("optional native install failed", tail)
+            self.assertLessEqual(len(tail), 400)
+        else:
+            self.assertNotIn("npm", terminal["detail"])
+            self.assertFalse(any(argv == ["npm", "ci"] for argv, _ in calls))
+
+    def test_fresh_web_missing_terminal_is_setup_before_subject(self):
+        self.assert_missing(self.case(), fresh=True)
+
+    def test_reused_web_missing_terminal_is_setup_before_subject(self):
+        self.assert_missing(self.case(reused=True), fresh=False)
+
+    def test_selected_npm_web_also_requires_terminal(self):
+        self.assert_missing(self.case("npm-test", web=True), fresh=True)
+
+    def test_passing_terminal_probe_preserves_subject(self):
+        code, subjects, events, _, probes = self.case(probe_rc=0)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(subjects), 1)
+        self.assertEqual(len(probes), 1)
+        self.assertIn("subject_started", [e["state"] for e in events])
+
+    def test_npm_non_web_does_not_probe_terminal(self):
+        code, subjects, _, _, probes = self.case("npm-test")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(subjects), 1)
+        self.assertEqual(probes, [])
+
+    def test_probe_timeout_is_setup_before_subject(self):
+        code, subjects, events, _, probes = self.case(timeout=True)
+        self.assertEqual(code, 3)
+        self.assertEqual(subjects, [])
+        self.assertEqual(events[-1]["first_failure"]["code"], "dependencies")
+        self.assertIn("node-pty", events[-1]["detail"]["failures"][0]["detail"])
+        self.assertEqual(len(probes), 1)
+
+
 class PythonChromePolicy(unittest.TestCase):
     def test_selenium_launch_retains_executable_headless_and_keychain_flags(self):
         import ast
