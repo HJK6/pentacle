@@ -2010,7 +2010,9 @@ function applyChatStreamState(data) {
   if (Array.isArray(data.events)) {
     state.chatStream.events = data.events.slice(-CHAT_STREAM_LIMIT);
   }
-  state.chatStream.drafts = data.drafts || {};
+  if (Object.prototype.hasOwnProperty.call(data, 'drafts')) {
+    state.chatStream.drafts = data.drafts || {};
+  }
   if (Object.prototype.hasOwnProperty.call(data, 'hosts_stats')) {
     state.chatStream.hostsStats = data.hosts_stats && typeof data.hosts_stats === 'object'
       ? { ...data.hosts_stats }

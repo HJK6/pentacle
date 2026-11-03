@@ -188,3 +188,91 @@ test('renderer consumes reconnect policy, snapshot replacement and recovery clea
  assert.equal(renderer.context.window.hostedDashboardPolicy, null);
  assert.equal(renderer.context.state.chatStream.connected, true);
 });
+
+
+function rendererDraftHarness() {
+ const fs = require('node:fs'), vm = require('node:vm');
+ const source = fs.readFileSync(require.resolve('../renderer/app.js'), 'utf8');
+ const session = { hostId: 'hostx', name: 'owned' };
+ const stream = { host: 'hostx', session_name: 'owned', stream_id: 'stream-x' };
+ const rendered = [];
+ const context = {
+  state: { chatStream: { connected: true, stateVersion: -1, drafts: {}, events: [], sessions: [stream] },
+   currentView: 'chats', sessions: [session], slots: [session], botSlots: [], slotViewModes: ['chat'],
+   locallyClosedStreamIds: new Set() },
+  window: { Event: class {}, dispatchEvent() {}, cc: { chatClose: async () => ({ ok: true }) } },
+  CHAT_STREAM_LIMIT: 100, SCHEDULE_EVENT_TYPES: [], IS_CLIENT: false,
+  withSharedWorkingProjection: p => p, setDegradedMode() {},
+  applyVersionedConnectionState: require('../renderer/chat_stream_connection_state').applyVersionedConnectionState,
+  nextChatStreamSessions: (current, data) => Array.isArray(data.sessions) ? data.sessions : current,
+  closedChatSlots: { update() {} }, reconcileComposerDraftInventory() {}, reconcileLocallyClosedStreamIds() {},
+  _perfRecord() {}, syncSlotDisplayNames() {}, restoreWorkspaceSessions() {}, scheduleSidebarRerender() {},
+  invalidateChatHistoryLoads() {}, refetchEventsForActiveChatSlots() {}, refetchAssetSnapshotsForActiveSlots() {},
+  resyncSpawnCatalogAfterReconnect() {}, renderHostsStats() {}, renderScheduledSection() {},
+  replaceSchedulesFromInventory: (_, next) => next,
+  scheduleDurableQuestionSlotRenders() {},
+  streamHostForHostId: id => id,
+  chatSessionStateForSession: () => stream, chatSessionStateForNameHost: () => stream,
+  isProtectedAssistantNameHost: () => false, decideUseChatClose: () => true,
+  detachSlot: slot => { context.state.slots[slot] = null; },
+  scheduleSlotChatRender: slot => {
+   context.renderSession = context.state.slots[slot];
+   rendered.push(vm.runInContext('chatDraftForSession(renderSession)', context));
+  },
+ };
+ vm.createContext(context);
+ vm.runInContext(source.slice(source.indexOf('function applyChatStreamState(data)'), source.indexOf('function chatEventsForSession(session)')), context);
+ vm.runInContext(source.slice(source.indexOf('function chatDraftForSession(session)'), source.indexOf('function chatSessionStateForSession(session)')), context);
+ // Execute the real chat-close path, ending before the unrelated legacy terminal branch.
+ vm.runInContext(source.slice(source.indexOf('async function deleteSession(name, hostId)'), source.indexOf('  // Non-chat-stream session (legacy or degraded)')) + '\n}', context);
+ return { context, session, stream, rendered,
+  apply(payload) { context.payload = payload; vm.runInContext('applyChatStreamPayload(payload)', context); },
+  draft() { context.session = session; return vm.runInContext('chatDraftStateForSession(session)', context); },
+  close: () => vm.runInContext("deleteSession('owned', 'hostx')", context),
+ };
+}
+function draftEntry(text = 'partial answer') {
+ return { kind: 'DRAFT', stream_id: 'stream-x', host: 'hostx', session_name: 'owned', text };
+}
+
+test('renderer draft survives snapshot-less reconnect ready and remains in the slot', t => {
+ const f = fixture(t), h = rendererDraftHarness(), draft = draftEntry();
+ h.apply(draft); assert.equal(h.draft(), draft);
+ f.drop(); readyWithoutSnapshot(f, { hostedDashboardPolicy: hostedPolicy });
+ const ready = f.frames.findLast(frame => frame.type === 'ready');
+ assert.equal(Object.hasOwn(ready, 'drafts'), false);
+ h.apply(ready);
+ assert.equal(h.draft(), draft);
+ assert.equal(h.rendered.at(-1), draft.text, 'slot still receives the draft');
+});
+test('renderer snapshot with empty drafts clears the slot', () => {
+ const h = rendererDraftHarness(); h.apply(draftEntry());
+ h.apply({ type: 'snapshot', connected: true, drafts: {} });
+ assert.equal(h.draft(), null); assert.equal(h.rendered.at(-1), '');
+});
+test('renderer snapshot replaces drafts rather than merging them', () => {
+ const h = rendererDraftHarness(), replacement = draftEntry('replacement');
+ h.apply(draftEntry()); h.context.state.chatStream.drafts['other-stream'] = draftEntry('old');
+ h.apply({ type: 'snapshot', connected: true, drafts: { 'stream-x': replacement } });
+ assert.equal(h.draft(), replacement);
+ assert.deepEqual(Object.keys(h.context.state.chatStream.drafts), ['stream-x']);
+ assert.equal(h.rendered.at(-1), replacement.text);
+});
+test('renderer DRAFT event still updates its stream entry', () => {
+ const h = rendererDraftHarness(), updated = draftEntry('updated'); h.apply(draftEntry());
+ h.apply({ type: 'chat.event', event: updated });
+ assert.equal(h.draft(), updated); assert.equal(h.rendered.at(-1), updated.text);
+});
+test('renderer chat close removes draft and status ready cannot revive it', async () => {
+ const h = rendererDraftHarness(); h.apply(draftEntry()); await h.close();
+ assert.equal(h.draft(), null); assert.equal(h.context.state.slots[0], null);
+ h.apply({ type: 'ready', snapshot: false, connected: true });
+ assert.equal(h.draft(), null);
+});
+test('renderer disconnected status preserves drafts until an explicit snapshot replaces them', () => {
+ const h = rendererDraftHarness(), draft = draftEntry(); h.apply(draft);
+ h.apply({ connected: false });
+ assert.equal(h.draft(), draft); assert.equal(h.rendered.at(-1), draft.text);
+ h.apply({ type: 'ready', snapshot: false, connected: true });
+ assert.equal(h.draft(), draft);
+});
