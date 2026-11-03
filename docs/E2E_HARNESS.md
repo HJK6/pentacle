@@ -28,12 +28,88 @@ the supported root npm tests, reusing the root installation. This native command
 runs the client-core TS tests and `typecheck:test`; either failure blocks the
 required frontend result and aggregate checks.
 
+### Command reference
+
+Run from the repository root. Replace `OWNED_ROOT` and `EVIDENCE` with
+separate owned directories outside the checkout; replace `SPEC`, `SERIES`
+and `MANIFEST` with the acceptance identity and attempt-manifest path.
+Keep one series for retries and preserve every attempt, including setup failures.
+Use a distinct evidence directory per invocation, or archive its subject outputs
+before reuse: attempt receipts append, but the files under `EVIDENCE/gate/`
+have fixed names and can be overwritten.
+These are commands to use on a capable test workstation, not a claim that they
+have run on every platform.
+
 ```bash
+# Prepare only; no subject and no --select. Repeat for another target as needed.
+python3 scripts/gate_env.py prepare --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target v2-pytest --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+
+# Focused checks: daemon, npm, and CLI respectively.
 python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
-  --target v2-unit --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+  --target v2-pytest --select tests/test_router_replay.py \
+  --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target npm-test --select test/asset_ipc.test.js \
+  --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target cli-pytest --select tests/test_account_cli.py \
+  --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+
+# Local browser gate, with disposable synthetic services and owned cleanup.
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target web-gate --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+
+# Final daemon gate on a workstation with a measured unit tier exceeding 900s.
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target v2-merge-capacity --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+# On hosts that meet the 900s unit bound, use --target v2-merge instead.
+
+# Final npm default union; omit --select. Bootstrap changes also need its selftest.
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target npm-test --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+python3 scripts/test_gate_env.py
+
+# Final CLI or shared-library area union, respectively.
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target cli-pytest --select tests --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
+python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
+  --target shared-pytest --select tests --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
 ```
 
-Targets are the closed list in `scripts/gate-env.json` (`v2-unit`, `v2-smoke`, `v2-merge`, `v2-merge-capacity`, `v2-pytest --select tests/test_x.py`, `npm-test --select test/x.test.js`); `prepare` (optionally with `--target`, to provision and preflight just that target) runs the same setup and never launches a subject or accepts `--select`; the focused `v2-pytest` target refuses to run without at least one `--select` (it never defaults to the full suite — use `v2-unit`/`v2-merge` for that). Every invocation writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before any setup, so failures, cancellation and crashes stay visible; `EVIDENCE/test-attempts.v1.json` is a derived index. The daemon targets run `run_gate.py` under a finite `--deadline-seconds` envelope (tier limits, smoke preflight and reserve) and fold its `primary_outcome` and secondary outcomes into the receipt. A changed requirement, lockfile or profile selects a new prepared cache; a drifted cache is refused until `--rebuild` (which removes only that owned directory). Exit codes: 0 pass, 1 subject failure, 3 setup failure, 130 cancelled. Running `run_gate.py` or `pytest` directly remains possible but is not the supported route. Self-test: `python3 scripts/test_gate_env.py`.
+Select the final gate for each changed area, not just one for a cross-area change.
+Renderer integration changes additionally need the local `web-gate` command
+above and the explicitly selected Chrome contracts below. Docs-only changes
+need source/link review; this command reference change also runs the unchanged
+bootstrap selftest. These commands do not change release admission or replace
+platform-specific and installed-artifact acceptance.
+
+Targets are the closed list in `scripts/gate-env.json`. `prepare` (optionally
+with `--target`) runs setup only; focused pytest targets require `--select`
+and never silently default to a full suite. `v2-unit` runs unit only and is
+not a substitute for the serial unit-and-smoke closing gate. Every invocation
+writes append-only receipts under `EVIDENCE/attempts/<attempt_id>/` before
+setup; `EVIDENCE/test-attempts.v1.json` is a derived index. Subject evidence is
+under `EVIDENCE/gate/`: daemon `v2-merge-evidence.json` (or
+`v2-unit-evidence.json`), tier logs and JUnit; focused pytest
+`pytest.junit.xml`; npm `npm-test-summary.json`; browser `web-summary.json`.
+Keep these with the terminal receipt and exact candidate identity.
+
+The daemon targets run `run_gate.py` under a finite `--deadline-seconds`
+envelope (tier limits, smoke preflight and reserve) and fold primary and
+secondary outcomes into the receipt. A changed requirement, lockfile or profile
+selects a new prepared cache; a drifted cache is refused until `--rebuild`
+(which removes only that owned directory). Exit codes: 0 pass, 1 subject
+failure, 3 setup failure, 130 cancelled. Direct `run_gate.py` and `pytest`
+remain available lower-level entries, not the supported preparation route.
+
+`--tmp-root` defaults to `/tmp/ge-<uid>`. The child `TMPDIR` adds a slash and
+eight-character attempt suffix; its resolved path must fit the 48-byte
+`max_tmpdir_bytes` limit, not merely the root argument. Leave the default or
+pass a shorter owned `--tmp-root` if preflight rejects the path. This protects
+Unix/tmux socket paths; do not increase the guard or put scratch under a long
+evidence directory. The owned HOME, scratch and evidence layout checks still
+apply.
 
 Focused `v2-pytest` always includes the four existing repository invariants in
 `tests/test_capabilities.py`: changed-test skip confinement, original assertion
@@ -76,11 +152,12 @@ Sandboxed seats use the same supported entry. Do not hand-build its venv with
 isolated interpreter. The prepared venv fully installs the declared requirements.
 The owned `HOME` also owns `.ssh/cm`; ambient SSH control-directory overrides are
 not forwarded. Keep the real SSH directory read-only. Put Python 3.13 and Node 22
-on the launching PATH, then use `--target v2-merge` for the serial closing gate;
+on the launching PATH, then select the serial closing target below;
 its child PATH and HOME come from the bootstrap rather than the launching shell.
 
-For a workstation with a measured unit overrun, the opt-in `v2-merge-capacity`
-target runs the same serial unit and smoke union with a 1,800-second unit limit
+For a workstation with a measured unit tier exceeding 900 seconds,
+`v2-merge-capacity` is the supported closing target. Use ordinary `v2-merge`
+on hosts that meet the 900-second unit bound. The capacity target runs the same serial unit and smoke union with a 1,800-second unit limit
 and the unchanged 900-second smoke limit. Its runner deadline is 2,820 seconds,
 inside a 2,850-second outer subject bound. Qualify it with a complete supported
 gate on the intended host and retain the exact source, environment, node counts
@@ -306,7 +383,10 @@ the same millisecond. The no-profile gate still starts its own daemon on an
 ephemeral port. Its verdict records the owned daemon PID and confirmed exit;
 failure to stop that process fails the gate after a forced termination attempt.
 
-For focused full-renderer slot-layout acceptance, build the web bundle and run:
+The standalone `test/e2e/grid_split_gate.js` entry is nonfunctional and is
+not a supported acceptance command. The historical invocations below are
+retained only to identify the path awaiting repair or retirement; do not use
+them as evidence of a passing gate:
 
 ```bash
 npm run build:web
@@ -314,7 +394,7 @@ node test/e2e/grid_split_gate.js web /tmp/pentacle-split-web
 node test/e2e/grid_split_gate.js desktop /tmp/pentacle-split-desktop
 ```
 
-This uses the same CDP client and scratch-daemon seeder. It launches the actual
+Its intended contract uses the same CDP client and scratch-daemon seeder. It launches the actual
 Electron entry point or served browser bundle with an isolated profile, creates
 four uniquely named local tmux fixtures, and checks their native PTY dimensions
 after drag, maximize/restore and view changes. It also checks narrow widths,
