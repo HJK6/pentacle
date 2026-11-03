@@ -618,6 +618,73 @@ class EntrypointReceipts(Tmp):
     def attempts(self):
         return ga.build_index(self.tmp / "ev")["attempts"]
 
+    def npm_python_case(self, version, *, undeclared=False):
+        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg['search_path'] = {'darwin': [], 'linux': []}
+        cfg['system_path'] = []
+        target = cfg['profiles']['pentacle']['targets']['npm-test']
+        if undeclared:
+            target['needs'] = [n for n in target['needs'] if n != 'python']
+        tools = self.tmp / 'tools'
+        tools.mkdir()
+        fake_exe(tools, 'node', 'v22.4.1')
+        fake_exe(tools, 'npm', '10.9.0')
+        if version:
+            fake_exe(tools, 'python3', 'Python ' + version)
+        # Real resolver rejects missing/wrong versions before any subject launch.
+        resolved = ge.resolve_toolchain(cfg, target['needs'], ambient_path=str(tools), system='linux')
+        observed = []
+        venv = self.tmp / 'venv'
+        def subject(command, **kw):
+            env = kw['env']
+            interpreter = env.get('PENTACLE_PYTHON', 'python3')
+            observed.append((interpreter, env.get('V2_PYTHON_BIN')))
+            # Deterministic model of the Python-3.9 probe: a bare fallback fails.
+            rc = 0 if interpreter == str(venv / 'bin/python') else 1
+            return SimpleNamespace(pid=123456789, returncode=rc, wait=lambda **k: rc, poll=lambda: rc)
+        with mock.patch.multiple(ge, load_config=lambda *a: cfg,
+                resolve_toolchain=lambda *a: resolved, pick_locale=lambda *a: ('C.UTF-8', None),
+                check_layout=lambda *a: [], prepared_key=lambda *a: 'fixture', ensure_python_env=lambda *a: (venv, {'reused': True}, []),
+                ensure_npm_env=lambda *a: ({'reused': True}, []), check_scratch=lambda *a: [],
+                check_node_npm=lambda *a: [], check_dependencies=lambda *a: [],
+                check_process_listing=lambda *a: [], group_alive=lambda *a: False,
+                build_command=lambda *a: (['npm', 'test'], {'cwd': self.tmp, 'classify':
+                    lambda rc, to: ('pass' if rc == 0 else 'product_failure', None, {})})), \
+                mock.patch.object(ge.subprocess, 'run', return_value=done()), \
+                mock.patch.object(ge.subprocess, 'Popen', side_effect=subject):
+            code = self.run_main('--target', 'npm-test', '--spec', 's', '--series', 'npm-python', '--purpose', 'negative_control')
+        events = [json.loads(p.read_text()) for p in sorted((self.tmp / 'ev/attempts').glob('*/*.json'))]
+        return code, observed, events, venv
+
+    def test_npm_declared_python_missing_stops_before_subject(self):
+        code, observed, events, _ = self.npm_python_case(None)
+        self.assertEqual(code, 3)
+        self.assertEqual(observed, [])
+        self.assertEqual([e['state'] for e in events], ['started', 'terminal'])
+        self.assertEqual(events[-1]['outcome'], 'setup_failure')
+        self.assertIn('python 3.13', events[-1]['detail']['failures'][0]['detail'])
+
+    def test_npm_declared_python_wrong_version_stops_before_subject(self):
+        code, observed, events, _ = self.npm_python_case('3.9.0')
+        self.assertEqual(code, 3)
+        self.assertEqual(observed, [])
+        self.assertIn('3.9.0', events[-1]['detail']['failures'][0]['detail'])
+
+    def test_npm_undeclared_python_reaches_wrong_interpreter_control(self):
+        code, observed, events, _ = self.npm_python_case('3.9.0', undeclared=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(observed, [('python3', None)])
+        self.assertIn('subject_started', [e['state'] for e in events])
+        self.assertEqual(events[-1]['outcome'], 'product_failure')
+
+    def test_npm_declared_python_is_provisioned_injected_and_recorded(self):
+        code, observed, events, venv = self.npm_python_case('3.13.1')
+        self.assertEqual(code, 0)
+        self.assertEqual(observed, [(str(venv / 'bin/python'), str(venv / 'bin/python'))])
+        prepared = next(e for e in events if e['state'] == 'prepared')
+        self.assertEqual(prepared['toolchain']['python']['version'], '3.13.1')
+        self.assertIn('PENTACLE_PYTHON', prepared['env_names'])
+
     def test_unknown_target_is_a_retained_setup_failure_and_missing_identity_is_unknown_history(self):
         code = self.run_main("--target", "does-not-exist")
         self.assertEqual(code, 3)

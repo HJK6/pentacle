@@ -145,6 +145,7 @@
         "npm-test": {
           "kind": "npm_test",
           "needs": [
+            "python",
             "node",
             "npm"
           ],

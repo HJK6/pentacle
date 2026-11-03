@@ -16,6 +16,11 @@ does not change required gates.
 
 QA briefs and fleet gates run the daemon and npm checks through one entrypoint instead of an ambient shell. It builds an owned venv (Python 3.13) and `npm ci` cache keyed by toolchain and lockfile hashes, gives the child its own `HOME`, a short `TMPDIR` and a UTF-8 locale, drops every other environment variable (including `TMUX`, `MAKEFLAGS` and credentials), and preflights the exact child context before the subject starts. Missing or wrong executables, denied `ps`, absent tmux/lsof/socket capabilities, dependency drift and nested HOME/evidence/basetemp paths are all reported together as a setup failure and never reach the tests.
 
+The `npm-test` target declares Python 3.13 alongside Node 22 and npm. Its
+prepared interpreter is injected as `PENTACLE_PYTHON` and `V2_PYTHON_BIN`;
+callers need not supply either variable. Missing or wrong-version Python is
+a setup failure (exit 3) before any npm subject starts.
+
 Public checks frontend also runs `npm --prefix pentacle-chat-core test` after
 the supported root npm tests, reusing the root installation. This native command
 runs the client-core TS tests and `typecheck:test`; either failure blocks the
