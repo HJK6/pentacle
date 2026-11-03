@@ -15,7 +15,7 @@ function observation() {
   return { visible: true, ids: ['shared-demo', 'modeler-3d'], state: 'unconfigured', text: 'Set dashboards.modeler3d.url',
     frameUrl: null, sandbox: null, open: true, reload: true };
 }
-function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', frameUrl: fixtureUrl, sandbox: 'allow-scripts allow-same-origin', allow: 'xr-spatial-tracking; fullscreen', loading: 'lazy', referrerPolicy: 'no-referrer' }; }
+function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', frameUrl: fixtureUrl, sandbox: 'allow-scripts allow-same-origin allow-popups', allow: 'xr-spatial-tracking; fullscreen', loading: 'lazy', referrerPolicy: 'no-referrer' }; }
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
@@ -82,7 +82,7 @@ test('retired-absent cannot pass through missing adapter registration', () => {
 test('real DOM reader observes visible state, actual frame attributes and controls', t => {
   const dom = new JSDOM(`<!doctype html><section id="panel-dashboards"><div id="dashboard-list"><button data-dashboard-id="modeler-3d">3D Modeler</button></div></section>
     <main id="dashboard-content"><section data-modeler-state="loaded"><a data-modeler-open>Open in new window</a><button data-modeler-reload>Reload</button>
-      <iframe src="${fixtureUrl}" sandbox="allow-scripts allow-same-origin" allow="xr-spatial-tracking; fullscreen" loading="lazy" referrerpolicy="no-referrer"></iframe></section></main>`);
+      <iframe src="${fixtureUrl}" sandbox="allow-scripts allow-same-origin allow-popups" allow="xr-spatial-tracking; fullscreen" loading="lazy" referrerpolicy="no-referrer"></iframe></section></main>`);
   t.after(() => dom.window.close());
   const seen = readDashboardObservation(dom.window.document);
   assert.equal(seen.visible, true); assert.deepEqual(seen.ids, ['modeler-3d']);

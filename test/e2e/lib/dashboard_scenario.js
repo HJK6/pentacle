@@ -37,7 +37,7 @@ function viewerChecks(observation, url = null) {
       url ? observation.state === 'loaded' && observation.frameUrl === url
         : observation.state === 'unconfigured' && observation.text.includes('dashboards.modeler3d.url') && observation.frameUrl === null, observation],
     ['modeler always exposes open-window and reload controls', observation.open && observation.reload, observation],
-    ...(url ? [['viewer uses the approved iframe attributes', observation.sandbox === 'allow-scripts allow-same-origin'
+    ...(url ? [['viewer uses the approved iframe attributes', observation.sandbox === 'allow-scripts allow-same-origin allow-popups'
       && observation.allow === 'xr-spatial-tracking; fullscreen' && observation.loading === 'lazy'
       && observation.referrerPolicy === 'no-referrer', observation]] : []),
   ];
