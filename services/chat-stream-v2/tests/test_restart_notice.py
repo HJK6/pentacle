@@ -25,9 +25,9 @@ from server import Server
 from sessions import Sessions, VerbError
 from store import Store
 
-LOCAL = "hosta"
-FD = "hosta:v2-fd"
-ADVISOR = "hosta:v2-adv"
+LOCAL = "hostx"
+FD = "hostx:v2-fd"
+ADVISOR = "hostx:v2-adv"
 ASSISTANT_CHAT = "home:assistant"
 NOW = 1_793_700_000.0
 HOLDS_DDL = ("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY, resource TEXT NOT NULL, "
@@ -81,7 +81,7 @@ def _queue_into(store):
 def _notice(store, composite, *, probe, notify=None, env=None, deliver=None, **kw):
     return rn.RestartNotice(
         store=store, composite=composite, deliver=deliver or _queue_into(store), probe=probe, notify=notify,
-        instance_id=kw.pop("instance_id", "hosta:4242:abc"), daemon_sha=kw.pop("daemon_sha", "b" * 40),
+        instance_id=kw.pop("instance_id", "hostx:4242:abc"), daemon_sha=kw.pop("daemon_sha", "b" * 40),
         pid=4242, started_at=kw.pop("started_at", NOW), env=env or {},
         boot_time=kw.pop("boot_time", lambda: 1_793_690_000), clock=kw.pop("clock", lambda: NOW), **kw)
 
@@ -126,7 +126,7 @@ def _hook_kwargs(store, composite, calls):
         calls.append(tell_id)
         return "committed"
     return dict(store=store, composite=composite, deliver=deliver, probe=_probe({FD: "alive"}),
-                instance_id="hosta:1:hook", daemon_sha="b" * 40, env={}, boot_time=lambda: 1)
+                instance_id="hostx:1:hook", daemon_sha="b" * 40, env={}, boot_time=lambda: 1)
 
 
 def test_disabled_flag_skips_snapshot_compose_delivery_and_marker():
@@ -141,7 +141,7 @@ def test_disabled_flag_skips_snapshot_compose_delivery_and_marker():
         # Control: the same hook enabled schedules one attempt and writes the marker.
         task = await daemon_main._start_restart_notice(enabled=True, **_hook_kwargs(store, composite, calls))
         marker = await asyncio.wait_for(task, 10)
-        assert calls == ["restart-notice:hosta:1:hook"] and json.loads(await store.get(rn.MARKER_KEY)) == marker
+        assert calls == ["restart-notice:hostx:1:hook"] and json.loads(await store.get(rn.MARKER_KEY)) == marker
     _run(body)
 
 
@@ -162,24 +162,24 @@ def test_invalid_flag_fails_daemon_startup_before_the_store_opens(monkeypatch):
 async def _seed(store, tmp_path, *, checkpoint=True, notify=None):
     fd = await _seat(store, FD, role="assistant")
     await _seat(store, ADVISOR, role="lead")
-    await _seat(store, "hosta:v2-alive", parent_stream_id=FD, spec_id="spec_x__alive", title="Alive child")
-    await _seat(store, "hosta:v2-gone", parent_stream_id=FD, spec_id="spec_x__gone", title="Gone child")
-    await _seat(store, "peer:v2-remote", parent_stream_id="hosta:v2-nexus", title="Remote child")
-    await _seat(store, "hosta:v2-print", spec_id="spec_printer__drawer_2026_10", title='Print "lead"')
+    await _seat(store, "hostx:v2-alive", parent_stream_id=FD, spec_id="spec_x__alive", title="Alive child")
+    await _seat(store, "hostx:v2-gone", parent_stream_id=FD, spec_id="spec_x__gone", title="Gone child")
+    await _seat(store, "peer:v2-remote", parent_stream_id="hostx:v2-nexus", title="Remote child")
+    await _seat(store, "hostx:v2-print", spec_id="spec_printer__drawer_2026_10", title='Print "lead"')
     await store.put("assistant.authority.shape", json.dumps({"stream_id": ADVISOR, "generation": "g"}))
 
     def seed(conn):
         conn.execute("INSERT INTO v2_spawn_admission_hold(host, held_until, reason, set_at) VALUES(?,?,?,?)",
-                     ("hosta", NOW + 600, "deploy freeze", NOW))
+                     ("hostx", NOW + 600, "deploy freeze", NOW))
         conn.execute("INSERT INTO v2_spawn_admission_hold(host, held_until, reason, set_at) VALUES(?,?,?,?)",
                      ("old", NOW - 600, "expired", NOW - 900))
         conn.execute(HOLDS_DDL)
-        conn.execute("INSERT INTO holds VALUES('h1','hosta:gate','hosta:v2-alive','merge gate',?,?,NULL,NULL)",
+        conn.execute("INSERT INTO holds VALUES('h1','hostx:gate','hostx:v2-alive','merge gate',?,?,NULL,NULL)",
                      ("2026-11-03T00:00:00Z", "2099-01-01T00:00:00Z"))
-        conn.execute("INSERT INTO holds VALUES('h2','hosta:old','hosta:v2-alive','old',?,?,NULL,NULL)",
+        conn.execute("INSERT INTO holds VALUES('h2','hostx:old','hostx:v2-alive','old',?,?,NULL,NULL)",
                      ("2026-11-01T00:00:00Z", "2026-11-01T01:00:00Z"))
         conn.execute("INSERT INTO v2_screen_leases(lease_id, host, holder_stream_id, holder_label, reason, "
-                     "acquired_at, expires_at) VALUES('l1','hosta','hosta:v2-alive','lead','ui walk',?,?)",
+                     "acquired_at, expires_at) VALUES('l1','hostx','hostx:v2-alive','lead','ui walk',?,?)",
                      (NOW - 60, NOW + 300))
         conn.execute(RULING_REQUESTS_DDL)
         base = ("intent", "{}", "g", ADVISOR, "g", NOW - 120, NOW + 600)
@@ -187,13 +187,13 @@ async def _seed(store, tmp_path, *, checkpoint=True, notify=None):
             "INSERT INTO v2_assistant_lane_rulings(ruling_request_id, request_key, action, intent_digest, "
             "intent_json, requester_generation, authority_stream_id, authority_generation, created_at, deadline, "
             "requester_stream_id, target_stream_id, state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("ruling-1", "k1", "spawn", *base, "hosta:v2-alive", "hosta:v2-new", "pending"))
+            ("ruling-1", "k1", "spawn", *base, "hostx:v2-alive", "hostx:v2-new", "pending"))
         conn.execute(
             "INSERT INTO v2_assistant_lane_rulings(ruling_request_id, request_key, action, intent_digest, "
             "intent_json, requester_generation, authority_stream_id, authority_generation, created_at, deadline, "
             "requester_stream_id, target_stream_id, state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("ruling-2", "k2", "close", *base, "hosta:v2-alive", None, "release_blocked"))
-        held = {"envelope": {"question_id": "q-held", "producer_stream_id": "hosta:v2-gone",
+            ("ruling-2", "k2", "close", *base, "hostx:v2-alive", None, "release_blocked"))
+        held = {"envelope": {"question_id": "q-held", "producer_stream_id": "hostx:v2-gone",
                              "spec_id": "spec_x__gone", "created_at": "2026-11-03T00:00:00Z"}}
         dup = {"envelope": {"question_id": "q-store", "producer_stream_id": FD,
                             "spec_id": "spec_fd", "created_at": "2026-11-03T00:00:00Z"}}
@@ -209,7 +209,7 @@ async def _seed(store, tmp_path, *, checkpoint=True, notify=None):
     await store.submit(seed)
     await store.enqueue_outbound_notice(
         notice_id="n1", tell_id="n1", kind="front_desk_held", dedupe_key="n1",
-        recipient_stream_id=FD, source_stream_id="hosta:v2-alive", body="held", metadata={})
+        recipient_stream_id=FD, source_stream_id="hostx:v2-alive", body="held", metadata={})
     if notify is not None:
         await notify._db.call("create_agent_question", envelope={
             "schema_version": 1, "question_id": "q-store", "title": "Approve?", "body": "Approve?",
@@ -252,7 +252,7 @@ def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
         try:
             fd, env = await _seed(store, tmp_path, checkpoint=checkpoint, notify=notify)
             composite = await _composite(store, fd)
-            states = {"hosta:v2-alive": "alive", "hosta:v2-print": "alive"}  # FD/advisor/gone: gone
+            states = {"hostx:v2-alive": "alive", "hostx:v2-print": "alive"}  # FD/advisor/gone: gone
             notice = _notice(store, composite, probe=_probe(states), notify=notify, env=env)
             marker = await notice.run_once(await notice.capture())
             text = (await _queued(store, notice.tell_id))[0]["body"]
@@ -267,25 +267,25 @@ def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
         assert f"Front desk: {FD} generation {fd['session_generation']} pane gone; auto-restore episode expected" in text
         assert f"Advisor: {ADVISOR} pane gone" in text
         assert "Seats open at start: 4 open: 2 alive, 1 gone, 1 unknown (probed 2026-" in text
-        seat_lines = [l for l in lines[order[3] + 1:order[4]] if l.startswith("  hosta:") or l.startswith("  peer:")]
-        assert [l.split()[0] for l in seat_lines] == ["hosta:v2-gone", "peer:v2-remote", "hosta:v2-alive", "hosta:v2-print"]
-        assert seat_lines[0] == '  hosta:v2-gone lead spec_x__gone "Gone child" gone parent=FD'
-        assert seat_lines[1].endswith("unknown parent=hosta:v2-nexus")
+        seat_lines = [l for l in lines[order[3] + 1:order[4]] if l.startswith("  hostx:") or l.startswith("  peer:")]
+        assert [l.split()[0] for l in seat_lines] == ["hostx:v2-gone", "peer:v2-remote", "hostx:v2-alive", "hostx:v2-print"]
+        assert seat_lines[0] == '  hostx:v2-gone lead spec_x__gone "Gone child" gone parent=FD'
+        assert seat_lines[1].endswith("unknown parent=hostx:v2-nexus")
         assert "\"Print 'lead'\" alive parent=top-level" in seat_lines[3]
         assert rn.SEATS_FOOTER in text and "(provisional)" in text
         assert FD not in [l.split()[0] for l in seat_lines] and ADVISOR not in [l.split()[0] for l in seat_lines]
         print_block = "\n".join(lines[order[4]:order[5]])
-        assert "Print work: 1 seat(s)" in print_block and "hosta:v2-print" in print_block
+        assert "Print work: 1 seat(s)" in print_block and "hostx:v2-print" in print_block
         assert ("printer state is not probed by the daemon; check: "
                 "printer status, as given in docs/abilities/printer_quest.md") in print_block
         windows = "\n".join(lines[order[5]:order[6]])
         assert "Windows: 3 active" in windows
-        assert 'admission freeze hosta until ' in windows and "old" not in windows.replace("hold", "")
-        assert "hold hosta:gate owner hosta:v2-alive" in windows and "hosta:old" not in windows
-        assert "screen lease hosta holder hosta:v2-alive" in windows
+        assert 'admission freeze hostx until ' in windows and "old" not in windows.replace("hold", "")
+        assert "hold hostx:gate owner hostx:v2-alive" in windows and "hostx:old" not in windows
+        assert "screen lease hostx holder hostx:v2-alive" in windows
         rulings = "\n".join(lines[order[6]:order[7]])
         assert "Advisor rulings: 2 pending" in rulings  # the held question ruling is pending too
-        assert "ruling-1 spawn requester=hosta:v2-alive target=hosta:v2-new age 120s" in rulings
+        assert "ruling-1 spawn requester=hostx:v2-alive target=hostx:v2-new age 120s" in rulings
         assert "other non-done: approved 1, release_blocked 1" in rulings
         undelivered = "\n".join(lines[order[8]:order[9]])
         assert "Undelivered FD traffic: 1 notice(s); composite queue depth 0 before this notice" in undelivered
@@ -339,9 +339,9 @@ def test_empty_sections_say_none(tmp_path):
 
 
 def _facts(n_seats=0, n_prints=0, n_questions=0, n_rulings=0, n_windows=0, title="t" * 40, pad=30):
-    seat = lambda i, spec: {"stream_id": f"hosta:v2-{i:04d}" + "x" * pad, "role": "worker", "spec_id": spec,
+    seat = lambda i, spec: {"stream_id": f"hostx:v2-{i:04d}" + "x" * pad, "role": "worker", "spec_id": spec,
                             "title": title, "probe": "gone", "created_at": f"2026-11-03T00:{i % 60:02d}:00Z",
-                            "parent_stream_id": "hosta:v2-parent-with-a-long-name"}
+                            "parent_stream_id": "hostx:v2-parent-with-a-long-name"}
     seats = [seat(i, "spec_x" + "_" * pad) for i in range(n_seats)]
     seats += [seat(1000 + i, "spec_printer__job" + "_" * pad) for i in range(n_prints)]
     return {
@@ -438,20 +438,20 @@ def test_marker_written_once_and_second_run_is_a_noop(tmp_path):
         stored = json.loads(await store.get(rn.MARKER_KEY))
         assert stored == marker
         assert set(stored) == {"instance_id", "pid", "started_at", "boot_time", "daemon_sha", "notice_tell_id", "kind"}
-        assert stored["notice_tell_id"] == "restart-notice:hosta:4242:abc"
+        assert stored["notice_tell_id"] == "restart-notice:hostx:4242:abc"
         assert await notice.run_once(snapshot) is None
         # A second object in the same process (same instance_id) also no-ops.
         again = _notice(store, composite, probe=_probe({FD: "alive"}))
         assert await again.run_once(snapshot) is None
         assert len(await _queued(store, notice.tell_id)) == 1
         # The next process (new instance, same boot + sha) is a daemon_restart.
-        later = _notice(store, composite, probe=_probe({FD: "alive"}), instance_id="hosta:5555:def",
+        later = _notice(store, composite, probe=_probe({FD: "alive"}), instance_id="hostx:5555:def",
                         started_at=NOW + 90)
         nxt = await later.run_once(await later.capture())
         assert nxt["kind"] == "daemon_restart"
         body_text = (await _queued(store, later.tell_id))[0]["body"]
         assert body_text.splitlines()[0].endswith(f"previous daemon started {rn._utc(NOW)} (90 s before this start) sha bbbbbbb")
-        deploy = _notice(store, composite, probe=_probe({FD: "alive"}), instance_id="hosta:6:x", daemon_sha="c" * 40)
+        deploy = _notice(store, composite, probe=_probe({FD: "alive"}), instance_id="hostx:6:x", daemon_sha="c" * 40)
         assert (await deploy.run_once(await deploy.capture()))["kind"] == "deploy"
     _run(body)
 
@@ -495,9 +495,9 @@ def test_delivery_failure_records_error_on_the_marker(tmp_path):
 def test_stalled_probe_does_not_delay_the_hook_and_reads_unknown(tmp_path):
     async def body(store):
         fd = await _seat(store, FD, role="assistant")
-        await _seat(store, "hosta:v2-stuck", parent_stream_id=FD)
+        await _seat(store, "hostx:v2-stuck", parent_stream_id=FD)
         composite = await _composite(store, fd)
-        notice = _notice(store, composite, probe=_probe({FD: "alive"}, stall={"hosta:v2-stuck"}),
+        notice = _notice(store, composite, probe=_probe({FD: "alive"}, stall={"hostx:v2-stuck"}),
                          clock=time.time)
         started = time.monotonic()
         task = notice.schedule(await notice.capture())
@@ -635,7 +635,7 @@ def test_questions_are_daemon_wide_and_deduplicated(tmp_path):
         block = lines[start:start + 3]
         assert block[0] == "Operator questions: 2 open"
         assert block[1].startswith(f"  q-store {FD} spec_fd age ") and block[1].endswith(" store")
-        assert block[2].startswith("  q-held hosta:v2-gone spec_x__gone age ") and block[2].endswith(" held")
+        assert block[2].startswith("  q-held hostx:v2-gone spec_x__gone age ") and block[2].endswith(" held")
         assert text.count("q-store") == 1
         assert stored["state"] == "open"  # read-only: no question state changed
     _run(body)
