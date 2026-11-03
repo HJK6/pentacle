@@ -82,14 +82,6 @@ need source/link review; this command reference change also runs the unchanged
 bootstrap selftest. These commands do not change release admission or replace
 platform-specific and installed-artifact acceptance.
 
-Dependency: the npm Python-prerequisite change on
-`dot/npm-python-prerequisite` is not part of this baseline. Until it lands,
-`npm-test` does not declare Python in its target requirements despite Python
-consumers in its default union. Do not infer that a prepared npm cache certifies
-that prerequisite. After it lands, the supported entry must provision Python
-3.13 and bind its prepared interpreter; no ambient interpreter workaround is
-part of this guidance.
-
 Targets are the closed list in `scripts/gate-env.json`. `prepare` (optionally
 with `--target`) runs setup only; focused pytest targets require `--select`
 and never silently default to a full suite. `v2-unit` runs unit only and is
