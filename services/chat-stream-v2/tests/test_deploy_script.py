@@ -965,8 +965,8 @@ def _u2_boot():
 
 def _u2_generation():
     def runner(argv, cwd):
-        return subprocess.CompletedProcess(argv, 0 if argv[2]=='999' else 1,
-                                           _U2_START if argv[2]=='999' else '', '')
+        return subprocess.CompletedProcess(argv, 0 if argv[argv.index('-p') + 1]=='999' else 1,
+                                           _U2_START if argv[argv.index('-p') + 1]=='999' else '', '')
     return dict(expected_pid=999, expected_start=_U2_START, prior_pid=111,
                 prior_start='old-start', runner=runner)
 
@@ -1334,3 +1334,98 @@ def test_keepalive_preceding_force_and_connection_priority():
     assert deploy_mod.classify_slow_consumer_lines([peer, force, close])['kinds'] == {'peer_liveness': 1}
     other = _u2_line('close', conn_id='other-connection', close_code=1011)
     assert deploy_mod.classify_slow_consumer_lines([force, other])['kinds'] == {'1011_close': 1}
+
+
+@pytest.mark.parametrize('parent_tz', [None, '', 'UTC0', 'America/Chicago'])
+def test_process_identity_uses_one_timezone(parent_tz, monkeypatch, capsys, tmp_path):
+    import os
+    import main as daemon_main
+    if parent_tz is None:
+        monkeypatch.delenv('TZ', raising=False)
+    else:
+        monkeypatch.setenv('TZ', parent_tz)
+    utc = 'Tue Nov  3 12:00:00 2026'
+    local = 'Tue Nov  3 06:00:00 2026'
+    def birth(env):
+        return utc if env.get('TZ') == 'UTC0' and env.get('LC_ALL') == 'C' else local
+    def fake_ps(cmd, **kw):
+        assert cmd[0] == 'ps'
+        return birth(kw.get('env', os.environ))
+    def runner(cmd, cwd):
+        assert tuple(cmd[-5:]) == ('ps', '-p', str(os.getpid()), '-o', 'lstart=')
+        env = dict(os.environ)
+        if cmd[0] == 'env':
+            env.update(part.split('=', 1) for part in cmd[1:-5])
+        return subprocess.CompletedProcess(cmd, 0, birth(env), '')
+    monkeypatch.setattr(daemon_main.subprocess, 'check_output', fake_ps)
+    daemon_main._emit_boot_marker('hostx', 1234)
+    output = capsys.readouterr()
+    # Compare actual emitted markers with an independently normalized deploy read.
+    expected = deploy_mod._process_start(os.getpid(), runner)
+    assert expected == ' '.join(utc.split())
+    groups = []
+    for name, text in [('out', output.out), ('err', output.err)]:
+        path = tmp_path / name
+        path.write_text(text)
+        groups.append([deploy_mod.freeze(path)])
+    _, _, markers = deploy_mod.generation_ranges(groups, os.getpid(), expected)
+    assert markers[0]['identity'] == markers[1]['identity']
+    assert not deploy_mod._prior_writer_exited(os.getpid(), expected, runner)
+
+
+def test_process_identity_timezone_mismatch_red_control(monkeypatch, capsys, tmp_path):
+    import os
+    import main as daemon_main
+    utc = 'Tue Nov 3 12:00:00 2026'
+    local = 'Tue Nov 3 06:00:00 2026'
+    monkeypatch.setenv('TZ', 'America/Chicago')
+    def fake_ps(cmd, **kw):
+        return utc if kw.get('env', os.environ).get('TZ') == 'UTC0' else local
+    monkeypatch.setattr(daemon_main.subprocess, 'check_output', fake_ps)
+    daemon_main._emit_boot_marker('hostx', 1234)
+    output = capsys.readouterr()
+    monkeypatch.setenv('TZ', 'UTC0')
+    def runner(cmd, cwd):
+        return subprocess.CompletedProcess(cmd, 0, utc, '')
+    expected = deploy_mod._process_start(os.getpid(), runner)
+    groups = []
+    for name, text in [('out', output.out), ('err', output.err)]:
+        path = tmp_path / name
+        path.write_text(text)
+        groups.append([deploy_mod.freeze(path)])
+    deploy_mod.generation_ranges(groups, os.getpid(), expected)
+
+
+@pytest.mark.parametrize('rc,value,error,exited', [(0, 'birth', '', False), (0, 'other', '', True),
+    (1, '', '', True), (0, '', '', False), (1, '', 'denied', False), (2, '', '', False)])
+def test_prior_writer_exit_remains_fail_closed(rc, value, error, exited):
+    def runner(cmd, cwd):
+        return subprocess.CompletedProcess(cmd, rc, value, error)
+    assert deploy_mod._prior_writer_exited(123, 'birth', runner) is exited
+
+
+@pytest.mark.parametrize('fault', ['pid', 'birth', 'uuid', 'malformed', 'missing', 'mixed', 'rotated'])
+def test_process_identity_bad_proofs_still_refuse(fault, tmp_path):
+    identity = {'pid': 123, 'start': 'Tue Nov 3 12:00:00 2026',
+                'boot_uuid': '00000000-0000-4000-8000-000000000001'}
+    def line(value):
+        return 'generation=' + json.dumps(value) + ' chat_streamd_v2 listening on hostx:1234\n'
+    left, right = line(identity), line(identity)
+    expected_pid, expected_start = 123, identity['start']
+    if fault == 'pid': expected_pid = 124
+    elif fault == 'birth': expected_start = 'Tue Nov 3 12:01:00 2026'
+    elif fault == 'uuid': right = line({**identity, 'boot_uuid': '00000000-0000-4000-8000-000000000002'})
+    elif fault == 'malformed': right = 'generation={} chat_streamd_v2 listening on hostx:1234\n'
+    elif fault == 'missing': right = 'no marker\n'
+    elif fault == 'mixed': right += line({**identity, 'pid': 124})
+    groups = []
+    for name, text in [('out', left), ('err', right)]:
+        path = tmp_path / name
+        path.write_text(text)
+        groups.append([deploy_mod.freeze(path)])
+    if fault == 'rotated':
+        path.rename(tmp_path / 'old')
+        path.write_text(right)
+    from deploy.packet.log_scan import IncompleteScan
+    with pytest.raises((deploy_mod.AttributionAmbiguous, IncompleteScan)):
+        deploy_mod.generation_ranges(groups, expected_pid, expected_start)

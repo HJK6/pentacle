@@ -160,7 +160,7 @@ sys.exit(payload['returncode'])
             calls.append(tuple(command))
             if command[0] == "git":
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
-            if command[0] == "ps":
+            if tuple(command[:4]) == ("env", "TZ=UTC0", "LC_ALL=C", "ps"):
                 return subprocess.CompletedProcess(command, 0, "Mon Jan 1 11:00:00 2024", "")
             if selection_fixture and (command[0] == str(python) or command[0] == "/usr/bin/env"):
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
@@ -333,7 +333,7 @@ def _diag(event, conn='reader', **values):
 
 def _proof(module, **changes):
     def runner(argv, cwd):
-        pid = int(argv[2])
+        pid = int(argv[argv.index('-p') + 1])
         return subprocess.CompletedProcess(argv, 0 if pid == 222 else 1,
                                            _ACTIVE_START if pid == 222 else '', '')
     return dict(expected_pid=222, expected_start=_ACTIVE_START, prior_pid=111,
@@ -385,14 +385,14 @@ def test_uncertain_generation_never_passes(tmp_path, monkeypatch, change):
     elif change == 'reused_pid': stderr = _boot(start=_OLD_START)
     elif change == 'missing_start': kwargs['expected_start'] = None
     elif change == 'old_writer_alive':
-        kwargs['runner'] = lambda argv, cwd: subprocess.CompletedProcess(argv, 0, _OLD_START if argv[2]=='111' else _ACTIVE_START, '')
+        kwargs['runner'] = lambda argv, cwd: subprocess.CompletedProcess(argv, 0, _OLD_START if argv[argv.index('-p') + 1]=='111' else _ACTIVE_START, '')
     elif change == 'new_writer_dead':
         kwargs['runner'] = lambda argv, cwd: subprocess.CompletedProcess(argv, 1, '', '')
     elif change == 'new_writer_reused_during_scan':
         calls = []
         def runner(argv, cwd):
-            calls.append(argv[2])
-            return subprocess.CompletedProcess(argv, 0, _ACTIVE_START if calls.count('222')==1 and argv[2]=='222' else 'changed', '')
+            calls.append(argv[argv.index('-p') + 1])
+            return subprocess.CompletedProcess(argv, 0, _ACTIVE_START if calls.count('222')==1 and argv[argv.index('-p') + 1]=='222' else 'changed', '')
         kwargs['runner'] = runner
     elif change == 'invalid_uuid': stderr = _boot(boot_uuid='missing')
     elif change == 'partial_marker': stderr = stderr[:-1]
@@ -498,7 +498,7 @@ def test_unanswered_old_writer_query_cannot_prove_exit(tmp_path, monkeypatch):
     module = _load_deploy(tmp_path, monkeypatch)
     proof = _proof(module)
     def runner(argv, cwd):
-        return (subprocess.CompletedProcess(argv, 2, '', 'process query denied') if argv[2] == '111'
+        return (subprocess.CompletedProcess(argv, 2, '', 'process query denied') if argv[argv.index('-p') + 1] == '111'
                 else subprocess.CompletedProcess(argv, 0, _ACTIVE_START, ''))
     proof['runner'] = runner
     result = _managed_window(module, tmp_path, monkeypatch, _boot(), _boot(), **proof)
