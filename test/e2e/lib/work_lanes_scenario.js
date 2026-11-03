@@ -19,11 +19,24 @@ async function webWorkLanes(ctx) {
   const { waitForValue } = require('./web_scenarios');
   const hostLocal = fixture.streamId; // local:web-gate-1, an open default-visibility session
 
+  // The gate daemon re-pushes its own empty work_lanes.inventory on every work-index sweep (about once a
+  // minute: last_sweep_at is part of the frame). Those pushes carry the same connection state version as
+  // the injected frames, so the renderer rightly applies them and "0 lanes" replaces the fixture mid-test.
+  // Once the scenario owns the lane source, daemon lane pushes are held back (and counted) instead.
   const hook = await session.send('Page.addScriptToEvaluateOnNewDocument', { source: `
     (() => { let cc;
       Object.defineProperty(window, 'cc', { configurable: true, get: () => cc, set: (value) => {
         const original = value.onChatStreamFrame;
-        value.onChatStreamFrame = (callback) => { window.__laneFrameSink = callback; return original.call(value, callback); };
+        window.__laneSourceOwned = false;
+        window.__laneDaemonHeld = [];
+        value.onChatStreamFrame = (callback) => { window.__laneFrameSink = callback;
+          return original.call(value, (frame) => {
+            if (window.__laneSourceOwned && frame && frame.type === 'work_lanes.inventory') {
+              window.__laneDaemonHeld.push({ state_version: frame.state_version, open: frame.counts && frame.counts.open });
+              return undefined;
+            }
+            return callback(frame);
+          }); };
         const read = value.requestStreamEvents;
         window.__laneReads = [];
         value.requestStreamEvents = (args) => { window.__laneReads.push(args); return read.call(value, args); };
@@ -86,6 +99,8 @@ async function webWorkLanes(ctx) {
     report.ok('before any injected frame the header shows the daemon\'s own empty inventory (0 lanes) and no lane rows',
       /^0 lanes \| \d+ sessions/.test(before) && rowsBefore === 0, { before, rowsBefore });
 
+    // From here the fixture frames are the only lane source.
+    await session.eval('window.__laneSourceOwned = true');
     await inject(frame);
     const stats = await waitForValue(session, cdp, `document.getElementById('stats').textContent`, (v) => /^4 lanes \|/.test(v),
       { timeoutMs, label: 'stats line leads with the open-lane count' });
@@ -151,6 +166,7 @@ async function webWorkLanes(ctx) {
       { timeoutMs, label: 'completed lane leaves the header' });
     report.ok('a completed lane leaves the header count and panel',
       /^3 lanes/.test(after) && await session.eval(`!document.querySelector('#session-list .lane-row[data-lane-id="wl-active-0002"]')`), { after });
+    report.note(`daemon lane pushes held while the fixture owned the lane source: ${JSON.stringify(await session.eval('window.__laneDaemonHeld'))}`);
 
     // lane_update cards in the primary assistant's timeline (composite stream), rendered by the real view.
     const cards = await session.eval(`(() => {
