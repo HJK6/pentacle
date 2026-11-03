@@ -338,3 +338,91 @@ Later bounded work can inspect client reconciliation, provider/account recovery
 and the unclassified/manual entries before selecting another reference. The
 current map/reference owner hands those priorities back with the work item;
 this page does not commission conversion, physical moves or coverage reduction.
+
+## Reference: critical journeys, tranche 3
+
+This bounded source map is based on
+`c40f2ebe6a6cfca598f70e3db9c8c752ce8891ed`; line citations refer to that base,
+not later additions. It supplements the two references above without changing
+runners, the UNKNOWN registry or test selection. All nine rows were re-inspected
+against source for this section. Source inspection is not a test-run receipt,
+production observation or assertion that no equivalent test exists elsewhere.
+The required prior-audit provenance remains explicit in each row.
+
+Paths beginning `tests/` below are relative to `services/chat-stream-v2/`;
+bare `test_*.py` names are relative to its `tests/` directory. Bare
+`optimisticReconciliation.test.ts` is under `pentacle-chat-core/tests/`, and
+bare `restart_matrix.py` is under `services/chat-stream-v2/tests/soak/`.
+**D** means the existing daemon merge runner: `tools/run_gate.py:94–102,430`
+runs unit **and smoke**. Unit excludes smoke/soak directories and the `soak`
+and `repin_exhaustive` markers. Public checks reaches this through
+`scripts/gate-env.json:167–182` and
+[the daemon job](../.github/workflows/predeploy-tests.yml#L194), 194–197.
+**C** means the separate `pentacle-chat-core` test command, not root npm's
+shallow selection ([frontend steps](../.github/workflows/predeploy-tests.yml#L47),
+47–52). **W** means the [web step](../.github/workflows/predeploy-tests.yml#L131),
+131–133, through `scripts/gate_web.py:14–17` into the browser runner.
+Registration of a browser scenario alone is not evidence of its assertions
+or a successful run. **R** means an opt-in real-process restart rehearsal;
+its `live_daemon` tests under `tests/soak/` are not selected by D, nor inferred
+selected merely from the generic `soak` marker. No such rehearsal was run here.
+
+| Journey and provenance | Behavior → test / runner | Boundary and protected failure | Evidence kind; residual UNKNOWN |
+| --- | --- | --- | --- |
+| **A1 — send survives reconnect.** audited at c40f2ebe (external audit, fleet-verified sample); source re-inspected | `test_send_survives_disconnect.py:98–115` / D holds accepted sends across disconnect. `test_send_idempotency_dedupe.py:55–71,103–124` / D checks rotated/concurrent retries and one paste. F1: `tests/smoke/test_cosmo_e2e_walk.py:114–140` / D reconnects and queries a receipt. | Disconnect test **replaces the send handler**: no Comms/Store send path runs there. Idempotency tests use real Comms/Store with fake paste. Smoke uses an authenticated real loopback server: same route ID, one stored USER event, receipt found on the new connection. Its initial send completes before socket close; consumer is a composite route, not a provider pane. | Separate task-lifetime, durable-send and loopback-composite assertions. They do not jointly prove an accepted send pending at disconnect completes exactly once through the real server path and exposes its receipt on a new connection. See G1. Provider-pane delivery remains a separate boundary. Related cancelled-hello node starts at `test_inbound_admission_bounds.py:670` (decorator at 669). |
+| **A2 — history, replay and ordering.** external audit, source re-inspected | `pentacle-chat-core/tests/messageIdentityOrdering.test.ts:94–115,137–151` / C asserts exact text, IDs and order for live, fetched, snapshot and backfill fixtures. F1: `tests/smoke/test_cosmo_e2e_walk.py:283–304` / D checks three USER/publish pairs and ordered submitted identities. | Real reducer/selector over synthetic envelopes; smoke's real server/Store plus test backend seat. Protects identity collapse, duplicate/lost counts and order regressions within those boundaries. `optimisticReconciliation.test.ts:659–672` asserts one persisted and rendered row after duplicate live input. | Component and loopback smoke evidence, not an actual provider/browser history round trip. Browser reconnect assertions (`test/e2e/lib/web_scenarios.js:436–450`) use a shimmed snapshot (`414–419`); no claim of arbitrary production history ordering. |
+| **A3 — optimistic echo reconciles.** external audit, source re-inspected | `pentacle-chat-core/tests/optimisticReconciliation.test.ts:642–656,1131–1146,1227–1252` / C covers live echo, snapshot and daemon-sequence correlation. `test/e2e/lib/optimistic_reload_scenario.js:74–85` / W covers the reload-facing state. | Core asserts optimistic indexes removed, one event and correlated daemon sequence; browser uses a never-resolving fake send (`19–25`) and injected echoes (`37–42`). Protects duplicate/zombie optimistic rows under controlled event input. | Component/browser fixture evidence. It does not establish real server receipt creation, provider delivery or installed-client behavior. A1's server receipt checks are separate, not a composed A3 proof. |
+| **B1 — boot gates spawn and initial input.** external audit, source re-inspected | `test_spawn_boot_gate.py:50–62,77–83` / D parks spawn and await_spawn until the gate opens. `test_spawn_initial_prompt_bootstrap.py:117–130`, `test_spawn_delivery_race.py:254–265`, `test_spawn_prompt_receipt_truthful.py:66–79` / D cover first input, collapsed delivery and truthful receipt seams. | Real dispatch with stub SpawnCtl; other tests exercise Sessions/SpawnCtl or Store with fake panes/events. Protects premature boot-window execution, treating a draft as delivered and claiming prebrief delivery without evidence. | Source assertions across separate seams; actual provider boot plus initial-prompt delivery remains UNKNOWN. A fake pane is not runtime readiness proof. |
+| **B2 — cancel/close preserve ownership.** audited at c40f2ebe (external audit, fleet-verified sample); source re-inspected | `test_close_ladder.py:213–224,615–634,689–708` / D covers persisted close and identity fences. F2: `test_spawn_cancel_fence_holes.py:303–336` and `test_approved_close_retry.py:149–177` / D cover cancellation/approved close across Store reopen. `test_close_progeny_cli.py:15–54` / D crosses CLI/socket. | F2 cancel: reopen DB, adopt zero, no open row or orphan fake pane. Approved close: preserved request/generation fences and exactly one fake kill. CLI test uses real CLI/Server/Store and a local test pane but only verifies unsupported-close refusal preserves it; no restart. | In-process restart assertions plus separate CLI refusal evidence, not a real-process CLI/RPC close across daemon restart. Tests that use real panes are indexed here, not run. See G2. |
+| **B3 — restart continuity retains truthful ownership.** audited at c40f2ebe (external audit, fleet-verified sample); source re-inspected | `test_restart_continuity_daemon.py:79–102,368–384,418–427,441–451` / D covers drain, same-key replay and pasted/not-pasted distinctions. F2's cancel/approved-close nodes above also apply. `tests/soak/test_restart_continuity.py:40–51` invokes `tests/soak/restart_matrix.py:491–587` / R. | Unit tests use Store with fake tmux/proof. R starts isolated daemon processes, RPC/DB and a stub-provider pane: success oracle `restart_matrix.py:445–456` checks one pane/open row/prompt, released reservation, delivered/ready state and keyed replay; failure and fresh-key recovery oracle `459–476` checks no pane/open row before a new-key recovery. | R is source-inspected, not executed or selected by merge. Signal-driven restart with a stub provider is not installed service-manager or real-provider qualification. Spawn continuity does not supply G2's close composition. |
+| **C1 — release admission requires bounded evidence.** external audit, source re-inspected | `test_deploy_release_selection.py:173–186` / D asserts exact affected child, qualified-affected verdict, omitted targets UNTESTED and no full-fleet acceptance. `test_deploy_log_guard.py:373–410`, `test_deploy_script.py:127–161,231–240`, `test_deploy_fleet_verdict.py:181–196` / D cover uncertain logs, runtime verification/deadline and missing verdict evidence. | Real isolated Git/preimage/log bytes with synthetic runtime receipts and service-manager/socket counterparts. Protects stale/absent evidence being promoted to successful qualification; not-selected is not passed. | Fixture acceptance/refusal evidence. Source fixtures do not activate installed services or prove their health. Selector `deploy_invocation` is narrower than D and does not by itself include every cited deploy test. |
+| **C2 — rollback uses actual preimage and fresh receipts.** audited at c40f2ebe (external audit, fleet-verified sample); source re-inspected | `test_deploy_release_selection.py:290–315` / D rejects target receipts for rollback, then checks prior SHA, actual checkout and a second activation call. Drift/non-green-child controls are at `244–285`. `test_event_push_pin.py:65–77,265–331` / D covers prior pin and preflight boundaries. | Real disposable Git/durable transaction state, synthetic installed/runtime observations and activation calls. Protects stale receipt reuse, wrong rollback source and unsupported success claims. This is explicit rollback, not proof of automatic rollback after every product failure. | Source fixture evidence only. Historical availability or health of real runtime receipts cannot be established from the repository. G3 is a runtime-evidence requirement, not a missing fixture assertion. |
+| **C3 — cold restore rebinds once and notices remain bounded.** external audit, source re-inspected | `test_assistant_restore.py:638–668,706–755` / D checks one resume/rebind episode and crash recovery. `test_restart_notice.py:132–145` / D covers disabled notices. `tests/soak/test_restart_notice.py:140–153,177–197` / R checks isolated restart notices. | Restore has real Store/Sessions/Composite/Restore but fake tmux/process/clock/SpawnCtl and a deduplicating notice callback (`test_assistant_restore.py:167–169`). One retained notice does not prove one callback invocation. R uses a real isolated daemon and stub provider; queued **or** delivered is accepted at line 147. | Separate in-process restore and opt-in restart-notice evidence. No composed cold restore through an actual browser/provider rendering proof; R's aggregate count is not that proof. |
+
+### Bounded gap decisions (G1–G3 only)
+
+**G1 — CONFIRMED, regression-assertion gap; eligible for M7.** Inspected
+`test_send_survives_disconnect.py`, `test_send_idempotency_dedupe.py`,
+`test_send_semantics.py`, `test_send_receipts.py`, `test_send_receipt_late_proof.py`
+and `tests/smoke/test_cosmo_e2e_walk.py`. The missing bounded assertion is one
+journey holding accepted-send completion pending through submitter disconnect
+on the real server path, then asserting exactly-once landing and receipt lookup
+through a new connection. Reuse the existing loopback-composite fixtures; this
+decision does not commission a provider-pane integration. F1 materially narrows this: real reconnect,
+route deduplication and receipt lookup already exist, but after completed send
+and on the composite path. Its receipt-mutation control
+(`test_cosmo_e2e_walk.py:404–456`) deliberately deletes the receipt and checks
+lookup failure, then restores persistence. Do not claim smoke or receipt
+failure controls are absent. This is a bounded inspected-scope decision, not
+an exhaustive repository-wide absence claim.
+
+**G2 — CONFIRMED, regression-assertion gap; eligible for M8.** Inspected
+`test_spawn_cancel_fence_holes.py`, `test_approved_close_retry.py`,
+`test_close_ladder.py`, `test_close_progeny_cli.py`,
+`test_restart_continuity_daemon.py`, `test_offline_operator_close.py:138–154,264–292`,
+`test_manager_close_waiver.py:370–390` and the restart-matrix sources above.
+F2 already proves cancel-wins and approved-close retry across in-process
+restart, including persistent fences and exactly one kill. The missing bounded
+assertion is **real-process CLI/RPC close composition across a daemon restart**,
+with owned pane/process release exactly once, foreign identity refusal and no
+double ownership after restart.
+The offline-close tests reopen Store or inject a fake wire; the manager-close
+journey retains Store and controlled tmux. Separate real CLI refusal,
+real-process spawn continuity and CLI report restart (`tests/soak/restart_matrix.py:920–945`)
+do not close this close-specific assertion gap.
+No claim that all close/restart assertions are missing is warranted.
+
+**G3 — CONFIRMED, runtime-evidence gap; no regression slice.** Inspected
+`test_deploy_release_selection.py:290–315`, `test_event_push_pin.py:65–77,265–331`
+and this document's existing release/deploy boundary. The missing evidence is
+installed-service rollback activation/health, beyond synthetic runtime receipts
+in source fixtures. Acceptance path: **fleet-owned runtime receipt, isolated
+rehearsal or explicit deferral**. No additional fixture is proposed, and a
+passing fixture cannot close this gap. Whether an external runtime receipt
+already exists remains UNKNOWN until its owner supplies it; this map does not
+infer a dated fleet incident or historical lack of receipts from source.
+
+Validation for this section is citation and diff review at the stated base.
+No runtime tests, full suites, daemon processes or closing gate were run for
+this docs-only change. Existing full acceptance requirements are unchanged;
+this section neither certifies runtime deployment nor commissions extra work.
