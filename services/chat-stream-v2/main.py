@@ -83,6 +83,7 @@ from usage_publisher import UsageStatePublisher
 from voice_answers import dispatch_block as voice_answers_dispatch_block
 from send_metadata import voice_context_from_route, voice_context_dispatch_block
 from window_schedule import WindowSchedule
+import restart_notice
 
 log = logging.getLogger("chat_streamd_v2")
 
@@ -102,6 +103,33 @@ def _emit_boot_marker(host: str, port: int) -> None:
     boot_line = f"generation={generation} chat_streamd_v2 listening on {host}:{port}"
     print(boot_line, file=sys.stdout, flush=True)
     print(boot_line, file=sys.stderr, flush=True)
+
+
+async def _deliver_composite_notice(
+    server: Any, store: Any, composite: Any, text: str, tell_id: str, *, from_stream_id: str,
+) -> str:
+    """Hand one daemon notice to the bound front desk, or queue it durably.
+
+    Returns ``queued`` (unbound, dead or stale seat: flushed later by the restore
+    or rebind path), ``committed`` (delivered or durably held by the digest) or
+    ``handoff`` (a reply that is neither; the caller decides whether to queue).
+    """
+    from sessions import VerbError as _VerbError
+    try:
+        delivered = await server._deliver_composite_tell(
+            composite, composite.config.stream_id, from_stream_id, text, tell_id, "",
+        )
+    except _VerbError:
+        delivered = None
+    if delivered is None:
+        await store.enqueue_composite_tell(
+            name=composite.config.name, tell_id=tell_id,
+            from_stream_id=from_stream_id, body=text, request_id="",
+        )
+        return "queued"
+    if server._composite_tell_committed(delivered) or await server._composite_tell_durably_held(delivered):
+        return "committed"
+    return "handoff"
 
 
 def _wire_cosmo_reply_push(assistant_composites: dict, push_reply) -> None:
@@ -283,6 +311,7 @@ async def run(args: argparse.Namespace) -> int:
     # A malformed value fails startup before anything is opened.
     from assistant_restore import parse_auto_restore_flag
     auto_restore_enabled = parse_auto_restore_flag(os.environ)
+    restart_notice_enabled = restart_notice.parse_flag(os.environ)
     store = Store(args.db)
     lifecycle = DaemonLifecycle(store, host=args.local_host)
     tmux = Tmux(args.tmux_bin)
@@ -838,20 +867,12 @@ async def run(args: argparse.Namespace) -> int:
             inhibit_path=Path(args.db).with_name('authority-restore.inhibit') if args.db != ':memory:' else None,
         )
 
-        async def _deliver_restore_notice(composite, text: str, tell_id: str) -> None:
-            from sessions import VerbError as _VerbError
-            try:
-                delivered = await server._deliver_composite_tell(
-                    composite, composite.config.stream_id, _assistant_restore.NOTICE_FROM,
-                    text, tell_id, "",
-                )
-            except _VerbError:
-                delivered = None
-            if delivered is None:
-                await store.enqueue_composite_tell(
-                    name=composite.config.name, tell_id=tell_id,
-                    from_stream_id=_assistant_restore.NOTICE_FROM, body=text, request_id="",
-                )
+        async def _deliver_restore_notice(
+            composite, text: str, tell_id: str, *, from_stream_id: str = _assistant_restore.NOTICE_FROM,
+        ) -> str:
+            return await _deliver_composite_notice(
+                server, store, composite, text, tell_id, from_stream_id=from_stream_id,
+            )
 
         _restore_fault, _restore_ps = _assistant_restore.test_hooks(os.environ)
         server.assistant_restore = _assistant_restore.AssistantRestore(
@@ -1000,11 +1021,29 @@ async def run(args: argparse.Namespace) -> int:
         await server.lane_rulings.start()
     await lifted  # both are fast; ensure done before the background tasks below
     await server.configure_error_alerts(outbound, alerts)
+    # One restart notice per process: capture the open-seat snapshot now, then
+    # probe/compose/deliver in a daemon-owned task so no startup worker waits.
+    restart_task = None
+    if restart_notice_enabled and assistant_composite.config.enabled:
+        notice = restart_notice.RestartNotice(
+            store=store, composite=assistant_composite, deliver=_deliver_restore_notice,
+            probe=lambda host, name: (
+                tmux if host == args.local_host else hosts.tmux_for(host)).session_state(name),
+            notify=notify, instance_id=lifecycle.instance_id, daemon_sha=event_push.daemon_sha,
+        )
+        try:
+            snapshot = await notice.capture()
+        except Exception:  # noqa: BLE001 - run_once still sends the header
+            log.exception("restart notice snapshot failed", extra={"subsystem": "restart_notice"})
+            snapshot = None
+        restart_task = notice.schedule(snapshot)
     work_lanes.refresh()  # Re-hand any opening persisted before the core was ready.
 
     # 3. Background tasks start last, each under the loop rules
     #    (cadence, per-pass cap, backoff, kill switch).
     tasks: list[asyncio.Task] = [asyncio.create_task(watchdog.run_consumer(), name="stall-handoff")]
+    if restart_task is not None:
+        tasks.append(restart_task)
     try:
         tasks.append(await server.start_consent())
     except (OSError, ValueError) as exc:
