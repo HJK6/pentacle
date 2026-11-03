@@ -258,9 +258,13 @@ def test_router_decision_persists_receipt_id_for_live_proof() -> None:
         store = Store(":memory:")
         store.start()
         dispatched: list[dict] = []
+        dispatch_entered = asyncio.Event()
+        release_dispatch = asyncio.Event()
 
         async def dispatch(route: dict) -> dict:
             dispatched.append(dict(route))
+            dispatch_entered.set()
+            await release_dispatch.wait()
             return {"delivery": "landed"}
 
         composite = None
@@ -292,7 +296,25 @@ def test_router_decision_persists_receipt_id_for_live_proof() -> None:
             decision = json.loads(route["route_json"])
             assert decision["router_decision_receipt_id"].startswith("assistant-router-decision-")
             assert route["dispatch_id"]
+            assert route["delivery_state"] == "intent"
+            assert route["route_target"] == CONVERSATION_STREAM
+            await asyncio.wait_for(dispatch_entered.wait(), timeout=5)
             assert dispatched and dispatched[0]["dispatch_id"] == route["dispatch_id"]
+            release_dispatch.set()
+            async with asyncio.timeout(5):
+                while True:
+                    route = await store.get_assistant_composite_route(
+                        stream_id=COMPOSITE_STREAM, input_identity="router-receipt",
+                    )
+                    assert route is not None
+                    assert route["dispatch_id"] == dispatched[0]["dispatch_id"]
+                    assert route["route_target"] == dispatched[0]["route_target"]
+                    if route["delivery_state"] == "landed":
+                        break
+                    await asyncio.sleep(0.01)  # Polling cadence, not an ordering guarantee.
+            assert route["routing_state"] == "resolved"
+            assert route["route_target"] == CONVERSATION_STREAM
+            assert route["delivery_state"] == "landed"
             assert authority["session_generation"]
         finally:
             if composite is not None:
