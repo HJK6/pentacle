@@ -26,7 +26,7 @@ test('Modeler is a generic hosted implementation and never self-registers', asyn
  const h = setup(); t.after(h.close); await tick(); assert.deepEqual(h.root.DASHBOARDS, []);
  assert.equal(h.viewer.dashboard.pollFn, undefined); assert.equal(h.viewer.dashboard.pollInterval, undefined);
  assert.equal(h.frame().src, fixtureUrl); assert.equal(h.frame().title, '3D Modeler viewer');
- assert.equal(h.frame().getAttribute('sandbox'), 'allow-scripts allow-same-origin');
+ assert.deepEqual(h.frame().getAttribute('sandbox').split(' '), ['allow-scripts', 'allow-same-origin', 'allow-popups']);
  assert.equal(h.frame().getAttribute('referrerpolicy'), 'no-referrer');
  assert.equal([...h.timers.values()][0].ms, 15000); h.frame().dispatchEvent(new h.root.Event('load'));
  assert.equal(h.state(), 'loaded'); assert.equal(h.container.dataset.boardState, 'ready'); assert.equal(h.timers.size, 0);

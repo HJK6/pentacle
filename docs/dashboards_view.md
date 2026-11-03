@@ -89,10 +89,12 @@ the view removes the frame, handlers and timeout; late events cannot update a
 new view. A frame load means navigation completed, not that the app rendered,
 authenticated or passed a health check. There is no hosted health polling.
 
-Hosted frames use `sandbox="allow-scripts allow-same-origin"`,
+Hosted frames use `sandbox="allow-scripts allow-same-origin allow-popups"`,
 `referrerpolicy="no-referrer"`, `allow="xr-spatial-tracking; fullscreen"` and
-`loading="lazy"` on a distinct permitted host. Popup and top-navigation sandbox
-permissions are absent. External web opening uses `noopener,noreferrer`.
+`loading="lazy"` on a distinct permitted host. Links may open a separate page;
+the popup inherits the sandbox. Popup sandbox escape and top navigation remain
+disallowed. Hosted links should use `target="_blank" rel="noopener noreferrer"`.
+External web opening uses `noopener,noreferrer`.
 Pentacle supplies no tokens, auth headers, session/config injection or action
 bridge to the hosted page. The hosted app may have its own unrelated session.
 
