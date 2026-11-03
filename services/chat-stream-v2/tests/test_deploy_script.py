@@ -812,8 +812,11 @@ def test_u2_server_keepalive_needs_terminal_1011():
     close = _u2_line(initiator="server", close_sent_code=1011,
                      close_sent_reason="keepalive_ping_timeout")
     scan = _u2_scan(force, close)
-    assert scan["failures"] == [{"kind": "1011_close", "client": _U2_CONN_A,
-                                  "transport": "loopback", "line": close}]
+    assert len(scan["failures"]) == 1
+    row = scan["failures"][0]
+    assert (row["kind"], row["class"], row["client"], row["transport"], row["line"]) == (
+        "keepalive_timeout", "liveness", _U2_CONN_A, "loopback", close)
+    assert row["queue_depth"] == 0
     assert scan["overflow_drops"] == 0
 
 
@@ -927,7 +930,7 @@ def test_u2_missing_marker_selects_empty_window(boot_line):
     )
     assert scan == {"class": "slow_consumer", "outcome": deploy_mod.SLOW_CONSUMER_PASSED,
                     "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
-                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": []}
+                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [], "kinds": {}}
 
 
 def test_u2_explicit_no_marker_scans_whole_text():
@@ -1281,3 +1284,53 @@ def test_web_reload_refuses_descriptor_identity_before_mutation(tmp_path):
     with pytest.raises(deploy_mod.DeployError, match="Label"):
         deploy_mod.reload_web("com.example.owned", descriptor, launchd.runner)
     assert not launchd.calls
+
+
+@pytest.mark.parametrize('kind', ['keepalive_timeout', 'overflow', '1011_close'])
+def test_keepalive_kind_receipt_and_exit_stay_failed(kind, monkeypatch, capsys):
+    force = dict(initiator='server', cause='liveness', cause_source='protocol_close')
+    close = dict(close_code=1011, close_reason='keepalive_ping_timeout', queue_depth=1)
+    if kind == 'overflow':
+        force.update(cause='slow_consumer', cause_source='server_policy')
+    elif kind == '1011_close':
+        force = None
+        close.update(close_reason='unknown')
+    lines = ([_u2_line('force_close', **force)] if force else []) + [_u2_line('close', **close)]
+    scan = deploy_mod.classify_slow_consumer_lines(lines)
+    assert scan['outcome'] == deploy_mod.SLOW_CONSUMER_FAILED
+    assert [r['kind'] for r in scan['failures']] == [kind]
+    assert scan['kinds'] == {kind: 1}
+    if kind == 'keepalive_timeout':
+        assert scan['class'] == scan['failures'][0]['class'] == 'liveness'
+        assert scan['failures'][0]['queue_depth'] == 1
+        assert scan['failures'][0]['queue_max'] == 256
+        assert scan['failures'][0]['line'] == lines[-1]
+    stamp = dict(sha=TARGET_SHA,
+                 daemon_boot_readback={'outcome': deploy_mod.BOOT_OBSERVED},
+                 daemon_runtime_readback={'outcome': deploy_mod.RUNTIME_SHA_OBSERVED, 'sha': TARGET_SHA},
+                 slow_consumer=scan, fleet_smoke={'outcome': deploy_mod.FLEET_SMOKE_PASSED})
+    code, _, err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == deploy_mod.EXIT_SLOW_CONSUMER_FAILED == 8
+    assert kind in err and 'kinds=' in err
+
+
+@pytest.mark.parametrize('field', ['close_reason', 'close_sent_reason'])
+def test_keepalive_reason_without_force_classifies_liveness(field):
+    scan = deploy_mod.classify_slow_consumer_lines([
+        _u2_line('close', **{field: 'keepalive_ping_timeout', 'close_code': 1011})])
+    assert scan['kinds'] == {'keepalive_timeout': 1}
+
+
+def test_keepalive_preceding_force_and_connection_priority():
+    force = _u2_line('force_close', initiator='server', cause='liveness', cause_source='protocol_close')
+    close = _u2_line('close', close_code=1011, close_reason='unknown')
+    scan = deploy_mod.classify_slow_consumer_lines([force, close])
+    assert scan['kinds'] == {'keepalive_timeout': 1}
+    assert deploy_mod.classify_slow_consumer_lines([close, force])['kinds'] == {'1011_close': 1}
+    overflow = _u2_line('force_close')
+    for lines in ([overflow, force, close], [force, close, overflow]):
+        assert deploy_mod.classify_slow_consumer_lines(lines)['kinds'] == {'overflow': 1}
+    peer = _u2_line('force_close', initiator='peer', cause='liveness')
+    assert deploy_mod.classify_slow_consumer_lines([peer, force, close])['kinds'] == {'peer_liveness': 1}
+    other = _u2_line('close', conn_id='other-connection', close_code=1011)
+    assert deploy_mod.classify_slow_consumer_lines([force, other])['kinds'] == {'1011_close': 1}

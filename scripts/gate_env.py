@@ -374,7 +374,8 @@ def ensure_npm_env(run, checkout: Path, prepared: Path, env: Dict[str, str], pro
         return {}, [fail("dependencies", "npm ci failed: " + " | ".join((out.stdout + out.stderr).strip().splitlines()[-5:])[:400], "inspect the npm log; no manual node_modules edits")]
     prepared.mkdir(parents=True, exist_ok=True)
     ga.atomic_write(marker, json.dumps({"lock": want, "installed": file_digest(installed) if installed.exists() else None}, sort_keys=True).encode())
-    return {"reused": False, "lock": want}, []
+    return {"reused": False, "lock": want,
+            "ci_output_tail": " | ".join((out.stdout + out.stderr).strip().splitlines()[-5:])[-400:]}, []
 
 
 # ------------------------------------------------------------ preflight
@@ -861,6 +862,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                 failures += check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
         if target.get("process_listing"):
             failures += check_process_listing(subprocess.run, env)
+        if args.command == "run" and (args.target == "web-gate" or web_selected):
+            # Optional npm dependencies can be silently dropped by a successful install.
+            # Probe from the exact checkout on both fresh and reused preparations.
+            terminal_failure = None
+            try:
+                probe = subprocess.run(["node", "-e", "require('node-pty')"],
+                                       cwd=str(checkout), env=env, capture_output=True, text=True, timeout=10)
+                if probe.returncode:
+                    terminal_failure = "node-pty is unavailable: " + probe.stderr[-400:]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                tail = getattr(exc, "stderr", "") or ""
+                if isinstance(tail, bytes):
+                    tail = tail.decode("utf-8", errors="replace")
+                terminal_failure = "node-pty probe failed (%s): %s" % (type(exc).__name__, tail[-400:])
+            if terminal_failure:
+                if not npm_info.get("reused") and "ci_output_tail" in npm_info:
+                    state["extra"]["npm"] = {"ci_output_tail": npm_info["ci_output_tail"]}
+                failures.append(fail("dependencies", terminal_failure))
         if args.command == "run" and web_selected:
             probe = subprocess.run(["node", "-e", "require('./test/e2e/web_gate').resolveChrome()"],
                                    cwd=str(checkout), env=env, capture_output=True, text=True, timeout=30)
@@ -908,7 +927,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         state["evidence"] = evidence_refs(evidence / "gate")
     except SetupFailure as exc:
         state.update(outcome="setup_failure", first_failure={"stage": "setup", "code": exc.failures[0]["code"]},
-                     extra={"failures": exc.failures})
+                     extra=dict(state["extra"], failures=exc.failures))
     except Cancelled:
         if proc is not None and proc.poll() is None:
             stop_group(proc)

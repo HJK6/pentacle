@@ -4,6 +4,8 @@ The public harness is provider-free and uses a disposable local daemon. It valid
 
 ## Supported entry: `scripts/gate_env.py`
 
+The web gate and web-selected npm tests require the optional `node-pty` module and fail as setup when it is absent.
+
 Use the [behavior coverage map](TEST_COVERAGE.md) to find existing protection,
 real/fake boundaries and unresolved selection; send retry to durable receipt
 is the first bounded reference flow. The map also holds the
