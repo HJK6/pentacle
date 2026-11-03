@@ -94,7 +94,7 @@ def _emit_boot_marker(host: str, port: int) -> None:
     try:
         process_start = " ".join(subprocess.check_output(
             ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True,
-            timeout=5,
+            timeout=5, env=dict(os.environ, TZ="UTC0", LC_ALL="C"),
         ).split())
     except (OSError, subprocess.SubprocessError):
         process_start = ""  # The deploy selector will refuse unproven identity.

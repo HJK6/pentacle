@@ -212,7 +212,7 @@ def test_deployment_reads_both_managed_streams_and_retained_boot_boundary(tmp_pa
         stdout.write('x' * 90 + '\n')
         stderr.write('ordinary warning\n')
         def runner(argv, cwd):
-            active = argv[2] == '222'
+            active = argv[argv.index('-p') + 1] == '222'
             return subprocess.CompletedProcess(argv, 0 if active else 1,
                                                start if active else '', '')
         result = deploy_mod._scan_slow_consumer_window(
