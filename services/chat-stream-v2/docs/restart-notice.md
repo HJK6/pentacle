@@ -76,7 +76,7 @@ when empty):
 2. Front desk: binding stream, generation, pane state, and whether an auto-restore episode is expected (`gone` with `PENTACLE_ASSISTANT_AUTO_RESTORE=1`).
 3. Advisor: authority stream and pane state, or `none configured`.
 4. Seats open at start (excluding front desk, advisor and composite projections): a count line, then at most 20 lines ordered gone, unknown, alive (oldest first in each group), then `+N more: agent-orch list` and the provisional-`gone` note.
-5. Print work: open seats whose `spec_id`/`qualified_spec_ids` match `^spec_printer__` (all of them, not only the 20 listed above), at most 8, then the printer check command. The daemon never probes the printer.
+5. Print work: open seats whose `spec_id`/`qualified_spec_ids` match `^spec_printer__` (the whole captured population, including the front desk and advisor and seats past the 20 listed above), at most 8, then the printer check command. The daemon never probes the printer.
 6. Windows: active spawn-admission freezes, `holds` and screen leases, at most 8 of each.
 7. Advisor rulings: `pending` rows (at most 8), then counts for the other states that are not `done`.
 8. Operator questions, across the whole daemon: open `agent_questions` whose producer is still current (the stale-question policy, applied read-only), plus held question rulings (`pending`/`approved`/`bypassed`/`unruled_disabled`), deduplicated by `question_id`, at most 8.
@@ -93,7 +93,7 @@ front desk, advisor, checkpoint and resume lines are never cut.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `PENTACLE_RESTART_NOTICE` | `1` | `0` skips the snapshot, compose, delivery and marker. Any other value fails startup. |
+| `PENTACLE_RESTART_NOTICE` | `1` | `0` skips the snapshot, compose, delivery and marker (`main._start_restart_notice`). Any other value fails startup before the store opens. |
 | `PENTACLE_FD_CHECKPOINT_PATH` | `~/agent-workspace/agent-outputs/fd-checkpoint/checkpoint-current.md` | Checkpoint path reported in section 10. |
 | `PENTACLE_RESTART_NOTICE_PRINTER_CMD` | a pointer to `printer status` in `docs/abilities/printer_quest.md` | Command named in section 5; a host sets the literal command here (fleet hosts stay out of this public tree). |
 

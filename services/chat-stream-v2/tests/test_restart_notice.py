@@ -121,15 +121,38 @@ def test_invalid_flag_fails_startup(value):
         rn.parse_flag({"PENTACLE_RESTART_NOTICE": value})
 
 
-def test_disabled_flag_skips_compose_delivery_and_marker_in_main():
-    """The kill switch gates the whole hook in main.run (source pin)."""
-    import inspect
-    src = inspect.getsource(daemon_main.run)
-    assert "restart_notice_enabled = restart_notice.parse_flag(os.environ)" in src
-    assert "if restart_notice_enabled and assistant_composite.config.enabled:" in src
-    hook = src.index("restart_notice.RestartNotice(")
-    assert src.index("await server.configure_error_alerts(outbound, alerts)") < hook
-    assert hook < src.index('tasks: list[asyncio.Task] = [')
+def _hook_kwargs(store, composite, calls):
+    async def deliver(composite, text, tell_id, *, from_stream_id):
+        calls.append(tell_id)
+        return "committed"
+    return dict(store=store, composite=composite, deliver=deliver, probe=_probe({FD: "alive"}),
+                instance_id="hosta:1:hook", daemon_sha="b" * 40, env={}, boot_time=lambda: 1)
+
+
+def test_disabled_flag_skips_snapshot_compose_delivery_and_marker():
+    async def body(store):
+        fd = await _seat(store, FD, role="assistant")
+        composite = await _composite(store, fd)
+        calls = []
+        task = await daemon_main._start_restart_notice(enabled=False, **_hook_kwargs(store, composite, calls))
+        await asyncio.sleep(0.2)
+        assert task is None and calls == []
+        assert await store.get(rn.MARKER_KEY) is None
+        # Control: the same hook enabled schedules one attempt and writes the marker.
+        task = await daemon_main._start_restart_notice(enabled=True, **_hook_kwargs(store, composite, calls))
+        marker = await asyncio.wait_for(task, 10)
+        assert calls == ["restart-notice:hosta:1:hook"] and json.loads(await store.get(rn.MARKER_KEY)) == marker
+    _run(body)
+
+
+def test_invalid_flag_fails_daemon_startup_before_the_store_opens(monkeypatch):
+    opened = []
+    monkeypatch.setattr(daemon_main, "Store", lambda *a, **k: opened.append(a))
+    monkeypatch.delenv("PENTACLE_ASSISTANT_AUTO_RESTORE", raising=False)
+    monkeypatch.setenv("PENTACLE_RESTART_NOTICE", "yes")
+    with pytest.raises(ValueError, match="PENTACLE_RESTART_NOTICE must be 0 or 1"):
+        asyncio.run(daemon_main.run(SimpleNamespace(db=":memory:")))
+    assert opened == []
 
 
 # --------------------------------------------------------------------------- #
@@ -274,6 +297,28 @@ def test_compose_lists_every_section_in_order(tmp_path, checkpoint):
             assert lines[order[9]].endswith("checkpoint-current.md missing")
         assert lines[-1] == rn.RESUME_LINE
         assert len(text.encode()) <= rn.CAP_BYTES
+    _run(body)
+
+
+@pytest.mark.parametrize("holder", ["fd", "advisor"])
+def test_print_work_keeps_a_print_spec_front_desk_or_advisor(tmp_path, holder):
+    """Print work covers the full captured population; Seats still excludes them."""
+    async def body(store):
+        fd = await _seat(store, FD, role="assistant", **({"spec_id": "spec_printer__fd_fixture"} if holder == "fd" else {}))
+        await _seat(store, ADVISOR)
+        if holder == "advisor":  # qualified ids are daemon-derived; seed the column as stored
+            await store.submit(lambda conn: (conn.execute(
+                "UPDATE sessions SET qualified_spec_ids=? WHERE host=? AND session_name=?",
+                (json.dumps(["spec_other", "spec_printer__adv_fixture"]), *ADVISOR.split(":", 1))), conn.commit()))
+        await store.put("assistant.authority.shape", json.dumps({"stream_id": ADVISOR}))
+        composite = await _composite(store, fd)
+        notice = _notice(store, composite, probe=_probe({FD: "alive", ADVISOR: "alive"}))
+        await notice.run_once(await notice.capture())
+        lines = (await _queued(store, notice.tell_id))[0]["body"].splitlines()
+        stream = FD if holder == "fd" else ADVISOR
+        start = lines.index("Print work: 1 seat(s)")
+        assert lines[start + 1].startswith(f"  {stream} ") and " alive " in lines[start + 1]
+        assert "Seats open at start: none" in lines
     _run(body)
 
 

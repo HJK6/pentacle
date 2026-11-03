@@ -212,7 +212,9 @@ def compose(facts: dict) -> str:
     if not seats:
         seat_section.head = "Seats open at start: none"
 
-    prints = [r for r in ranked if PRINT_SPEC.match(str(r.get("spec_id") or ""))
+    population = sorted(facts.get("population", seats),
+                        key=lambda r: (order.get(r.get("probe"), 1), str(r.get("created_at") or "")))
+    prints = [r for r in population if PRINT_SPEC.match(str(r.get("spec_id") or ""))
               or any(PRINT_SPEC.match(s) for s in _json_list(r.get("qualified_spec_ids")))]
     print_lines = [_seat_line(r, fd_stream) for r in prints[:LIST_LINES]]
     if len(prints) > LIST_LINES:
@@ -428,17 +430,16 @@ class RestartNotice:
     async def gather(self, kind: str, current: dict, previous: dict | None, snapshot: dict) -> dict:
         fd_stream = snapshot["binding"]["stream_id"]
         adv_stream = snapshot["authority_stream_id"]
-        rows = []
-        for r in snapshot["rows"]:
-            stream = f"{r['host']}:{r['session_name']}"
-            if stream in (fd_stream, adv_stream):
-                continue
-            rows.append({**r, "stream_id": stream})
-        streams = [r["stream_id"] for r in rows] + [s for s in (fd_stream, adv_stream) if s]
+        population = [{**r, "stream_id": f"{r['host']}:{r['session_name']}"} for r in snapshot["rows"]]
+        streams = list(dict.fromkeys([r["stream_id"] for r in population]
+                                     + [s for s in (fd_stream, adv_stream) if s]))
         states = await self._probe_all(streams)
         probed_at = self.clock()
-        for r in rows:
+        for r in population:
             r["probe"] = states.get(r["stream_id"], "unknown")
+        # Seats exclude the front desk and advisor; Print work keeps the full
+        # captured population, so a print-spec FD or advisor is still listed.
+        rows = [r for r in population if r["stream_id"] not in (fd_stream, adv_stream)]
         now = self.clock()
         admission = await self._rows(
             "SELECT host, held_until, reason FROM v2_spawn_admission_hold WHERE held_until > ? ORDER BY held_until",
@@ -477,6 +478,7 @@ class RestartNotice:
                            "auto_restore": str(self.env.get("PENTACLE_ASSISTANT_AUTO_RESTORE", "")).strip() == "1"},
             "advisor": {"stream_id": adv_stream, "probe": states.get(adv_stream, "unknown")},
             "seats": rows,
+            "population": population,
             "probed_at": probed_at,
             "printer_cmd": self.env.get("PENTACLE_RESTART_NOTICE_PRINTER_CMD") or DEFAULT_PRINTER_CMD,
             "windows": {"admission": admission, "holds": holds, "screen": screen},

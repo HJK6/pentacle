@@ -132,6 +132,23 @@ async def _deliver_composite_notice(
     return "handoff"
 
 
+async def _start_restart_notice(*, enabled: bool, **kwargs: Any) -> "asyncio.Task | None":
+    """Capture the startup snapshot and schedule the restart notice, or do nothing.
+
+    `PENTACLE_RESTART_NOTICE=0` arrives as ``enabled=False``: no snapshot,
+    compose, delivery or marker. Only the DB-only capture is awaited here.
+    """
+    if not enabled:
+        return None
+    notice = restart_notice.RestartNotice(**kwargs)
+    try:
+        snapshot = await notice.capture()
+    except Exception:  # noqa: BLE001 - run_once still sends the header
+        log.exception("restart notice snapshot failed", extra={"subsystem": "restart_notice"})
+        snapshot = None
+    return notice.schedule(snapshot)
+
+
 def _wire_cosmo_reply_push(assistant_composites: dict, push_reply) -> None:
     """Wire the Cosmo reply-push hook to the Daff composite ONLY.
 
@@ -1024,19 +1041,14 @@ async def run(args: argparse.Namespace) -> int:
     # One restart notice per process: capture the open-seat snapshot now, then
     # probe/compose/deliver in a daemon-owned task so no startup worker waits.
     restart_task = None
-    if restart_notice_enabled and assistant_composite.config.enabled:
-        notice = restart_notice.RestartNotice(
-            store=store, composite=assistant_composite, deliver=_deliver_restore_notice,
+    if assistant_composite.config.enabled:
+        restart_task = await _start_restart_notice(
+            enabled=restart_notice_enabled, store=store, composite=assistant_composite,
+            deliver=_deliver_restore_notice,
             probe=lambda host, name: (
                 tmux if host == args.local_host else hosts.tmux_for(host)).session_state(name),
             notify=notify, instance_id=lifecycle.instance_id, daemon_sha=event_push.daemon_sha,
         )
-        try:
-            snapshot = await notice.capture()
-        except Exception:  # noqa: BLE001 - run_once still sends the header
-            log.exception("restart notice snapshot failed", extra={"subsystem": "restart_notice"})
-            snapshot = None
-        restart_task = notice.schedule(snapshot)
     work_lanes.refresh()  # Re-hand any opening persisted before the core was ready.
 
     # 3. Background tasks start last, each under the loop rules
