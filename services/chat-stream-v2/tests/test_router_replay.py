@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from assistant_composite import AssistantComposite, AssistantCompositeConfig  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -138,7 +140,13 @@ def test_router_input_carries_authoritative_last_outbound_excerpt() -> None:
     asyncio.run(_go())
 
 
-def test_non_explicit_short_continuation_calls_router_without_local_lane_binding() -> None:
+@pytest.mark.parametrize(
+    ("dispatch_result", "expected_delivery"),
+    [("landed", "landed"), ("not_landed", "failed"), ("raises", "uncertain")],
+)
+def test_non_explicit_short_continuation_calls_router_without_local_lane_binding(
+    dispatch_result: str, expected_delivery: str,
+) -> None:
     """A bare continuation is classified, but a local regex cannot select its lane."""
 
     class RecordingRouter:
@@ -160,10 +168,16 @@ def test_non_explicit_short_continuation_calls_router_without_local_lane_binding
         store.start()
         dispatched: list[dict] = []
         router = RecordingRouter()
+        dispatch_entered = asyncio.Event()
+        release_dispatch = asyncio.Event()
 
         async def dispatch(route: dict) -> dict:
             dispatched.append(dict(route))
-            return {"delivery": "landed"}
+            dispatch_entered.set()
+            await release_dispatch.wait()
+            if dispatch_result == "raises":
+                raise RuntimeError("synthetic dispatch failure")
+            return {"delivery": dispatch_result}
 
         composite = None
         try:
@@ -197,7 +211,28 @@ def test_non_explicit_short_continuation_calls_router_without_local_lane_binding
             assert route is not None
             assert route["routing_state"] == "fallback_dispatched"
             assert route["route_target"] == CONVERSATION_STREAM
+            assert route["delivery_state"] == "intent"
+            await asyncio.wait_for(dispatch_entered.wait(), timeout=5)
             assert dispatched and dispatched[0]["route_target"] == CONVERSATION_STREAM
+            assert route["dispatch_id"] == dispatched[0]["dispatch_id"]
+            release_dispatch.set()
+            async with asyncio.timeout(5):
+                while True:
+                    route = await store.get_assistant_composite_route(
+                        stream_id=COMPOSITE_STREAM,
+                        input_identity="bare-continuation",
+                    )
+                    assert route is not None
+                    assert route["dispatch_id"] == dispatched[0]["dispatch_id"]
+                    assert route["route_target"] == dispatched[0]["route_target"]
+                    if route["delivery_state"] == expected_delivery:
+                        break
+                    await asyncio.sleep(0.01)  # Polling cadence, not an ordering guarantee.
+            assert route["routing_state"] == "fallback_dispatched"
+            assert route["route_target"] == CONVERSATION_STREAM
+            assert route["delivery_state"] == expected_delivery
+            if dispatch_result == "raises":
+                assert route["error_code"].startswith("dispatch_exception:")
         finally:
             if composite is not None:
                 await composite.stop()
