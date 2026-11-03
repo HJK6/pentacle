@@ -278,7 +278,7 @@ def _assert_deploy_stamp_path(release_stamp_path: Path, launchd_environment: Seq
 def _new_restart_activation(
     *,
     requested_at: str,
-    pre_restart_pid: int,
+    pre_restart_pid: int | None,
     target_sha: str,
     deployer_stream_id: str,
 ) -> dict[str, object]:
@@ -1728,6 +1728,8 @@ def verify_deploy_guard(
     *,
     repo: Path = REPO_ROOT,
     sha: str,
+    rollback: bool = False,
+    rollback_from_sha: str | None = None,
     sessions_db: Path | None = None,
     legacy_schedules_db: Path | None = None,
 ) -> dict[str, object]:
@@ -1738,34 +1740,69 @@ def verify_deploy_guard(
     instead serializes every deployer, refusing to proceed while any other open
     `role=deployer` session exists. It records the target checkout SHA and the
     pre-restart launchd pid as activation evidence, and refuses if any nonterminal
-    scheduled spawn (v2 or legacy) could race the restart.
+    scheduled spawn (v2 or legacy) could race the restart. Rollback of a down
+    daemon uses durable sessions instead of the unavailable live list; only that
+    mode permits a null pre-restart PID, marked by daemon_state="down".
     """
     resource = _coordination_resource(service)
     if not deployer_stream_id:
         raise DeployError("restart activation requires a deployer stream id")
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise DeployError("restart activation requires a full lowercase target SHA")
-    agent_orch = _resolve_agent_orch(repo, service)
-    listing = _checked((agent_orch, "list"), Path.cwd(), runner)
-    try:
-        rows = json.loads(listing.stdout or "[]")
-    except ValueError as exc:
-        raise DeployError("invalid agent-orch list response") from exc
-    if not isinstance(rows, list):
-        raise DeployError("invalid agent-orch list response")
-    other_deployers = sorted(
-        str(row.get("stream_id") or "")
-        for row in rows
-        if isinstance(row, dict)
-        and row.get("role") == "deployer"
-        and str(row.get("stream_id") or "") != deployer_stream_id
-    )
+    down = False
+    if rollback:
+        state = _launchd_state(service.launchd_label, runner)
+        current_stamp = _read_stamp(repo, service)
+        # deploy() has already checked out the rollback target. Bind the failed
+        # stamp to the checkout that the operator asked to roll back instead.
+        checkout_sha = rollback_from_sha or _git(repo, "rev-parse", "HEAD", runner=runner)
+        boot = current_stamp.get("daemon_boot_readback")
+        down = (state.answered and state.pid is None) or (
+            current_stamp.get("sha") == checkout_sha
+            and isinstance(boot, dict) and boot.get("outcome") == "boot_failed"
+        )
+    configured_db = sessions_db
+    if down:
+        arguments = _launchd_plist(service.launchd_label).get("ProgramArguments", [])
+        if configured_db is None and isinstance(arguments, list) and "--db" in arguments:
+            index = arguments.index("--db") + 1
+            if index >= len(arguments) or not isinstance(arguments[index], str) or not arguments[index]:
+                raise DeployError("rollback sessions DB path is missing")
+            configured_db = Path(arguments[index]).expanduser()
+        if configured_db is None and os.environ.get("PENTACLE_STREAM_SESSIONS_DB"):
+            configured_db = Path(os.environ["PENTACLE_STREAM_SESSIONS_DB"]).expanduser()
+        if configured_db is None:
+            raise DeployError("rollback sessions DB path is missing")
+        try:
+            with sqlite3.connect(configured_db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                other_deployers = sorted(
+                    f"{host}:{name}" for host, name in conn.execute(
+                        "SELECT host, session_name FROM sessions WHERE status='open' AND role='deployer'"
+                    ) if f"{host}:{name}" != deployer_stream_id
+                )
+        except (OSError, sqlite3.Error) as exc:
+            raise DeployError("rollback sessions DB readback failed") from exc
+    else:
+        agent_orch = _resolve_agent_orch(repo, service)
+        listing = _checked((agent_orch, "list"), Path.cwd(), runner)
+        try:
+            rows = json.loads(listing.stdout or "[]")
+        except ValueError as exc:
+            raise DeployError("invalid agent-orch list response") from exc
+        if not isinstance(rows, list):
+            raise DeployError("invalid agent-orch list response")
+        other_deployers = sorted(
+            str(row.get("stream_id") or "")
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("role") == "deployer"
+            and str(row.get("stream_id") or "") != deployer_stream_id
+        )
     if other_deployers:
         raise DeployError(
             "daemon deploys serialize on a single deployer; other open deployer "
             f"session(s) present: {', '.join(other_deployers)}"
         )
-    configured_db = sessions_db
     if (
         configured_db is None
         and service.launchd_label == V2_DAEMON_LABEL
@@ -1807,7 +1844,7 @@ def verify_deploy_guard(
             f"daemon deploy requires zero nonterminal legacy schedules; found {legacy_count}"
         )
     pre_restart_pid = _launchd_state(service.launchd_label, runner).pid
-    if type(pre_restart_pid) is not int or pre_restart_pid <= 0:
+    if not (down and pre_restart_pid is None) and (type(pre_restart_pid) is not int or pre_restart_pid <= 0):
         raise DeployError("restart activation requires a positive launchd PID")
     return {
         "resource": resource,
@@ -1815,6 +1852,7 @@ def verify_deploy_guard(
         "sole_deployer": True,
         "checkout_sha": sha,
         "pre_restart_pid": pre_restart_pid,
+        **({"daemon_state": "down"} if down else {}),
     }
 
 
@@ -1908,7 +1946,8 @@ def deploy(
         stamp["activation_runtime_manifest"] = activation_runtime_manifest
         if not skip_kickstart:
             stamp["restart_guard"] = verify_deploy_guard(
-                service, str(stamp["deployer_stream_id"]), runner, repo=repo, sha=sha
+                service, str(stamp["deployer_stream_id"]), runner, repo=repo, sha=sha,
+                rollback=rollback, rollback_from_sha=prior_sha,
             )
         activation_launchd_environment = service.launchd_environment
         if not skip_kickstart:
@@ -1965,7 +2004,8 @@ def deploy(
             if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
                 raise DeployError("restart activation requires a full lowercase target SHA")
             prior_pid = _launchd_state(service.launchd_label, runner).pid
-            if type(prior_pid) is not int or prior_pid <= 0:
+            down = rollback and restart_guard.get("daemon_state") == "down"
+            if not (down and prior_pid is None) and (type(prior_pid) is not int or prior_pid <= 0):
                 raise DeployError("restart activation requires a positive launchd PID")
             requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             stamp["restart_activation"] = _new_restart_activation(
@@ -1974,6 +2014,8 @@ def deploy(
                 target_sha=sha,
                 deployer_stream_id=deployer_stream_id,
             )
+            if down:
+                stamp["restart_activation"]["daemon_state"] = "down"
         if selection is not None:
             try:
                 release_selection.revalidate(selection, release_inputs)
