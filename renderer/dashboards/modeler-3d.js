@@ -54,7 +54,7 @@
       const generation = refs.generation;
       const url = await admission(generation); if (!url) return;
       const frame = doc.createElement('iframe'); frame.title = `${name} viewer`;
-      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin'); frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups'); frame.setAttribute('referrerpolicy', 'no-referrer');
       frame.setAttribute('allow', 'xr-spatial-tracking; fullscreen'); frame.setAttribute('loading', 'lazy');
       function finish(state, message) {
         if (refs.disposed || refs.generation !== generation || shell.dataset.modelerState !== 'loading') return;

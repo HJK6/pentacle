@@ -41,7 +41,7 @@ for (const mode of ['token', 'unknown', undefined, 'other', 'malformed', 'failed
 }
 test('identity fetches before every frame assignment and opener; preserves sandbox', async t => {
  const h = harness('identity'); t.after(h.close); assert.equal(h.frame(), null); await settled();
- assert.equal(h.frame().src, url); assert.equal(h.frame().getAttribute('sandbox'), 'allow-scripts allow-same-origin');
+ assert.equal(h.frame().src, url); assert.equal(h.frame().getAttribute('sandbox'), 'allow-scripts allow-same-origin allow-popups');
  assert.equal(h.frame().referrerPolicy || h.frame().getAttribute('referrerpolicy'), 'no-referrer');
  h.open(); await settled(); assert.deepEqual(h.calls, [url]);
  h.reload(); assert.equal(h.frame(), null); await settled(); assert.equal(h.fetches(), 3);
