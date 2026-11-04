@@ -37,9 +37,14 @@ def launch_daemon(source, root):
     root = root.resolve()
     events=[]; lock=threading.Lock(); owned={}; barriers={}; stopping=threading.Event()
     def event(name, **data):
+        # Timing-only fields split fixture I/O (dump_s) from scheduling (lock_wait_s);
+        # dump_s lands in the file with the next event's rewrite.
+        called=time.monotonic()
         with lock:
             row={'event':name,'mono_s':time.monotonic(),'wall_s':time.time(), **data}
+            row['lock_wait_s']=row['mono_s']-called
             events.append(row); dump(root/'events.json', events)
+            row['dump_s']=time.monotonic()-row['mono_s']
         return row
     original_init=Store.__init__
     def store_init(self,*a,**kw):
@@ -73,7 +78,8 @@ def launch_daemon(source, root):
     async def queue_read():
         enqueue=event('queued_read_enqueued')['mono_s']
         def callback(conn):
-            event('queued_read_started',queue_wait_s=time.monotonic()-enqueue)
+            picked_up=time.monotonic()  # store-thread pickup, before this event's own rewrite
+            event('queued_read_started',queue_wait_s=picked_up-enqueue,pickup_mono_s=picked_up)
             return conn.execute('SELECT 42').fetchone()[0]
         value=await owned['store'].submit(callback)
         event('queued_read_completed',value=value)

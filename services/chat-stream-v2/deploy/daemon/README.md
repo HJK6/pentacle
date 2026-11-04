@@ -146,8 +146,13 @@ both records flush without an intervening await before client handlers run.
 An optional TLS start failure leaves the plain listener available.
 
 The deploy scanner requires both matching markers, a stable activated PID/start,
-and a distinct outgoing process whose recorded PID/start has exited. It scans
-only bytes after each matching marker. `old_generation.inputs` retains the exact
+and a distinct outgoing process whose recorded PID/start has exited. The one
+exception is a down-daemon rollback whose guard and activation launchd samples
+were both answered with no PID (`down_basis: launchd_answered_no_pid`): there is
+no outgoing writer, so attribution records `no_outgoing_writer` and the exit
+follows the slow-consumer scan and fleet-smoke verdicts instead of being forced
+to 8; `full-window.py` still rejects that outcome. The scanner reads only bytes
+after each matching marker. `old_generation.inputs` retains the exact
 pre-marker ranges: the outgoing tail plus incoming startup logs. Its classifier
 is separate evidence, not a verdict on the activated process. Existing 1011,
 4000, overflow and peer-liveness failure rules are unchanged.
