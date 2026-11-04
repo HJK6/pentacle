@@ -231,3 +231,90 @@ def test_publisher_generation_must_be_verified_not_inferred(tmp_path):
                 await server._on_assistant_publish(msg)
             assert caught.value.code=='publish_not_authorized'
     asyncio.run(run())
+
+
+def proactive_msg(msg, upload_id, **extra):
+    return dict(type='assistant.publish', request_id='proactive-file', composite_stream_id=ASSISTANT,
+        publish_kind='status', message='', attachment_ids=[upload_id],
+        _auth_context=dict(msg['_auth_context']), **extra)
+
+
+async def committed(store):
+    refs = await store.submit(lambda c: c.execute('SELECT count(*) FROM v2_attachment_refs').fetchone()[0])
+    events = [e for e in await store.fetch_session_event_tail(ASSISTANT, limit=20) if e['kind'] == 'ASSIST_TEXT']
+    return refs, events
+
+
+def test_proactive_publish_carries_managed_attachment(tmp_path):
+    async def run():
+        async with publication_fixture(tmp_path) as (blobs, store, server, msg):
+            r = await upload(blobs)
+            proactive = proactive_msg(msg, r['upload_id'])
+            first = await server._on_assistant_publish(proactive)
+            assert first['type'] == 'assistant.publish.ok' and first['duplicate'] is False
+            retry = await server._on_assistant_publish(dict(proactive, _auth_context=dict(proactive['_auth_context'])))
+            assert retry['duplicate'] is True and retry['event_id'] == first['event_id']
+            with pytest.raises(Exception) as caught:
+                await server._on_assistant_publish(dict(proactive, message='changed caption',
+                    _auth_context=dict(proactive['_auth_context'])))
+            assert caught.value.code == 'assistant_publish_conflict'
+            refs, events = await committed(store)
+            assert refs == 1 and len(events) == 1
+            event = events[0]
+            assert event['raw']['dispatch_id'] == ''
+            assert event['raw']['published_by'] == {'stream_id': ROOT, 'generation': msg['_auth_context']['session_generation']}
+            a = event['attachments'][0]
+            assert a['key'] == r['blob_sha'] and a['upload_id'] == r['upload_id']
+            assert a['mime'] == 'application/pdf' and a['filename'] == 'sample.pdf' and a['size'] == r['bytes']
+            assert a['uploader']['principal_id'] == AUTH['stream_id']
+            assert a['uploader']['generation'] == AUTH['session_generation']
+            assert a['publisher'] == {'stream_id': ROOT, 'generation': msg['_auth_context']['session_generation']}
+            rows = await store.submit(lambda conn: [dict(row) for row in conn.execute('SELECT * FROM v2_attachment_refs')])
+            assert rows == [dict(owner_kind='publication', owner_id='proactive-file', stream_id=ASSISTANT,
+                upload_id=r['upload_id'], blob_sha=r['blob_sha'])]
+            await store.open_session('fixture-new', 'publisher', provider='codex', role='assistant', visibility='default',
+                pane_status='pane_alive', effective_model='gpt-6-sol', effective_effort='high')
+            composite = server.assistant_composite
+            await composite.load_binding()
+            await composite.rebind(dict(type='assistant.rebind', request_id='move-root', expected_revision=0,
+                target_stream_id='fixture-new:publisher', clear=False), actor_stream_id=ROOT)
+            with pytest.raises(Exception) as caught:
+                await server._on_assistant_publish(dict(proactive, request_id='proactive-after-rebind',
+                    _auth_context=dict(proactive['_auth_context'])))
+            assert caught.value.code == 'publish_not_authorized'
+            assert await committed(store) == (refs, events)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('case', ['unknown', 'pending', 'other-scope'])
+def test_proactive_publish_rejects_unverified_attachment(tmp_path, case):
+    async def run():
+        async with publication_fixture(tmp_path) as (blobs, store, server, msg):
+            if case == 'other-scope':
+                r = await upload(blobs, auth={'scoped_principal': True, 'credential_id': 'synthetic-scope',
+                    'scope_stream': 'other:assistant'})
+            else:
+                r = await upload(blobs)
+            upload_id = 'invented-upload' if case == 'unknown' else r['upload_id']
+            if case == 'pending':
+                await store.submit(lambda conn: conn.execute(
+                    "UPDATE v2_attachment_uploads SET state='pending' WHERE upload_id=?", (upload_id,)))
+            with pytest.raises(Exception, match='attachment_unverified'):
+                await server._on_assistant_publish(proactive_msg(msg, upload_id))
+            assert await committed(store) == (0, [])
+            assert await store.submit(lambda c: c.execute(
+                'SELECT count(*) FROM v2_assistant_composite_publications').fetchone()[0]) == 0
+    asyncio.run(run())
+
+
+def test_proactive_scoped_upload_resolves_in_composite_scope(tmp_path):
+    async def run():
+        async with publication_fixture(tmp_path) as (blobs, store, server, msg):
+            r = await upload(blobs, auth={'scoped_principal': True, 'credential_id': 'synthetic-scope',
+                'scope_stream': ASSISTANT})
+            result = await server._on_assistant_publish(proactive_msg(msg, r['upload_id']))
+            assert result['type'] == 'assistant.publish.ok'
+            a = (await committed(store))[1][-1]['attachments'][0]
+            assert a['uploader']['principal_id'] == 'credential:synthetic-scope'
+            assert a['publisher']['stream_id'] == ROOT
+    asyncio.run(run())

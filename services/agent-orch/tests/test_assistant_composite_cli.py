@@ -180,3 +180,22 @@ def test_assistant_publish_requires_dispatch_or_proactive(monkeypatch):
         '--publish-kind', 'prose', '--message', 'progress'])
     monkeypatch.setattr(cli, '_assistant_call', lambda *args: 99)
     assert args.func(args) == 2
+
+
+def test_assistant_proactive_publish_carries_attachments(monkeypatch):
+    def parsed(*extra):
+        return cli.build_parser().parse_args([
+            'assistant', 'publish', '--proactive', '--request-id', 'r', '--composite-stream-id', 'bart:assistant',
+            '--message', 'm', '--attachment-ids-json', '["u1"]', *extra])
+    captured = {}
+    monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)
+    args = parsed('--publish-kind', 'status')
+    assert args.func(args) == 0
+    assert captured['attachment_ids'] == ['u1'] and captured['publish_kind'] == 'status'
+    assert not {'dispatch_id', 'reply_to_message_id', 'reply_to_question_id', 'reply_to_message_ids'} & set(captured)
+    for extra in (['--publish-kind', 'question'], ['--publish-kind', 'result'],
+                  ['--publish-kind', 'status', '--reply-to-message-id', 'input-1'],
+                  ['--publish-kind', 'status', '--reply-to-question-id', 'q-1']):
+        captured.clear()
+        args = parsed(*extra)
+        assert args.func(args) == 2 and captured == {}

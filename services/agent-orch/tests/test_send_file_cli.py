@@ -336,3 +336,54 @@ def test_existing_server_scope_refusals_report_publish_not_authorized(monkeypatc
     monkeypatch.setattr(cli,'assistant_once',denied)
     assert cli.send_file(publish_args('--upload-id','synthetic-upload'))==1
     assert json.loads(capsys.readouterr().out)['error_code']=='publish_not_authorized'
+
+
+def test_proactive_publish_omits_correlation(wire):
+    for extra in ([], ['--publish-kind', 'status']):
+        wire.clear()
+        assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant', '--proactive', *extra)) == 0
+        assert wire == [('publish', dict(type='assistant.publish', request_id='send-file:synthetic-upload',
+            composite_stream_id='home:assistant', publish_kind='status', message='',
+            attachment_ids=['synthetic-upload']), {'timeout': 30.0})]
+
+
+def test_proactive_defaults_and_overrides(tmp_path, wire, capsys):
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant', '--proactive',
+        '--publish-kind', 'prose', '--caption', 'x', '--request-id', 'k')) == 0
+    assert wire[0][1] == dict(type='assistant.publish', request_id='k', composite_stream_id='home:assistant',
+        publish_kind='prose', message='x', attachment_ids=['synthetic-upload'])
+    assert json.loads(capsys.readouterr().out)['request_id'] == 'k'
+    wire.clear()
+    p = tmp_path / 'sample.png'; p.write_bytes(b'\x89PNG synthetic')
+    assert cli.send_file(args(p, '--to', 'home:assistant', '--proactive')) == 0
+    assert [call[0] for call in wire] == ['upload', 'publish']
+    assert wire[1][1]['request_id'] == 'send-file:synthetic-upload' and wire[1][1]['attachment_ids'] == ['synthetic-upload']
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[0]['upload_id'] == 'synthetic-upload'  # receipt printed before publish
+    assert lines[1] == {'type': 'assistant.publish.ok', 'request_id': 'send-file:synthetic-upload', 'upload_id': 'synthetic-upload'}
+
+
+@pytest.mark.parametrize('extra', [
+    ['--dispatch-id', 'real'], ['--reply-to-message-id', 'input'], ['--reply-to-question-id', 'question'],
+    ['--publish-kind', 'result'], ['--publish-kind', 'question'], ['--evidence-refs-json', '["receipt"]'],
+])
+def test_proactive_rejects_correlation_and_evidence(wire, capsys, extra):
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant', '--proactive', *extra)) == 2
+    assert wire == []
+    assert json.loads(capsys.readouterr().out) == {'type': 'send_file.error', 'error_code': 'proactive_fields_invalid'}
+
+
+def test_proactive_requires_target(wire, capsys):
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--proactive')) == 2
+    assert wire == []
+    assert json.loads(capsys.readouterr().out)['error_code'] == 'publish_target_required'
+
+
+def test_proactive_replay_conflict_code(monkeypatch, wire, capsys):
+    async def conflict(*a, **kw):
+        return {'type': 'assistant.publish.error', 'error_code': 'assistant_publish_conflict', 'message': 'DO_NOT_PRINT'}
+    monkeypatch.setattr(cli, 'assistant_once', conflict)
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant', '--proactive', '--caption', 'changed')) == 1
+    out = capsys.readouterr().out
+    assert json.loads(out) == {'type': 'assistant.publish.error', 'error_code': 'publish_replay_conflict', 'upload_id': 'synthetic-upload'}
+    assert 'DO_NOT_PRINT' not in out
