@@ -109,6 +109,9 @@ def test_boot_failed_candidate_can_activate_stamped_prior(rollback_release, monk
     assert result['restart_guard']['daemon_state'] == 'down'
     assert result['restart_activation']['daemon_state'] == 'down'
     assert result['restart_activation']['pre_restart_pid'] is None
+    assert result['restart_activation']['pre_restart_launchd_answered'] is answered
+    assert result['restart_guard']['launchd_answered'] is answered
+    assert result['restart_guard']['down_basis'] == ('launchd_answered_no_pid' if answered else 'boot_failed_stamp')
     assert any(c[:2] == ('launchctl', 'kickstart') for c in calls)
     assert not any(c[0] == 'agent-orch' for c in calls)
 
@@ -209,3 +212,99 @@ def test_down_stamp_does_not_allow_invalid_nonnull_pid(guard_case, monkeypatch, 
         'sha': 'a' * 40, 'daemon_boot_readback': {'outcome': 'boot_failed'}})
     with pytest.raises(module.DeployError, match="positive launchd PID"):
         check(rollback=True)
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('answered', 'launchd_answered_no_pid'),
+    ('unanswered', 'boot_failed_stamp'),
+    ('live', 'boot_failed_stamp'),
+])
+def test_down_basis_records_admission_without_changing_it(guard_case, monkeypatch, case, expected):
+    module, db, calls, check = guard_case
+    first = module.LaunchdState(True, 111 if case == 'live' else None, case != 'unanswered')
+    samples = iter([first, module.LaunchdState(False, None, False)])
+    monkeypatch.setattr(module, '_launchd_state', lambda *_: next(samples))
+    monkeypatch.setattr(module, '_read_stamp', lambda *_: {
+        'sha': 'a' * 40, 'daemon_boot_readback': {'outcome': 'boot_failed'}})
+    result = check(rollback=True)
+    assert result['daemon_state'] == 'down'
+    assert result['down_basis'] == expected
+    assert result['launchd_answered'] is (case != 'unanswered')
+    assert result['pre_restart_launchd_answered'] is False
+    assert result['pre_restart_pid'] is None
+
+
+@pytest.mark.parametrize('case,expected_exit', [
+    ('answered', 0), ('smoke_partial', 10), ('smoke_untested', 9), ('smoke_failed', 6),
+    ('stamp_only', 8), ('guard_unanswered', 8), ('guard_final_unanswered', 8),
+    ('activation_unanswered', 8), ('forward', 8), ('serving_unproven', 8),
+    ('identity_changed', 8), ('identity_changed_during_scan', 8),
+    ('missing_marker', 8), ('failure', 8), ('old_failure', 0),
+])
+def test_down_rollback_post_boot_attribution(tmp_path, monkeypatch, capsys, case, expected_exit):
+    from . import test_deploy_script as fixtures
+    module = fixtures.deploy_mod
+    stdout, stderr = fixtures._u2_log_paths(tmp_path, monkeypatch)
+    marker = '' if case == 'missing_marker' else fixtures._u2_boot()
+    failure = fixtures._u2_line('force_close') + '\n'
+    stdout.write_text((failure if case == 'old_failure' else '') + marker + 'ordinary log line\n')
+    stderr.write_text(marker + (failure if case == 'failure' else ''))
+    guard = dict(daemon_state='down', down_basis='launchd_answered_no_pid',
+                 launchd_answered=True, pre_restart_launchd_answered=True, pre_restart_pid=None)
+    activation = dict(daemon_state='down', pre_restart_pid=None, pre_restart_launchd_answered=True)
+    prior_pid = None
+    if case == 'stamp_only':
+        guard['down_basis'] = 'boot_failed_stamp'
+    elif case == 'guard_unanswered':
+        guard['launchd_answered'] = False
+    elif case == 'guard_final_unanswered':
+        guard['pre_restart_launchd_answered'] = False
+    elif case == 'activation_unanswered':
+        activation['pre_restart_launchd_answered'] = False
+    elif case == 'forward':
+        guard = activation = {}
+    elif case == 'serving_unproven':
+        prior_pid = 111
+        guard = dict(pre_restart_pid=111)
+        activation = dict(pre_restart_pid=111)
+    smoke = case.removeprefix('smoke_') if case.startswith('smoke_') else 'passed'
+    monkeypatch.setattr(module, '_fleet_smoke_verdict', lambda *_: {'outcome': smoke})
+    monkeypatch.setattr(module, '_install_fleet_smoke_schedule', lambda *_: None)
+    calls, active_samples = [], []
+    def runner(argv, cwd):
+        calls.append(tuple(argv))
+        if '-p' in argv:
+            pid = argv[argv.index('-p') + 1]
+            if pid == '111':
+                return subprocess.CompletedProcess(argv, 0, 'old-start', '')
+            assert pid == '999'
+            active_samples.append(pid)
+            changed = ((case == 'identity_changed' and len(active_samples) >= 2)
+                       or (case == 'identity_changed_during_scan' and len(active_samples) >= 3))
+            return subprocess.CompletedProcess(argv, 0, 'changed-start' if changed else fixtures._U2_START, '')
+        assert argv[0] == 'launchctl' or any('spawn_fleet_smoke.py' in part for part in argv)
+        return subprocess.CompletedProcess(argv, 0, '', '')
+    stamp = dict(sha=fixtures.TARGET_SHA, restart_guard=guard, restart_activation=activation)
+    module._apply_post_activation(
+        module.SERVICES['chat-streamd-v2'], tmp_path, fixtures.TARGET_SHA, stamp,
+        prior_log_size=0, prior_pid=prior_pid, reload_launchd=False, runner=runner,
+        verify_boot=fixtures._boot_observed,
+        verify_runtime=lambda *_: (True, {'sha': fixtures.TARGET_SHA, 'pid': 999}))
+    assert 'post_activation_error' not in stamp
+    scan = stamp['slow_consumer']
+    ambiguous = case in {'stamp_only', 'guard_unanswered', 'guard_final_unanswered',
+                        'activation_unanswered', 'forward', 'serving_unproven',
+                        'identity_changed', 'identity_changed_during_scan', 'missing_marker'}
+    assert scan['attribution']['outcome'] == ('attribution_ambiguous' if ambiguous else 'no_outgoing_writer')
+    assert scan['outcome'] == ('failed' if ambiguous or case == 'failure' else 'passed')
+    assert scan['failure_count'] == int(case == 'failure')
+    if not ambiguous:
+        assert scan['attribution']['prior_writer_exited'] is False
+        assert scan['selected_inputs']
+    if case == 'old_failure':
+        assert scan['old_generation']['classifier']['failure_count'] == 1
+    code, output, error = fixtures._run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == expected_exit
+    if code == 0:
+        assert 'do NOT retry' not in error
+    assert json.loads(output) == stamp

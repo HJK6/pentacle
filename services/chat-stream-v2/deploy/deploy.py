@@ -1385,6 +1385,7 @@ def _scan_slow_consumer_window(
     expected_start: str | None = None,
     prior_pid: int | None = None,
     prior_start: str | None = None,
+    no_outgoing_writer: bool = False,
     runner: Runner,
 ) -> dict[str, object]:
     paths = _daemon_log_paths(service)
@@ -1400,27 +1401,28 @@ def _scan_slow_consumer_window(
         attribution = {"outcome": "attribution_ambiguous", "reasons": []}
         selected, preceding, markers = [], [], []
         try:
-            if (type(prior_pid) is not int or prior_pid <= 0
+            if not (no_outgoing_writer and prior_pid is None) and (type(prior_pid) is not int or prior_pid <= 0
                     or prior_pid == expected_pid or not prior_start
                     or not _prior_writer_exited(prior_pid, prior_start, runner)):
                 raise AttributionAmbiguous("outgoing writer lifetime is unproven")
             if not expected_start or _process_start(expected_pid, runner) != expected_start:
                 raise AttributionAmbiguous("activated PID/start identity is missing or changed")
             selected, preceding, markers = generation_ranges(groups, expected_pid, expected_start)
-            attribution.update(outcome="attributed", generation=markers[0]["identity"],
-                               markers=markers, prior_pid=prior_pid, prior_start=prior_start,
-                               prior_writer_exited=True)
+            attribution.update(outcome="no_outgoing_writer" if no_outgoing_writer and prior_pid is None else "attributed",
+                               generation=markers[0]["identity"], markers=markers,
+                               prior_pid=prior_pid, prior_start=prior_start,
+                               prior_writer_exited=not (no_outgoing_writer and prior_pid is None))
         except AttributionAmbiguous as error:
             attribution["reasons"].append(str(error))
         # Ambiguous records remain inspectable and can never produce a pass.
-        observed = selected if attribution["outcome"] == "attributed" else groups
+        observed = selected if attribution["outcome"] in ("attributed", "no_outgoing_writer") else groups
         scan = classify_slow_consumer_lines(
             (line for group in observed for line in lines_many(group)),
             boot_marker_seen=boot_marker_seen, max_examples=100,
         )
-        if attribution["outcome"] == "attributed" and _process_start(expected_pid, runner) != expected_start:
+        if attribution["outcome"] in ("attributed", "no_outgoing_writer") and _process_start(expected_pid, runner) != expected_start:
             attribution.update(outcome="attribution_ambiguous", reasons=["activated PID/start changed during scan"])
-        if attribution["outcome"] != "attributed":
+        if attribution["outcome"] not in ("attributed", "no_outgoing_writer"):
             scan["outcome"] = SLOW_CONSUMER_FAILED
         prior_scan = classify_slow_consumer_lines(
             (line for group in preceding for line in lines_many(group)), max_examples=100,
@@ -1689,10 +1691,22 @@ def _apply_post_activation(
                     ),
                     repo,
                 )
+                guard = stamp.get("restart_guard") or {}
+                activation = stamp.get("restart_activation") or {}
+                no_outgoing_writer = (
+                    guard.get("daemon_state") == activation.get("daemon_state") == "down"
+                    and guard.get("down_basis") == "launchd_answered_no_pid"
+                    and guard.get("launchd_answered") is True
+                    and guard.get("pre_restart_pid") is None
+                    and guard.get("pre_restart_launchd_answered") is True
+                    and activation.get("pre_restart_launchd_answered") is True
+                    and activation.get("pre_restart_pid") is None
+                    and prior_pid is None
+                )
                 stamp["slow_consumer"] = _scan_slow_consumer_window(
                     service, prior_log_size, expected_pid=readback.pid,
                     expected_start=active_start, prior_pid=prior_pid,
-                    prior_start=prior_start, runner=runner,
+                    prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
                 )
                 stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file, required_cells)
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
@@ -1766,6 +1780,8 @@ def verify_deploy_guard(
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise DeployError("restart activation requires a full lowercase target SHA")
     down = False
+    down_basis = None
+    launchd_answered = None
     if rollback:
         state = _launchd_state(service.launchd_label, runner)
         current_stamp = _read_stamp(repo, service)
@@ -1773,10 +1789,13 @@ def verify_deploy_guard(
         # stamp to the checkout that the operator asked to roll back instead.
         checkout_sha = rollback_from_sha or _git(repo, "rev-parse", "HEAD", runner=runner)
         boot = current_stamp.get("daemon_boot_readback")
+        launchd_answered = state.answered
         down = (state.answered and state.pid is None) or (
             current_stamp.get("sha") == checkout_sha
             and isinstance(boot, dict) and boot.get("outcome") == "boot_failed"
         )
+        if down:
+            down_basis = "launchd_answered_no_pid" if state.answered and state.pid is None else "boot_failed_stamp"
     configured_db = sessions_db
     if down:
         arguments = _launchd_plist(service.launchd_label).get("ProgramArguments", [])
@@ -1859,7 +1878,8 @@ def verify_deploy_guard(
         raise DeployError(
             f"daemon deploy requires zero nonterminal legacy schedules; found {legacy_count}"
         )
-    pre_restart_pid = _launchd_state(service.launchd_label, runner).pid
+    pre_restart_state = _launchd_state(service.launchd_label, runner)
+    pre_restart_pid = pre_restart_state.pid
     if not (down and pre_restart_pid is None) and (type(pre_restart_pid) is not int or pre_restart_pid <= 0):
         raise DeployError("restart activation requires a positive launchd PID")
     return {
@@ -1868,7 +1888,9 @@ def verify_deploy_guard(
         "sole_deployer": True,
         "checkout_sha": sha,
         "pre_restart_pid": pre_restart_pid,
-        **({"daemon_state": "down"} if down else {}),
+        **({"daemon_state": "down", "down_basis": down_basis,
+            "launchd_answered": launchd_answered,
+            "pre_restart_launchd_answered": pre_restart_state.answered} if down else {}),
     }
 
 
@@ -2019,7 +2041,8 @@ def deploy(
                 raise DeployError("restart activation requires a non-empty deployer stream id")
             if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
                 raise DeployError("restart activation requires a full lowercase target SHA")
-            prior_pid = _launchd_state(service.launchd_label, runner).pid
+            pre_restart_state = _launchd_state(service.launchd_label, runner)
+            prior_pid = pre_restart_state.pid
             down = rollback and restart_guard.get("daemon_state") == "down"
             if not (down and prior_pid is None) and (type(prior_pid) is not int or prior_pid <= 0):
                 raise DeployError("restart activation requires a positive launchd PID")
@@ -2032,6 +2055,7 @@ def deploy(
             )
             if down:
                 stamp["restart_activation"]["daemon_state"] = "down"
+                stamp["restart_activation"]["pre_restart_launchd_answered"] = pre_restart_state.answered
         if selection is not None:
             try:
                 release_selection.revalidate(selection, release_inputs)
