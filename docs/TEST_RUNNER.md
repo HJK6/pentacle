@@ -129,8 +129,7 @@ it makes attribution, deadlines and cleanup deterministic.
 
 Install the unchanged lockfile dependencies. On a fleet host use plain `npm ci`:
 the root postinstall must run (on macOS it makes the node-pty spawn helper
-executable; without it `test/provider_relogin.test.js` and
-`test/web_server.test.js` fail). The sandbox-only variant exercised in the
+executable; without it `test/web_server.test.js` fails). The sandbox-only variant exercised in the
 authoring workspace is `npm ci --ignore-scripts --no-audit --no-fund`, followed by
 `npm rebuild node-pty`; writable npm/node-gyp cache directories are environment
 settings only. No dependency, pin or workflow file changes are included.

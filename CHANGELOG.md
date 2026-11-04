@@ -13,6 +13,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+### Removed
+
+- Settings no longer shows the provider re-login controls, and the `provider-relogin:*` web socket and desktop IPC channels are gone; a rebuilt flow is tracked as `spec_pentacle__provider_relogin_flow_validation_2026_09`. Daemon account health and `agent-orch account relogin` are unchanged.
+
 ## 2026-11-02
 
 ### Added

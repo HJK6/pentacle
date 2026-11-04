@@ -532,6 +532,13 @@ async function settingsVersionLine(ctx) {
   const title = await session.eval(`(document.getElementById('settings-version-line') || {}).title || ''`);
   report.ok('the full SHAs are available on hover', title.includes(build) && title.includes(runtime), { title });
 
+  // The provider re-login controls were removed; Settings must not render them.
+  const relogin = await session.eval(`({
+    section: document.querySelector('.provider-relogin') !== null,
+    buttons: document.querySelectorAll('#settings-overlay [data-provider]').length,
+  })`);
+  report.ok('Settings renders no provider re-login control', relogin.section === false && relogin.buttons === 0, relogin);
+
   // Leave the modal closed so later scenarios see a clean page.
   await session.eval(`document.getElementById('settings-close').click()`);
 }

@@ -65,9 +65,9 @@ function createWsBridge({ table, logger = console } = {}) {
   const bridge = {
     connections,
 
-    addSocket(socket, { micStartAllowed = false, reloginAllowed = false } = {}) {
+    addSocket(socket, { micStartAllowed = false } = {}) {
       const sender = createSender(socket);
-      connections.set(socket, { sender, event: { sender }, micStartAllowed, reloginAllowed });
+      connections.set(socket, { sender, event: { sender }, micStartAllowed });
       return sender;
     },
 
@@ -117,8 +117,6 @@ function createWsBridge({ table, logger = console } = {}) {
 
       if ((method === 'mic:start-server' || method === 'mic:request') && !connection.micStartAllowed)
         return rawSend(socket, errorPayload(id, 'mic_origin_refused', 'Microphone recovery requires the web page on this origin.'));
-      if (method.startsWith('provider-relogin:') && !connection.reloginAllowed)
-        return rawSend(socket, errorPayload(id, 'relogin_origin_refused', 'Provider sign-in requires the web page on this origin.'));
 
       const entry = table[method];
       if (!entry) return rawSend(socket, errorPayload(id, 'unknown_method', `unknown method: ${method}`));

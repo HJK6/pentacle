@@ -83,7 +83,7 @@ test('config-trio (retired host): a removed machine still renders history but is
   assert.ok(hp.hostColor(config, 'legacy'), 'a color always resolves');
   assert.ok(hp.hostSigil(config, 'legacy'), 'a sigil always resolves');
   // But the retired host is NOT offered as a live execution target
-  // (executionHosts is the provider-relogin / host-picker source).
+  // (executionHosts is the host-picker source).
   const ids = executionHosts(config).map((h) => h.id);
   assert.equal(ids.includes('legacy'), false, 'retired host absent from execution targets');
   assert.deepEqual(ids.sort(), ['builder', 'desk', 'primary']);

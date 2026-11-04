@@ -121,8 +121,6 @@ function createTransport({ url, logger = console } = {}) {
       }
       rejectAllPending('pentacle web host connection lost');
       try { disconnectHandler?.({ epoch }); } catch (e) { logger.warn('[web] disconnect handler threw:', e); }
-      // Auth material never survives a connection loss or enters the replay queue.
-      try { listeners.get('provider-relogin:state')?.({ state: 'disconnected' }); } catch {}
       if (closed) return;
       const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** attempt++);
       reconnectTimer = setTimeout(connect, delay);
@@ -139,10 +137,6 @@ function createTransport({ url, logger = console } = {}) {
     call(method, ...args) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        if (method.startsWith('provider-relogin:') && (!socket || socket.readyState !== WebSocket.OPEN)) {
-          reject(new Error('Provider sign-in connection is unavailable'));
-          return;
-        }
         if (method === 'chat-stream:household' && (!socket || socket.readyState !== WebSocket.OPEN)) {
           reject(Object.assign(new Error('Household connection is unavailable'), { code: 'disconnected' }));
           return;
@@ -324,11 +318,6 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
   const notInWeb = (label) => { if (micFeature) showWebToast(`${label} is not available in web mode`); };
 
   return {
-    reloginHosts: () => call('provider-relogin:hosts'),
-    reloginStart: (request) => call('provider-relogin:start', request),
-    reloginCode: (id, code) => call('provider-relogin:code', id, code),
-    reloginCancel: (id) => call('provider-relogin:cancel', id),
-    onReloginState: (callback) => on('provider-relogin:state', callback),
     // PTY operations — hostId threads through so each slot knows which tmux
     // server its session lives on. Defaults to 'local' for backcompat.
     createPty: (slot, sessionName, hostId, cols, rows) => call('pty:create', slot, sessionName, hostId || 'local', cols, rows),
