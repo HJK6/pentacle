@@ -386,7 +386,7 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
         except ValueError as exc:
             raise ValueError("assistant_publish_provenance_unverified") from exc
         if (dispatch_id or publish_kind not in {"prose", "status"}
-                or attachment_ids or reply_to_message_id or reply_to_question_id):
+                or reply_to_message_id or reply_to_question_id):
             raise ValueError("assistant_publish_payload_invalid")
     elif actor_generation is not None:
         _assistant_actor_conn(conn, actor_stream_id, actor_generation)

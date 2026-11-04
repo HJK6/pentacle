@@ -145,9 +145,22 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         if sum(v is not None for v in sources) != 1:
             raise AttachmentError('file_source_required')
         target = getattr(args, 'to', None)
+        proactive = getattr(args, 'proactive', False)
         correlation = {k: getattr(args, k, None) for k in
             ('dispatch_id', 'reply_to_message_id', 'publish_kind', 'request_id')}
-        if target:
+        if proactive:
+            if not target:
+                raise AttachmentError('publish_target_required')
+            # No correlation keys at all: the daemon binds a proactive publish to the current seat.
+            correlation_ids = [correlation.pop('dispatch_id'), correlation.pop('reply_to_message_id'),
+                getattr(args, 'reply_to_question_id', None), getattr(args, 'evidence_refs_json', None)]
+            correlation['publish_kind'] = correlation['publish_kind'] or 'status'
+            if (not _nonempty(target) or any(v is not None for v in correlation_ids)
+                    or correlation['publish_kind'] not in ('prose', 'status')):
+                raise AttachmentError('proactive_fields_invalid')
+            if correlation['request_id'] is not None and not _nonempty(correlation['request_id'], 1024):
+                raise AttachmentError('publish_request_id_required')
+        elif target:
             if not _nonempty(target) or any(not _nonempty(correlation[k]) for k in ('dispatch_id', 'reply_to_message_id', 'publish_kind')):
                 raise AttachmentError('publish_correlation_required')
             if correlation['publish_kind'] not in ('prose', 'question', 'result', 'status'):
@@ -187,13 +200,15 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
             upload_id = verified['upload_id']
         if not target:
             return 0
+        if proactive and not correlation['request_id']:
+            correlation['request_id'] = 'send-file:' + upload_id
         payload = dict(type='assistant.publish', composite_stream_id=target,
             **correlation, message=getattr(args, 'caption', '') or '',
             attachment_ids=[upload_id])
         for field in ('reply_to_question_id', 'response_state'):
             if getattr(args, field, None):
                 payload[field] = getattr(args, field)
-        if correlation['publish_kind'] == 'prose' and 'response_state' not in payload:
+        if not proactive and correlation['publish_kind'] == 'prose' and 'response_state' not in payload:
             payload['response_state'] = 'final'
         if evidence is not None:
             payload['evidence_refs'] = evidence
@@ -210,6 +225,8 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         code = response.get('error_code') if isinstance(response, dict) else None
         if code in ('scope_denied', 'assistant_publish_unauthorized'):
             code = 'publish_not_authorized'
+        elif code == 'assistant_publish_conflict':
+            code = 'publish_replay_conflict'
         safe = code if code in ('publish_not_authorized', 'upload_unknown', 'blob_unknown',
             'attachment_invalid', 'publish_correlation_invalid', 'publish_replay_conflict') else 'publish_failed'
         _print({'type': 'assistant.publish.error', 'error_code': safe, 'upload_id': upload_id})

@@ -165,7 +165,7 @@ def test_proactive_idempotent_and_conflict(kind):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize('case', ['unbound', 'stale', 'other', 'scoped', 'unverified', 'missing-generation', 'attachments', 'question', 'result', 'reply', 'closed'])
+@pytest.mark.parametrize('case', ['unbound', 'stale', 'other', 'scoped', 'unverified', 'missing-generation', 'question', 'result', 'reply', 'closed'])
 def test_proactive_refusals(case):
     async def go():
         store, composite, generation = await setup()
@@ -178,7 +178,6 @@ def test_proactive_refusals(case):
             elif case == 'scoped': msg['_auth_context']['scoped_principal'] = True
             elif case == 'unverified': msg['_auth_context']['token_verified'] = False
             elif case == 'missing-generation': msg['_auth_context'].pop('session_generation')
-            elif case == 'attachments': msg['attachment_ids'] = ['file']
             elif case in ('question', 'result'): msg['publish_kind'] = case
             elif case == 'reply': msg['reply_to_message_id'] = 'input'
             elif case == 'closed': await sql(store, "UPDATE sessions SET status='closed' WHERE host='fixture-root'")

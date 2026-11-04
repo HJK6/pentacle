@@ -133,6 +133,9 @@ retains the daemon event_id and duplicate flag. `--caption` supplies optional te
 `publish:<dispatch-id>` key and `response_state=final`; other kinds require an
 explicit stable request key. `--response-state` and `--reply-to-question-id`
 remain available for the existing protocol. No dispatch or input ID is invented.
+The current direct-primary binding may instead pass `--proactive` (no
+correlation flags) to publish an ad hoc status/prose file; see the
+[agent-orch README](../services/agent-orch/README.md#ad-hoc-images-in-the-assistant-chat).
 
 The path guard checks lexical and canonical credential directories, configured
 token-file paths and .env names, before reading; descriptor-relative no-follow

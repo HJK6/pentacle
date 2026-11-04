@@ -1811,9 +1811,9 @@ def assistant_publish(args: argparse.Namespace) -> int:
     reply_ids = [item for value in (getattr(args, "reply_to_message_ids", None) or [])
                  for item in value.split(",") if item]
     if (proactive and (args.dispatch_id or args.reply_to_message_id or args.reply_to_question_id or reply_ids
-                       or attachment_ids or args.publish_kind not in {"prose", "status"})
+                       or args.publish_kind not in {"prose", "status"})
             or not proactive and (not args.dispatch_id or not args.reply_to_message_id)):
-        print("agent-orch assistant publish: use --proactive for prose/status without dispatch, reply or attachments; otherwise dispatch/reply IDs are required", file=sys.stderr)
+        print("agent-orch assistant publish: use --proactive for prose/status without dispatch or reply IDs; otherwise dispatch/reply IDs are required", file=sys.stderr)
         return 2
     payload: dict[str, object] = {
         "type": "assistant.publish",
@@ -5671,6 +5671,8 @@ def build_parser() -> argparse.ArgumentParser:
     file_source.add_argument("--upload-id")
     file_source.add_argument("--from-receipt", help="Inline JSON or receipt file; only upload_id is used")
     send_file_parser.add_argument("--to", help="Target assistant composite for authorized publication")
+    send_file_parser.add_argument("--proactive", action="store_true",
+        help="With --to: publish prose/status without dispatch/reply IDs from the current direct-primary binding; request ID defaults to send-file:<upload-id>")
     send_file_parser.add_argument("--dispatch-id")
     send_file_parser.add_argument("--reply-to-message-id")
     send_file_parser.add_argument("--reply-to-question-id")
@@ -5748,7 +5750,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assistant_publish_parser.add_argument("--request-id", required=True)
     assistant_publish_parser.add_argument("--composite-stream-id", required=True)
-    assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status from the current direct-primary binding")
+    assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status, optionally with attachments, from the current direct-primary binding")
     assistant_publish_parser.add_argument("--dispatch-id")
     assistant_publish_parser.add_argument("--reply-to-message-id")
     assistant_publish_parser.add_argument(

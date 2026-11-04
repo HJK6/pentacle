@@ -185,7 +185,7 @@ def test_assistant_publish_requires_dispatch_or_proactive(monkeypatch):
 def test_assistant_proactive_publish_carries_attachments(monkeypatch):
     def parsed(*extra):
         return cli.build_parser().parse_args([
-            'assistant', 'publish', '--proactive', '--request-id', 'r', '--composite-stream-id', 'bart:assistant',
+            'assistant', 'publish', '--proactive', '--request-id', 'r', '--composite-stream-id', 'home:assistant',
             '--message', 'm', '--attachment-ids-json', '["u1"]', *extra])
     captured = {}
     monkeypatch.setattr(cli, '_assistant_call', lambda args, payload: captured.update(payload) or 0)

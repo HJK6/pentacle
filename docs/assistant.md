@@ -436,8 +436,12 @@ agent-orch assistant publish --proactive --request-id <stable-id> \
   --composite-stream-id <assistant-stream> --publish-kind status --message <text>
 ```
 
-Proactive publication accepts prose/status only, without dispatch/reply IDs or
-attachments. A verified stream token must match the current binding and its
+Proactive publication accepts prose/status only, without dispatch/reply IDs. It
+may carry managed `attachment_ids`; they resolve in the composite's own scope
+with the same ready-row, purpose and byte re-verification as a dispatch reply,
+and `--message` may then be empty. `agent-orch send-file <path> --to
+<assistant-stream> --proactive` is the one-command form; its request ID
+defaults to `send-file:<upload_id>`. A verified stream token must match the current binding and its
 live generation on every call, including retries. Unbound, stale, other and
 scoped/Dot callers are rejected with `assistant_publish_provenance_unverified`.
 Identical request ID and payload retries return the same event; changed payloads

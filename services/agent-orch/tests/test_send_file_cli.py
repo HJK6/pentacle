@@ -354,7 +354,7 @@ def test_proactive_defaults_and_overrides(tmp_path, wire, capsys):
         publish_kind='prose', message='x', attachment_ids=['synthetic-upload'])
     assert json.loads(capsys.readouterr().out)['request_id'] == 'k'
     wire.clear()
-    p = tmp_path / 'sample.png'; p.write_bytes(b'\x89PNG synthetic')
+    p = tmp_path / 'sample.pdf'; p.write_bytes(PDF)
     assert cli.send_file(args(p, '--to', 'home:assistant', '--proactive')) == 0
     assert [call[0] for call in wire] == ['upload', 'publish']
     assert wire[1][1]['request_id'] == 'send-file:synthetic-upload' and wire[1][1]['attachment_ids'] == ['synthetic-upload']

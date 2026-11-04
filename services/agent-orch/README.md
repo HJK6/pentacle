@@ -258,6 +258,17 @@ On success the CLI prints a JSON receipt:
 
 `event_id` is the durable transcript row (it survives reconnect/history replay as one row). The send is idempotent by `request_id`: a retry with the same request id returns `"duplicate": true` and adds no second row. Genuine error receipts (non-zero exit, `send_image.error` with an `error_code`) cover an unsupported type or oversize file (rejected client-side before upload, exit `2`), a blob that was never uploaded (`attachment_missing`), an invalid attachment (`attachment_invalid`), and calling from an unverified or foreign stream (`stream_ownership_unverified`, exit `66`). Exit codes: `0` delivered, `1` send error, `2` bad input, `66` not authorized. This is agent → operator only; the operator's own image sends use the existing desktop/mobile attachment composer, not this verb.
 
+### Ad hoc images in the assistant chat
+
+A hidden seat has no operator-facing chat, and the assistant composite does not mirror an own-stream `send-image`. To show an image in the assistant chat (for example `home:assistant`) without waiting for a dispatch reply, the current direct-primary binding publishes it proactively:
+
+```bash
+agent-orch send-file ./chart.png --to home:assistant --proactive --caption "Q3 conversions"
+agent-orch send-file --upload-id <id> --to home:assistant --proactive
+```
+
+`send-file --proactive` uploads the path (printing the receipt first), then sends one `assistant.publish` with `attachment_ids=[<upload_id>]` and no dispatch or reply IDs. `--publish-kind` is `status` (default) or `prose`; `--request-id` defaults to `send-file:<upload_id>`. A retry with the same upload and caption returns `"duplicate": true`; a different caption on the same key is refused as `publish_replay_conflict`, so pass a fresh `--request-id` to post the same file twice. Correlation flags, `--evidence-refs-json` and `question`/`result` with `--proactive` are refused before any network call (`proactive_fields_invalid`). The equivalent two-step form is `agent-orch assistant publish --proactive --publish-kind status --message "" --attachment-ids-json '["<upload_id>"]' …`. Any other seat gets `publish_not_authorized` and keeps its upload receipt; it hands that receipt to the front desk, which publishes it. Correlated dispatch replies are unchanged ([chat file delivery](../../docs/chat_file_delivery.md)).
+
 ## Saved question answers
 
 A successful answer acknowledgment means the answer is saved. Delivery to the asking agent uses one durable notice identity and survives a client disconnect or daemon restart. A retry of the same answer reconciles that identity; a conflicting answer is rejected.

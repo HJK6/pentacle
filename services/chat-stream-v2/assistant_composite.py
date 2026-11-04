@@ -1716,7 +1716,7 @@ class AssistantComposite:
                     or not isinstance(auth.get("session_generation"), str)
                     or not auth["session_generation"]):
                 raise ValueError("assistant_publish_provenance_unverified")
-            if (kind not in {"prose", "status"} or attachment_ids
+            if (kind not in {"prose", "status"}
                     or msg.get("reply_to_message_id") is not None
                     or msg.get("reply_to_question_id") is not None):
                 raise ValueError("assistant_publish_payload_invalid")
@@ -1779,7 +1779,9 @@ class AssistantComposite:
         if attachment_ids:
             if self.publication_attachments is None:
                 raise ValueError("assistant_publish_attachment_validation_unavailable")
-            attachments = await self.publication_attachments(attachment_ids, route)
+            # A proactive publication has no route; uploads scope to the composite itself.
+            scope = route if route is not None else {"stream_id": self.config.stream_id}
+            attachments = await self.publication_attachments(attachment_ids, scope)
             for attachment in attachments:
                 attachment["publisher"] = {"stream_id": actor_stream_id, "generation": actor_generation}
         canonical_payload = {
