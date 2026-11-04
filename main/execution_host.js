@@ -1,6 +1,6 @@
 'use strict';
 
-// Shared by terminal attachment and provider sign-in. Configuration, never RPC
+// Shared by terminal attachment. Configuration, never RPC
 // input, supplies executable transports and SSH destinations.
 const quote = value => "'" + String(value).replace(/'/g, "'\\''") + "'";
 

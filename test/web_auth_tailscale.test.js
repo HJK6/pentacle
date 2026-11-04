@@ -232,7 +232,7 @@ test('micStartSameOrigin honors X-Forwarded-Proto from a loopback peer only', ()
   assert.equal(micStartSameOrigin(req('127.0.0.1', { 'x-forwarded-proto': 'https, http' })), false, 'a forwarded-proto list is not trusted');
 });
 
-for (const mode of ['tailscale', 'token']) test(`mic:start-server and provider-relogin:* reach their handlers through the proxy (${mode} mode)`, async (t) => {
+for (const mode of ['tailscale', 'token']) test(`mic:start-server and mic:request reach their handlers through the proxy (${mode} mode)`, async (t) => {
   let extra = TS_ARGS;
   let cookie = null;
   if (mode === 'token') {
@@ -248,7 +248,7 @@ for (const mode of ['tailscale', 'token']) test(`mic:start-server and provider-r
     cookie = r.headers.get('set-cookie').split(';')[0];
   }
   const invoked = [];
-  const methods = ['mic:start-server', 'provider-relogin:hosts'];
+  const methods = ['mic:start-server', 'mic:request'];
   for (const m of methods) host.handlers[m].handler = () => { invoked.push(m); return { fixture: m }; };
   // Exactly what tailscale serve sends: Host preserved, forwarded https.
   const proxied = { ...VALID_V4, Host: HOST, 'x-forwarded-host': HOST, ...(cookie ? { Cookie: cookie } : {}) };

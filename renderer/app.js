@@ -24,7 +24,6 @@ const { createClosedChatSlots } = require('./closed_chat_slots');
 const { applyVersionedConnectionState } = require('./chat_stream_connection_state');
 const { resolveMicUrl } = require('../main/mic-url');
 const { createSpawnCatalogLoader } = require('./spawn_catalog_loader');
-const { createProviderRelogin } = require('./provider_relogin_ui');
 const householdSelectors = require('./household/selectors');
 const { householdStore } = require('./household/store');
 householdStore.configure({
@@ -9227,9 +9226,7 @@ function setupSettingsPanel() {
     list.appendChild(row);
   }
 
-  const relogin = window.cc?.reloginHosts ? createProviderRelogin({ document, cc: window.cc, parent: list }) : null;
   function open() {
-    relogin?.refresh();
     list.querySelectorAll('.settings-row[data-setting]').forEach(row => {
       setSegment(row, state.appearance[row.dataset.setting]);
     });
@@ -9240,7 +9237,7 @@ function setupSettingsPanel() {
     overlay.style.display = 'flex';
     window.PentacleHarness?.emit?.('settings:open', { data: {} });
   }
-  const close = () => { relogin?.close(); overlay.style.display = 'none'; };
+  const close = () => { overlay.style.display = 'none'; };
 
   btn.addEventListener('click', open);
   closeBtn?.addEventListener('click', close);

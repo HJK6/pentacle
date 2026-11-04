@@ -537,7 +537,7 @@ async function main(argv = process.argv.slice(2)) {
         ? done(true) : done(false, 403, 'origin_refused'),
   });
   wss.on('connection', (socket, req) => {
-    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req), reloginAllowed: micStartSameOrigin(req) });
+    bridge.addSocket(socket, { micStartAllowed: micStartSameOrigin(req) });
     socket.on('message', (raw) => { bridge.handleMessage(socket, raw.toString()); });
     socket.on('close', () => bridge.removeSocket(socket));
     socket.on('error', () => bridge.removeSocket(socket));

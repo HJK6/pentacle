@@ -253,7 +253,7 @@ answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety ne
   The command is omitted from public configuration and runs without a shell.
   Only matching WebSocket Origin/Host requests may start it (behind a loopback
   TLS proxy the scheme comes from `X-Forwarded-Proto`, § Behind `tailscale serve`);
-  existing web authentication still applies. `provider-relogin:*` uses the same gate. `mic.useStreamHost` disables local recovery.
+  existing web authentication still applies. `mic.useStreamHost` disables local recovery.
   Concurrent starts share one execution with a 75-second timeout. The helper
   must emit JSON `{"ok":true,"ready":true}` only after verifying service readiness;
   exit success alone is insufficient. A service that answers `/status` must not be
@@ -333,11 +333,11 @@ scripts send the canonical `Origin`. No cookie is ever set, and an old
 non-loopback `--bind`, with `--token-file`, or without `--origin` / `--allow-login`.
 
 Because the proxy reaches the host over plain HTTP, the same-origin gate on
-`mic:start-server` and `provider-relogin:*` takes the scheme from
+`mic:start-server` and `mic:request` takes the scheme from
 `X-Forwarded-Proto` when (and only when) the peer is loopback and the header is a
 single `http`/`https` value; `Host` is used as sent (serve preserves it). This
 applies in token mode too, so a token-mode host behind the same proxy also
-admits mic recovery and provider sign-in.
+admits mic recovery.
 
 **Trust boundary.** Identity headers are trustworthy only because nothing but the
 proxy can reach the loopback port: any local process that can connect to it can
@@ -399,7 +399,7 @@ retained conservatively.
 | `test/ws_bridge_multiclient.test.js` | two sockets over the real handler table: slot isolation, broadcast, disconnect cleanup, per-connection cap |
 | `test/web_server.test.js` | the real host: HTTP surface, a refused native channel, a live local tmux attach, and two concurrent connections keeping their tmux sessions isolated |
 | `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, cookie-gated `/api` + `/cc`, and the `--token-path` flag |
-| `test/web_auth_tailscale.test.js` | `--auth tailscale`: flags and startup refusals, the identity predicate (IPv4/IPv6 fixtures, one field varied per case, repeated headers, non-loopback peer), HTTP 401/404, `/cc` 401 vs `403 origin_refused`, and forwarded-proto same-origin admission for `mic:start-server` / `provider-relogin:*` through a stand-in handler table |
+| `test/web_auth_tailscale.test.js` | `--auth tailscale`: flags and startup refusals, the identity predicate (IPv4/IPv6 fixtures, one field varied per case, repeated headers, non-loopback peer), HTTP 401/404, `/cc` 401 vs `403 origin_refused`, and forwarded-proto same-origin admission for `mic:start-server` / `mic:request` through a stand-in handler table |
 | `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
 | `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
 | `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
