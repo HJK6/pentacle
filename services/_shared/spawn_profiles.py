@@ -23,17 +23,20 @@ PROFILES = {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
         "gemini": ("gemini-3.1-pro-preview", "default"),
+        "cursor": ("auto", "default"),
     },
     "desktop_manual": {
         "claude": ("claude-opus-4-8", "high"),
         "codex": ("gpt-6-sol", "high"),
         "gemini": ("gemini-3.1-pro-preview", "default"),
+        "cursor": ("auto", "default"),
     },
 }
 DEFAULT_MAX_CONCURRENT_BOOTS = 3
 DEFAULT_SPAWN_QUEUE_TIMEOUT_SECONDS = 180
 SPAWN_DEFAULTS_PATH = Path(__file__).resolve().with_name("spawn_defaults.json")
 MODELS = {
+    "cursor": {"auto": {"aliases": ("auto", "cursor-auto"), "efforts": ("default",)}},
     "claude": {
         "claude-haiku-5-5": {"aliases": ("claude-haiku-5-5",), "efforts": ("high",)},
         "claude-opus-4-8": {"aliases": ("opus", "claude-opus-4-8"), "efforts": ("low", "medium", "high", "xhigh", "max")},
@@ -199,7 +202,7 @@ def load_spawn_config() -> dict[str, Any]:
     if not isinstance(providers, dict):
         raise _config_error("spawn defaults providers must be an object")
     for provider in MODELS:
-        if provider == "gemini" and provider not in providers:
+        if provider in {"gemini", "cursor"} and provider not in providers:
             continue  # Older deployment policies remain two-provider policies.
         _config_tuple(provider, providers.get(provider))
     _positive_int(raw.get("max_concurrent_boots"), "max_concurrent_boots")
@@ -272,7 +275,7 @@ def _default_tuple(provider: str, host: str | None) -> tuple[str, str]:
     providers = config["providers"]
     values = dict(providers.get(provider) or (
         {"model": PROFILES["agent_orch"][provider][0], "effort": PROFILES["agent_orch"][provider][1]}
-        if provider == "gemini" else {}
+        if provider in {"gemini", "cursor"} else {}
     ))
     if host:
         host_overrides = config.get("host_overrides", {})

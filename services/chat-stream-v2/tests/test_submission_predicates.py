@@ -334,3 +334,16 @@ def test_gemini_is_wired_into_the_dispatch_tables() -> None:
     assert READY_PREDICATES["gemini"] is gemini_prompt_ready
     assert SUBMIT_PREDICATES["gemini"] is gemini_prompt_submitted
     assert DRAFT_PREDICATES["gemini"] is gemini_prompt_in_active_draft
+
+# Captured from the real Pentacle REPL in an owned tmux pane with a fake agent.
+def test_cursor_recorded_pane_states_and_counter_proof():
+    from boot_ready import cursor_prompt_ready, cursor_prompt_in_active_draft
+    root = Path(__file__).parent / 'fixtures'
+    pane = lambda state: (root / f'cursor_{state}_pane.txt').read_text()
+    prompt = 'run the delivery check now'
+    assert cursor_prompt_ready(pane('idle'))
+    assert cursor_prompt_in_active_draft(pane('draft'), prompt)
+    assert not submission_proven_after(pane('draft'), pane('idle'), prompt, 'cursor')
+    assert submission_proven_after(pane('submitted'), pane('idle'), prompt, 'cursor')
+    assert submission_proven_after(pane('queued'), pane('submitted'), 'queued-prompt', 'cursor')
+    assert not cursor_prompt_ready(pane('mismatch'))

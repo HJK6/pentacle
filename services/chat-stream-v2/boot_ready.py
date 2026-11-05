@@ -794,7 +794,23 @@ def codex_prompt_exactly_in_active_draft(pane_text: str, prompt: str) -> bool:
 
 #: Submission proof (`spawn.ok` requires it for a real provider TUI) and its
 #: negative (proof the brief is still an unsubmitted draft → re-paste once).
+from cursor_receipts import receipt_key as cursor_receipt_key, receipts as cursor_receipts, high_water as cursor_high_water
+
+def cursor_prompt_ready(pane_text: str) -> bool:
+    lines = [line.strip() for line in pane_text.splitlines() if line.strip()]
+    return bool(lines and lines[-1] == "›" and "! identity mismatch" not in pane_text)
+
+def cursor_prompt_submitted(pane_text: str, prompt: str, baseline_n: int = 0) -> bool:
+    return any(n > baseline_n and key == cursor_receipt_key(prompt) for n, key in cursor_receipts(pane_text))
+
+def cursor_prompt_in_active_draft(pane_text: str, prompt: str) -> bool:
+    composer = pane_text.rsplit("›", 1)[-1] if "›" in pane_text else ""
+    return bool(cursor_receipt_key(prompt) and cursor_receipt_key(prompt) in " ".join(composer.split()))
+
+READY_PREDICATES["cursor"] = cursor_prompt_ready
+
 SUBMIT_PREDICATES = {
+    "cursor": cursor_prompt_submitted,
     "claude": claude_prompt_submitted,
     "codex": codex_prompt_submitted,
     "gemini": gemini_prompt_submitted,
@@ -810,6 +826,8 @@ def submission_marker_count(pane_text: str, provider: str) -> int:
 
 def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...]:
     lines = pane_text.splitlines()
+    if provider == "cursor":
+        return tuple(str(n) for n, _ in cursor_receipts(pane_text))
     if provider == "gemini":
         composer_index = _gemini_composer_index(lines)
         if composer_index is None:
@@ -832,6 +850,8 @@ def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...
 
 def submission_proven_after(pane_text: str, baseline: str, prompt: str, provider: str) -> bool:
     """Require new provider evidence after the exact pre-paste baseline."""
+    if provider == "cursor":
+        return cursor_prompt_submitted(pane_text, prompt, cursor_high_water(baseline))
     if provider == "gemini":
         if gemini_prompt_in_active_draft(pane_text, prompt):
             return False
@@ -854,6 +874,7 @@ def submission_proven_after(pane_text: str, baseline: str, prompt: str, provider
         return after_markers != baseline_markers
     return len(after_markers) > len(baseline_markers)
 DRAFT_PREDICATES = {
+    "cursor": cursor_prompt_in_active_draft,
     "claude": claude_prompt_in_active_draft,
     "codex": codex_prompt_in_active_draft,
     "gemini": gemini_prompt_in_active_draft,

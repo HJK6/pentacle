@@ -241,6 +241,8 @@ def watcher_sources() -> dict[str, str]:
 def transcript_allowed(path: str, provider: str, binding: Mapping | None = None) -> bool:
     if not isinstance(path, str) or not path.endswith(".jsonl"):
         return False
+    if provider == "cursor":
+        return _cursor_transcript_allowed(path, binding)
     if binding is None:
         if provider == "gemini":
             candidate = Path(path)
@@ -502,3 +504,24 @@ def write_private_json(path: Path, data: dict):
         finally: os.close(parent)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
+
+
+def _cursor_transcript_allowed(path: str, binding: Mapping | None) -> bool:
+    if not isinstance(binding, Mapping) or binding.get("provider") != "cursor":
+        return False
+    import stat
+    try:
+        candidate = Path(path)
+        cwd = Path(binding["cwd"])
+        root = Path(binding["transcript_root"])
+        expected = Path(binding["jsonl_path"])
+        meta = candidate.stat()
+        return (candidate.is_absolute() and cwd.is_absolute() and cwd == cwd.resolve(strict=True)
+                and root == cwd / ".cursor/sessions" and candidate == expected
+                and expected == root / (binding["session_id"] + ".jsonl")
+                and candidate == candidate.resolve(strict=True)
+                and not (cwd / ".cursor").is_symlink() and not root.is_symlink()
+                and not candidate.is_symlink() and stat.S_ISREG(meta.st_mode)
+                and meta.st_uid == os.getuid() and stat.S_IMODE(meta.st_mode) == 0o600)
+    except (KeyError, OSError, ValueError, TypeError, RuntimeError):
+        return False

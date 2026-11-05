@@ -45,6 +45,9 @@ class MachineConfig:
     label: str | None = None
     smoke_optional: bool = False
     gemini_bin: str = "gemini"
+    cursor_agent_bin: str = "agent"
+    cursor_repl: str = str(Path(__file__).with_name("cursor_repl.py"))
+    cursor_version: str = "2026.10.22-27dcf5f"
     # Private, host-scoped native qualification; absent/invalid disables only
     # remote queued-send control, leaving the peer's ordinary routes intact.
     queued_send_now_qualifications: tuple[tuple[str, str, str], ...] = ()
@@ -135,6 +138,9 @@ def _machine_from_dict(raw: dict) -> MachineConfig:
         claude_bin=_expand(str(raw.get("claude_bin") or claude_default)),
         codex_bin=_expand(str(raw.get("codex_bin") or codex_default)),
         gemini_bin=_expand(str(raw.get("gemini_bin") or gemini_default)),
+        cursor_agent_bin=_expand(str(raw.get("cursor_agent_bin") or "agent")),
+        cursor_repl=_expand(str(raw.get("cursor_repl") or defaults.cursor_repl)),
+        cursor_version=str(raw.get("cursor_version") or defaults.cursor_version),
         projects_root=_expand(str(raw.get("projects_root") or projects_default)),
         cwd=_expand(str(raw.get("cwd") or cwd_default)),
         agent_orch_bin_dir=(

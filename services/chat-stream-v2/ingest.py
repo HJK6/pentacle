@@ -129,6 +129,8 @@ class _StreamIngest:
     next_attempt_monotonic: float = 0.0  # earliest retry time (per-stream backoff)
     #: Cross-span provenance context (Codex identity, turn models); reset on rebind.
     provenance_state: dict = field(default_factory=dict)
+    cursor_norm_state: dict = field(default_factory=dict)
+    cursor_line: int = 0
     identity_incident_id: str | None = None
 
 
@@ -494,7 +496,9 @@ class Ingest:
         # normalizer (`codex_rollout_norm`) — the claude normalizer is never
         # pointed at them. Any third provider still short-circuits rather than
         # being parsed by a normalizer that was not written for it.
-        if provider not in ("claude", "codex", "gemini"):
+        if provider not in ("claude", "codex", "gemini", "cursor"):
+            return 0
+        if provider == "cursor" and st.cursor_norm_state.get("halted"):
             return 0
 
         if not st.path:
@@ -597,6 +601,18 @@ class Ingest:
             st.session_id = native
         elif not st.session_id and provider == "claude":
             st.session_id = str(row.get("claude_session_id") or "")
+        if provider == "cursor":
+            launch_binding = binding.get("cursor") if isinstance(binding, dict) else None
+            if not transcript_allowed(st.path, "cursor", launch_binding):
+                _close_stream(st)
+                return 0
+            header = await asyncio.to_thread(_cursor_header, st.fd)
+            if (not launch_binding or not header or header.get("session_id") != launch_binding.get("session_id")
+                    or header.get("chat_id") != launch_binding.get("chat_id")):
+                _close_stream(st)
+                log.warning("Cursor transcript identity refused", extra={"subsystem":"ingest", "bug_ref":"cursor_provider_identity"})
+                return 0
+            st.session_id = launch_binding["session_id"]
         if provider == "gemini":
             native = await asyncio.to_thread(_native_session_identity_from_fd, st.fd, provider)
             expected = str(row.get("claude_session_id") or st.session_id or "")
@@ -669,8 +685,11 @@ class Ingest:
         # with "replace" is not byte-reversible, so it cannot be measured after.
         record_end_offsets: list[int] = []
         cursor = st.offset
+        cursor_line = st.cursor_line if st.offset else 0
+        cursor_records = []
         for raw_line in consumed.splitlines(keepends=True):
             cursor += len(raw_line)
+            cursor_line += 1
             line = raw_line.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -688,6 +707,9 @@ class Ingest:
             # guard silently disarmed on the majority of the fleet.
             if provider == "codex":
                 rec_sid = codex_session_identity(record)
+            elif provider == "cursor":
+                rec_sid = ""  # Native chat UUID differs from the daemon session UUID.
+                cursor_records.append((cursor_line, record))
             else:
                 rec_sid = str(record.get("sessionId") or record.get("session_id") or "")
             if rec_sid:
@@ -848,7 +870,12 @@ class Ingest:
             return 0
         if isinstance(binding, dict) and await self._provider_root(row, name) is None:
             return 0
-        if provider == "gemini":
+        cursor_state = dict(st.cursor_norm_state) if st.offset else {}
+        if provider == "cursor":
+            from cursor_stream_norm import normalize_cursor_stream_records
+            events = normalize_cursor_stream_records(cursor_records, host=host, session_name=name,
+                session_id=st.session_id, state=cursor_state)
+        elif provider == "gemini":
             from gemini_jsonl_norm import normalize_gemini_jsonl_records
             events = normalize_gemini_jsonl_records(
                 records, host=host, session_name=name,
@@ -880,6 +907,9 @@ class Ingest:
                 appended += 1
         if not capped:
             st.offset = new_offset
+            if provider == "cursor":
+                st.cursor_norm_state = cursor_state
+                st.cursor_line = cursor_line
         if appended and self.inventory_emitter is not None:
             await self.inventory_emitter.emit_if_changed()
         return appended
@@ -896,7 +926,9 @@ class Ingest:
             if path and not transcript_allowed(path, row.get("provider"), account): return None
         if (not isinstance(binding, dict) or not row.get("session_generation")
                 or binding.get("generation") != row.get("session_generation")
-                or row.get("provider") not in {"codex", "claude", "gemini"}):
+                or row.get("provider") not in {"codex", "claude", "gemini", "cursor"}):
+            return None
+        if row.get("provider") == "cursor" and not isinstance(binding.get("cursor"), dict):
             return None
         pid = codex_source_pane_pid(row.get("pane_pid"))
         started = canonical_start(binding.get("pane_started_at"))
@@ -913,7 +945,7 @@ class Ingest:
             observation["start"] = canonical_start(record.get("start_id")) if record else ""
         if (not record or record["uid"] != os.getuid()
                 or canonical_start(record["start_id"]) != started
-                or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
+                or not _provider_command_matches(record["command"], str(binding.get("executable") or ""), binding.get("cursor") if row.get("provider") == "cursor" else None)):
             return None
         return pid, canonical_start(record["start_id"])
 
@@ -953,7 +985,7 @@ class Ingest:
         started = canonical_start(record.get("start_id")) if record else ""
         observation["start"] = started
         if (not record or record["uid"] != os.getuid()
-                or not _provider_command_matches(record["command"], str(binding.get("executable") or ""))):
+                or not _provider_command_matches(record["command"], str(binding.get("executable") or ""), binding.get("cursor") if row.get("provider") == "cursor" else None)):
             if record:
                 observation["reason"] = "foreign_identity"
             return row
@@ -966,7 +998,7 @@ class Ingest:
             observation["reason"] = "start_mismatch" if started != prior_start else "proof_unavailable"
             return row  # recorded/first-bind paths cannot seed recovery authority
         provider = row.get("provider")
-        if provider not in {"codex", "claude", "gemini"} or transcript.get("provider") != provider:
+        if provider not in {"codex", "claude", "gemini", "cursor"} or transcript.get("provider") != provider:
             observation["reason"] = "foreign_identity"
             return row
         if provider == "claude" and row.get("jsonl_path"):
@@ -1080,15 +1112,19 @@ class Ingest:
             if await self._provider_root(row, name) is None:
                 return ""
             path = str(prior.get("path") or "")
+            if row.get("provider") == "cursor" and not transcript_allowed(path, "cursor", binding.get("cursor")):
+                return ""
             return path if path and await asyncio.to_thread(_exists, path) else ""
         recorded = str(row.get("jsonl_path") or "")
+        if row.get("provider") == "cursor":
+            launch_binding = binding.get("cursor") if isinstance(binding, dict) else None
+            return recorded if recorded and transcript_allowed(recorded, "cursor", launch_binding) else ""
         if recorded and await asyncio.to_thread(_exists, recorded):
             return recorded
         root = await self._provider_root(row, name)
         if root is None:
             return ""
         account = row.get("account_binding")
-        from provider_accounts import transcript_allowed
         candidates = await (_open_writable_transcripts(root[0], account) if account else _open_writable_transcripts(root[0]))
         candidates = [candidate for candidate in candidates if transcript_allowed(candidate[0], row.get("provider"), account)]
         if len(candidates) != 1:
@@ -1099,7 +1135,7 @@ class Ingest:
         return path
 
 
-def _provider_command_matches(command: str, expected: str) -> bool:
+def _provider_command_matches(command: str, expected: str, cursor: dict | None = None) -> bool:
     if not expected:
         return False
     try:
@@ -1108,6 +1144,11 @@ def _provider_command_matches(command: str, expected: str) -> bool:
         tokens = [next(lexer, ""), next(lexer, "")]
     except ValueError:
         return False
+    if cursor is not None:
+        return (isinstance(cursor, dict) and len(tokens) == 2
+                and os.path.isabs(tokens[0]) and os.path.isabs(tokens[1])
+                and os.path.realpath(tokens[0]) == cursor.get("python") == os.path.realpath(expected)
+                and os.path.realpath(tokens[1]) == cursor.get("repl"))
     def matches(token: str) -> bool:
         return os.path.isabs(token) and os.path.realpath(token) == os.path.realpath(expected)
     if tokens and matches(tokens[0]):
@@ -1117,6 +1158,9 @@ def _provider_command_matches(command: str, expected: str) -> bool:
 
 
 def _native_session_identity_from_fd(fd: int, provider: str) -> str:
+    if provider == "cursor":
+        header = _cursor_header(fd)
+        return str(header.get("session_id") or "") if header else ""
     if provider == "codex":
         return _codex_session_identity_from_fd(fd) or ""
     for line in os.pread(fd, 262144, 0).splitlines():
@@ -1135,6 +1179,8 @@ def _provider_from_session_name(name: str) -> str | None:
         return "codex"
     if "claude" in lowered:
         return "claude"
+    if "cursor" in lowered:
+        return "cursor"
     if "gemini" in lowered:
         return "gemini"
     return None
@@ -1275,3 +1321,11 @@ async def _open_writable_transcripts(root_pid: str, account: dict | None = None)
                     os.close(fd)
             files.setdefault(identity, value)
     return sorted((path, identity) for identity, path in files.items())
+
+
+def _cursor_header(fd: int) -> dict | None:
+    try:
+        header = json.loads(os.pread(fd, 16384, 0).split(b"\n", 1)[0])
+        return header if isinstance(header, dict) and header.get("type") == "pentacle_repl" and header.get("version") == 1 else None
+    except (OSError, ValueError):
+        return None

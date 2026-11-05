@@ -1019,6 +1019,9 @@ class SpawnCtl:
                     else launch.machine_from_config(peer, provider=provider)
                 )
             except ValueError as exc:
+                code = str(exc).split(":", 1)[0]
+                if provider == "cursor" and (code.startswith("cursor_") or code in {"provider_executable_missing", "resume_unsupported_provider"}):
+                    raise VerbError(code, code) from exc
                 raise VerbError("spawn_launch_unavailable", str(exc)) from exc
         return machine
 
@@ -3414,7 +3417,12 @@ class SpawnCtl:
         model = resolved["model"]
         effort = resolved["effort"]
         account_binding = None
-        if account_runtime is not None:
+        if provider == "cursor":
+            if host != self.sessions.local_host:
+                raise VerbError("cursor_remote_unsupported", "Cursor seats are local only")
+            if "account" in msg or msg.get("_account_resume_binding"):
+                raise VerbError("cursor_named_accounts_unsupported", "Cursor uses the local sign-in")
+        if account_runtime is not None and provider != "cursor":
             from provider_accounts import AccountError
             try:
                 account_binding = await account_runtime.choose_launch(host=host, provider=provider, model=model,
@@ -3449,7 +3457,8 @@ class SpawnCtl:
                 raise VerbError("spawn_launch_unavailable",
                                 "no local machine profile configured for tuple-path spawn")
             try:
-                plan = launch.build_launch(
+                import functools
+                build_plan = functools.partial(launch.build_launch,
                     machine, provider=provider, tmux_session=name,
                     launch_model=launch_model, launch_effort=launch_effort,
                     operator_facing=(
@@ -3474,7 +3483,11 @@ class SpawnCtl:
                     ),
                     account_binding=account_binding,
                 )
+                plan = await asyncio.to_thread(build_plan) if provider == "cursor" else build_plan()
             except ValueError as exc:
+                code = str(exc).split(":", 1)[0]
+                if provider == "cursor" and (code.startswith("cursor_") or code in {"provider_executable_missing", "resume_unsupported_provider"}):
+                    raise VerbError(code, code) from exc
                 raise VerbError("spawn_launch_unavailable", str(exc)) from exc
             if msg.get("_defer_launch_token_stage"):
                 deferred_launch_plan = plan
@@ -3510,11 +3523,13 @@ class SpawnCtl:
             "effective_effort": effort,
         }
         if not explicit:
-            configured = machine.claude_bin if provider == "claude" else (machine.gemini_bin if provider == "gemini" else machine.codex_bin)
+            configured = plan.cursor_binding["python"] if provider == "cursor" else machine.claude_bin if provider == "claude" else (machine.gemini_bin if provider == "gemini" else machine.codex_bin)
             parts = launch._command_parts(configured)
             overrides["observer_binding"] = {
                 "executable": launch._resolve_local_executable(parts[0]) if parts else "",
             }
+        if not explicit and provider == "cursor":
+            overrides["observer_binding"]["cursor"] = plan.cursor_binding
         if account_binding is not None:
             overrides["account_binding"] = account_binding.public()
             resolution["account_binding"] = account_binding.public()

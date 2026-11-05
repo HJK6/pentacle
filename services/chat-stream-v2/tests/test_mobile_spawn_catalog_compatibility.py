@@ -13,6 +13,7 @@ def catalog(monkeypatch):
         'codex': {'codex-z': {'efforts': ['high']}, 'codex-a': {'efforts': ['high']}},
         'gemini': {'gemini-example': {'efforts': ['default']}},
         'future': {'future-example': {'efforts': ['default']}},
+        'cursor': {'auto': {'efforts': ['default']}},
     }
     value = {
         'schema_version': 'CatalogV1',

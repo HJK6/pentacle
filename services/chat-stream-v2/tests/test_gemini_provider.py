@@ -42,6 +42,7 @@ def test_remote_gemini_refuses_until_native_ingest_is_supported():
 def test_legacy_two_provider_config_and_picker_stay_compatible(monkeypatch, tmp_path):
     config = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text())
     config["providers"].pop("gemini", None)
+    config["providers"].pop("cursor", None)
     path = tmp_path / "defaults.json"
     path.write_text(json.dumps(config))
     monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", path)

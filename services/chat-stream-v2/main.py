@@ -252,6 +252,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--claude-bin", default="", help="claude binary for tuple-path spawn")
     p.add_argument("--codex-bin", default="", help="codex binary for tuple-path spawn")
     p.add_argument("--gemini-bin", default="", help="gemini binary for tuple-path spawn")
+    p.add_argument("--cursor-agent-bin", default="", help="absolute pinned Cursor launcher")
+    p.add_argument("--cursor-repl", default="", help="absolute Cursor REPL script")
+    p.add_argument("--cursor-version", default="", help="expected Cursor release version")
     p.add_argument("--spawn-cwd", default="", help="cwd a tuple-path spawn launches in")
     p.add_argument("--projects-root", default="", help="provider transcript projects root")
     p.add_argument("--agent-orch-bin-dir", default="", help="dir put on a spawned pane's PATH")
@@ -294,6 +297,9 @@ def _local_machine_for_spawn(args: argparse.Namespace, configured_machines: tupl
             claude_bin=args.claude_bin or None,
             codex_bin=args.codex_bin or None,
             gemini_bin=args.gemini_bin or None,
+            cursor_agent_bin=args.cursor_agent_bin or None,
+            cursor_repl=args.cursor_repl or None,
+            cursor_version=args.cursor_version or None,
             projects_root=args.projects_root or None,
             agent_orch_bin_dir=args.agent_orch_bin_dir or None,
         )
@@ -303,6 +309,9 @@ def _local_machine_for_spawn(args: argparse.Namespace, configured_machines: tupl
         claude_bin=args.claude_bin or None,
         codex_bin=args.codex_bin or None,
         gemini_bin=args.gemini_bin or None,
+        cursor_agent_bin=args.cursor_agent_bin or None,
+        cursor_repl=args.cursor_repl or None,
+        cursor_version=args.cursor_version or None,
         projects_root=args.projects_root or None,
         agent_orch_bin_dir=args.agent_orch_bin_dir or None,
     )

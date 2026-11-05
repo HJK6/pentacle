@@ -593,7 +593,7 @@ def test_local_empty_list_hides_provider_only_from_advertised_models(installatio
 
 
 def test_only_gemini_can_be_advertised(installation_config):
-    result = installation_config({"claude": [], "codex": []})
+    result = installation_config({"claude": [], "codex": [], "cursor": []})
     assert result["available_models"] == {"gemini": spawn_profiles.MODELS["gemini"]}
 
 

@@ -36,6 +36,8 @@ import shlex
 import shutil
 import uuid
 import hashlib
+import sys
+from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, replace
 
@@ -106,6 +108,9 @@ class LocalMachine:
     agent_orch_bin_dir: str | None = None
     gemini_bin: str = "gemini"
     resolve_cwd_locally: bool = True
+    cursor_agent_bin: str = "agent"
+    cursor_repl: str = str(Path(__file__).with_name("cursor_repl.py"))
+    cursor_version: str = "2026.10.22-27dcf5f"
 
 
 def local_machine(
@@ -115,6 +120,9 @@ def local_machine(
     claude_bin: str | None = None,
     codex_bin: str | None = None,
     gemini_bin: str | None = None,
+    cursor_agent_bin: str | None = None,
+    cursor_repl: str | None = None,
+    cursor_version: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -131,6 +139,9 @@ def local_machine(
         claude_bin=resolved_claude,
         codex_bin=codex_bin or "codex",
         gemini_bin=gemini_bin or "gemini",
+        cursor_agent_bin=cursor_agent_bin or "agent",
+        cursor_repl=cursor_repl or str(Path(__file__).with_name("cursor_repl.py")),
+        cursor_version=cursor_version or "2026.10.22-27dcf5f",
         projects_root=projects_root or os.path.join(home, ".claude/projects"),
         # Keep an explicit profile/CLI value here. When it is absent, the
         # provider-specific command builder derives the fallback after the
@@ -148,6 +159,10 @@ def machine_from_config(cfg: Any, *, provider: str = "claude") -> LocalMachine:
     (the cutover-day remote-canary failure mode). The active provider is
     validated independently so a Codex-only legacy profile does not need a
     Claude path merely to launch Codex."""
+    if provider == "cursor":
+        if getattr(cfg, "ssh_target", None) is not None:
+            raise ValueError("cursor_remote_unsupported")
+        return local_machine_from_config(cfg)
     if provider not in ("claude", "codex", "gemini"):
         raise ValueError(f"provider_unknown: {provider}")
     provider_bin = getattr(cfg, f"{provider}_bin", "") or ""
@@ -303,6 +318,9 @@ def local_machine_from_config(
     claude_bin: str | None = None,
     codex_bin: str | None = None,
     gemini_bin: str | None = None,
+    cursor_agent_bin: str | None = None,
+    cursor_repl: str | None = None,
+    cursor_version: str | None = None,
     projects_root: str | None = None,
     agent_orch_bin_dir: str | None = None,
 ) -> LocalMachine:
@@ -317,6 +335,9 @@ def local_machine_from_config(
         claude_bin=claude_bin or cfg.claude_bin or None,
         codex_bin=codex_bin or cfg.codex_bin or None,
         gemini_bin=gemini_bin or getattr(cfg, "gemini_bin", None) or None,
+        cursor_agent_bin=cursor_agent_bin or getattr(cfg, "cursor_agent_bin", None),
+        cursor_repl=cursor_repl or getattr(cfg, "cursor_repl", None),
+        cursor_version=cursor_version or getattr(cfg, "cursor_version", None),
         projects_root=projects_root or cfg.projects_root or None,
         agent_orch_bin_dir=(
             agent_orch_bin_dir or cfg.agent_orch_bin_dir or None
@@ -599,6 +620,15 @@ class LaunchPlan:
     jsonl_path: str
     stream_token: str
     stream_token_file: str
+    cursor_binding: dict | None = None
+
+
+def cursor_python_executable() -> str:
+    """Launch the actual interpreter, including macOS framework re-exec."""
+    framework = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+    if sys.platform == "darwin" and framework.is_file():
+        return str(framework.resolve())
+    return os.path.realpath(sys.executable)
 
 
 def build_launch(
@@ -621,6 +651,10 @@ def build_launch(
     (no flag passed, CLI default used) and the canonical value for an explicit
     request — matching v1's `launch_model = model if requested_model is not None`.
     """
+    if account_binding is not None and provider == "cursor":
+        raise ValueError("cursor_named_accounts_unsupported")
+    if provider == "cursor" and resume_session_id is not None:
+        raise ValueError("resume_unsupported_provider: cursor")
     if account_binding is not None and provider == "gemini":
         raise ValueError("gemini_named_accounts_unsupported")
     if account_binding is not None:
@@ -693,6 +727,24 @@ def build_launch(
             stream_token=stream_token,
             stream_token_file=stream_token_file,
         )
+    if provider == "cursor":
+        from cursor_admission import prepare_cursor
+        native = prepare_cursor(machine, cwd=cwd)
+        session_id = str(uuid.uuid4())
+        transcript_root = os.path.join(native["cwd"], ".cursor", "sessions")
+        jsonl_path = os.path.join(transcript_root, session_id + ".jsonl")
+        binding = {**native, "session_id": session_id, "transcript_root": transcript_root,
+                   "jsonl_path": jsonl_path, "provider": "cursor",
+                   "python": cursor_python_executable(), "repl": os.path.realpath(machine.cursor_repl)}
+        argv = [binding["python"], binding["repl"], "--agent", native["agent"],
+                "--session-id", session_id, "--chat-id", native["chat_id"],
+                "--transcript", jsonl_path, "--cwd", native["cwd"], "--model", "auto",
+                "--cli-version", native["cli_version"]]
+        command = (f"cd {shlex.quote(native['cwd'])} && "
+                   + agent_orch_path_export(machine, provider_bin=native["agent"])
+                   + stream_env_assignments(machine, tmux_session, stream_token_file)
+                   + " exec " + shlex.join(argv))
+        return LaunchPlan(command, session_id, jsonl_path, stream_token, stream_token_file, binding)
     if provider == "gemini":
         if launch_effort not in (None, "default"):
             raise ValueError("gemini_effort_unsupported: use default")

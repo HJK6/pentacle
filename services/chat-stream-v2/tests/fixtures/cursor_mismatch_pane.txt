@@ -1,0 +1,15 @@
+use /exit to close
+» #1 run the delivery check now
+▶ #1
+│ OK
+─ #1 done 38 ms
+» #2 slow fixture
+▶ #2
+» #3 queued-prompt
+! #2 interrupted
+▶ #3
+│ OK
+─ #3 done 22 ms
+» #4 mismatch
+▶ #4
+! identity mismatch

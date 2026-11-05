@@ -2673,6 +2673,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                         "pane_pid": str(reservation.get("pane_pid") or ""),
                         "pane_started_at": str(reservation.get("pane_started_at") or ""),
                         "generation": generation,
+                        **({"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
+                           and isinstance(observer.get("cursor"), dict) else {}),
                     }
             stream_id = f"{host}:{session_name}"
             existing = conn.execute(
@@ -2702,7 +2704,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     cols["observer_binding"] = {
                         key: observer.get(key, "")
                         for key in ("executable", "pane_pid", "pane_started_at")
-                    } | {"generation": generation}
+                    } | {"generation": generation} | (
+                        {"cursor": dict(observer["cursor"])} if cols.get("provider") == "cursor"
+                        and isinstance(observer.get("cursor"), dict) else {})
                     cols["observer_binding"]["pane_pid"] = str(
                         cols["observer_binding"].get("pane_pid") or cols.get("pane_pid") or "")
                 else:
