@@ -358,7 +358,54 @@ def _configured_spec_authorized(
     )
 
 
+def front_desk_aliases_conn(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> set[str]:
+    """Seat ids the daemon's own records prove were bound as the primary FD.
+
+    Sources: the primary env pin and binding row, lifecycle binding-change
+    and legacy grant-move audit rows (primary-only), and rebind audit rows
+    excluding any seat ever bound to another assistant name or holding a
+    secondary protected role. Never role, title or message text. Historical
+    ids are tell aliases only; they confer no authority.
+    """
+    if not front_desk:
+        return set()
+    name = front_desk["name"]
+    aliases: set[str] = set()
+    env_stream = str((front_desk.get("env_binding") or {}).get("stream_id") or "")
+    if env_stream:
+        aliases.add(env_stream)
+    other: set[str] = set()
+    for row in conn.execute("SELECT name,stream_id FROM v2_assistant_direct_binding"):
+        if row[1]:
+            (aliases if row[0] == name else other).add(str(row[1]))
+    for row in conn.execute(
+            "SELECT prior_stream_id,target_stream_id FROM v2_lifecycle_authority_audit WHERE result='applied' "
+            "AND action IN ('fd_binding_change','host_transfer','handoff_transfer')"):
+        aliases.update(str(v) for v in row if v)
+    from assistant_policy import AssistantPolicy
+    secondary = AssistantPolicy(None, "").extra_roles
+    for row in conn.execute("SELECT old_binding_json,new_binding_json FROM v2_assistant_rebind_audit WHERE outcome='ok'"):
+        for raw in row:
+            try:
+                value = json.loads(raw) if raw else None
+            except ValueError:
+                value = None
+            stream = str(value.get("stream_id") or "") if isinstance(value, dict) else ""
+            if not stream or stream in other:
+                continue
+            seat = _seat_conn(conn, stream)
+            if seat is not None and seat["role"] in secondary:
+                continue
+            aliases.add(stream)
+    return aliases - other
+
+
 class AssistantBindingStoreMixin:
+    async def front_desk_aliases(self) -> set[str]:
+        def _op(conn: sqlite3.Connection) -> set[str]:
+            return front_desk_aliases_conn(conn, lifecycle_authority.configured(conn))
+        return await self.submit(_op)
+
     async def record_scoped_owner(self, *, kind: str, key: str, credential_id: str) -> None:
         """Bind a blob sha or request id to the scoped credential that created it.
 

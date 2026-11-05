@@ -4229,6 +4229,13 @@ class Server:
             "tell_id": tell_reply.get("tell_id"),
         }
 
+    def _front_desk_composite(self) -> Any:
+        """The primary composite when its direct binding names the FD."""
+        composite = self.sessions.assistant.front_desk
+        if composite is None or not self.sessions.assistant.front_desk_mode or not composite.enabled:
+            return None
+        return composite
+
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_tell(msg)
@@ -4237,6 +4244,12 @@ class Server:
         composite = self._composite_for(target_stream_id)
         if composite is not None:
             return await self._composite_tell(composite, target_stream_id, msg)
+        front_desk = self._front_desk_composite()
+        if front_desk is not None and target_stream_id in await self.store.front_desk_aliases():
+            # The current or a proved former FD seat id is a logical FD address:
+            # canonicalize before physical routing, even if the old seat is open.
+            return await self._composite_tell(front_desk, front_desk.config.stream_id,
+                                              {**msg, "_fd_requested_to": target_stream_id})
         # Suppression is applied by Comms.tell, after its route/body/Codex guards
         # and under the tell_id idempotency ledger.
         return await self.comms.tell(msg)
@@ -4271,6 +4284,8 @@ class Server:
         delivered = await self._deliver_composite_tell(
             composite, composite_stream_id, from_stream_id, body, tell_id, str(msg.get("request_id") or ""),
             service_ingress_body=msg.get("_wmi_brief_ingress_body"),
+            requested_to=str(msg.get("_fd_requested_to") or msg.get("to_stream_id") or composite_stream_id),
+            auth=auth,
         )
         if delivered is not None:
             return delivered
@@ -4288,7 +4303,8 @@ class Server:
     async def _deliver_composite_tell(
         self, composite: Any, composite_stream_id: str, from_stream_id: str,
         body: str, tell_id: str, request_id: str,
-        *, service_ingress_body: str | None = None,
+        *, service_ingress_body: str | None = None, requested_to: str | None = None,
+        auth: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Deliver one composite tell to the current bound pane.
 
@@ -4314,10 +4330,19 @@ class Server:
             # The pane was replaced without a rebind: refuse the stale generation.
             raise VerbError("assistant_direct_generation_conflict",
                             "assistant binding generation is stale")
+        logical = None
+        if composite is self._front_desk_composite():
+            # FD tell identity is the logical destination, not this seat, so a
+            # retry after a rebind replays the committed outcome.
+            verified = str((auth or {}).get("stream_id") or "") if (auth or {}).get("token_verified") else ""
+            logical = {"name": composite.config.name, "requested": requested_to or composite_stream_id,
+                       "binding_revision": binding.get("revision"), "sender": verified or from_stream_id,
+                       "aliases": await self.store.front_desk_aliases()}
         reply = await self.comms.tell({
             "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
             "from_stream_id": from_stream_id or composite_stream_id, "message": body,
             "tell_id": tell_id, "request_id": request_id,
+            **({"_logical_front_desk": logical} if logical else {}),
             # Only authenticated service dispatch or its durable queue entry
             # supplies the sanitized original. Never infer trust from a header.
             "_wmi_brief_ingress_body": service_ingress_body,
@@ -4335,7 +4360,8 @@ class Server:
             delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
         # Preserve the committed-but-not-yet-proven acknowledgement for callers
         # which must not resend an already committed brief.
-        for key in ("action_committed", "action_status", "confirmation_status", "confirmation_pending", "do_not_resubmit"):
+        for key in ("action_committed", "action_status", "confirmation_status", "confirmation_pending",
+                    "do_not_resubmit", "duplicate"):
             if key in reply:
                 delivered[key] = reply[key]
         return delivered
@@ -4470,7 +4496,10 @@ class Server:
         # A transient physical-target copy: never the caller's object, and no
         # private marker survives (only the server-derived peer context).
         physical = {key: value for key, value in msg.items() if not str(key).startswith("_")}
-        physical.update(to_stream_id=target, host=host, session_name=name, _auth_context=peer)
+        physical.update(to_stream_id=target, host=host, session_name=name, _auth_context=peer,
+                        _assistant_alias_binding={"name": composite.env_config.name,
+                            "env_binding": composite._env_binding(), "stream_id": target,
+                            "generation": generation, "revision": binding.get("revision")})
         if isinstance(msg.get("inbox"), dict):
             physical["inbox"] = {**msg["inbox"], "to": target}
         return await self._on_send(physical)
