@@ -504,3 +504,19 @@ test('Cursor uses existing catalog slots and provider/model names', () => {
   assert.deepEqual(hidden.catalogProviders(hidden.catalog()), []);
   assert.equal(hidden.catalogTuple('cursor'), null);
 });
+
+test('Cursor hero resolves the canonical provider through the real slot DOM update', () => {
+  const document = new JSDOM('<div id="header-0"><span class="cell-label">Chat</span></div>').window.document;
+  const state = {
+    slots: [{ name: 'v2-cursor', hostId: 'local' }], botSlots: [],
+    chatStream: { sessions: [{ session_name: 'v2-cursor', host: 'local', provider: 'cursor' }] },
+  };
+  new Function('state', 'document', 'streamHostForHostId', 'isCompositeSlot', `
+    ${extractFunction('providerForSession')}
+    ${extractFunction('providerLabelForHero')}
+    ${extractFunction('updateSlotProviderTag')}
+    updateSlotProviderTag(0);
+  `)(state, document, value => value, () => false);
+  assert.equal(document.querySelector('.cell-provider-tag').textContent, 'Cursor');
+  assert.equal(document.querySelectorAll('.cell-provider-tag').length, 1);
+});

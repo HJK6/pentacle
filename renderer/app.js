@@ -996,7 +996,7 @@ function providerForSession(sessionName, hostId) {
     return !streamHost || !candidate?.host || candidate.host === streamHost;
   });
   const canonical = String(streamSession?.provider || '').trim().toLowerCase();
-  if (canonical === 'codex' || canonical === 'claude') return canonical;
+  if (canonical === 'codex' || canonical === 'claude' || canonical === 'cursor') return canonical;
   return '';
 }
 

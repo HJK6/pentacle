@@ -16,6 +16,10 @@ _REMOVED_SWITCHES = frozenset({"reaper", "alerts", "schedule", "usage-probes"})
 def _advertised_switches() -> set[str]:
     names: set[str] = set()
     for module in SERVICE_DIR.glob("*.py"):
+        # This separate native CLI has its own parser/process. Its vendor
+        # updater switch is not a daemon background-task kill switch.
+        if module == SERVICE_DIR / "cursor_repl.py":
+            continue
         names.update(_SWITCH.findall(module.read_text()))
     return names
 

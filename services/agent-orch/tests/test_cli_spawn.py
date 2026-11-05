@@ -382,7 +382,7 @@ def test_spawn_rejects_model_for_unsupported_provider(tmp_path: Path, capsys) ->
 
     assert cli.spawn(args) == 2
     captured = capsys.readouterr()
-    assert "--model requires --provider claude, codex or gemini" in captured.err
+    assert "--model requires --provider claude, codex, gemini or cursor" in captured.err
 
 
 def test_spawn_payload_includes_generated_idempotency_key(monkeypatch, tmp_path: Path, capsys) -> None:
