@@ -30,6 +30,7 @@ if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 from deploy.packet.log_scan import AttributionAmbiguous, freeze, generation_ranges, lines_many
 from deploy import release_selection
+from deploy import coordinated
 from managed_logs import Config, retained_paths
 
 
@@ -397,6 +398,7 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
 def _fleet_smoke_verdict(
     result: subprocess.CompletedProcess[str], machines_file: str,
     required_cells: list[dict[str, str]] | None = None,
+    *, declared_exclusions: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     """Combine every smoke evidence channel; missing cells can never turn green.
 
@@ -421,6 +423,16 @@ def _fleet_smoke_verdict(
         for mode in ("prompted", "promptless")
     }
     expected = full_expected
+    declarations = []
+    if declared_exclusions is not None:
+        try:
+            if required_cells is not None:
+                raise ValueError("qualified scope cannot combine with coordinated exclusions")
+            scope = coordinated.host_scope(machines_file, declared_exclusions)
+            declarations = scope["excluded_hosts"]
+            expected = {key for key in full_expected if key[0] in scope["included_hosts"]}
+        except (OSError, ValueError, TypeError, coordinated.Invalid) as exc:
+            issues.append("invalid_declared_exclusions: " + str(exc))
     if required_cells is not None:
         try:
             keys = [tuple(row[field] for field in ("host", "provider", "prompt_mode")) for row in required_cells]
@@ -431,7 +443,8 @@ def _fleet_smoke_verdict(
             issues.append("invalid_required_cells: " + str(exc))
     cells: dict[tuple[str, str, str], dict[str, object]] = {}
     severity = {"passed": 0, "unreachable": 1, "untested": 2, "failed": 3}
-    for source in ("cells", "untested", "quota_exhausted", "failures"):
+    seen_pass_rows = set()
+    for source in ("cells", "untested", "quota_exhausted", "failures", "skipped"):
         rows = payload.get(source, [])
         if not isinstance(rows, list):
             issues.append(f"invalid_{source}_evidence")
@@ -441,6 +454,10 @@ def _fleet_smoke_verdict(
                 issues.append(f"invalid_{source}_row:{index}")
                 row = {}
             key = tuple(str(row.get(field) or "").strip() for field in ("host", "provider", "prompt_mode"))
+            if declared_exclusions is not None and source == "cells":
+                if key in seen_pass_rows:
+                    issues.append("duplicate_included_cell:" + "/".join(key))
+                seen_pass_rows.add(key)
             if key not in expected:
                 issues.append(f"unconfigured_or_invalid_cell:{'/'.join(key)}")
             outcome = str(row.get("outcome") or "").lower()
@@ -479,6 +496,13 @@ def _fleet_smoke_verdict(
         if row["host"] in optional_hosts and row["outcome"] == "unreachable":
             row["outcome"] = "SKIPPED_OFFLINE"
             skipped.append(row)
+    declared_rows = [{"host": declaration["host"], "provider": provider, "prompt_mode": mode,
+                      "outcome": "SKIPPED_DECLARED", "reason": declaration["reason"],
+                      "authority": declaration["authority"]}
+                     for declaration in declarations for provider in ("claude", "codex")
+                     for mode in ("prompted", "promptless")]
+    reports.extend(declared_rows)
+    skipped.extend(declared_rows)
     untested = [row for row in reports if row["outcome"] in {"untested", "unreachable"}]
     unreachable_hosts = sorted({row["host"] for row in reports if row["outcome"] == "unreachable"})
     status = str(payload.get("status") or "").upper()
@@ -487,6 +511,9 @@ def _fleet_smoke_verdict(
         outcome = FLEET_SMOKE_FAILED
     elif issues or not reports or any(row["outcome"] == "untested" for row in reports):
         outcome = FLEET_SMOKE_UNTESTED
+    elif declarations and any(row["outcome"] != "passed" for row in reports if row["host"] not in {d["host"] for d in declarations}):
+        outcome = FLEET_SMOKE_UNTESTED
+        issues.append("included_cells_not_all_passed")
     elif unreachable_hosts:
         local_passed = all(cells[key]["outcome"] == "passed" for key in expected if key[0] in local_hosts)
         outcome = FLEET_SMOKE_PARTIAL if local_passed else FLEET_SMOKE_UNTESTED
@@ -500,10 +527,10 @@ def _fleet_smoke_verdict(
         outcome = FLEET_SMOKE_PASSED
     return {
         "outcome": outcome, "cells": reports, "local_hosts": list(local_hosts),
-        "scope": "qualified_affected" if required_cells is not None else "full_matrix",
+        "scope": "declared_optional_exclusions" if declarations else "qualified_affected" if required_cells is not None else "full_matrix",
         "full_fleet_acceptance": outcome == FLEET_SMOKE_PASSED and expected == full_expected,
         "not_selected": [{"host": h, "provider": p, "prompt_mode": m, "outcome": "UNTESTED",
-                          "reason": "outside_qualified_scope"} for h, p, m in sorted(full_expected - expected)],
+                          "reason": "outside_qualified_scope"} for h, p, m in sorted(full_expected - expected)] if required_cells is not None else [],
         "unreachable_hosts": unreachable_hosts, "untested": untested, "skipped": skipped,
         "evidence": payload, "issues": issues, "returncode": result.returncode,
         "detail": _terminal_command_detail(result),
@@ -1894,7 +1921,51 @@ def verify_deploy_guard(
     }
 
 
-def deploy(
+def _code_identity_at(repo: Path, sha: str, runner: Runner) -> str:
+    from deploy.coordinated_runtime import code_identity_at
+    try:
+        return code_identity_at(repo, sha, runner)
+    except (coordinated.Invalid, OSError, ValueError, StopIteration) as exc:
+        raise DeployError("cannot establish coordinated code identity: " + str(exc)) from exc
+
+
+def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
+           rollback: bool = False, gate_evidence: Path | None = None,
+           release_inputs: Path | None = None, deployer_stream_id: str | None = None,
+           skip_kickstart: bool = False, log_guard_dir: str | Path | None = None,
+           boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
+           coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
+           prepare_only: bool = False, runner: Runner) -> dict[str, object]:
+    coordinated_mode = coordinated_plan is not None or coordinated_receipt is not None or prepare_only
+    if coordinated_mode and (service.name != "chat-streamd-v2" or release_inputs is not None or skip_kickstart):
+        raise DeployError("coordinated deployment cannot combine with release-inputs/skip-kickstart or another service")
+    if coordinated_mode and (coordinated_receipt is None or (not rollback and coordinated_plan is None)
+                             or (rollback and (coordinated_plan is not None or prepare_only))):
+        raise DeployError("coordinated prepare/apply requires intent and receipt; rollback requires receipt only")
+    repo = release_checkout.expanduser().resolve()
+    try:
+        with coordinated.transaction_lock(repo) as root:
+            if coordinated_mode:
+                from deploy.coordinated_runtime import Runtime
+                adapter = Runtime(sys.modules[__name__], service, repo, runner,
+                    stream=deployer_stream_id or os.environ.get("AGENT_ORCH_STREAM_ID", ""),
+                    boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir)
+                transaction = coordinated.Transaction(adapter, root)
+                if rollback:
+                    return transaction.rollback(coordinated_receipt)
+                if prepare_only:
+                    return transaction.prepare(coordinated_plan, coordinated_receipt)
+                return transaction.apply(coordinated_plan, coordinated_receipt)
+            coordinated.legacy_guard(repo, _read_stamp(repo, service), rollback=rollback)
+            return _deploy_legacy(service, release_checkout=repo, ref=ref, rollback=rollback,
+                gate_evidence=gate_evidence, release_inputs=release_inputs, deployer_stream_id=deployer_stream_id,
+                skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
+                boot_wait_seconds=boot_wait_seconds, runner=runner)
+    except (coordinated.Invalid, OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
+        raise DeployError(str(exc)) from exc
+
+
+def _deploy_legacy(
     service: ServiceConfig,
     *,
     release_checkout: Path,
@@ -1925,6 +1996,8 @@ def deploy(
         deploy_ref = prior
     sha = _resolve_sha(repo, deploy_ref, runner)
     _verify_origin_reachable(repo, sha, runner)
+    if not rollback and _code_identity_at(repo, prior_sha, runner) != _code_identity_at(repo, sha, runner):
+        raise DeployError("code identity changes require an admitted coordinated plan before checkout mutation")
 
     with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
         _checked(("git", "checkout", "--detach", sha), repo, runner)
@@ -1977,6 +2050,9 @@ def deploy(
             "gates": gates,
             "selective_qualification": "admitted" if selection is not None else "not_enabled",
         }
+        ancestry = coordinated.legacy_guard(repo, prior_stamp, rollback=rollback)
+        if ancestry:
+            stamp["coordinated_receipt"] = ancestry
         if selection is not None:
             stamp["release_selection"] = selection
             stamp["gates"]["seam_results"] = evidence["seam_results"]
@@ -2096,6 +2172,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--gate-evidence", type=Path)
+    parser.add_argument("--coordinated-plan", type=Path, help="Private coordinated deployment intent.")
+    parser.add_argument("--coordinated-receipt", type=Path, help="Sealed preparation receipt, also used for whole-transaction rollback.")
+    parser.add_argument("--prepare-only", action="store_true", help="Stage inert helpers and seal the coordinated receipt only.")
     parser.add_argument("--release-inputs", type=Path, help="Observed installed baselines and external tuples for qualified seam admission.")
     parser.add_argument("--deployer-stream-id", default=None)
     parser.add_argument("--log-guard-dir", default=None, help="Override the service log guard directory checked before deploy.")
@@ -2129,6 +2208,8 @@ EXIT_POST_ACTIVATION_ERROR = 7
 EXIT_SLOW_CONSUMER_FAILED = 8
 EXIT_FLEET_SMOKE_UNTESTED = 9
 EXIT_FLEET_SMOKE_PARTIAL = 10
+EXIT_SCOPED_OK = 11
+EXIT_COORDINATED_FAILED = 12
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2145,6 +2226,9 @@ def main(argv: list[str] | None = None) -> int:
             skip_kickstart=args.skip_kickstart,
             log_guard_dir=args.log_guard_dir,
             boot_wait_seconds=args.boot_wait_seconds,
+            coordinated_plan=args.coordinated_plan,
+            coordinated_receipt=args.coordinated_receipt,
+            prepare_only=args.prepare_only,
             runner=_run,
         )
     except DeployError as exc:
@@ -2153,6 +2237,10 @@ def main(argv: list[str] | None = None) -> int:
     # Print the stamp on every post-kickstart outcome: the deploy record is what an operator
     # needs most in exactly the cases that are not a clean success.
     print(json.dumps(stamp, sort_keys=True))
+    if "exit_code" in stamp:
+        return int(stamp["exit_code"])
+    if stamp.get("prepared_only"):
+        return EXIT_OK
     readback = stamp.get("daemon_boot_readback") or {}
     outcome = readback.get("outcome")
     detail = readback.get("detail") or ""

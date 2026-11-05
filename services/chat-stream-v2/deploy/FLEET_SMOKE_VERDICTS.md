@@ -26,6 +26,19 @@ The existing precedence of boot/runtime/post-activation/slow-consumer checks is
 unchanged. Their failure can take precedence over the smoke exit above, while the
 printed stamp still retains the smoke evidence.
 
+The [coordinated transaction](daemon/README.md#coordinated-helper-and-daemon-deployment)
+adds exit **11** for committed success with explicitly declared optional remote
+exclusions. It synthesizes `SKIPPED_DECLARED` rows with reason and authority from
+the sealed receipt, requires every included cell to pass, and always reports
+`scope=declared_optional_exclusions`, `full_fleet_acceptance=false`. Unexpected
+excluded-host observations, duplicate included pass rows, runner-plan drift and
+input drift are non-green. An optional included host's actual offline evidence
+remains `SKIPPED_OFFLINE`; it cannot satisfy the complete-included scoped result.
+Generic gates must continue to require 0. This scoped transaction does not
+install or change the recurring smoke schedule. A failed coordinated forward
+attempt returns **12**, including when whole-transaction recovery restores
+prior health; the original failure survives in its durable journal.
+
 ## Evidence and identity
 
 The JSON stamp and stdout include every normalized `fleet_smoke.cells` outcome
