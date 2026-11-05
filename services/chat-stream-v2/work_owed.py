@@ -149,6 +149,22 @@ def move_disposition_custody_conn(conn, source, generation, target, target_gener
     _save(conn, state, registry)
 
 
+def front_desk_custody_conn(conn, stream, generation):
+    """An explicit FD close of an undisposed lead leaves its debt with the FD.
+
+    The episode still becomes owed on close; nothing marks the spec complete.
+    """
+    state = _state_conn(conn)
+    registry = _registry(state)
+    root = registry.get("root")
+    for episode in registry["episodes"].values():
+        if (episode["closing_stream_id"], episode["session_generation"]) == (stream, generation):
+            episode["front_desk_owned"] = True
+            if root:
+                episode.update(parent_stream_id=root[0], parent_generation=root[1])
+    _save(conn, state, registry)
+
+
 def disposition_root_conn(conn, root, now):
     """Use the existing generation-bound digest custody, retaining every debt."""
     state = _state_conn(conn)

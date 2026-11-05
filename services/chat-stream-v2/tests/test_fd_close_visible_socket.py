@@ -43,6 +43,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
                 "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": fd["session_generation"],
             }))
             server.assistant_composite = composite
+            sessions.assistant.front_desk = composite
             token = "synthetic-fd-token"
             await store.grant_stream_token(HOST, "front-desk", hashlib.sha256(token.encode()).hexdigest(),
                                            STREAM_TOKEN_HASH_VERSION)
@@ -93,7 +94,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
                 assert (await store.get_work_lane(saved_lane["lane_id"]))["lane"] == saved_lane
                 assert await store.latest_close_audit(HOST + ":target") is None
                 rows = await store.lifecycle_authority_audit_rows(limit=20)
-                assert any(r["action"] == "fd_close" and r["result"] == "refused"
+                assert any(r["action"] == "manager_close" and r["result"] == "refused"
                            and r["refusal_code"] == "close_operator_lane_protected" for r in rows)
                 # Only the independently authenticated fixture operator cleans
                 # this protected target up, through the supported close ladder.
@@ -107,8 +108,9 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             assert code == 0, {"reply": reply, "target_status": row["status"], "pane_alive": alive}
             assert reply["type"] == "close.ok" and row["status"] == "closed" and not alive
             rows = [r for r in await store.lifecycle_authority_audit_rows(limit=20)
-                    if r["action"] == "fd_close"]
-            assert {r["result"] for r in rows} == {"admitted", "applied"}
+                    if r["action"].startswith("manager_close")]
+            assert {(r["action"], r["result"]) for r in rows} == {
+                ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"), ("manager_close", "applied")}
             assert all(r["actor_kind"] == "front_desk" and r["actor_identity"] == FD
                        and r["actor_generation"] == fd["session_generation"]
                        and r["target_generation"] == target["session_generation"]
@@ -117,7 +119,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             assert audit["actor_kind"] == "front_desk" and audit["closed_by"] == FD
             assert await store.lifecycle_authority_current() == grant
             code, repeat = await close()
-            assert code == 0 and repeat["type"] == "close.already_closed"
+            assert code == 0 and repeat["type"] == "close.already_closed", repeat
         finally:
             await server.close()
             if composite is not None:

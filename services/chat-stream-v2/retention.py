@@ -85,6 +85,8 @@ class HistoryConnection(sqlite3.Connection):
     history_archive_path: Path | None = None
     history_attachment_identity: tuple[int, int] | None = None
     history_schema_version: int | None = None
+    # Front-desk binding coordinates (store_lifecycle_authority.configured).
+    lifecycle_front_desk: dict | None = None
 
 
 def _columns(conn, table, schema="main"):

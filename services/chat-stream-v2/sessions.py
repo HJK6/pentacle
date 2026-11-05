@@ -997,6 +997,10 @@ class Sessions:
             await self.store.require_current_actor(caller, generation)
         except TransferError as exc:
             raise VerbError(exc.code, str(exc)) from exc
+        # A binding swap or revoke commits under this graph lock, so the
+        # principal re-read here either precedes or follows the effect.
+        if manager_authorized and not await self.assistant.manager_holds(auth):
+            raise VerbError("authority_holder_required", "lifecycle principal changed before reparent")
         # Only the owner moves a worker: a top-level stream (including a
         # protected assistant) has none, and adopting oneself confers nothing.
         allowed = old_parent_stream_id is not None and caller == old_parent_stream_id
@@ -1409,8 +1413,10 @@ class Sessions:
             restored = self._cache(row)
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
-    async def _guard_lead_disposition(self, host, name, generation, close_kind):
-        if close_kind not in {"session_close", "manager_close"} or not generation:
+    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, custody=False):
+        if close_kind not in {"session_close", "manager_close"} or not generation or (
+                custody and close_kind == "manager_close"):
+            # The current FD's explicit close records debt custody at admission.
             return
         stream = f"{host}:{name}"
         context = await self.store.lead_close_context(stream, generation)
@@ -1461,6 +1467,7 @@ class Sessions:
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
         admission_guard: Any = None,
+        disposition_custody: bool = False,
     ) -> dict[str, Any]:
         """Serialize one lifecycle operation for this host/session name.
 
@@ -1497,7 +1504,8 @@ class Sessions:
             ):
                 # Do not hold the shared graph lock during the bounded index
                 # wait. Target generation is rechecked again below before kill.
-                await self._guard_lead_disposition(host, session_name, self._row_generation(row), close_kind)
+                await self._guard_lead_disposition(host, session_name, self._row_generation(row), close_kind,
+                                                   custody=disposition_custody)
             # Admission and termination share the same graph fence as reparent
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.

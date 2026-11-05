@@ -1480,6 +1480,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # Shared with Sessions: ownership/binding writes cannot outrun a close
         # between its final authoritative admission and process termination.
         self.session_graph_lock = asyncio.Lock()
+        # Primary direct-binding coordinates; set by AssistantPolicy.front_desk.
+        self.lifecycle_front_desk: dict[str, Any] | None = None
         self._configured_archive_path = archive_path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
         self._spec_identities_resolver: Callable[[Any], dict] | None = None
@@ -1938,6 +1940,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 started = time.monotonic()
                 self.progress.start(started)
                 try:
+                    conn.lifecycle_front_desk = self.lifecycle_front_desk
                     result = fn(conn)
                 except BaseException as exc:
                     outcome, failed = exc, True
@@ -4746,6 +4749,43 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             grant = lifecycle_authority.current(conn)
             conn.commit()
             return grant
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_effective(self) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            readback = lifecycle_authority.effective(conn, lifecycle_authority.configured(conn))
+            conn.commit()
+            return readback
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_activate(self) -> bool:
+        """Idempotent front-desk policy activation audit (daemon startup)."""
+        def _op(conn: sqlite3.Connection) -> bool:
+            try:
+                written = lifecycle_authority.activate_front_desk_policy(conn, lifecycle_authority.configured(conn))
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return written
+
+        return await self.submit(_op)
+
+    async def lifecycle_authority_project_for_rollback(self, request_id: str) -> dict[str, Any]:
+        def _op(conn: sqlite3.Connection) -> dict[str, Any]:
+            front_desk = lifecycle_authority.configured(conn)
+            if not front_desk:
+                raise lifecycle_authority.AuthorityError("front_desk_unconfigured")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                receipt = lifecycle_authority.project_for_rollback(conn, front_desk, request_id)
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+            return receipt
 
         return await self.submit(_op)
 

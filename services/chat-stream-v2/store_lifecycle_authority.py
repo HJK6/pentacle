@@ -1,9 +1,15 @@
-"""Operator-designated fleet lifecycle authority (Store worker only).
+"""Fleet lifecycle authority (Store worker only).
 
-One durable manager grant names an existing session generation. Only a verified phone-consent context designates, replaces or revokes it;
-a local emergency context may revoke. Discretionary transfer is disabled. Eligibility is
-re-read inside the same transaction as the mutation. Every recognized attempt
-is audited with the server-verified actor, never a caller claim.
+With a configured primary direct binding (front-desk mode) the FD principal is
+the binding's current effective (stream, generation), read in the caller's
+transaction; the singleton row below is then only an enabled/revoked policy.
+A populated row is enabled, a nonzero revision with a null holder is revoked,
+and no row adopts the binding default. Its holder is a rollback snapshot and
+never authorizes. Without a direct binding, the row names the one holder
+generation as before. Only a verified phone-consent context designates or
+revokes; a local emergency context may revoke. Discretionary transfer is
+disabled. Every recognized attempt is audited with the server-verified actor,
+never a caller claim.
 
 Protected-assistant handoffs also record their source identity here so a
 retired source can read back exactly its own receipt without new admission.
@@ -106,8 +112,79 @@ def current(conn: sqlite3.Connection) -> dict[str, Any]:
     return {"stream_id": row[0], "session_generation": row[1], "revision": int(row[2])}
 
 
+def front_desk_spec(composite: Any) -> dict[str, Any] | None:
+    """Binding coordinates of a configured primary direct binding, or None."""
+    config = getattr(composite, "env_config", None)
+    if composite is None or not getattr(composite, "enabled", False) or not getattr(config, "direct_primary", False):
+        return None
+    return {"name": config.name, "env_binding": composite._env_binding()}
+
+
+def policy_state(conn: sqlite3.Connection) -> dict[str, Any]:
+    grant = current(conn)
+    # A rollback projection of an enabled policy with no available FD also
+    # writes a null holder; that is not a revocation on roll-forward.
+    revoked = grant["revision"] > 0 and grant["stream_id"] is None and not conn.execute(
+        "SELECT 1 FROM v2_lifecycle_authority_audit WHERE action='fd_rollback_projection' "
+        "AND new_revision=? AND reason='rollback projection (enabled)' LIMIT 1", (grant["revision"],)).fetchone()
+    return {"state": "revoked" if revoked else "enabled", "revision": grant["revision"]}
+
+
+def front_desk_principal(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The bound primary FD at its open, unretired generation; None grants nothing.
+
+    No fallback to a prior seat, the legacy holder or another assistant. An
+    unreadable binding raises, which callers treat as no authority.
+    """
+    if not front_desk:
+        return None
+    from store_assistant_binding import _binding_conn
+    from store_host_transfer import authority_state
+    binding = _binding_conn(conn, front_desk["env_binding"], name=front_desk["name"], include_target=False)
+    stream_id, generation = binding["stream_id"], binding["generation"]
+    if binding["source"] == "unconfigured" or not stream_id or not generation:
+        return None
+    row = _session(conn, stream_id)
+    if (row is None or row.get("status") != "open" or _generation(conn, stream_id) != generation
+            or authority_state(conn, stream_id, generation)):
+        return None
+    return {"stream_id": stream_id, "session_generation": generation,
+            "binding_revision": binding["revision"], "binding_source": binding["source"]}
+
+
+def effective(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> dict[str, Any]:
+    """Inspect readback of who may exercise lifecycle authority now, and why."""
+    policy = policy_state(conn)
+    if not front_desk:
+        grant = current(conn)
+        held = bool(grant["stream_id"]) and holder_is(conn, grant["stream_id"], grant["session_generation"])
+        return {"source": "legacy_grant", "holder_stream_id": grant["stream_id"] if held else None,
+                "holder_generation": grant["session_generation"] if held else None,
+                "binding_revision": None, "policy_state": policy["state"], "policy_revision": policy["revision"]}
+    principal = front_desk_principal(conn, front_desk)
+    from store_assistant_binding import _binding_conn
+    binding = _binding_conn(conn, front_desk["env_binding"], name=front_desk["name"], include_target=False)
+    enabled = policy["state"] == "enabled" and principal is not None
+    return {"source": "binding", "holder_stream_id": principal["stream_id"] if enabled else None,
+            "holder_generation": principal["session_generation"] if enabled else None,
+            "binding_stream_id": binding["stream_id"] or None, "binding_generation": binding["generation"] or None,
+            "binding_revision": binding["revision"], "binding_available": principal is not None,
+            "policy_state": policy["state"], "policy_revision": policy["revision"]}
+
+
+def configured(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The Store's front-desk spec, stamped on its connection for every operation."""
+    return getattr(conn, "lifecycle_front_desk", None)
+
+
 def holder_is(conn: sqlite3.Connection, stream_id: str, generation: str | None) -> bool:
-    """True only for the exact current holder generation of an open session."""
+    """True only for the exact current principal generation of an open session."""
+    front_desk = configured(conn)
+    if front_desk:
+        if not stream_id or not generation or policy_state(conn)["state"] != "enabled":
+            return False
+        principal = front_desk_principal(conn, front_desk)
+        return bool(principal and (principal["stream_id"], principal["session_generation"]) == (stream_id, generation))
     grant = current(conn)
     if not stream_id or not generation or grant["stream_id"] != stream_id or grant["session_generation"] != generation:
         return False
@@ -176,8 +253,11 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
            protected_role: str) -> dict[str, Any]:
     """Apply one consented designate/revoke atomically; raise AuthorityError on refusal.
 
+    In front-desk mode designate only re-enables the current logical FD (its
+    pair is snapshotted for rollback); it never selects another holder.
     The caller commits; on refusal the audit row is committed without mutation.
     """
+    front_desk = configured(conn)
     action = str(msg.get("action") or "")
     request_id = str(msg.get("request_id") or "").strip()
     reason = str(msg.get("reason") or "").strip()
@@ -234,12 +314,21 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
     if action == "designate":
         if not target or not target_generation:
             refuse("authority_target_required")
-        code = eligible(conn, target, target_generation, protected_role)
-        if code:
-            refuse(code)
+        if front_desk:
+            principal = front_desk_principal(conn, front_desk)
+            if principal is None:
+                refuse("authority_target_unavailable")
+            if principal["stream_id"] != target:
+                refuse("authority_target_not_front_desk")
+            if principal["session_generation"] != target_generation:
+                refuse("authority_target_generation_mismatch")
+        else:
+            code = eligible(conn, target, target_generation, protected_role)
+            if code:
+                refuse(code)
         new_holder: tuple[str | None, str | None] = (target, target_generation)
     else:
-        if grant["stream_id"] is None:
+        if (policy_state(conn)["state"] == "revoked") if front_desk else grant["stream_id"] is None:
             refuse("authority_not_held")
         new_holder = (None, None)
     new_revision = grant["revision"] + 1
@@ -259,9 +348,72 @@ def mutate(conn: sqlite3.Connection, msg: dict[str, Any], auth: dict[str, Any],
     return receipt
 
 
+def binding_change(conn: sqlite3.Connection, *, old: dict[str, Any], new: dict[str, Any],
+                   binding_revision: int, actor_kind: str, actor_identity: str | None,
+                   actor_generation: str | None, reason: str, request_id: str | None) -> None:
+    """One append-only row per committed primary binding transition, in its transaction.
+
+    Authority follows the binding by derivation; this row only records it.
+    """
+    policy = policy_state(conn)
+    audit(conn, action="fd_binding_change", actor_kind=actor_kind, actor_identity=actor_identity,
+          actor_generation=actor_generation, target_stream_id=new.get("stream_id") or None,
+          target_generation=new.get("generation") or None, old_revision=policy["revision"],
+          new_revision=policy["revision"], prior_stream_id=old.get("stream_id") or None,
+          prior_generation=old.get("generation") or None, reason=reason, request_id=request_id,
+          result="applied", caller_claims=json.dumps({"binding_revision": binding_revision}))
+
+
+def activate_front_desk_policy(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> bool:
+    """Record once that the legacy row became policy-only; never edits the row.
+
+    A populated holder (open, closed or bound) keeps no residual privilege; a
+    revoked row stays revoked; no row adopts the binding default. Idempotent
+    across restarts. Returns whether a row was written.
+    """
+    if not front_desk or conn.execute("SELECT 1 FROM v2_lifecycle_authority_audit "
+                                      "WHERE action='fd_policy_activation' LIMIT 1").fetchone():
+        return False
+    grant, policy = current(conn), policy_state(conn)
+    audit(conn, action="fd_policy_activation", actor_kind="daemon", actor_identity="daemon:lifecycle",
+          actor_generation=None, target_stream_id=None, target_generation=None,
+          old_revision=grant["revision"], new_revision=grant["revision"], prior_stream_id=grant["stream_id"],
+          prior_generation=grant["session_generation"], reason=f"front-desk policy {policy['state']}",
+          request_id=None, result="applied")
+    return True
+
+
+def project_for_rollback(conn: sqlite3.Connection, front_desk: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Before admitting pre-binding code: write the then-current eligible FD as its holder.
+
+    Revocation is preserved; an unavailable binding yields no holder. Run once
+    inside the coordinated release transaction, never per swap.
+    """
+    grant, policy = current(conn), policy_state(conn)
+    principal = front_desk_principal(conn, front_desk) if policy["state"] == "enabled" else None
+    holder = (principal["stream_id"], principal["session_generation"]) if principal else (None, None)
+    revision = grant["revision"] + 1
+    conn.execute("INSERT INTO v2_lifecycle_manager (id, stream_id, session_generation, revision, updated_at) "
+                 "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET stream_id=excluded.stream_id, "
+                 "session_generation=excluded.session_generation, revision=excluded.revision, "
+                 "updated_at=excluded.updated_at", (*holder, revision, time.time()))
+    audit(conn, action="fd_rollback_projection", actor_kind="daemon", actor_identity="daemon:release",
+          actor_generation=None, target_stream_id=holder[0], target_generation=holder[1],
+          old_revision=grant["revision"], new_revision=revision, prior_stream_id=grant["stream_id"],
+          prior_generation=grant["session_generation"], reason=f"rollback projection ({policy['state']})",
+          request_id=request_id, result="applied")
+    return {"holder_stream_id": holder[0], "holder_generation": holder[1], "revision": revision,
+            "policy_state": policy["state"]}
+
+
 def carry_on_handoff(conn: sqlite3.Connection, source: str, source_generation: str,
                      successor: str, successor_generation: str, protected_role: str) -> dict[str, Any] | None:
-    """A completed protected handoff moves authority only from the exact holder."""
+    """A completed protected handoff moves authority only from the exact holder.
+
+    Front-desk mode has nothing to carry: authority follows the binding.
+    """
+    if configured(conn):
+        return None
     grant = current(conn)
     if grant["stream_id"] != source or grant["session_generation"] != source_generation:
         return None
