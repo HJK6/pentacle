@@ -265,7 +265,10 @@ def _insert_outbound_notice_conn(
 
 
 
-def _retarget_front_desk_notice_conn(conn: sqlite3.Connection, notice_id: str) -> bool:
+# Retry interval for a logical FD notice while no front desk is eligible.
+FRONT_DESK_NOTICE_DEFER_S = 30.0
+
+def _retarget_front_desk_notice_conn(conn: sqlite3.Connection, notice_id: str) -> str | None:
     """Resolve a claimed FD-purpose notice's logical recipient to the current FD.
 
     Only a notice addressed to a proved primary-bound seat qualifies: a
@@ -274,35 +277,42 @@ def _retarget_front_desk_notice_conn(conn: sqlite3.Connection, notice_id: str) -
     evidence exists for its tell id; an uncertain attempt stays fenced to its
     recorded target. Error alerts keep their own superseded-binding rebind;
     question answers and ordinary seat notices keep their producer binding.
+
+    Returns "retargeted" when the (stream, generation) pair moved, "defer"
+    when no front desk is currently eligible, else None.
     """
     import store_lifecycle_authority as lifecycle_authority
     from store_assistant_binding import front_desk_aliases_conn
     front_desk = lifecycle_authority.configured(conn)
     if not front_desk:
-        return False
+        return None
     row = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone()
     if row is None:
-        return False
+        return None
     row = dict(row)
     metadata = json.loads(row.get("metadata") or "{}")
     if not (row["kind"] in {"report", "assistant_lane_ruling_result"}
             or (row["kind"] == "lane_digest" and metadata.get("front_desk_digest"))):
-        return False
+        return None
+    if (row["recipient_stream_id"] not in front_desk_aliases_conn(conn, front_desk)
+            or conn.execute("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone()):
+        return None
     try:
         principal = lifecycle_authority.front_desk_principal(conn, front_desk)
     except ValueError:
-        return False
-    if (principal is None or row["recipient_stream_id"] == principal["stream_id"]
-            or row["recipient_stream_id"] not in front_desk_aliases_conn(conn, front_desk)
-            or conn.execute("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone()):
-        return False
+        principal = None
+    if principal is None:
+        return "defer"  # Never paste a logical FD notice into an obsolete seat.
+    keys = [key for key in ("root_generation", "authority_generation") if key in metadata]
+    if row["recipient_stream_id"] == principal["stream_id"] and all(
+            metadata[key] == principal["session_generation"] for key in keys):
+        return None
     metadata.setdefault("front_desk_retargeted_from", []).append(row["recipient_stream_id"])
-    for key in ("root_generation", "authority_generation"):
-        if key in metadata:
-            metadata[key] = principal["session_generation"]
+    for key in keys:
+        metadata[key] = principal["session_generation"]
     conn.execute("UPDATE v2_outbound_notices SET recipient_stream_id=?, metadata=? WHERE notice_id=?",
                  (principal["stream_id"], json.dumps(metadata, sort_keys=True), notice_id))
-    return True
+    return "retargeted"
 
 class _RoutingIntegrityLifecycleEntry:
     """Reference-counted per-stream lock entry.
@@ -2684,7 +2694,16 @@ class _RoutingStoreMixin:
             if cur.rowcount != 1:
                 conn.commit()
                 return None
-            _retarget_front_desk_notice_conn(conn, notice_id)
+            if _retarget_front_desk_notice_conn(conn, notice_id) == "defer":
+                # Nothing is sent; the attempt is returned until a front desk
+                # is eligible again.
+                conn.execute(
+                    """UPDATE v2_outbound_notices
+                       SET lease_owner=NULL, lease_until=NULL, attempts=MAX(attempts-1, 0),
+                           next_attempt_at=?, next_action='awaiting_front_desk'
+                       WHERE notice_id=?""", (now + FRONT_DESK_NOTICE_DEFER_S, notice_id))
+                conn.commit()
+                return None
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)

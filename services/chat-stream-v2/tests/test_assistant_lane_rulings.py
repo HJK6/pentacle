@@ -2091,11 +2091,18 @@ def test_unexecuted_fd_ruling_is_superseded_once_after_fd_change(same_stream):
             assert json.loads(row["outcome_json"])["error"] == "requester_superseded"
             assert env.tmux.kills == 0
             await env.rulings.tick()
-            notices = await env.store.submit(lambda c: [dict(r) for r in c.execute(
-                "SELECT recipient_stream_id, metadata FROM v2_outbound_notices WHERE notice_id LIKE "
-                "'assistant-lane-ruling-superseded:%'")])
-            assert [(n["recipient_stream_id"], json.loads(n["metadata"])["authority_generation"])
-                    for n in notices] == [(current, generation)]
+            rid = row["ruling_request_id"]
+            ids = await env.store.submit(lambda c: [r[0] for r in c.execute(
+                "SELECT notice_id FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_result' "
+                "AND body LIKE ?", (f"%{rid}%",))])
+            assert ids == [f"assistant-lane-ruling-result:{rid}"]
+            # The one result notice is claimed for the current front desk.
+            await env.store.claim_outbound_notice(ids[0], owner="fixture", lease_s=5, force=True)
+            notice = await env.store.submit(lambda c: dict(c.execute(
+                "SELECT recipient_stream_id, metadata FROM v2_outbound_notices WHERE notice_id=?",
+                (ids[0],)).fetchone()))
+            assert (notice["recipient_stream_id"], json.loads(notice["metadata"])["authority_generation"]) == (
+                current, generation)
     asyncio.run(go())
 
 

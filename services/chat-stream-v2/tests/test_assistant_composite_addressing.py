@@ -769,6 +769,7 @@ def test_fd_legacy_physical_tell_receipt_matches_only_with_proved_provenance(tmp
             "reply": {"type": "tell.ok", "tell_id": "legacy-tell", "delivery_status": "delivered",
                       "to_stream_id": attempted, "submission_confirmed": True},
             "delivery": {"tell_id": "legacy-tell", "to_stream_id": attempted, "text": text,
+                         "from_stream_id": SENDER,
                          "delivery_status": "delivered", "submission_confirmed": True}})
         await h.move_to_b()
         if replays:

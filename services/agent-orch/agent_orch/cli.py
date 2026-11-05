@@ -6337,7 +6337,7 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle_sub = lifecycle_parser.add_subparsers(dest="lifecycle_command", required=True)
     lifecycle_inspect = lifecycle_sub.add_parser("inspect", help="effective holder and policy, raw grant, recent audit, optional target readback")
     lifecycle_inspect.add_argument("--target", help="stream id to read back generation and eligibility")
-    lifecycle_transfer = lifecycle_sub.add_parser("transfer", help="holder-only: move the grant to an existing eligible seat")
+    lifecycle_transfer = lifecycle_sub.add_parser("transfer", help="disabled (authority_transfer_disabled): authority follows the front-desk binding; use operator designate or revoke")
     lifecycle_transfer.add_argument("target", help="recipient stream id (existing open lead or protected assistant)")
     lifecycle_transfer.add_argument("--reason", required=True)
     lifecycle_transfer.add_argument("--target-generation", help="exact recipient generation (default: fresh readback)")

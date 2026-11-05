@@ -5608,6 +5608,10 @@ class Server:
                     )
             else:
                 coordinator_authorized = True
+        # The current FD closing its own child keeps the FD lane and custody
+        # fences; parentage never narrows FD-held authority.
+        fd_parent = bool(coordinator_authorized and self.sessions.assistant.front_desk_mode
+                         and await self.sessions.assistant.manager_holds(auth))
         if coordinator_authorized and msg.get("operator_confirm") is True:
             # The existing explicit parent-authorized operator route is an
             # involuntary close. A self-supplied flag never acquires it.
@@ -5685,9 +5689,11 @@ class Server:
             attribution=attribution,
             # An explicit current-FD close of a lead with pending disposition
             # is involuntary; its debt stays owed with FD custody.
-            disposition_custody=manager_generation is not None and self.sessions.assistant.front_desk_mode,
+            disposition_custody=(manager_generation is not None or fd_parent)
+            and self.sessions.assistant.front_desk_mode,
             admission_guard=(
-                (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
+                (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row,
+                                                        fd_parent=fd_parent))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
                 else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
@@ -5736,7 +5742,7 @@ class Server:
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
 
-    async def _seat_close_admission(self, auth, caller, target, row):
+    async def _seat_close_admission(self, auth, caller, target, row, *, fd_parent=False):
         # Runs after acquiring the target lifecycle and graph locks, directly
         # before termination. Admission-time parentage is only an observation.
         if (row or {}).get('status') == 'closed':
@@ -5751,6 +5757,12 @@ class Server:
             raise VerbError(exc.code, str(exc)) from exc
         if caller != target and (row or {}).get('parent_stream_id') != caller:
             raise VerbError('close_unauthorized', 'caller no longer owns this child')
+        if fd_parent and (row or {}).get('status') == 'open':
+            if not await self.sessions.assistant.manager_holds(auth):
+                raise VerbError('authority_holder_required', 'front desk changed before close')
+            if await self._operator_lane_protects(target):
+                raise VerbError('close_operator_lane_protected', 'closing a seat never closes an operator lane')
+            await self.store.front_desk_disposition_custody(target, row.get('session_generation'))
 
     async def _manager_close_locked(
         self, close: Callable[[], Awaitable[dict[str, Any]]], msg: dict[str, Any], auth: dict[str, Any],
@@ -5819,16 +5831,18 @@ class Server:
         if code is None and action == "close" and str((target or {}).get("status") or "") == "open":
             # Closing a seat never closes an operator lane; that keeps its own
             # confirmation. An unavailable authoritative read propagates.
-            for lane in await self.store.work_lane_rows():
-                if lane.get("owner_kind") == "operator" and sid in {
-                        lane.get("bound_stream_id"), lane.get("visible_chat_stream_id")}:
-                    code = "close_operator_lane_protected"
-                    break
+            if await self._operator_lane_protects(sid):
+                code = "close_operator_lane_protected"
         if code is not None:
             await self._manager_audit(action, msg, auth, sid, generation, result="refused", refusal_code=code)
             raise VerbError(code, f"manager {action} refused: {code}")
         return await self.store.find_report(
             sid, statuses=INSPECT_TERMINAL_STATUSES, session_generation=generation) is None
+
+    async def _operator_lane_protects(self, sid: str) -> bool:
+        return any(lane.get("owner_kind") == "operator" and sid in {
+            lane.get("bound_stream_id"), lane.get("visible_chat_stream_id")}
+            for lane in await self.store.work_lane_rows())
 
     async def _manager_close_admission(
         self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,

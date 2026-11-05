@@ -1044,16 +1044,20 @@ class Comms:
         """The stored digest a logical FD retry matches, or tell_id_conflict.
 
         A row written before logical FD identity hashed its physical seat; it
-        matches only when that seat is a proved primary binding and the body is
-        the same. Ambiguous evidence fails closed.
+        matches only when that seat is a proved primary binding, its retained
+        sender is this sender and the body is the same. Ambiguous evidence
+        fails closed.
         """
         if not isinstance(prior, dict):
             raise self._conflict(tell_id)
         if prior.get("payload_digest") == digest:
             return digest
-        attempted = str((prior.get("delivery") or {}).get("to_stream_id") or "")
+        delivery = prior.get("delivery") or {}
+        attempted = str(delivery.get("to_stream_id") or "")
+        sender = str(logical.get("sender") or "")
         if (attempted and attempted in logical.get("aliases", ())
-                and (prior.get("delivery") or {}).get("logical_front_desk") is None
+                and sender and str(delivery.get("from_stream_id") or "") == sender
+                and delivery.get("logical_front_desk") is None
                 and prior.get("payload_digest") == payload_digest(attempted, body)):
             return str(prior["payload_digest"])
         raise self._conflict(tell_id)
@@ -1993,8 +1997,13 @@ class Comms:
                 or queued_operation is not None or queued_binding
                 or (row or {}).get("provider") == "claude" else nullcontext()
             )
+            # An alias send holds the FD gate through physical input, so a
+            # rebind commits either before its binding check or after the
+            # paste. Gate before lifecycle, as for binding writers.
+            binding_gate = (self.store.front_desk_fence()
+                            if isinstance(plan.message.get("_assistant_alias_binding"), dict) else nullcontext())
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
-            async with lifecycle, self._pane_input_lock(target):
+            async with binding_gate, lifecycle, self._pane_input_lock(target):
                 if queued_operation is not None:
                     policy = getattr(self, "queued_send_now", None)
                     current = await self.store.fetch_session(host, name) or {}

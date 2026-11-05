@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from store_host_transfer import effective_ruling
 import asyncio
+import contextlib
 from contextlib import nullcontext
 import hashlib
 import json
@@ -310,7 +311,15 @@ class AssistantLaneRulings:
                             (old and (old.get('session_generation') != expected_old[1] or
                                       self._authority_loss_evidence(old) is None))):
                             raise ValueError('binding_moved')
-                    elif conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
+                    else:
+                        # The actor must still be the bound primary inside the
+                        # same transaction as the write; a swap while waiting
+                        # for the lock makes the request stale.
+                        primary = _binding_conn(conn, composite._env_binding(), name=composite.env_config.name,
+                                                include_target=False)
+                        if (primary.get('stream_id'), primary.get('generation')) != (actor_stream_id, actor_generation):
+                            raise ValueError("assistant_authority_config_unauthorized")
+                    if not is_service and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
                         conn.execute("UPDATE v2_authority_restore_episode SET state='superseded',last_error='binding_moved',updated_at=? WHERE state IN ('pending','spawning','unresolved','exhausted')", (time.time(),))
                     conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)",
                                  ("assistant.authority.stream_id", value))
@@ -1328,7 +1337,7 @@ class AssistantLaneRulings:
     async def _release_serial(self, request: dict[str, Any]) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
-        async with lock:
+        async with lock, contextlib.AsyncExitStack() as fence:
             current = await self._fetch(rid)
             if current is None or current["state"] not in {"approved", "unruled", "unruled_disabled", "bypassed"}:
                 return
@@ -1347,6 +1356,9 @@ class AssistantLaneRulings:
                 # The task link was checked when this request was admitted (R4).
                 "ruled_release": True,
             }
+            if self.server.sessions.assistant.front_desk_mode:
+                # No binding change commits between this check and the effect.
+                await fence.enter_async_context(self.store.front_desk_fence())
             if await self._fd_requester_superseded(rid, current):
                 return
             requester_host, _, requester_name = current["requester_stream_id"].partition(":")
@@ -1480,8 +1492,8 @@ class AssistantLaneRulings:
     async def _fd_requester_superseded(self, rid: str, current: dict[str, Any]) -> bool:
         """An unexecuted FD-requested ruling never executes under a successor FD.
 
-        The intent stays immutable; it is closed as superseded with one durable
-        notice to the current FD, which may file a new request itself.
+        The intent stays immutable; it is closed as superseded and its one
+        result notice reaches the current FD, which may file a new request.
         """
         if not self.server.sessions.assistant.front_desk_mode:
             return False
@@ -1491,17 +1503,11 @@ class AssistantLaneRulings:
         if (not all(principal) or principal == requester or not effective.get("binding_available")
                 or requester[0] not in await self.store.front_desk_aliases()):
             return False
+        # The ordinary result notice is the single notice; claim-time
+        # retargeting delivers it to the current front desk.
         await self._mark(rid, "release_blocked", {"error": "requester_superseded",
-            "superseded_by": {"stream_id": principal[0], "generation": principal[1]}})
-        notice_id = f"assistant-lane-ruling-superseded:{rid}"
-        await self.store.enqueue_outbound_notice(notice_id=notice_id, kind="assistant_lane_ruling_result",
-            dedupe_key=notice_id, recipient_stream_id=principal[0], tell_id=notice_id,
-            source_stream_id=current.get("authority_stream_id"),
-            body="[Assistant lane ruling] " + _canonical({"event": "requester_superseded",
-                "ruling_request_id": rid, "action": current["action"],
-                "requester": {"stream_id": requester[0], "generation": requester[1]},
-                "next": "file a new request under the current front desk if still needed"}),
-            metadata={"authority_generation": principal[1]})
+            "superseded_by": {"stream_id": principal[0], "generation": principal[1]},
+            "next": "file a new request under the current front desk if still needed"})
         return True
 
     async def _mark(self, rid: str, state: str, outcome: dict[str, Any]) -> None:

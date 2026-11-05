@@ -24,6 +24,7 @@ stored). v2-only auxiliary tables are prefixed `v2_` and are invisible to v1.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1471,6 +1472,7 @@ def _iso_epoch(value: object) -> float | None:
 
 from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
 
+
 class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
@@ -1482,6 +1484,11 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         self.session_graph_lock = asyncio.Lock()
         # Primary direct-binding coordinates; set by AssistantPolicy.front_desk.
         self.lifecycle_front_desk: dict[str, Any] | None = None
+        # Serializes primary binding changes with effects attributed to the
+        # front desk (ruling releases, logical FD input). Writers take it
+        # inside the composite binding lock and outside the graph lock.
+        self.front_desk_effect_gate = asyncio.Lock()
+        self._front_desk_fence_owner: asyncio.Task | None = None
         self._configured_archive_path = archive_path
         self._spec_identity_resolver: Callable[[str | None], str | None] | None = None
         self._spec_identities_resolver: Callable[[Any], dict] | None = None
@@ -2012,6 +2019,20 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     async def transfer_successor(self, stream_id, generation):
         return await self.submit(lambda conn: host_transfer.successor(conn, stream_id, generation))
+
+    @asynccontextmanager
+    async def front_desk_fence(self):
+        """Hold the FD effect gate; re-entrant only within the owning task."""
+        task = asyncio.current_task()
+        if task is not None and self._front_desk_fence_owner is task:
+            yield
+            return
+        async with self.front_desk_effect_gate:
+            self._front_desk_fence_owner = task
+            try:
+                yield
+            finally:
+                self._front_desk_fence_owner = None
 
     async def require_current_actor(self, stream_id, generation):
         def op(conn):

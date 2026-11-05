@@ -361,11 +361,11 @@ def _configured_spec_authorized(
 def front_desk_aliases_conn(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> set[str]:
     """Seat ids the daemon's own records prove were bound as the primary FD.
 
-    Sources: the primary env pin and binding row, lifecycle binding-change
-    and legacy grant-move audit rows (primary-only), and rebind audit rows
-    excluding any seat ever bound to another assistant name or holding a
-    secondary protected role. Never role, title or message text. Historical
-    ids are tell aliases only; they confer no authority.
+    Sources: the primary env pin and binding row, and lifecycle
+    binding-change and legacy grant-move audit rows (primary-only), less any
+    seat bound to another assistant name. Rebind audit rows name no
+    assistant, so they are never evidence. Never role, title or message
+    text. Historical ids are tell aliases only; they confer no authority.
     """
     if not front_desk:
         return set()
@@ -382,21 +382,6 @@ def front_desk_aliases_conn(conn: sqlite3.Connection, front_desk: dict[str, Any]
             "SELECT prior_stream_id,target_stream_id FROM v2_lifecycle_authority_audit WHERE result='applied' "
             "AND action IN ('fd_binding_change','host_transfer','handoff_transfer')"):
         aliases.update(str(v) for v in row if v)
-    from assistant_policy import AssistantPolicy
-    secondary = AssistantPolicy(None, "").extra_roles
-    for row in conn.execute("SELECT old_binding_json,new_binding_json FROM v2_assistant_rebind_audit WHERE outcome='ok'"):
-        for raw in row:
-            try:
-                value = json.loads(raw) if raw else None
-            except ValueError:
-                value = None
-            stream = str(value.get("stream_id") or "") if isinstance(value, dict) else ""
-            if not stream or stream in other:
-                continue
-            seat = _seat_conn(conn, stream)
-            if seat is not None and seat["role"] in secondary:
-                continue
-            aliases.add(stream)
     return aliases - other
 
 
@@ -629,7 +614,7 @@ class AssistantBindingStoreMixin:
                 conn.rollback()
                 raise
 
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             result = await self.submit(_op)
         if result.get("error_code"):
             raise ValueError(result["error_code"])
@@ -672,7 +657,7 @@ class AssistantBindingStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             return await self.submit(_op)
 
     # -- daemon-owned restore of the bound seat (assistant_restore.py) --------
@@ -1044,7 +1029,7 @@ class AssistantBindingStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             return await self.submit(_op)
 
     async def restore_reset_budget(
