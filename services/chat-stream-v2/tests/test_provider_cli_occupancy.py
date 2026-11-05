@@ -52,7 +52,6 @@ async def occupancy_journey(tmp_path, monkeypatch, provider="codex", platform="m
         state.extra_records=f'51 50 {os.getuid()} 50 50 {started} node {target} opaque quotes\n'
         state.argv={51:['node',str(target),"operator's unbalanced '\\ prompt"]}
         monkeypatch.setattr(occupancy,'_kernel_argv',lambda pid:state.argv[pid],raising=False)
-        monkeypatch.setattr(occupancy,'_executed_file',lambda pid,path,cache:occupancy._file(path,cache),raising=False)
         monkeypatch.setattr(occupancy,'_helper_os',lambda:'linux',raising=False)
     for root, name, bound in ((40,"selected-seat",selected), (50,"other-seat",other)):
         await store.open_session(selected.host, name, provider=provider, session_generation=name+"-generation",
@@ -81,7 +80,37 @@ async def occupancy_journey(tmp_path, monkeypatch, provider="codex", platform="m
         return state.paths[pid]
     host.run = running
     monkeypatch.setattr(occupancy, "_native_executable", probe, raising=False)
+    def image(pid,path,cache):
+        assert pid in state.paths, "synthetic image PID must never reach host procfs"
+        return occupancy._file(path,cache)
+    monkeypatch.setattr(occupancy,'_executed_file',image)
     return state
+
+
+@pytest.mark.parametrize('provider,launch_type', [('codex','native'),('claude','symlink'),('codex','js'),('codex','ready')])
+def test_synthetic_native_images_never_open_host_procfs(tmp_path,monkeypatch,provider,launch_type):
+    import builtins
+    import provider_cli_occupancy as occupancy
+    monkeypatch.setattr(occupancy,'_helper_os',lambda:'linux')
+    def opened(path,*args,**kwargs):
+        assert not os.fspath(path).startswith('/proc/'), 'synthetic PID reached host procfs'
+        return builtins.open(path,*args,**kwargs)
+    monkeypatch.setattr(occupancy,'open',opened,raising=False)
+    async def run():
+        if launch_type=='ready':
+            from test_provider_cli_initial_activation import ready_fixture
+            store,runtime,_,selected,_,_,_=await ready_fixture(tmp_path,monkeypatch,provider=provider,platform='wsl')
+            expected={42}
+        else:
+            s=await occupancy_journey(tmp_path,monkeypatch,provider,'wsl',launch_type=launch_type)
+            store,runtime,selected=s.store,s.runtime,s.selected
+            expected={42,52}
+        try:
+            value=await runtime.executor.verify_launchers(selected)
+            assert value['missing']==[] and value['unmanaged']==[]
+            assert {row['process']['pid'] for row in value['managed']}==expected
+        finally:store.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("prompt", ["normal multiword prompt", "unbalanced ' single", 'unbalanced " double',
@@ -145,6 +174,10 @@ def test_native_repin_distinguishes_managed_home_from_unattributed_process(proof
                 assert pid==42, "synthetic PID must never reach host procfs/libproc"
                 return bound.executable
             monkeypatch.setattr(occupancy,"_native_executable",probe)
+            def image(pid,path,cache):
+                assert pid==42, "synthetic image PID must never reach host procfs"
+                return occupancy._file(path,cache)
+            monkeypatch.setattr(occupancy,'_executed_file',image)
             started = "Thu Oct 29 10:00:00 2026"
             if proof != "unmanaged":
                 await store.open_session(old.host,"managed-other",provider=provider,session_generation="other-seat-gen",
