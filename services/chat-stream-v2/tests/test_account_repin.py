@@ -663,6 +663,10 @@ def test_reconcile_resume_and_refusal_regressions(tmp_path,monkeypatch,case):
                 await assert_split(runtime,old)
                 return
             historical=await store.open_session(old.host,"historical-seat",session_generation="original-seat",provider=old.provider,account_binding=old.public())
+            # This is retained history, not an unverified serving pane. An
+            # open row without process evidence must now block drain safety.
+            await store.update_session(old.host,"historical-seat",status="closed")
+            historical=await store.fetch_session(old.host,"historical-seat")
             await runtime.operation(request)
             if case=="old-generation":
                 with pytest.raises(VerbError): await runtime.operation(dict(request,operation_id="old",reconcile_of=None,new_generation="historical"))

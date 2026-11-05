@@ -341,7 +341,7 @@ class NativeHost:
             if action=="launcher-status":
                 from provider_cli_occupancy import status as launcher_status
                 if active is None:raise AccountError("account_login_generation_unknown")
-                return launcher_status(self,active,(reconcile or {}).get("managed_launchers",[]))
+                return launcher_status(self,active,(reconcile or {}).get("managed_launchers",[]),pin=pin)
             if action in {"enroll","adopt","repin","repin-reconcile"}:
                 authorize(self,action,{"provider":provider,"alias":alias,
                     "expected_generation":expected_generation,"generation":generation},operation_id,clearance)

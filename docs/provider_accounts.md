@@ -607,15 +607,36 @@ exclusions. Process environments and credentials are never read for attribution;
 unmanaged/operator processes are never torn down by this guard.
 
 The helper reads the executed path using macOS `proc_pidpath` or Linux
-`/proc/<pid>/exe` and compares it exactly with the immutable binding. Displayed
-prompt arguments are never parsed as shell syntax; the full command display
-still contributes to the process fingerprint. There is no basename, symlink,
-realpath or argv fallback. Unsupported platforms, unreadable or deleted
-executables, truncated/malformed paths and mismatches leave the launcher
-unverified. After native reads, a fresh process/boot census and tmux readback
-must retain the same root and candidate identities and unique native descendant.
-These observations preserve the existing birth precision; they are not an
-atomic kernel snapshot.
+`/proc/<pid>/exe`. It strictly resolves the immutable binding's executable,
+retaining its symlink chain, regular-file identity and pinned SHA256. Direct
+native and native symlink launchers must resolve to that same target and match
+the binding hash. Displayed prompt arguments are never parsed as shell syntax;
+the full command display still contributes to the process fingerprint.
+
+The supported Linux Codex JS form has additional requirements: the bound
+`codex.js` script must match the binding hash; a regular Node interpreter inside
+the exact pane must execute that script as its absolute second kernel argv
+element; and a complete, unchanged, same-UID parent chain must connect it to the
+unique provider native child. Bounded NUL-delimited procfs argv supplies this
+linkage; prompt arguments after the script are opaque. Node alone, a script
+mentioned in a prompt, unsupported Node options or a sibling process cannot
+prove provider identity. The native child must separately match the daemon's
+validated provider/version/actual-host-platform native pin, passed through the
+authenticated helper input and fenced before/after dispatch. Script and native
+hashes are never interchangeable. Missing pins leave wrappers unverified;
+direct native proofs have no new release-pin dependency. Other wrapper forms,
+including macOS JS wrappers, fail closed.
+
+On Linux the helper hashes the executing image through procfs and compares its
+file identity with the resolved image, refusing deleted or replaced images.
+Across a fresh process/boot census and tmux readback, it rechecks file chains,
+hashes, kernel paths, wrapper argv/ancestry and the unique native descendant.
+Unreadable, malformed, ambiguous or changing evidence remains missing and
+unclaimed. There is no basename or displayed-argv fallback. These observations
+preserve existing birth precision and the macOS immutable-artifact assumption;
+they are not an atomic kernel snapshot. Drain checks also refuse missing
+launcher evidence; callers without trusted wrapper pin inputs cannot assume a
+wrapper pane is drained.
 
 This proof covers every open launcher for the host/provider, across account
 aliases. A helper-only or daemon-only update is refused by the shared code

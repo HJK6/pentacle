@@ -80,11 +80,20 @@ class AccountExecutor:
 
     async def verify_launchers(self,account):
         from provider_cli_artifact import code_identity
-        from provider_cli_pin import digest
+        from provider_cli_pin import digest,current,raw,raw_digest
+        def pin_snapshot(ledger):
+            token=raw_digest(raw(ledger))
+            try:pin=current(ledger)
+            except AccountError:pin=None  # Direct natives do not require a release pin.
+            return token,pin
+        before,pin=await self.runtime.run(pin_snapshot)
         launchers=await self.launcher_descriptors(account.host,account.provider)
         value=await self.execute(account,"launcher-status",uuid.uuid4().hex,
-                                 reconcile={"managed_launchers":launchers})
+                                 pin=pin,reconcile={"managed_launchers":launchers})
+        after,latest=await self.runtime.run(pin_snapshot)
+        expected_pin=digest(pin) if pin is not None else 'absent'
         if (value.get("outcome")!="ok" or value.get("host")!=account.host
+                or before!=after or latest!=pin or value.get('pin_digest',expected_pin)!=expected_pin
                 or value.get("provider")!=account.provider or value.get("manifest_digest")!=digest(launchers)
                 or value.get("code_identity")!=code_identity() or not isinstance(value.get("managed"),list)
                 or not isinstance(value.get("unmanaged"),list) or value.get("missing")!=[]
