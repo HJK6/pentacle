@@ -558,6 +558,17 @@ def test_managed_helper_root_is_stable_after_a_coordinated_release(tmp_path):
     with pytest.raises(c.Invalid): helper_release_root(root / "malformed" / "app" / HELPER)
 
 
+def test_internal_harness_children_cannot_bypass_disposable_resource_binding(tmp_path):
+    from deploy.coordinated_harness import validate_child
+    root = tmp_path / "owned"; root.mkdir(mode=0o700)
+    c.atomic_json(root / ".coordinated-harness.json", {"schema": "pentacle.coordinated-harness.v1", "root": str(root)})
+    with pytest.raises(c.Invalid): validate_child(root, source=Path("/production/runtime"))
+    with pytest.raises((c.Invalid, ValueError)): validate_child(root, script=Path("/production/provider_account_host.py"), home=root / "home")
+    with pytest.raises(c.Invalid): validate_child(root, home=Path("/production/home"))
+    c.atomic_json(root / "config.json", {"port": 7791})
+    with pytest.raises(c.Invalid): validate_child(root, source=root / "release", config=root / "config.json")
+
+
 @pytest.mark.parametrize("kind", ["catalog", "policy", "staged_source", "manifest", "interpreter", "pin_artifact", "gate", "controller"])
 def test_concrete_input_drift_refuses_before_stop(runtime_preparation, kind):
     runtime, fixture, intent, root = runtime_preparation

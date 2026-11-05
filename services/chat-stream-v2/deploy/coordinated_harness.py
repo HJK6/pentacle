@@ -54,7 +54,35 @@ def source_paths(source):
     sys.path[:0] = [str(source / "services/chat-stream-v2"), str(source / "services"), str(source / "services/agent-orch")]
 
 
+def validate_child(root, *, source=None, script=None, home=None, config=None):
+    """Internal child modes retain containment when invoked directly."""
+    root = c.absolute(str(root))
+    marker = c.read_json(root / ".coordinated-harness.json")
+    if marker != {"schema": "pentacle.coordinated-harness.v1", "root": str(root)}:
+        raise c.Invalid("disposable harness ownership marker required")
+    if home is not None and home != root / "home":
+        raise c.Invalid("disposable helper home substitution")
+    if source is not None and source != root / "release":
+        raise c.Invalid("disposable daemon source substitution")
+    if script is not None:
+        relative = script.relative_to(root)
+        valid = (relative.as_posix() == "release/services/chat-stream-v2/provider_account_host.py"
+                 or (len(relative.parts) == 6 and relative.parts[0] == "helpers"
+                     and relative.parts[2:] == ("app", "services", "chat-stream-v2", "provider_account_host.py")))
+        if not valid or script != script.resolve():
+            raise c.Invalid("disposable staged helper source required")
+    if config is not None:
+        if config != root / "config.json": raise c.Invalid("disposable config substitution")
+        value = c.read_json(config)
+        port = value.get("port")
+        if type(port) is not int or not 0 <= port <= 65535 or port in {7791, 7790}:
+            raise c.Invalid("production endpoint forbidden in disposable child")
+        for key, name in (("policy", "policy.json"), ("database", "sessions.db"), ("ready", "ready.json"), ("home", "home")):
+            if value.get(key) != str(root / name): raise c.Invalid("disposable child resource substitution")
+
+
 def child_helper(script, home, args):
+    validate_child(home.parent, script=script, home=home)
     source_paths(script.parents[2])
     os.environ["HOME"] = str(home)
     # Mock the native executable boundary only. The actual helper CLI, host
@@ -70,6 +98,7 @@ def child_helper(script, home, args):
 
 
 async def child_daemon(source, config_path):
+    validate_child(config_path.parent, source=source, config=config_path)
     source_paths(source)
     from account_executor import AccountExecutor
     from account_runtime import load_policy
@@ -115,6 +144,7 @@ class Rehearsal:
         bindings.validate()  # Before any mkdir, process, staging or socket action.
         self.b, self.controller = bindings, controller
         self.b.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        c.atomic_json(self.b.root / ".coordinated-harness.json", {"schema": "pentacle.coordinated-harness.v1", "root": str(self.b.root)})
         self.repo = self.b.root / "release"
         self.repo.mkdir(mode=0o700)
         self.process = None
@@ -250,7 +280,12 @@ class Rehearsal:
     def stop(self, receipt, provenance=None):
         if self.process is not None:
             self.process.terminate()
-            self.process.wait(timeout=15)
+            try:
+                self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+                self.events.append({"event": "forced_owned_cleanup", "pid": self.process.pid})
             self.events.append({"event": "exited", "pid": self.process.pid, "returncode": self.process.returncode})
             self.log_handle.close()
             self.process = None
