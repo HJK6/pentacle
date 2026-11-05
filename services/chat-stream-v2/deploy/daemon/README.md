@@ -188,6 +188,8 @@ slots. Unresolved recovery or generation intents, including attempts awaiting
 enrollment, still refuse preparation and revalidation; deployment never rewrites
 the account journal to clear them.
 
+Helper child failures report argv0, exit status or timeout, and redacted stdout/stderr tails (at most 1000 characters each). Remaining argv and environment are omitted. Pre-stop apply refusals retain this diagnostic in `helper_proof_failure` in the prepared journal; post-stop failures retain it in the existing recovery failure record. A journal write error preserves the original refusal. Diagnostic capture adds no lock wait, retry or admission exception.
+
 Apply rechecks sealed inputs, sole-deployer/schedule/account quiescence and
 staged proofs. It unloads the old job and proves daemon/local helper exit before
 switching the checkout and included executor script fields. Other policy fields

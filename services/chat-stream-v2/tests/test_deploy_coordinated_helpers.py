@@ -640,3 +640,99 @@ def test_concrete_input_drift_refuses_before_stop(runtime_preparation, kind):
     with pytest.raises(c.Invalid): runtime.revalidate(receipt, forward=True)
     assert fixture.git("rev-parse", "HEAD") == fixture.prior
     assert not runtime.stopped
+
+
+@pytest.mark.parametrize('kind', ['exit', 'timeout'])
+def test_helper_child_refusal_keeps_bounded_redacted_diagnostics(monkeypatch, kind):
+    from deploy.coordinated_runtime import Runtime
+    runtime = object.__new__(Runtime)
+    secret = 'CanarySecretValue123456789012345'
+    stdout = 'x' * 5000 + '\n{"outcome":"account_busy"}\n'
+    stderr = ('Authorization: Bearer short-secret\npassword=short-password\n'
+              'api_key: "' + secret + '"\n' + secret + '\nhttps://person:short-pass@example.invalid\n'
+              '\x1bTraceback: lock unavailable\n')
+    failure = (subprocess.CalledProcessError(1, ['ssh', '--private-token=' + secret], output=stdout, stderr=stderr)
+               if kind == 'exit' else subprocess.TimeoutExpired(['ssh', secret], 210, output=stdout.encode(), stderr=stderr.encode()))
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(runtime, '_helper_proof', fail)
+    with pytest.raises(c.Invalid) as caught:
+        runtime.helper_proof({}, {}, 'identity', {}, 'sha')
+    detail = str(caught.value)
+    assert 'ssh' in detail and 'account_busy' in detail and 'lock unavailable' in detail
+    assert kind == 'timeout' and '210' in detail or kind == 'exit' and 'rc=1' in detail
+    assert len(detail) < 2600
+    assert all(value not in detail for value in [secret, 'short-secret', 'short-password', 'short-pass', '--private-token'])
+    assert '\x1b' not in detail
+
+
+def test_helper_child_refusal_is_journaled_without_starting_apply(transaction, monkeypatch):
+    from deploy.coordinated_runtime import Runtime
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    runtime = object.__new__(Runtime)
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ['ssh', 'private-argument'], output='{"outcome":"account_busy"}', stderr='')
+    monkeypatch.setattr(runtime, '_helper_proof', fail)
+    monkeypatch.setattr(adapter, 'revalidate', lambda *args, **kwargs: runtime.helper_proof({}, {}, '', {}, ''))
+    with pytest.raises(c.Invalid, match='account_busy'):
+        tx.apply(intent, path)
+    _, journal = tx.load(path)
+    assert journal['phase'] == 'prepared' and journal['history'] == ['prepared']
+    assert 'account_busy' in journal['helper_proof_failure']['reason']
+    assert 'private-argument' not in json.dumps(journal)
+    assert adapter.calls == ['prepare']
+    assert (adapter.source, adapter.policy, adapter.pid) == ('prior', 'prior', 111)
+
+
+def test_helper_child_refusal_uses_actual_local_subprocess(monkeypatch):
+    from deploy.coordinated_runtime import Runtime, load_installer
+    runtime = object.__new__(Runtime)
+    runtime.installer = load_installer(Path(__file__).resolve().parents[3])
+    helper = {'target': {'name': 'fixture', 'ssh': '', 'root': '/unused', 'local': True}}
+    def child(*args, **kwargs):
+        return runtime.remote_json(helper, [sys.executable, '-c',
+            'import sys; print(\'{"outcome":"account_busy"}\'); print("lock unavailable",file=sys.stderr); sys.exit(1)'])
+    monkeypatch.setattr(runtime, '_helper_proof', child)
+    with pytest.raises(c.Invalid, match='account_busy') as caught:
+        runtime.helper_proof({}, {}, '', {}, '')
+    assert 'lock unavailable' in str(caught.value) and '"argv0": "sh"' in str(caught.value)
+
+
+def test_helper_child_journal_write_failure_preserves_original_refusal(transaction, monkeypatch):
+    from deploy.coordinated_runtime import Runtime
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    runtime = object.__new__(Runtime)
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(255, ['ssh'], stderr='connection closed')
+    monkeypatch.setattr(runtime, '_helper_proof', fail)
+    monkeypatch.setattr(adapter, 'revalidate', lambda *args, **kwargs: runtime.helper_proof({}, {}, '', {}, ''))
+    def disk_full(*args, **kwargs):
+        raise OSError('disk full')
+    monkeypatch.setattr(c, 'atomic_json', disk_full)
+    with pytest.raises(c.Invalid, match='rc=255.*connection closed'):
+        tx.apply(intent, path)
+    _, journal = tx.load(path)
+    assert journal['phase'] == 'prepared' and adapter.calls == ['prepare']
+
+
+def test_helper_child_post_stop_failure_keeps_diagnostic_in_recovery_journal(transaction, monkeypatch):
+    from deploy.coordinated_runtime import Runtime
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    runtime = object.__new__(Runtime)
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ['ssh'], output='{"outcome":"account_busy"}', stderr='')
+    monkeypatch.setattr(runtime, '_helper_proof', fail)
+    original = adapter.start_verify
+    def verify(receipt, *, rollback):
+        if not rollback:
+            runtime.helper_proof({}, {}, '', {}, '')
+        return original(receipt, rollback=rollback)
+    monkeypatch.setattr(adapter, 'start_verify', verify)
+    result = tx.apply(intent, path)
+    _, journal = tx.load(path)
+    assert result['exit_code'] == 12 and journal['phase'] == 'rolled_back'
+    assert 'account_busy' in journal['forward_failure']['reason']
+    assert (adapter.source, adapter.policy) == ('prior', 'prior')

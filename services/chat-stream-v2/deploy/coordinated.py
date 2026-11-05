@@ -29,6 +29,10 @@ class Invalid(RuntimeError):
     pass
 
 
+class HelperProofFailure(Invalid):
+    """A refused helper child, with safe diagnostic text only."""
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
@@ -294,7 +298,17 @@ class Transaction:
         if (file_digest(private_file(intent_path)) != receipt["intent_sha256"]
                 or validate_intent(intent_path) != receipt["intent"]):
             raise Invalid("intent changed after preparation")
-        self.adapter.revalidate(receipt, forward=True)
+        try:
+            self.adapter.revalidate(receipt, forward=True)
+        except HelperProofFailure as exc:
+            # Diagnostic only: keep prepared phase, original refusal and the
+            # existing no-stop/no-retry behavior, even if journaling fails.
+            journal["helper_proof_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
+            try:
+                atomic_json(self.root / journal["transaction_id"] / "journal.json", journal)
+            except OSError:
+                pass
+            raise
         # This readback is persisted before the stop: recovery does not need RPC.
         before = self.adapter.current(receipt)
         journal["before_stop"] = before

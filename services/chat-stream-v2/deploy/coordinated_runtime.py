@@ -17,7 +17,7 @@ import sys
 import tarfile
 import time
 
-from deploy.coordinated import (Invalid, absolute, atomic_bytes, canonical, digest,
+from deploy.coordinated import (Invalid, HelperProofFailure, absolute, atomic_bytes, canonical, digest,
     file_digest, host_scope, private_file)
 from provider_cli_artifact import code_identity, validate_proof
 from provider_accounts import AccountError, Binding
@@ -30,6 +30,32 @@ from provider_cli_pin import current as current_pin
 SERVICE = "services/chat-stream-v2"
 HELPER = SERVICE + "/provider_account_host.py"
 RUNNER = SERVICE + "/tools/spawn_fleet_smoke.py"
+
+
+def _diagnostic_tail(value, limit=1000):
+    """Redact complete output before truncation, including byte partials."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    value = str(value or "")
+    value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
+                   "[redacted]", value, flags=re.S)
+    value = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
+    value = re.sub(r"(?im)^.*(?:authorization|bearer\s+|(?:access|refresh)[_-]?token|api[_-]?key|password|secret|cookie)\s*[:=]?.*$",
+                   "[redacted]", value)
+    value = re.sub(r"[A-Za-z0-9_+/=-]{20,}", lambda m: "[redacted]" if (
+        any(c.isupper() for c in m[0]) and any(c.islower() for c in m[0]) and any(c.isdigit() for c in m[0])) else m[0], value)
+    value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", value)
+    return value[-limit:]
+
+
+def _helper_child_failure(exc):
+    command = exc.cmd
+    # Never expose the shell command, pin input or remaining private argv.
+    argv0 = command[0] if isinstance(command, (list, tuple)) and command else "unknown"
+    detail = {"argv0": _diagnostic_tail(Path(str(argv0)).name, 160),
+              "stdout_tail": _diagnostic_tail(exc.stdout), "stderr_tail": _diagnostic_tail(exc.stderr)}
+    status = "rc=" + str(exc.returncode) if isinstance(exc, subprocess.CalledProcessError) else "timeout=" + str(exc.timeout)
+    return "helper closure/artifact verification failed: " + type(exc).__name__ + " " + status + " " + json.dumps(detail, ensure_ascii=True)
 
 
 def helper_release_root(script):
@@ -294,6 +320,8 @@ class Runtime:
                                       verify_release=verify_release, closure_only=closure_only)
         except Invalid:
             raise
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise HelperProofFailure(_helper_child_failure(exc)) from exc
         except Exception as exc:
             raise Invalid("helper closure/artifact verification failed: " + type(exc).__name__) from exc
 
