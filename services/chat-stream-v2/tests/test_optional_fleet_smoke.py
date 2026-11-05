@@ -35,12 +35,13 @@ def test_scheduled_smoke_optional_offline_is_pass(tmp_path, monkeypatch, capsys)
     assert not payload['untested']
 
 
-def test_deploy_optional_offline_is_pass_with_all_required_cells(tmp_path):
+def test_deploy_optional_offline_is_untested_without_declared_exclusion(tmp_path):
     offline = _rows('portable', 'UNTESTED', 'host_unavailable')
     payload = dict(ok=True, status='PASS', failures=[], untested=[],
                    cells=_rows('primary') + _rows('required') + offline)
     result = deploy_mod._fleet_smoke_verdict(subprocess.CompletedProcess([], 0, json.dumps(payload), ''), str(config(tmp_path)))
-    assert result['outcome'] == 'passed'
+    assert result['outcome'] == 'untested'
+    assert result['full_fleet_acceptance'] is False
     assert len(result['skipped']) == 4
     assert not result['untested'] and not result['unreachable_hosts']
 

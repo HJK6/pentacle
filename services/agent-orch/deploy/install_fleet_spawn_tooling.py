@@ -827,6 +827,96 @@ def stage(
     return result
 
 
+def stage_helper_source(target: Target, bundle: Path, commit: str, manifest: dict[str, object],
+                        *, runner: Callable[..., object] = subprocess.run) -> str:
+    """Inert full-source staging; no venv, launcher, pointer or account changes.
+
+    Verify every archived byte, rather than the CLI package subset. Existing
+    immutable directories are reusable only when they match exactly.
+    """
+    underlying = runner
+    def bounded(argv, **kwargs):
+        kwargs.setdefault("timeout", DEFAULT_SFTP_TIMEOUT_SECONDS)
+        return underlying(argv, **kwargs)
+    runner = bounded
+    release = _release(target, commit)
+    if (_sha256(bundle / "pentacle.tar") != manifest.get("archive_sha256")
+            or json.loads((bundle / "manifest.json").read_text()) != manifest
+            or manifest.get("commit") != commit):
+        raise ValueError("helper_bundle_manifest_invalid")
+    with tarfile.open(bundle / "pentacle.tar") as archive:
+        for member in archive:
+            path = Path(member.name)
+            if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+                raise ValueError("helper_bundle_member_invalid")
+    verify_helper_source(target, commit, manifest, runner=runner, missing_ok=True)
+    exists = _remote(target, f"if test -e {_remote_quote(release)} || test -L {_remote_quote(release)}; then printf exists; fi",
+                     dry_run=False, runner=runner)
+    if exists:
+        return release
+    staging = release + ".helper-staging"
+    _remote(target, " && ".join(("umask 077", f"mkdir -p {_remote_quote(target.root)}",
+            f"mkdir -m 700 {_remote_quote(staging)}")), dry_run=False, runner=runner)
+    if target.local:
+        shutil.copy2(bundle / "pentacle.tar", Path(staging) / "pentacle.tar")
+        shutil.copy2(bundle / "manifest.json", Path(staging) / "manifest.json")
+    else:
+        result = runner(_scp_argv(target, bundle, staging), text=True, capture_output=True,
+                        check=False, timeout=DEFAULT_SFTP_TIMEOUT_SECONDS)
+        if result.returncode:
+            raise RuntimeError(f"helper_source_transfer_failed:{target.name}")
+    _remote(target, " && ".join(("umask 077",
+            f"chmod 600 {_remote_quote(staging + '/pentacle.tar')} {_remote_quote(staging + '/manifest.json')}",
+            f"mkdir {_remote_quote(staging + '/app')}",
+            f"tar -xf {_remote_quote(staging + '/pentacle.tar')} -C {_remote_quote(staging + '/app')}",
+            f"test ! -e {_remote_quote(release)}", f"test ! -L {_remote_quote(release)}",
+            f"mv {_remote_quote(staging)} {_remote_quote(release)}")), dry_run=False, runner=runner)
+    verify_helper_source(target, commit, manifest, runner=runner)
+    return release
+
+
+def verify_helper_source(target: Target, commit: str, manifest: dict[str, object],
+                         *, runner: Callable[..., object] = subprocess.run, missing_ok: bool = False) -> None:
+    underlying = runner
+    def bounded(argv, **kwargs):
+        kwargs.setdefault("timeout", DEFAULT_SFTP_TIMEOUT_SECONDS)
+        return underlying(argv, **kwargs)
+    runner = bounded
+    release = _release(target, commit)
+    # Python owns traversal/path checks, including symlinked ancestors. Never
+    # repair or replace a mismatched release, even when no CLI pointer uses it.
+    script = r'''
+import hashlib,json,os,pathlib,stat,sys,tarfile
+root=pathlib.Path(sys.argv[1]); expected=json.loads(sys.argv[2]); missing=sys.argv[3]=='1'
+if missing and not root.exists() and not root.is_symlink(): raise SystemExit(0)
+assert root==root.resolve() and root.is_dir(), 'helper_release_path_invalid'
+for p in (root,root/'app',root/'pentacle.tar',root/'manifest.json'):
+    s=p.lstat(); assert s.st_uid in {0,os.getuid()} and not s.st_mode&0o022 and not p.is_symlink()
+assert json.loads((root/'manifest.json').read_bytes())==expected, 'helper_manifest_mismatch'
+assert hashlib.sha256((root/'pentacle.tar').read_bytes()).hexdigest()==expected['archive_sha256']
+with tarfile.open(root/'pentacle.tar') as archive:
+    expected_files=set()
+    for member in archive:
+        relative=pathlib.PurePosixPath(member.name)
+        assert not relative.is_absolute() and '..' not in relative.parts
+        p=root/'app'/member.name
+        if member.isdir(): continue
+        assert member.isfile(), 'helper_archive_nonregular_member'
+        expected_files.add(member.name)
+        assert p==p.resolve() and p.is_file() and not p.stat().st_mode&0o022
+        assert hashlib.sha256(p.read_bytes()).digest()==hashlib.sha256(archive.extractfile(member).read()).digest(), 'helper_source_mismatch'
+actual_files=set()
+for p in (root/'app').rglob('*'):
+    assert not p.is_symlink(), 'helper_source_symlink'
+    if p.is_file() and '__pycache__' not in p.parts:
+        actual_files.add(p.relative_to(root/'app').as_posix())
+assert actual_files==expected_files, 'helper_source_unexpected_file'
+'''
+    command = " ".join(("python3 -c", _remote_quote(script), _remote_quote(release),
+                        _remote_quote(json.dumps(manifest, sort_keys=True)), "1" if missing_ok else "0"))
+    _remote(target, command, dry_run=False, runner=runner)
+
+
 def activate(target: Target, commit: str, manifest: dict[str, object], previous: str | None, *, dry_run: bool, runner: Callable[..., object] = subprocess.run) -> dict[str, str | None]:
     stamp = manifest.get("stamp")
     if not isinstance(stamp, str):

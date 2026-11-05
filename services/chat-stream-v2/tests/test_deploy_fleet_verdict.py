@@ -320,3 +320,77 @@ def test_relative_installed_machine_file_uses_smoke_cwd_for_local_identity(tmp_p
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
     assert code == 10 and schedules == []
+
+
+@pytest.mark.parametrize("state", ["green", "missing", "duplicate", "failure", "quota", "excluded_observation", "offline"])
+def test_coordinated_exclusion_is_failure_dominant_and_scope_bound(tmp_path, state):
+    import subprocess
+    machines = tmp_path / "machines.json"
+    machines.write_text(json.dumps([
+        {"name": "primary", "ssh_target": None},
+        {"name": "peer", "ssh_target": "peer.example.invalid", "smoke_optional": True},
+        {"name": "optional", "ssh_target": "optional.example.invalid", "smoke_optional": True},
+    ]))
+    cells = _rows("primary") + _rows("peer")
+    payload = {"ok": True, "status": "PASS", "cells": cells}
+    if state == "missing": cells.pop()
+    elif state == "duplicate": cells.append(dict(cells[0]))
+    elif state == "failure": payload["failures"] = [dict(cells[0], outcome="failed", reason="cleanup")]
+    elif state == "quota": cells[-1].update(outcome="untested", reason="quota_exhausted")
+    elif state == "excluded_observation": cells += _rows("optional")
+    elif state == "offline": cells[-1].update(outcome="unreachable", reason="host_unavailable")
+    result = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+    verdict = deploy_mod._fleet_smoke_verdict(result, str(machines), declared_exclusions=[{
+        "host": "optional", "reason": "tracked readiness defect", "authority": "fd:example",
+    }])
+    assert verdict["full_fleet_acceptance"] is False
+    assert len([row for row in verdict["skipped"] if row["outcome"] == "SKIPPED_DECLARED"]) == 4
+    assert (verdict["outcome"] == "passed") is (state == "green")
+    if state == "offline":
+        assert len([row for row in verdict["skipped"] if row["outcome"] == "SKIPPED_OFFLINE"]) == 1
+
+
+def test_excluded_host_without_declaration_is_still_required(tmp_path):
+    import subprocess
+    machines = tmp_path / "machines.json"
+    machines.write_text(json.dumps([
+        {"name": "primary", "ssh_target": None},
+        {"name": "optional", "ssh_target": "optional.example.invalid", "smoke_optional": True},
+    ]))
+    result = subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "cells": _rows("primary")}), "")
+    verdict = deploy_mod._fleet_smoke_verdict(result, str(machines))
+    assert verdict["outcome"] == "untested"
+    assert len(verdict["untested"]) == 4
+
+
+def test_real_runner_optional_offline_payload_cannot_install_schedule(tmp_path, monkeypatch, capsys):
+    payload = {"ok": True, "status": "PASS", "cells": _rows("primary"),
+        "failures": [], "untested": [], "skipped": [
+            dict(row, outcome="SKIPPED_OFFLINE", **{"class": "untested", "reason": "host_unavailable"})
+            for row in _rows("satellite")]}
+    stamp, schedules = _apply(tmp_path, monkeypatch, payload, machines=[
+        {"name": "primary", "ssh_target": None},
+        {"name": "satellite", "ssh_target": "peer.example.invalid", "smoke_optional": True},
+    ])
+    code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == 9 and schedules == []
+    assert stamp["fleet_smoke"]["full_fleet_acceptance"] is False
+    assert len(stamp["fleet_smoke"]["skipped"]) == 4
+
+
+def test_real_runner_included_optional_offline_is_not_scoped_success(tmp_path):
+    import subprocess
+    machines = tmp_path / "machines.json"
+    machines.write_text(json.dumps([
+        {"name": "primary", "ssh_target": None},
+        {"name": "peer", "ssh_target": "peer.example.invalid", "smoke_optional": True},
+        {"name": "optional", "ssh_target": "optional.example.invalid", "smoke_optional": True},
+    ]))
+    payload = {"ok": True, "status": "PASS", "cells": _rows("primary"), "skipped": [
+        dict(row, outcome="SKIPPED_OFFLINE", **{"class": "untested", "reason": "host_unavailable"})
+        for row in _rows("peer")]}
+    verdict = deploy_mod._fleet_smoke_verdict(
+        subprocess.CompletedProcess([], 0, json.dumps(payload), ""), str(machines),
+        declared_exclusions=[{"host": "optional", "reason": "tracked defect", "authority": "fd:example"}])
+    assert verdict["outcome"] == "untested" and verdict["full_fleet_acceptance"] is False
+    assert len([row for row in verdict["skipped"] if row["outcome"] == "SKIPPED_OFFLINE"]) == 4

@@ -127,6 +127,113 @@ passes its native runner explicitly; direct library callers must do the same onl
 inside their authorized live path. Collector bootstrap failures propagate instead
 of being reported as a successful install.
 
+### Coordinated helper and daemon deployment
+
+A forward release that changes `provider_cli_artifact.code_identity()` requires
+an admitted coordinated transaction. The ordinary deployer refuses it before
+changing the active checkout. Identity equality remains enforced by the account
+executor. Run the tooling from a separate clean, pinned controller checkout;
+the daemon target can be an older exact origin-backed commit.
+
+Create an owner-only (0600), nonsymlinked intent file in a private (0700)
+directory, using absolute canonical paths. The schema is:
+
+```json
+{
+  "schema": "pentacle.coordinated-deploy.intent.v1",
+  "transaction_id": "release-example-01",
+  "controller_sha": "<40 lowercase hex characters>",
+  "target_sha": "<exact daemon target SHA>",
+  "prior_sha": "<current daemon checkout SHA>",
+  "machines_file": "/private/config/machines.json",
+  "policy_file": "/private/config/provider-account-policy.json",
+  "gate_evidence": "/private/evidence/target-merge.json",
+  "prior_gate_evidence": "/private/evidence/prior-merge.json",
+  "excluded_hosts": []
+}
+```
+
+Only a configured optional remote host can be excluded. Each declaration is
+`{"host":"optional-peer","reason":"tracked readiness defect","authority":"deployment-owner grant reference"}`.
+Local and required hosts, unknown hosts, duplicates and empty reasons/authority
+are refused. Installed catalog/transport data defines the host population.
+
+From the pinned controller root, use its provisioned interpreter:
+
+```sh
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout /absolute/runtime --coordinated-plan /private/intent.json \
+  --coordinated-receipt /private/receipt.json --prepare-only
+# Inside the separately granted deployment window:
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout /absolute/runtime --coordinated-plan /private/intent.json \
+  --coordinated-receipt /private/receipt.json --deployer-stream-id host:deployer
+# Whole-transaction recovery, including a committed transaction or down daemon:
+python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
+  --release-checkout /absolute/runtime --rollback \
+  --coordinated-receipt /private/receipt.json --deployer-stream-id host:deployer
+```
+
+Preparation stages full immutable helper source, tests the existing configured
+interpreters and read-only native artifacts, validates target/prior gate evidence
+and both target smoke plans, and saves private preimages. It changes no active
+policy, source, launchd state, CLI launcher, pin or account generation. It needs
+the owner's explicit host-staging/probe authority. Keep its directories through
+handoff; there is no automatic garbage collection.
+
+Apply rechecks sealed inputs, sole-deployer/schedule/account quiescence and
+staged proofs. It unloads the old job and proves daemon/local helper exit before
+switching the checkout and included executor script fields. Other policy fields
+and excluded executors stay intact. It bootstraps and verifies the target,
+dispatched identities, included canaries, cleanup and slow-consumer evidence.
+No coordinated invocation accepts `--release-inputs` or `--skip-kickstart`.
+
+The immutable receipt links the intent digest to preimages, staged source,
+interpreter/dependency evidence, catalog/policy/pin digests and exact scope.
+A separate owner-only journal lives beside the runtime checkout in
+`.pentacle-coordinated-<checkout-path-hash>/<transaction-id>/journal.json`.
+`active.json` binds the current receipt. Each phase is durable before its side
+effects: prepared, stopping, stopped, switching, verifying, committed,
+rolling_back, rolled_back, discarded or recovery_required. An unfinished journal blocks a
+new forward deploy. Recover explicitly with the same receipt after interruption.
+Plain `--rollback` refuses coordinated ancestry and prints that receipt path;
+unchanged-identity releases retain the ancestry in their stamps.
+
+If apply has never begun, the same receipt-based `--rollback` command discards
+the preparation without stopping a daemon, restoring files, probing helpers or
+running canaries. It works after input drift and preserves all current runtime
+state, staged directories and receipt bytes. The journal becomes terminal
+`discarded`; operation exit 0 has `outcome=discarded`, `scope=preparation_only`
+and `full_fleet_acceptance=false`, and is not deployment acceptance. Prepare
+again with fresh inputs, a new transaction ID and a new receipt path. Discard
+is idempotent until a new preparation supersedes the active receipt; it does
+not bypass any older coordinated ancestry in the live deployment stamp.
+
+Exit **11** means committed scoped success (or successful explicit restoration)
+with declared optional exclusions and `full_fleet_acceptance=false`. It requires
+every included cell to pass and preserves four `SKIPPED_DECLARED` rows per
+excluded host. Only a coordinated consumer that validates receipt digest,
+committed phase, admitted exclusions and complete included evidence may accept
+11; generic release gates continue to require 0. Scoped deployment never changes
+the recurring smoke schedule or satellite admission/pins.
+
+Exit **12** is an applied/recovered or recovery-required coordinated failure.
+Automatic rollback retains the original forward failure and never converts it
+to success. Inspect the journal and returned receipt, and GATE the owner when
+recovery is required. A stale receipt or post-commit source/policy/plist drift
+refuses before stop; prepare a new transaction rather than overwriting later
+work. Explicit rollback restores original source/policy/plist/stamp bytes and
+verifies prior health under the same declared canary scope.
+
+The reusable offline rehearsal is `PYTHONPATH=services/chat-stream-v2:services
+python -m deploy.coordinated_harness --root /absolute/empty/owned/scratch`.
+Its typed bindings reject production labels, endpoints and external resource
+paths before starting. It exercises real disposable Server/Store/helper
+processes, controlled post-switch failure, automatic recovery and explicit
+committed rollback with invented account data and mocked native responses.
+It proves transaction ordering and cleanup; actual fleet readiness still needs
+the separately granted deployment window.
+
 Proof harnesses must pass a no-native runner to every helper and redirect every
 written descriptor to owned scratch paths. Block subprocess entrypoints before
 importing the module as a second containment boundary. Scratch plist paths alone

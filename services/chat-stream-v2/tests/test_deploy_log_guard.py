@@ -5,6 +5,8 @@ import importlib.util
 import json
 import plistlib
 import subprocess
+import ast
+import shutil
 import sys
 from pathlib import Path
 
@@ -67,6 +69,18 @@ def isolated_release(tmp_path, monkeypatch, request):
     main.parent.mkdir(parents=True)
     main.write_text("version = 1\n")
     (repo / service.requirements_path).write_text("")
+    # Real identity inputs let the default deploy guard compare isolated Git
+    # objects. These fixtures change main.py only, so identity stays equal.
+    source = DEPLOY_PATH.parents[1]
+    tree = ast.parse((source / "provider_cli_artifact.py").read_text())
+    identity = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "code_identity")
+    names = ast.literal_eval(next(node.value for node in identity.body if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "files" for t in node.targets)))
+    for name in names:
+        shutil.copy2(source / name, main.parent / name)
+    shared = repo / "services/_shared"
+    shared.mkdir()
+    shutil.copy2(source.parent / "_shared/provider_cli_release.py", shared / "provider_cli_release.py")
     selection_fixture = getattr(request, "param", None) == "selection"
     if selection_fixture:
         from .test_release_selection import _seed_selector_files

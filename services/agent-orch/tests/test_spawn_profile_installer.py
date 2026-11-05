@@ -78,6 +78,53 @@ def test_default_install_targets_only_this_user_local_machine() -> None:
     assert installer.HOSTS == {"local": ("localhost", str(Path.home() / ".local/share/pentacle/releases"))}
 
 
+@pytest.mark.parametrize("local", [True, False])
+@pytest.mark.parametrize("ambient_umask", [0o022, 0o002])
+def test_helper_source_stage_is_inert_full_source_and_immutable(tmp_path, local, ambient_umask):
+    bundle = tmp_path / "helper-bundle"
+    bundle.mkdir()
+    data = b"# helper closure stand-in\n"
+    with tarfile.open(bundle / "pentacle.tar", "w") as archive:
+        info = tarfile.TarInfo("services/chat-stream-v2/provider_account_host.py")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    commit = "a" * 40
+    manifest = {"commit": commit, "archive_sha256": installer._sha256(bundle / "pentacle.tar")}
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    target = installer.Target("peer", "peer.example.invalid", str(tmp_path / "releases"), local)
+    previous_umask = os.umask(ambient_umask)
+    try:
+        release = Path(installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner))
+    finally:
+        os.umask(previous_umask)
+    assert (release / "app/services/chat-stream-v2/provider_account_host.py").read_bytes() == data
+    assert (release / "app").stat().st_mode & 0o777 == 0o700
+    for path in (release / "pentacle.tar", release / "manifest.json",
+                 release / "app/services/chat-stream-v2/provider_account_host.py"):
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert not (Path(target.root) / "active").exists()
+    assert not list(release.glob("**/.venv"))
+    assert installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner) == str(release)
+    source = release / "app/services/chat-stream-v2/provider_account_host.py"
+    source.write_text("# unrelated immutable collision\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner)
+    assert source.read_text() == "# unrelated immutable collision\n"
+
+
+def test_helper_source_refuses_archive_path_escape_before_transport(tmp_path):
+    with tarfile.open(tmp_path / "pentacle.tar", "w") as archive:
+        entry = tarfile.TarInfo("../escape.py"); entry.size = 1
+        archive.addfile(entry, io.BytesIO(b"x"))
+    manifest = {"commit": "a" * 40, "archive_sha256": installer._sha256(tmp_path / "pentacle.tar")}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    calls = []
+    with pytest.raises(ValueError, match="member_invalid"):
+        installer.stage_helper_source(installer.Target("peer", "peer.example.invalid", str(tmp_path / "releases")),
+            tmp_path, "a" * 40, manifest, runner=lambda *a, **kw: calls.append(a))
+    assert calls == []
+
+
 @pytest.mark.parametrize("mapping", [{}, {"office": {}}, {"office": {"ssh": "office", "release_root": "relative"}}, {"office": {"ssh": "-oProxyCommand=bad", "release_root": "/tmp/releases"}}])
 def test_invalid_fleet_configuration_is_rejected_before_target_selection(tmp_path, mapping):
     path = tmp_path / "hosts.json"
