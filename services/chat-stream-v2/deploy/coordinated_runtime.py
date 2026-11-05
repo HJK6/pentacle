@@ -43,8 +43,8 @@ def _diagnostic_tail(value, limit=1000):
     value = str(value or "")
     value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
                    "[redacted]", value, flags=re.S)
-    value = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
-    value = re.sub(r"(?im)^.*(?:authorization|bearer\s+|token|api[_-]?key|password|secret|cookie|credential)\s*[:=]?.*$",
+    value = re.sub(r"(?i)(https?://)[^\s/@]+@", r"\1[redacted]@", value)
+    value = re.sub(r"(?im)^.*(?:authorization|bearer|token|api[_-]?key|password|secret|cookie|credential)\s*[:=]?.*$",
                    "[redacted]", value)
     value = re.sub(r"[A-Za-z0-9_+/=-]{20,}", lambda m: "[redacted]" if (
         any(c.isupper() for c in m[0]) and any(c.islower() for c in m[0]) and any(c.isdigit() for c in m[0])) else m[0], value)

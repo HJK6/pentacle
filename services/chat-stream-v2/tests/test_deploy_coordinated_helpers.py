@@ -881,3 +881,25 @@ def test_busy_outside_artifact_command_is_not_retried(monkeypatch):
     monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json({'target':{}}, ['python','-c','closure']))
     with pytest.raises(c.Invalid): runtime.helper_proof({}, {}, '', {}, '')
     assert calls == [1]
+
+
+@pytest.mark.parametrize('payload', ['https://ghp_abc1234567890@example.invalid/path',
+    '{"bearer":"smallopaque9"}', 'Bearer=smallopaque9'])
+def test_credential_forms_are_redacted_in_refusal_and_prepared_journal(transaction, monkeypatch, payload):
+    from deploy.coordinated_runtime import Runtime
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    runtime = object.__new__(Runtime)
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ['ssh', 'private-argument'],
+            output='{"outcome":"account_busy"}', stderr=payload)
+    monkeypatch.setattr(runtime, '_helper_proof', fail)
+    monkeypatch.setattr(adapter, 'revalidate', lambda *args, **kwargs: runtime.helper_proof({}, {}, '', {}, ''))
+    with pytest.raises(c.Invalid) as caught:
+        tx.apply(intent, path)
+    _, journal = tx.load(path)
+    forbidden = 'ghp_abc1234567890' if 'ghp_' in payload else 'smallopaque9'
+    assert forbidden not in str(caught.value) and forbidden not in json.dumps(journal)
+    assert 'account_busy' in str(caught.value)
+    assert journal['phase'] == 'prepared' and journal['history'] == ['prepared']
+    assert adapter.calls == ['prepare']
