@@ -79,7 +79,8 @@ def test_default_install_targets_only_this_user_local_machine() -> None:
 
 
 @pytest.mark.parametrize("local", [True, False])
-def test_helper_source_stage_is_inert_full_source_and_immutable(tmp_path, local):
+@pytest.mark.parametrize("ambient_umask", [0o022, 0o002])
+def test_helper_source_stage_is_inert_full_source_and_immutable(tmp_path, local, ambient_umask):
     bundle = tmp_path / "helper-bundle"
     bundle.mkdir()
     data = b"# helper closure stand-in\n"
@@ -91,8 +92,16 @@ def test_helper_source_stage_is_inert_full_source_and_immutable(tmp_path, local)
     manifest = {"commit": commit, "archive_sha256": installer._sha256(bundle / "pentacle.tar")}
     (bundle / "manifest.json").write_text(json.dumps(manifest))
     target = installer.Target("peer", "peer.example.invalid", str(tmp_path / "releases"), local)
-    release = Path(installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner))
+    previous_umask = os.umask(ambient_umask)
+    try:
+        release = Path(installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner))
+    finally:
+        os.umask(previous_umask)
     assert (release / "app/services/chat-stream-v2/provider_account_host.py").read_bytes() == data
+    assert (release / "app").stat().st_mode & 0o777 == 0o700
+    for path in (release / "pentacle.tar", release / "manifest.json",
+                 release / "app/services/chat-stream-v2/provider_account_host.py"):
+        assert path.stat().st_mode & 0o777 == 0o600
     assert not (Path(target.root) / "active").exists()
     assert not list(release.glob("**/.venv"))
     assert installer.stage_helper_source(target, bundle, commit, manifest, runner=_localhost_runner) == str(release)

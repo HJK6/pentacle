@@ -855,7 +855,7 @@ def stage_helper_source(target: Target, bundle: Path, commit: str, manifest: dic
     if exists:
         return release
     staging = release + ".helper-staging"
-    _remote(target, " && ".join((f"mkdir -p {_remote_quote(target.root)}",
+    _remote(target, " && ".join(("umask 077", f"mkdir -p {_remote_quote(target.root)}",
             f"mkdir -m 700 {_remote_quote(staging)}")), dry_run=False, runner=runner)
     if target.local:
         shutil.copy2(bundle / "pentacle.tar", Path(staging) / "pentacle.tar")
@@ -865,7 +865,9 @@ def stage_helper_source(target: Target, bundle: Path, commit: str, manifest: dic
                         check=False, timeout=DEFAULT_SFTP_TIMEOUT_SECONDS)
         if result.returncode:
             raise RuntimeError(f"helper_source_transfer_failed:{target.name}")
-    _remote(target, " && ".join((f"mkdir {_remote_quote(staging + '/app')}",
+    _remote(target, " && ".join(("umask 077",
+            f"chmod 600 {_remote_quote(staging + '/pentacle.tar')} {_remote_quote(staging + '/manifest.json')}",
+            f"mkdir {_remote_quote(staging + '/app')}",
             f"tar -xf {_remote_quote(staging + '/pentacle.tar')} -C {_remote_quote(staging + '/app')}",
             f"test ! -e {_remote_quote(release)}", f"test ! -L {_remote_quote(release)}",
             f"mv {_remote_quote(staging)} {_remote_quote(release)}")), dry_run=False, runner=runner)
