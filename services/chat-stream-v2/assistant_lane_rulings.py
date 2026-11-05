@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from store_host_transfer import effective_ruling
 import asyncio
-import contextlib
 from contextlib import nullcontext
 import hashlib
 import json
@@ -312,12 +311,14 @@ class AssistantLaneRulings:
                                       self._authority_loss_evidence(old) is None))):
                             raise ValueError('binding_moved')
                     else:
-                        # The actor must still be the bound primary inside the
-                        # same transaction as the write; a swap while waiting
-                        # for the lock makes the request stale.
-                        primary = _binding_conn(conn, composite._env_binding(), name=composite.env_config.name,
-                                                include_target=False)
-                        if (primary.get('stream_id'), primary.get('generation')) != (actor_stream_id, actor_generation):
+                        # The actor must still be the eligible bound primary
+                        # (open, current generation, not retired) inside the
+                        # same transaction as the write.
+                        import store_lifecycle_authority
+                        principal = store_lifecycle_authority.front_desk_principal(
+                            conn, store_lifecycle_authority.front_desk_spec(composite))
+                        if principal is None or (principal["stream_id"], principal["session_generation"]) != (
+                                actor_stream_id, actor_generation):
                             raise ValueError("assistant_authority_config_unauthorized")
                     if not is_service and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
                         conn.execute("UPDATE v2_authority_restore_episode SET state='superseded',last_error='binding_moved',updated_at=? WHERE state IN ('pending','spawning','unresolved','exhausted')", (time.time(),))
@@ -1331,13 +1332,18 @@ class AssistantLaneRulings:
             producer = str(request["requester_stream_id"])
             if callable(lock_factory) and ":" in producer:
                 lifecycle = lock_factory(*producer.split(":", 1))
-        async with lifecycle:
-            await self._release_serial(request)
+        # One order with alias input and binding writers: FD effect gate, then
+        # lifecycle. An immediate bypass already holds lifecycle inside its
+        # requester's own live call, so it takes no gate.
+        fd_fence = self.server.sessions.assistant.front_desk_mode and not lifecycle_locked
+        gate = self.store.front_desk_fence() if fd_fence else nullcontext()
+        async with gate, lifecycle:
+            await self._release_serial(request, fd_fence=fd_fence)
 
-    async def _release_serial(self, request: dict[str, Any]) -> None:
+    async def _release_serial(self, request: dict[str, Any], *, fd_fence: bool = False) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
-        async with lock, contextlib.AsyncExitStack() as fence:
+        async with lock:
             current = await self._fetch(rid)
             if current is None or current["state"] not in {"approved", "unruled", "unruled_disabled", "bypassed"}:
                 return
@@ -1356,10 +1362,9 @@ class AssistantLaneRulings:
                 # The task link was checked when this request was admitted (R4).
                 "ruled_release": True,
             }
-            if self.server.sessions.assistant.front_desk_mode:
-                # No binding change commits between this check and the effect.
-                await fence.enter_async_context(self.store.front_desk_fence())
-            if await self._fd_requester_superseded(rid, current):
+            # Under fd_fence no binding change commits between this check and
+            # the effect.
+            if fd_fence and await self._fd_requester_superseded(rid, current):
                 return
             requester_host, _, requester_name = current["requester_stream_id"].partition(":")
             requester = await self.store.fetch_session(requester_host, requester_name)

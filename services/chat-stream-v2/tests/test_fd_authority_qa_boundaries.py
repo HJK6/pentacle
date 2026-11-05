@@ -225,3 +225,109 @@ def test_alias_send_swap_at_attempt_entry_waits_for_input(tmp_path):
         after = await h.send(request_id='after-swap')
         assert h.inputs_at(SEAT_B) == 1 and h.inputs_at(SEAT_A) == 1, {'after': after, 'inputs': h.tmux.inputs}
     _run(tmp_path, body, front_desk=True)
+
+
+# Scoped re-review (cycle 1, round 2) cases.
+from test_fd_close_visible import setup, close, FD
+from test_lifecycle_authority import scenario, HOST as LHOST, _until
+
+@pytest.mark.parametrize('case,code', [('reason','lifecycle_reason_required'),('request','lifecycle_request_id_required')])
+def test_fd_own_child_keeps_explicit_request_fences(case,code):
+    async def run(env):
+        auth=await setup(env)
+        await env.store.update_session(LHOST,'target',parent_stream_id=FD)
+        await env.sessions.refresh()
+        msg=close(auth)
+        msg.pop('reason' if case=='reason' else 'request_id')
+        await _refused(env.server._on_close(msg),code)
+        assert env.tmux.killed == []
+    scenario(run)
+
+def test_fd_own_child_cannot_force_busy_target():
+    async def run(env):
+        auth=await setup(env)
+        await env.store.update_session(LHOST,'target',parent_stream_id=FD)
+        await env.sessions.refresh()
+        env.tmux.working.add('target')
+        result=await env.server._on_close(close(auth,operator_override=True,operator_confirm=True))
+        assert env.tmux.killed == [], result
+    scenario(run)
+
+def test_fd_own_child_audit_failure_refuses_before_effect():
+    import sqlite3
+    async def run(env):
+        auth=await setup(env)
+        await env.store.update_session(LHOST,'target',parent_stream_id=FD)
+        await env.sessions.refresh()
+        async def broken(*a,**k): raise sqlite3.OperationalError('synthetic audit failure')
+        env.store.lifecycle_authority_audit=broken
+        with pytest.raises((sqlite3.OperationalError,Exception)):
+            await env.server._on_close(close(auth))
+        assert env.tmux.killed == []
+    scenario(run)
+
+def test_question_release_and_alias_send_do_not_invert_gate_lifecycle(tmp_path):
+    from notify import Notify
+    async def run(h):
+        rulings=h.server.lane_rulings
+        notify=Notify(str(tmp_path/'notifications.db'),sessions=h.sessions,notice_store=h.store,lane_rulings=rulings)
+        h.server.notify=notify
+        await notify.start()
+        tasks=[]
+        paused,proceed=asyncio.Event(),asyncio.Event()
+        try:
+            frozen={'envelope':{'schema_version':1,'question_id':'repair-lock-order','title':'Fixture','body':'Fixture question',
+                'dedup_key':'repair-lock-order','producer_stream_id':SEAT_A,'producer_session_generation':h.gen[SEAT_A],
+                'response_mode':'free_text','options':[]},'actions':[],'severity':'info'}
+            row=await rulings._create(action='question',key='repair-lock-order',intent=frozen,requester=SEAT_A,
+                requester_generation=h.gen[SEAT_A],binding=await rulings.binding(),target=SEAT_A,target_generation='',covered=True)
+            rid=row['ruling_request_id']
+            await h.store.submit(lambda c:(c.execute("UPDATE v2_assistant_lane_rulings SET state='approved',ruling='approve' WHERE ruling_request_id=?",(rid,)),c.commit()))
+            original=rulings._fetch
+            async def paused_fetch(rid_arg):
+                result=await original(rid_arg)
+                if asyncio.current_task() is tasks[0]:
+                    paused.set()
+                    await proceed.wait()
+                return result
+            rulings._fetch=paused_fetch
+            tasks.append(asyncio.create_task(rulings._release(row)))
+            await asyncio.wait_for(paused.wait(),2)
+            tasks.append(asyncio.create_task(h.send(request_id='question-send-race')))
+            await _until(lambda:h.store.front_desk_effect_gate.locked())
+            await asyncio.sleep(.02)
+            proceed.set()
+            done,pending=await asyncio.wait(tasks,timeout=.5)
+            assert not pending, {'pending':len(pending),'effect_gate_locked':h.store.front_desk_effect_gate.locked(),
+                'gate_waiters':len(h.store.front_desk_effect_gate._waiters or []),
+                'stacks':[[str(f.f_code.co_name)+':'+str(f.f_lineno) for f in t.get_stack()] for t in pending]}
+            for t in done:t.result()
+        finally:
+            proceed.set()
+            for t in tasks:
+                if not t.done():t.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+            await rulings.stop()
+            await notify.stop()
+    _run(tmp_path,run,front_desk=True)
+
+@pytest.mark.parametrize('change',['closed','generation'])
+def test_unavailable_fd_cannot_configure_advisor_after_lock_wait(tmp_path,change):
+    async def run(h):
+        rulings=h.server.lane_rulings
+        await rulings._authority_lock.acquire()
+        task=asyncio.create_task(h.server._on_assistant_authority({'action':'set','value':'disabled',
+            '_auth_context':{'token_verified':True,'stream_id':SEAT_A,'session_generation':h.gen[SEAT_A]}}))
+        try:
+            await _until(lambda:bool(rulings._authority_lock._waiters))
+            if change=='closed':
+                await h.store.update_session(SEAT_A.split(':')[0],'seat-a',status='closed')
+            else:
+                await h.store.open_session(SEAT_A.split(':')[0],'seat-a',provider='claude',pane_status='pane_alive')
+        finally:rulings._authority_lock.release()
+        try:
+            await _refused(task,'assistant_authority_config_unauthorized')
+        finally:
+            if not task.done():task.cancel()
+            await asyncio.gather(task,return_exceptions=True)
+    _run(tmp_path,run,front_desk=True)

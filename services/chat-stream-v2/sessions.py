@@ -1414,9 +1414,9 @@ class Sessions:
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
     async def _guard_lead_disposition(self, host, name, generation, close_kind, *, custody=False):
-        if close_kind not in {"session_close", "manager_close"} or not generation or custody:
-            # The current FD's close (manager or own child) records debt
-            # custody at admission, under the graph lock.
+        if close_kind not in {"session_close", "manager_close"} or not generation or (
+                custody and close_kind == "manager_close"):
+            # The current FD's explicit close records debt custody at admission.
             return
         stream = f"{host}:{name}"
         context = await self.store.lead_close_context(stream, generation)

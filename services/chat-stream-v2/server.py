@@ -5606,12 +5606,14 @@ class Server:
                         "close_unauthorized",
                         "close requires a verified self, direct-parent, or authenticated operator",
                     )
+            elif (self.sessions.assistant.front_desk_mode and not operator_authenticated
+                  and await self.sessions.assistant.manager_holds(auth)):
+                # The current FD closing its own child takes the one FD close
+                # path; parentage never narrows FD-held authority or its fences.
+                manager_generation = expected_generation or self._manager_target_generation(target)
+                close_kind = "manager_close"
             else:
                 coordinator_authorized = True
-        # The current FD closing its own child keeps the FD lane and custody
-        # fences; parentage never narrows FD-held authority.
-        fd_parent = bool(coordinator_authorized and self.sessions.assistant.front_desk_mode
-                         and await self.sessions.assistant.manager_holds(auth))
         if coordinator_authorized and msg.get("operator_confirm") is True:
             # The existing explicit parent-authorized operator route is an
             # involuntary close. A self-supplied flag never acquires it.
@@ -5689,11 +5691,9 @@ class Server:
             attribution=attribution,
             # An explicit current-FD close of a lead with pending disposition
             # is involuntary; its debt stays owed with FD custody.
-            disposition_custody=(manager_generation is not None or fd_parent)
-            and self.sessions.assistant.front_desk_mode,
+            disposition_custody=manager_generation is not None and self.sessions.assistant.front_desk_mode,
             admission_guard=(
-                (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row,
-                                                        fd_parent=fd_parent))
+                (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
                 else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
@@ -5742,7 +5742,7 @@ class Server:
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
 
-    async def _seat_close_admission(self, auth, caller, target, row, *, fd_parent=False):
+    async def _seat_close_admission(self, auth, caller, target, row):
         # Runs after acquiring the target lifecycle and graph locks, directly
         # before termination. Admission-time parentage is only an observation.
         if (row or {}).get('status') == 'closed':
@@ -5757,12 +5757,6 @@ class Server:
             raise VerbError(exc.code, str(exc)) from exc
         if caller != target and (row or {}).get('parent_stream_id') != caller:
             raise VerbError('close_unauthorized', 'caller no longer owns this child')
-        if fd_parent and (row or {}).get('status') == 'open':
-            if not await self.sessions.assistant.manager_holds(auth):
-                raise VerbError('authority_holder_required', 'front desk changed before close')
-            if await self._operator_lane_protects(target):
-                raise VerbError('close_operator_lane_protected', 'closing a seat never closes an operator lane')
-            await self.store.front_desk_disposition_custody(target, row.get('session_generation'))
 
     async def _manager_close_locked(
         self, close: Callable[[], Awaitable[dict[str, Any]]], msg: dict[str, Any], auth: dict[str, Any],
