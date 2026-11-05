@@ -1,9 +1,9 @@
 """Read-only managed launcher attestation; unknown provider processes block."""
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 
@@ -93,6 +93,36 @@ def _tree(records, root):
         result|=found
 
 
+def _native_executable(pid):
+    """Read the executed pathname, never the shell-like ps argument display."""
+    try:
+        if type(pid) is not int or pid <= 0:
+            raise ValueError()
+        if sys.platform == "darwin":
+            library=ctypes.CDLL("/usr/lib/libproc.dylib",use_errno=True)
+            probe=library.proc_pidpath
+            probe.argtypes=(ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32)
+            probe.restype=ctypes.c_int
+            buffer=ctypes.create_string_buffer(4096)
+            length=probe(pid,buffer,len(buffer))
+            raw=buffer.raw
+            if (length<=0 or length>=len(buffer) or raw[length]!=0
+                    or b"\0" in raw[:length]):
+                raise ValueError()
+            path=os.fsdecode(raw[:length])
+        elif sys.platform == "linux":
+            path=os.readlink(f"/proc/{pid}/exe")
+            if path.endswith(" (deleted)"):
+                raise ValueError()
+        else:
+            raise ValueError()
+        if not path or not os.path.isabs(path) or "\0" in path:
+            raise ValueError()
+        return path
+    except (OSError,AttributeError,TypeError,ValueError):
+        raise AccountError("account_repin_occupancy_unavailable") from None
+
+
 def status(host, binding, launchers, *, mutation_state=True):
     """Attest a unique native process per immutable managed pane/birth/home."""
     from provider_cli_artifact import code_identity
@@ -104,7 +134,7 @@ def status(host, binding, launchers, *, mutation_state=True):
         raise AccountError("account_repin_occupancy_unavailable")
     boot=_boot(host) if records else ""
     local={row.key:row for row in host.registry.bindings()}
-    managed=[];missing=[];claimed=set()
+    managed=[];missing=[];claimed=set();probed=[];reserved=set()
     for launcher in launchers:
         try:
             if not isinstance(launcher,dict):
@@ -136,9 +166,8 @@ def status(host, binding, launchers, *, mutation_state=True):
             if len(candidates)!=1 or not boot:
                 raise ValueError()
             pid=next(iter(candidates));actual=records[pid]
-            argv=shlex.split(actual["command"])
-            if (pid in claimed or actual["uid"]!=os.getuid() or not argv
-                    or argv[0]!=source.executable):
+            if (pid in reserved or actual["uid"]!=os.getuid()
+                    or _native_executable(pid)!=source.executable):
                 raise ValueError()
             proof=identity_proof(host=source.host,boot=boot,record=actual,tmux_session=name,
                 tmux_pane=fields[1],tty=fields[2],tmux_socket=fields[3])
@@ -146,11 +175,35 @@ def status(host, binding, launchers, *, mutation_state=True):
                 tmux_pane=fields[1],tty=fields[2],tmux_socket=fields[3])
             if not proof or not root_proof:
                 raise ValueError()
-            claimed.add(pid)
-            managed.append({"stream_id":sid,"session_generation":launcher["session_generation"],
-                "binding":source.public(),"process":proof,"pane_root":root_proof})
+            reserved.add(pid)
+            probed.append((root,pid,name,fields,{"stream_id":sid,
+                "session_generation":launcher["session_generation"],"binding":source.public(),
+                "process":proof,"pane_root":root_proof}))
         except (AccountError,KeyError,TypeError,ValueError):
             missing.append(launcher.get("stream_id") if isinstance(launcher,dict) else "unverified")
+    # Share bounded full-host observations after every native path read. Admit
+    # only unchanged process instances and the same unique native descendant.
+    if probed:
+        try:
+            fresh_native=_native_pids(host,binding)
+            fresh_records=_records(host)
+            fresh_boot=_boot(host)
+            native|=fresh_native  # Newly observed unknown processes stay visible.
+        except AccountError:
+            fresh_native=set();fresh_records={};fresh_boot=""
+        for root,pid,name,fields,row in probed:
+            try:
+                code,output=_run(host,["tmux","list-panes","-t","="+name,"-F",
+                    "#{pane_pid}|#{pane_id}|#{pane_tty}|#{socket_path}|#{session_name}"])
+                if (code or output.strip().split("|")!=fields or fresh_boot!=boot
+                        or not fresh_native<=fresh_records.keys()
+                        or fresh_records.get(root)!=records[root] or fresh_records.get(pid)!=records[pid]
+                        or fresh_native&_tree(fresh_records,root)!={pid}):
+                    raise ValueError()
+                claimed.add(pid)
+                managed.append(row)
+            except (AccountError,KeyError,TypeError,ValueError):
+                missing.append(row["stream_id"])
     from provider_account_mutation import _cell_entries,read
     pending=[]
     for operation in (_cell_entries(host,"permits",binding.provider,binding.alias) if mutation_state else ()):

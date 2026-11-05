@@ -605,6 +605,31 @@ any same-user provider process without complete launcher proof blocks the whole
 host/provider. PID reuse, unknown descendants and stale/missing records are not
 exclusions. Process environments and credentials are never read for attribution;
 unmanaged/operator processes are never torn down by this guard.
+
+The helper reads the executed path using macOS `proc_pidpath` or Linux
+`/proc/<pid>/exe` and compares it exactly with the immutable binding. Displayed
+prompt arguments are never parsed as shell syntax; the full command display
+still contributes to the process fingerprint. There is no basename, symlink,
+realpath or argv fallback. Unsupported platforms, unreadable or deleted
+executables, truncated/malformed paths and mismatches leave the launcher
+unverified. After native reads, a fresh process/boot census and tmux readback
+must retain the same root and candidate identities and unique native descendant.
+These observations preserve the existing birth precision; they are not an
+atomic kernel snapshot.
+
+This proof covers every open launcher for the host/provider, across account
+aliases. A helper-only or daemon-only update is refused by the shared code
+identity check. Activate an exact matched daemon/helper release through the
+coordinated deployment procedure with the prior set retained for rollback.
+Before activation, use the actual helper user/interpreter to probe every open
+Codex and Claude launcher on each included host, including explicit empty census
+cells. Actual bound-provider smoke on both macOS and Linux must prove exact path
+readability after startup. Permission or path mismatches block activation;
+they do not authorize elevated probe privileges or rewritten bindings. Refresh
+the census after launcher/generation changes, verify full manifests after the
+switch, and retain the maintenance hold until the supported clear and real input
+journey succeed.
+
 The central import compares the pin, health, default and exact hold tuple. A host
 success with failed central import remains parked: reconcile that same operation
 under a valid hold, without repeating its native turn. Auth, network, quota and

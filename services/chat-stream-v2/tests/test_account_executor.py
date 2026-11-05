@@ -175,3 +175,59 @@ def test_successful_generations_keep_cell_cooldown_and_hourly_cap(tmp_path):
             assert (await executor.recover(current,relogin=True,operation_id="later"))["outcome"]=="recovered"
         finally: store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('consumer,helper', [('current','current'),('old','old'),('current','old'),('old','current')])
+def test_launcher_code_identity_requires_matched_release(tmp_path,monkeypatch,consumer,helper):
+    import provider_cli_artifact
+    import provider_cli_occupancy as occupancy
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch)
+        try:
+            # Frozen public release identity; the current side uses the actual
+            # artifact hasher and actual occupancy/proof construction.
+            identities={'current':provider_cli_artifact.code_identity(),
+                'old':'bcf52a169f45c6ffcd5b02c131c3fbbc0a34b72f5d728b08444ef8515c88ff7d'}
+            assert identities['current']!=identities['old']
+            payload=occupancy.status(s.host,s.selected,await occupancy.descriptors(s.runtime,s.selected.host,s.selected.provider))
+            payload['code_identity']=identities[helper]
+            async def execute(*args,**kwargs):return payload
+            s.runtime.executor.execute=execute
+            monkeypatch.setattr(provider_cli_artifact,'code_identity',lambda:identities[consumer])
+            if consumer==helper:assert (await s.runtime.executor.verify_launchers(s.selected))['missing']==[]
+            else:
+                with pytest.raises(AccountError) as refused:await s.runtime.executor.verify_launchers(s.selected)
+                assert refused.value.context['reason']=='launcher_unverified'
+        finally:s.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('field', ['manifest_digest','pending_mutations','process-version','root-start','root-uid',
+    'process-boot','process-command','process-start','process-pid','root-pid','session-generation','duplicate','missing-row'])
+def test_native_launcher_proof_keeps_daemon_rejections(tmp_path,monkeypatch,field):
+    import provider_cli_occupancy as occupancy
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch)
+        try:
+            payload=occupancy.status(s.host,s.selected,await occupancy.descriptors(s.runtime,s.selected.host,s.selected.provider))
+            row=payload['managed'][0]
+            if field=='manifest_digest':payload[field]='0'*64
+            elif field=='pending_mutations':payload[field]=['unfinished']
+            elif field=='duplicate':payload['managed'].append(row)
+            elif field=='missing-row':payload['managed'].pop()
+            elif field=='session-generation':row['session_generation']='stale'
+            elif field=='process-version':row['process']['version']=1
+            elif field=='root-start':row['pane_root']['start_id']='stale'
+            elif field=='root-uid':row['pane_root']['uid']+=1
+            elif field=='root-pid':row['pane_root']['pid']+=1
+            else:
+                key={'process-boot':'boot_id','process-command':'command_fingerprint','process-start':'start_id','process-pid':'pid'}[field]
+                row['process'][key]=0 if key=='pid' else ''
+            async def execute(*args,**kwargs):return payload
+            s.runtime.executor.execute=execute
+            with pytest.raises(AccountError) as refused:await s.runtime.executor.verify_launchers(s.selected)
+            assert refused.value.context['reason']=='launcher_unverified'
+        finally:s.store.stop()
+    asyncio.run(run())

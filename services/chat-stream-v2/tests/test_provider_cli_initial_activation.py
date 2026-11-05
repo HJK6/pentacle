@@ -38,6 +38,11 @@ async def ready_fixture(tmp_path, monkeypatch, *, serving_seat=True,provider="co
     target=copy.deepcopy(pin);target["revision"]=1
     row=None
     if serving_seat:
+        import provider_cli_occupancy as occupancy
+        def probe(pid):
+            assert pid==42, "synthetic PID must never reach host procfs/libproc"
+            return selected.executable
+        monkeypatch.setattr(occupancy,"_native_executable",probe)
         started="Thu Oct 29 10:00:00 2026"
         row=await store.open_session("host-a","current-ready",session_generation="current-generation",provider=provider,
             pane_pid="42",bootstrap_state="ready",account_binding=selected.public(),observer_binding={
