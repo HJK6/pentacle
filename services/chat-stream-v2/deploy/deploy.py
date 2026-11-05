@@ -509,7 +509,7 @@ def _fleet_smoke_verdict(
     if (any(row["outcome"] == "failed" for row in reports)
             or payload.get("failures") or status == "FAIL" or result.returncode not in (0, 2)):
         outcome = FLEET_SMOKE_FAILED
-    elif issues or not reports or any(row["outcome"] == "untested" for row in reports):
+    elif issues or not reports or any(row["outcome"] in {"untested", "SKIPPED_OFFLINE"} for row in reports):
         outcome = FLEET_SMOKE_UNTESTED
     elif declarations and any(row["outcome"] != "passed" for row in reports if row["host"] not in {d["host"] for d in declarations}):
         outcome = FLEET_SMOKE_UNTESTED
@@ -528,7 +528,8 @@ def _fleet_smoke_verdict(
     return {
         "outcome": outcome, "cells": reports, "local_hosts": list(local_hosts),
         "scope": "declared_optional_exclusions" if declarations else "qualified_affected" if required_cells is not None else "full_matrix",
-        "full_fleet_acceptance": outcome == FLEET_SMOKE_PASSED and expected == full_expected,
+        "full_fleet_acceptance": outcome == FLEET_SMOKE_PASSED and expected == full_expected
+                                 and all(row["outcome"] == "passed" for row in reports),
         "not_selected": [{"host": h, "provider": p, "prompt_mode": m, "outcome": "UNTESTED",
                           "reason": "outside_qualified_scope"} for h, p, m in sorted(full_expected - expected)] if required_cells is not None else [],
         "unreachable_hosts": unreachable_hosts, "untested": untested, "skipped": skipped,

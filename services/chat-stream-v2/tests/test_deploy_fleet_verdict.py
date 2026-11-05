@@ -361,3 +361,36 @@ def test_excluded_host_without_declaration_is_still_required(tmp_path):
     verdict = deploy_mod._fleet_smoke_verdict(result, str(machines))
     assert verdict["outcome"] == "untested"
     assert len(verdict["untested"]) == 4
+
+
+def test_real_runner_optional_offline_payload_cannot_install_schedule(tmp_path, monkeypatch, capsys):
+    payload = {"ok": True, "status": "PASS", "cells": _rows("primary"),
+        "failures": [], "untested": [], "skipped": [
+            dict(row, outcome="SKIPPED_OFFLINE", **{"class": "untested", "reason": "host_unavailable"})
+            for row in _rows("satellite")]}
+    stamp, schedules = _apply(tmp_path, monkeypatch, payload, machines=[
+        {"name": "primary", "ssh_target": None},
+        {"name": "satellite", "ssh_target": "peer.example.invalid", "smoke_optional": True},
+    ])
+    code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == 9 and schedules == []
+    assert stamp["fleet_smoke"]["full_fleet_acceptance"] is False
+    assert len(stamp["fleet_smoke"]["skipped"]) == 4
+
+
+def test_real_runner_included_optional_offline_is_not_scoped_success(tmp_path):
+    import subprocess
+    machines = tmp_path / "machines.json"
+    machines.write_text(json.dumps([
+        {"name": "primary", "ssh_target": None},
+        {"name": "peer", "ssh_target": "peer.example.invalid", "smoke_optional": True},
+        {"name": "optional", "ssh_target": "optional.example.invalid", "smoke_optional": True},
+    ]))
+    payload = {"ok": True, "status": "PASS", "cells": _rows("primary"), "skipped": [
+        dict(row, outcome="SKIPPED_OFFLINE", **{"class": "untested", "reason": "host_unavailable"})
+        for row in _rows("peer")]}
+    verdict = deploy_mod._fleet_smoke_verdict(
+        subprocess.CompletedProcess([], 0, json.dumps(payload), ""), str(machines),
+        declared_exclusions=[{"host": "optional", "reason": "tracked defect", "authority": "fd:example"}])
+    assert verdict["outcome"] == "untested" and verdict["full_fleet_acceptance"] is False
+    assert len([row for row in verdict["skipped"] if row["outcome"] == "SKIPPED_OFFLINE"]) == 4

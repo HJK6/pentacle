@@ -20,9 +20,9 @@ import uuid
 
 INTENT_SCHEMA = "pentacle.coordinated-deploy.intent.v1"
 RECEIPT_SCHEMA = "pentacle.coordinated-deploy.receipt.v1"
-PHASES = {"prepared", "stopping", "stopped", "switching", "verifying", "committed",
+PHASES = {"prepared", "discarded", "stopping", "stopped", "switching", "verifying", "committed",
           "rolling_back", "rolled_back", "recovery_required"}
-TERMINAL = {"committed", "rolled_back"}
+TERMINAL = {"committed", "rolled_back", "discarded"}
 
 
 class Invalid(RuntimeError):
@@ -324,6 +324,16 @@ class Transaction:
 
     def rollback(self, receipt_path):
         receipt, journal = self.load(receipt_path)
+        if journal["phase"] in {"prepared", "discarded"}:
+            # Apply persists 'stopping' before its first runtime side effect.
+            # A never-applied preparation needs no restoration or live proofs:
+            # discard only its journal claim, even when sealed inputs drifted.
+            # Keep receipt/staging bytes and any older live stamp ancestry.
+            if journal["phase"] == "prepared":
+                self.phase(journal, "discarded")
+            return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
+                    "phase": "discarded", "outcome": "discarded", "scope": "preparation_only",
+                    "full_fleet_acceptance": False, "runtime_mutated": False, "exit_code": 0}
         if journal["phase"] == "rolled_back":
             self.adapter.validate_restored(receipt, journal)
             return self.result(receipt, journal, explicit_rollback=True)

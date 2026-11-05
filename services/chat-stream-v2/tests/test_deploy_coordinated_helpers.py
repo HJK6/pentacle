@@ -205,6 +205,35 @@ def test_post_commit_drift_refuses_before_stop(transaction):
     assert "stop" not in adapter.calls
 
 
+@pytest.mark.parametrize("drift", ["none", "inputs", "catalog", "policy", "source"])
+def test_prepared_rollback_discards_without_runtime_effects_and_allows_reprepare(transaction, drift):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    sealed = path.read_bytes()
+    if drift == "inputs": adapter.input_drift = True
+    elif drift == "catalog": adapter.catalog_drift = True
+    elif drift == "policy": adapter.policy = "newer-unrelated-policy"
+    elif drift == "source": adapter.source = "newer-unrelated-source"
+    if drift == "inputs":
+        with pytest.raises(c.Invalid, match="input drift"): tx.apply(intent, path)
+    before = (adapter.current(None), adapter.pid)
+    adapter.calls.clear()
+    result = tx.rollback(path)
+    assert result["phase"] == "discarded" and result["outcome"] == "discarded"
+    assert result["exit_code"] == 0 and result["full_fleet_acceptance"] is False
+    assert result["runtime_mutated"] is False
+    assert adapter.calls == [] and (adapter.current(None), adapter.pid) == before
+    assert path.read_bytes() == sealed and tx.rollback(path) == result
+    assert c.legacy_guard(adapter.repo, {}, rollback=False) is None
+    # Existing coordinated ancestry in a live stamp still requires its receipt.
+    with pytest.raises(c.Invalid, match="coordinated ancestry"):
+        c.legacy_guard(adapter.repo, {"coordinated_receipt": "/prior/receipt"}, rollback=True)
+    value = json.loads(intent.read_bytes()); value["transaction_id"] = "example-transaction-02"
+    fresh_intent = private_json(intent.parent / "intent2.json", value)
+    assert tx.prepare(fresh_intent, intent.parent / "receipt2.json")["phase"] == "prepared"
+    with pytest.raises(c.Invalid, match="stale receipt"): tx.rollback(path)
+
+
 def test_legacy_forward_and_plain_rollback_cannot_bypass_journal(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)

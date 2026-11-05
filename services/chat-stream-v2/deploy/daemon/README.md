@@ -194,10 +194,20 @@ A separate owner-only journal lives beside the runtime checkout in
 `.pentacle-coordinated-<checkout-path-hash>/<transaction-id>/journal.json`.
 `active.json` binds the current receipt. Each phase is durable before its side
 effects: prepared, stopping, stopped, switching, verifying, committed,
-rolling_back, rolled_back or recovery_required. An unfinished journal blocks a
+rolling_back, rolled_back, discarded or recovery_required. An unfinished journal blocks a
 new forward deploy. Recover explicitly with the same receipt after interruption.
 Plain `--rollback` refuses coordinated ancestry and prints that receipt path;
 unchanged-identity releases retain the ancestry in their stamps.
+
+If apply has never begun, the same receipt-based `--rollback` command discards
+the preparation without stopping a daemon, restoring files, probing helpers or
+running canaries. It works after input drift and preserves all current runtime
+state, staged directories and receipt bytes. The journal becomes terminal
+`discarded`; operation exit 0 has `outcome=discarded`, `scope=preparation_only`
+and `full_fleet_acceptance=false`, and is not deployment acceptance. Prepare
+again with fresh inputs, a new transaction ID and a new receipt path. Discard
+is idempotent until a new preparation supersedes the active receipt; it does
+not bypass any older coordinated ancestry in the live deployment stamp.
 
 Exit **11** means committed scoped success (or successful explicit restoration)
 with declared optional exclusions and `full_fleet_acceptance=false`. It requires

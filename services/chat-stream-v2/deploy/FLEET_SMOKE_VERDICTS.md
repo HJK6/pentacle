@@ -53,6 +53,10 @@ merged by `(host, provider, prompt_mode)`. Failure dominates; quota/general
 untested dominates unreachable; incomplete evidence never becomes passed.
 Expected cells missing from all channels appear explicitly as
 `untested` / `missing_evidence`.
+The runner's `skipped` array is also consumed. Optional-offline rows retain
+`SKIPPED_OFFLINE` and make the verdict `untested` (exit 9), including when the
+runner reports PASS/exit 0. They never establish full-fleet acceptance, install
+the recurring smoke schedule or satisfy the included cells of a scoped result.
 
 Local identity and the expected host set come from the installed launchd
 `PENTACLE_MACHINES_FILE`, using the existing `ssh_target: null` local marker.
