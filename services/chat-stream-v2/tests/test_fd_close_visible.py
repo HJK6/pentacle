@@ -446,3 +446,99 @@ def test_only_the_current_binding_generation_has_fd_authority(monkeypatch, calle
             await env.server._on_close(close(auth, request_id="refused-" + caller))
         assert env.tmux.killed == [] and (await env.store.fetch_session(HOST, "target"))["status"] == "open"
     scenario(run)
+
+
+async def fd_changes(env):
+    return [r for r in await env.audit() if r["action"] == "fd_binding_change"]
+
+
+def test_rebind_audits_one_transition_and_replay_adds_none():
+    async def run(env):
+        await swap(env)
+        changes = await fd_changes(env)
+        assert [(r["prior_stream_id"], r["target_stream_id"], r["actor_identity"], r["request_id"], r["reason"])
+                for r in changes] == [(FD, B, FD, "a-to-b", "assistant rebind")]
+        replay = await env.server.assistant_composite.rebind({"type": "assistant.rebind", "request_id": "a-to-b",
+            "expected_revision": 0, "target_stream_id": B}, actor_stream_id=FD)
+        assert replay["duplicate"] is True and len(await fd_changes(env)) == 1
+    scenario(run)
+
+
+def test_policy_activation_is_audited_once_and_legacy_holder_has_no_privilege(tmp_path):
+    async def run(env):
+        auth_a, auth_b = await swap(env)
+        assert await env.store.lifecycle_authority_activate() is True
+        env.store.stop(); env.store.start()
+        assert await env.store.lifecycle_authority_activate() is False
+        rows = [r for r in await env.audit() if r["action"] == "fd_policy_activation"]
+        assert [(r["prior_stream_id"], r["reason"]) for r in rows] == [(HOST + ":legacy", "front-desk policy enabled")]
+        await env.store.update_session(HOST, "legacy", status="open")  # even reopened, a snapshot grants nothing
+        legacy = {"token_verified": True, "stream_id": HOST + ":legacy", "session_generation": await env.gen("legacy")}
+        assert await env.sessions.assistant.manager_holds(legacy) is False
+        assert await env.sessions.assistant.manager_holds(auth_b) is True
+    scenario(run, path=str(tmp_path / "sessions.db"))
+
+
+def test_revocation_survives_rebind_and_designation_only_reenables_the_current_fd():
+    async def run(env):
+        auth_a, auth_b = await swap(env)
+        await env.mutate(OPERATOR, "revoke", request_id="revoke", reason="operator pause")
+        assert await env.sessions.assistant.manager_holds(auth_b) is False
+        composite = env.server.assistant_composite
+        await composite.rebind({"type": "assistant.rebind", "request_id": "b-to-a", "expected_revision": 1,
+                                "target_stream_id": FD}, actor_stream_id=B)
+        assert await env.sessions.assistant.manager_holds(auth_a) is False  # still revoked
+        assert (await env.store.lifecycle_authority_effective())["policy_state"] == "revoked"
+        await _refused(env.mutate(OPERATOR, "designate", target="front-desk-b", request_id="former"),
+                       "authority_target_not_front_desk")
+        await _refused(env.mutate(OPERATOR, "designate", target="front-desk", target_generation="stale",
+                                  request_id="stale"), "authority_target_generation_mismatch")
+        receipt = (await env.mutate(OPERATOR, "designate", target="front-desk", request_id="enable"))["receipt"]
+        assert (receipt["holder_stream_id"], receipt["holder_generation"]) == (FD, auth_a["session_generation"])
+        assert await env.sessions.assistant.manager_holds(auth_a) is True
+        assert await env.sessions.assistant.manager_holds(auth_b) is False
+    scenario(run)
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+def test_rollback_projection_never_lets_old_code_grant_the_former_fd(revoked):
+    async def run(env):
+        auth_a, auth_b = await swap(env)  # A stays open after A -> B
+        if revoked:
+            await env.mutate(OPERATOR, "revoke", request_id="revoke", reason="operator pause")
+        receipt = await env.store.lifecycle_authority_project_for_rollback("release-rollback")
+        assert receipt["holder_stream_id"] == (None if revoked else B)
+        env.sessions.assistant.front_desk = None  # the pre-binding reader
+        assert await env.sessions.assistant.manager_holds(auth_a) is False
+        assert await env.sessions.assistant.manager_holds(auth_b) is (not revoked)
+        # Rolling forward again keeps an enabled policy enabled and a revoked one revoked.
+        env.sessions.assistant.front_desk = env.server.assistant_composite
+        assert (await env.store.lifecycle_authority_effective())["policy_state"] == (
+            "revoked" if revoked else "enabled")
+    scenario(run)
+
+
+def test_reparent_rechecks_the_principal_under_the_graph_lock():
+    async def run(env):
+        _, auth_b = await swap(env)
+        await env.open("other", role="lead")
+        await env.open("kid", parent_stream_id=HOST + ":other")
+        reached, resume = asyncio.Event(), asyncio.Event()
+        original = env.sessions.reparent
+        async def paused(*args, **kwargs):
+            reached.set()
+            await resume.wait()
+            return await original(*args, **kwargs)
+        env.sessions.reparent = paused
+        task = asyncio.create_task(env.server._on_reparent({"stream_id": HOST + ":kid", "new_parent_stream_id": B,
+            "reason": REASON, "request_id": "raced", "expected_generation": await env.gen("kid"),
+            "_auth_context": auth_b}))
+        await asyncio.wait_for(reached.wait(), 5)
+        try:
+            await env.server.assistant_composite.rebind({"type": "assistant.rebind", "request_id": "b-to-a",
+                "expected_revision": 1, "target_stream_id": FD}, actor_stream_id=B)
+        finally:
+            resume.set()
+        await _refused(task, "authority_holder_required")
+        assert (await env.store.fetch_session(HOST, "kid"))["parent_stream_id"] == HOST + ":other"
+    scenario(run)

@@ -183,7 +183,10 @@ def holder_is(conn: sqlite3.Connection, stream_id: str, generation: str | None) 
     if front_desk:
         if not stream_id or not generation or policy_state(conn)["state"] != "enabled":
             return False
-        principal = front_desk_principal(conn, front_desk)
+        try:
+            principal = front_desk_principal(conn, front_desk)
+        except ValueError:  # a corrupt binding grants nothing
+            return False
         return bool(principal and (principal["stream_id"], principal["session_generation"]) == (stream_id, generation))
     grant = current(conn)
     if not stream_id or not generation or grant["stream_id"] != stream_id or grant["session_generation"] != generation:
