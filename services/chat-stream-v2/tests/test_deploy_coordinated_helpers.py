@@ -458,16 +458,39 @@ def runtime_preparation(tmp_path, monkeypatch):
     fixture.close()
 
 
-def test_real_runtime_prepare_preserves_source_policy_and_proves_configured_interpreters(runtime_preparation):
+@pytest.mark.parametrize("interpreter_flags", [[], ["-u"]])
+def test_real_runtime_prepare_preserves_source_policy_and_proves_configured_interpreters(runtime_preparation, interpreter_flags):
+    import plistlib
     runtime, fixture, intent, root = runtime_preparation
-    before = (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes())
+    plist_path = root / "daemon.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+    # Installed launchd shape: checkout Python, optional -u, checkout main.py.
+    plist["ProgramArguments"][1:1] = interpreter_flags
+    plist_path.write_bytes(plistlib.dumps(plist))
+    before = (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
     folder = root / "preparation"; folder.mkdir(mode=0o700)
     prepared = runtime.prepare(intent, folder)
-    assert before == (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes())
+    assert before == (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
     assert prepared["source"]["target"]["code_identity"] != prepared["source"]["prior"]["code_identity"]
     assert all(row["proof"]["closure"]["python"] == sys.executable for source in prepared["source"].values() for row in source["helpers"].values())
     assert len(prepared["source"]["target"]["helpers"]["fixture"]["proof"]["artifacts"]) == 2
     assert prepared["source"]["target"]["smoke_plan"]["hosts"] == ["fixture"]
+
+
+@pytest.mark.parametrize("prefix", [["-I"], ["-u", "-u"], ["-c"], ["/other/main.py"], ["-u", "/other/main.py"]])
+def test_runtime_prepare_rejects_other_entrypoint_prefixes_before_staging(runtime_preparation, prefix):
+    import plistlib
+    runtime, fixture, intent, root = runtime_preparation
+    plist_path = root / "daemon.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+    plist["ProgramArguments"][1:1] = prefix
+    plist_path.write_bytes(plistlib.dumps(plist))
+    before = (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
+    folder = root / "preparation"; folder.mkdir(mode=0o700)
+    with pytest.raises(c.Invalid, match="installed daemon must execute the target checkout main.py"):
+        runtime.prepare(intent, folder)
+    assert not list(folder.iterdir())
+    assert before == (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
 
 
 def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch(runtime_preparation):

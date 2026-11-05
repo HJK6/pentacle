@@ -169,7 +169,9 @@ class Runtime:
         accounts = self.account_snapshot(policy, self.database(plist))
         arguments = plist.get("ProgramArguments", [])
         self.d._validate_v2_launchd_program(self.repo, arguments)
-        if len(arguments) < 2 or arguments[1] != str(self.repo / SERVICE / "main.py"):
+        # Match packet/activation-evidence.py's optional unbuffered prefix.
+        main_index = 2 if len(arguments) > 1 and arguments[1] == "-u" else 1
+        if len(arguments) <= main_index or arguments[main_index] != str(self.repo / SERVICE / "main.py"):
             raise Invalid("installed daemon must execute the target checkout main.py")
         self.d.verify_log_guard(self.log_guard_dir or self.service.log_guard_dir)
         if not self.d._daemon_log_paths(self.service):
