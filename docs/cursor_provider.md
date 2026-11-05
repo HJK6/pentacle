@@ -87,6 +87,7 @@ at idle keeps the seat open. `/exit` and EOF stop the child and close the REPL;
 other slash-prefixed text is an ordinary prompt. Each turn has a 20-minute bound.
 The fixed turn command includes `--trust --force --workspace`, the existing chat's
 `--resume`, stream JSON, partial output, `--model auto`, and disabled auto-update.
+An option terminator (`--`) keeps every prompt, including leading hyphens, as data.
 Cursor's sandbox default is unchanged. The native Cursor TUI is separate; open
 `agent --resume=<chat_id>` outside the seat if needed.
 

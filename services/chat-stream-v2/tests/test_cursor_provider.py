@@ -45,7 +45,7 @@ from pathlib import Path
 args=sys.argv[1:]
 mode=os.environ.get('CURSOR_FAKE_MODE','ok')
 chat='11111111-2222-4333-8444-555555555555'
-if '--version' in args:
+if args[0]=='--version':
  print('bad' if mode=='version' else '2026.10.22-27dcf5f'); sys.exit(0)
 if args[0]=='status':
  if mode=='status_timeout':time.sleep(30)
@@ -57,8 +57,21 @@ if args[0]=='create-chat':
  if mode=='create_timeout':time.sleep(30)
  print('bad' if mode=='create_bad' else chat,flush=True)
  sys.exit(0 if os.isatty(0) and os.isatty(1) else 9)
-prompt=args[-1]
-Path(os.environ['CURSOR_FAKE_CALLS']).open('a').write(json.dumps({'argv':args,'prompt':prompt,'pid':os.getpid(),'pgid':os.getpgrp()})+'\\n')
+# Model the pinned commander's option boundary, including last-option-wins.
+options={};operands=[];i=0
+while i<len(args):
+ arg=args[i];i+=1
+ if arg=='--':operands.extend(args[i:]);break
+ name,sep,value=arg.partition('=')
+ if name in ('--workspace','--resume','--output-format','--model'):
+  if not sep:value=args[i];i+=1
+  options[name]=value
+ elif arg in ('-p','--trust','--force','--disable-auto-update','--stream-partial-output'):pass
+ elif arg.startswith('-') and len(arg)>1:
+  print('unknown option',file=sys.stderr);sys.exit(1)
+ else:operands.append(arg)
+prompt=' '.join(operands)
+Path(os.environ['CURSOR_FAKE_CALLS']).open('a').write(json.dumps({'argv':args,'options':options,'prompt':prompt,'pid':os.getpid(),'pgid':os.getpgrp()})+'\\n')
 def emit(d):print(json.dumps(d),flush=True)
 emit({'type':'system','subtype':'init','session_id':'wrong' if prompt=='mismatch' else chat})
 emit({'type':'user','session_id':chat,'message':{'content':[{'type':'text','text':prompt}]}})
@@ -300,6 +313,23 @@ def test_tmux_multiline_long_and_repeated_admissions(pane):
     before=pane.path.read_bytes();pane.paste('/exit');pane.wait(pane.dead)
     assert pane.path.read_bytes().startswith(before)
     assert pane.records()[-1]['event']=='exit'
+
+
+@pytest.mark.parametrize('message',['- item','--model=other model','--workspace=/other',
+                                  '--resume=other-chat','--version','-h','--'])
+def test_tmux_leading_hyphen_prompt_remains_data(pane,message):
+    pane.paste(message)
+    pane.wait(lambda:any(r.get('type')=='result' or r.get('event')=='turn_failed'
+                         for r in pane.records()))
+    assert not any(r.get('event')=='turn_failed' for r in pane.records())
+    call=pane.receipts()[-1]
+    assert call['prompt']==message
+    assert call['options']['--model']=='auto'
+    assert call['options']['--workspace']==str(pane.path.parents[2])
+    assert call['options']['--resume']==CHAT
+    assert call['options']['--output-format']=='stream-json'
+    users=[r for r in pane.records() if r.get('type')=='user']
+    assert users[-1]['message']['content'][0]['text']==message
 
 
 def test_tmux_busy_queue_receipt_and_ctrl_c_cleanup(pane):

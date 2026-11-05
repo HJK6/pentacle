@@ -82,7 +82,7 @@ class Repl:
         command = [args.agent, '-p', '--trust', '--force', '--disable-auto-update',
                    '--workspace', args.cwd, '--resume=' + args.chat_id,
                    '--output-format', 'stream-json', '--stream-partial-output',
-                   '--model', args.model, message]
+                   '--model', args.model, '--', message]
         self.stdout = b''
         self.stderr_class = 'other'
         self.result_seen = False
