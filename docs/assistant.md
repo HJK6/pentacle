@@ -436,16 +436,23 @@ agent-orch assistant publish --proactive --request-id <stable-id> \
   --composite-stream-id <assistant-stream> --publish-kind status --message <text>
 ```
 
-Proactive publication accepts prose/status only, without dispatch/reply IDs. It
-may carry managed `attachment_ids`; they resolve in the composite's own scope
+Proactive publication accepts `prose` and `status` only. `question`, `result` and
+`reply_to_*` IDs are refused (`assistant_publish_payload_invalid`).
+
+It may carry managed `attachment_ids`; they resolve in the composite's own scope
 with the same ready-row, purpose and byte re-verification as a dispatch reply,
 and `--message` may then be empty. `agent-orch send-file <path> --to
 <assistant-stream> --proactive` is the one-command form; its request ID
-defaults to `send-file:<upload_id>`. A verified stream token must match the current binding and its
-live generation on every call, including retries. Unbound, stale, other and
-scoped/Dot callers are rejected with `assistant_publish_provenance_unverified`.
-Identical request ID and payload retries return the same event; changed payloads
-return `assistant_publish_conflict`. Rebinding or closing the seat revokes the
+defaults to `send-file:<upload_id>`.
+
+A verified stream token must match the current binding and its live generation
+on every call, including retries. Unbound, stale, other and scoped/Dot callers
+are rejected with `assistant_publish_provenance_unverified`. A stale or
+other-binding seat that carries attachments gets `publish_not_authorized`
+instead. Identical request ID
+and payload retries return the same event; changed payloads return
+`assistant_publish_conflict` (`send-file` reports it as `publish_replay_conflict`).
+Rebinding or closing the seat revokes the
 old publisher. No glyph-only final is needed to hide notice-turn prose.
 
 The source transcript remains intact. In the same ingest transaction, the store
