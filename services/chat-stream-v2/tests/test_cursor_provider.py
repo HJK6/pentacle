@@ -249,7 +249,7 @@ def test_notices_malformed_records_and_line_identity():
     assert all('secret' not in str(e) for e in events)
 
 class Pane:
-    def __init__(self,tmp_path,fake_agent,socket):
+    def __init__(self,tmp_path,fake_agent,socket,*,retain_shell=False):
         self.socket=socket
         self.calls=tmp_path/'calls.jsonl'
         self.path=tmp_path/'.cursor/sessions'/f'{SID}.jsonl'
@@ -257,10 +257,11 @@ class Pane:
             '--agent',str(fake_agent),'--session-id',SID,'--chat-id',CHAT,
             '--transcript',str(self.path),'--cwd',str(tmp_path),'--model','auto',
             '--cli-version','2026.10.22-27dcf5f']
-        self.command='CURSOR_FAKE_CALLS='+shlex.quote(str(self.calls))+' '+shlex.join(self.args)
+        self.command='CURSOR_FAKE_CALLS='+shlex.quote(str(self.calls))+' exec '+shlex.join(self.args)
         self.run('new-session','-d','-x','240','-y','60','-s','cursor','sleep 300')
         self.run('set-option','-g','remain-on-exit','on')
-        self.run('respawn-pane','-k','-t','cursor',self.command)
+        # A trailing command prevents shells from implicitly exec'ing the REPL.
+        self.run('respawn-pane','-k','-t','cursor',self.command+('; :' if retain_shell else ''))
         try:
             self.wait(lambda:cursor_prompt_ready(self.capture()))
         except BaseException:
@@ -288,11 +289,11 @@ class Pane:
 
 
 @pytest.fixture
-def pane(tmp_path,fake_agent):
+def pane(tmp_path,fake_agent,request):
     p=None
     socket=Path('/tmp') / ('cursor-' + uuid.uuid4().hex + '.sock')
     try:
-        p=Pane(tmp_path,fake_agent,socket)
+        p=Pane(tmp_path,fake_agent,socket,retain_shell=getattr(request,'param',False))
         yield p
     finally:
         # Also clean the server if construction/boot assertion failed.
@@ -482,6 +483,7 @@ def test_admission_probes_leave_event_loop_responsive(tmp_path,fake_agent,monkey
     asyncio.run(run())
 
 @pytest.mark.requires('process start identity readable')
+@pytest.mark.parametrize('pane',[False,True],indirect=True,ids=['default-shell','retained-shell'])
 def test_real_pane_root_and_durable_ingest_journey(pane):
     """Unmocked ps + real pane + real append file + real event store."""
     from prockill import process_record
