@@ -605,6 +605,52 @@ any same-user provider process without complete launcher proof blocks the whole
 host/provider. PID reuse, unknown descendants and stale/missing records are not
 exclusions. Process environments and credentials are never read for attribution;
 unmanaged/operator processes are never torn down by this guard.
+
+The helper reads the executed path using macOS `proc_pidpath` or Linux
+`/proc/<pid>/exe`. It strictly resolves the immutable binding's executable,
+retaining its symlink chain, regular-file identity and pinned SHA256. Direct
+native and native symlink launchers must resolve to that same target and match
+the binding hash. Displayed prompt arguments are never parsed as shell syntax;
+the full command display still contributes to the process fingerprint.
+
+The supported Linux Codex JS form has additional requirements: the bound
+`codex.js` script must match the binding hash; a regular Node interpreter inside
+the exact pane must execute that script as its absolute second kernel argv
+element; and a complete, unchanged, same-UID parent chain must connect it to the
+unique provider native child. Bounded NUL-delimited procfs argv supplies this
+linkage; prompt arguments after the script are opaque. Node alone, a script
+mentioned in a prompt, unsupported Node options or a sibling process cannot
+prove provider identity. The native child must separately match the daemon's
+validated provider/version/actual-host-platform native pin, passed through the
+authenticated helper input and fenced before/after dispatch. Script and native
+hashes are never interchangeable. Missing pins leave wrappers unverified;
+direct native proofs have no new release-pin dependency. Other wrapper forms,
+including macOS JS wrappers, fail closed.
+
+On Linux the helper hashes the executing image through procfs and compares its
+file identity with the resolved image, refusing deleted or replaced images.
+Across a fresh process/boot census and tmux readback, it rechecks file chains,
+hashes, kernel paths, wrapper argv/ancestry and the unique native descendant.
+Unreadable, malformed, ambiguous or changing evidence remains missing and
+unclaimed. There is no basename or displayed-argv fallback. These observations
+preserve existing birth precision and the macOS immutable-artifact assumption;
+they are not an atomic kernel snapshot. Drain checks also refuse missing
+launcher evidence; callers without trusted wrapper pin inputs cannot assume a
+wrapper pane is drained.
+
+This proof covers every open launcher for the host/provider, across account
+aliases. A helper-only or daemon-only update is refused by the shared code
+identity check. Activate an exact matched daemon/helper release through the
+coordinated deployment procedure with the prior set retained for rollback.
+Before activation, use the actual helper user/interpreter to probe every open
+Codex and Claude launcher on each included host, including explicit empty census
+cells. Actual bound-provider smoke on both macOS and Linux must prove exact path
+readability after startup. Permission or path mismatches block activation;
+they do not authorize elevated probe privileges or rewritten bindings. Refresh
+the census after launcher/generation changes, verify full manifests after the
+switch, and retain the maintenance hold until the supported clear and real input
+journey succeed.
+
 The central import compares the pin, health, default and exact hold tuple. A host
 success with failed central import remains parked: reconcile that same operation
 under a valid hold, without repeating its native turn. Auth, network, quota and

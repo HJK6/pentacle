@@ -175,3 +175,109 @@ def test_successful_generations_keep_cell_cooldown_and_hourly_cap(tmp_path):
             assert (await executor.recover(current,relogin=True,operation_id="later"))["outcome"]=="recovered"
         finally: store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('consumer,helper', [('current','current'),('old','old'),('current','old'),('old','current')])
+def test_launcher_code_identity_requires_matched_release(tmp_path,monkeypatch,consumer,helper):
+    import provider_cli_artifact
+    import provider_cli_occupancy as occupancy
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch)
+        try:
+            # Frozen public release identity; the current side uses the actual
+            # artifact hasher and actual occupancy/proof construction.
+            identities={'current':provider_cli_artifact.code_identity(),
+                'old':'bcf52a169f45c6ffcd5b02c131c3fbbc0a34b72f5d728b08444ef8515c88ff7d'}
+            assert identities['current']!=identities['old']
+            payload=occupancy.status(s.host,s.selected,await occupancy.descriptors(s.runtime,s.selected.host,s.selected.provider),pin=s.pin)
+            payload['code_identity']=identities[helper]
+            async def execute(*args,**kwargs):return payload
+            s.runtime.executor.execute=execute
+            monkeypatch.setattr(provider_cli_artifact,'code_identity',lambda:identities[consumer])
+            if consumer==helper:assert (await s.runtime.executor.verify_launchers(s.selected))['missing']==[]
+            else:
+                with pytest.raises(AccountError) as refused:await s.runtime.executor.verify_launchers(s.selected)
+                assert refused.value.context['reason']=='launcher_unverified'
+        finally:s.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('field', ['manifest_digest','pending_mutations','process-version','root-start','root-uid',
+    'process-boot','process-command','process-start','process-pid','root-pid','session-generation','duplicate','missing-row'])
+def test_native_launcher_proof_keeps_daemon_rejections(tmp_path,monkeypatch,field):
+    import provider_cli_occupancy as occupancy
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch)
+        try:
+            payload=occupancy.status(s.host,s.selected,await occupancy.descriptors(s.runtime,s.selected.host,s.selected.provider))
+            row=payload['managed'][0]
+            if field=='manifest_digest':payload[field]='0'*64
+            elif field=='pending_mutations':payload[field]=['unfinished']
+            elif field=='duplicate':payload['managed'].append(row)
+            elif field=='missing-row':payload['managed'].pop()
+            elif field=='session-generation':row['session_generation']='stale'
+            elif field=='process-version':row['process']['version']=1
+            elif field=='root-start':row['pane_root']['start_id']='stale'
+            elif field=='root-uid':row['pane_root']['uid']+=1
+            elif field=='root-pid':row['pane_root']['pid']+=1
+            else:
+                key={'process-boot':'boot_id','process-command':'command_fingerprint','process-start':'start_id','process-pid':'pid'}[field]
+                row['process'][key]=0 if key=='pid' else ''
+            async def execute(*args,**kwargs):return payload
+            s.runtime.executor.execute=execute
+            with pytest.raises(AccountError) as refused:await s.runtime.executor.verify_launchers(s.selected)
+            assert refused.value.context['reason']=='launcher_unverified'
+        finally:s.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('case',['valid','changed-authoritative-pin','wrong-pin-echo','missing-transport-pin'])
+def test_wrapper_pin_uses_authenticated_transport_and_daemon_fence(tmp_path,monkeypatch,case):
+    import provider_cli_occupancy as occupancy
+    from provider_cli_fixtures import seed_pin
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch,platform='wsl',launch_type='js')
+        try:
+            calls=[]
+            class Transport:
+                async def run_command(self,host,*argv,timeout):
+                    assert host==s.selected.host and argv[:3]==('/fixture/python','/fixture/helper.py','launcher-status')
+                    flags=dict(zip(argv[3::2],argv[4::2]));calls.append(flags)
+                    pin=json.loads(flags['--pin-json'])
+                    assert pin==s.pin  # Maintained account's old version is deliberately different.
+                    payload=s.host.handle('launcher-status',provider=s.selected.provider,alias=s.selected.alias,
+                        expected_generation=s.selected.generation,operation_id='fixture-transport',
+                        pin=None if case=='missing-transport-pin' else pin,
+                        reconcile=json.loads(flags['--reconcile-json']))
+                    if case=='wrong-pin-echo':payload['pin_digest']='0'*64
+                    if case=='changed-authoritative-pin':
+                        await seed_pin(s.runtime,dict(s.pin,revision=s.pin['revision']+1))
+                    return 0,json.dumps(payload)
+            s.runtime.policy['executors']={s.selected.host:{'python':'/fixture/python','script':'/fixture/helper.py'}}
+            s.runtime.executor=RealAccountExecutor(s.runtime,Transport())
+            if case=='valid':
+                value=await s.runtime.executor.verify_launchers(s.selected)
+                assert value['missing']==[] and value['unmanaged']==[]
+            else:
+                with pytest.raises(AccountError) as refused:await s.runtime.executor.verify_launchers(s.selected)
+                assert refused.value.context['reason']=='launcher_unverified'
+            assert len(calls)==1 and len(json.loads(calls[0]['--reconcile-json'])['managed_launchers'])==2
+        finally:s.store.stop()
+    asyncio.run(run())
+
+
+def test_direct_native_does_not_gain_a_release_pin_dependency(tmp_path,monkeypatch):
+    import provider_cli_pin
+    from test_provider_cli_occupancy import occupancy_journey
+    async def run():
+        s=await occupancy_journey(tmp_path,monkeypatch)
+        try:
+            def unavailable(ledger):raise AccountError('provider_cli_pin_unavailable')
+            monkeypatch.setattr(provider_cli_pin,'current',unavailable)
+            value=await s.runtime.executor.verify_launchers(s.selected)
+            assert value['missing']==[] and value['pin_digest']=='absent'
+        finally:s.store.stop()
+    asyncio.run(run())
