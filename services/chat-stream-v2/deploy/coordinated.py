@@ -265,6 +265,8 @@ class Transaction:
         journal = {"transaction_id": intent["transaction_id"], "receipt": str(receipt_path),
                    "receipt_sha256": receipt["receipt_sha256"], "forward_failure": None,
                    "rollback_failure": None, "readbacks": [], "history": []}
+        if getattr(self.adapter, "helper_wait_events", None):
+            journal["helper_proof_waits"] = copy.deepcopy(self.adapter.helper_wait_events)
         self.phase(journal, "prepared")
         # Prepared transactions also block legacy deploys: their preimages must
         # not silently become stale during the FD window.
@@ -291,8 +293,27 @@ class Transaction:
             raise Invalid("stale receipt: not the active coordinated transaction")
         return receipt, journal
 
+    @contextmanager
+    def helper_wait_journal(self, journal):
+        previous = getattr(self.adapter, "helper_wait_observer", None)
+        def record(row):
+            journal.setdefault("helper_proof_waits", []).append(copy.deepcopy(row))
+            try:
+                atomic_json(self.root / journal["transaction_id"] / "journal.json", journal)
+            except OSError:
+                pass  # Diagnostics cannot replace a refusal or change admission.
+        self.adapter.helper_wait_observer = record
+        try:
+            yield
+        finally:
+            self.adapter.helper_wait_observer = previous
+
     def apply(self, intent_path, receipt_path):
         receipt, journal = self.load(receipt_path)
+        with self.helper_wait_journal(journal):
+            return self._apply(intent_path, receipt, journal)
+
+    def _apply(self, intent_path, receipt, journal):
         if journal["phase"] != "prepared":
             raise Invalid("forward deployment requires prepared phase; recover unfinished transactions explicitly")
         if (file_digest(private_file(intent_path)) != receipt["intent_sha256"]
@@ -338,6 +359,10 @@ class Transaction:
 
     def rollback(self, receipt_path):
         receipt, journal = self.load(receipt_path)
+        with self.helper_wait_journal(journal):
+            return self._rollback(receipt, journal)
+
+    def _rollback(self, receipt, journal):
         if journal["phase"] in {"prepared", "discarded"}:
             # Apply persists 'stopping' before its first runtime side effect.
             # A never-applied preparation needs no restoration or live proofs:

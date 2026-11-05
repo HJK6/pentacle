@@ -30,6 +30,10 @@ from provider_cli_pin import current as current_pin
 SERVICE = "services/chat-stream-v2"
 HELPER = SERVICE + "/provider_account_host.py"
 RUNNER = SERVICE + "/tools/spawn_fleet_smoke.py"
+# Three times the observed registry-lock hold maximum fits within this budget.
+# Shared by all helper proofs in one controller invocation; never reset per cell.
+HELPER_BUSY_DEADLINE_SECONDS = 15.0
+HELPER_BUSY_BACKOFF_SECONDS = 0.25
 
 
 def _diagnostic_tail(value, limit=1000):
@@ -40,7 +44,7 @@ def _diagnostic_tail(value, limit=1000):
     value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)",
                    "[redacted]", value, flags=re.S)
     value = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
-    value = re.sub(r"(?im)^.*(?:authorization|bearer\s+|(?:access|refresh)[_-]?token|api[_-]?key|password|secret|cookie)\s*[:=]?.*$",
+    value = re.sub(r"(?im)^.*(?:authorization|bearer\s+|token|api[_-]?key|password|secret|cookie|credential)\s*[:=]?.*$",
                    "[redacted]", value)
     value = re.sub(r"[A-Za-z0-9_+/=-]{20,}", lambda m: "[redacted]" if (
         any(c.isupper() for c in m[0]) and any(c.islower() for c in m[0]) and any(c.isdigit() for c in m[0])) else m[0], value)
@@ -54,6 +58,8 @@ def _helper_child_failure(exc):
     argv0 = command[0] if isinstance(command, (list, tuple)) and command else "unknown"
     detail = {"argv0": _diagnostic_tail(Path(str(argv0)).name, 160),
               "stdout_tail": _diagnostic_tail(exc.stdout), "stderr_tail": _diagnostic_tail(exc.stderr)}
+    if getattr(exc, "helper_wait", None):
+        detail["wait"] = exc.helper_wait
     status = "rc=" + str(exc.returncode) if isinstance(exc, subprocess.CalledProcessError) else "timeout=" + str(exc.timeout)
     return "helper closure/artifact verification failed: " + type(exc).__name__ + " " + status + " " + json.dumps(detail, ensure_ascii=True)
 
@@ -304,14 +310,66 @@ class Runtime:
 
     def remote_json(self, helper, argv):
         target = self.installer.Target(**helper["target"])
+        attempts, last_busy = 0, None
+        budget = getattr(self, "_helper_busy_budget", None)
+
+        def record(outcome):
+            row = {"host": target.name, "attempt_count": attempts,
+                   "elapsed_seconds": round(time.monotonic() - budget["started"], 6),
+                   "deadline_seconds": HELPER_BUSY_DEADLINE_SECONDS,
+                   "wait_reason": "account_busy", "last_outcome": outcome}
+            if not hasattr(self, "helper_wait_events"):
+                self.helper_wait_events = []
+            self.helper_wait_events.append(row)
+            observer = getattr(self, "helper_wait_observer", None)
+            if observer:
+                observer(row)
+            return row
+
         def bounded(argv, **kwargs):
-            return subprocess.run(argv, timeout=210, **kwargs)
-        output = self.installer._remote(target, shlex.join([str(a) for a in argv]), dry_run=False, runner=bounded)
+            timeout = 210 if last_busy is None else max(0.001, budget["deadline"] - time.monotonic())
+            return subprocess.run(argv, timeout=timeout, **kwargs)
+
+        while True:
+            if last_busy is not None and time.monotonic() >= budget["deadline"]:
+                last_busy.helper_wait = record("account_busy")
+                raise last_busy
+            attempts += 1
+            try:
+                output = self.installer._remote(target, shlex.join([str(a) for a in argv]), dry_run=False, runner=bounded)
+                if last_busy is not None and time.monotonic() >= budget["deadline"]:
+                    last_busy.helper_wait = record("account_busy")
+                    raise last_busy
+                break
+            except subprocess.CalledProcessError as exc:
+                try:
+                    busy = (len(argv) > 2 and argv[2] == "verify-artifact" and exc.returncode == 1
+                            and json.loads(exc.stdout, object_pairs_hook=lambda pairs: pairs) == [("outcome", "account_busy")])
+                except (ValueError, TypeError):
+                    busy = False
+                if not busy:
+                    if last_busy is not None:
+                        exc.helper_wait = record("child_failed")
+                    raise
+                if budget is None:
+                    started = time.monotonic()
+                    budget = self._helper_busy_budget = {"started": started, "deadline": started + HELPER_BUSY_DEADLINE_SECONDS}
+                last_busy = exc
+                exc.helper_wait = record("account_busy")
+                time.sleep(min(HELPER_BUSY_BACKOFF_SECONDS, max(0, budget["deadline"] - time.monotonic())))
+            except subprocess.TimeoutExpired as exc:
+                if last_busy is not None:
+                    exc.helper_wait = record("child_timeout")
+                raise
         try:
             value = json.loads(output)
             if not isinstance(value, dict): raise ValueError()
+            if last_busy is not None:
+                record("ok" if value.get("outcome") == "ok" else "response_other")
             return value
         except ValueError as exc:
+            if last_busy is not None:
+                record("response_invalid")
             raise Invalid("helper proof response invalid") from exc
 
     def helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False):

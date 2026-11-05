@@ -648,7 +648,7 @@ def test_helper_child_refusal_keeps_bounded_redacted_diagnostics(monkeypatch, ki
     runtime = object.__new__(Runtime)
     secret = 'CanarySecretValue123456789012345'
     stdout = 'x' * 5000 + '\n{"outcome":"account_busy"}\n'
-    stderr = ('Authorization: Bearer short-secret\npassword=short-password\n'
+    stderr = ('Authorization: Bearer short-secret\npassword=short-password\ntoken=short-token\n'
               'api_key: "' + secret + '"\n' + secret + '\nhttps://person:short-pass@example.invalid\n'
               '\x1bTraceback: lock unavailable\n')
     failure = (subprocess.CalledProcessError(1, ['ssh', '--private-token=' + secret], output=stdout, stderr=stderr)
@@ -662,7 +662,7 @@ def test_helper_child_refusal_keeps_bounded_redacted_diagnostics(monkeypatch, ki
     assert 'ssh' in detail and 'account_busy' in detail and 'lock unavailable' in detail
     assert kind == 'timeout' and '210' in detail or kind == 'exit' and 'rc=1' in detail
     assert len(detail) < 2600
-    assert all(value not in detail for value in [secret, 'short-secret', 'short-password', 'short-pass', '--private-token'])
+    assert all(value not in detail for value in [secret, 'short-secret', 'short-password', 'short-token', 'short-pass', '--private-token'])
     assert '\x1b' not in detail
 
 
@@ -736,3 +736,148 @@ def test_helper_child_post_stop_failure_keeps_diagnostic_in_recovery_journal(tra
     assert result['exit_code'] == 12 and journal['phase'] == 'rolled_back'
     assert 'account_busy' in journal['forward_failure']['reason']
     assert (adapter.source, adapter.policy) == ('prior', 'prior')
+
+
+def test_helper_waits_for_actual_nativehost_registry_flock(runtime_preparation, monkeypatch):
+    """Real flock + NativeHost + AccountExecutor, only host transport is local."""
+    import threading
+    import time
+    from account_executor import AccountExecutor
+    from provider_account_host import NativeHost
+    from provider_accounts import Binding, AccountError
+    runtime, fixture, intent, root = runtime_preparation
+    config = c.read_json(fixture.home / '.config/pentacle/provider-account-host.json')
+    account = Binding(**c.read_json(fixture.b.config)['bindings'][0])
+    pin = c.read_json(fixture.b.config)['pin']
+    held = threading.Event()
+    release = threading.Event()
+    def observation(binding):
+        held.set()
+        assert release.wait(5)
+        return {}
+    holder = NativeHost(config, observation=observation)
+    holder_thread = threading.Thread(target=lambda: holder.handle('observe', provider=account.provider,
+        alias=account.alias, expected_generation=account.generation, operation_id='fixture-holder'))
+    holder_thread.start()
+    assert held.wait(5)
+    helper_host = NativeHost(config, run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0,
+        next(row['version'] for row in config['cells'].values() if row['executable'] == argv[0]) + '\n', ''))
+    calls = []
+    class Hosts:
+        async def run_command(self, host, *argv, **kwargs):
+            calls.append(argv)
+            try:
+                value = helper_host.handle(argv[2], provider=account.provider, alias=account.alias,
+                    expected_generation=account.generation, operation_id='fixture-proof', pin=pin)
+                return 0, json.dumps(value)
+            except AccountError as exc:
+                return 1, json.dumps({'outcome': str(exc)})
+    executor = AccountExecutor(SimpleNamespace(policy={'executors':{account.host:{'python':sys.executable,
+        'script':'/fixture/provider_account_host.py'}}}), Hosts())
+    def remote(target, command, **kwargs):
+        try:
+            value = asyncio.run(executor.execute(account, 'verify-artifact', 'fixture-proof', pin=pin))
+            return json.dumps(value)
+        except AccountError as exc:
+            raise subprocess.CalledProcessError(1, ['sh'], output=json.dumps({'outcome':str(exc)}), stderr='') from exc
+    monkeypatch.setattr(runtime.installer, '_remote', remote)
+    helper = {'target':{'name':account.host,'ssh':'','root':str(root),'local':True}}
+    monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json(helper,
+        [sys.executable, '/fixture/provider_account_host.py', 'verify-artifact']))
+    timer = threading.Timer(.35, release.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        proof = runtime.helper_proof(helper, {}, '', {}, '')
+        assert proof['outcome'] == 'ok'
+        assert len(calls) >= 2 and time.monotonic() - started < 5
+    finally:
+        release.set(); timer.cancel(); holder_thread.join(timeout=5)
+    assert not holder_thread.is_alive()
+
+
+@pytest.mark.parametrize('returncode,output', [(1,'{"outcome":"account_host_failed"}'),
+    (255,'{"outcome":"account_busy"}'), (1,'{"outcome":"account_busy","extra":true}'), (1,'not-json')])
+def test_helper_nonbusy_child_failures_never_wait(monkeypatch, returncode, output):
+    from deploy.coordinated_runtime import Runtime
+    runtime = object.__new__(Runtime)
+    calls = []
+    def remote(*args, **kwargs):
+        calls.append(1)
+        raise subprocess.CalledProcessError(returncode, ['ssh'], output=output, stderr='')
+    runtime.installer = SimpleNamespace(Target=lambda **kwargs:None, _remote=remote)
+    monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json({'target':{}},
+        ['python','provider_account_host.py','verify-artifact']))
+    with pytest.raises(c.Invalid): runtime.helper_proof({}, {}, '', {}, '')
+    assert len(calls) == 1
+
+
+def test_busy_deadline_is_shared_and_exhaustion_journals_without_stop(transaction, monkeypatch):
+    import deploy.coordinated_runtime as module
+    runtime = object.__new__(module.Runtime)
+    runtime.installer = SimpleNamespace(Target=lambda **kwargs:SimpleNamespace(name='fixture'))
+    calls = []
+    def remote(*args, **kwargs):
+        calls.append(1)
+        raise subprocess.CalledProcessError(1, ['ssh'], output='{"outcome":"account_busy"}', stderr='')
+    runtime.installer._remote = remote
+    monkeypatch.setattr(module, 'HELPER_BUSY_DEADLINE_SECONDS', .08)
+    monkeypatch.setattr(module, 'HELPER_BUSY_BACKOFF_SECONDS', .01)
+    monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json({'target':{}},
+        ['python','provider_account_host.py','verify-artifact']))
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    # The real adapter owns the wait; the transaction observer journals progress.
+    def revalidate(*args, **kwargs):
+        runtime.helper_wait_observer = adapter.helper_wait_observer
+        runtime.helper_proof({}, {}, '', {}, '')
+    monkeypatch.setattr(adapter, 'revalidate', revalidate)
+    with pytest.raises(c.Invalid, match='account_busy') as caught:
+        tx.apply(intent, path)
+    _, journal = tx.load(path)
+    assert journal['phase'] == 'prepared' and adapter.calls == ['prepare']
+    waits = journal['helper_proof_waits']
+    assert len(waits) >= 2 and waits[-1]['elapsed_seconds'] >= .08
+    assert waits[-1]['last_outcome'] == 'account_busy'
+    assert waits[-1]['attempt_count'] == len(calls)
+    assert 'attempt_count' in str(caught.value)
+    before = len(calls)
+    # A later proof does not get another deadline or sleep budget.
+    with pytest.raises(c.Invalid, match='account_busy'):
+        runtime.helper_proof({}, {}, '', {}, '')
+    assert len(calls) == before + 1
+
+
+@pytest.mark.parametrize('failure', ['nonbusy', 'timeout'])
+def test_failure_after_busy_is_not_retried(monkeypatch, failure):
+    import deploy.coordinated_runtime as module
+    runtime = object.__new__(module.Runtime)
+    calls = []
+    def remote(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(1, ['ssh'], output='{"outcome":"account_busy"}', stderr='')
+        if failure == 'timeout':
+            raise subprocess.TimeoutExpired(['ssh'], .01, stderr=b'connection stalled')
+        raise subprocess.CalledProcessError(255, ['ssh'], output='', stderr='connection closed')
+    runtime.installer = SimpleNamespace(Target=lambda **kwargs:SimpleNamespace(name='fixture'), _remote=remote)
+    monkeypatch.setattr(module, 'HELPER_BUSY_BACKOFF_SECONDS', .001)
+    monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json({'target':{}},
+        ['python','provider_account_host.py','verify-artifact']))
+    with pytest.raises(c.Invalid, match='connection'):
+        runtime.helper_proof({}, {}, '', {}, '')
+    assert len(calls) == 2
+    assert runtime.helper_wait_events[-1]['last_outcome'] == ('child_timeout' if failure == 'timeout' else 'child_failed')
+
+
+def test_busy_outside_artifact_command_is_not_retried(monkeypatch):
+    from deploy.coordinated_runtime import Runtime
+    runtime = object.__new__(Runtime)
+    calls = []
+    def remote(*args, **kwargs):
+        calls.append(1)
+        raise subprocess.CalledProcessError(1, ['sh'], output='{"outcome":"account_busy"}', stderr='')
+    runtime.installer = SimpleNamespace(Target=lambda **kwargs:None, _remote=remote)
+    monkeypatch.setattr(runtime, '_helper_proof', lambda *args, **kwargs: runtime.remote_json({'target':{}}, ['python','-c','closure']))
+    with pytest.raises(c.Invalid): runtime.helper_proof({}, {}, '', {}, '')
+    assert calls == [1]
