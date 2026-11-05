@@ -790,3 +790,29 @@ def test_fd_tell_to_closed_former_seat_and_unbound_queue(tmp_path):
         assert queued["delivery_status"] == "queued_unbound"
         assert h.inputs_at(SEAT_B) == 1
     _run(tmp_path, body, front_desk=True)
+
+
+@pytest.mark.parametrize("attempted", [False, True])
+def test_fd_child_report_notice_follows_binding_unless_an_attempt_is_recorded(tmp_path, attempted):
+    from outbound_notices import OutboundNoticeConfig, OutboundNoticeQueue
+    async def body(h):
+        queue = OutboundNoticeQueue(h.store, h.comms, config=OutboundNoticeConfig(lease_s=.1, max_attempts=2))
+        await queue.enqueue(kind="report", dedupe_key="report:r1", recipient_stream_id=SEAT_A,
+                            body="[child_report_ready] synthetic", tell_id="notice-r1",
+                            source_stream_id=SENDER, metadata={"report_id": "r1"})
+        if attempted:  # an uncertain physical attempt at A stays fenced to A
+            await h.store.put_tell_delivery("notice-r1", {"payload_digest": "x", "reply": {}, "delivery": {
+                "tell_id": "notice-r1", "to_stream_id": SEAT_A, "delivery_status": "proof_unavailable"}})
+        await h.move_to_b()
+        await queue.drain_once(force=True)
+        row = await h.store.submit(lambda c: dict(c.execute(
+            "SELECT recipient_stream_id FROM v2_outbound_notices WHERE notice_id='notice-r1'").fetchone()))
+        assert row["recipient_stream_id"] == (SEAT_A if attempted else SEAT_B)
+        assert h.inputs_at(SEAT_B) == (0 if attempted else 1)
+        # An ordinary worker's report notice keeps its physical recipient.
+        await queue.enqueue(kind="report", dedupe_key="report:r2", recipient_stream_id=SENDER,
+                            body="[child_report_ready] worker", tell_id="notice-r2", source_stream_id=SEAT_B,
+                            metadata={"report_id": "r2"})
+        await queue.drain_once(force=True)
+        assert h.inputs_at(SENDER) == 1
+    _run(tmp_path, body, front_desk=True)

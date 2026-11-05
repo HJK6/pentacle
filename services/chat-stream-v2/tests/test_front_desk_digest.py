@@ -565,3 +565,37 @@ def test_queue_marks_only_an_immediate_work_lane_alert_as_a_wake(tmp_path, famil
             assert (message.get('_front_desk_wake_token') is WAKE_TOKEN)==woken
         finally:store.stop()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('restart', [False, True])
+def test_rows_held_for_a_former_fd_seat_fold_once_for_the_new_binding(tmp_path, monkeypatch, restart):
+    """Hold before rebind A -> B, deadline after the swap: B gets one digest with every member."""
+    from notification_answer_fixture import fixture
+    from message_envelopes import match_message_envelope
+    async def run():
+        async with fixture(tmp_path, host='fixture-host') as (_notify, queue, comms, provider, sessions, store):
+            new = 'fixture-host:v2-test'
+            old = (await store.open_session('fixture-host', 'old-desk', provider='codex', pane_status='pane_alive'))
+            old_id, old_gen = 'fixture-host:old-desk', old['session_generation']
+            await store.update_session('fixture-host', 'v2-test', pane_status='pane_alive')
+            composite = _desk(store, old_id, old_gen)
+            comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+            for i in range(2):
+                held = await comms.tell({'stream_id': old_id, 'message': f'END: held item {i}', 'tell_id': f'held-{i}'})
+                assert held['delivery_status'] == 'persisted'
+            store.lifecycle_front_desk = {'name': 'assistant', 'env_binding': {'stream_id': old_id, 'generation': old_gen}}
+            await store.recover_assistant_binding(name='assistant', target_stream_id=new,
+                target_generation=sessions.get(new)['session_generation'])
+            if restart:
+                store.stop(); store.start()
+            composite = _desk(store, new, sessions.get(new)['session_generation'])
+            comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+            comms.front_desk_digest = queue.front_desk_digest = composite.front_desk_digest
+            monkeypatch.setenv('PENTACLE_FRONT_DESK_DIGEST_S', '0')
+            assert await queue.drain_once(force=True) == 1
+            assert len(provider.pastes) == 1
+            lanes = match_message_envelope(provider.pastes[0])['lanes']
+            assert [lane['text'] for lane in lanes] == ['END: held item 0', 'END: held item 1']
+            assert not await composite.front_desk_digest._rows(old_id)
+            assert await queue.drain_once(force=True) == 0 and len(provider.pastes) == 1
+    asyncio.run(run())

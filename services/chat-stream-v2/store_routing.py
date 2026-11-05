@@ -264,6 +264,46 @@ def _insert_outbound_notice_conn(
     return out
 
 
+
+def _retarget_front_desk_notice_conn(conn: sqlite3.Connection, notice_id: str) -> bool:
+    """Resolve a claimed FD-purpose notice's logical recipient to the current FD.
+
+    Only a notice addressed to a proved primary-bound seat qualifies: a
+    front-desk digest, a child report, or an advisor/ruling result or
+    authority loss/restoration notice. It moves only while no attempt
+    evidence exists for its tell id; an uncertain attempt stays fenced to its
+    recorded target. Error alerts keep their own superseded-binding rebind;
+    question answers and ordinary seat notices keep their producer binding.
+    """
+    import store_lifecycle_authority as lifecycle_authority
+    from store_assistant_binding import front_desk_aliases_conn
+    front_desk = lifecycle_authority.configured(conn)
+    if not front_desk:
+        return False
+    row = conn.execute("SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone()
+    if row is None:
+        return False
+    row = dict(row)
+    metadata = json.loads(row.get("metadata") or "{}")
+    if not (row["kind"] in {"report", "assistant_lane_ruling_result"}
+            or (row["kind"] == "lane_digest" and metadata.get("front_desk_digest"))):
+        return False
+    try:
+        principal = lifecycle_authority.front_desk_principal(conn, front_desk)
+    except ValueError:
+        return False
+    if (principal is None or row["recipient_stream_id"] == principal["stream_id"]
+            or row["recipient_stream_id"] not in front_desk_aliases_conn(conn, front_desk)
+            or conn.execute("SELECT 1 FROM v2_tell_deliveries WHERE tell_id=?", (row["tell_id"],)).fetchone()):
+        return False
+    metadata.setdefault("front_desk_retargeted_from", []).append(row["recipient_stream_id"])
+    for key in ("root_generation", "authority_generation"):
+        if key in metadata:
+            metadata[key] = principal["session_generation"]
+    conn.execute("UPDATE v2_outbound_notices SET recipient_stream_id=?, metadata=? WHERE notice_id=?",
+                 (principal["stream_id"], json.dumps(metadata, sort_keys=True), notice_id))
+    return True
+
 class _RoutingIntegrityLifecycleEntry:
     """Reference-counted per-stream lock entry.
 
@@ -2644,6 +2684,7 @@ class _RoutingStoreMixin:
             if cur.rowcount != 1:
                 conn.commit()
                 return None
+            _retarget_front_desk_notice_conn(conn, notice_id)
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)

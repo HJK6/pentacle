@@ -215,8 +215,13 @@ class AssistantLaneRulings:
             return {"state": "disabled", "source": "kv", "stream_id": "", "generation": ""}
         if not _STREAM_RE.fullmatch(selected):
             raise ValueError("assistant_authority_stream_id_invalid")
-        if selected == composite.config.direct_primary_stream_id:
-            return {"state": "same_primary", "source": source, "stream_id": selected,
+        if selected == composite.config.direct_primary_stream_id or (
+                self.server.sessions.assistant.front_desk_mode
+                and selected in await self.store.front_desk_aliases()):
+            # A selection of a proved FD seat is the logical primary, so it
+            # follows the binding; an independent advisor stays independent.
+            return {"state": "same_primary", "source": source,
+                    "stream_id": composite.config.direct_primary_stream_id,
                     "generation": composite.config.direct_primary_generation}
         host, _, name = selected.partition(":")
         seat = await self.store.fetch_session(host, name)
@@ -1342,6 +1347,8 @@ class AssistantLaneRulings:
                 # The task link was checked when this request was admitted (R4).
                 "ruled_release": True,
             }
+            if await self._fd_requester_superseded(rid, current):
+                return
             requester_host, _, requester_name = current["requester_stream_id"].partition(":")
             requester = await self.store.fetch_session(requester_host, requester_name)
             if requester is None or requester.get("status") != "open" or requester.get("session_generation") != current["requester_generation"]:
@@ -1469,6 +1476,33 @@ class AssistantLaneRulings:
                      request["requester_generation"], request["ruling_request_id"]),
                 )
         await self.store.submit(op)
+
+    async def _fd_requester_superseded(self, rid: str, current: dict[str, Any]) -> bool:
+        """An unexecuted FD-requested ruling never executes under a successor FD.
+
+        The intent stays immutable; it is closed as superseded with one durable
+        notice to the current FD, which may file a new request itself.
+        """
+        if not self.server.sessions.assistant.front_desk_mode:
+            return False
+        requester = (current["requester_stream_id"], current["requester_generation"])
+        effective = await self.store.lifecycle_authority_effective()
+        principal = (effective.get("binding_stream_id"), effective.get("binding_generation"))
+        if (not all(principal) or principal == requester or not effective.get("binding_available")
+                or requester[0] not in await self.store.front_desk_aliases()):
+            return False
+        await self._mark(rid, "release_blocked", {"error": "requester_superseded",
+            "superseded_by": {"stream_id": principal[0], "generation": principal[1]}})
+        notice_id = f"assistant-lane-ruling-superseded:{rid}"
+        await self.store.enqueue_outbound_notice(notice_id=notice_id, kind="assistant_lane_ruling_result",
+            dedupe_key=notice_id, recipient_stream_id=principal[0], tell_id=notice_id,
+            source_stream_id=current.get("authority_stream_id"),
+            body="[Assistant lane ruling] " + _canonical({"event": "requester_superseded",
+                "ruling_request_id": rid, "action": current["action"],
+                "requester": {"stream_id": requester[0], "generation": requester[1]},
+                "next": "file a new request under the current front desk if still needed"}),
+            metadata={"authority_generation": principal[1]})
+        return True
 
     async def _mark(self, rid: str, state: str, outcome: dict[str, Any]) -> None:
         def op(conn: sqlite3.Connection) -> None:

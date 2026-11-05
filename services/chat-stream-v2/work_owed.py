@@ -171,10 +171,13 @@ def disposition_root_conn(conn, root, now):
     registry = _registry(state)
     prior = registry.get("root")
     if prior and prior != list(root):
+        # A front-desk digest folds held members; it resolves the current FD
+        # at delivery instead of being replaced.
         conn.execute("UPDATE v2_outbound_notices SET terminal_at=?, "
             "terminal_reason='root_generation_replaced' WHERE kind='lane_digest' "
             "AND recipient_stream_id=? AND delivered_at IS NULL AND terminal_at IS NULL "
-            "AND json_extract(metadata,'$.root_generation')=?", (timestamp(now), *prior))
+            "AND json_extract(metadata,'$.root_generation')=? "
+            "AND json_extract(metadata,'$.front_desk_digest') IS NULL", (timestamp(now), *prior))
     for episode in [*registry["episodes"].values(), *registry["owed"].values()]:
         pair = [episode.get("parent_stream_id"), episode.get("parent_generation")]
         if episode.get("front_desk_owned") or (prior and pair == prior) or pair == list(root):
