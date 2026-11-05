@@ -123,6 +123,8 @@ def test_b_hatch_g1_fresh_home_supersedes_split_without_old_import(tmp_path,monk
         try:
             historical=await store.open_session(old.host,"historical",provider=provider,
                 session_generation="old-session",account_binding=old.public())
+            # Retained history is closed, so it does not assert an unverified live pane.
+            await store.update_session(old.host,"historical",status="closed")
             with pytest.raises(VerbError):await runtime.operation(request)
             host_only=host.registry.active(provider,old.alias,old.host)
             runtime.policy["watchers"]={"host-a:fixture-watcher":{"host":old.host}}
