@@ -20,8 +20,10 @@ import time
 from deploy.coordinated import (Invalid, absolute, atomic_bytes, canonical, digest,
     file_digest, host_scope, private_file)
 from provider_cli_artifact import code_identity, validate_proof
-from provider_accounts import Binding
+from provider_accounts import AccountError, Binding
 from account_store import AccountStore
+from account_repin_state import causes, generation_intents
+from provider_cli_maintenance import PREFIX as MAINTENANCE_PREFIX, status as maintenance_status
 from provider_cli_pin import current as current_pin
 
 
@@ -121,13 +123,32 @@ class Runtime:
                 "SELECT data FROM v2_account_bindings WHERE active=1 ORDER BY binding_key")]
             defaults = [list(row) for row in conn.execute("SELECT host,provider,alias,revision FROM v2_account_defaults ORDER BY host,provider")]
             selected = [raw for raw in bindings if any((raw["host"], raw["provider"], raw["alias"]) == tuple(row[:3]) for row in defaults)]
-            pending = conn.execute("SELECT count(*) FROM v2_account_recovery WHERE state NOT IN ('done','idle')").fetchone()[0]
-            if pending:
-                raise Invalid("in-flight account mutation/recovery blocks deployment")
-            for key, value in conn.execute("SELECT k,v FROM kv WHERE k LIKE 'provider_cli.maintenance_input:%'"):
-                slot = json.loads(value)
-                if slot.get("state") not in {"done", "released", "expired"}:
-                    raise Invalid("active provider maintenance blocks deployment")
+            cells = {tuple(row) for row in conn.execute("SELECT DISTINCT host,provider,alias FROM v2_account_bindings")}
+            # Attempts can precede enrollment. Include their addressed cells as
+            # well as registered bindings; historical row states are not fences.
+            for row in conn.execute("SELECT data FROM v2_account_recovery"):
+                record = json.loads(row[0])
+                if not isinstance(record, dict) or not isinstance(record.get("arguments", {}), dict):
+                    raise Invalid("invalid account recovery arguments")
+                arguments = record.get("arguments", {})
+                if {"host", "provider", "account"} <= arguments.keys():
+                    cells.add(tuple(arguments[key] for key in ("host", "provider", "account")))
+            hosts = {cell[0] for cell in cells}
+            hosts.update(row[0] for row in conn.execute("SELECT host FROM v2_spawn_admission_hold"))
+            hosts.update(row[0][len(MAINTENANCE_PREFIX):] for row in conn.execute(
+                "SELECT k FROM kv WHERE substr(k,1,?)=?", (len(MAINTENANCE_PREFIX), MAINTENANCE_PREFIX)))
+            try:
+                for host, provider, account in cells:
+                    cell = {"host": host, "provider": provider, "account": account}
+                    if causes(ledger, cell) or generation_intents(ledger, cell):
+                        raise Invalid("in-flight account mutation/recovery blocks deployment")
+                for host in hosts:
+                    maintenance = maintenance_status(ledger, host)
+                    hold = maintenance["hold"]
+                    if maintenance["slot"] is not None or (hold and hold["held_until"] > time.time()):
+                        raise Invalid("active provider maintenance blocks deployment")
+            except AccountError as exc:
+                raise Invalid("account admission state invalid: " + str(exc)) from exc
             return {"pin": pin, "pin_digest": digest(pin), "bindings": bindings,
                     "bindings_digest": digest(bindings), "defaults": defaults,
                     "selected_bindings": selected, "database": str(database)}

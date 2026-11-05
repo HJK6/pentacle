@@ -181,6 +181,13 @@ policy, source, launchd state, CLI launcher, pin or account generation. It needs
 the owner's explicit host-staging/probe authority. Keep its directories through
 handoff; there is no automatic garbage collection.
 
+Account admission follows the existing recovery predicates, including sealed
+resolution of parked repins, and checks live maintenance input slots and
+unexpired spawn holds. Historical maintenance receipts do not represent live
+slots. Unresolved recovery or generation intents, including attempts awaiting
+enrollment, still refuse preparation and revalidation; deployment never rewrites
+the account journal to clear them.
+
 Apply rechecks sealed inputs, sole-deployer/schedule/account quiescence and
 staged proofs. It unloads the old job and proves daemon/local helper exit before
 switching the checkout and included executor script fields. Other policy fields
