@@ -22,6 +22,7 @@ __all__ = [
     "normalize_codex_rollout_records",
     "codex_session_identity",
     "codex_is_guardian_review",
+    "codex_is_native_worker",
 ]
 
 # `response_item` payload types carrying a tool invocation / its output. Codex
@@ -47,6 +48,21 @@ def codex_is_guardian_review(record: dict) -> bool:
     source = payload.get("source")
     subagent = source.get("subagent") if isinstance(source, dict) else None
     return isinstance(subagent, dict) and subagent.get("other") == "guardian"
+
+
+def codex_is_native_worker(record: dict) -> bool:
+    """Recognize a spawned worker from its session header, not chat content.
+
+    Discovery can exclude these from a pane's primary-rollout candidates.
+    Normalization still accepts their messages when explicitly addressed.
+    Unknown subagent kinds remain subject to discovery's ambiguity refusal.
+    """
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return False
+    payload = record.get("payload")
+    source = payload.get("source") if isinstance(payload, dict) else None
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    return isinstance(subagent, dict) and isinstance(subagent.get("thread_spawn"), dict)
 
 
 def codex_session_identity(record: dict) -> str:

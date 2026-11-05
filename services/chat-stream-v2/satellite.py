@@ -70,7 +70,7 @@ import websockets
 import chat_recovery
 
 from claude_jsonl_norm import normalize_claude_jsonl_records_grouped
-from codex_rollout_norm import codex_is_guardian_review, codex_session_identity, normalize_codex_rollout_records_grouped
+from codex_rollout_norm import codex_is_guardian_review, codex_is_native_worker, codex_session_identity, normalize_codex_rollout_records_grouped
 from machine_stats import STATS_INTERVAL_S, WIRE_VERSION as STATS_WIRE_VERSION, sample_machine_stats
 from mirror import _provider_from_session_name
 from logging_config import configure_logging
@@ -396,7 +396,7 @@ def _codex_transcript_for_pid(pane_pid: int, account: dict | None = None) -> str
         line[1:]
         for line in result.stdout.splitlines()
         if line.startswith("n") and _is_codex_rollout_path(line[1:], account)
-        and _codex_session_identity_from_bound_path(line[1:])
+        and _codex_session_identity_from_bound_path(line[1:], primary_only=True)
     }
     return next(iter(paths)) if len(paths) == 1 else ""
 
@@ -447,13 +447,14 @@ def _detached_fork_session_uuid(stream_id: str, proc_root: Path = _PROC_ROOT) ->
     return best_uuid
 
 
-def _codex_session_identity_from_bound_path(path: str) -> str:
+def _codex_session_identity_from_bound_path(path: str, *, primary_only: bool = False) -> str:
     """Read Codex's head-only session identity before the history horizon.
 
     Discovery obtained ``path`` from an FD held by a descendant of the observed
     tmux pane.  Re-open the same path read-only here solely to inspect its
     immutable prefix before any tail seek can skip ``session_meta``.  The value
     remains in-memory source evidence; no provider-to-session mapping is stored.
+    Primary discovery also excludes known native workers sharing the process.
     """
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -475,6 +476,8 @@ def _codex_session_identity_from_bound_path(path: str) -> str:
             continue
         if codex_is_guardian_review(record):
             return ""  # Internal thread, never a seat's conversation source.
+        if primary_only and codex_is_native_worker(record):
+            return ""  # A worker FD cannot displace its pane's primary chat.
         found = codex_session_identity(record) if isinstance(record, dict) else ""
         if found:
             return found

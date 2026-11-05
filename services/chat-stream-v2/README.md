@@ -244,6 +244,15 @@ ingest exclude them by their `session_meta` provenance before selecting a seat's
 conversation transcript; genuine messages and operator approval prompts remain
 unchanged. Previously stored events are retained without rewriting history.
 
+Satellite primary discovery also excludes native worker rollouts whose session
+header has a `source.subagent.thread_spawn` object. Those files can share the
+primary process's descriptors; they must not make its conversation ambiguous.
+The filter does not change worker-message normalization. Account and process
+checks still apply, and multiple remaining candidates fail closed.
+The retained source checkpoint resumes missing primary messages without clearing
+history. Restart recovery can drain that checkpoint independently of discovery;
+verify that the source returns to live capture after recovery completes.
+
 Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
 
 Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
