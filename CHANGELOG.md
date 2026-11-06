@@ -21,6 +21,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 ### Fixed
 
 - Coordinated deployment preparation resolves smoke helper imports without a custom Python path.
+- New Chat lists healthy accounts with configurable labels, preselects the host default without a duplicate option, and retains account choice across late catalog responses.
 
 ### Removed
 

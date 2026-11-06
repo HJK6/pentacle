@@ -53,7 +53,7 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel(''), '');
 });
 
-function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = [], submissions = []) {
+function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = [], submissions = [], accountLabels = {}) {
   const dom = new JSDOM('<main><h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div></main>');
   const catalog = catalogOverride || {
     profiles: { desktop_manual: { [selection.provider]: [selection.model, selection.effort] } },
@@ -64,8 +64,9 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
     'selectionForProvider', 'renderNewSessionModal',
     'newSessionSelection', 'newSessionCatalog', 'newSessionError', 'newSessionLocation',
-    'submissions',
-    `let newSessionSubmitting = false; let newSessionSubmitToken = 0;
+    'submissions', 'accountLabels',
+    `const CONFIG = { chatStream: { accountLabels } };
+     let newSessionSubmitting = false; let newSessionSubmitToken = 0;
      const state = { slots: [null] };
      const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
      const waitForNewSessionSpawn = promise => promise; const NEW_SESSION_LONG_WAIT_MS = 100;
@@ -99,10 +100,182 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     '',
     'fixture-host',
     submissions,
+    accountLabels,
   );
   const container = dom.window.document.getElementById('profile');
   controller.render(container);
   return { dom, container, selection: controller.selection, submit: controller.submit };
+}
+
+function lateCatalogPicker(previousAccount) {
+  const dom = new JSDOM('<h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div>');
+  const models = Object.fromEntries(['gpt-6.1-sol', 'gpt-6.1-terra'].map(model => [model, { efforts: ['low', 'medium', 'high'] }]));
+  const catalog = { profiles: { desktop_manual: { codex: ['gpt-6.1-sol', 'medium'] } },
+    models: { codex: models }, account_status: { accounts: ['primary', 'spare'].map(alias =>
+      ({ host: 'fixture-host', provider: 'codex', alias, active: true, enabled: true, health: 'healthy' })) } };
+  let resolveCatalog;
+  const arrival = new Promise(resolve => { resolveCatalog = resolve; });
+  const submissions = [];
+  const controller = new Function('document', 'catalog', 'arrival', 'submissions', 'previousAccount', `
+    const CONFIG = {};
+    let newSessionCatalog = catalog;
+    let newSessionSelection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium',
+      ...(previousAccount !== undefined ? { account: previousAccount } : {}) };
+    let newSessionError = '', newSessionSubmitting = false, newSessionSubmitToken = 0;
+    const newSessionLocation = 'fixture-host', NEW_SESSION_LONG_WAIT_MS = 100;
+    const state = { slots: [null] }, esc = String;
+    let prefs = { defaultProvider: 'codex', byProvider: {} };
+    const spawnPreferences = () => prefs;
+    const saveSpawnPreference = (provider, tuple) => {
+      prefs = { defaultProvider: provider, byProvider: { [provider]: { model: tuple.model, effort: tuple.effort } } };
+    };
+    const spawnCatalogLoader = { peek: () => catalog, load: () => arrival };
+    const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
+    const updateNewSessionStatus = () => {}, hideNewSessionModal = () => {};
+    const providerLabelForHero = value => value, waitForNewSessionSpawn = promise => promise;
+    const renderNewSessionModal = () => renderSpawnProfileOptions(document.getElementById('profile'));
+    ${['catalogForNewSession', 'catalogTuple', 'catalogProviders', 'selectionForProvider', 'modelLabel',
+      'spawnAccountControl', 'renderSpawnProfileOptions', 'loadSpawnCatalog', 'warmSpawnCatalog', 'newSession']
+      .map(extractFunction).join('\n')}
+    renderNewSessionModal();
+    return { loadSpawnCatalog, warmSpawnCatalog, selection: () => newSessionSelection, submit: () => newSession() };
+  `)(dom.window.document, catalog, arrival, submissions, previousAccount);
+  return { ...controller, submissions, dom,
+    arrive: async () => { resolveCatalog({ ok: true, catalog }); await arrival; await Promise.resolve(); },
+    edit: (control, value) => {
+      const select = dom.window.document.querySelector('#spawn-' + control);
+      select.value = value; select.dispatchEvent(new dom.window.Event('change'));
+    },
+  };
+}
+
+for (const method of ['loadSpawnCatalog', 'warmSpawnCatalog']) {
+  for (const previousAccount of [undefined, 'primary']) {
+    test(`${method} late arrival retains the edited account through effort and submit (${previousAccount || 'default'})`, async () => {
+      const ui = lateCatalogPicker(previousAccount);
+      ui[method]();
+      ui.edit('account', 'spare');
+      ui.edit('model', 'gpt-6.1-terra');
+      ui.edit('model', 'gpt-6.1-sol');
+      ui.edit('effort', 'low');
+      await ui.arrive();
+      ui.edit('effort', 'medium');
+      assert.equal(ui.dom.window.document.querySelector('#spawn-account').value, 'spare');
+      assert.equal(ui.selection().account, 'spare');
+      assert.equal(ui.submissions.length, 0, 'pre-submit edits never launch');
+      await ui.submit();
+      assert.equal(ui.submissions.length, 1);
+      assert.equal(ui.submissions[0].account, 'spare');
+      assert.equal(ui.submissions[0].model, 'gpt-6.1-sol');
+      assert.equal(ui.submissions[0].effort, 'medium');
+    });
+  }
+}
+
+
+function labelledAccountCatalog(defaultAlias = 'primary', provider = 'codex') {
+  const model = provider === 'codex' ? 'gpt-6.1-sol' : 'claude-fable-5';
+  const cell = (alias, extras = {}) => ({ host: 'fixture-host', provider, alias,
+    active: true, enabled: true, health: 'healthy', ...extras });
+  return { profiles: { desktop_manual: { [provider]: [model, 'high'] } },
+    models: { [provider]: { [model]: { efforts: ['high', 'medium'] } } },
+    account_status: { defaults: [{ host: 'fixture-host', provider, alias: defaultAlias }],
+      accounts: [cell('primary'), cell('spare'), cell('old', { health: 'auth_unhealthy' }),
+        cell('disabled', { enabled: false }), cell('retired', { active: false }),
+        cell('foreign', { host: 'other-host' }), cell('other-provider', { provider: provider === 'codex' ? 'claude' : 'codex' })] } };
+}
+
+for (const provider of ['codex', 'claude']) {
+  test(`account labels list only eligible aliases and preselect the actual default (${provider})`, () => {
+    const catalog = labelledAccountCatalog('primary', provider);
+    const model = catalog.profiles.desktop_manual[provider][0];
+    const labels = { codex: { primary: 'first-codex@example.invalid', spare: 'second-codex' },
+      claude: { primary: 'first-claude@example.invalid', spare: 'second-claude' } };
+    const ui = renderProfileForTest({ provider, model, effort: 'high' },
+      catalog.models[provider], [], catalog, [], [], labels);
+    const select = ui.container.querySelector('#spawn-account');
+    assert.deepEqual([...select.options].map(option => [option.value, option.textContent]),
+      [['primary', `first-${provider}`], ['spare', `second-${provider}`]]);
+    assert.equal(select.value, 'primary');
+    assert.doesNotMatch(select.textContent, /Host default|old|disabled|retired|foreign/);
+  });
+}
+
+test('returning to the default after effort edits omits the explicit account', async () => {
+  const catalog = labelledAccountCatalog(); const requests = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'spare' },
+    catalog.models.codex, [], catalog, [], requests);
+  const select = ui.container.querySelector('#spawn-account');
+  select.value = 'primary'; select.dispatchEvent(new ui.dom.window.Event('change'));
+  const effort = ui.container.querySelector('#spawn-effort');
+  effort.value = 'medium'; effort.dispatchEvent(new ui.dom.window.Event('change'));
+  await ui.submit(); assert.equal(requests[0].effort, 'medium');
+  assert.equal(Object.hasOwn(requests[0], 'account'), false);
+});
+
+test('no eligible accounts produces a disabled empty control without synthetic options', () => {
+  const catalog = labelledAccountCatalog(); catalog.account_status.accounts = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+    catalog.models.codex, [], catalog);
+  const select = ui.container.querySelector('#spawn-account');
+  assert.equal(select.options.length, 0); assert.equal(select.disabled, true);
+});
+
+for (const selected of [undefined, 'primary', 'spare']) {
+  test(`account submit omits only the current default (${selected || 'preselected'})`, async () => {
+    const catalog = labelledAccountCatalog(); const requests = [];
+    const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: selected },
+      catalog.models.codex, [], catalog, [], requests);
+    await ui.submit();
+    assert.equal(requests.length, 1);
+    assert.equal(Object.hasOwn(requests[0], 'account'), selected === 'spare');
+    if (selected === 'spare') assert.equal(requests[0].account, 'spare');
+  });
+}
+
+test('default comparison uses current catalog and retains a deliberate different alias', async () => {
+  const catalog = labelledAccountCatalog(); const requests = [];
+  const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: 'primary' },
+    catalog.models.codex, [], catalog, [], requests);
+  catalog.account_status.defaults[0].alias = 'spare';
+  await ui.submit(); assert.equal(requests[0].account, 'primary');
+});
+
+test('an unavailable default or retained alias is never silently displayed as another account', () => {
+  for (const account of [undefined, 'old']) {
+    const catalog = labelledAccountCatalog('old');
+    const ui = renderProfileForTest({ provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account },
+      catalog.models.codex, [], catalog);
+    const select = ui.container.querySelector('#spawn-account');
+    assert.deepEqual([...select.options].map(option => option.value), ['primary', 'spare']);
+    assert.equal(select.selectedIndex, -1);
+  }
+});
+
+for (const selected of ['primary', 'spare']) {
+  test(`terminal account control uses labels/defaults and submit semantics (${selected})`, async () => {
+    const dom = new JSDOM('<div id="agents"></div>'); const calls = [];
+    const run = new Function('document', 'catalog', 'calls', `
+      const CONFIG = { chatStream: { accountLabels: { codex: { primary: 'first', spare: 'second' } } } };
+      const newSessionCatalog = catalog, newSessionLocation = 'fixture-host', newSessionTerminalMode = true;
+      const state = { workspace: {}, slots: [null] }, esc = String;
+      const getNewSessionHostOptions = () => [{ id: 'fixture-host', label: 'Fixture' }];
+      const getNewSessionAgentOptions = () => [{ id: 'codex', label: 'Codex' }];
+      const getSourceInitial = value => value[0], hideNewSessionModal = () => {}, placementSlot = () => 0;
+      const window = { cc: { newSession: async (...args) => { calls.push(args); return null; } } };
+      ${extractFunction('spawnAccountControl')}
+      ${extractFunction('renderNewSessionAgentOptions')}
+      ${extractFunction('newTerminalSession')}
+      renderNewSessionAgentOptions(document.getElementById('agents'));
+    `);
+    run(dom.window.document, labelledAccountCatalog(), calls);
+    const select = dom.window.document.querySelector('#terminal-account-codex');
+    assert.deepEqual([...select.options].map(option => option.textContent), ['first', 'second']);
+    assert.equal(select.value, 'primary');
+    select.value = selected; dom.window.document.querySelector('[data-agent]').click();
+    await Promise.resolve();
+    assert.deepEqual(calls[0], selected === 'primary' ? ['codex', 'fixture-host'] : ['codex', 'fixture-host', 'spare']);
+  });
 }
 
 for (const control of ['effort', 'model']) {
@@ -130,7 +303,7 @@ for (const control of ['effort', 'model']) {
   }
 }
 
-test('account picker uses active target aliases, submits the selection, and exposes unsupported providers', () => {
+test('account picker excludes unhealthy aliases, submits an alternate, and omits unsupported controls', () => {
   const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' };
   const catalog = { profiles: { desktop_manual: { codex: [selection.model, 'high'] } },
     models: { codex: { [selection.model]: { efforts: ['high'] } } }, account_status: {
@@ -142,15 +315,13 @@ test('account picker uses active target aliases, submits the selection, and expo
     } };
   const ui = renderProfileForTest(selection, catalog.models.codex, [], catalog);
   const picker = ui.container.querySelector('#spawn-account');
-  assert.deepEqual([...picker.options].map(o => o.value), ['', 'spare', 'parked']);
-  assert.match(picker.options[0].textContent, /primary/);
-  assert.equal(picker.options[2].disabled, true);
+  assert.deepEqual([...picker.options].map(o => o.value), ['spare']);
+  assert.equal(picker.selectedIndex, -1, 'unavailable default never silently falls back');
   picker.value = 'spare'; picker.dispatchEvent(new ui.dom.window.Event('change'));
   assert.equal(ui.selection().account, 'spare');
   const cursor = renderProfileForTest({ provider: 'cursor', model: 'auto', effort: 'default' },
     { auto: { efforts: ['default'] } }, []);
-  assert.equal(cursor.container.querySelector('#spawn-account').disabled, true);
-  assert.match(cursor.container.querySelector('#spawn-account').textContent, /unsupported/);
+  assert.equal(cursor.container.querySelector('#spawn-account'), null);
 });
 
 test('spawn picker displays mapped labels while retaining raw option values and emitted selections', () => {
@@ -226,6 +397,16 @@ test('hidden provider has no tuple; saved hidden provider falls back to first ad
   assert.equal(picker.catalogTuple('codex'), null);
   assert.deepEqual(picker.catalogProviders(picker.catalog()), ['gemini']);
   assert.deepEqual(picker.selectionForProvider('codex'), { provider: 'gemini', model: 'gemini-default', effort: 'default' });
+});
+
+test('catalog fallback retains an account within its provider, never across providers', () => {
+  const selected = { provider: 'codex', model: 'removed-model', effort: 'medium', account: 'spare' };
+  const sameProvider = visibilityPicker({ codex: { 'codex-default': { efforts: ['high'] } } }, {}, selected);
+  assert.deepEqual(sameProvider.selectionForProvider('codex'),
+    { provider: 'codex', model: 'codex-default', effort: 'high', account: 'spare' });
+  const differentProvider = visibilityPicker({ gemini: { 'gemini-default': { efforts: ['default'] } } }, {}, selected);
+  assert.deepEqual(differentProvider.selectionForProvider('codex'),
+    { provider: 'gemini', model: 'gemini-default', effort: 'default' });
 });
 
 test('hidden default model and invalid effort fall back within the visible provider', () => {

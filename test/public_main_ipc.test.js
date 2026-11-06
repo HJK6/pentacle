@@ -71,6 +71,7 @@ test('signed operator RPC inventory reaches the real account picker', async () =
   try {
     const requestPath = path.join(scratch, 'request.json');
     const responsePath = path.join(scratch, 'response.json');
+    const accountLabels = { codex: { primary: 'primary-user', spare: 'spare-user' } };
     const invoke = harness({ getSpawnCatalog: async () => ({ profiles: { desktop_manual: {} } }),
       getProviderAccounts: () => client.getProviderAccounts.call({
         async sendCommand(request, prefix) {
@@ -85,7 +86,7 @@ test('signed operator RPC inventory reaches the real account picker', async () =
           });
           return JSON.parse(fs.readFileSync(responsePath, 'utf8'));
         },
-      }) });
+      }) }, { chatStream: { accountLabels } });
     const result = await invoke('chat-stream:spawn-catalog');
     assert.equal(result.ok, true, result.error);
     const app = fs.readFileSync(path.join(root, 'renderer/app.js'), 'utf8');
@@ -93,9 +94,17 @@ test('signed operator RPC inventory reaches the real account picker', async () =
     const html = new Function('newSessionCatalog', 'esc', `${source}; return spawnAccountControl('codex', 'fixture-host');`)(result.catalog, String);
     const dom = new JSDOM(html);
     const picker = dom.window.document.querySelector('select');
-    assert.deepEqual([...picker.options].map(option => option.value), ['', 'primary', 'spare']);
-    assert.equal(picker.options[2].disabled, false);
-    assert.match(picker.options[0].textContent, /primary/);
+    assert.deepEqual([...picker.options].map(option => option.value), ['primary', 'spare']);
+    assert.equal(picker.value, 'primary');
+    assert.ok([...picker.options].every(option => !option.disabled));
+    assert.deepEqual([...picker.options].map(option => option.textContent), ['primary', 'spare']);
+    const config = await invoke('get-config');
+    const labelledHtml = new Function('newSessionCatalog', 'esc', 'CONFIG',
+      `${source}; return spawnAccountControl('codex', 'fixture-host');`)(result.catalog, String, config);
+    const labelledPicker = new JSDOM(labelledHtml).window.document.querySelector('select');
+    assert.deepEqual([...labelledPicker.options].map(option => [option.value, option.textContent]),
+      [['primary', 'primary-user'], ['spare', 'spare-user']]);
+    assert.equal(labelledPicker.value, 'primary');
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
