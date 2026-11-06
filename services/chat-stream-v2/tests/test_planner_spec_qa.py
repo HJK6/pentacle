@@ -68,6 +68,72 @@ def test_planner_spec_spawn(monkeypatch):
     asyncio.run(run())
 
 
+def test_planner_explicit_account_keeps_spec_phase_admission(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import launch
+    from account_runtime import AccountRuntime
+    from spawnctl import SpawnCtl
+    from test_account_rotation import binding
+    from test_spec_binding_provenance import SpawnTmux
+    from test_provider_cli_pin import artifact_executor
+    from provider_cli_fixtures import seed_pin
+    from work_lane_link import link_specs
+    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
+    class Catalog:
+        def resolution_for(self, value):
+            return 'resolved' if value == SPEC else 'zero_matches'
+        def canonical_spec_identity(self, value):
+            return value if value == SPEC else None
+    class ProviderTmux(SpawnTmux):
+        async def new_session(self, name, command, cwd=None, env=None):
+            self.nonce = (env or {}).get('PENTACLE_SPAWN_NONCE', '')
+            await super().new_session(name, command, cwd=cwd, env=env)
+        async def run(self, *_args, **_kwargs):
+            return 0, f'PENTACLE_SPAWN_NONCE={self.nonce}\n'
+        async def stage_text(self, *_args): pass
+        async def pretrust_codex_cwd(self, path, **kwargs):
+            assert kwargs.get('code_home') == str(tmp_path/'spare'), 'pretrust lost selected account home'
+    async def run():
+        store, sessions, _, comms, _, server = await state()
+        tmux = ProviderTmux()
+        ctl = SpawnCtl(store, sessions, tmux=tmux, specs=Catalog(),
+            machine=launch.local_machine('localhost', cwd=str(tmp_path), codex_bin='/bin/echo'))
+        runtime = AccountRuntime(store, sessions, policy={'enabled': True})
+        runtime.attach(server, ctl, comms)
+        try:
+            await store.update_session('localhost', 'lead', role='planner')
+            await link_specs(store, SPEC)
+            for alias in ('primary', 'spare'):
+                account = replace(binding(alias, host='localhost'), home=str(tmp_path/alias))
+                await runtime.run(lambda a, account=account: a.register(account))
+            await runtime.run(lambda a: a.set_default(host='localhost', provider='codex', alias='primary'))
+            await seed_pin(runtime)
+            await artifact_executor(runtime)
+            owner = await store.fetch_session('localhost', 'lead')
+            result = await ctl.spawn({
+                'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'account': 'spare',
+                'objective': 'Review the assigned spec', 'visibility': 'hidden',
+                'ready_marker': 'READY',
+                'session_name': 'account-spec-review', 'request_id': 'account-spec-spawn',
+                'parent_stream_id': LEAD, 'from_stream_id': LEAD, 'stream_token': TOKEN,
+                'role': 'qa', 'phase': 'spec', 'spec_id': SPEC,
+                'qa_spec_id': SPEC, 'qa_surface': 'admission', 'qa_cycle': 1,
+                '_auth_context': {'token_verified': True, 'stream_id': LEAD,
+                                  'session_generation': owner['session_generation']},
+            }, 'localhost')
+            assert result['type'] == 'spawn.ok', result
+            row = await store.fetch_session('localhost', 'account-spec-review')
+            assert row['account_binding']['alias'] == 'spare'
+            assert (await issue(server, 'show'))['commissions'][0]['phase'] == 'spec'
+            assert (await runtime.run(lambda a: a.defaults()))[0]['alias'] == 'primary'
+        finally:
+            for task in tuple(ctl._background_spawns): task.cancel()
+            await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
+            for name in tuple(tmux.live): await tmux.kill_session(name)
+            store.stop()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('case', ['missing_phase', 'implementation_phase', 'phase_override',
                                   'unassigned', 'different_assignment', 'secondary_tag',
                                   'unbound', 'worker', 'closed', 'forged', 'self_review'])

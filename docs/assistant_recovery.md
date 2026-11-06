@@ -15,13 +15,19 @@ Keep the manifest and journal outside this repository, owned by the executor and
 | `predecessor`, `predecessor_generation` | Read from the current binding immediately before launch. |
 | `authorization` | Explicit owner references for `spawn`, `rebind`, `retire`, `routes`, and optional `rollback`; prepare all needed references before advancing. |
 | `spawn_spec_ids` | Owner-commissioned canonical recovery and configured rebind specs. A spec attachment alone grants nothing. |
-| `target` | Explicit host/provider/model/effort plus staged `python`, `script`, `manifest`, `journal` paths. |
+| `target` | Explicit host/provider/model/effort, optional `account` alias, plus staged `python`, `script`, `manifest`, `journal` paths. |
 | `snapshot_command`, `snapshot_inputs` | Retained-host read-only adapter; inputs name sessions/notifications databases and the deployed authority-membership table explicitly; no private assistant name is a default. |
 | `route_command`, `routes` | Retained-host selected-field adapter and effective consumer checks. |
 | `mirror_command` | Authorized correlated-dispatch/canonical-final verification adapter. |
 | checkpoint/bootstrap pointers | Private durable context, supplementary to current daemon state. |
 
 The retained host can run `snapshot` and `route-files` as adapters: both read their JSON input from stdin. `snapshot` opens databases read-only and selects state, not tokens or consent keys. Capture its output into the private runtime journal, never into review logs. It includes current children, grants, subscriptions, active work, pending route references and question obligations. These facts come from the daemon, not a last hand-written checkpoint.
+
+An explicit `target.account` selects that alias without changing defaults. If omitted,
+a bound predecessor's alias is retained. The existing journal freezes the alias before
+spawn; target binding and generation are checked on admission, replay and advance.
+A missing target cell refuses before provider work. Preserve the original key and
+owned admission when reconciliation fails.
 
 Every route names `id`, `path`, `format` (`json` or `plist`), `fields` (`keys`, `before`, `after`), `verify_command`, and `expected_readback`. Optional `activate_command` runs only when the effective readback is wrong. The adapter CAS-checks selected fields, preserves other content and verifies the loaded consumer. `$successor_stream` / `$successor_generation` substitute the actual successor. Store selected rollback fields/readbacks, not whole secret configurations. A configured local-only native wake requires an explicit fail-closed degradation with independent push/Updates readbacks; changing its stream id cannot make it a remote transport.
 

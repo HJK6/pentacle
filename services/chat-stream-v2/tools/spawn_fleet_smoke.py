@@ -94,13 +94,13 @@ def notify_operator_failure(payload: dict) -> dict:
     return {"dedup_key": dedup_key, "returncode": proc.returncode}
 
 
-def _failure_card(host: str, provider: str, prompt_mode: str, stage: str, exc: Exception) -> dict:
+def _failure_card(host: str, provider: str, prompt_mode: str, stage: str, exc: Exception, account=None) -> dict:
     return {
         "producer": "spawn-fleet-smoke",
         "severity": "critical",
         "title": f"Spawn smoke failed: {host}/{provider}/{stage}",
-        "body": f"prompt_mode={prompt_mode}; {exc}",
-        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{prompt_mode}:{stage}",
+        "body": f"account={account or 'default'}; prompt_mode={prompt_mode}; {exc}",
+        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{account or 'default'}:{prompt_mode}:{stage}",
     }
 
 
@@ -230,6 +230,7 @@ def run_cell(
     provider: str,
     prompt_mode: str,
     *,
+    account: str | None = None,
     rpc,
     wait_ready,
     wait_event,
@@ -248,7 +249,12 @@ def run_cell(
     stage = "catalog"
     cell_error: Exception | None = None
     session_metrics: dict | None = None
+    actual_binding = None
     try:
+        if provider_probe is not None:
+            if account is not None and account != provider_probe.binding.alias:
+                raise ValueError("account conflicts with pinned provider tuple")
+            account = provider_probe.binding.alias
         if inject_stage == stage:
             raise RuntimeError("forced failure")
         catalog = rpc({"type": "spawn_catalog_get"}, "spawn_catalog_get")
@@ -282,6 +288,10 @@ def run_cell(
             "request_id": str(uuid.uuid4()),
             "idempotency_key": idempotency_key,
         }
+        if account is not None:
+            from provider_accounts import _component
+            _component(account)
+            spawn["account"] = account
         if prompt_mode == "prompted":
             spawn["initial_prompt"] = f"Reply exactly {marker} and do nothing else."
         if prepare_owned_spawn is not None:
@@ -296,7 +306,14 @@ def run_cell(
         if provider_probe is not None:
             stage = "identity"
             provider_probe.verify_spawn(result)
-
+        actual_binding = result.get("account_binding") or (result.get("session") or {}).get("account_binding")
+        if account is not None:
+            stage = "account"
+            if (not isinstance(actual_binding, dict)
+                    or any(actual_binding.get(k) != v for k, v in
+                           (("alias", account), ("host", host), ("provider", provider)))
+                    or not actual_binding.get("generation")):
+                raise RuntimeError("requested account binding was not honored")
         stage = "readiness"
         if inject_stage == stage:
             raise RuntimeError("forced failure")
@@ -333,6 +350,12 @@ def run_cell(
                 if isinstance(gate, dict) and not gate.get("passed", True):
                     stage = gate_name
                     raise RuntimeError(f"{gate_name}: {json.dumps(gate, sort_keys=True)}")
+        if account is not None:
+            stage = "account"
+            inventory = rpc({"type": "list_sessions"}, "list_sessions")
+            row = next((row for row in inventory.get("active", []) if row.get("stream_id") == stream_id), {})
+            if row.get("account_binding") != actual_binding:
+                raise RuntimeError("account binding changed or disappeared before final response")
     except Exception as exc:
         # A codex cell that reached readiness but produced no assistant turn may
         # be over its usage limit rather than hitting a daemon/wire fault. The
@@ -384,7 +407,10 @@ def run_cell(
         raise cell_error
     if inject_stage == "teardown":
         raise RuntimeError("teardown: forced failure")
-    result = {"host": host, "provider": provider, "prompt_mode": prompt_mode, "stream_id": stream_id}
+    result = {"host": host, "provider": provider, "prompt_mode": prompt_mode, "stream_id": stream_id,
+              "account": account, "account_selection": "explicit" if account is not None else "default"}
+    if actual_binding is not None:
+        result["account_binding"] = actual_binding
     if session_metrics is not None:
         result["metrics"] = session_metrics
     return result
@@ -874,6 +900,32 @@ def _rescue_teardown(
         close_owned(stream_id)
 
 
+def account_map(entries, cells):
+    """Flatten declared aliases to scalar cells; AccountRuntime remains resolver."""
+    from provider_accounts import _component
+    included = {(h, p) for h, p, _ in cells}
+    providers = {p for _, p in included}
+    declared = {}
+    for entry in entries:
+        key, sep, alias = entry.partition("=")
+        if not sep or key in declared:
+            raise ValueError("account mappings require unique PROVIDER=ALIAS or HOST/PROVIDER=ALIAS keys")
+        _component(alias)
+        parts = key.split("/")
+        if ((len(parts) == 1 and key not in providers)
+                or (len(parts) == 2 and tuple(parts) not in included) or len(parts) not in (1, 2)):
+            raise ValueError(f"account mapping names an uncovered cell: {key}")
+        declared[key] = alias
+    result = {}
+    for host, provider in included:
+        alias = declared.get(f"{host}/{provider}", declared.get(provider))
+        if alias is None and declared:
+            raise ValueError(f"explicit account map does not cover {host}/{provider}")
+        if alias is not None:
+            result[(host, provider)] = alias
+    return result
+
+
 def run_matrix(
     url: str,
     token_path: Path,
@@ -883,6 +935,7 @@ def run_matrix(
     evidence: list[dict[str, object]] | None = None,
     allow_legacy_close: bool = False,
     provider_probe=None,
+    accounts=None,
 ) -> list[dict[str, object]]:
     if cells is None:
         cells = smoke_plan()["cells"]
@@ -890,8 +943,17 @@ def run_matrix(
         raise ValueError("no smoke host cells configured")
     if provider_probe is not None and cells != ((provider_probe.binding.host, "codex", "promptless"),):
         raise ValueError("provider tuple requires exactly its local Codex promptless cell")
+    accounts = dict(accounts or {})
+    if provider_probe is not None:
+        key = (provider_probe.binding.host, provider_probe.binding.provider)
+        if accounts.get(key, provider_probe.binding.alias) != provider_probe.binding.alias:
+            raise ValueError("account map conflicts with pinned provider tuple")
+        accounts[key] = provider_probe.binding.alias
+    if accounts and set(accounts) != {(h, p) for h, p, _ in cells}:
+        raise ValueError("explicit account map must cover exactly the included cells")
     failures: list[dict[str, str]] = []
     for host, provider, prompt_mode in cells:
+        account = accounts.get((host, provider))
         state_path = Path(tempfile.gettempdir()) / f"pentacle-live-window-{uuid.uuid4().hex}.json"
         registry = OwnedSessionRegistry(state_path, allow_legacy_close=allow_legacy_close)
 
@@ -911,6 +973,7 @@ def run_matrix(
                         rescue_teardown=rescue_cell_teardown,
                         validate_session=getattr(close_owned, "validate", None),
                         **({"provider_probe": provider_probe} if provider_probe is not None else {}),
+                        **({"account": account} if account is not None else {}),
                     )
                     if evidence is not None and isinstance(result, dict):
                         evidence.append({"outcome": "passed", **result})
@@ -921,7 +984,7 @@ def run_matrix(
                     # regression failures by `main`) and retain a disposable
                     # warning card plus the normal JSON/log failure evidence.
                     row = {
-                        "host": host, "provider": provider, "prompt_mode": prompt_mode,
+                        "host": host, "provider": provider, "account": account, "prompt_mode": prompt_mode,
                         "stage": "event", "class": "untested", "reason": "quota_exhausted",
                         "reset_at": exc.reset_at,
                     }
@@ -936,7 +999,7 @@ def run_matrix(
                             "title": f"Codex quota exhausted: {host}",
                             "body": f"{host} Codex account is over its usage limit{reset}. "
                                     "Restore quota (/usage reset or top-up); not a daemon fault.",
-                            "dedup_key": f"spawn-fleet-smoke-quota:{host}",
+                            "dedup_key": f"spawn-fleet-smoke-quota:{host}:{account or 'default'}",
                         })
                     except Exception as card_error:
                         row["smoke_card_error"] = str(card_error)
@@ -945,7 +1008,7 @@ def run_matrix(
                     stage = _stage_from_error(exc)
                     classification = classify_cell_outcome(exc)
                     row = {
-                        "host": host, "provider": provider, "prompt_mode": prompt_mode,
+                        "host": host, "provider": provider, "account": account, "prompt_mode": prompt_mode,
                         "stage": stage, "class": classification["class"],
                         "detail": "".join(traceback.format_exception(exc)),
                         **({"reason": classification["reason"]} if classification.get("reason") else {}),
@@ -960,12 +1023,12 @@ def run_matrix(
                                 "severity": "warning",
                                 "title": f"Spawn smoke untested: {host}/{provider}",
                                 "body": f"prompt_mode={prompt_mode}; {exc}",
-                                "dedup_key": f"spawn-fleet-smoke-untested:{host}:{provider}:{prompt_mode}",
+                                "dedup_key": f"spawn-fleet-smoke-untested:{host}:{provider}:{account or 'default'}:{prompt_mode}",
                             })
                         except Exception as card_error:
                             row["smoke_card_error"] = str(card_error)
                         continue
-                    card = _failure_card(host, provider, prompt_mode, stage, exc)
+                    card = _failure_card(host, provider, prompt_mode, stage, exc, account)
                     try:
                         row["smoke_card"] = publish_smoke_card(card)
                     except Exception as card_error:
@@ -976,7 +1039,7 @@ def run_matrix(
             # returned JSON/log evidence.
             classification = classify_cell_outcome(exc)
             row = {
-                "host": host, "provider": provider, "prompt_mode": prompt_mode,
+                "host": host, "provider": provider, "account": account, "prompt_mode": prompt_mode,
                 "stage": _stage_from_error(exc), "class": classification["class"],
                 "detail": "".join(traceback.format_exception(exc)),
                 **({"reason": classification["reason"]} if classification.get("reason") else {}),
@@ -985,7 +1048,7 @@ def run_matrix(
             if evidence is not None and classification["class"] == "untested":
                 evidence.append({"outcome": "UNTESTED", **row})
             if classification["class"] == "failure":
-                _notify_failure(row, _failure_card(host, provider, prompt_mode, row["stage"], exc))
+                _notify_failure(row, _failure_card(host, provider, prompt_mode, row["stage"], exc, account))
     return failures
 
 
@@ -1017,6 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="operator credential for the explicitly selected endpoint")
     parser.add_argument("--provider-tuple", type=Path, default=None,
                         help="private pinned local Codex binding/config input; requires URL and HOST")
+    parser.add_argument("--account", action="append", default=None,
+                        help="PROVIDER=ALIAS or HOST/PROVIDER=ALIAS; repeat to cover every included cell")
     parser.add_argument(
         "host", nargs="?", default=None,
         help="with URL, run only the post-deploy canary cell (<host>, codex, "
@@ -1037,6 +1102,14 @@ def main(argv: list[str] | None = None) -> int:
                      "pass no arguments to run the full matrix")
     else:
         plan = smoke_plan()
+        url, cells = DEFAULT_URL, plan["cells"]
+        optional_hosts = plan["optional_hosts"]
+    try:
+        accounts = account_map(args.account if args.account is not None else
+                               list(filter(None, os.environ.get("PENTACLE_SMOKE_ACCOUNTS", "").split(","))), cells)
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
+    if args.host is None:
         if args.dry_run:
             print(json.dumps({
                 "source": plan["source"],
@@ -1044,13 +1117,13 @@ def main(argv: list[str] | None = None) -> int:
                 "optional_hosts": plan["optional_hosts"],
                 "excluded_present": plan["excluded_present"],
                 "excluded_absent": plan["excluded_absent"],
-                "cells": [{"host": host, "provider": provider, "prompt_mode": mode}
+                "cells": [{"host": host, "provider": provider, "prompt_mode": mode,
+                           "account": accounts.get((host, provider)),
+                           "account_selection": "explicit" if accounts else "default"}
                           for host, provider, mode in plan["cells"]],
                 "dry_run": True,
             }, sort_keys=True))
             return 0
-        url, cells = DEFAULT_URL, plan["cells"]
-        optional_hosts = plan["optional_hosts"]
     provider_probe = None
     native_identity = None
     if args.provider_tuple is not None:
@@ -1072,17 +1145,20 @@ def main(argv: list[str] | None = None) -> int:
     results = run_matrix(
         url, args.token_path or DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         allow_legacy_close=args.allow_legacy_close,
+        **({"accounts": accounts} if accounts else {}),
         **({"provider_probe": provider_probe} if provider_probe is not None else {}),
     )
     # A successful verdict requires actual evidence for every planned cell.
     # run_matrix returns nongreen rows and appends completed passes to evidence.
-    accounted = {(row.get("host"), row.get("provider"), row.get("prompt_mode"))
+    if provider_probe is not None:
+        accounts[(provider_probe.binding.host, provider_probe.binding.provider)] = provider_probe.binding.alias
+    accounted = {(row.get("host"), row.get("provider"), row.get("prompt_mode"), row.get("account"))
                  for row in evidence if row.get("outcome") == "passed"}
-    accounted.update((row.get("host"), row.get("provider"), row.get("prompt_mode"))
+    accounted.update((row.get("host"), row.get("provider"), row.get("prompt_mode"), row.get("account"))
                      for row in results)
-    results.extend({"host": host, "provider": provider, "prompt_mode": mode,
+    results.extend({"host": host, "provider": provider, "prompt_mode": mode, "account": accounts.get((host, provider)),
                     "class": "untested", "reason": "missing_evidence"}
-                   for host, provider, mode in cells if (host, provider, mode) not in accounted)
+                   for host, provider, mode in cells if (host, provider, mode, accounts.get((host, provider))) not in accounted)
     optional = set(optional_hosts)
     skipped = [{**row, "outcome": "SKIPPED_OFFLINE"} for row in results
                if row.get("host") in optional and row.get("class") == "untested"

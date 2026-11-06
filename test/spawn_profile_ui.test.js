@@ -59,12 +59,12 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     profiles: { desktop_manual: { [selection.provider]: [selection.model, selection.effort] } },
     models: { [selection.provider]: models },
   };
-  const renderSpawnProfileOptions = new Function(
+  const controller = new Function(
     'document', 'esc', 'modelLabel', 'updateNewSessionStatus',
     'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
     'selectionForProvider', 'renderNewSessionModal',
-    'newSessionSelection', 'newSessionCatalog', 'newSessionError',
-    `${extractFunction('renderSpawnProfileOptions')}; return renderSpawnProfileOptions;`,
+    'newSessionSelection', 'newSessionCatalog', 'newSessionError', 'newSessionLocation',
+    `${extractFunction('spawnAccountControl')}; ${extractFunction('renderSpawnProfileOptions')}; return { render: renderSpawnProfileOptions, selection: () => newSessionSelection };`,
   )(
     dom.window.document,
     String,
@@ -89,11 +89,35 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     selection,
     catalog,
     '',
+    'fixture-host',
   );
   const container = dom.window.document.getElementById('profile');
-  renderSpawnProfileOptions(container);
-  return { dom, container };
+  controller.render(container);
+  return { dom, container, selection: controller.selection };
 }
+
+test('account picker uses active target aliases, submits the selection, and exposes unsupported providers', () => {
+  const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' };
+  const catalog = { profiles: { desktop_manual: { codex: [selection.model, 'high'] } },
+    models: { codex: { [selection.model]: { efforts: ['high'] } } }, account_status: {
+      defaults: [{ host: 'fixture-host', provider: 'codex', alias: 'primary' }], accounts: [
+        { host: 'fixture-host', provider: 'codex', alias: 'spare', active: true, enabled: true, health: 'healthy' },
+        { host: 'fixture-host', provider: 'codex', alias: 'parked', active: true, enabled: false, health: 'parked' },
+        { host: 'other-host', provider: 'codex', alias: 'foreign', active: true, enabled: true, health: 'healthy' },
+      ],
+    } };
+  const ui = renderProfileForTest(selection, catalog.models.codex, [], catalog);
+  const picker = ui.container.querySelector('#spawn-account');
+  assert.deepEqual([...picker.options].map(o => o.value), ['', 'spare', 'parked']);
+  assert.match(picker.options[0].textContent, /primary/);
+  assert.equal(picker.options[2].disabled, true);
+  picker.value = 'spare'; picker.dispatchEvent(new ui.dom.window.Event('change'));
+  assert.equal(ui.selection().account, 'spare');
+  const cursor = renderProfileForTest({ provider: 'cursor', model: 'auto', effort: 'default' },
+    { auto: { efforts: ['default'] } }, []);
+  assert.equal(cursor.container.querySelector('#spawn-account').disabled, true);
+  assert.match(cursor.container.querySelector('#spawn-account').textContent, /unsupported/);
+});
 
 test('spawn picker displays mapped labels while retaining raw option values and emitted selections', () => {
   const claudeEmissions = [];
@@ -321,9 +345,9 @@ test('spawn picker stays catalog-driven — model list and efforts derive from t
   assert.match(app, /const efforts = entries\[selection\.model\]\?\.efforts/);
 });
 
-test('manual spawn UI exposes three labelled native controls and modal live status', () => {
+test('manual spawn UI exposes account and native controls with modal live status', () => {
   const labels = [...app.matchAll(/<label[^>]*>([^<]+)<\/label>/g)].map((match) => match[1]);
-  assert.deepEqual(labels, ['Provider', 'Model', 'Effort']);
+  assert.deepEqual(labels, ['Account', 'Provider', 'Model', 'Effort']);
   assert.doesNotMatch(app, /id="spawn-family"/);
   assert.match(app, /id="spawn-provider"/);
   assert.match(app, /<select id="spawn-provider"/);
@@ -451,7 +475,8 @@ test('post-spawn uses selection.provider, not a bare undeclared agent identifier
 test('manual spawn leaves failure notification to the daemon terminal frame', () => {
   const source = app.slice(app.indexOf('async function newSession('), app.indexOf('\nasync function newTerminalSession('));
   assert.match(source, /newSessionError = result\?\.error\?\.message \|\| result\?\.error/);
-  assert.doesNotMatch(source, /showToast/);
+  const failure = source.slice(source.indexOf('if (!result?.ok)'), source.indexOf('if (!result.session)'));
+  assert.doesNotMatch(failure, /showToast/);
   assert.doesNotMatch(app, /aria-label="Starting"/);
 });
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -86,6 +87,7 @@ def wait_until(predicate, timeout_s: float, poll_s: float = 1.0) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--provider", choices=sorted(MODELS), required=True)
+    parser.add_argument('--account', help='explicit provider account alias')
     parser.add_argument("--host", default=None, help="spawn host (default: daemon's choice for this caller)")
     parser.add_argument("--busy-seconds", type=int, default=75)
     parser.add_argument("--spec-id", action="append", default=[])
@@ -93,6 +95,8 @@ def main() -> int:
     parser.add_argument("--ssh", default=None, metavar="USER@HOST",
                         help="capture the pane over ssh when --host is a peer (e.g. user@peer-host)")
     args = parser.parse_args()
+    if args.account is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', args.account):
+        parser.error('invalid explicit account alias')
     global SSH_TARGET
     SSH_TARGET = args.ssh
 
@@ -133,6 +137,8 @@ def _probe(args: argparse.Namespace, report: dict, token: str, model: str, effor
         spawn += ["--host", args.host]
     for spec_id in args.spec_id:
         spawn += ["--spec-id", spec_id]
+    if args.account is not None:
+        spawn += ['--account', args.account]
     try:
         rc, out = run(spawn, timeout=300)
     except subprocess.TimeoutExpired:
@@ -148,6 +154,14 @@ def _probe(args: argparse.Namespace, report: dict, token: str, model: str, effor
         return 3
     session_name = stream_id.split(":", 1)[1]
     report["stream_id"] = stream_id
+    if args.account is not None:
+        actual = (spawned.get('session') or {}).get('account_binding') or spawned.get('account_binding') or {}
+        report.update(account=args.account, account_binding=actual)
+        if (actual.get('alias') != args.account or actual.get('provider') != args.provider
+                or not actual.get('host') or (args.host and actual.get('host') != args.host)
+                or not actual.get('generation')):
+            report.update(verdict='harness_error', stage='account_binding_mismatch')
+            return 3
 
     # Busy = the foreground command is visibly running (the command text is
     # on screen and the provider shows its interrupt affordance).

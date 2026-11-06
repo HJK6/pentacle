@@ -1784,6 +1784,19 @@ class SpawnCtl:
         except SpawnProfileError as exc:
             raise VerbError(exc.code, str(exc)) from exc
         resolved_provider = str(resolved["provider"])
+        account_msg = await self._retain_handoff_account(msg)
+        runtime = getattr(self, "account_runtime", None)
+        if "account" in account_msg:
+            if runtime is None:
+                raise VerbError("account_feature_off", "named accounts are unavailable")
+            from provider_accounts import AccountError
+            try:
+                if resolved_provider in {"cursor", "gemini"}:
+                    raise AccountError(f"{resolved_provider}_named_accounts_unsupported")
+                await runtime.choose_launch(host=host, provider=resolved_provider,
+                    model=resolved["model"], effort=resolved["effort"], message=account_msg)
+            except AccountError as exc:
+                raise VerbError(str(exc), str(exc), **exc.context) from None
         if not str(msg.get("command") or "").strip() and self._launch_machine(host, resolved_provider) is None:
             raise VerbError("spawn_launch_unavailable", "no target-host machine profile for scheduled spawn")
         qa = await qa_dispatch.admit(self.store, msg,
@@ -1791,6 +1804,7 @@ class SpawnCtl:
             reviewer=f"{host}:{admission_name}", generation="", msg_id=0,
             check_only=True, handoff=bool(msg.get("handoff")))
         return {
+            **({"account": account_msg["account"]} if "account" in account_msg else {}),
             "qa_owner_generation": (qa or {}).get("coordinator_generation"),
             "host": host,
             "role": resolved.get("role", msg.get("role")),
@@ -2982,10 +2996,6 @@ class SpawnCtl:
             raise VerbError("spawn_fence_lost", "spawn no longer owns its creation intent")
         provider = str((resolution.get("resolved_launch_tuple") or {}).get("provider") or "")
         promptless_codex = provider == "codex" and not brief
-        if provider == "codex" and not str(msg.get("command") or "").strip():
-            machine = self._launch_machine(host, provider)
-            if machine is not None:
-                await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd))
         if provider == "codex":
             # An explicitly reused name is a fresh pane, with its own Enter budget.
             self._native_trust_entered.discard(f"{host}:{name}")
@@ -3001,6 +3011,12 @@ class SpawnCtl:
                 await account_runtime.admit_launch({**open_flds, "host":host, "stream_id":f"{host}:{name}"})
             except AccountError as exc:
                 raise VerbError(str(exc),str(exc),**exc.context) from None
+        if provider == "codex" and not str(msg.get("command") or "").strip():
+            machine = self._launch_machine(host, provider)
+            if machine is not None:
+                selected_home = (open_flds.get("account_binding") or {}).get("home")
+                await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd),
+                    **({"code_home": selected_home} if selected_home else {}))
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart
@@ -3417,11 +3433,16 @@ class SpawnCtl:
         model = resolved["model"]
         effort = resolved["effort"]
         account_binding = None
+        msg = await self._retain_handoff_account(msg)
         if provider == "cursor":
             if host != self.sessions.local_host:
                 raise VerbError("cursor_remote_unsupported", "Cursor seats are local only")
             if "account" in msg or msg.get("_account_resume_binding"):
                 raise VerbError("cursor_named_accounts_unsupported", "Cursor uses the local sign-in")
+        if provider == "gemini" and ("account" in msg or msg.get("_account_resume_binding")):
+            raise VerbError("gemini_named_accounts_unsupported", "Gemini uses the local sign-in")
+        if "account" in msg and account_runtime is None:
+            raise VerbError("account_feature_off", "named accounts are unavailable")
         if account_runtime is not None and provider != "cursor":
             from provider_accounts import AccountError
             try:
@@ -3614,6 +3635,16 @@ class SpawnCtl:
         )
         resolved["_handoff_model_change_warning"] = warning
         return resolved
+
+    async def _retain_handoff_account(self, msg):
+        if "account" in msg or not msg.get("handoff"):
+            return msg
+        source_id = str(msg.get("handoff_from_stream_id") or "")
+        source = await self.store.fetch_session(*source_id.split(":", 1)) if ":" in source_id else None
+        alias = ((source or {}).get("account_binding") or {}).get("alias")
+        if not alias:
+            return msg
+        return {**msg, "account": alias}
 
     async def _record_protected_handoff(self, msg: dict[str, Any], host: str, name: str, key: str) -> None:
         """Bind a protected source's own handoff to its generation and token."""

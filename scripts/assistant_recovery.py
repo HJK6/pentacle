@@ -105,11 +105,13 @@ def snapshot(inputs):
         seats = [dict(row) for row in conn.execute("""SELECT s.host,s.session_name,s.status,
             s.parent_stream_id,s.role,s.visibility,s.pane_status,s.bootstrap_state,
             s.provider,s.effective_model,s.effective_effort,s.offline_since_ts,s.presumed_dead_at,
-            s.spec_id,s.qualified_spec_ids,s.objective,
+            s.spec_id,s.qualified_spec_ids,s.objective,s.account_binding,
             g.generation AS session_generation FROM sessions s
             JOIN v2_session_generations g USING(host,session_name)""")]
         for seat in seats:
             seat["stream_id"] = seat["host"] + ":" + seat["session_name"]
+            if isinstance(seat.get('account_binding'), str):
+                seat['account_binding'] = json.loads(seat['account_binding'])
         binding = dict(conn.execute("SELECT name,stream_id,generation,revision FROM "
             "v2_assistant_direct_binding WHERE name=?", (inputs["binding_name"],)).fetchone() or {})
         grant = dict(conn.execute("SELECT stream_id,session_generation,revision FROM "
@@ -335,6 +337,34 @@ class Recovery:
         if not self.m.get("authorization", {}).get(action):
             raise Refused("missing_"+action+"_authorization")
 
+    async def selected_account(self, state=None):
+        if 'spawn_account' not in self.j:
+            target = self.m['target']
+            if 'account' in target:
+                alias = target['account']
+                if not isinstance(alias, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', alias):
+                    raise Refused('invalid_account')
+            else:
+                state = state or await self.g.snapshot()
+                old = state.get('predecessor') or {}
+                if old.get('session_generation') != self.m['predecessor_generation']:
+                    raise Refused('predecessor_generation_changed')
+                alias = (old.get('account_binding') or {}).get('alias')
+            if alias is not None and target['provider'] not in ('codex', 'claude'):
+                raise Refused('named_accounts_unsupported')
+            self.j['spawn_account'] = alias
+            self.commit()
+        return self.j['spawn_account']
+
+    def check_account_binding(self, seat, alias):
+        if alias is None:
+            return
+        actual = seat.get('account_binding') or {}
+        target = self.m['target']
+        if (actual.get('alias') != alias or actual.get('host') != target['host']
+                or actual.get('provider') != target['provider'] or not actual.get('generation')):
+            raise Refused('successor_account_binding_mismatch')
+
     async def effect(self, key, payload):
         if key in self.j["receipts"]:
             return self.j["receipts"][key]
@@ -378,6 +408,7 @@ class Recovery:
         old = state["predecessor"]
         if not old or old["session_generation"] != self.m["predecessor_generation"]:
             raise Refused("predecessor_generation_changed")
+        self.check_account_binding(actor, await self.selected_account(state))
         if "successor" not in self.j:
             if state["binding"]["stream_id"] != self.m["predecessor"] or state["binding"]["generation"] != self.m["predecessor_generation"]:
                 raise Refused("foreign_binding")
@@ -551,7 +582,15 @@ class Recovery:
     async def start(self):
         """One fenced existing spawn; files are pre-staged, not copied secretly."""
         self.require("spawn")
+        account = await self.selected_account()
         if "spawn" in self.j:
+            if account is not None:
+                state = await self.g.snapshot()
+                prior = self.j['spawn']
+                seat = next((s for s in state['seats'] if s['stream_id'] == prior['stream_id']), {})
+                if seat.get('session_generation') != prior['generation']:
+                    raise Refused('successor_generation_changed')
+                self.check_account_binding(seat, account)
             return self.j["spawn"]
         target = self.m["target"]
         script, manifest, journal = (target[k] for k in ("script","manifest","journal"))
@@ -573,6 +612,8 @@ class Recovery:
             "objective":"Recover the explicitly commissioned assistant front desk","objective_supported":True,
             "initial_prompt":brief,"spec_id":self.m["spawn_spec_ids"][0],"spec_ids":self.m["spawn_spec_ids"],
             "request_id":self.identity("spawn"),"idempotency_key":self.identity("spawn")}
+        if account is not None:
+            payload['account'] = account
         prior=self.j.get("spawn_intent_digest")
         if prior and prior != digest(payload):
             raise Refused("spawn_intent_changed")
@@ -585,6 +626,11 @@ class Recovery:
             self.commit()
             raise Refused("spawn_not_ready_reconcile_same_intent")
         seat=response["session"]
+        if account is not None:
+            self.j['spawn_admission'] = {'stream_id': response['stream_id'],
+                'generation': seat.get('session_generation'), 'account_binding': seat.get('account_binding')}
+            self.commit()
+        self.check_account_binding(seat, account)
         if seat.get("parent_stream_id") or seat["visibility"] != "default" or (seat["effective_model"],seat["effective_effort"]) != (target["model"],target["effort"]):
             raise Refused("spawn_topology_or_tuple_mismatch")
         self.j["spawn"]={"stream_id":response["stream_id"],"generation":seat["session_generation"],

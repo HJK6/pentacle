@@ -328,7 +328,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     scrollTmux: (slot, direction, lines) => fire('pty:scroll', slot, direction, lines || 1),
     exitCopyMode: (slot) => fire('pty:exit-copy-mode', slot),
     killPty: (slot) => call('pty:kill', slot),
-    newSession: (agent, location) => call('pty:new-session', agent, location || 'local'),
+    newSession: (agent, location, account) => call('pty:new-session', agent, location || 'local', account),
     checkSession: (sessionName, hostId) => call('pty:check-session', sessionName, hostId || 'local'),
 
     // PTY events

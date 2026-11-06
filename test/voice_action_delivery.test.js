@@ -35,6 +35,23 @@ test('unknown tuple/action fails without fallback', () => {
   const c = capture(); c.action.model = 'unknown'; assert.throws(() => prepareVoiceSpawn(c, catalog));
   c.action.version = 3; assert.throws(() => prepareVoiceSpawn(c, catalog));
 });
+
+test('voice and client preserve explicit aliases and reject malformed or unsupported choices', async () => {
+  const c = capture(); c.action.account = 'spare';
+  const request = prepareVoiceSpawn(c, catalog);
+  assert.equal(request.account, 'spare');
+  const client = require('../main/chat_stream_client');
+  const original = client.sendCommand;
+  client.sendCommand = async payload => payload;
+  try { assert.equal((await client.spawnSession(request)).account, 'spare'); }
+  finally { client.sendCommand = original; }
+  for (const alias of [null, '', '../home']) {
+    c.action.account = alias;
+    assert.throws(() => prepareVoiceSpawn(c, catalog), /Named account/);
+  }
+  c.action.account = 'spare'; c.action.provider = 'cursor';
+  assert.throws(() => prepareVoiceSpawn(c, catalog), /Named account/);
+});
 test('one local spawn without assistant session; no chat injection', async () => {
   const f = fixture();
   await Promise.all([f.helper.tick(f.status), f.helper.tick(f.status)]);

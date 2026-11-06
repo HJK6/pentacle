@@ -283,6 +283,7 @@ class Transport:
                 "report": {"report_id": inp["report_id"], "effective_model": payload["model"],
                            "effective_effort": payload["effort"], "extras": {"daily_retro": packet}}}
 
+
     async def close_once(self, config, stream, **kwargs):
         self.closed.append((stream, kwargs["expected_generation"]))
         return {"type": "close.ok", "session": {"status": "closed", "session_generation": kwargs["expected_generation"]}}
@@ -313,6 +314,54 @@ class Transport:
     async def prompt_cancel_once(self, config, payload):
         self.questions[payload["question_id"]]["state"] = "cancelled"
         return {"type": "prompt.cancel.ok"}
+
+
+def test_explicit_account_is_retained_and_changed_configuration_refuses(config):
+    class Selected(Transport):
+        async def spawn_once(self, settings, payload):
+            result = await super().spawn_once(settings, payload)
+            result['session']['account_binding'] = {'host': config.host, 'provider': 'codex',
+                'alias': 'spare', 'generation': 'login-one'}
+            return result
+    async def run():
+        settings = replace(config, account='spare')
+        rpc = Selected()
+        manifest = retro.collect(settings, at())
+        first = await retro.Pipeline(settings, rpc).worker(manifest, 'sol')
+        assert next(iter(rpc.spawns.values()))['account'] == 'spare'
+        assert await retro.Pipeline(settings, rpc).worker(manifest, 'sol') == first
+        with pytest.raises(ValueError, match='account intent mismatch'):
+            await retro.Pipeline(replace(settings, account='primary'), rpc).worker(manifest, 'sol')
+        assert len(rpc.spawns) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('corrected', [False, True])
+def test_mismatched_owned_account_cannot_bypass_refusal_on_replay(config, corrected):
+    class Wrong(Transport):
+        reports = 0
+        async def await_report_once(self, *args, **kwargs):
+            self.reports += 1
+            return await super().await_report_once(*args, **kwargs)
+    async def run():
+        settings = replace(config, account='spare')
+        rpc = Wrong()
+        manifest = retro.collect(settings, at())
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match='account binding mismatch'):
+                await retro.Pipeline(settings, rpc).worker(manifest, 'sol')
+        assert len(rpc.spawns) == 1 and rpc.reports == 0
+        if corrected:
+            receipt = settings.state_root/'runs'/manifest['run_id']/'sol.json'
+            stage = retro.read(receipt)
+            original_key = stage['payload']['idempotency_key']
+            stage['admission']['session']['account_binding'] = {
+                'host': settings.host, 'provider': 'codex', 'alias': 'spare', 'generation': 'login-one'}
+            retro.atomic(receipt, stage)  # Counterpart supplies a reconciled binding receipt.
+            result = await retro.Pipeline(settings, rpc).worker(manifest, 'sol')
+            assert result['payload']['idempotency_key'] == original_key
+            assert result['packet'] and rpc.reports == 1 and len(rpc.spawns) == 1
+    asyncio.run(run())
 
 
 def proposal():

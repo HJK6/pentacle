@@ -129,6 +129,49 @@ async def prepare_bundle(store,server,row):
     return await store.submit(lambda c:transfer.seats(c,row['command_id']))
 
 
+@pytest.mark.parametrize('outcome', ['selected', 'mismatch', 'missing'])
+def test_transfer_preparation_carries_recorded_alias_before_custody(tmp_path, monkeypatch, outcome):
+    from dataclasses import replace
+    from account_runtime import AccountRuntime
+    from test_account_rotation import binding
+    async def run():
+        async with fixture(tmp_path, authority=True, account_alias='spare') as (store, server, composite, gateway, *_):
+            row, *_ = await claim_bundle(store, server, gateway, composite)
+            async def reachable(*_args): pass
+            async def command(_host, *_args):
+                return 0, row['pointers'][OLD][0]['sha256']
+            monkeypatch.setattr(server.hosts, 'ensure_reachable', reachable)
+            monkeypatch.setattr(server.hosts, 'run_command', command)
+            runtime = AccountRuntime(store, server.sessions, policy={'enabled': True})
+            seen = []
+            class Target:
+                async def spawn(self, message, _host):
+                    await runtime.authorize_choice(message)
+                    seen.append(message)
+                    assert message['account'] == 'spare'
+                    if outcome == 'missing':
+                        raise VerbError('account_unconfigured', 'target has no selected alias')
+                    target = await store.open_session(message['host'], message['session_name'],
+                        provider='codex', role='worker', bootstrap_state='ready', pane_status='pane_alive',
+                        account_binding=replace(binding('spare' if outcome == 'selected' else 'primary',
+                            host='node-b'), generation='target-login').public())
+                    return {'type': 'spawn.ok', 'session': target}
+            server.spawnctl = Target()
+            if outcome == 'selected':
+                await server.host_transfer.prepare(row)
+                parts = await store.submit(lambda c: transfer.seats(c, row['command_id']))
+                assert len(seen) == 2 and all(p['target_generation'] for p in parts)
+            else:
+                expected = 'transfer_account_binding_mismatch' if outcome == 'mismatch' else 'account_unconfigured'
+                with pytest.raises((VerbError, transfer.TransferError)) as refused:
+                    await server.host_transfer.prepare(row)
+                assert getattr(refused.value, 'code', str(refused.value)) == expected
+            assert (await composite.binding())['stream_id'] == OLD
+            assert (await store.lifecycle_authority_current())['stream_id'] == OLD
+            assert (await store.fetch_session(*OLD.split(':', 1)))['status'] == 'open'
+    asyncio.run(run())
+
+
 def test_atomic_custody_including_live_retired_source_and_restart(tmp_path):
     async def run():
         async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):

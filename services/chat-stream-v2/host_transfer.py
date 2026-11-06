@@ -252,6 +252,10 @@ class HostTransfer:
                     'attempt_id':row.get('attempt_id'),
                     'pointer_digest':journal.digest(row['pointers'].get(part['source'],[]))}),
                 '_auth_context':{'service_authenticated':True,'service_actor':'daemon:host-transfer'}}
+            account=source.get('account_binding')
+            account=json.loads(account) if isinstance(account,str) else account
+            if account:
+                message['account']=account['alias']
             existing=await self.store.fetch_session(host,name)
             if existing is None:
                 result=await self.server.spawnctl.spawn(message,self.server.local_host)
@@ -263,7 +267,13 @@ class HostTransfer:
                 if fresh['state']!='preparing' or fresh.get('attempt_id')!=row.get('attempt_id'): return
                 journal._fresh(fresh,time.time())
                 existing=await self.store.fetch_session(host,name)
-                if existing and existing.get('bootstrap_state')=='ready': break
+                if existing and existing.get('bootstrap_state')=='ready':
+                    if account:
+                        actual=existing.get('account_binding') or {}
+                        if (actual.get('alias')!=account['alias'] or actual.get('host')!=host
+                                or actual.get('provider')!=source['provider'] or not actual.get('generation')):
+                            raise journal.TransferError('transfer_account_binding_mismatch')
+                    break
                 if existing and existing.get('status')!='open': raise journal.TransferError('transfer_preparation_failed')
                 outcome=await self.store.get_spawn_outcome(host,name)
                 if outcome and outcome.get('state') in {'failed','cancelled'}:

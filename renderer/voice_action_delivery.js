@@ -5,7 +5,7 @@
 function prepareVoiceSpawn(capture, response) {
   const action = capture?.action;
   const catalog = response?.catalog || response;
-  const allowed = new Set(['version', 'route', 'task', 'host', 'provider', 'model', 'effort', 'effort_source']);
+  const allowed = new Set(['version', 'route', 'task', 'host', 'provider', 'account', 'model', 'effort', 'effort_source']);
   if (!action || ![1, 2].includes(action.version) || action.route !== 'spawn_agent'
     || Object.keys(action).some(key => !allowed.has(key))
     || typeof capture.id !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(capture.id)
@@ -14,12 +14,16 @@ function prepareVoiceSpawn(capture, response) {
     throw new Error('Invalid local spawn action');
   }
   const model = catalog?.models?.[action.provider]?.[action.model];
+  if (Object.hasOwn(action, 'account') && (typeof action.account !== 'string'
+    || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(action.account)
+    || !['codex', 'claude'].includes(action.provider))) throw new Error('Named account unavailable');
   const effort = action.effort;
   if (!catalog?.catalog_version || !model?.efforts?.includes(effort)) {
     throw new Error('Requested voice spawn configuration is unavailable');
   }
   return {
     host: action.host, provider: action.provider, model: action.model, effort,
+    ...(Object.hasOwn(action, 'account') ? { account: action.account } : {}),
     spawnProfile: 'desktop_manual', catalogVersion: catalog.catalog_version,
     resolutionSource: 'explicit_override',
     objective: Array.from(action.task.trim() || `Voice-opened ${action.model} agent`).slice(0, 120).join(''),

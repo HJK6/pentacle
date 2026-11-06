@@ -136,7 +136,59 @@ class AccountRuntime:
     async def authorize_choice(self,message):
         if "account" in message:
             _component(message["account"])
-            await self._front_desk(message.get("_auth_context") or {})
+            auth=message.get("_auth_context") or {}
+            # Choosing a launch account confers no spawn authority. The ordinary
+            # lineage/spec/phase admission still runs before any provider work.
+            # Administration deliberately keeps the independent FD-only guard.
+            if auth.get("service_authenticated"):
+                if await self._carried_choice(message,auth):
+                    return
+            elif auth.get("token_verified") is True:
+                stream=str(auth.get("stream_id") or "")
+                row=await self.store.fetch_session(*self.sessions.split(stream)) if ":" in stream else None
+                if (row and row.get("status")=="open" and auth.get("session_generation")
+                        and row.get("session_generation")==auth["session_generation"]):
+                    return
+            elif auth.get("operator_authenticated") is True:
+                return
+            raise AccountError("account_control_unauthorized")
+
+    async def _carried_choice(self,message,auth):
+        """Internal identities carry a recorded intent; they cannot choose aliases."""
+        actor=auth.get("service_actor")
+        alias=message["account"]
+        key=message.get("idempotency_key")
+        if actor=="daemon:scheduler":
+            row=await self.store.submit(lambda c:c.execute(
+                "SELECT s.account FROM v2_schedules s JOIN v2_schedule_dispatches d USING(schedule_id,generation) "
+                "WHERE d.spawn_key=? AND s.state='firing' AND d.phase='dispatch_claimed'",(key,)).fetchone())
+            if row is not None and row[0]==alias:
+                return True
+            source=str(message.get("handoff_from_stream_id") or "")
+            if (message.get("handoff") and auth.get("token_verified") is True
+                    and source==auth.get("stream_id") and ":" in source):
+                row=await self.store.fetch_session(*self.sessions.split(source))
+                return bool(row and row.get("session_generation")==auth.get("session_generation")
+                    and (row.get("account_binding") or {}).get("alias")==alias)
+        elif actor=="daemon:host-transfer":
+            from store_host_transfer import load
+            target=f"{message.get('host')}:{message.get('session_name')}"
+            def retained(c):
+                part=c.execute("SELECT command_id,source FROM v2_host_transfer_seats WHERE target=?",(target,)).fetchone()
+                intent=load(c,part['command_id']) if part else None
+                if not intent or intent['state']!='preparing' or key!=f"transfer:{part['command_id']}:{message.get('session_name')}":
+                    return False
+                value=intent['sources'][part['source']].get('account_binding')
+                value=json.loads(value) if isinstance(value,str) else value
+                return bool(value and value.get('alias')==alias)
+            return await self.store.submit(retained)
+        # Authority restoration freezes the complete spawn payload before dispatch.
+        if actor=="daemon:scheduler" and str(key or "").startswith("authority-restore:"):
+            def retained(c):
+                row=c.execute("SELECT payload FROM v2_authority_restore_episode WHERE spawn_key=? AND state IN ('spawning','unresolved')",(key,)).fetchone()
+                return bool(row and json.loads(row[0]).get('account')==alias)
+            return await self.store.submit(retained)
+        return False
 
     def manages(self,host,provider=None):
         return policy_manages(self.policy,host,provider)
@@ -173,6 +225,8 @@ class AccountRuntime:
         binding=await self.run(lambda accounts:accounts.select(host=host,provider=provider,alias=message.get("account")))
         from provider_cli_pin import check
         await self.run(lambda a:check(a,binding))
+        log.info("subsystem=provider_accounts bug_ref=explicit_account_selection action=selected host=%s provider=%s account=%s generation=%s selection=%s",
+                 host,provider,binding.alias,binding.generation,"explicit" if "account" in message else "default")
         return binding
 
     async def bind_launch(self,row):
