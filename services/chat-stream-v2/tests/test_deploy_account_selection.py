@@ -1,7 +1,10 @@
 """Deployment captures account intent; synthetic transports, no runtime writes."""
 import json
+import os
 import plistlib
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -145,3 +148,55 @@ def test_coordinated_schedule_switch_and_rollback_restore_owned_preimage(tmp_pat
     assert Path(preimages['schedule']['path']).read_bytes() == b'original schedule'
     assert Path(preimages['test_settings']['path']).read_bytes() == b'original test_settings'
     assert Path(preimages['test_settings']['path']).stat().st_mode & 0o777 == 0o600
+
+
+def test_explicit_snapshot_and_prior_qualification_survive_hash_seed_changes(history, tmp_path):
+    runtime, ledger, database, *_ = history
+    scope = {'included_hosts': ['host-b', 'host-a']}
+    accounts = ['codex=spare', 'claude=primary']
+    snapshot = runtime.account_snapshot(ledger.policy, database, accounts=accounts, scope=scope)
+    sha = 'a' * 40
+    stamp = {
+        'sha': sha, 'daemon_runtime_readback': {'sha': sha},
+        'daemon_boot_readback': {'outcome': 'observed'},
+        'fleet_smoke': {'outcome': 'passed', 'cells': [
+            {'host': binding['host'], 'provider': binding['provider'],
+             'prompt_mode': mode, 'outcome': 'passed', 'account_binding': binding}
+            for binding in snapshot['selected_bindings'] for mode in ('prompted', 'promptless')]},
+    }
+    inputs = tmp_path / 'snapshot-inputs.json'
+    inputs.write_text(json.dumps({'policy': ledger.policy, 'accounts': accounts,
+                                 'scope': scope, 'stamp': stamp}))
+    program = textwrap.dedent("""\
+        import copy, json, sys
+        from pathlib import Path
+        service = Path(sys.argv[1])
+        sys.path[:0] = [str(service), str(service.parent)]
+        from deploy.coordinated import Invalid
+        from deploy.coordinated_runtime import Runtime
+        from deploy.restoration import qualified_prior
+        inputs = json.loads(Path(sys.argv[3]).read_text())
+        runtime = Runtime.__new__(Runtime)
+        snapshot = runtime.account_snapshot(inputs['policy'], sys.argv[2],
+            accounts=inputs['accounts'], scope=inputs['scope'])
+        selected = snapshot['selected_bindings']
+        stamp = inputs['stamp']
+        qualification = qualified_prior(stamp, stamp['sha'], selected)
+        for field in ('generation', 'executable_sha256'):
+            wrong = copy.deepcopy(selected)
+            wrong[0][field] = 'different-from-qualified-binding'
+            try:
+                qualified_prior(stamp, stamp['sha'], wrong)
+            except Invalid:
+                pass
+            else:
+                raise AssertionError(field + ' drift must remain refused')
+        print(json.dumps({'accounts': snapshot, 'prior_qualification': qualification}))
+    """)
+    service = Path(__file__).resolve().parents[1]
+    results = [json.loads(subprocess.check_output(
+        [sys.executable, '-c', program, str(service), str(database), str(inputs)],
+        env={**os.environ, 'PYTHONHASHSEED': str(seed)}, text=True, timeout=20))
+        for seed in range(4)]
+    assert all(result == results[0] for result in results[1:]), (
+        'Account snapshots and prior qualification must match across process hash seeds')
