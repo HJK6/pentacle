@@ -628,7 +628,8 @@ def test_approved_ruling_and_done_report_do_not_waive_owner_disposition():
     ("planner", None, "ready_for_dev", True),
     ("lead", None, "in_progress", False),
 ])
-def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, phase, status, allowed):
+@pytest.mark.parametrize("bound_fd", [False, True], ids=["parent", "configured-fd"])
+def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, phase, status, allowed, bound_fd):
     """Real typed reports do not add a move for settled QA/planner work."""
     async def run():
         from ledger import Ledger
@@ -657,14 +658,25 @@ def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, 
             assert stored["status"] == "done"
             if role == "qa":
                 assert stored["qa_verdict"] == "accept" and stored["target_sha"] == "c" * 40
-            close = request(row, operator_confirm=True)
+            if bound_fd:
+                from assistant_composite import AssistantComposite, AssistantCompositeConfig
+                composite = AssistantComposite(store, config=AssistantCompositeConfig.from_env({
+                    "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                    "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": f"{HOST}:assistant",
+                    "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": f"{HOST}:fd",
+                    "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": parent["session_generation"],
+                }))
+                server.assistant_composite = composite
+                sessions.assistant.front_desk = composite
+            close = request(row, operator_confirm=True, reason="Review finished; close owned fixture",
+                            request_id="fd-typed-close")
             close["_auth_context"] = {"token_verified": True, "stream_id": f"{HOST}:fd",
                                       "session_generation": parent["session_generation"]}
             if allowed:
                 assert (await server._on_close(close))["type"] == "close.ok"
                 assert tmux.kills == 1 and (await store.work_owed())["total"] == 0
                 closed = await store.fetch_session(HOST, row["session_name"])
-                assert closed["close_kind"] == "session_close"  # ordinary parent, no recovery bypass
+                assert closed["close_kind"] == ("manager_close" if bound_fd else "session_close")
             else:
                 with pytest.raises(VerbError) as exc:
                     await server._on_close(close)
@@ -676,3 +688,144 @@ def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, 
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_bound_fd_ordinary_owner_close_refuses_then_accepts_real_disposition():
+    from test_fd_close_visible import setup, close, FD
+    from test_lifecycle_authority import HOST as FD_HOST, scenario, _refused
+    from test_work_owed import observe
+    async def run(env):
+        auth = await setup(env)
+        await cached(env.store)
+        await env.store.update_session(FD_HOST, "target", role="lead",
+            assigned_spec_id="spec_demo__item_00", parent_stream_id=FD)
+        await env.sessions.refresh()
+        await _refused(env.server._on_close(close(auth, operator_confirm=True)), "lead_close_requires_disposition")
+        assert env.tmux.killed == []
+        assert (await env.store.fetch_session(FD_HOST, "target"))["status"] == "open"
+        await observe(env.store, "backlog", "accepted-disposition", 101, identity="spec_demo__item_00")
+        assert (await env.server._on_close(close(auth, request_id="after-disposition")))["type"] == "close.ok"
+        assert env.tmux.killed == ["target"] and (await env.store.work_owed())["total"] == 0
+    scenario(run)
+
+
+@pytest.mark.parametrize("case", ["busy", "idle", "unknown", "no_force", "nonchild", "children", "pending_spawn", "missing_reason", "missing_request", "stale_fd"])
+def test_bound_fd_busy_override_is_explicit_recovery_with_debt(case):
+    from test_fd_close_visible import setup, close, FD
+    from test_lifecycle_authority import HOST as FD_HOST, scenario
+    async def run(env):
+        auth = await setup(env)
+        await cached(env.store)
+        await env.store.update_session(FD_HOST, "target", role="lead", assigned_spec_id="spec_demo__item_00",
+            parent_stream_id=FD if case != "nonchild" else None)
+        await env.sessions.refresh()
+        if case != "idle":
+            env.tmux.working.add("target")
+        if case == "unknown":
+            async def unavailable(*args, **kwargs):
+                return False, ""
+            env.tmux.capture_checked = unavailable
+        if case == "children":
+            await env.open("grandchild", parent_stream_id=FD_HOST + ":target")
+        if case == "pending_spawn":
+            assert await env.store.reserve_stream_id(FD_HOST, "pending", ttl_s=60, request_id="sp", nonce="n")
+            assert await env.store.record_spawn_intent(FD_HOST, "pending",
+                {"open_fields": {"parent_stream_id": FD_HOST + ":target"}}, request_id="sp", nonce="n")
+        msg = close(auth, force=case != "no_force", operator_confirm=True)
+        if case == "missing_reason":
+            msg.pop("reason")
+        if case == "missing_request":
+            msg.pop("request_id")
+        if case == "stale_fd":
+            auth["session_generation"] = "stale"
+        if case == "busy":
+            assert (await env.server._on_close(msg))["type"] == "close.ok"
+            assert env.tmux.killed == ["target"]
+            owed = await env.store.work_owed()
+            assert [(i["spec_id"], i["closing_stream_id"]) for i in owed["items"]] == [
+                ("spec_demo__item_00", FD_HOST + ":target")]
+            from store_work_index import _state_conn
+            state = await env.store.submit(_state_conn)
+            debt, = state["_lead_dispositions"]["owed"].values()
+            assert debt["front_desk_owned"] is True
+        else:
+            with pytest.raises(VerbError):
+                await env.server._on_close(msg)
+            assert env.tmux.killed == []
+            assert (await env.store.fetch_session(FD_HOST, "target"))["status"] == "open"
+    scenario(run)
+
+
+def test_bound_fd_busy_override_socket_uses_cli_force_wire_shape():
+    from test_fd_close_visible import setup, FD
+    from test_lifecycle_authority import HOST as FD_HOST, scenario
+    async def run(env):
+        auth = await setup(env)
+        await cached(env.store)
+        await env.store.update_session(FD_HOST, "target", role="lead", assigned_spec_id="spec_demo__item_00",
+                                       parent_stream_id=FD)
+        env.tmux.working.add("target")
+        await env.sessions.refresh()
+        env.server.port = 0  # Env normally never binds; this socket fixture owns an ephemeral port.
+        token = "synthetic-fd-recovery"
+        await env.store.grant_stream_token(FD_HOST, "front-desk", hashlib.sha256(token.encode()).hexdigest(),
+                                           STREAM_TOKEN_HASH_VERSION)
+        try:
+            port = await env.server.bind()
+            async with connect(f"ws://127.0.0.1:{port}", close_timeout=0) as ws:
+                await ws.send(json.dumps({"type": "hello", "from_stream_id": FD, "stream_token": token,
+                                         "subscribe": {"snapshot": False, "mode": "rpc"}}))
+                await ws.send(json.dumps({"type": "close", "request_id": "fd-cli-force", "host": FD_HOST,
+                    "session_name": "target", "force": True, "reason": "Recover owned busy fixture"}))
+                async with asyncio.timeout(5):
+                    while True:
+                        reply = json.loads(await ws.recv())
+                        if reply.get("request_id") == "fd-cli-force":
+                            break
+            assert reply["type"] == "close.ok", reply
+            assert env.tmux.killed == ["target"]
+            assert (await env.store.work_owed())["total"] == 1
+            audit = await env.store.latest_close_audit(FD_HOST + ":target")
+            assert audit["actor_kind"] == "front_desk" and audit["request_id"] == "fd-cli-force"
+        finally:
+            await env.server.close()
+    scenario(run)
+
+
+@pytest.mark.parametrize("change,code", [("parent", "close_unauthorized"),
+    ("binding", "authority_holder_required"), ("grandchild", "close_live_children")])
+def test_bound_fd_busy_override_rechecks_final_admission(change, code):
+    from test_fd_close_visible import setup, close, FD
+    from test_lifecycle_authority import HOST as FD_HOST, scenario, _refused
+    async def run(env):
+        auth = await setup(env)
+        await cached(env.store)
+        await env.store.update_session(FD_HOST, "target", role="lead", assigned_spec_id="spec_demo__item_00",
+                                       parent_stream_id=FD)
+        env.tmux.working.add("target")
+        await env.sessions.refresh()
+        reached, resume = asyncio.Event(), asyncio.Event()
+        original = env.sessions._probe_capture_liveness
+        async def paused(*args, **kwargs):
+            value = await original(*args, **kwargs)
+            reached.set()
+            await resume.wait()
+            return value
+        env.sessions._probe_capture_liveness = paused
+        task = asyncio.create_task(env.server._on_close(close(auth, force=True)))
+        await asyncio.wait_for(reached.wait(), 5)
+        try:
+            if change == "parent":
+                await env.store.update_session(FD_HOST, "target", parent_stream_id=None)
+            elif change == "binding":
+                await env.open("replacement", provider="codex")
+                await env.store.recover_assistant_binding(name=env.server.assistant_composite.env_config.name,
+                    target_stream_id=FD_HOST + ":replacement", target_generation=await env.gen("replacement"))
+            else:
+                await env.open("grandchild", parent_stream_id=FD_HOST + ":target")
+        finally:
+            resume.set()
+        await _refused(task, code)
+        assert env.tmux.killed == []
+        assert (await env.store.fetch_session(FD_HOST, "target"))["status"] == "open"
+    scenario(run)

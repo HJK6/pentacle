@@ -325,7 +325,11 @@ def test_fd_close_of_undisposed_lead_keeps_owed_debt_with_fd():
         await _refused(env.server._on_close({**close(await env.seat("other")), "request_id": "parent-close"}),
                        "lead_close_requires_disposition")
         assert env.tmux.killed == []
-        result = await env.server._on_close(close(auth, disposition_waived_reason="forged"))
+        await _refused(env.server._on_close(close(auth, disposition_waived_reason="forged")),
+                       "lead_close_requires_disposition")
+        await env.store.update_session(HOST, "target", parent_stream_id=FD)
+        env.tmux.working.add("target")
+        result = await env.server._on_close(close(auth, force=True))
         assert result["type"] == "close.ok" and env.tmux.killed == ["target"]
         owed = await env.store.work_owed()
         assert [(i["spec_id"], i["closing_stream_id"]) for i in owed["items"]] == [

@@ -1413,9 +1413,8 @@ class Sessions:
             restored = self._cache(row)
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
-    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, operator_confirm=False, custody=False):
-        if close_kind not in {"session_close", "manager_close", "idle_reap"} or not generation or (
-                custody and close_kind == "manager_close"):
+    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, operator_confirm=False):
+        if close_kind not in {"session_close", "manager_close", "idle_reap"} or not generation:
             return True, True
         # Confirmed offline retirement preserves recovery custody.
         if self.hosts is not None and not self.hosts.is_local(host) and (operator_confirm or close_kind == "manager_close"):
@@ -1475,7 +1474,7 @@ class Sessions:
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
         admission_guard: Any = None,
-        disposition_custody: bool = False,
+        busy_override_recovery: bool = False,
     ) -> dict[str, Any]:
         """Serialize one lifecycle operation for this host/session name.
 
@@ -1513,8 +1512,17 @@ class Sessions:
             ):
                 # Do not hold the shared graph lock during the bounded index
                 # wait. Target generation is rechecked again below before kill.
-                recovery, observation_available = await self._guard_lead_disposition(host, session_name, self._row_generation(row), close_kind,
-                    operator_confirm=operator_confirm, custody=disposition_custody)
+                if busy_override_recovery and close_kind == "manager_close":
+                    # The server admits only an explicit current-FD own-child
+                    # force request. Fresh busy proof distinguishes recovery
+                    # from ordinary disposition; unknown capture grants neither.
+                    await self._probe_capture_liveness(host, session_name, row)
+                    recovery = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
+                    operator_override = recovery
+                if not recovery:
+                    recovery, observation_available = await self._guard_lead_disposition(
+                        host, session_name, self._row_generation(row), close_kind,
+                        operator_confirm=operator_confirm)
             # Admission and termination share the same graph fence as reparent
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.

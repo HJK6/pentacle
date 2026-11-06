@@ -24,8 +24,14 @@ non-presumed-dead, non-protected, non-composite lead/nexus/planner effectively
 assigned to the same spec. Authority tags, QA/worker roles, reports and prose
 custody do not qualify. Closing one parallel owner leaves the others tracked.
 
-Parent/FD `--operator-confirm`, approved close rulings, force flags and done or
-aborted reports do not waive disposition. Elevated seat credentials remain seat
+Ordinary parent/FD `--operator-confirm`, approved close rulings and done or
+aborted reports do not waive disposition. The configured FD uses this guard
+even for its own children. An explicit FD `--force` request with a reason and
+request id may recover its own freshly proven busy child, preserving disposition
+debt with FD custody. It cannot recover another parent's child this way; idle or
+unknown capture does not waive disposition. The current FD binding, target
+generation, parentage and absence of live children/pending spawns are rechecked
+at final admission. Elevated seat credentials remain seat
 credentials even when marked `operator_authenticated`. Genuine connection-bound
 operator recovery, confirmed gone manager panes, existing offline/deferred
 retirement and failed-spawn cleanup keep their recovery paths and durable owed

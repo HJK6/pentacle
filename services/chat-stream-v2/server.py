@@ -5671,6 +5671,11 @@ class Server:
             expected_generation = manager_generation
             defer_if_working = False
             attribution["defer_if_working"] = False
+        fd_busy_override = bool(
+            manager_generation is not None and self.sessions.assistant.front_desk_mode
+            and msg.get("force") is True
+            and self.sessions.assistant.manager_request_code(msg) is None
+            and isinstance(target, dict) and target.get("parent_stream_id") == caller_stream_id)
         close = functools.partial(
             self.sessions.close,
             host,
@@ -5687,14 +5692,15 @@ class Server:
             and manager_generation is None,
             defer_if_working=defer_if_working,
             attribution=attribution,
-            # An explicit current-FD close of a lead with pending disposition
-            # is involuntary; its debt stays owed with FD custody.
-            disposition_custody=manager_generation is not None and self.sessions.assistant.front_desk_mode,
+            # Only an explicit own-busy-child force request may use recovery;
+            # ordinary FD closes use the same disposition guard as parents.
+            busy_override_recovery=fd_busy_override,
             admission_guard=(
                 (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
-                else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
+                else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth,
+                    busy_override=fd_busy_override)
             ),
         )
         if manager_generation is None:
@@ -5838,11 +5844,15 @@ class Server:
 
     async def _manager_close_admission(
         self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,
-        expected_generation: str, auth: dict[str, Any],
+        expected_generation: str, auth: dict[str, Any], *, busy_override: bool = False,
     ) -> None:
         waived = await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
         if (row or {}).get("status") == "closed":
             return
+        if busy_override and (row or {}).get("parent_stream_id") != auth.get("stream_id"):
+            await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation,
+                                      result="refused", refusal_code="close_unauthorized")
+            raise VerbError("close_unauthorized", "FD busy override requires its own child")
         if waived:
             await self._manager_audit("close_report_waived", msg, auth, f"{host}:{name}",
                                       expected_generation, result="admitted")

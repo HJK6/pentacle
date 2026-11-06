@@ -221,7 +221,9 @@ are required and audited. Protected assistants and leads or visible chats of
 open operator-owned lanes are refused, including with force or confirmation
 flags. Idle, child/spawn, external close-ruling and process-death checks still
 apply; a missing terminal report uses the audited exact-generation waiver, and
-a lead with pending disposition keeps owed debt with FD custody. Binding,
+an ordinary accountable-owner close requires a fresh disposition or live
+same-spec successor. Explicit `--force` recovery of the FD's own proven busy
+child retains owed debt with FD custody; a reason and request id are required. Binding,
 generation and lane ownership are rechecked under the close fence before
 termination. Audit rows are `manager_close*` with `actor_kind=front_desk`. See
 [Fleet lifecycle authority](../../docs/assistant.md#fleet-lifecycle-authority).
