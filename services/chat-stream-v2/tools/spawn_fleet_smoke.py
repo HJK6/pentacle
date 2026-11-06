@@ -29,7 +29,7 @@ from _shared.spawn_profiles import resolve_test_profile, validate_test_profile, 
 from boot_ready import codex_reset_interstitial_visible  # noqa: E402
 from machines import load_machines  # noqa: E402
 from tools.disposable_smoke import publish_smoke_card  # noqa: E402
-from client_contract_probe import (  # noqa: E402
+from tools.client_contract_probe import (  # noqa: E402
     CONTROL_PLANE_P95_LIMIT_MS,
     CONVERGENCE_QUIET_LIMIT_MS,
     HEARTBEAT_DEADLINE_MS,

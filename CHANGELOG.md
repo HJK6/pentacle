@@ -18,6 +18,10 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 - Select a named provider account across launches, schedules, recovery, desktop/web controls, and smoke/deploy callers while preserving host defaults and session bindings.
 - Cursor CLI seats with the existing provider picker, queued terminal input, streamed chat/tool events, and pinned-release admission checks.
 
+### Fixed
+
+- Coordinated deployment preparation resolves smoke helper imports without a custom Python path.
+
 ### Removed
 
 - Settings no longer shows the provider re-login controls, and the `provider-relogin:*` web socket and desktop IPC channels are gone; a rebuilt flow is tracked as `spec_pentacle__provider_relogin_flow_validation_2026_09`. Daemon account health and `agent-orch account relogin` are unchanged.
