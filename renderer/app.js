@@ -7046,7 +7046,7 @@ function renderNewSessionLocationOptions(container) {
       newSessionLocation = btn.dataset.loc;
       newSessionStep = newSessionTerminalMode ? 'agent' : 'profile';
       renderNewSessionModal();
-      if (!newSessionTerminalMode) await loadSpawnCatalog();
+      await loadSpawnCatalog();
     });
   });
 }
@@ -7056,22 +7056,33 @@ function renderNewSessionAgentOptions(container) {
   const machineLabel = machine?.label || newSessionLocation || 'machine';
   const agents = getNewSessionAgentOptions();
   container.innerHTML = agents.map((agent) => (
-    `<button class="new-session-option new-session-agent" data-agent="${esc(agent.id)}" title="Start ${esc(agent.label)} on ${esc(machineLabel)}">
+    `<div><button class="new-session-option new-session-agent" data-agent="${esc(agent.id)}" title="Start ${esc(agent.label)} on ${esc(machineLabel)}">
       <span class="new-session-option-mark">${esc(getSourceInitial(agent.label))}</span>
       <span class="new-session-option-label">${esc(agent.label)}</span>
       <span class="new-session-option-meta">${esc(machineLabel)}</span>
-    </button>`
+    </button>${spawnAccountControl(agent.id, newSessionLocation, undefined, `terminal-account-${agent.id}`)}</div>`
   )).join('');
 
   container.querySelectorAll('[data-agent]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (newSessionTerminalMode) {
-        newTerminalSession(btn.dataset.agent, newSessionLocation);
+        const account = container.querySelector(`#terminal-account-${btn.dataset.agent}`)?.value || undefined;
+        newTerminalSession(btn.dataset.agent, newSessionLocation, account);
       } else {
         newSession(btn.dataset.agent, newSessionLocation);
       }
     });
   });
+}
+
+function spawnAccountControl(provider, host, selected, id = 'spawn-account') {
+  const supported = ['codex', 'claude'].includes(provider);
+  const status = newSessionCatalog?.account_status;
+  const aliases = (status?.accounts || []).filter(row => row.host === host && row.provider === provider && row.active);
+  const defaultAlias = (status?.defaults || []).find(row => row.host === host && row.provider === provider)?.alias;
+  const label = supported ? `Host default${defaultAlias ? ` (${defaultAlias})` : ''}` : 'Named accounts unsupported';
+  return `<div class="spawn-profile-row"><label for="${esc(id)}">Account</label><select id="${esc(id)}" class="spawn-profile-control" aria-label="Account"${supported ? '' : ' disabled'}>
+    <option value="">${esc(label)}</option>${aliases.map(row => `<option value="${esc(row.alias)}"${row.alias === selected ? ' selected' : ''}${row.enabled && row.health === 'healthy' ? '' : ' disabled'}>${esc(row.alias)}${row.enabled && row.health === 'healthy' ? '' : ` (${esc(row.health || 'unavailable')})`}</option>`).join('')}</select></div>`;
 }
 
 function renderSpawnProfileOptions(container) {
@@ -7106,6 +7117,7 @@ function renderSpawnProfileOptions(container) {
       <div class="spawn-profile-row"><label for="spawn-provider">Provider</label><select id="spawn-provider" class="spawn-profile-control" aria-label="Provider">${providers.map((provider) => `<option value="${esc(provider)}"${provider === selection.provider ? ' selected' : ''}>${esc(providerLabelForHero(provider))}</option>`).join('')}</select></div>
       <div class="spawn-profile-row"><label for="spawn-model">Model</label><select id="spawn-model" class="spawn-profile-control" aria-label="Model">${models.map((model) => `<option value="${esc(model)}"${model === selection.model ? ' selected' : ''}>${esc(modelLabel(model))}</option>`).join('')}</select></div>
       <div class="spawn-profile-row"><label for="spawn-effort">Effort</label><select id="spawn-effort" class="spawn-profile-control" aria-label="Reasoning effort">${efforts.map((effort) => `<option value="${esc(effort)}"${effort === selection.effort ? ' selected' : ''}>${esc(effort)}</option>`).join('')}</select></div>
+      ${spawnAccountControl(selection.provider, newSessionLocation, selection.account)}
     </div>`;
   container.querySelector('#spawn-provider')?.addEventListener('change', (event) => {
     newSessionSelection = selectionForProvider(event.target.value);
@@ -7115,20 +7127,27 @@ function renderSpawnProfileOptions(container) {
     updateNewSessionStatus(`Provider changed to ${newSessionSelection.provider}.`);
   });
   container.querySelector('#spawn-model')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
     const model = event.target.value;
     const next = catalogTuple(selection.provider, { model, effort: selection.effort });
-    newSessionSelection = next;
+    newSessionSelection = { ...next, ...(selection.account !== undefined ? { account: selection.account } : {}) };
     saveSpawnPreference(next.provider, next);
     newSessionError = '';
     renderNewSessionModal();
     updateNewSessionStatus(`Version changed to ${modelLabel(model)}.`);
   });
   container.querySelector('#spawn-effort')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
     newSessionSelection = { ...selection, effort: event.target.value };
     saveSpawnPreference(newSessionSelection.provider, newSessionSelection);
     newSessionError = '';
     renderNewSessionModal();
     updateNewSessionStatus(`Effort changed to ${event.target.value}.`);
+  });
+  container.querySelector('#spawn-account')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
+    newSessionSelection = { ...selection, account: event.target.value || undefined };
+    updateNewSessionStatus(`Account: ${event.target.value || 'host default'}.`);
   });
   updateNewSessionStatus(newSessionError || `${selection.provider} ${modelLabel(selection.model)} ${selection.effort}.`, !!newSessionError);
 }
@@ -7139,7 +7158,7 @@ async function loadSpawnCatalog() {
   if (!newSessionCatalog) renderNewSessionModal();
   let response;
   try {
-    response = await spawnCatalogLoader.load();
+    response = await spawnCatalogLoader.load({ refresh: true });
   } catch (error) {
     response = { ok: false, error: error?.message || String(error) };
   }
@@ -7254,9 +7273,10 @@ async function newSession(options = {}, locationOverride = null) {
   const input = typeof options === 'string' ? { provider: options, hostId: locationOverride } : options;
   const location = input.hostId || locationOverride || newSessionLocation || 'local';
   if (!newSessionCatalog && !await loadSpawnCatalog()) return null;
-  const selection = input.provider && input.model && input.effort
-    ? { provider: input.provider, model: input.model, effort: input.effort }
+  const selected = input.provider && input.model && input.effort
+    ? { provider: input.provider, model: input.model, effort: input.effort, ...(input.account !== undefined ? { account: input.account } : {}) }
     : (newSessionSelection || selectionForProvider(input.provider || spawnPreferences().defaultProvider || 'codex'));
+  const selection = selected && { ...selected, ...(input.account !== undefined ? { account: input.account } : {}) };
   if (!selection) return null;
   const profileDefault = newSessionCatalog.profiles?.desktop_manual?.[selection.provider] || [];
   const myToken = ++newSessionSubmitToken;
@@ -7277,6 +7297,7 @@ async function newSession(options = {}, locationOverride = null) {
         provider: selection.provider,
         model: selection.model,
         effort: selection.effort,
+        ...(selection.account !== undefined ? { account: selection.account } : {}),
         spawnProfile: 'desktop_manual',
         catalogVersion: newSessionCatalog.catalog_version,
         resolutionSource: input.provider && input.model && input.effort
@@ -7314,6 +7335,7 @@ async function newSession(options = {}, locationOverride = null) {
     hideNewSessionModal();
     return null;
   }
+  if (result.session.account_binding?.alias) showToast(`Started account ${result.session.account_binding.alias}`);
   hideNewSessionModal();
   const sessionName = result.session.sessionName || result.session.session_name;
   const hostId = result.session.hostId || location;
@@ -7355,16 +7377,17 @@ async function newSession(options = {}, locationOverride = null) {
   // harness action shim uses it to drive + assert a freshly-spawned throwaway).
   return {
     sessionName, hostId, displayName, streamId: result.session.stream_id || null, slot,
-    spawnAck: { requested: result.requested, resolved: result.resolved, actualLaunch: result.actualLaunch, resolutionSource: result.resolutionSource, catalogVersion: result.catalogVersion },
+    spawnAck: { requested: result.requested, resolved: result.resolved, actualLaunch: result.actualLaunch, accountBinding: result.session.account_binding, resolutionSource: result.resolutionSource, catalogVersion: result.catalogVersion },
   };
 }
 
-async function newTerminalSession(agent = 'codex', locationOverride = null) {
+async function newTerminalSession(agent = 'codex', locationOverride = null, account) {
   const location = locationOverride || newSessionLocation || 'local';
   hideNewSessionModal();
   const slot = placementSlot(state.workspace, state.slots);
-  const result = await window.cc.newSession(agent, location);
+  const result = await window.cc.newSession(agent, location, account);
   if (!result) return;
+  if (result.accountBinding?.alias) showToast(`Started account ${result.accountBinding.alias}`);
   const sessionName = result.sessionName || result;
   const hostId = result.hostId || location;
   await attachSession(slot, sessionName, sessionName, hostId);

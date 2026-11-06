@@ -1,17 +1,20 @@
 # Named provider accounts
 
 Named accounts are optional and **default OFF**. They let concurrent agents on
-one host use independent subscription logins. The front desk chooses an account
-for a launch or changes the saved host/provider default. A default change affects
+one host use independent subscription logins. Authorized launch callers choose an
+account; the front desk controls saved host/provider defaults. A default change affects
 future launches; each running agent keeps its original home and login generation.
 
 ## Controls
 
-Use the existing authenticated front-desk seat. A role name or claimed stream ID
-alone grants no account-control authority. Its authenticated successor inherits
-control through the existing assistant binding. Workers can spawn through their
-existing grants using the default, and read account status; they cannot choose
-an account override or change a default.
+Authenticated operator clients and current token/generation-verified seats can
+choose an account within their existing spawn authority, including planner SPEC
+QA and evaluator commissions. Ordinary lineage, spec and phase checks still
+apply. A role name, claimed stream ID, watcher or generic service token grants
+no launch authority. Default changes, login, enrollment and repin remain limited
+to the authenticated front-desk binding and its existing successor authority.
+Authenticated operators can also read the inventory used by the pickers. Inventory
+authorization failures remain visible instead of presenting an empty account list.
 
 ```sh
 agent-orch account status --host host-a --provider codex
@@ -24,8 +27,54 @@ agent-orch usage --account primary --json
 An explicit account changes only that launch. Unknown, disabled, unavailable,
 wrong-provider and unprovisioned selections fail clearly, with no alternate
 account, default rewrite, model/provider change or hidden login attempt. Explicit
-account choices currently apply to immediate spawns. Ordinary scheduled spawns
-resolve the saved default when they execute.
+account choices apply to immediate and scheduled spawns. Delayed and recurring
+templates retain the alias and resolve its active generation at fire time, with
+current owner and pin/health checks. A default change cannot redirect an explicit
+schedule. Old rows and omitted selectors retain default-at-fire behavior.
+
+The desktop/web chat and terminal pickers expose aliases from account status,
+submit the optional scalar `account`, and display the actual bound alias. Voice
+actions can carry the same field. Cursor and Gemini do not support named accounts.
+
+Canonical smoke supports repeatable `--account codex=primary` or
+`--account host-a/codex=spare`. Provider-wide entries cover every included host;
+host-specific entries override them. Duplicate keys, unknown cells and incomplete
+explicit maps refuse before any prompt. `--dry-run` lists the resolved aliases;
+receipts and failure keys include account identity. Scheduled smoke may supply
+the same comma-separated declarations through `PENTACLE_SMOKE_ACCOUNTS`.
+Coordinated deployment intents accept optional `smoke_accounts`, an array of
+those declarations covering every included host/provider. The sealed intent,
+helper proofs, forward/rollback dry plans and actual verdict use the same map.
+Both archived runners must support explicit selection before any activation.
+Full-scope coordinated deployment seals the scheduled job definition and restores
+its prior bytes on rollback; declared-exclusion runs preserve the existing job.
+Qualified release inputs put the canary map in `activation.accounts`; it is part
+of the qualification identity. Legacy full-matrix deployment accepts repeatable
+`--account` and retains its map in the stamp and installed smoke job.
+On a subsequent forward legacy deployment, omitting `--account` resets smoke
+selection to configured legacy defaults (including `PENTACLE_SMOKE_ACCOUNTS`
+from the daemon environment, when set); it does not inherit the previous stamped map.
+The installed scheduled smoke map is replaced accordingly. Repeat the declarations
+to keep an explicit map across forward deployments. Rollback uses its recorded map.
+Startup tuple probes select the tuple's alias explicitly. Wrapper/delivery probes
+and event-push canaries accept the same map. Daily-retro settings accept optional
+`account` and retain it in the original idempotent intent.
+Assistant bootstrap and the busy-seat probe accept scalar `--account`. The
+commissioned recovery manifest accepts `target.account`; omitted selection retains
+the bound predecessor alias. These tools verify the admitted binding, and retained
+retro/recovery admissions are checked again before consuming work on replay.
+
+Bound handoff, recovery and host transfer preserve the source alias when omitted,
+and fail if that target account is unavailable. Same-native-session resume and
+capacity retry retain their immutable original binding. A different account needs
+a fresh context handoff. Provider-native workers have no independent selector;
+their account attribution requires native evidence from the selected parent
+process. A different worker account requires a separate ordinary seat.
+
+Before rolling back to a daemon that cannot interpret account-bearing schedule
+rows, the deployment owner must cancel pending explicit one-shot schedules and
+pause explicit recurring rules through the existing schedule controls. Preserve
+their rows/receipts and defaults; never let old code fire them on a default.
 
 Priorities, exclusions, caps and ratios remain front-desk instructions. For
 example, the front desk can explicitly launch three agents on one permitted

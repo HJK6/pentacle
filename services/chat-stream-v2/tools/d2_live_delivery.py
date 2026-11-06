@@ -28,6 +28,7 @@ from agent_orch.wsclient import _one_shot_rpc
 from agent_orch.send_boundary import defer_stream_token
 from live_window import LiveWindow, authenticated_operator_connection, write_receipt
 from machines import configured_local_host, load_machines
+from tools.spawn_fleet_smoke import account_map
 
 
 LIVE_DB = Path(os.environ.get("PENTACLE_SESSION_DB", str(Path.home() / ".local/share/pentacle-stream/sessions.db"))).expanduser()
@@ -194,12 +195,24 @@ class D2Journey:
                 "On a D2 BUSY instruction run only its exact bounded command and reply DONE after it finishes."
             ),
         }
+        account = getattr(self.args, 'accounts', {}).get((LIVE_HOST, provider))
+        if account is not None:
+            payload['account'] = account
         owned = window.spawn(payload)
         self.owned[owned.stream_id] = {
             "label": label, "provider": provider, "request_id": owned.request_id,
             "idempotency_key": owned.idempotency_key, "stream_id": owned.stream_id,
             "generation": owned.session_generation, "legacy_unique_name": owned.legacy_unique_name,
+            "account": account,
         }
+        if account is not None:
+            row = self._row(owned.stream_id) or {}
+            binding = row.get('account_binding')
+            binding = json.loads(binding) if isinstance(binding, str) else binding or {}
+            self.owned[owned.stream_id]['account_binding'] = binding
+            if (binding.get('alias') != account or binding.get('host') != LIVE_HOST
+                    or binding.get('provider') != provider or not binding.get('generation')):
+                raise RuntimeError('explicit account binding mismatch')
         self._event("spawn", self.owned[owned.stream_id])
         self._save_progress()
         return owned
@@ -465,6 +478,7 @@ def main() -> None:
     parser.add_argument("--runtime-checkout", type=Path, default=Path.home() / "repos/pentacle-v2")
     parser.add_argument("--parent-stream-id", default=os.environ.get("AGENT_ORCH_STREAM_ID"))
     parser.add_argument("--url", default="ws://127.0.0.1:7791")
+    parser.add_argument('--account', action='append', default=[], help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS')
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--candidate-sha", required=True, help="Exact helper checkout SHA")
     parser.add_argument("--runtime-sha", help="Held runtime SHA; defaults to candidate SHA")
@@ -477,6 +491,10 @@ def main() -> None:
     parser.add_argument("--proof-backoff-seconds", type=int, default=60)
     parser.add_argument("--nonurgent-delivery-seconds", type=int, default=330)
     args = parser.parse_args()
+    try:
+        args.accounts = account_map(args.account, tuple((LIVE_HOST, p, 'prompted') for p in ('codex', 'claude')))
+    except ValueError as exc:
+        parser.error(str(exc))
     if not args.parent_stream_id:
         parser.error("--parent-stream-id is required")
     if args.proof_backoff_seconds < 60:

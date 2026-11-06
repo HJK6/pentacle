@@ -55,6 +55,18 @@ test('failed or malformed catalog replies are not cached and remain retryable', 
   assert.equal(calls, 3);
 });
 
+test('opening a picker can refresh account inventory without dropping the warm catalog', async () => {
+  let calls = 0;
+  const loader = createSpawnCatalogLoader(async () => ({ ok: true, catalog: {
+    ...catalog, account_status: { accounts: [{ alias: `account-${++calls}` }] },
+  } }));
+  const first = await loader.load();
+  assert.equal(first.catalog.account_status.accounts[0].alias, 'account-1');
+  const fresh = await loader.load({ refresh: true });
+  assert.equal(fresh.catalog.account_status.accounts[0].alias, 'account-2');
+  assert.equal(loader.peek(), fresh.catalog);
+});
+
 test('a rejected cold request clears the in-flight slot for the next attempt', async () => {
   let calls = 0;
   const loader = createSpawnCatalogLoader(async () => {

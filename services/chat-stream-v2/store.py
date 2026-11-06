@@ -1878,6 +1878,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(CLOSE_AUDIT_INDEX_DDL)
             for ddl in SCHEDULE_DDL:
                 conn.execute(ddl)
+            for table in ("v2_schedules", "v2_recurring_schedules"):
+                for column in ("account", "account_owner_json"):
+                    if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
             if "no_watch" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_schedules)")}:
                 conn.execute("ALTER TABLE v2_schedules ADD COLUMN no_watch INTEGER NOT NULL DEFAULT 0")
             conn.execute(SPAWN_OUTCOME_IDEMPOTENCY_INDEX_DDL)

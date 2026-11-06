@@ -45,6 +45,20 @@ retired and refuses before any external command; merging a PR does not deploy. F
 `services/chat-stream-v2/tests/test_deploy_log_guard.py`; the local release gate is
 `python services/chat-stream-v2/tools/run_gate.py merge`.
 
+Smoke account selection uses the [named-account declarations](provider_accounts.md#controls).
+An optional coordinated intent `smoke_accounts` array is sealed with the transaction
+and applies to both forward and rollback checks. Preparation refuses a prior or target
+runner that cannot honor it. Full-scope scheduled configuration carries the reviewed
+map; rollback restores the job preimage. Qualified canaries use release-input
+`activation.accounts`, included in their qualification identity. Legacy full-matrix
+activation accepts repeatable `--account` declarations; it cannot override a sealed
+coordinated intent or qualification input. Omitted maps preserve legacy defaults.
+For a new forward legacy deployment, omitted `--account` resets selection to those
+defaults and replaces the scheduled map; it does not inherit a prior stamped map.
+The legacy configuration may supply `PENTACLE_SMOKE_ACCOUNTS` through the daemon environment.
+Repeat the declarations when the next deployment should retain explicit selection.
+Rollback uses the map recorded in its stamp.
+
 FD is the release owner for the deploy gate-evidence choice. When a fresh,
 accepted local v2-merge receipt names the exact public candidate SHA, clean
 source before and after, and passing unit and smoke tiers, FD may pass

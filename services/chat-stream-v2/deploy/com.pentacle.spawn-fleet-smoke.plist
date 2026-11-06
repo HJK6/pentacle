@@ -14,6 +14,8 @@
   <integer>43200</integer>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PENTACLE_SMOKE_ACCOUNTS</key>
+    <string>__PENTACLE_SMOKE_ACCOUNTS__</string>
     <key>PENTACLE_MACHINES_FILE</key>
     <string>__PENTACLE_USER_HOME__/.config/pentacle-public/machines.json</string>
   </dict>

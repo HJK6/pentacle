@@ -145,7 +145,7 @@ class Runtime:
             raise Invalid("coordinated deploy needs the installed daemon --db path")
         return absolute(arguments[arguments.index("--db") + 1])
 
-    def account_snapshot(self, policy, database):
+    def account_snapshot(self, policy, database, *, accounts=None, scope=None):
         with sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
@@ -155,6 +155,20 @@ class Runtime:
                 "SELECT data FROM v2_account_bindings WHERE active=1 ORDER BY binding_key")]
             defaults = [list(row) for row in conn.execute("SELECT host,provider,alias,revision FROM v2_account_defaults ORDER BY host,provider")]
             selected = [raw for raw in bindings if any((raw["host"], raw["provider"], raw["alias"]) == tuple(row[:3]) for row in defaults)]
+            if accounts:
+                if policy.get('enabled') is not True:
+                    raise Invalid('explicit smoke accounts require enabled account policy')
+                from deploy.coordinated import smoke_account_map
+                choices = smoke_account_map(accounts, scope)
+                selected = []
+                for (host, provider), alias in choices.items():
+                    try:
+                        binding = ledger._available(ledger._cell(host, provider, alias))
+                    except AccountError as exc:
+                        raise Invalid('selected smoke account unavailable: ' + str(exc)) from exc
+                    selected.append(next(raw for raw in bindings if raw['host'] == host
+                        and raw['provider'] == provider and raw['alias'] == alias
+                        and raw['generation'] == binding.generation))
             cells = {tuple(row) for row in conn.execute("SELECT DISTINCT host,provider,alias FROM v2_account_bindings")}
             # Attempts can precede enrollment. Include their addressed cells as
             # well as registered bindings; historical row states are not fences.
@@ -219,7 +233,8 @@ class Runtime:
             raise Invalid("intent must name the installed machine and policy paths")
         policy = json.loads(private_file(intent["policy_file"]).read_bytes())
         scope = host_scope(intent["machines_file"], intent["excluded_hosts"])
-        accounts = self.account_snapshot(policy, self.database(plist))
+        accounts = self.account_snapshot(policy, self.database(plist),
+            accounts=intent.get('smoke_accounts'), scope=scope)
         arguments = plist.get("ProgramArguments", [])
         self.d._validate_v2_launchd_program(self.repo, arguments)
         # Match packet/activation-evidence.py's optional unbuffered prefix.
@@ -284,7 +299,7 @@ class Runtime:
             source[direction] = {"sha": sha, "snapshot": str(snapshot), "manifest": manifest,
                 "code_identity": identity, "helpers": helpers,
                 "runner_sha256": file_digest(snapshot / RUNNER),
-                "smoke_plan": self.smoke_plan(snapshot, scope, machine_copy)}
+                "smoke_plan": self.smoke_plan(snapshot, scope, machine_copy, accounts=intent.get('smoke_accounts', []))}
             daemon_helper = {**helpers[scope["local_hosts"][0]], "python": str(self.d._venv_python(self.repo, self.service))}
             source[direction]["daemon_interpreter"] = {"helper": daemon_helper,
                 "proof": self.helper_proof(daemon_helper, accounts, identity, manifest, sha, closure_only=True)}
@@ -303,10 +318,24 @@ class Runtime:
         atomic_bytes(post_policy_path, post_policy_bytes)
         post_plist_path = folder / "daemon.after"
         atomic_bytes(post_plist_path, plistlib.dumps(candidate_plist))
-        return {"scope": scope, "origin": origin, "machines_snapshot": str(machine_copy), "machines_sha256": file_digest(machine_copy),
+        prepared = {"scope": scope, "origin": origin, "machines_snapshot": str(machine_copy), "machines_sha256": file_digest(machine_copy),
                 "accounts": accounts, "source": source, "gates": evidence, "preimages": preimages,
                 "post_policy": {"path": str(post_policy_path), "sha256": file_digest(post_policy_path)},
                 "post_plist": {"path": str(post_plist_path), "sha256": file_digest(post_plist_path)}}
+        if intent.get('smoke_accounts') and not scope['excluded_hosts']:
+            path = folder/'schedule.after'
+            atomic_bytes(path, self.schedule_definition(source['target'], intent['smoke_accounts'], intent['machines_file']))
+            prepared['post_schedule'] = {'path': str(path), 'sha256': file_digest(path)}
+        return prepared
+
+    def schedule_definition(self, source, accounts, machines=None):
+        from xml.sax.saxutils import escape
+        snapshot = Path(source['snapshot'])
+        value = plistlib.loads(self.d._render_v2_spawn_fleet_smoke_plist(snapshot, accounts=accounts).replace(
+            escape(str(snapshot)).encode(), escape(str(self.repo)).encode()))
+        if machines is not None:
+            value['EnvironmentVariables']['PENTACLE_MACHINES_FILE'] = str(machines)
+        return plistlib.dumps(value)
 
     def remote_json(self, helper, argv):
         target = self.installer.Target(**helper["target"])
@@ -427,15 +456,18 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             raise Invalid("included host lacks both provider bindings")
         return {"closure": closure, "artifacts": proofs}
 
-    def smoke_argv(self, snapshot, scope, machines, *, dry_run=False):
+    def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False):
         return ("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
-                "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS", "PENTACLE_MACHINES_FILE=" + str(machines),
+                "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS", "-u", "PENTACLE_SMOKE_ACCOUNTS", "PENTACLE_MACHINES_FILE=" + str(machines),
                 "PENTACLE_SMOKE_EXCLUDED_HOSTS=" + ",".join(r["host"] for r in scope["excluded_hosts"]),
                 str(self.d._venv_python(self.repo, self.service)), str(Path(snapshot) / RUNNER),
+                *(arg for entry in accounts for arg in ('--account', entry)),
                 *(("--dry-run",) if dry_run else ()))
 
-    def smoke_plan(self, snapshot, scope, machines):
-        result = self.checked(self.smoke_argv(snapshot, scope, machines, dry_run=True), Path(snapshot))
+    def smoke_plan(self, snapshot, scope, machines, *, accounts=()):
+        from deploy.coordinated import smoke_account_map
+        choices = smoke_account_map(list(accounts), scope)
+        result = self.checked(self.smoke_argv(snapshot, scope, machines, accounts=accounts, dry_run=True), Path(snapshot))
         plan = json.loads(result.stdout)
         if (plan.get("source") != str(machines) or list(plan.get("hosts", [])) != scope["included_hosts"]
                 or list(plan.get("optional_hosts", [])) != scope["optional_hosts"]
@@ -443,8 +475,13 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
                 or plan.get("excluded_absent")):
             raise Invalid("target smoke runner scope disagreement")
         expected = [{"host": h, "provider": p, "prompt_mode": m} for h in scope["included_hosts"] for p in ("claude", "codex") for m in ("prompted", "promptless")]
-        if plan.get("cells") != expected:
+        rows = plan.get('cells')
+        if (not isinstance(rows, list) or [{k: r.get(k) for k in ('host', 'provider', 'prompt_mode')}
+                for r in rows] != expected):
             raise Invalid("target smoke runner cell-plan disagreement")
+        if choices and any(r.get('account') != choices[(r['host'], r['provider'])]
+                           or r.get('account_selection') != 'explicit' for r in rows):
+            raise Invalid('smoke runner cannot honor explicit accounts')
         return plan
 
     def current(self, receipt):
@@ -456,7 +493,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         for row in receipt["preimages"].values():
             if row["saved"] and (file_digest(private_file(row["saved"])) != row["sha256"] or row["uid"] != os.getuid()):
                 raise Invalid("preimage drift")
-        for key in ("post_policy", "post_plist"):
+        for key in ("post_policy", "post_plist", *(("post_schedule",) if 'post_schedule' in receipt else ())):
             if file_digest(private_file(receipt[key]["path"])) != receipt[key]["sha256"]:
                 raise Invalid("sealed postimage drift")
 
@@ -484,6 +521,13 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         for key, name in (("post_policy", "policy.after"), ("post_plist", "daemon.after")):
             if receipt[key]["path"] != str(folder / name):
                 raise Invalid("postimage path substitution")
+        scheduled = bool(receipt['intent'].get('smoke_accounts') and not receipt['scope']['excluded_hosts'])
+        if scheduled != ('post_schedule' in receipt):
+            raise Invalid('scheduled account intent substitution')
+        if scheduled and (receipt['post_schedule']['path'] != str(folder/'schedule.after')
+                or Path(receipt['post_schedule']['path']).read_bytes() != self.schedule_definition(
+                    receipt['source']['target'], receipt['intent']['smoke_accounts'], receipt['intent']['machines_file'])):
+            raise Invalid('scheduled account definition substitution')
         self.check_preimages(receipt)
         if (file_digest(receipt["intent"]["machines_file"]) != receipt["machines_sha256"]
                 or file_digest(private_file(receipt["machines_snapshot"])) != receipt["machines_sha256"]):
@@ -523,7 +567,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         if plistlib.loads(Path(receipt["post_plist"]["path"]).read_bytes()) != expected_plist:
             raise Invalid("sealed launchd definition substitution")
         policy = json.loads(private_file(receipt["intent"]["policy_file"]).read_bytes())
-        accounts = self.account_snapshot(policy, receipt["accounts"]["database"])
+        accounts = self.account_snapshot(policy, receipt["accounts"]["database"], accounts=receipt["intent"].get("smoke_accounts"), scope=receipt["scope"])
         if accounts != receipt["accounts"]:
             raise Invalid("provider pin/account generation drift")
         for direction in ("target", "prior"):
@@ -556,7 +600,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"], verify_release=False) != helper["proof"]:
                 raise Invalid("original helper proof drift before stop")
         source = receipt["source"]["target"]
-        if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"]) != source["smoke_plan"]:
+        if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])) != source["smoke_plan"]:
             raise Invalid("runner plan drift")
         self.guard(receipt)
 
@@ -658,7 +702,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         direction = "prior" if rollback else "target"
         self.checked(("git", "checkout", "--detach", receipt["source"][direction]["sha"]))
         if rollback:
-            for key in ("policy", "plist", "collector", "stamp"):
+            for key in ("policy", "plist", "collector", "stamp", *(("schedule",) if 'post_schedule' in receipt else ())):
                 row = receipt["preimages"][key]
                 if row["saved"]:
                     atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
@@ -672,6 +716,8 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             atomic_bytes(receipt["intent"]["policy_file"], Path(receipt["post_policy"]["path"]).read_bytes())
             atomic_bytes(receipt["preimages"]["plist"]["path"], Path(receipt["post_plist"]["path"]).read_bytes(),
                          mode=receipt["preimages"]["plist"]["mode"])
+            if 'post_schedule' in receipt:
+                atomic_bytes(receipt['preimages']['schedule']['path'], Path(receipt['post_schedule']['path']).read_bytes())
 
     def validate_recovery(self, receipt, journal):
         self.validate_common(receipt)
@@ -687,6 +733,8 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             allowed = {receipt["preimages"][key]["sha256"]}
             if key == "policy": allowed.add(receipt["post_policy"]["sha256"])
             if key == "plist": allowed.add(receipt["post_plist"]["sha256"])
+            if key == 'schedule' and 'post_schedule' in receipt:
+                allowed.add(receipt['post_schedule']['sha256'])
             if key == "stamp":
                 # Our activation stamp is the only additional admitted stamp.
                 stamp = self.d._read_stamp(self.repo, self.service)
@@ -726,12 +774,12 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         self.validate_common(receipt)
         if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
             raise Invalid("installed smoke runner drift")
-        if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"]) != source["smoke_plan"]:
+        if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])) != source["smoke_plan"]:
             raise Invalid("pre-canary runner plan drift")
-        smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"]), self.repo)
+        smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])), self.repo)
         self.validate_common(receipt)
         verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
-                    declared_exclusions=receipt["intent"]["excluded_hosts"])
+                    declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []))
         slow = self.d._scan_slow_consumer_window(self.service, self.log_offsets,
             expected_pid=boot.pid, expected_start=self.d._process_start(boot.pid, self.runner),
             prior_pid=self.old_pid, prior_start=self.old_start, no_outgoing_writer=self.old_pid is None, runner=self.runner)
@@ -739,6 +787,12 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         result = {"outcome": "passed" if verdict["outcome"] == "passed" and slow.get("outcome") == "passed" else "failed",
                   "boot": boot.as_stamp(), "runtime": runtime, "fleet_smoke": verdict, "slow_consumer": slow,
                   "helper_dispatch": dispatch}
+        if result['outcome'] == 'passed' and 'post_schedule' in receipt:
+            label = 'com.pentacle.spawn-fleet-smoke'
+            self.runner(('launchctl', 'bootout', self.d._launchctl_target(label)), self.repo)
+            schedule = receipt['preimages']['schedule']
+            if not rollback or schedule['saved']:
+                self.checked(('launchctl', 'bootstrap', self.d._launchctl_target(label).rsplit('/', 1)[0], schedule['path']))
         stamp.update(daemon_boot_readback=boot.as_stamp(), daemon_runtime_readback=runtime,
                      fleet_smoke=verdict, slow_consumer=slow, coordinated_phase="rolled_back" if rollback else "committed")
         # Preserve original rollback stamp bytes; its separate verification is
