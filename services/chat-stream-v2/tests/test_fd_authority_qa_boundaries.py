@@ -97,10 +97,22 @@ def test_fd_own_child_with_pending_disposition_uses_fd_custody():
         await env.store.update_session(LHOST, 'target', role='lead', assigned_spec_id='spec_demo__item_00',
             parent_stream_id=FD)
         await env.sessions.refresh()
-        result = await env.server._on_close(close(auth))
+        # Ordinary FD own-child closure follows the owner disposition guard.
+        await _refused(env.server._on_close(close(auth)), 'lead_close_requires_disposition')
+        assert env.tmux.killed == []
+        assert (await env.store.fetch_session(LHOST, 'target'))['status'] == 'open'
+        # Explicit recovery of this FD's proven busy child retains FD debt.
+        env.tmux.working.add('target')
+        result = await env.server._on_close(close(auth, force=True, request_id='fd-busy-recovery'))
         assert result['type'] == 'close.ok', result
+        assert env.tmux.killed == ['target']
         owed = await env.store.work_owed()
-        assert owed['items'], owed
+        assert [(item['spec_id'], item['closing_stream_id']) for item in owed['items']] == [
+            ('spec_demo__item_00', LHOST + ':target')]
+        from store_work_index import _state_conn
+        state = await env.store.submit(_state_conn)
+        debt, = state['_lead_dispositions']['owed'].values()
+        assert debt['front_desk_owned'] is True
     scenario(body)
 
 
