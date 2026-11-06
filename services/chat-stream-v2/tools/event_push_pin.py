@@ -158,6 +158,7 @@ async def _observe(store, participants, target, since, deadline, *, useful):
 async def _run(
     db: str, *, stage: str | None, rollback: bool, gate_evidence: Path | None = None,
     satellite_preflight: Path | None = None, url: str = 'ws://127.0.0.1:7791',
+    accounts: list[str] | None = None,
 ) -> dict[str, object]:
     if not rollback and not SATELLITE_HOSTS:
         raise ValueError('no satellite hosts configured; refusing to change the target pin')
@@ -168,6 +169,8 @@ async def _run(
         if target:
             _require_gate_evidence(gate_evidence, target)
             participants = _preflight_participants(satellite_preflight, target)
+            from tools.spawn_fleet_smoke import account_map
+            selected_accounts = account_map(accounts or [], tuple((p['host'], 'codex', 'promptless') for p in participants))
         elif not rollback:
             raise ValueError('a nonempty exact target is required')
         since = time.time()
@@ -196,7 +199,9 @@ async def _run(
                 raise RuntimeError('satellite deadline before affected Codex canary')
             # Existing single-host Codex canary only; never the default fleet matrix.
             smoke = subprocess.run(
-                [sys.executable, str(SERVICE_DIR / 'tools' / 'spawn_fleet_smoke.py'), url, host],
+                [sys.executable, str(SERVICE_DIR / 'tools' / 'spawn_fleet_smoke.py'), url, host,
+                 *(['--account', f"{host}/codex={selected_accounts[(host, 'codex')]}" ]
+                   if selected_accounts else [])],
                 cwd=REPO_ROOT, text=True, capture_output=True, check=False,
             )
             notes = _smoke_quota_note(smoke)
@@ -228,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--satellite-preflight', type=Path,
                         help='fresh exact candidate host/dependency/consumer receipt')
     parser.add_argument('--url', default='ws://127.0.0.1:7791', help='affected Codex canary endpoint')
+    parser.add_argument('--account', action='append', default=[], help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--stage", metavar="SHA", help="exact deployed 40-character SHA")
     action.add_argument("--rollback", action="store_true", help="restore the captured preceding pin")
@@ -235,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = asyncio.run(_run(args.db, stage=args.stage, rollback=args.rollback,
                                   gate_evidence=args.gate_evidence,
-                                  satellite_preflight=args.satellite_preflight, url=args.url))
+                                  satellite_preflight=args.satellite_preflight, url=args.url, accounts=args.account))
     except (DeployError, ValueError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, sort_keys=True))

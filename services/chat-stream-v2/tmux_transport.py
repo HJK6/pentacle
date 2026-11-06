@@ -530,17 +530,19 @@ class Tmux:
             )
         return "pane_in_mode" if pane_in_mode else None
 
-    async def pretrust_codex_cwd(self, cwd: str) -> None:
+    async def pretrust_codex_cwd(self, cwd: str, *, code_home: str | None = None) -> None:
         """Persist trust on the same host and CODEX_HOME as the provider."""
         from codex_trust import ensure_codex_trust
         if self.ssh_target is None:
             try:
-                await asyncio.to_thread(ensure_codex_trust, cwd)
+                await asyncio.to_thread(ensure_codex_trust, cwd, code_home=code_home)
             except (OSError, ValueError) as exc:
                 raise VerbError("codex_trust_failed", "local host could not persist cwd trust") from exc
             return
         source = await asyncio.to_thread(Path(__file__).with_name("codex_trust.py").read_text)
         command = "python3 - " + shlex.quote(cwd)
+        if code_home is not None:
+            command += " " + shlex.quote(code_home)
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(

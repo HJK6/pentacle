@@ -230,10 +230,19 @@ def prepare(repo, sha, input_path, python, runner):
     require(isinstance(candidate_mobile, list) and candidate_mobile and all(full_sha(v) for v in candidate_mobile),
             "missing candidate consumer source")
     activation = inputs.get("activation")
-    require(isinstance(activation, dict) and set(activation) == {"url", "host"}
+    require(isinstance(activation, dict) and set(activation) - {'accounts'} == {"url", "host"}
             and isinstance(activation["host"], str) and activation["host"]
             and isinstance(activation["url"], str) and activation["url"].startswith(("ws://", "wss://")),
             "unsupported activation scope (requires explicit Codex promptless endpoint/host)")
+    if 'accounts' in activation:
+        from tools.spawn_fleet_smoke import account_map
+        try:
+            require(isinstance(activation['accounts'], list)
+                    and all(isinstance(v, str) for v in activation['accounts']),
+                    'activation accounts must be an array of declarations')
+            account_map(activation['accounts'], ((activation['host'], 'codex', 'promptless'),))
+        except (ValueError, TypeError) as exc:
+            raise Invalid('invalid activation account mapping: ' + str(exc)) from exc
     selector_hash = digest((repo / "scripts/select_tests.py").read_bytes())
     map_hash = digest((repo / "scripts/test-selection.json").read_bytes())
     config_hash = digest((repo / "scripts/gate-env.json").read_bytes())

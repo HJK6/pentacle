@@ -196,7 +196,17 @@ function createCcHandlers({
           error: normalizeChatStreamError(error) };
       }
     });
-    target.handle('chat-stream:spawn-catalog', () => command(async () => ({ catalog: await chatStreamClient.getSpawnCatalog() })));
+    target.handle('chat-stream:spawn-catalog', () => command(async () => {
+      const [catalog, accounts] = await Promise.all([
+        chatStreamClient.getSpawnCatalog(),
+        chatStreamClient.getProviderAccounts?.().catch(error => {
+          // Keep protocol refusals visible instead of presenting a default-only picker.
+          if (error?.type === 'account.error' || error?.error_code || error?.code) throw error;
+          return null;
+        }),
+      ]);
+      return { catalog: accounts ? { ...catalog, account_status: accounts } : catalog };
+    }));
     target.handle('chat-stream:spawn', async (_event, request, legacyHostId) => {
       const input = request && typeof request === 'object' ? request : { provider: request, host: legacyHostId };
       const spawnProfile = input.spawnProfile || input.spawn_profile;

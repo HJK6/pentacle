@@ -72,6 +72,13 @@ def _install_spawn_fakes(monkeypatch, tmp_path: Path, captured: dict, response: 
     monkeypatch.setattr(cli, "schedule_once", fake_schedule_once)
 
 
+def test_explicit_account_is_retained_in_scheduled_spawn(monkeypatch, tmp_path, capsys):
+    captured = {}
+    _install_spawn_fakes(monkeypatch, tmp_path, captured)
+    assert cli.spawn(_spawn_args(delay='2m', account='spare')) == 0
+    assert captured['payload']['account'] == 'spare'
+
+
 def test_spawn_handoff_at_inserts_schedule_without_spawning(monkeypatch, tmp_path, capsys):
     captured: dict = {}
     _install_spawn_fakes(monkeypatch, tmp_path, captured)
@@ -367,14 +374,14 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
             "--qa-spec-id", "--qa-surface", "--qa-cycle",
             "--no-reparent-children", "--parent", "--top-level",
             "--self-close-on-completion", "--no-self-close-on-completion",
-            "--no-watch",
+            "--no-watch", "--account",
             "--initial-prompt", "--initial-prompt-file",
         },
         "timing": {"--at", "--delay"},
         "client_only": {"--timeout", "--allow-past-time", "--allow-far-future"},
         "request_identity": {"--request-id"},
         "rejected": {"--resume", "--confirm-model-change", "--idempotency-key", "--cwd",
-                     "--account", "--handoff-from"},
+                     "--handoff-from"},
     }
     classified = [flag for values in groups.values() for flag in values]
     assert set(classified) == live_flags
@@ -384,7 +391,6 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
 @pytest.mark.parametrize("timing", [["--delay", "2m"], ["--at", "2026-05-20T20:05:00+00:00"]])
 @pytest.mark.parametrize("handoff", [False, True])
 @pytest.mark.parametrize("choice,detail", [
-    (["--account", "spare"], "explicit account choice requires an immediate front-desk spawn"),
     (["--handoff-from", "hosta:conversation"], "--handoff-from requires --handoff --account and a stream id"),
 ])
 def test_named_account_flags_refuse_scheduling_before_any_rpc(

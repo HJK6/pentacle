@@ -17,7 +17,7 @@ VARIANTS={"B-admission":tuple(state+"/"+consumer for state in ("U","S","X") for 
 
 
 class AdmissionTmux(ReconTmux):
-    async def pretrust_codex_cwd(self,_cwd):pass
+    async def pretrust_codex_cwd(self,_cwd, *, code_home: str | None = None):pass
 
 
 async def prepare(case,j,mp,current,parent,tmp_path,attempt):
