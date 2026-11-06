@@ -935,7 +935,7 @@ def account_map(entries, cells):
             raise ValueError(f"account mapping names an uncovered cell: {key}")
         declared[key] = alias
     result = {}
-    for host, provider in included:
+    for host, provider in sorted(included):
         alias = declared.get(f"{host}/{provider}", declared.get(provider))
         if alias is None and declared:
             raise ValueError(f"explicit account map does not cover {host}/{provider}")
