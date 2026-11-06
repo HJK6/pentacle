@@ -40,6 +40,15 @@ host-specific entries override them. Duplicate keys, unknown cells and incomplet
 explicit maps refuse before any prompt. `--dry-run` lists the resolved aliases;
 receipts and failure keys include account identity. Scheduled smoke may supply
 the same comma-separated declarations through `PENTACLE_SMOKE_ACCOUNTS`.
+Coordinated deployment intents accept optional `smoke_accounts`, an array of
+those declarations covering every included host/provider. The sealed intent,
+helper proofs, forward/rollback dry plans and actual verdict use the same map.
+Both archived runners must support explicit selection before any activation.
+Full-scope coordinated deployment seals the scheduled job definition and restores
+its prior bytes on rollback; declared-exclusion runs preserve the existing job.
+Qualified release inputs put the canary map in `activation.accounts`; it is part
+of the qualification identity. Legacy full-matrix deployment accepts repeatable
+`--account` and retains its map in the stamp and installed smoke job.
 Startup tuple probes select the tuple's alias explicitly. Wrapper/delivery probes
 and event-push canaries accept the same map. Daily-retro settings accept optional
 `account` and retain it in the original idempotent intent.
