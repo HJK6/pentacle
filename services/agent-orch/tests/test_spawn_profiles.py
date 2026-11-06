@@ -618,3 +618,67 @@ def test_invalid_local_availability_is_rejected(installation_config, available):
 def test_null_or_empty_policy_keeps_full_catalog(installation_config, available):
     result = installation_config(available)
     assert result["available_models"] == result["models"]
+
+
+@pytest.fixture
+def test_policy_file(tmp_path, monkeypatch):
+    raw = json.loads(spawn_profiles.SPAWN_DEFAULTS_PATH.read_text())
+    path = tmp_path / "spawn_defaults.json"
+    path.write_text(json.dumps(raw))
+    monkeypatch.setattr(spawn_profiles, "SPAWN_DEFAULTS_PATH", path)
+    spawn_profiles.load_spawn_config.cache_clear()
+    yield path, raw
+    spawn_profiles.load_spawn_config.cache_clear()
+
+
+def test_test_profile_refreshes_without_changing_cached_work_defaults(test_policy_file):
+    path, raw = test_policy_file
+    ordinary = resolve_spawn(provider="codex")
+    first = spawn_profiles.resolve_test_profile()
+    assert spawn_profiles.test_prompt_tuple("codex", first) == ("gpt-6-luna", "low")
+    raw["profiles"]["test_prompt"]["codex"] = {"model": "gpt-5.6-luna", "effort": "low"}
+    path.write_text(json.dumps(raw))
+    second = spawn_profiles.resolve_test_profile()
+    assert spawn_profiles.test_prompt_tuple("codex", second) == ("gpt-5.6-luna", "low")
+    assert first["profile_sha256"] != second["profile_sha256"]
+    assert first["settings_sha256"] != second["settings_sha256"]
+    assert catalog()["profiles"]["test_prompt"]["codex"] == ("gpt-5.6-luna", "low")
+    assert resolve_spawn(provider="codex") == ordinary
+    # Frozen runs retain their exact tuple after current settings change.
+    assert spawn_profiles.test_prompt_tuple("codex", first) == ("gpt-6-luna", "low")
+
+
+def test_test_profile_overlay_replaces_complete_pair_and_ignores_picker(test_policy_file):
+    path, raw = test_policy_file
+    local = path.with_name("spawn_defaults.local.json")
+    local.write_text(json.dumps({"schema_version": 1, "available_models": {"claude": ["claude-opus-4-8"]},
+        "profiles": {"test_prompt": {"claude": {"model": "claude-haiku-5-5", "effort": "low"}}}}))
+    profile = spawn_profiles.resolve_test_profile()
+    assert spawn_profiles.test_prompt_tuple("claude", profile) == ("claude-haiku-5-5", "low")
+    assert "claude-haiku-5-5" not in catalog()["available_models"]["claude"]
+    local.write_text(json.dumps({"schema_version": 1, "profiles": {"test_prompt": {"claude": {"effort": "low"}}}}))
+    with pytest.raises(SpawnProfileError): spawn_profiles.resolve_test_profile()
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"codex": {"model": "gpt-6-luna"}},
+    {"codex": {"model": "gpt-6-luna", "effort": "invalid"}}])
+def test_test_profile_never_falls_back_to_work_defaults(test_policy_file, bad):
+    path, raw = test_policy_file
+    raw["profiles"]["test_prompt"] = bad
+    path.write_text(json.dumps(raw))
+    with pytest.raises(SpawnProfileError): spawn_profiles.resolve_test_profile()
+    assert resolve_spawn(provider="codex")["effort"] == "max"
+
+
+def test_test_profile_missing_file_and_disabled_provider_refuse(test_policy_file):
+    path, _ = test_policy_file
+    with pytest.raises(SpawnProfileError, match="disabled"):
+        spawn_profiles.test_prompt_tuple("cursor")
+    path.unlink()
+    with pytest.raises(SpawnProfileError, match="missing"):
+        spawn_profiles.resolve_test_profile()
+
+
+def test_haiku_all_installed_efforts_validate_at_shared_boundary():
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        assert resolve_spawn(provider="claude", model="claude-haiku-5-5", effort=effort)["effort"] == effort

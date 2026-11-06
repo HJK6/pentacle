@@ -7,31 +7,28 @@ from _shared.spawn_profiles import SpawnProfileError, catalog, resolve_spawn, va
 MODEL = "claude-haiku-5-5"
 
 
-def test_haiku_high_resolves_and_daemon_revalidates():
-    request = resolve_spawn(provider="claude", model=MODEL, effort="high")
-    assert (request["model"], request["effort"]) == (MODEL, "high")
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_haiku_installed_efforts_resolve_and_daemon_revalidates(effort):
+    request = resolve_spawn(provider="claude", model=MODEL, effort=effort)
+    assert (request["model"], request["effort"]) == (MODEL, effort)
     accepted = validate_v2(
-        schema="SpawnRequestV2", provider="claude", model=MODEL, effort="high",
+        schema="SpawnRequestV2", provider="claude", model=MODEL, effort=effort,
         spawn_profile="agent_orch", catalog_version="spawn-catalog-v2",
         resolution_source="explicit_override",
     )
-    assert accepted["model"] == MODEL
+    assert (accepted["model"], accepted["effort"]) == (MODEL, effort)
     advertised = catalog()["available_models"]["claude"]
-    assert advertised[MODEL]["efforts"] == ("high",)
+    assert advertised[MODEL]["efforts"] == ("low", "medium", "high", "xhigh", "max")
 
 
-@pytest.mark.parametrize("effort", ["low", "medium", "xhigh", "max"])
-def test_haiku_other_efforts_refuse_in_client_and_daemon(effort):
-    with pytest.raises(SpawnProfileError) as client_error:
+@pytest.mark.parametrize("effort", ["invalid", "default", "ultra"])
+def test_haiku_unknown_efforts_refuse_in_client_and_daemon(effort):
+    with pytest.raises(SpawnProfileError):
         resolve_spawn(provider="claude", model=MODEL, effort=effort)
-    assert client_error.value.code == "spawn_pair_unsupported"
-    with pytest.raises(SpawnProfileError) as daemon_error:
-        validate_v2(
-            schema="SpawnRequestV2", provider="claude", model=MODEL, effort=effort,
+    with pytest.raises(SpawnProfileError):
+        validate_v2(schema="SpawnRequestV2", provider="claude", model=MODEL, effort=effort,
             spawn_profile="agent_orch", catalog_version="spawn-catalog-v2",
-            resolution_source="explicit_override",
-        )
-    assert daemon_error.value.code == "spawn_pair_unsupported"
+            resolution_source="explicit_override")
 
 
 def test_existing_defaults_luna_qa_and_unknown_id_behavior_are_preserved():

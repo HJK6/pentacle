@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Synthetic lane/card publication must stay off the operator connection."""
 import asyncio
 from contextlib import contextmanager
@@ -86,6 +87,7 @@ def test_matrix_failure_never_publishes_on_operator_rpc(monkeypatch, error):
     monkeypatch.setattr(spawn_fleet_smoke, "_operator_connection", connection)
     monkeypatch.setattr(spawn_fleet_smoke, "run_cell", fail)
     results = spawn_fleet_smoke.run_matrix("ws://unreachable-fixture", Path("unused"), 1,
+        test_profile_snapshot=resolve_test_profile(),
         cells=(("fixture-host", "codex", "promptless"),))
     assert not calls
     assert len(results) == 1

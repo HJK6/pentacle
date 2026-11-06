@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Admission/refusal through the real deploy transaction, with isolated launchd."""
 from pathlib import Path
 import hashlib
@@ -37,7 +38,7 @@ def test_supplied_merge_receipt_is_reused_once_and_seams_admitted(isolated_relea
         assert evidence["sha"] == target and evidence["passed"] is True
         evidence["seam_results"] = {"identity": {"candidate": target}, "results": []}
         admitted.append(True)
-        return {"identity": {"candidate": target}}
+        return {"identity": {"candidate": target, "test_profile": resolve_test_profile()}}
     monkeypatch.setattr(module.release_selection, "admit", admit)
     monkeypatch.setattr(module.release_selection, "revalidate", lambda *_: None)
     monkeypatch.setattr(module, "_validate_selected_activation", lambda *_: None)
@@ -153,6 +154,12 @@ def admitted_transaction(isolated_release, tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'run_gate_and_write_evidence', lambda *_a, **_k: pytest.fail('duplicate merge gate'))
     monkeypatch.setattr(module, '_install_fleet_smoke_schedule', lambda *_: pytest.fail('canary cannot install full-matrix schedule'))
     cell = {'host': 'primary', 'provider': 'codex', 'prompt_mode': 'promptless', 'outcome': 'passed'}
+    from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple
+    profile = resolve_test_profile()
+    model, effort = test_prompt_tuple('codex', profile)
+    cell.update(model=model, effort=effort, test_profile=profile,
+        tuple_evidence={'requested_model': model, 'requested_effort': effort,
+                        'effective_model': model, 'effective_effort': effort})
     payload = {'returncode': 0, 'result': {'ok': True, 'status': 'PASS', 'cells': [cell]}}
     result_path = tmp_path / 'synthetic-provider-result.json'
     _write(result_path, payload)
@@ -175,7 +182,9 @@ def test_real_admission_reuses_merge_and_dispatches_exact_affected_child(admitte
     assert stamp['release_selection']['identity'] == t['section']['identity']
     assert {b['id'] for b in stamp['release_selection']['boundaries']} == {'client_wire_render', 'deploy_invocation'}
     child = json.loads(t['child'].read_text())
-    assert child['argv'][1:] == ['ws://127.0.0.1:7791', 'primary']
+    assert child['argv'][1:3] == ['ws://127.0.0.1:7791', 'primary']
+    assert child['argv'][3] == '--test-profile-snapshot'
+    assert json.loads(Path(child['argv'][4]).read_text()) == stamp['test_profile']
     assert child['machines_file'] == str(t['machines'])
     assert child['ambient_hosts'] is None and child['ambient_json'] is None
     verdict = stamp['fleet_smoke']

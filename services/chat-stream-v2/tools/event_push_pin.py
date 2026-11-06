@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 
@@ -21,6 +22,9 @@ SERVICE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = SERVICE_DIR.parents[1]
 if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
+
+sys.path.insert(0, str(SERVICE_DIR.parent))
+from _shared.spawn_profiles import resolve_test_profile, validate_test_profile
 
 from store import Store  # noqa: E402
 from machines import configured_host_names, load_machines  # noqa: E402
@@ -79,6 +83,9 @@ def _preflight_participants(path: Path | None, candidate: str) -> list[dict]:
         payload = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise ValueError('satellite preflight receipt unreadable') from exc
+    profile = validate_test_profile(payload.get('test_profile'))
+    if profile != resolve_test_profile():
+        raise ValueError('satellite preflight test profile/settings drift')
     stamp = payload.get('observed_at_epoch')
     rows = payload.get('participants')
     if (payload.get('candidate') != candidate or type(stamp) not in (int, float)
@@ -162,6 +169,8 @@ async def _run(
 ) -> dict[str, object]:
     if not rollback and not SATELLITE_HOSTS:
         raise ValueError('no satellite hosts configured; refusing to change the target pin')
+    profile_directory = tempfile.TemporaryDirectory(prefix="pentacle-satellite-test-profile-")
+    profile_path = Path(profile_directory.name) / "test-profile.json"
     store = Store(db)
     store.start()
     try:
@@ -169,6 +178,9 @@ async def _run(
         if target:
             _require_gate_evidence(gate_evidence, target)
             participants = _preflight_participants(satellite_preflight, target)
+            profile = validate_test_profile(json.loads(satellite_preflight.read_text())['test_profile'])
+            profile_path.write_text(json.dumps(profile))
+            profile_path.chmod(0o600)
             from tools.spawn_fleet_smoke import account_map
             selected_accounts = account_map(accounts or [], tuple((p['host'], 'codex', 'promptless') for p in participants))
         elif not rollback:
@@ -200,6 +212,7 @@ async def _run(
             # Existing single-host Codex canary only; never the default fleet matrix.
             smoke = subprocess.run(
                 [sys.executable, str(SERVICE_DIR / 'tools' / 'spawn_fleet_smoke.py'), url, host,
+                 '--test-profile-snapshot', str(profile_path),
                  *(['--account', f"{host}/codex={selected_accounts[(host, 'codex')]}" ]
                    if selected_accounts else [])],
                 cwd=REPO_ROOT, text=True, capture_output=True, check=False,
@@ -219,10 +232,11 @@ async def _run(
             print('pin staged; partial: Codex quota exhausted; restore quota before validation', file=sys.stderr)
         return {'action': 'rollback' if rollback else 'stage', 'previous': previous,
                 'target_sha': target, 'readback': await store.get('event_push.target_sha'),
-                'status': 'PARTIAL' if partial else 'PASS', 'satellites': observed,
+                'status': 'PARTIAL' if partial else 'PASS', 'satellites': observed, 'test_profile': profile,
                 'pending': pending, 'quota_exhausted': quota, 'smoke': smoke_results}
     finally:
         store.stop()
+        profile_directory.cleanup()
 
 
 def main(argv: list[str] | None = None) -> int:

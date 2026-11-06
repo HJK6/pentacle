@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import tomllib
 
+from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple
+
 from machines import configured_local_host
 from provider_accounts import AccountError, Binding
 from provider_account_native import codex_observation, verify_binary
@@ -45,7 +47,10 @@ class ProviderStartupProbe:
             raise ValueError("provider tuple requires binding, config_sha256, model and effort")
         self.binding = Binding.from_public(value["binding"])
         self.config_sha256 = value["config_sha256"]
-        self.model, self.effort = value["model"], value["effort"]
+        self.test_profile = resolve_test_profile()
+        self.model, self.effort = test_prompt_tuple("codex", self.test_profile)
+        if (value["model"], value["effort"]) != (self.model, self.effort):
+            raise ValueError("provider tuple must match test_prompt settings")
         self.config_comparison = {}
         self._last_config_sha256 = None
         if (self.binding.provider != "codex" or self.binding.host != host

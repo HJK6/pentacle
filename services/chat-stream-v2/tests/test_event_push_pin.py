@@ -255,7 +255,9 @@ def test_optional_offline_stays_partial_and_canary_is_only_affected_codex(tmp_pa
         result = await event_push_pin._run(db, stage=TARGET, rollback=False,
             gate_evidence=tmp_path / 'gate.json', satellite_preflight=receipt, url='ws://owned-fixture')
         assert result['status'] == 'PARTIAL' and result['pending'] == ['optional']
-        assert len(commands) == 1 and commands[0][2:] == ['ws://owned-fixture', 'workstation']
+        assert len(commands) == 1 and commands[0][2:4] == ['ws://owned-fixture', 'workstation']
+        assert commands[0][4] == '--test-profile-snapshot'
+        assert result['test_profile'] == json.loads(receipt.read_text())['test_profile']
     asyncio.run(run())
 
 

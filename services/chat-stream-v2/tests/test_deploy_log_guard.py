@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _shared.spawn_profiles import resolve_test_profile
+
 from functools import partial
 import importlib.util
 import json
@@ -80,19 +82,27 @@ def isolated_release(tmp_path, monkeypatch, request):
         shutil.copy2(source / name, main.parent / name)
     shared = repo / "services/_shared"
     shared.mkdir()
+    for name in ("spawn_profiles.py", "spawn_defaults.json"):
+        shutil.copy2(source.parent / "_shared" / name, shared / name)
     shutil.copy2(source.parent / "_shared/provider_cli_release.py", shared / "provider_cli_release.py")
     selection_fixture = getattr(request, "param", None) == "selection"
     if selection_fixture:
         from .test_release_selection import _seed_selector_files
         _seed_selector_files(repo)
-        # Only an external provider counterpart: records the real child argv/env.
-        smoke = repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"
-        smoke.parent.mkdir(parents=True, exist_ok=True)
-        smoke.write_text("""import json, os, pathlib, sys
-root = pathlib.Path(__file__).resolve().parents[3].parent
+    # Only an external provider counterpart: records the real child argv/env.
+    smoke = repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"
+    smoke.parent.mkdir(parents=True, exist_ok=True)
+    smoke.write_text("""import json, os, pathlib, sys
+repo = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(repo/'services'))
+from _shared.spawn_profiles import resolve_test_profile
+if '--dry-run' in sys.argv:
+    print(json.dumps({'test_profile': resolve_test_profile()}))
+    raise SystemExit(0)
+root = repo.parent
 json.dump({'argv': sys.argv, 'machines_file': os.environ.get('PENTACLE_MACHINES_FILE'),
-           'ambient_hosts': os.environ.get('PENTACLE_SMOKE_HOSTS'),
-           'ambient_json': os.environ.get('PENTACLE_MACHINES_JSON')}, open(root/'observed-child.json', 'w'))
+       'ambient_hosts': os.environ.get('PENTACLE_SMOKE_HOSTS'),
+       'ambient_json': os.environ.get('PENTACLE_MACHINES_JSON')}, open(root/'observed-child.json', 'w'))
 payload = json.load(open(root/'synthetic-provider-result.json'))
 print(json.dumps(payload['result']))
 sys.exit(payload['returncode'])
@@ -114,7 +124,7 @@ sys.exit(payload['returncode'])
     git("checkout", "-q", "--detach", prior)
     python = module._venv_python(repo, service)
     python.parent.mkdir(parents=True)
-    python.symlink_to(sys.executable) if selection_fixture else python.touch()
+    python.symlink_to(sys.executable)
     guard = Path(service.log_guard_dir)
     assert guard.is_relative_to(tmp_path), "test guard must stay inside the owned temporary home"
     guard.mkdir(parents=True)
@@ -131,6 +141,8 @@ sys.exit(payload['returncode'])
     # (no spurious reload); out-of-band drift is covered by its own test below.
     module._write_stamp(repo, service, {
         "sha": "c" * 40, "prior_sha": target,
+        "test_profile": resolve_test_profile(),
+        "prior_test_profile": resolve_test_profile(),
         "requirements_hash": module._sha256(repo / service.requirements_path),
         "launchd_plist_digest": module._launchd_plist_managed_digest(service.launchd_label),
     })
@@ -176,7 +188,7 @@ sys.exit(payload['returncode'])
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
             if tuple(command[:4]) == ("env", "TZ=UTC0", "LC_ALL=C", "ps"):
                 return subprocess.CompletedProcess(command, 0, "Mon Jan 1 11:00:00 2024", "")
-            if selection_fixture and (command[0] == str(python) or command[0] == "/usr/bin/env"):
+            if command[0] == str(python) or (selection_fixture and command[0] == "/usr/bin/env"):
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
             assert command[0] == "launchctl", command
             if selection_fixture and command[1] == "bootout" and command[2].endswith("/" + module.USAGE_COLLECTOR_LABEL):

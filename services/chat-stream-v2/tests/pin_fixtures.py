@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Synthetic counterpart receipts for the pin operation; no host/SSH/provider calls."""
 import json
 import hashlib
@@ -51,7 +52,7 @@ def preflight(root, candidate, hosts=('workstation',), optional=()):
                      'installed_cli_version': 'fixture-cli', 'installed_source_sha': 'a' * 40,
                      'configuration_sha256': 'c' * 64, 'installed_cli_sha256': 'b' * 64})
     path = root / ('preflight-' + candidate + '.json')
-    path.write_text(json.dumps({'candidate': candidate, 'observed_at_epoch': time.time(), 'participants': rows}))
+    path.write_text(json.dumps({'test_profile': resolve_test_profile(), 'candidate': candidate, 'observed_at_epoch': time.time(), 'participants': rows}))
     return path
 
 

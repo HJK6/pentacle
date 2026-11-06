@@ -17,6 +17,8 @@ import stat
 from dataclasses import replace, asdict
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from provider_accounts import AccountError, Registry, _component, _mkdir, _private, environment, write_private_json
 from provider_account_native import (
     adopt, claude_observation, codex_observation, enroll, native_login, verify_binary,
@@ -191,12 +193,16 @@ class NativeHost:
                 self._save_operation(operation_id,result)
                 return result
         assert_drained(active,run=self.run,host=self,launchers=self._managed_launchers)
+        from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple
+        profile = resolve_test_profile()
+        model, effort = test_prompt_tuple(active.provider, profile)
+        identity = {**identity, "test_profile": profile}
         state={**identity,"state":"started","outcome":"execution_unresolved","started_at_ns":__import__("time").time_ns()}
         self._save_operation(operation_id,state)
         try:
             before=self._probe_observation(target)
             if not _valid_observation(target,before): raise AccountError("account_repin_identity_invalid")
-            minimal_turn(target,model=cell["model"],effort=cell["effort"],cwd=cell["cwd"],run=self.run)
+            minimal_turn(target,model=model,effort=effort,cwd=cell["cwd"],run=self.run,test_profile=profile)
             after=self._probe_observation(target)
             if not _valid_observation(target,after): raise AccountError("account_repin_identity_invalid")
             proof=verify(target,cell,pin,run=self.run)
@@ -388,7 +394,7 @@ class NativeHost:
                 # A crash after activation but before the receipt is repaired
                 # from the active generation. No second login is attempted.
                 if active and active.generation == generation and (not cell.get("expected_provider_id") or active.provider_id == cell["expected_provider_id"]):
-                    result = identity | {"state": "done", "outcome": "ok", "binding": active.public()}
+                    result = {**prior, **identity, "state": "done", "outcome": "ok", "binding": active.public()}
                     if prior.get("enrollment_proof"):
                         staged=prior["enrollment_proof"]
                         if staged.get("binding")!=active.public():raise AccountError("account_host_binding_invalid")
@@ -399,6 +405,10 @@ class NativeHost:
             if (active.generation if active else "unenrolled") != expected_generation:
                 raise AccountError("account_login_generation_stale")
             _component(generation)
+            from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple
+            profile = resolve_test_profile()
+            model, effort = test_prompt_tuple(provider, profile)
+            identity = {**identity, "test_profile": profile}
             intent = identity | {"state": "started", "outcome": "execution_unresolved"}
             self._save_operation(operation_id, intent)
             try:
@@ -429,12 +439,12 @@ class NativeHost:
                     self._save_operation(operation_id,{**intent,"enrollment_proof":staged})
                 if action == "adopt":
                     bound = adopt(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
-                        identity=identity_readback, model=cell["model"], effort=cell["effort"], cwd=cell["cwd"],
+                        identity=identity_readback, model=model, effort=effort, cwd=cell["cwd"], test_profile=profile,
                         manifest=cell.get("bootstrap", {}), run=self.run)
                 else:
                     bound = enroll(self.registry, draft, expected_provider_id=cell.get("expected_provider_id"),
                         browser_authorize=self._browser, login=self.login, identity=identity_readback,
-                        model=cell["model"], effort=cell["effort"], cwd=cell["cwd"], manifest=cell.get("bootstrap", {}), run=self.run,
+                        model=model, effort=effort, cwd=cell["cwd"], test_profile=profile, manifest=cell.get("bootstrap", {}), run=self.run,
                         before_activate=before_activate if pin is not None else None)
                 result = identity | {"state": "done", "outcome": "ok", "binding": bound.public()}
                 if pin is not None:

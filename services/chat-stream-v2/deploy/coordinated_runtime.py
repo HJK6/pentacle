@@ -12,12 +12,13 @@ import plistlib
 import re
 import shlex
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
 import time
 
-from deploy.coordinated import (Invalid, HelperProofFailure, absolute, atomic_bytes, canonical, digest,
+from deploy.coordinated import (Invalid, HelperProofFailure, absolute, atomic_bytes, atomic_json, read_json, canonical, digest,
     file_digest, host_scope, private_file)
 from provider_cli_artifact import code_identity, validate_proof
 from provider_accounts import AccountError, Binding
@@ -259,16 +260,29 @@ class Runtime:
         # drift detection even on a full-matrix coordinated transaction.
         schedule = self.d._launchd_plist_path("com.pentacle.spawn-fleet-smoke")
         preimages["schedule"] = self.preimage(schedule, folder, "schedule.before")
+        settings_path = self.repo / "services/_shared/spawn_defaults.local.json"
+        preimages["test_settings"] = self.preimage(settings_path, folder, "test-settings.before")
+        overlay = settings_path.read_bytes() if settings_path.exists() else None
         source = {}
         hosts = {row["name"]: row for row in scope["machines"]}
         for direction, sha in (("target", intent["target_sha"]), ("prior", intent["prior_sha"])):
             bundle = folder / (direction + "-bundle")
             bundle.mkdir(mode=0o700)
-            manifest = self.installer._archive(self.repo, sha, bundle, provider_cli_pin=accounts["pin"])
+            manifest = self.installer._archive(self.repo, sha, bundle, provider_cli_pin=accounts["pin"], spawn_settings=overlay)
             snapshot = folder / (direction + "-source")
             snapshot.mkdir(mode=0o700)
             with tarfile.open(bundle / "pentacle.tar") as archive:
                 archive.extractall(snapshot, filter="data")
+            # Both runners must understand and validate the sealed profile before
+            # any helper staging, stop, or inference. Old priors refuse here.
+            profile_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                                           accounts=intent.get('smoke_accounts', []))
+            profile_path = folder / (direction + "-test-profile.json")
+            atomic_json(profile_path, profile_plan["test_profile"])
+            sealed_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                accounts=intent.get('smoke_accounts', []), test_profile=profile_path)
+            if profile_plan != sealed_plan:
+                raise Invalid("runner cannot honor sealed test profile")
             identity = code_identity_at(self.repo, sha, self.runner)
             if file_digest(snapshot / self.service.requirements_path) != file_digest(self.repo / self.service.requirements_path):
                 raise Invalid("dependency changes require a separately provisioned compatible interpreter")
@@ -295,11 +309,14 @@ class Runtime:
                 release = self.installer.stage_helper_source(target, bundle, sha, manifest)
                 helper = {"target": vars(target), "python": str(python), "script": release + "/app/" + HELPER}
                 helper["proof"] = self.helper_proof(helper, accounts, identity, manifest, sha)
+                if helper["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
+                    raise Invalid("staged native helper test settings mismatch")
                 helpers[host] = helper
             source[direction] = {"sha": sha, "snapshot": str(snapshot), "manifest": manifest,
                 "code_identity": identity, "helpers": helpers,
                 "runner_sha256": file_digest(snapshot / RUNNER),
-                "smoke_plan": self.smoke_plan(snapshot, scope, machine_copy, accounts=intent.get('smoke_accounts', []))}
+                "test_profile": {"path": str(profile_path), "sha256": file_digest(profile_path)},
+                "smoke_plan": sealed_plan}
             daemon_helper = {**helpers[scope["local_hosts"][0]], "python": str(self.d._venv_python(self.repo, self.service))}
             source[direction]["daemon_interpreter"] = {"helper": daemon_helper,
                 "proof": self.helper_proof(daemon_helper, accounts, identity, manifest, sha, closure_only=True)}
@@ -308,6 +325,8 @@ class Runtime:
                 for host, staged in helpers.items():
                     original = {"target": staged["target"], **policy["executors"][host]}
                     original["proof"] = self.helper_proof(original, accounts, identity, manifest, sha, verify_release=False)
+                    if original["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
+                        raise Invalid("original rollback helper test settings mismatch")
                     originals[host] = original
                 source[direction]["original_helpers"] = originals
         post_policy = copy.deepcopy(policy)
@@ -421,6 +440,7 @@ class Runtime:
 import hashlib,importlib.metadata,json,pathlib,site,sys
 app=pathlib.Path(sys.argv[1]); sys.path[:0]=[str(app/'services/chat-stream-v2'),str(app/'services'),str(app/'services/agent-orch')]
 import provider_account_host,account_executor,provider_cli_artifact,account_runtime,main
+from _shared.spawn_profiles import resolve_test_profile
 origins={}; dependencies={}
 for name,module in list(sys.modules.items()):
     value=getattr(module,'__file__',None)
@@ -432,7 +452,7 @@ for name,module in list(sys.modules.items()):
         if path.is_file() and any(path.is_relative_to(pathlib.Path(root).resolve()) for root in site.getsitepackages()):
             dependencies[name]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 exe=pathlib.Path(sys.executable).resolve()
-print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.executable,
+print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_artifact.code_identity(),'python':sys.executable,
  'real_python':str(exe),'python_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),
  'version':sys.version,'modules':origins,'dependency_files':dependencies,
  'dependencies':sorted((d.metadata['Name'],d.version) for d in importlib.metadata.distributions())}))
@@ -456,18 +476,19 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             raise Invalid("included host lacks both provider bindings")
         return {"closure": closure, "artifacts": proofs}
 
-    def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False):
+    def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False, test_profile=None):
         return ("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
                 "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS", "-u", "PENTACLE_SMOKE_ACCOUNTS", "PENTACLE_MACHINES_FILE=" + str(machines),
                 "PENTACLE_SMOKE_EXCLUDED_HOSTS=" + ",".join(r["host"] for r in scope["excluded_hosts"]),
                 str(self.d._venv_python(self.repo, self.service)), str(Path(snapshot) / RUNNER),
                 *(arg for entry in accounts for arg in ('--account', entry)),
+                *(("--test-profile-snapshot", str(test_profile)) if test_profile else ()),
                 *(("--dry-run",) if dry_run else ()))
 
-    def smoke_plan(self, snapshot, scope, machines, *, accounts=()):
+    def smoke_plan(self, snapshot, scope, machines, *, accounts=(), test_profile=None):
         from deploy.coordinated import smoke_account_map
         choices = smoke_account_map(list(accounts), scope)
-        result = self.checked(self.smoke_argv(snapshot, scope, machines, accounts=accounts, dry_run=True), Path(snapshot))
+        result = self.checked(self.smoke_argv(snapshot, scope, machines, accounts=accounts, dry_run=True, test_profile=test_profile), Path(snapshot))
         plan = json.loads(result.stdout)
         if (plan.get("source") != str(machines) or list(plan.get("hosts", [])) != scope["included_hosts"]
                 or list(plan.get("optional_hosts", [])) != scope["optional_hosts"]
@@ -482,9 +503,24 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         if choices and any(r.get('account') != choices[(r['host'], r['provider'])]
                            or r.get('account_selection') != 'explicit' for r in rows):
             raise Invalid('smoke runner cannot honor explicit accounts')
+        from _shared.spawn_profiles import validate_test_profile, test_prompt_tuple
+        try:
+            profile = validate_test_profile(plan.get("test_profile"))
+            if any((r.get("model"), r.get("effort")) != test_prompt_tuple(r["provider"], profile)
+                   or r.get("profile_sha256") != profile["profile_sha256"] for r in rows):
+                raise ValueError("cell tuple disagreement")
+        except ValueError as exc:
+            raise Invalid("runner lacks compatible test profile: " + str(exc)) from exc
         return plan
 
     def current(self, receipt):
+        settings = receipt["preimages"]["test_settings"]
+        settings_path = Path(settings["path"])
+        if settings_path.exists() or settings_path.is_symlink():
+            info = settings_path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != settings["uid"]
+                    or settings["mode"] is not None and stat.S_IMODE(info.st_mode) != settings["mode"]):
+                raise Invalid("test settings owner/type/permission drift")
         paths = {key: value["path"] for key, value in receipt["preimages"].items()}
         return {"sha": self.git("rev-parse", "HEAD"),
                 "files": {key: file_digest(path) if Path(path).exists() else None for key, path in paths.items()}}
@@ -510,6 +546,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             "stamp": (str(self.d._stamp_path(self.repo, self.service)), "stamp.before"),
             "collector": (str(self.d._usage_collector_plist_path()), "collector.before"),
             "schedule": (str(self.d._launchd_plist_path("com.pentacle.spawn-fleet-smoke")), "schedule.before"),
+            "test_settings": (str(self.repo / "services/_shared/spawn_defaults.local.json"), "test-settings.before"),
         }
         if set(receipt["preimages"]) != set(expected_preimages):
             raise Invalid("preimage population substitution")
@@ -546,6 +583,11 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
                     or set(source["helpers"]) != set(scope["included_hosts"])
                     or source["code_identity"] != code_identity_at(self.repo, sha, self.runner)):
                 raise Invalid("sealed source substitution")
+            profile = source.get("test_profile", {})
+            if (profile.get("path") != str(folder / (direction + "-test-profile.json"))
+                    or file_digest(private_file(profile["path"])) != profile.get("sha256")
+                    or read_json(profile["path"]) != source["smoke_plan"]["test_profile"]):
+                raise Invalid("sealed test profile drift")
             for host, helper in source["helpers"].items():
                 old = original_policy["executors"][host]
                 root = str(helper_release_root(old["script"]))
@@ -600,7 +642,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"], verify_release=False) != helper["proof"]:
                 raise Invalid("original helper proof drift before stop")
         source = receipt["source"]["target"]
-        if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])) != source["smoke_plan"]:
+        if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
             raise Invalid("runner plan drift")
         self.guard(receipt)
 
@@ -702,7 +744,7 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         direction = "prior" if rollback else "target"
         self.checked(("git", "checkout", "--detach", receipt["source"][direction]["sha"]))
         if rollback:
-            for key in ("policy", "plist", "collector", "stamp", *(("schedule",) if 'post_schedule' in receipt else ())):
+            for key in ("policy", "plist", "collector", "stamp", "test_settings", *(("schedule",) if 'post_schedule' in receipt else ())):
                 row = receipt["preimages"][key]
                 if row["saved"]:
                     atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
@@ -774,12 +816,12 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         self.validate_common(receipt)
         if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
             raise Invalid("installed smoke runner drift")
-        if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])) != source["smoke_plan"]:
+        if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
             raise Invalid("pre-canary runner plan drift")
-        smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", [])), self.repo)
+        smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]), self.repo)
         self.validate_common(receipt)
         verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
-                    declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []))
+                    declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
         slow = self.d._scan_slow_consumer_window(self.service, self.log_offsets,
             expected_pid=boot.pid, expected_start=self.d._process_start(boot.pid, self.runner),
             prior_pid=self.old_pid, prior_start=self.old_start, no_outgoing_writer=self.old_pid is None, runner=self.runner)

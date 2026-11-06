@@ -7,6 +7,7 @@ the complete tuple without silently consulting host defaults.
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -38,7 +39,7 @@ SPAWN_DEFAULTS_PATH = Path(__file__).resolve().with_name("spawn_defaults.json")
 MODELS = {
     "cursor": {"auto": {"aliases": ("auto", "cursor-auto"), "efforts": ("default",)}},
     "claude": {
-        "claude-haiku-5-5": {"aliases": ("claude-haiku-5-5",), "efforts": ("high",)},
+        "claude-haiku-5-5": {"aliases": ("claude-haiku-5-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-4-8": {"aliases": ("opus", "claude-opus-4-8"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5-5": {"aliases": ("claude-opus-5-5", "opus-5.5", "opus-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-opus-5": {"aliases": ("claude-opus-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
@@ -163,8 +164,7 @@ def _config_tuple(provider: str, values: object) -> tuple[str, str]:
     return canonical, effort
 
 
-@lru_cache(maxsize=1)
-def load_spawn_config() -> dict[str, Any]:
+def _load_spawn_config() -> dict[str, Any]:
     """Load the deployment-owned default policy.
 
     The in-module fallback preserves compatibility for old checkouts which
@@ -191,13 +191,25 @@ def load_spawn_config() -> dict[str, Any]:
         if (
             not isinstance(local, dict)
             or local.get("schema_version") != 1
-            or set(local) - {"schema_version", "host_overrides", "available_models"}
+            or set(local) - {"schema_version", "host_overrides", "available_models", "profiles"}
             or not isinstance(local.get("host_overrides", {}), dict)
         ):
             raise _config_error("unsupported local spawn defaults")
         raw["host_overrides"] = {**raw.get("host_overrides", {}), **local.get("host_overrides", {})}
         if "available_models" in local:
             raw["available_models"] = local["available_models"]
+        if "profiles" in local:
+            profiles = local["profiles"]
+            if not isinstance(profiles, dict) or set(profiles) != {"test_prompt"}:
+                raise _config_error("local profiles may only override test_prompt")
+            pairs = profiles["test_prompt"]
+            if not isinstance(pairs, dict) or set(pairs) - set(MODELS):
+                raise _config_error("invalid local test_prompt profile")
+            # Each provider pair replaces the entire shipped pair, never fills
+            # a missing field from a different policy revision.
+            raw.setdefault("profiles", {})["test_prompt"] = {
+                **raw.get("profiles", {}).get("test_prompt", {}), **pairs}
+
     providers = raw.get("providers")
     if not isinstance(providers, dict):
         raise _config_error("spawn defaults providers must be an object")
@@ -230,6 +242,70 @@ def load_spawn_config() -> dict[str, Any]:
     if not isinstance(handoff, dict):
         raise _config_error("agent_orch handoff policy is required")
     return raw
+
+
+@lru_cache(maxsize=1)
+def load_spawn_config() -> dict[str, Any]:
+    return _load_spawn_config()
+
+
+def _profile_digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def validate_test_profile(snapshot: object) -> dict[str, Any]:
+    """Validate a frozen run artifact without consulting mutable defaults."""
+    fields = {"schema", "providers", "profile_sha256", "settings_sha256", "resolver_sha256"}
+    if (not isinstance(snapshot, dict) or set(snapshot) != fields
+            or snapshot.get("schema") != "pentacle.test-profile.v1"):
+        raise _config_error("invalid test profile snapshot")
+    pairs = snapshot["providers"]
+    if not isinstance(pairs, dict) or set(pairs) != set(MODELS):
+        raise _config_error("test_prompt must explicitly configure or disable every provider")
+    for provider, pair in pairs.items():
+        if pair is None:
+            continue
+        if not isinstance(pair, dict) or set(pair) != {"model", "effort"}:
+            raise _config_error("test_prompt requires complete model/effort pairs")
+        if _config_tuple(provider, pair) != (pair["model"], pair["effort"]):
+            raise _config_error("test_prompt requires canonical model ids")
+    def sha(value):
+        return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    settings = snapshot["settings_sha256"]
+    if (not isinstance(settings, dict) or set(settings) != {"spawn_defaults.json", "spawn_defaults.local.json"}
+            or not sha(settings["spawn_defaults.json"])
+            or settings["spawn_defaults.local.json"] is not None and not sha(settings["spawn_defaults.local.json"])
+            or not sha(snapshot["resolver_sha256"])
+            or snapshot["profile_sha256"] != _profile_digest(pairs)):
+        raise _config_error("test profile identity mismatch")
+    return json.loads(json.dumps(snapshot))
+
+
+def resolve_test_profile() -> dict[str, Any]:
+    """Read fresh settings once per test run; never use work defaults/fallbacks."""
+    if not SPAWN_DEFAULTS_PATH.is_file():
+        raise _config_error("test_prompt settings are missing")
+    # Bind identities to the exact bytes parsed, detecting concurrent writers.
+    paths = {"spawn_defaults.json": SPAWN_DEFAULTS_PATH,
+             "spawn_defaults.local.json": SPAWN_DEFAULTS_PATH.with_name("spawn_defaults.local.json")}
+    before = {name: hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None for name, p in paths.items()}
+    config = _load_spawn_config()
+    after = {name: hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None for name, p in paths.items()}
+    if before != after:
+        raise _config_error("test_prompt settings changed during resolution")
+    pairs = config.get("profiles", {}).get("test_prompt")
+    return validate_test_profile({"schema": "pentacle.test-profile.v1", "providers": pairs,
+        "profile_sha256": _profile_digest(pairs), "settings_sha256": before,
+        "resolver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
+
+
+def test_prompt_tuple(provider: str, snapshot: dict[str, Any] | None = None) -> tuple[str, str]:
+    profile = resolve_test_profile() if snapshot is None else validate_test_profile(snapshot)
+    pair = profile["providers"].get(provider)
+    if pair is None:
+        raise _config_error(f"test_prompt is disabled for {provider}")
+    return pair["model"], pair["effort"]
 
 
 def _available_model_ids(config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
@@ -457,20 +533,23 @@ def validate_v2(*, schema: str, provider: str, model: str, effort: str,
 
 def catalog() -> dict:
     config = load_spawn_config()
+    test_profile = resolve_test_profile()
     return {
         "schema_version": "CatalogV1",
         "catalog_version": CATALOG_VERSION,
         "profiles": {
             profile: {provider: _default_tuple(provider, None) for provider in config["providers"] if provider in MODELS}
             for profile in PROFILES
-        },
+        } | {"test_prompt": {p: (v["model"], v["effort"]) if v else None
+                              for p, v in test_profile["providers"].items()}},
+        "test_prompt_profile": test_profile,
         "spawn_defaults": {
             "schema_version": config["schema_version"],
             "max_concurrent_boots": config["max_concurrent_boots"],
             "spawn_queue_timeout_seconds": config["spawn_queue_timeout_seconds"],
             "providers": config["providers"],
             "host_overrides": config.get("host_overrides", {}),
-            "profiles": config.get("profiles", {}),
+            "profiles": {**config.get("profiles", {}), "test_prompt": test_profile["providers"]},
         },
         "models": MODELS,
         "available_models": {

@@ -1699,3 +1699,6 @@ current pin snapshot under a real admission hold. The authenticated host resolve
 the successful chain. Matching artifacts reuse retained turn evidence without
 creating the prospective generation; only a changed provider target needs a new
 native turn. See [provider accounts](../../docs/provider_accounts.md).
+
+Test and proof actors use the [test prompt settings](../../docs/test_prompt_profiles.md),
+exposed by `agent-orch profiles`; they pass explicit model/effort values.

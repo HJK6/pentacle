@@ -1,3 +1,4 @@
+const { selectTestPromptProfile } = require('../lib/test_prompt_profile');
 // Walk: spawn_new_chat_send_sequence — the operator's "create a new chat" path:
 // drive the REAL new-session wizard (#btn-new -> pick machine -> profile),
 // which spawns + attaches + opens chat, then send a turn and assert the reply.
@@ -19,6 +20,7 @@ async function run(ctx) {
       return true;
     })()`));
   }
+  await selectTestPromptProfile(ctx, provider);
   await ctx.screenshot('wizard-profile-step');
   // Step 2: submit the explicit profile — this calls newSession (spawn -> attach -> chat).
   const seq = ctx.beaconSeq();

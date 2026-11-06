@@ -32,7 +32,16 @@ import sys
 import time
 import uuid
 
-MODELS = {"claude": ("claude-sonnet-5-5", "low"), "codex": ("gpt-6-luna", "low")}
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.spawn_profiles import validate_test_profile, test_prompt_tuple
+
+
+def test_profile_from_daemon():
+    rc, out = run(["agent-orch", "profiles"])
+    if rc:
+        raise RuntimeError("test profile catalog unavailable")
+    return validate_test_profile(last_json(out).get("test_prompt_profile"))
 # Native-queue chrome as rendered by the provider TUIs (Claude Code 2.1.x,
 # codex-cli 0.15x). Deliberately independent of the daemon's own predicates so
 # the probe is ground truth for them, not a restatement.
@@ -86,7 +95,7 @@ def wait_until(predicate, timeout_s: float, poll_s: float = 1.0) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--provider", choices=sorted(MODELS), required=True)
+    parser.add_argument("--provider", choices=("claude", "codex"), required=True)
     parser.add_argument('--account', help='explicit provider account alias')
     parser.add_argument("--host", default=None, help="spawn host (default: daemon's choice for this caller)")
     parser.add_argument("--busy-seconds", type=int, default=75)
@@ -100,7 +109,8 @@ def main() -> int:
     global SSH_TARGET
     SSH_TARGET = args.ssh
 
-    model, effort = MODELS[args.provider]
+    profile = test_profile_from_daemon()
+    model, effort = test_prompt_tuple(args.provider, profile)
     token = f"busyprobe-{uuid.uuid4().hex[:10]}"
     busy_cmd = f"python3 -c 'import time; time.sleep({args.busy_seconds})'"
     prompt = (
@@ -108,7 +118,7 @@ def main() -> int:
         f"Run exactly this foreground shell command and wait for it to finish: {busy_cmd} "
         "Then reply PROBE_IDLE. For any later message reply only: ack."
     )
-    report: dict = {"provider": args.provider, "model": model, "effort": effort, "token": token}
+    report: dict = {"provider": args.provider, "model": model, "effort": effort, "token": token, "test_profile": profile}
     code = 3
     try:
         code = _probe(args, report, token, model, effort, prompt)
