@@ -7088,7 +7088,7 @@ function spawnAccountControl(provider, host, selected, id = 'spawn-account') {
     && row.active && row.enabled && row.health === 'healthy');
   const defaultAlias = (status?.defaults || []).find(row => row.host === host && row.provider === provider)?.alias;
   const value = selected ?? defaultAlias ?? '';
-  const labels = CONFIG.chatStream?.accountLabels?.[provider] || {};
+  const labels = typeof CONFIG === 'undefined' ? {} : (CONFIG.chatStream?.accountLabels?.[provider] || {});
   return `<div class="spawn-profile-row"><label for="${esc(id)}">Account</label><select id="${esc(id)}" class="spawn-profile-control" aria-label="Account" data-account-selection="${esc(value)}"${aliases.length ? '' : ' disabled'}>
     ${aliases.map(row => {
       const label = typeof labels[row.alias] === 'string' && labels[row.alias].trim()
