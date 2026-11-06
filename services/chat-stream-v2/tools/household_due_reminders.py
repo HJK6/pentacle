@@ -293,8 +293,8 @@ def atomic_json(path: Path, value):
             os.unlink(name)
 
 
-def alert(state, day, error, evidence):
-    key = f"household-due:blocker:{day}:{error}"
+def alert(state, day, error, evidence, namespace="household-due"):
+    key = f"{namespace}:blocker:{day}:{error}"
     if key not in state["alerts"]:
         state["alerts"][key] = {"day": day, "error": error,
             "message": f"BLOCKER Household due reminders {day}: {error}; evidence {evidence}", "receipt": None}
@@ -321,6 +321,7 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
         raise Failure("production_state_override_refused")
     if not to_fd and not config.get("enabled", False):
         return {"status": "disabled"}
+    alert_namespace = "household-due:fd-test:" + digest(str(root))[:24] if to_fd else "household-due"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = root.stat()
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
@@ -354,7 +355,7 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
                 prior = state["days"].get(prior_day, {})
                 if prior.get("status") not in ("delivered", "empty", "missed"):
                     state["days"][prior_day] = {**prior, "status": "missed"}
-                    alert(state, prior_day, "missed", str(path))
+                    alert(state, prior_day, "missed", str(path), alert_namespace)
                 missed += timedelta(days=1)
             save()
         flush_alerts(state, save, publisher)
@@ -365,7 +366,7 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
             return {"status": record["status"]}
         if local.hour >= 12:
             state["days"][day] = {**record, "status": "missed"}
-            alert(state, day, "missed", str(path))
+            alert(state, day, "missed", str(path), alert_namespace)
             save()
             flush_alerts(state, save, publisher)
             return {"status": "missed"}
@@ -390,7 +391,7 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
             return {"status": "delivered", "body_sha256": record["body_sha256"], "sources": record["sources"]}
         except Exception as exc:
             error = str(exc) if isinstance(exc, Failure) else "unexpected_failure"
-            alert(state, day, error, str(path))
+            alert(state, day, error, str(path), alert_namespace)
             save()
             flush_alerts(state, save, publisher)
             return {"status": "failed", "error": error}

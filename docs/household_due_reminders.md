@@ -75,6 +75,9 @@ python3 services/chat-stream-v2/tools/household_due_reminders.py \
 Use the intended first-delivery date, a separate private state directory and the
 real live store. Repeating the same rehearsal state sends nothing a second time.
 Injected time refuses operator publication; test mode refuses production state.
+FD-only test alert IDs include the resolved test-state identity, so rehearsal
+failures cannot conflict with or acknowledge a production BLOCKER. Production
+alert IDs are unchanged.
 Verify the FD receipt, selected source IDs and body hash in `delivery.json`.
 Then enable production with the accepted `not_before` date and verify the loaded
 job and installed source/config hashes. Verify the first actual publish receipt

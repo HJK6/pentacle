@@ -323,3 +323,24 @@ def test_tell_ledger_without_committed_delivery_is_not_ack(config, monkeypatch):
     monkeypatch.setattr(wrapper, "rpc", lambda *args: {"type": "tell.ok", "ledger_row_id": 1, "delivery_status": "pasted_unsubmitted"})
     with pytest.raises(tool.Failure, match="tell_unconfirmed"):
         wrapper.tell("blocker-fixture", "BLOCKER Synthetic failure")
+
+
+def test_fd_failure_rehearsals_cannot_poison_production_blocker_keys(config, tmp_path):
+    sink = Sink()
+    def failed_read(route):
+        raise tool.Failure("cosmo_read_failed")
+    now = datetime.fromisoformat(DAY+"T08:00:00-06:00")
+    for name in ("rehearsal-a", "rehearsal-b"):
+        result = tool.run(config, now, to_fd=True, state_root=str(tmp_path / name),
+                          reader=failed_read, publisher=sink)
+        assert result["status"] == "failed"
+    assert tool.run(config, now, reader=failed_read, publisher=sink)["status"] == "failed"
+    assert len(sink.told) == 3
+    production_key = f"household-due:blocker:{DAY}:cosmo_read_failed"
+    assert production_key in sink.told
+    assert all(record["receipt"] for record in state(config)["alerts"].values())
+    # Each namespace also preserves its own identical ID/body on a replay.
+    before = set(sink.told)
+    tool.run(config, now, to_fd=True, state_root=str(tmp_path / "rehearsal-a"), reader=failed_read, publisher=sink)
+    tool.run(config, now, reader=failed_read, publisher=sink)
+    assert set(sink.told) == before
