@@ -43,6 +43,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
                 "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": fd["session_generation"],
             }))
             server.assistant_composite = composite
+            sessions.assistant.front_desk = composite
             token = "synthetic-fd-token"
             await store.grant_stream_token(HOST, "front-desk", hashlib.sha256(token.encode()).hexdigest(),
                                            STREAM_TOKEN_HASH_VERSION)
@@ -93,7 +94,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
                 assert (await store.get_work_lane(saved_lane["lane_id"]))["lane"] == saved_lane
                 assert await store.latest_close_audit(HOST + ":target") is None
                 rows = await store.lifecycle_authority_audit_rows(limit=20)
-                assert any(r["action"] == "fd_close" and r["result"] == "refused"
+                assert any(r["action"] == "manager_close" and r["result"] == "refused"
                            and r["refusal_code"] == "close_operator_lane_protected" for r in rows)
                 # Only the independently authenticated fixture operator cleans
                 # this protected target up, through the supported close ladder.
@@ -107,8 +108,9 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             assert code == 0, {"reply": reply, "target_status": row["status"], "pane_alive": alive}
             assert reply["type"] == "close.ok" and row["status"] == "closed" and not alive
             rows = [r for r in await store.lifecycle_authority_audit_rows(limit=20)
-                    if r["action"] == "fd_close"]
-            assert {r["result"] for r in rows} == {"admitted", "applied"}
+                    if r["action"].startswith("manager_close")]
+            assert {(r["action"], r["result"]) for r in rows} == {
+                ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"), ("manager_close", "applied")}
             assert all(r["actor_kind"] == "front_desk" and r["actor_identity"] == FD
                        and r["actor_generation"] == fd["session_generation"]
                        and r["target_generation"] == target["session_generation"]
@@ -117,7 +119,92 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             assert audit["actor_kind"] == "front_desk" and audit["closed_by"] == FD
             assert await store.lifecycle_authority_current() == grant
             code, repeat = await close()
-            assert code == 0 and repeat["type"] == "close.already_closed"
+            assert code == 0 and repeat["type"] == "close.already_closed", repeat
+        finally:
+            await server.close()
+            if composite is not None:
+                await composite.stop()
+            await tmux.run("kill-server")
+            rc, _ = await tmux.run("list-sessions")
+            assert rc != 0, "owned tmux socket survived cleanup"
+            store.stop()
+    asyncio.run(run())
+
+
+def test_rebind_then_fd_close_stale_tell_and_held_digest_follow_binding(tmp_path, isolated_tmux_env, monkeypatch):
+    """Real WebSocket + CLI: rebind A -> B, B closes a non-child, a tell to A
+    and a hold made for A both fold into one digest for B."""
+    from comms import Comms
+    from spawnctl import SpawnCtl
+    monkeypatch.setenv("PENTACLE_FRONT_DESK_DIGEST_S", "0")
+    async def run():
+        store = Store(str(tmp_path / "sessions.db"))
+        store.start()
+        tmux = Tmux()
+        sessions = Sessions(store, tmux=tmux, local_host=HOST)
+        comms = Comms(store, sessions, SpawnCtl(store, sessions, tmux=tmux), attachment_root=tmp_path / "attachments")
+        server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, comms=comms, local_host=HOST)
+        composite = None
+        try:
+            for name in ("front-desk", "desk-b", "worker", "target"):
+                await tmux.new_session(name, "echo ready; exec sleep 600")
+                await sessions.open(HOST, name, provider="codex", pane_status="pane_alive", bootstrap_state="ready",
+                                    effective_model="fixture-model", effective_effort="medium", role="lead")
+            rows = {n: await store.fetch_session(HOST, n) for n in ("front-desk", "desk-b", "worker", "target")}
+            composite = AssistantComposite(store, config=AssistantCompositeConfig.from_env({
+                "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": HOST + ":assistant",
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": FD,
+                "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": rows["front-desk"]["session_generation"],
+            }))
+            await composite.load_binding()
+            server.assistant_composite = composite
+            server.assistant_composites = {composite.env_config.name: composite}
+            sessions.assistant.front_desk = composite
+            comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+            comms.front_desk_digest = composite.front_desk_digest
+            tokens = {}
+            for name in ("front-desk", "desk-b", "worker"):
+                tokens[name] = f"synthetic-{name}-token"
+                await store.grant_stream_token(HOST, name, hashlib.sha256(tokens[name].encode()).hexdigest(),
+                                               STREAM_TOKEN_HASH_VERSION)
+            port = await server.bind()
+            async def cli(seat, *argv):
+                env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8",
+                       "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "agent-orch"),
+                       "AGENT_ORCH_WS_URL": f"ws://127.0.0.1:{port}", "AGENT_ORCH_TOKEN": "",
+                       "AGENT_ORCH_HOST_ID": HOST, "AGENT_ORCH_STREAM_ID": f"{HOST}:{seat}",
+                       "AGENT_ORCH_STREAM_TOKEN": tokens[seat], "AGENT_ORCH_RUNTIME_DIR": str(tmp_path / ("cli-" + seat)),
+                       "AGENT_ORCH_MEMORY_REPO": str(tmp_path / "memory")}
+                proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "agent_orch.cli", *argv, env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), 20)
+                except BaseException:
+                    proc.kill()
+                    await proc.wait()
+                    raise
+                assert stdout, stderr.decode()
+                return proc.returncode, json.loads(stdout.decode().strip().splitlines()[-1])
+            code, held = await cli("worker", "tell", FD, "END: synthetic routine before swap")
+            assert code == 0 and held["delivery_status"] == "persisted", held
+            code, rebound = await cli("front-desk", "assistant", "rebind", "--target", HOST + ":desk-b",
+                                      "--request-id", "socket-a-to-b", "--expected-revision", "0")
+            assert code == 0 and rebound["type"] == "assistant.rebind.ok", rebound
+            code, closed = await cli("desk-b", "close", HOST + ":target", "--reason", REASON,
+                                     "--expected-generation", rows["target"]["session_generation"])
+            assert code == 0 and closed["type"] == "close.ok", closed
+            assert not await tmux.has_session("target")
+            code, stale = await cli("worker", "tell", FD, "END: synthetic routine after swap")
+            assert code == 0 and stale["delivery_status"] == "persisted", stale
+            await composite.front_desk_digest.tick()
+            digests = await store.submit(lambda c: [dict(r) for r in c.execute(
+                "SELECT recipient_stream_id, body FROM v2_outbound_notices WHERE kind='lane_digest'")])
+            assert [d["recipient_stream_id"] for d in digests] == [HOST + ":desk-b"]
+            assert "before swap" in digests[0]["body"] and "after swap" in digests[0]["body"]
+            effective = await store.lifecycle_authority_effective()
+            assert effective["holder_stream_id"] == HOST + ":desk-b"
+            assert (await store.lifecycle_authority_current())["stream_id"] is None
         finally:
             await server.close()
             if composite is not None:

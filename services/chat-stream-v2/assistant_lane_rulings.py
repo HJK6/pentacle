@@ -215,8 +215,13 @@ class AssistantLaneRulings:
             return {"state": "disabled", "source": "kv", "stream_id": "", "generation": ""}
         if not _STREAM_RE.fullmatch(selected):
             raise ValueError("assistant_authority_stream_id_invalid")
-        if selected == composite.config.direct_primary_stream_id:
-            return {"state": "same_primary", "source": source, "stream_id": selected,
+        if selected == composite.config.direct_primary_stream_id or (
+                self.server.sessions.assistant.front_desk_mode
+                and selected in await self.store.front_desk_aliases()):
+            # A selection of a proved FD seat is the logical primary, so it
+            # follows the binding; an independent advisor stays independent.
+            return {"state": "same_primary", "source": source,
+                    "stream_id": composite.config.direct_primary_stream_id,
                     "generation": composite.config.direct_primary_generation}
         host, _, name = selected.partition(":")
         seat = await self.store.fetch_session(host, name)
@@ -305,7 +310,17 @@ class AssistantLaneRulings:
                             (old and (old.get('session_generation') != expected_old[1] or
                                       self._authority_loss_evidence(old) is None))):
                             raise ValueError('binding_moved')
-                    elif conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
+                    else:
+                        # The actor must still be the eligible bound primary
+                        # (open, current generation, not retired) inside the
+                        # same transaction as the write.
+                        import store_lifecycle_authority
+                        principal = store_lifecycle_authority.front_desk_principal(
+                            conn, store_lifecycle_authority.front_desk_spec(composite))
+                        if principal is None or (principal["stream_id"], principal["session_generation"]) != (
+                                actor_stream_id, actor_generation):
+                            raise ValueError("assistant_authority_config_unauthorized")
+                    if not is_service and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_authority_restore_episode'").fetchone():
                         conn.execute("UPDATE v2_authority_restore_episode SET state='superseded',last_error='binding_moved',updated_at=? WHERE state IN ('pending','spawning','unresolved','exhausted')", (time.time(),))
                     conn.execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)",
                                  ("assistant.authority.stream_id", value))
@@ -1317,10 +1332,15 @@ class AssistantLaneRulings:
             producer = str(request["requester_stream_id"])
             if callable(lock_factory) and ":" in producer:
                 lifecycle = lock_factory(*producer.split(":", 1))
-        async with lifecycle:
-            await self._release_serial(request)
+        # One order with alias input and binding writers: FD effect gate, then
+        # lifecycle. An immediate bypass already holds lifecycle inside its
+        # requester's own live call, so it takes no gate.
+        fd_fence = self.server.sessions.assistant.front_desk_mode and not lifecycle_locked
+        gate = self.store.front_desk_fence() if fd_fence else nullcontext()
+        async with gate, lifecycle:
+            await self._release_serial(request, fd_fence=fd_fence)
 
-    async def _release_serial(self, request: dict[str, Any]) -> None:
+    async def _release_serial(self, request: dict[str, Any], *, fd_fence: bool = False) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
         async with lock:
@@ -1342,6 +1362,10 @@ class AssistantLaneRulings:
                 # The task link was checked when this request was admitted (R4).
                 "ruled_release": True,
             }
+            # Under fd_fence no binding change commits between this check and
+            # the effect.
+            if fd_fence and await self._fd_requester_superseded(rid, current):
+                return
             requester_host, _, requester_name = current["requester_stream_id"].partition(":")
             requester = await self.store.fetch_session(requester_host, requester_name)
             if requester is None or requester.get("status") != "open" or requester.get("session_generation") != current["requester_generation"]:
@@ -1469,6 +1493,27 @@ class AssistantLaneRulings:
                      request["requester_generation"], request["ruling_request_id"]),
                 )
         await self.store.submit(op)
+
+    async def _fd_requester_superseded(self, rid: str, current: dict[str, Any]) -> bool:
+        """An unexecuted FD-requested ruling never executes under a successor FD.
+
+        The intent stays immutable; it is closed as superseded and its one
+        result notice reaches the current FD, which may file a new request.
+        """
+        if not self.server.sessions.assistant.front_desk_mode:
+            return False
+        requester = (current["requester_stream_id"], current["requester_generation"])
+        effective = await self.store.lifecycle_authority_effective()
+        principal = (effective.get("binding_stream_id"), effective.get("binding_generation"))
+        if (not all(principal) or principal == requester or not effective.get("binding_available")
+                or requester[0] not in await self.store.front_desk_aliases()):
+            return False
+        # The ordinary result notice is the single notice; claim-time
+        # retargeting delivers it to the current front desk.
+        await self._mark(rid, "release_blocked", {"error": "requester_superseded",
+            "superseded_by": {"stream_id": principal[0], "generation": principal[1]},
+            "next": "file a new request under the current front desk if still needed"})
+        return True
 
     async def _mark(self, rid: str, state: str, outcome: dict[str, Any]) -> None:
         def op(conn: sqlite3.Connection) -> None:

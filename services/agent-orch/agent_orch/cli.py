@@ -3775,10 +3775,11 @@ def consent_command(args: argparse.Namespace) -> int:
 
 
 def lifecycle(args: argparse.Namespace) -> int:
-    """Inspect, or (as the designated manager) transfer, fleet lifecycle authority.
+    """Inspect fleet lifecycle authority, or emergency-revoke it on loopback.
 
-    Designation and revocation require the authenticated operator (web UI);
-    a seat token can only transfer a grant it currently holds.
+    With a primary direct binding the current front desk holds it automatically;
+    otherwise the operator-designated grant does. Designation and ordinary
+    revocation go through phone consent; transfer is disabled.
     """
     config = load_config()
     caller = getattr(args, "from_stream_id", None) or discover_leader_stream_id_short(config)
@@ -6331,12 +6332,12 @@ def build_parser() -> argparse.ArgumentParser:
                 command.add_argument("fingerprint")
     lifecycle_parser = subparsers.add_parser(
         "lifecycle",
-        description="inspect or transfer operator-designated fleet lifecycle authority",
+        description="inspect fleet lifecycle authority (the current front-desk binding, or the designated grant)",
     )
     lifecycle_sub = lifecycle_parser.add_subparsers(dest="lifecycle_command", required=True)
-    lifecycle_inspect = lifecycle_sub.add_parser("inspect", help="current grant, recent audit, optional target readback")
+    lifecycle_inspect = lifecycle_sub.add_parser("inspect", help="effective holder and policy, raw grant, recent audit, optional target readback")
     lifecycle_inspect.add_argument("--target", help="stream id to read back generation and eligibility")
-    lifecycle_transfer = lifecycle_sub.add_parser("transfer", help="holder-only: move the grant to an existing eligible seat")
+    lifecycle_transfer = lifecycle_sub.add_parser("transfer", help="disabled (authority_transfer_disabled): authority follows the front-desk binding; use operator designate or revoke")
     lifecycle_transfer.add_argument("target", help="recipient stream id (existing open lead or protected assistant)")
     lifecycle_transfer.add_argument("--reason", required=True)
     lifecycle_transfer.add_argument("--target-generation", help="exact recipient generation (default: fresh readback)")

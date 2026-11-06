@@ -2050,3 +2050,73 @@ def test_completed_same_key_spawn_returns_recorded_outcome_after_assignment_remo
         finally:
             store.stop()
     asyncio.run(go())
+
+
+# -- FD swaps: advisor independence and superseded FD requests (spec 2026-11) --
+
+async def _fd_swap(env, *, same_stream=False):
+    """Front-desk mode, then a real binding transition away from the requester."""
+    from test_approved_close_retry import HOST as JHOST
+    composite = env.server.assistant_composite
+    env.sessions.assistant.front_desk = composite
+    if same_stream:  # restore: same stream id, new generation is a new FD principal
+        await env.store.open_session(JHOST, "primary", provider="codex", role="lead", pane_status="pane_alive",
+                                     bootstrap_state="ready")
+        target = f"{JHOST}:primary"
+    else:
+        await env.store.open_session(JHOST, "desk-b", provider="codex", role="lead", pane_status="pane_alive",
+                                     bootstrap_state="ready")
+        target = f"{JHOST}:desk-b"
+    row = await env.store.fetch_session(*target.split(":", 1))
+    await env.store.recover_assistant_binding(name=composite.env_config.name, target_stream_id=target,
+                                              target_generation=row["session_generation"])
+    await composite.load_binding()
+    return target, row["session_generation"]
+
+
+@pytest.mark.parametrize("same_stream", [False, True])
+def test_unexecuted_fd_ruling_is_superseded_once_after_fd_change(same_stream):
+    from test_approved_close_retry import journey
+    async def go():
+        async with journey() as env:
+            env.sessions.assistant.front_desk = env.server.assistant_composite
+            pending = await env.request()
+            assert pending["type"] == "close.pending_ruling"
+            current, generation = await _fd_swap(env, same_stream=same_stream)
+            env.tmux.text = "ready\n"
+            await env.approve()
+            await env.rulings.tick()
+            row = await env.row()
+            assert row["state"] == "release_blocked", row
+            assert json.loads(row["outcome_json"])["error"] == "requester_superseded"
+            assert env.tmux.kills == 0
+            await env.rulings.tick()
+            rid = row["ruling_request_id"]
+            ids = await env.store.submit(lambda c: [r[0] for r in c.execute(
+                "SELECT notice_id FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_result' "
+                "AND body LIKE ?", (f"%{rid}%",))])
+            assert ids == [f"assistant-lane-ruling-result:{rid}"]
+            # The one result notice is claimed for the current front desk.
+            await env.store.claim_outbound_notice(ids[0], owner="fixture", lease_s=5, force=True)
+            notice = await env.store.submit(lambda c: dict(c.execute(
+                "SELECT recipient_stream_id, metadata FROM v2_outbound_notices WHERE notice_id=?",
+                (ids[0],)).fetchone()))
+            assert (notice["recipient_stream_id"], json.loads(notice["metadata"])["authority_generation"]) == (
+                current, generation)
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("selected,expected", [("former_fd", "same_primary"), ("advisor", "ready")])
+def test_same_primary_advisor_follows_binding_and_independent_advisor_stays(selected, expected):
+    from test_approved_close_retry import ROOT as JROOT, ADVISOR as JADVISOR, journey
+    async def go():
+        async with journey() as env:
+            await env.store.put("assistant.authority.stream_id", JROOT if selected == "former_fd" else JADVISOR)
+            current, generation = await _fd_swap(env)
+            binding = await env.rulings.binding()
+            assert binding["state"] == expected
+            if expected == "same_primary":
+                assert (binding["stream_id"], binding["generation"]) == (current, generation)
+            else:
+                assert binding["stream_id"] == JADVISOR
+    asyncio.run(go())

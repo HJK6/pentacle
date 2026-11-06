@@ -415,14 +415,24 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
         generation=excluded.generation,revision=excluded.revision,updated_at=excluded.updated_at''',
         (row['name'],target,tgen,row['binding']['revision']+1,stamp()))
     grant=row['grant']
-    changed=conn.execute('''UPDATE v2_lifecycle_manager SET stream_id=?,session_generation=?,revision=revision+1,
-        updated_at=? WHERE id=1 AND revision=? AND stream_id=? AND session_generation=?''',
-        (target,tgen,time.time(),grant['revision'],grant['stream_id'],grant['session_generation']))
-    if changed.rowcount!=1: raise TransferError('transfer_authority_changed')
-    lifecycle.audit(conn,action='host_transfer',actor_kind='manager',actor_identity=row['actor'],
-        actor_generation=row['actor_generation'],target_stream_id=target,target_generation=tgen,
-        old_revision=grant['revision'],new_revision=grant['revision']+1,prior_stream_id=grant['stream_id'],
-        prior_generation=grant['session_generation'],request_id=cid,result='applied')
+    if lifecycle.configured(conn):
+        # FD authority follows the binding written above; the policy row is
+        # only compared (check_source), never moved.
+        grant_revision=grant['revision']
+        lifecycle.binding_change(conn,old={'stream_id':row['actor'],'generation':row['actor_generation']},
+            new={'stream_id':target,'generation':tgen},binding_revision=row['binding']['revision']+1,
+            actor_kind='front_desk',actor_identity=row['actor'],actor_generation=row['actor_generation'],
+            reason='host transfer',request_id=cid)
+    else:
+        changed=conn.execute('''UPDATE v2_lifecycle_manager SET stream_id=?,session_generation=?,revision=revision+1,
+            updated_at=? WHERE id=1 AND revision=? AND stream_id=? AND session_generation=?''',
+            (target,tgen,time.time(),grant['revision'],grant['stream_id'],grant['session_generation']))
+        if changed.rowcount!=1: raise TransferError('transfer_authority_changed')
+        grant_revision=grant['revision']+1
+        lifecycle.audit(conn,action='host_transfer',actor_kind='manager',actor_identity=row['actor'],
+            actor_generation=row['actor_generation'],target_stream_id=target,target_generation=tgen,
+            old_revision=grant['revision'],new_revision=grant_revision,prior_stream_id=grant['stream_id'],
+            prior_generation=grant['session_generation'],request_id=cid,result='applied')
     if row['advisor'] in mapping:
         conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('assistant.authority.stream_id',?)",
                      (mapping[row['advisor']][0],))
@@ -437,7 +447,7 @@ def commit(conn,cid,registry,*,now=None,attempt_id=None):
     row['last_error']=None
     row['receipt']={'command_id':cid,'digest':row['digest'],'operator':row['operator'],
         'dispatch_id':row['dispatch_id'],'mapping':parts,'binding_revision':row['binding']['revision']+1,
-        'grant_revision':grant['revision']+1,'committed_at':stamp()}
+        'grant_revision':grant_revision,'committed_at':stamp()}
     save(conn,row)
     if row.get('authorization_id'):
         grant_record['receipt']={k:v for k,v in row['receipt'].items() if k!='operator'}
@@ -632,7 +642,8 @@ def emergency_revoke(conn,msg,auth,protected_role):
     binding=_binding_conn(conn,config['env_binding'],name=config['name'])
     grant=lifecycle.current(conn)
     pair=(msg.get('target_stream_id'),msg.get('target_generation'))
-    if not all(pair) or pair!=(binding['stream_id'],binding['generation']) or pair!=(grant['stream_id'],grant['session_generation']):
+    holder=pair if lifecycle.configured(conn) and lifecycle.holder_is(conn,*pair) else (grant['stream_id'],grant['session_generation'])
+    if not all(pair) or pair!=(binding['stream_id'],binding['generation']) or pair!=holder:
         raise TransferError('transfer_revoke_target_conflict')
     receipt=lifecycle.mutate(conn,msg,auth,protected_role)
     conn.execute('INSERT INTO v2_host_transfer_retirements VALUES(?,?,?,?)',(*pair,rid,time.time()))

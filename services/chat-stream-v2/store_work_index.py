@@ -126,6 +126,13 @@ class WorkIndexStoreMixin:
         from work_owed import lead_close_context_conn
         return await self.submit(lambda conn: lead_close_context_conn(conn, stream, generation))
 
+    async def front_desk_disposition_custody(self, stream, generation):
+        from work_owed import front_desk_custody_conn
+        def write(conn):
+            front_desk_custody_conn(conn, stream, generation)
+            conn.commit()
+        return await self.submit(write)
+
     async def work_unattended(self, *, now: float | None = None) -> dict:
         from work_unattended import unattended_work_conn
         return await self.submit(lambda conn: unattended_work_conn(conn, now=now))
