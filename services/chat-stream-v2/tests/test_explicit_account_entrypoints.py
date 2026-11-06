@@ -1,5 +1,7 @@
 """Explicit selection reaches production builders without changing defaults."""
 import asyncio
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -150,3 +152,35 @@ def test_wrong_account_receipt_is_closed_before_promptless_send():
             register_owned=lambda *_: None, close_owned=closed.append)
     assert seen == ['spawn_catalog_get', 'spawn']
     assert closed == ['host-a:owned']
+
+
+@pytest.mark.parametrize('account', [None, 'primary', 'spare'])
+@pytest.mark.parametrize('kind', ['failure', 'quota', 'untested'])
+def test_smoke_notice_keys_preserve_omission_and_separate_accounts(monkeypatch, account, kind):
+    cards = []
+
+    @contextmanager
+    def connection(*_args):
+        yield (None, None, None, None, None)
+
+    def failed_cell(*_args, **_kwargs):
+        if kind == 'quota':
+            raise smoke.CodexQuotaExhausted('host-a', None)
+        if kind == 'untested':
+            raise smoke.ProviderTurnError('provider_throttled', 'fixture')
+        raise smoke.ProviderTurnError('provider_error', 'fixture')
+
+    monkeypatch.setattr(smoke, '_operator_connection', connection)
+    monkeypatch.setattr(smoke, 'run_cell', failed_cell)
+    monkeypatch.setattr(smoke, 'publish_smoke_card', lambda payload: cards.append(payload) or {})
+    monkeypatch.setattr(smoke, 'notify_operator_failure', lambda _payload: {})
+    accounts = {('host-a', 'codex'): account} if account is not None else {}
+    (row,) = smoke.run_matrix('ws://fixture', Path('unused'), 1,
+        (('host-a', 'codex', 'promptless'),), accounts=accounts)
+    suffix = '' if account is None else ':' + account
+    expected = {
+        'failure': f"spawn-fleet-smoke:host-a:codex{suffix}:promptless:{row['stage']}",
+        'quota': f'spawn-fleet-smoke-quota:host-a{suffix}',
+        'untested': f'spawn-fleet-smoke-untested:host-a:codex{suffix}:promptless',
+    }
+    assert [card['dedup_key'] for card in cards] == [expected[kind]]

@@ -95,12 +95,13 @@ def notify_operator_failure(payload: dict) -> dict:
 
 
 def _failure_card(host: str, provider: str, prompt_mode: str, stage: str, exc: Exception, account=None) -> dict:
+    account_suffix = f":{account}" if account is not None else ""
     return {
         "producer": "spawn-fleet-smoke",
         "severity": "critical",
         "title": f"Spawn smoke failed: {host}/{provider}/{stage}",
         "body": f"account={account or 'default'}; prompt_mode={prompt_mode}; {exc}",
-        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}:{account or 'default'}:{prompt_mode}:{stage}",
+        "dedup_key": f"spawn-fleet-smoke:{host}:{provider}{account_suffix}:{prompt_mode}:{stage}",
     }
 
 
@@ -954,6 +955,7 @@ def run_matrix(
     failures: list[dict[str, str]] = []
     for host, provider, prompt_mode in cells:
         account = accounts.get((host, provider))
+        account_suffix = f":{account}" if account is not None else ""
         state_path = Path(tempfile.gettempdir()) / f"pentacle-live-window-{uuid.uuid4().hex}.json"
         registry = OwnedSessionRegistry(state_path, allow_legacy_close=allow_legacy_close)
 
@@ -999,7 +1001,7 @@ def run_matrix(
                             "title": f"Codex quota exhausted: {host}",
                             "body": f"{host} Codex account is over its usage limit{reset}. "
                                     "Restore quota (/usage reset or top-up); not a daemon fault.",
-                            "dedup_key": f"spawn-fleet-smoke-quota:{host}:{account or 'default'}",
+                            "dedup_key": f"spawn-fleet-smoke-quota:{host}{account_suffix}",
                         })
                     except Exception as card_error:
                         row["smoke_card_error"] = str(card_error)
@@ -1023,7 +1025,7 @@ def run_matrix(
                                 "severity": "warning",
                                 "title": f"Spawn smoke untested: {host}/{provider}",
                                 "body": f"prompt_mode={prompt_mode}; {exc}",
-                                "dedup_key": f"spawn-fleet-smoke-untested:{host}:{provider}:{account or 'default'}:{prompt_mode}",
+                                "dedup_key": f"spawn-fleet-smoke-untested:{host}:{provider}{account_suffix}:{prompt_mode}",
                             })
                         except Exception as card_error:
                             row["smoke_card_error"] = str(card_error)

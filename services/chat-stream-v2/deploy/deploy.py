@@ -1759,7 +1759,10 @@ def _apply_post_activation(
                 stamp["fleet_smoke"] = (_fleet_smoke_verdict(smoke, machines_file, required_cells, accounts=smoke_accounts)
                     if smoke_accounts else _fleet_smoke_verdict(smoke, machines_file, required_cells))
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
-                    _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
+                    if smoke_accounts:
+                        _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
+                    else:
+                        _install_fleet_smoke_schedule(repo, runner)
         # Persist the classified record inside the same never-raising boundary. A stamp-write
         # failure after activation must not escape as a refusal either — record it and make one
         # best-effort retry so the error itself is captured; main() still prints the returned
