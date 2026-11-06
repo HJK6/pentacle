@@ -571,6 +571,15 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
         return rows
 
+    def _process_absent(self, pid):
+        # A census member can exit before its birth is read. None from
+        # _process_start also covers tooling errors, so qualify absence anew.
+        if type(pid) is not int or pid <= 0:
+            return False
+        result = self.runner(("env", "TZ=UTC0", "LC_ALL=C", "ps", "-p", str(pid), "-o", "lstart="), self.repo)
+        return (result.returncode == 1 and not (result.stdout or "").strip()
+                and not (result.stderr or "").strip())
+
     def provenance(self, receipt):
         state = self.d._launchd_state(self.service.launchd_label, self.runner)
         if not state.answered:
@@ -584,6 +593,8 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
             if pid in owned or (uid == os.getuid() and "provider_account_host" in command and str(self.repo) in command):
                 start = self.d._process_start(pid, self.runner)
                 if not start:
+                    if pid != state.pid and self._process_absent(pid):
+                        continue
                     raise Invalid("helper process provenance is unproven")
                 processes.append({"pid": pid, "start": start})
         if state.pid and not any(row["pid"] == state.pid for row in processes):
@@ -602,8 +613,14 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         owned = {pid} if pid else set()
         for _ in rows:
             owned.update(p for p, parent, uid, command in rows if parent in owned and uid == os.getuid())
-        tracked = {p: self.d._process_start(p, self.runner) for p, parent, uid, command in rows
-                   if p in owned and p != pid}
+        tracked = {}
+        for p, parent, uid, command in rows:
+            if p in owned and p != pid:
+                born = self.d._process_start(p, self.runner)
+                if born:
+                    tracked[p] = born
+                elif not self._process_absent(p):
+                    raise Invalid("helper process provenance is unproven")
         for row in (provenance or {}).get("processes", []):
             tracked[row["pid"]] = row["start"]
         self.old_pid, self.old_start = pid, start
