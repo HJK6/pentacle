@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import uuid
 
-from deploy.coordinated import Invalid, digest, read_json
+from deploy.coordinated import Invalid, atomic_json, digest, read_json
 from tools.live_window import OwnedSessionRegistry
 from tools.spawn_fleet_smoke import _operator_connection, DEFAULT_URL, DEFAULT_TOKEN_PATH
 
@@ -63,6 +63,9 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
     cells = []
     for index, binding in enumerate(bindings):
         checkpoint = Path(str(state_path) + f'.{index}.json')
+        intent = checkpoint.with_suffix('.spawn.json')
+        payload = read_json(intent).get('spawn') if intent.exists() else None
+        expected_stream = f'{payload["host"]}:{payload["session_name"]}' if payload else None
         pending = []
         if checkpoint.exists():
             registry = OwnedSessionRegistry.recover(checkpoint, allow_legacy_close=True)
@@ -71,9 +74,10 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
             registry = OwnedSessionRegistry(checkpoint, allow_legacy_close=True)
         with _operator_connection(url, Path(token_path), 180.0, registry) as wire:
             rpc, wait_ready, _unused_wait_event, register_owned, close_owned = wire
-            # A failed close must not lose its ownership fence on re-entry.
+            # Recover the same ambiguous/owned activation; do not replace it.
             for stream in pending:
-                close_owned(stream)
+                if stream != expected_stream:
+                    close_owned(stream)
             catalog = rpc({'type':'spawn_catalog_get'}, 'spawn_catalog_get')
             status = rpc({'type':'account', 'action':'status', 'host':binding['host'],
                           'provider':binding['provider'], 'account':binding['alias']}, 'account')
@@ -86,19 +90,32 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
                 version = catalog['catalog_version']
             except (KeyError, TypeError, ValueError) as exc:
                 raise Invalid('restored work catalog unavailable') from exc
-            key = uuid.uuid4().hex
-            payload = {'type':'spawn', 'host':binding['host'], 'provider':binding['provider'],
-                'account':binding['alias'], 'session_name':f'v2-restore-{binding["provider"]}-{key[:12]}',
-                'visibility':'hidden', 'schema':'SpawnRequestV2', 'spawn_profile':'desktop_manual',
-                'model':model, 'effort':effort, 'catalog_version':version,
-                'resolution_source':'explicit_override', 'request_id':str(uuid.uuid4()), 'idempotency_key':key}
-            register_owned.prepare_owned_spawn(payload)
-            result = rpc(payload, 'spawn')
+            if payload:
+                if any(payload.get(k) != v for k, v in (
+                        ('host', binding['host']), ('provider', binding['provider']),
+                        ('account', binding['alias']))):
+                    raise Invalid('pending restoration spawn binding mismatch')
+                # The unique stream is bound to the persisted request. The
+                # existing registrar still requires its authoritative generation.
+                result = {'stream_id': expected_stream}
+            else:
+                key = uuid.uuid4().hex
+                payload = {'type':'spawn', 'host':binding['host'], 'provider':binding['provider'],
+                    'account':binding['alias'], 'session_name':f'v2-restore-{binding["provider"]}-{key[:12]}',
+                    'visibility':'hidden', 'schema':'SpawnRequestV2', 'spawn_profile':'desktop_manual',
+                    'model':model, 'effort':effort, 'catalog_version':version,
+                    'resolution_source':'explicit_override', 'request_id':str(uuid.uuid4()), 'idempotency_key':key}
+                register_owned.prepare_owned_spawn(payload)
+                # Persist before dispatch: a committed spawn can outlive a lost
+                # reply or failed registration. Re-entry must not dispatch again.
+                atomic_json(intent, {'spawn': payload})
+                result = rpc(payload, 'spawn')
             stream = str(result.get('stream_id') or '')
             if not stream:
                 raise Invalid('restoration spawn returned no stream')
             # Ownership registration is required even when readiness/binding fails.
-            register_owned(payload, result)
+            if stream not in pending:
+                register_owned(payload, result)
             try:
                 wait_ready(stream)
                 inventory = rpc({'type':'list_sessions'}, 'list_sessions')
@@ -113,6 +130,7 @@ def verify_no_input(bindings, state_path, *, url=DEFAULT_URL, token_path=DEFAULT
                             readiness='ready', outcome='passed', model_input='none')
             finally:
                 close_owned(stream)
+                atomic_json(intent, {'spawn': None})
             cell['cleanup'] = 'passed'
             cells.append(cell)
     return {'outcome':'passed', 'mode':'zero_input', 'cells':cells,

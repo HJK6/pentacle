@@ -324,7 +324,8 @@ def test_direct_forward_binds_qualification_before_checkout(isolated_release, mo
     assert observed==[prior]
 
 
-def test_no_input_retry_cleans_persisted_owned_probe_before_new_spawn(tmp_path,monkeypatch):
+@pytest.mark.parametrize('replaced_generation', [False, True])
+def test_no_input_retry_cleans_persisted_owned_probe_before_new_spawn(tmp_path,monkeypatch,replaced_generation):
     from contextlib import contextmanager
     from deploy import restoration
     from _shared.spawn_profiles import catalog
@@ -359,6 +360,78 @@ def test_no_input_retry_cleans_persisted_owned_probe_before_new_spawn(tmp_path,m
         restoration.verify_no_input([binding],tmp_path/'owned')
     old=next(iter(rows))
     assert json.loads((tmp_path/'owned.0.json').read_text())['owned']
+    if replaced_generation:
+        from tools.live_window import OwnershipError
+        rows[old]['session_generation'] = 'replacement'
+        with pytest.raises(OwnershipError, match='generation changed'):
+            restoration.verify_no_input([binding],tmp_path/'owned')
+        assert list(rows) == [old] and [e for e in events if e[0]=='spawn'] == [('spawn',old)]
+        assert json.loads((tmp_path/'owned.0.json').read_text())['owned'][0]['session_generation'] != 'replacement'
+        return
     result=restoration.verify_no_input([binding],tmp_path/'owned')
     assert result['outcome']=='passed' and rows=={}, 'retry must not orphan its earlier owned probe'
     assert events[2]==('close',old), 'recover ownership and close before another spawn'
+
+
+@pytest.mark.parametrize('failure', ['reply_lost', 'missing_stream', 'registration'])
+def test_no_input_recovers_committed_spawn_without_second_probe(tmp_path, monkeypatch, failure):
+    # QA's lost-reply repro: mocked wire, real persisted registry and close fence.
+    from contextlib import contextmanager
+    from deploy import restoration
+    from _shared.spawn_profiles import catalog
+    binding = {'host':'fixture', 'provider':'claude', 'alias':'primary', 'generation':'one', 'enabled':True}
+    rows = {}; events = []; fail_once = [True]; unavailable = [False]
+    @contextmanager
+    def connection(url, token, timeout, registry):
+        registry.configure_runtime({'capabilities':{'close_expected_generation':True}})
+        def rpc(payload, prefix):
+            assert not set(payload) & {'initial_prompt', 'initial_prompt_blob', 'brief', 'role', 'text'}
+            if prefix == 'spawn_catalog_get': return catalog()
+            if prefix == 'account': return {'accounts':[binding]}
+            if prefix == 'list_sessions':
+                if unavailable[0]: raise ConnectionError('inventory unavailable')
+                return {'active':list(rows.values())}
+            if prefix == 'spawn':
+                sid = 'fixture:' + payload['session_name']
+                events.append(('spawn', sid))
+                rows[sid] = {'stream_id':sid, 'session_generation':sid+'-generation',
+                    'bootstrap_state':'ready', 'account_binding':binding,
+                    'host':'fixture', 'session_name':payload['session_name']}
+                if fail_once[0] and failure != 'registration':
+                    fail_once[0] = False
+                    if failure == 'reply_lost': raise TimeoutError('spawn committed, response lost')
+                    return {}  # The committed stream must also survive an invalid reply.
+                return dict(rows[sid])
+            raise AssertionError(prefix)
+        def register(payload, result):
+            if unavailable[0]: raise ConnectionError('inventory unavailable')
+            if fail_once[0] and failure == 'registration':
+                fail_once[0] = False
+                raise RuntimeError('registration failed after commit')
+            registry.register_spawn(payload, result, rows[result['stream_id']])
+        register.prepare_owned_spawn = registry.prepare_spawn
+        def close(sid):
+            events.append(('close', sid))
+            def send(payload):
+                assert payload['expected_generation'] == rows[sid]['session_generation']
+                rows.pop(sid)
+                return {'type':'close.ok'}
+            registry.close(sid, inventory=lambda deadline:list(rows.values()), send_close=send,
+                wait_gone=lambda owned, deadline:owned.stream_id not in rows, timeout=1)
+        yield rpc, lambda sid:None, lambda *a:pytest.fail('inference'), register, close
+    monkeypatch.setattr(restoration, '_operator_connection', connection)
+    state = tmp_path/'owned'
+    with pytest.raises((TimeoutError, c.Invalid, RuntimeError)):
+        restoration.verify_no_input([binding], state)
+    original = next(iter(rows))
+    # A failed recovery must retain the original request, never launch again.
+    unavailable[0] = True
+    with pytest.raises(ConnectionError, match='inventory unavailable'):
+        restoration.verify_no_input([binding], state)
+    assert events == [('spawn', original)]
+    unavailable[0] = False
+    result = restoration.verify_no_input([binding], state)
+    assert result['outcome'] == 'passed' and result['cells'][0]['cleanup'] == 'passed'
+    assert result['cells'][0]['stream_id'] == original
+    assert rows == {} and events == [('spawn', original), ('close', original)]
+    assert json.loads((tmp_path/'owned.0.json').read_text())['owned'] == []
