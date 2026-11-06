@@ -164,7 +164,7 @@ household store. The daemon keeps no household state, cache or broadcast.
 
 | Verb | Fields | Result |
 |---|---|---|
-| `household.snapshot` | `month?` (`YYYY-MM`, 2000-01…2100-12, default today's America/Chicago month) | `{today, month, people:{partner}, lists:{tasks,grocery,meals,chores,study}, events, server_now}`; open items only; events from that month plus today…today+7, de-duplicated |
+| `household.snapshot` | `month?` (`YYYY-MM`, 2000-01…2100-12, default today's America/Chicago month) | `{today, month, people:{partner}, lists:{tasks,grocery,meals,chores,study}, events, routines, server_now}`; open items only; events from that month plus today…today+7, de-duplicated |
 | `household.item.add` | `list`, `label` (1–1000 chars) | `{item, server_now}` |
 | `household.item.done` | `item_id` | `{item, server_now}` (Cosmo keeps it 5 s, then removes it) |
 | `household.item.remove` | `item_id` | `{item_id}` (Cosmo's 204 carries no `server_now`) |
@@ -177,7 +177,8 @@ household store. The daemon keeps no household state, cache or broadcast.
   timing out or exceeding 1 MiB); `unknown_outcome` (a change was sent but not confirmed: timeout or
   connection lost while waiting, or an unexpected status). Calls are never retried; after
   `unknown_outcome` the client reads back with `household.snapshot` instead of resending.
-- **Bounds.** Seven concurrent GETs per snapshot, 5 s per call, 8 s overall, all-or-nothing.
+- **Routines.** Additive `routines` rows come from `GET /routines` with the same neutral scope/author mapping; the read is required for a successful refresh. They carry the known `next_due`, `paused` and `item_id`, not a forecast series. Older clients ignore this field.
+- **Bounds.** Eight concurrent GETs per snapshot, 5 s per call, 8 s overall, all-or-nothing.
 
 ## Session interrupt
 
