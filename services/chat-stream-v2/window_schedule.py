@@ -38,6 +38,7 @@ RECURRING_OWNER = "recurring"
 RECURRING_OPEN_STATES = frozenset({"pending", "retry_pending", "firing"})
 # Spawn-template fields; changing any of them re-runs spawn admission.
 RECURRING_TEMPLATE_KEYS = frozenset({
+    "account",
     "provider", "model", "effort", "host", "target_host", "role", "phase", "visibility",
     "parent", "spec_id", "spec_ids", "objective", "initial_prompt", "self_close_on_completion",
 })
@@ -141,6 +142,7 @@ def _project_schedule(row: dict[str, Any] | None, *, include_prompt: bool = Fals
     if row is None:
         return None
     value = dict(row)
+    value.pop("account_owner_json", None)
     value["owner_spec_ids"] = _decode(value.pop("owner_spec_ids_json", "[]"), [])
     value["owner_spec_provenance"] = _decode(
         value.pop("owner_spec_provenance_json", "[]"), []
@@ -179,6 +181,7 @@ def _project_recurring(row: dict[str, Any] | None, *, include_prompt: bool = Fal
     if row is None:
         return None
     value = dict(row)
+    value.pop("account_owner_json", None)
     rule = _decode(value.pop("recurrence_json", "{}"), {})
     value["recurrence"] = rule
     value["tz"] = rule.get("tz")
@@ -642,6 +645,7 @@ class WindowSchedule:
         resolved_provider = str(admission.get("resolved_provider") or "").strip()
         resolved_model = str(admission.get("resolved_model") or "").strip()
         resolved_effort = str(admission.get("resolved_effort") or "").strip()
+        account_owner = await self._account_owner(msg) if "account" in admission else None
         if not all((resolved_provider, resolved_model, resolved_effort)):
             raise VerbError("invalid_request", "scheduled spawn resolution is incomplete")
 
@@ -676,6 +680,8 @@ class WindowSchedule:
                     conn.execute("UPDATE v2_schedules SET qa_spec_id=?,qa_surface=?,qa_cycle=?,qa_owner_generation=? WHERE schedule_id=?",
                         (msg.get("qa_spec_id"), msg.get("qa_surface"), msg.get("qa_cycle"),
                          admission.get("qa_owner_generation"), schedule_id))
+                    conn.execute("UPDATE v2_schedules SET account=?,account_owner_json=? WHERE schedule_id=?",
+                                 (admission.get("account"), account_owner, schedule_id))
                     prior = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 result = {
                     "type": "schedule.insert.ok", "schedule": _project_schedule(prior),
@@ -978,6 +984,8 @@ class WindowSchedule:
             if effective_owner == schedule.get('owner_stream_id'):
                 owner_generation = effective_generation
         source_id = str(schedule.get("handoff_from_stream_id") or "")
+        if schedule.get("account") is not None and not await self._account_owner_current(schedule):
+            oracle_error = "stale_owner_generation"
         policy = getattr(self.sessions, "assistant", None)
         source = (await self.store.fetch_session(*source_id.split(":", 1))
                   if policy and ":" in source_id else None)
@@ -999,6 +1007,7 @@ class WindowSchedule:
             "type": "spawn", "request_id": dispatch["spawn_request_id"],
             "idempotency_key": dispatch["spawn_key"], "host": schedule["target_host"],
             "provider": schedule["resolved_provider"], "model": schedule["resolved_model"],
+            "account": schedule.get("account"),
             "effort": schedule["resolved_effort"], "role": schedule.get("role"),
             "phase": schedule.get("phase"), "visibility": schedule.get("visibility"),
             "objective": schedule.get("objective"),
@@ -1344,6 +1353,41 @@ class WindowSchedule:
             return None
         return stream_id
 
+    async def _account_owner(self, msg):
+        auth = msg.get("_auth_context") or {}
+        if auth.get("token_verified") is True:
+            actor = str(auth.get("stream_id") or "")
+            seat = await self.store.fetch_session(*actor.split(":", 1)) if ":" in actor else None
+            if (seat and seat.get("status") == "open" and auth.get("session_generation")
+                    and seat.get("session_generation") == auth["session_generation"]):
+                return _compact({"kind": "seat", "stream_id": actor,
+                    "generation": auth["session_generation"], "token_hash": seat.get("token_hash")})
+        elif auth.get("operator_authenticated") is True and auth.get("credential_id"):
+            return _compact({"kind": "operator", "credential_id": auth["credential_id"]})
+        raise VerbError("account_control_unauthorized", "explicit schedules need a current launch owner")
+
+    async def _account_owner_current(self, schedule):
+        owner = _decode(schedule.get("account_owner_json"), {})
+        if owner.get("kind") == "seat":
+            stream, generation = await self.store.transfer_successor(owner.get("stream_id"), owner.get("generation"))
+            seat = await self.store.fetch_session(*stream.split(":", 1)) if ":" in str(stream) else None
+            if (not seat or seat.get("status") != "open" or seat.get("session_generation") != generation
+                    or (stream == owner.get("stream_id") and seat.get("token_hash") != owner.get("token_hash"))):
+                return False
+            return set(_decode(schedule.get("owner_spec_ids_json"), [])) <= set(seat.get("qualified_spec_ids") or [])
+        if owner.get("kind") == "operator":
+            runtime = getattr(self.spawnctl, "account_runtime", None)
+            registry = getattr(getattr(runtime, "server", None), "operator_credential_registry", None)
+            if registry is None:
+                return False
+            try:
+                snapshot = await asyncio.to_thread(registry.load)
+                credential = snapshot.credentials.get(owner.get("credential_id"))
+                return bool(credential and not credential.get("revoked_at") and not credential.get("scope"))
+            except Exception:
+                return False
+        return False
+
     async def _recurring_template(
         self, msg: dict[str, Any], fields: dict[str, Any], *, kind: str, actor: str,
         seat: dict[str, Any] | None, admission_name: str,
@@ -1417,6 +1461,8 @@ class WindowSchedule:
             "role": fields.get("role"), "phase": fields.get("phase"),
             "visibility": fields.get("visibility"), "initial_prompt": prompt_text,
         }
+        if fields.get("account") is not None or "account" in msg:
+            admission_msg["account"] = fields.get("account")
         admission_msg.pop("spec_id", None)
         if parent_stream_id is not None:
             admission_msg["parent_stream_id"] = parent_stream_id
@@ -1450,6 +1496,8 @@ class WindowSchedule:
             raise VerbError("invalid_request", "recurring spawn resolution is incomplete")
         raw = prompt_text.encode("utf-8")
         return {
+            "account": admission.get("account"),
+            "account_owner_json": await self._account_owner(msg) if "account" in admission else None,
             "parent_mode": parent_mode,
             "target_host": str(admission.get("host") or self.local_host),
             "requested_provider": requested["provider"], "requested_model": requested["model"],
@@ -1617,6 +1665,7 @@ class WindowSchedule:
             creator = row.get("created_by_stream_id")
             creator_row = seat if kind == "seat" else (await self._session(creator) if creator else None)
             prior = {
+                **({"account": row["account"]} if row.get("account") is not None else {}),
                 "provider": row["requested_provider"], "model": row["requested_model"],
                 "effort": row["requested_effort"], "target_host": row["target_host"],
                 "role": row.get("role"), "phase": row.get("phase"), "visibility": row.get("visibility"),
@@ -1793,6 +1842,8 @@ class WindowSchedule:
                      occurrence, rule["prompt_sha256"], rule["prompt_b64"], timestamp, timestamp,
                      rule["self_close_on_completion"], rule["objective"], rule["objective_source"]),
                 )
+                conn.execute("UPDATE v2_schedules SET account=?,account_owner_json=? WHERE schedule_id=?",
+                             (rule.get("account"), rule.get("account_owner_json"), schedule_id))
                 self._insert_receipt_tx(
                     conn, request_id=request_id, phase="row_committed", surface="schedule",
                     verb="schedule.recurring.materialise", actor_kind="service", actor_id=RECURRING_OWNER,

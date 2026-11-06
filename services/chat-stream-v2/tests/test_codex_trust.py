@@ -69,7 +69,18 @@ def test_transport_seeds_temporary_codex_home(tmp_path,monkeypatch):
     assert tomllib.loads((tmp_path/'home/config.toml').read_text())['projects'][str(cwd.resolve())]['trust_level']=='trusted'
 
 
-def test_remote_writer_runs_on_target_with_quoted_cwd(monkeypatch):
+def test_transport_bound_home_overrides_ambient_without_touching_default(tmp_path,monkeypatch):
+    import asyncio
+    ambient=tmp_path/'ambient'; selected=tmp_path/'selected'
+    ambient.mkdir(); (ambient/'config.toml').write_text('model="unchanged"\n')
+    monkeypatch.setenv('CODEX_HOME',str(ambient))
+    asyncio.run(Tmux().pretrust_codex_cwd(str(tmp_path),code_home=str(selected)))
+    assert (ambient/'config.toml').read_text()=='model="unchanged"\n'
+    assert tomllib.loads((selected/'config.toml').read_text())['projects'][str(tmp_path.resolve())]['trust_level']=='trusted'
+
+
+@pytest.mark.parametrize('selected_home', [None, '/tmp/selected account'])
+def test_remote_writer_runs_on_target_with_quoted_cwd(monkeypatch, selected_home):
     import asyncio
     import tmux_transport
     calls=[]
@@ -83,8 +94,12 @@ def test_remote_writer_runs_on_target_with_quoted_cwd(monkeypatch):
         return Process()
     monkeypatch.setattr(tmux_transport.asyncio,'create_subprocess_exec',create)
     monkeypatch.setattr(tmux_transport,'ssh_command',lambda target,command,**kw:['ssh',target,command])
-    asyncio.run(Tmux(ssh_target='fixture-user@fixture-peer').pretrust_codex_cwd('/tmp/folder with spaces'))
-    assert calls and calls[0][-1]=="python3 - '/tmp/folder with spaces'"
+    asyncio.run(Tmux(ssh_target='fixture-user@fixture-peer').pretrust_codex_cwd(
+        '/tmp/folder with spaces', code_home=selected_home))
+    expected = "python3 - '/tmp/folder with spaces'"
+    if selected_home:
+        expected += " '/tmp/selected account'"
+    assert calls and calls[0][-1] == expected
 
 
 def test_spawn_pretrusts_effective_cwd_before_creating_pane(tmp_path,monkeypatch):

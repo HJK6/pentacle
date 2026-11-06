@@ -159,7 +159,7 @@ def validate_intent(path):
     intent = read_json(path)
     fields = {"schema", "transaction_id", "controller_sha", "target_sha", "prior_sha",
               "machines_file", "policy_file", "excluded_hosts", "gate_evidence", "prior_gate_evidence"}
-    if set(intent) != fields or intent.get("schema") != INTENT_SCHEMA:
+    if set(intent) - {'smoke_accounts'} != fields or intent.get("schema") != INTENT_SCHEMA:
         raise Invalid("unsupported coordinated intent schema or fields")
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,95}", str(intent["transaction_id"])):
         raise Invalid("invalid transaction id")
@@ -169,8 +169,21 @@ def validate_intent(path):
     for key in ("machines_file", "policy_file", "gate_evidence", "prior_gate_evidence"):
         absolute(intent[key])
     private_file(intent["policy_file"])
-    host_scope(intent["machines_file"], intent["excluded_hosts"])
+    scope = host_scope(intent["machines_file"], intent["excluded_hosts"])
+    smoke_account_map(intent.get('smoke_accounts', []), scope)
     return intent
+
+
+def smoke_account_map(entries, scope):
+    from tools.spawn_fleet_smoke import account_map
+    if not isinstance(entries, list) or any(not isinstance(v, str) for v in entries):
+        raise Invalid('smoke_accounts must be an array of account declarations')
+    cells = tuple((h, p, m) for h in scope['included_hosts']
+                  for p in ('claude', 'codex') for m in ('prompted', 'promptless'))
+    try:
+        return account_map(entries, cells)
+    except ValueError as exc:
+        raise Invalid('invalid smoke_accounts: ' + str(exc)) from exc
 
 
 def state_root(repo):

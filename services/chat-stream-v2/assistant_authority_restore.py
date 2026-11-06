@@ -311,6 +311,9 @@ class AuthorityRestore:
                 'role': shape.get('role'), 'visibility': shape.get('visibility'), 'spec_id': shape.get('spec_id'),
                 'parent_stream_id': primary['stream_id'], 'initial_prompt': brief, 'self_close_on_completion': False,
                 'objective': 'Restore the assistant ruling authority'}
+            observed=shape.get('account_observed')
+            if observed:
+                payload['account']=observed['alias']
             episode = await self.update(episode, {'state': 'spawning', 'attempt_seq': seq,
                 'budget_used': episode['budget_used'] + 1, 'spawn_key': spawn_key,
                 'attempt_generation': payload['_session_generation'], 'payload': canonical(payload),

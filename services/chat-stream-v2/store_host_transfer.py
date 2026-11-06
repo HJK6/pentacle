@@ -22,7 +22,7 @@ actor_context: ContextVar[tuple[str, str] | None] = ContextVar('transfer_actor',
 TERMINAL = {'committed', 'complete', 'cancelled', 'failed', 'expired'}
 COMMITTED = {'committed', 'complete'}
 SOURCE_FIELDS = ('session_generation', 'role', 'parent_stream_id', 'provider',
-                 'effective_model', 'effective_effort')
+                 'effective_model', 'effective_effort', 'account_binding')
 
 
 class TransferError(ValueError):

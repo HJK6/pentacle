@@ -69,7 +69,9 @@ window.cc = {
   scrollTmux: (slot, direction, lines) => ipcRenderer.send('pty:scroll', slot, direction, lines || 1),
   exitCopyMode: (slot) => ipcRenderer.send('pty:exit-copy-mode', slot),
   killPty: (slot) => ipcRenderer.invoke('pty:kill', slot),
-  newSession: (agent, location) => ipcRenderer.invoke('pty:new-session', agent, location || 'local'),
+  newSession: (agent, location, account) => account === undefined
+    ? ipcRenderer.invoke('pty:new-session', agent, location || 'local')
+    : ipcRenderer.invoke('pty:new-session', agent, location || 'local', account),
   checkSession: (sessionName, hostId) => ipcRenderer.invoke('pty:check-session', sessionName, hostId || 'local'),
 
   // PTY events

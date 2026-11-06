@@ -67,4 +67,4 @@ def ensure_codex_trust(cwd: str, *, code_home: str | None = None) -> None:
 
 if __name__ == '__main__':
     import sys
-    ensure_codex_trust(sys.argv[1])
+    ensure_codex_trust(sys.argv[1], code_home=sys.argv[2] if len(sys.argv) > 2 else None)

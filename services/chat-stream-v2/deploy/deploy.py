@@ -398,7 +398,7 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
 def _fleet_smoke_verdict(
     result: subprocess.CompletedProcess[str], machines_file: str,
     required_cells: list[dict[str, str]] | None = None,
-    *, declared_exclusions: list[dict[str, str]] | None = None,
+    *, declared_exclusions: list[dict[str, str]] | None = None, accounts: Sequence[str] = (),
 ) -> dict[str, object]:
     """Combine every smoke evidence channel; missing cells can never turn green.
 
@@ -441,6 +441,13 @@ def _fleet_smoke_verdict(
             expected = set(keys)
         except (TypeError, KeyError, ValueError) as exc:
             issues.append("invalid_required_cells: " + str(exc))
+    choices = {}
+    if accounts:
+        from tools.spawn_fleet_smoke import account_map
+        try:
+            choices = account_map(list(accounts), tuple(sorted(expected)))
+        except ValueError as exc:
+            issues.append('invalid_smoke_accounts: ' + str(exc))
     cells: dict[tuple[str, str, str], dict[str, object]] = {}
     severity = {"passed": 0, "unreachable": 1, "untested": 2, "failed": 3}
     seen_pass_rows = set()
@@ -460,6 +467,13 @@ def _fleet_smoke_verdict(
                 seen_pass_rows.add(key)
             if key not in expected:
                 issues.append(f"unconfigured_or_invalid_cell:{'/'.join(key)}")
+            if choices and key in expected:
+                actual = row.get('account_binding') or {}
+                alias = choices[(key[0], key[1])]
+                if (row.get('account') != alias or actual.get('alias') != alias
+                        or actual.get('host') != key[0] or actual.get('provider') != key[1]
+                        or not actual.get('generation')):
+                    row = {**row, 'outcome': 'failed', 'reason': 'account_binding_mismatch'}
             outcome = str(row.get("outcome") or "").lower()
             classification = str(row.get("class") or "").lower()
             reason = str(row.get("reason") or row.get("stage") or "")
@@ -793,8 +807,10 @@ def _render_v2_usage_collector_plist(repo: Path) -> bytes:
     return _render_release_checkout_plist(repo, USAGE_COLLECTOR_TEMPLATE, "usage collector")
 
 
-def _render_v2_spawn_fleet_smoke_plist(repo: Path) -> bytes:
-    return _render_release_checkout_plist(repo, SPAWN_FLEET_SMOKE_TEMPLATE, "fleet smoke")
+def _render_v2_spawn_fleet_smoke_plist(repo: Path, *, accounts: Sequence[str] = ()) -> bytes:
+    value = plistlib.loads(_render_release_checkout_plist(repo, SPAWN_FLEET_SMOKE_TEMPLATE, "fleet smoke"))
+    value.setdefault('EnvironmentVariables', {})['PENTACLE_SMOKE_ACCOUNTS'] = ','.join(accounts)
+    return plistlib.dumps(value)
 
 
 def _validate_v2_launchd_program(repo: Path, arguments: Sequence[str]) -> Path:
@@ -1627,10 +1643,10 @@ def _verify_runtime_sha(
         sleep(min(RUNTIME_READBACK_INTERVAL_SECONDS, remaining))
 
 
-def _install_fleet_smoke_schedule(repo: Path, runner: Runner) -> None:
+def _install_fleet_smoke_schedule(repo: Path, runner: Runner, accounts: Sequence[str] = ()) -> None:
     schedule = Path.home() / "Library/LaunchAgents/com.pentacle.spawn-fleet-smoke.plist"
     schedule.parent.mkdir(parents=True, exist_ok=True)
-    _write_bytes(schedule, _render_v2_spawn_fleet_smoke_plist(repo))
+    _write_bytes(schedule, _render_v2_spawn_fleet_smoke_plist(repo, accounts=accounts))
     domain = f"gui/{os.getuid()}"
     runner(("launchctl", "bootout", f"{domain}/com.pentacle.spawn-fleet-smoke"), repo)
     _checked(("launchctl", "bootstrap", domain, str(schedule)), repo, runner)
@@ -1707,11 +1723,15 @@ def _apply_post_activation(
                     activation = identity["activation"]
                     required_cells = identity["required_cells"]
                     smoke_args = (activation["url"], activation["host"])
+                smoke_accounts = (selection['identity']['activation'].get('accounts', [])
+                                  if selection is not None else stamp.get('smoke_accounts', []))
+                smoke_args += tuple(arg for entry in smoke_accounts for arg in ('--account', entry))
                 smoke = runner(
                     (
                         "/usr/bin/env",
                         "-u", "PENTACLE_MACHINES_JSON",
                         "-u", "PENTACLE_SMOKE_HOSTS",
+                        "-u", "PENTACLE_SMOKE_ACCOUNTS",
                         f"PENTACLE_MACHINES_FILE={machines_file}",
                         str(_venv_python(repo, service)),
                         str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
@@ -1736,9 +1756,13 @@ def _apply_post_activation(
                     expected_start=active_start, prior_pid=prior_pid,
                     prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
                 )
-                stamp["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file, required_cells)
+                stamp["fleet_smoke"] = (_fleet_smoke_verdict(smoke, machines_file, required_cells, accounts=smoke_accounts)
+                    if smoke_accounts else _fleet_smoke_verdict(smoke, machines_file, required_cells))
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
-                    _install_fleet_smoke_schedule(repo, runner)
+                    if smoke_accounts:
+                        _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
+                    else:
+                        _install_fleet_smoke_schedule(repo, runner)
         # Persist the classified record inside the same never-raising boundary. A stamp-write
         # failure after activation must not escape as a refusal either — record it and make one
         # best-effort retry so the error itself is captured; main() still prints the returned
@@ -1936,8 +1960,10 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            skip_kickstart: bool = False, log_guard_dir: str | Path | None = None,
            boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
-           prepare_only: bool = False, runner: Runner) -> dict[str, object]:
+           prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None, runner: Runner) -> dict[str, object]:
     coordinated_mode = coordinated_plan is not None or coordinated_receipt is not None or prepare_only
+    if smoke_accounts is not None and (coordinated_mode or release_inputs is not None):
+        raise DeployError('account mapping belongs in coordinated intent or release-input activation')
     if coordinated_mode and (service.name != "chat-streamd-v2" or release_inputs is not None or skip_kickstart):
         raise DeployError("coordinated deployment cannot combine with release-inputs/skip-kickstart or another service")
     if coordinated_mode and (coordinated_receipt is None or (not rollback and coordinated_plan is None)
@@ -1961,7 +1987,7 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
             return _deploy_legacy(service, release_checkout=repo, ref=ref, rollback=rollback,
                 gate_evidence=gate_evidence, release_inputs=release_inputs, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
-                boot_wait_seconds=boot_wait_seconds, runner=runner)
+                boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts, runner=runner)
     except (coordinated.Invalid, OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
         raise DeployError(str(exc)) from exc
 
@@ -1978,6 +2004,7 @@ def _deploy_legacy(
     skip_kickstart: bool = False,
     log_guard_dir: str | Path | None = None,
     boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
+    smoke_accounts: Sequence[str] | None = None,
     runner: Runner,
 ) -> dict[str, object]:
     repo = release_checkout.expanduser().resolve()
@@ -2057,6 +2084,22 @@ def _deploy_legacy(
         if selection is not None:
             stamp["release_selection"] = selection
             stamp["gates"]["seam_results"] = evidence["seam_results"]
+        elif service.name == 'chat-streamd-v2':
+            configured = _launchd_environment(service.launchd_label)
+            entries = (list(smoke_accounts) if smoke_accounts is not None else
+                prior_stamp.get('smoke_accounts', []) if rollback else
+                [v for v in configured.get('PENTACLE_SMOKE_ACCOUNTS', '').split(',') if v])
+            if entries:
+                from tools.spawn_fleet_smoke import account_map
+                try:
+                    if not all(isinstance(v, str) for v in entries):
+                        raise ValueError('accounts must be declarations')
+                    hosts, _, _ = _fleet_smoke_hosts(configured.get('PENTACLE_MACHINES_FILE', ''))
+                    account_map(entries, tuple((h, p, m) for h in hosts
+                        for p in ('claude', 'codex') for m in ('prompted', 'promptless')))
+                except (ValueError, OSError) as exc:
+                    raise DeployError('invalid deployment account mapping: ' + str(exc)) from exc
+                stamp['smoke_accounts'] = entries
         activation_runtime_manifest = runtime_manifest(repo, service, runner)
         stamp["activation_runtime_manifest"] = activation_runtime_manifest
         if not skip_kickstart:
@@ -2177,6 +2220,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coordinated-receipt", type=Path, help="Sealed preparation receipt, also used for whole-transaction rollback.")
     parser.add_argument("--prepare-only", action="store_true", help="Stage inert helpers and seal the coordinated receipt only.")
     parser.add_argument("--release-inputs", type=Path, help="Observed installed baselines and external tuples for qualified seam admission.")
+    parser.add_argument('--account', action='append', default=None, help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS for legacy full-matrix smoke')
     parser.add_argument("--deployer-stream-id", default=None)
     parser.add_argument("--log-guard-dir", default=None, help="Override the service log guard directory checked before deploy.")
     parser.add_argument("--skip-kickstart", action="store_true", help="Test/dev only: do not kick launchd after stamping.")
@@ -2230,6 +2274,7 @@ def main(argv: list[str] | None = None) -> int:
             coordinated_plan=args.coordinated_plan,
             coordinated_receipt=args.coordinated_receipt,
             prepare_only=args.prepare_only,
+            smoke_accounts=args.account,
             runner=_run,
         )
     except DeployError as exc:

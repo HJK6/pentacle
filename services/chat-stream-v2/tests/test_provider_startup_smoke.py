@@ -104,10 +104,12 @@ def test_spawn_binding_is_checked_before_send_and_owned_child_is_closed(pinned, 
                     'profiles': {'desktop_manual': {'codex': ['catalog-default', 'medium']}}}
         if prefix == 'spawn':
             assert payload['model'] == probe.model and payload['effort'] == probe.effort
-            assert 'account' not in payload
+            assert payload['account'] == binding.alias
             return {'stream_id': 'fixture-host:v2-owned', 'session': session}
         if prefix == 'send':
             return {'type': 'send.result', 'receipt_id': 'receipt', 'delivery': 'landed'}
+        if prefix == 'list_sessions':
+            return {'active': [{'stream_id': 'fixture-host:v2-owned', **session}]}
         pytest.fail(prefix)
     kwargs = dict(rpc=rpc, wait_ready=lambda _: calls.append('ready'),
                   wait_event=lambda *_: calls.append('reply'), verify_teardown=None,
@@ -151,7 +153,8 @@ def test_explicit_endpoint_credential_and_single_tuple_are_forwarded(pinned, mon
         assert url == 'ws://candidate' and token == path.parent / 'candidate.token'
         assert cells == ((binding.host, 'codex', 'promptless'),)
         assert kwargs['provider_probe'].binding == binding
-        evidence.append({'host': binding.host, 'provider': 'codex', 'prompt_mode': 'promptless', 'outcome': 'passed'})
+        evidence.append({'host': binding.host, 'provider': 'codex', 'account': binding.alias,
+                         'prompt_mode': 'promptless', 'outcome': 'passed'})
         return []
     monkeypatch.setattr(smoke, 'run_matrix', matrix)
     assert smoke.main(['ws://candidate', binding.host, '--provider-tuple', str(path),

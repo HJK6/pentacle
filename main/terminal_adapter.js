@@ -76,12 +76,12 @@ function registerTerminalIpc(ipcMain, config, client, { pty = null, execute = ru
     const command = target(host, ['has-session', '-t', `=${sessionName}`]);
     try { await execute(command.file, command.args, { timeout: 5000 }); return true; } catch { return false; }
   });
-  ipcMain.handle('pty:new-session', async (_event, provider, host = 'local') => {
-    const response = await client.spawnSession({ provider, host });
+  ipcMain.handle('pty:new-session', async (_event, provider, host = 'local', account) => {
+    const response = await client.spawnSession({ provider, host, ...(account !== undefined ? { account } : {}) });
     const session = response.session || response;
     const sessionName = session?.session_name || response.session_name;
     if (!sessionName) throw new Error('Daemon has not finished creating the session; open it from the sidebar when ready');
-    return { sessionName, hostId: session?.host || host };
+    return { sessionName, hostId: session?.host || host, accountBinding: session?.account_binding };
   });
   // Keep scroll, mode exit and input in order on this attachment. Live typing
   // stays on the PTY: only history/initial attachment requires a tmux round trip.

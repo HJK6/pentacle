@@ -4,6 +4,18 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { registerTerminalIpc } = require('../main/terminal_adapter');
 
+test('terminal spawn forwards an explicit account and returns its actual binding', async () => {
+  const handlers = new Map(), requests = [];
+  const binding = { host: 'peer', provider: 'codex', alias: 'spare', generation: 'one' };
+  const cleanup = registerTerminalIpc({ handle: (key, fn) => handlers.set(key, fn), on() {} }, {},
+    { async spawnSession(input) { requests.push(input); return { session: { host: 'peer', session_name: 'owned', account_binding: binding } }; } });
+  try {
+    const result = await handlers.get('pty:new-session')({}, 'codex', 'peer', 'spare');
+    assert.deepEqual(requests, [{ provider: 'codex', host: 'peer', account: 'spare' }]);
+    assert.deepEqual(result.accountBinding, binding);
+  } finally { cleanup(); }
+});
+
 test('terminal attachment targets a real pane and fences stale output after replacement', async () => {
   const handlers = new Map(), listeners = new Map(), processes = [], calls = [], output = [];
   const sender = new EventEmitter(); sender.id = 7; sender.isDestroyed = () => false; sender.send = (...args) => output.push(args);

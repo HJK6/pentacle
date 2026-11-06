@@ -28,6 +28,7 @@ def parser():
     p.add_argument('--physical-host', required=True)
     p.add_argument('--name', required=True)
     p.add_argument('--provider', choices=('claude', 'codex', 'gemini'), required=True)
+    p.add_argument('--account', help='explicit account alias; omission uses the target default')
     p.add_argument('--model', required=True)
     p.add_argument('--effort', required=True)
     p.add_argument('--private-workspace', type=Path, required=True)
@@ -65,6 +66,9 @@ def prepare(args):
         raise ValueError('name must not have surrounding whitespace')
     if args.timeout <= 0 or not args.model.strip() or not args.effort.strip():
         raise ValueError('positive timeout and explicit model/effort are required')
+    if args.account is not None and (args.provider not in ('codex', 'claude')
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', args.account)):
+        raise ValueError('invalid or unsupported explicit account')
     workspace = args.private_workspace.expanduser().absolute()
     if workspace.resolve().is_relative_to(ROOT):
         raise ValueError('private workspace must be outside the public checkout')
@@ -87,6 +91,13 @@ def prepare(args):
     return workspace, credential, instructions, text, paths
 
 
+def selected_account_matches(session, args):
+    actual = session.get('account_binding') or {}
+    return args.account is None or (actual.get('alias') == args.account
+        and actual.get('host') == args.physical_host and actual.get('provider') == args.provider
+        and bool(actual.get('generation')))
+
+
 def bootstrap(args):
     workspace, credential, instructions, text, paths = prepare(args)
     plan = {'schema_version': 1, 'url': args.url, 'physical_host': args.physical_host,
@@ -96,6 +107,8 @@ def bootstrap(args):
             'private_workspace': str(workspace), 'output_paths': [str(p) for p in paths],
             'instructions_sha256': hashlib.sha256(text.encode()).hexdigest(),
             'recovery': 'off', 'requires_owner_restart': True}
+    if args.account is not None:
+        plan['account'] = args.account
     if args.dry_run:
         return {**plan, 'dry_run': True, 'mutated': False}
     # Imports happen only after dry-run; no connection or local state on a plan.
@@ -103,7 +116,8 @@ def bootstrap(args):
     from tools.live_window import authenticated_operator_connection
     if args.readback:
         receipt = json.loads(paths[2].read_text(encoding='utf-8'))
-        if any(receipt.get(key) != plan[key] for key in ('url', 'physical_host', 'name', 'requested_tuple', 'instructions_sha256')):
+        if (any(receipt.get(key) != plan[key] for key in ('url', 'physical_host', 'name', 'requested_tuple', 'instructions_sha256'))
+                or receipt.get('account') != plan.get('account')):
             raise ValueError('readback inputs differ from the preserved bootstrap receipt')
         with authenticated_operator_connection(args.url, credential, args.timeout) as operator:
             binding = operator.rpc({'type': 'assistant.binding'})
@@ -120,6 +134,8 @@ def bootstrap(args):
                 or session.get('session_generation') != receipt['backend_generation']
                 or session.get('bootstrap_state') != 'ready'
                 or effective != receipt['effective_tuple'] or session.get('role') != 'assistant'
+                or not selected_account_matches(session, args)
+                or (args.account is not None and session.get('account_binding') != receipt.get('account_binding'))
                 or session.get('parent_stream_id') or (lifecycle.get('target') or {}).get('eligible') is not True
                 or (composite.get('session') or {}).get('title') != args.name):
             raise RuntimeError('restart readback failed exact binding/readiness/title verification')
@@ -150,7 +166,8 @@ def bootstrap(args):
             'session_name': session_name, 'provider': args.provider, 'model': args.model,
             'effort': args.effort, 'role': 'assistant', 'visibility': 'visible',
             'parent_stream_id': None, 'cwd': str(workspace), 'title': args.name,
-            'initial_prompt': text, 'request_id': request_id, 'idempotency_key': idempotency_key})
+            'initial_prompt': text, 'request_id': request_id, 'idempotency_key': idempotency_key,
+            **({'account': args.account} if args.account is not None else {})})
         if spawned.get('type') != 'spawn.ok':
             raise RuntimeError('protected spawn refused: ' + str(spawned.get('error_code') or spawned.get('error')))
         stream_id = spawned.get('stream_id')
@@ -168,6 +185,9 @@ def bootstrap(args):
         generation = session.get('session_generation')
         effective = {'provider': session.get('provider'), 'model': session.get('effective_model'),
                      'effort': session.get('effective_effort')}
+        account = session.get('account_binding') or {}
+        if not selected_account_matches(session, args):
+            raise RuntimeError('backend account binding mismatch; inspect the retained bootstrap intent')
         lifecycle = operator.rpc({'type': 'assistant.lifecycle', 'action': 'inspect',
                                   'target_stream_id': stream_id})
         protected = lifecycle.get('target') or {}
@@ -190,6 +210,7 @@ def bootstrap(args):
         'backend_generation': generation, 'bootstrap_state': 'ready',
         'protected_role_verified': True,
         'effective_tuple': effective, 'daemon_environment': environment,
+        **({'account_binding': account} if args.account is not None else {}),
         'instructions_file': str(instructions), 'activation': 'owner_restart_required'}
     private_new(paths[0], ''.join(f'export {key}={shlex.quote(value)}\n' for key, value in environment.items()))
     private_new(paths[1], json.dumps({'daemon_environment': environment, 'client': client}, indent=2) + '\n')
