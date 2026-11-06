@@ -63,7 +63,8 @@ def test_close_refuses_child_before_kill(caller, child_host):
             await opened("child", host=child_host, parent_stream_id=SOURCE, offline_since_ts=1)
             msg = close_message(HOST + ":owner" if caller == "parent" else SOURCE)
             if caller == "operator":
-                msg["_auth_context"] = {"operator_authenticated": True}
+                msg["_auth_context"] = {"operator_authenticated": True, "token_verified": False,
+                                        "operator_principal": "operator:lifecycle-fixture"}
             with pytest.raises(VerbError) as err:
                 await server._on_close(msg)
             assert err.value.code == "close_live_children"

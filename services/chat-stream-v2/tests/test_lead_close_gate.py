@@ -620,3 +620,59 @@ def test_approved_ruling_and_done_report_do_not_waive_owner_disposition():
             assert env.tmux.kills == 0
             assert (await env.store.fetch_session(lane_host, "lane"))["status"] == "open"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("role,phase,status,allowed", [
+    ("qa", "spec", "backlog", True),
+    ("planner", None, "backlog", True),
+    ("planner", None, "ready_for_dev", True),
+    ("lead", None, "in_progress", False),
+])
+def test_fd_parent_closes_reported_literal_work_without_extra_disposition(role, phase, status, allowed):
+    """Real typed reports do not add a move for settled QA/planner work."""
+    async def run():
+        from ledger import Ledger
+        from test_work_owed import observe
+        spec = "spec_demo__item_00"
+        # The status predates ownership: no post-assignment move is required.
+        store, sessions, server, tmux, row = await environment(role="worker", assigned_spec_id="", spec_ids=[spec])
+        try:
+            store.set_spec_identity_resolver(lambda identity: identity if identity == spec else None)
+            await observe(store, status, "already-settled-source", 101, identity=spec)
+            parent = await store.open_session(HOST, "fd", role="lead", assigned_spec_id="")
+            await store.update_session(HOST, row["session_name"], role=role, phase=phase,
+                assigned_spec_id=spec, parent_stream_id=f"{HOST}:fd", visibility="hidden")
+            await sessions.refresh()
+            stream = f"{HOST}:{row['session_name']}"
+            report = {"report_id": "reported-" + role + "-" + status, "from_stream_id": stream,
+                "msg_id": 0, "status": "done", "summary": "Assigned review or planning work finished",
+                "findings": [], "next_action": "Parent reviews the existing disposition",
+                "_auth_context": {"token_verified": True, "stream_id": stream,
+                                  "session_generation": row["session_generation"]}}
+            if role == "qa":
+                report.update(qa_verdict="accept", target_sha="c" * 40,
+                    extras={"qa_review": {"reviewed_scope": "spec", "candidate_identity": "c" * 40,
+                                           "gate_evidence_digest": "d" * 64}})
+            stored = await Ledger(store, sessions=sessions).ingest(report)
+            assert stored["status"] == "done"
+            if role == "qa":
+                assert stored["qa_verdict"] == "accept" and stored["target_sha"] == "c" * 40
+            close = request(row, operator_confirm=True)
+            close["_auth_context"] = {"token_verified": True, "stream_id": f"{HOST}:fd",
+                                      "session_generation": parent["session_generation"]}
+            if allowed:
+                assert (await server._on_close(close))["type"] == "close.ok"
+                assert tmux.kills == 1 and (await store.work_owed())["total"] == 0
+                closed = await store.fetch_session(HOST, row["session_name"])
+                assert closed["close_kind"] == "session_close"  # ordinary parent, no recovery bypass
+            else:
+                with pytest.raises(VerbError) as exc:
+                    await server._on_close(close)
+                assert exc.value.code == "lead_close_requires_disposition" and tmux.kills == 0
+                assert (await store.fetch_session(HOST, row["session_name"]))["status"] == "open"
+            observed = await store.submit(lambda conn: json.loads(conn.execute(
+                "SELECT record_json FROM v2_work_item_observations WHERE spec_id=?", (spec,)).fetchone()[0]))
+            assert observed["member"]["status"] == status and observed["source_hash"] == "already-settled-source"
+        finally:
+            store.stop()
+    asyncio.run(run())

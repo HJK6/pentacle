@@ -3943,7 +3943,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "state": "active",
-            "state_reason": "fd",
+            "state_reason": "members_working",
             "blocker": null,
             "owner_kind": "operator",
             "version": 2,
