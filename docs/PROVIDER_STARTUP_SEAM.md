@@ -95,3 +95,7 @@ does not provision accounts, launch daemons, authorize resource windows or
 certify an all-provider matrix. Without an explicitly authorized account window
 and isolated candidate resources, retain that live acceptance prerequisite;
 deterministic green cannot waive it.
+
+Current native startup tuples must match the [test prompt profile](test_prompt_profiles.md).
+Historical seam qualification remains bound to its original frozen tuple and
+does not qualify a newly configured model.

@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from _shared.spawn_profiles import resolve_test_profile
 
 from codex_rollout_norm import normalize_codex_rollout_record
 import spawn_fleet_smoke as smoke
@@ -185,6 +186,7 @@ def cell_callbacks(error, *, rejected_send=False, teardown_failure=False):
         calls.append(prefix)
         if prefix == "spawn_catalog_get":
             return {"type": "spawn_catalog_get.ok", "catalog_version": "fixture",
+                    "test_prompt_profile": resolve_test_profile(),
                     "profiles": {"desktop_manual": {"codex": ("gpt-6-luna", "max")}}}
         if prefix == "spawn":
             return {"stream_id": STREAM}

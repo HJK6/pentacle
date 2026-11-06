@@ -292,7 +292,11 @@ def prepare(repo, sha, input_path, python, runner):
             # The mandatory merge gate is independently required and reused once.
             if target["target"] != "v2-merge":
                 targets[key(target)] = target
-    required_cells = [{"host": activation["host"], "provider": "codex", "prompt_mode": "promptless"}]
+    from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple
+    profile = resolve_test_profile()
+    model, effort = test_prompt_tuple("codex", profile)
+    required_cells = [{"host": activation["host"], "provider": "codex", "prompt_mode": "promptless",
+                       "model": model, "effort": effort, "profile_sha256": profile["profile_sha256"]}]
     identity = {"candidate": sha, "inputs_sha256": digest(Path(input_path).read_bytes()),
                 "selector_sha256": selector_hash, "map_sha256": map_hash, "gate_config_sha256": config_hash,
                 "admission_sha256": LOADED_ADMISSION_SHA256,
@@ -303,7 +307,7 @@ def prepare(repo, sha, input_path, python, runner):
                 "target_needs": {t["target"]: read(repo / "scripts/gate-env.json")["profiles"]["pentacle"]["targets"][t["target"]]["needs"]
                                  for t in targets.values()},
                 "installed": installed, "external_inputs": external, "activation": activation,
-                "required_cells": required_cells}
+                "test_profile": profile, "required_cells": required_cells}
     plan = {"identity": identity, "reports": reports, "boundaries": [boundaries[k] for k in sorted(boundaries)],
             "targets": [targets[k] for k in sorted(targets)],
             "classification": "broad_fallback" if any(r["classification"] == "broad_fallback" for r in reports)
@@ -501,6 +505,8 @@ def admit(repo, sha, input_path, gate_evidence, python, runner):
 
 def revalidate(plan, input_path):
     identity = plan["identity"]
+    from _shared.spawn_profiles import resolve_test_profile
+    require(resolve_test_profile() == identity["test_profile"], "changed test profile/settings before activation")
     require(digest(Path(input_path).read_bytes()) == identity["inputs_sha256"], "changed release inputs before activation")
     require(digest(Path(__file__).read_bytes()) == identity["admission_sha256"], "changed admission code before activation")
     require(digest(QUALIFICATION_PATH.read_bytes()) == identity["qualification_sha256"], "changed qualification before activation")

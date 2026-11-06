@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Public host configuration must work without a built-in fleet."""
 import asyncio
 import json
@@ -180,7 +181,7 @@ def test_quota_cell_with_failed_teardown_reports_leak():
     from tools import spawn_fleet_smoke
     def rpc(payload, _expected):
         if payload["type"] == "spawn_catalog_get":
-            return {"type": "spawn_catalog_get.ok", "profiles": {
+            return {"test_prompt_profile": resolve_test_profile(), "type": "spawn_catalog_get.ok", "profiles": {
                 "desktop_manual": {"codex": ("gpt-6-sol", "medium")}},
                 "catalog_version": "test"}
         return {"stream_id": "local:v2-fleet-smoke-codex-example"}

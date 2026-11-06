@@ -6,6 +6,7 @@ invoked solely by the account recovery coordinator, after daemon admission.
 """
 from __future__ import annotations
 import contextlib
+import sys
 import json
 import math
 import os
@@ -15,6 +16,8 @@ import signal
 import subprocess
 import time
 import re
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from provider_accounts import AccountError, Binding, environment
 
@@ -370,7 +373,15 @@ def native_login(binding: Binding, browser_authorize, *, rpc_factory=CodexRPC):
         if slave >= 0: os.close(slave)
 
 
-def minimal_turn(binding: Binding, *, model: str, effort: str, cwd: str, run=subprocess.run):
+def minimal_turn(binding: Binding, *, model: str, effort: str, cwd: str, run=subprocess.run, test_profile=None):
+    from _shared.spawn_profiles import resolve_test_profile, test_prompt_tuple, SpawnProfileError
+    try:
+        profile = resolve_test_profile() if test_profile is None else test_profile
+        expected = test_prompt_tuple(binding.provider, profile)
+        if (model, effort) != expected:
+            raise AccountError("provider_probe_config_invalid")
+    except SpawnProfileError:
+        raise AccountError("provider_probe_config_invalid") from None
     if not model or not effort or not Path(cwd).is_absolute() or Path(cwd).is_relative_to(Path(binding.home)):
         raise AccountError("provider_probe_config_invalid")
     command = ([binding.executable, "-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"',
@@ -384,7 +395,7 @@ def minimal_turn(binding: Binding, *, model: str, effort: str, cwd: str, run=sub
 
 
 def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_authorize,
-           login, identity, model: str, effort: str, cwd: str, manifest=None, run=subprocess.run, before_activate=None):
+           login, identity, model: str, effort: str, cwd: str, manifest=None, run=subprocess.run, before_activate=None, test_profile=None):
     """Execute native login in the FINAL home and atomically activate on proof.
 
     ``login`` is the pinned provider's native authorization driver; the browser
@@ -409,7 +420,7 @@ def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_autho
                 intended_id = receipt.get("provider_id")
             if (not intended_id or receipt.get("provider_id") != intended_id or receipt.get("auth_mode") != "subscription"):
                 raise AccountError("account_enrollment_unverified")
-            minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run)
+            minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run, test_profile=test_profile)
             if identity(draft) != receipt: raise AccountError("provider_identity_changed")
             activation=receipt | {"store": "keychain" if draft.provider == "claude" and draft.platform == "macos" else "file",
                 "minimal_turn": True,"independent_login":True}
@@ -420,7 +431,7 @@ def enroll(registry, draft: Binding, *, expected_provider_id: str, browser_autho
 
 
 def adopt(registry, draft: Binding, *, expected_provider_id: str, identity, model: str, effort: str, cwd: str,
-          manifest=None, run=subprocess.run):
+          manifest=None, run=subprocess.run, test_profile=None):
     """Register a host-configured, already signed-in Codex home in place.
 
     No login runs and no credential file is created, copied, moved or renamed;
@@ -437,7 +448,7 @@ def adopt(registry, draft: Binding, *, expected_provider_id: str, identity, mode
             if (not expected_provider_id or receipt.get("provider_id") != expected_provider_id
                     or receipt.get("auth_mode") != "subscription"):
                 raise AccountError("account_enrollment_unverified")
-            minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run)
+            minimal_turn(draft, model=model, effort=effort, cwd=cwd, run=run, test_profile=test_profile)
             if identity(draft) != receipt: raise AccountError("provider_identity_changed")
             return registry.activate(draft, receipt | {"store": "file", "minimal_turn": True, "adopted_home": True},
                 expected_provider_id=expected_provider_id)

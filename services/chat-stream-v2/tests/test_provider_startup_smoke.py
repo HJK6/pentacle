@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Fail closed at the native/installed/daemon binding bridge, before input."""
 from dataclasses import replace
 import hashlib
@@ -22,7 +23,7 @@ def pinned(tmp_path, monkeypatch):
                       str(executable), 'codex-cli fixture', 'macos', 'identity-a', 'identity-a',
                       True, True, hashlib.sha256(executable.read_bytes()).hexdigest())
     value = {'binding': binding.public(), 'config_sha256': hashlib.sha256(config.read_bytes()).hexdigest(),
-             'model': 'gpt-6.1-sol', 'effort': 'high'}
+             'model': 'gpt-6-luna', 'effort': 'low'}
     path = tmp_path / 'tuple.json'
     path.write_text(json.dumps(value))
     monkeypatch.setattr(probe_module, 'configured_local_host', lambda: 'fixture-host')
@@ -92,7 +93,7 @@ def test_spawn_binding_is_checked_before_send_and_owned_child_is_closed(pinned, 
     probe = probe_module.ProviderStartupProbe(path, binding.host)
     calls = []
     account = dict(binding.public(), default_revision=1)
-    session = {'account_binding': account, 'effective_model': probe.model, 'effective_effort': probe.effort}
+    session = {'account_binding': account, 'effective_model': probe.model, 'effective_effort': probe.effort, 'requested_model': probe.model, 'requested_effort': probe.effort}
     if mismatch == 'account': account['alias'] = 'foreign'
     if mismatch == 'executable': account['executable_sha256'] = '0' * 64
     if mismatch == 'model': session['effective_model'] = 'other'
@@ -100,7 +101,7 @@ def test_spawn_binding_is_checked_before_send_and_owned_child_is_closed(pinned, 
     def rpc(payload, prefix):
         calls.append(prefix)
         if prefix == 'spawn_catalog_get':
-            return {'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
+            return {'test_prompt_profile': resolve_test_profile(), 'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
                     'profiles': {'desktop_manual': {'codex': ['catalog-default', 'medium']}}}
         if prefix == 'spawn':
             assert payload['model'] == probe.model and payload['effort'] == probe.effort
@@ -185,7 +186,7 @@ def nux_probe(pinned, monkeypatch):
     path, value, binding = pinned
     content = ('model = "fixture-model"\ncli_auth_credentials_store = "file"\nunchanged = 1\n'
                '[tui]\nstatus_line = ["model-name"]\n[tui.model_availability_nux]\n'
-               '"gpt-6.1-sol" = 2\n"other-model" = 2\n'
+               '"gpt-6-luna" = 2\n"other-model" = 2\n'
                '[projects."/fixture/trusted"]\ntrust_level = "trusted"\n')
     config = Path(binding.home) / 'config.toml'
     config.write_text(content)
@@ -200,23 +201,23 @@ def test_selected_native_nux_counter_can_increment_after_exact_initial_pin(pinne
     probe, config, content = nux_probe(pinned, monkeypatch)
     receipt = probe.observe()
     assert receipt['native_identity'] == 'matched'
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3'))
     probe.verify_inputs()
     # Rechecking unchanged bytes is valid; a later increase is also valid.
     probe.verify_inputs()
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 5'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 5'))
     probe.verify_inputs()
     comparison = receipt['config_comparison']
     assert comparison['matched'] and comparison['comparison'] == 'allowed_native_nux_increase'
     assert comparison['raw_before_sha256'] != comparison['raw_after_sha256']
     assert comparison['effective_before_sha256'] == comparison['effective_after_sha256']
-    assert comparison['allowed_field'] == 'tui.model_availability_nux.gpt-6.1-sol'
+    assert comparison['allowed_field'] == 'tui.model_availability_nux.gpt-6-luna'
     assert 'trust_level' not in json.dumps(receipt)
 
 
 def test_native_nux_counter_does_not_relax_initial_raw_config_pin(pinned, monkeypatch):
     probe, config, content = nux_probe(pinned, monkeypatch)
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3'))
     with pytest.raises(AccountError, match='provider_config_changed'):
         probe.observe()
 
@@ -225,13 +226,13 @@ def test_native_nux_counter_does_not_relax_initial_raw_config_pin(pinned, monkey
     ('"fixture-model"', '"different-model"'),
     ('"model-name"', '"different-status"'),
     ('"other-model" = 2', '"other-model" = 3'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = -1'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 1'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = true'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3.0'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = "3"'),
-    ('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = [3]'),
-    ('"gpt-6.1-sol" = 2\n', ''),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = -1'),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = 1'),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = true'),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = 3.0'),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = "3"'),
+    ('"gpt-6-luna" = 2', '"gpt-6-luna" = [3]'),
+    ('"gpt-6-luna" = 2\n', ''),
     ('"other-model" = 2', '"other-model" = 2\n"new-model" = 3'),
     ('unchanged = 1', 'unchanged = true'),
     ('trust_level = "trusted"', 'trust_level = "untrusted"'),
@@ -269,7 +270,7 @@ def test_pinned_malformed_toml_cannot_qualify(pinned, monkeypatch):
 def test_nux_increment_cannot_hide_other_drift(pinned, monkeypatch, change):
     probe, config, content = nux_probe(pinned, monkeypatch)
     probe.observe()
-    changed = content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3')
+    changed = content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3')
     if change == 'provider': changed = 'model_provider = "foreign"\n' + changed
     elif change == 'trust': changed = changed.replace('"trusted"', '"untrusted"')
     elif change == 'sibling': changed = changed.replace('"other-model" = 2', '"other-model" = 3')
@@ -286,7 +287,7 @@ def test_nux_increment_cannot_hide_other_drift(pinned, monkeypatch, change):
 def test_invalid_initial_nux_counter_never_reaches_native(pinned, monkeypatch, counter):
     path, value, binding = pinned
     config = Path(binding.home) / 'config.toml'
-    config.write_text('[tui.model_availability_nux]\n"gpt-6.1-sol" = ' + counter + '\n')
+    config.write_text('[tui.model_availability_nux]\n"gpt-6-luna" = ' + counter + '\n')
     value['config_sha256'] = hashlib.sha256(config.read_bytes()).hexdigest()
     path.write_text(json.dumps(value))
     monkeypatch.setattr(probe_module, 'verify_binary', lambda _: pytest.fail('invalid config before native process'))
@@ -298,7 +299,7 @@ def test_allowed_nux_rewrite_invalidates_stale_future_pin(pinned, monkeypatch):
     path, _, binding = pinned
     probe, config, content = nux_probe(pinned, monkeypatch)
     probe.observe()
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3'))
     probe.verify_inputs()
     monkeypatch.setattr(probe_module, 'verify_binary', lambda _: pytest.fail('raw mismatch before any native process'))
     with pytest.raises(AccountError, match='provider_config_changed'):
@@ -310,9 +311,9 @@ def test_allowed_nux_rewrite_invalidates_stale_future_pin(pinned, monkeypatch):
 def test_nux_counter_cannot_decrease_after_an_accepted_increase(pinned, monkeypatch):
     probe, config, content = nux_probe(pinned, monkeypatch)
     probe.observe()
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 5'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 5'))
     probe.verify_inputs()
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 4'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 4'))
     with pytest.raises(AccountError, match='provider_config_changed'):
         probe.verify_inputs()
 
@@ -324,7 +325,7 @@ def test_new_nux_leaf_cannot_become_an_exception(pinned, monkeypatch):
         'provider_id': binding.provider_id, 'pool_id': binding.pool_id})
     probe.observe()
     (Path(binding.home) / 'config.toml').write_text(
-        'cli_auth_credentials_store = "file"\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 3\n')
+        'cli_auth_credentials_store = "file"\n[tui.model_availability_nux]\n"gpt-6-luna" = 3\n')
     with pytest.raises(AccountError, match='provider_config_changed'):
         probe.verify_inputs()
 
@@ -334,7 +335,7 @@ def test_nux_exception_preserves_independent_binding_guards(pinned, monkeypatch,
     _, _, binding = pinned
     probe, config, content = nux_probe(pinned, monkeypatch)
     probe.observe()
-    config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+    config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3'))
     if drift == 'binary':
         Path(binding.executable).write_text('#!/bin/sh\nexit 0\n')
         with pytest.raises(AccountError, match='provider_executable_changed'):
@@ -350,7 +351,7 @@ def test_nux_rewrite_during_native_observation_retains_metadata_only_receipt(pin
     _, _, binding = pinned
     probe, config, content = nux_probe(pinned, monkeypatch)
     def observe(_):
-        config.write_text(content.replace('"gpt-6.1-sol" = 2', '"gpt-6.1-sol" = 3'))
+        config.write_text(content.replace('"gpt-6-luna" = 2', '"gpt-6-luna" = 3'))
         return {'provider_id': binding.provider_id, 'pool_id': binding.pool_id}
     monkeypatch.setattr(probe_module, 'codex_observation', observe)
     receipt = probe.observe()

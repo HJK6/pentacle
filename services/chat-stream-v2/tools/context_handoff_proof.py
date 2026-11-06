@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.spawn_profiles import validate_test_profile, test_prompt_tuple
 
 
 def verify_handoff(manifest: dict, rows: dict, receipt: dict) -> None:
@@ -24,9 +27,11 @@ def verify_handoff(manifest: dict, rows: dict, receipt: dict) -> None:
         raise ValueError('witness parentage mismatch')
     if source['status'] != 'closed' or source['close_kind'] != 'handed_off':
         raise ValueError('source not closed by handoff')
+    profile = validate_test_profile(manifest.get('test_profile'))
     for row in (source, successor):
-        if (row['effective_model'], row['effective_effort']) != ('claude-fable-5-1', 'high'):
-            raise ValueError('Fable source/successor tuple mismatch')
+        expected = test_prompt_tuple(row['provider'], profile)
+        if (row['effective_model'], row['effective_effort']) != expected:
+            raise ValueError('frozen test source/successor tuple mismatch')
         if row.get('routing_integrity') == 'mismatch':
             raise ValueError('routing integrity mismatch')
     if successor['status'] != 'open' or witness['status'] != 'open':
@@ -45,7 +50,7 @@ def main() -> None:
     root = args.artifact_directory
     verify_handoff(*(json.loads((root/name).read_text()) for name in (
         'handoff-manifest.json', 'lead-lineage-readback.json', 'successor-delivery.json')))
-    print('PASS: installed Fable handoff delivery, generations and child parentage')
+    print('PASS: installed test-profile handoff delivery, generations and child parentage')
 
 
 if __name__ == '__main__':

@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """Explicit selection reaches production builders without changing defaults."""
 import asyncio
 from contextlib import contextmanager
@@ -70,13 +71,13 @@ def test_canonical_cell_carries_and_checks_explicit_account(mode):
     def rpc(payload, expected):
         seen.append(payload)
         if expected == 'spawn_catalog_get':
-            return {'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
+            return {'test_prompt_profile': resolve_test_profile(), 'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
                     'profiles': {'desktop_manual': {'codex': ['gpt-6.1-sol', 'high']}}}
         if expected == 'spawn':
             return {'type': 'spawn.ok', 'stream_id': 'host-a:owned',
                     'session': {'account_binding': binding}}
         if expected == 'list_sessions':
-            return {'type': 'list_sessions.ok', 'active': [{'stream_id': 'host-a:owned', 'account_binding': binding}]}
+            return {'type': 'list_sessions.ok', 'active': [{'stream_id': 'host-a:owned', 'account_binding': binding, 'requested_model': 'gpt-6-luna', 'effective_model': 'gpt-6-luna', 'requested_effort': 'low', 'effective_effort': 'low'}]}
         return {'type': 'send.result', 'delivery': 'accepted', 'receipt_id': 'fixture'}
     result = smoke.run_cell('host-a', 'codex', mode, account='spare', rpc=rpc,
         wait_ready=lambda _: None, wait_event=lambda *_: None, verify_teardown=lambda _: None,
@@ -91,7 +92,7 @@ def test_omitted_selector_keeps_default_builder_compatibility():
     seen = []
     def rpc(payload, expected):
         if expected == 'spawn_catalog_get':
-            return {'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
+            return {'test_prompt_profile': resolve_test_profile(), 'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
                     'profiles': {'desktop_manual': {'codex': ['gpt-6.1-sol', 'high']}}}
         seen.append(payload)
         raise RuntimeError('isolated admission capture; zero provider invocations')
@@ -142,7 +143,7 @@ def test_wrong_account_receipt_is_closed_before_promptless_send():
     def rpc(payload, prefix):
         seen.append(prefix)
         if prefix == 'spawn_catalog_get':
-            return {'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
+            return {'test_prompt_profile': resolve_test_profile(), 'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
                     'profiles': {'desktop_manual': {'codex': ['gpt-6.1-sol', 'high']}}}
         return {'stream_id': 'host-a:owned', 'session': {'account_binding': {
             'host': 'host-a', 'provider': 'codex', 'alias': 'primary', 'generation': 'login-one'}}}
@@ -176,7 +177,7 @@ def test_smoke_notice_keys_preserve_omission_and_separate_accounts(monkeypatch, 
     monkeypatch.setattr(smoke, 'notify_operator_failure', lambda _payload: {})
     accounts = {('host-a', 'codex'): account} if account is not None else {}
     (row,) = smoke.run_matrix('ws://fixture', Path('unused'), 1,
-        (('host-a', 'codex', 'promptless'),), accounts=accounts)
+        (('host-a', 'codex', 'promptless'),), accounts=accounts, test_profile_snapshot=resolve_test_profile())
     suffix = '' if account is None else ':' + account
     expected = {
         'failure': f"spawn-fleet-smoke:host-a:codex{suffix}:promptless:{row['stage']}",

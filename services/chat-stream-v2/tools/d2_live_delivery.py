@@ -23,6 +23,7 @@ SERVICE = WORKTREE / "services" / "chat-stream-v2"
 for import_root in (WORKTREE / "services", WORKTREE / "services" / "agent-orch", SERVICE, SERVICE / "tools"):
     sys.path.insert(0, str(import_root))
 
+from _shared.spawn_profiles import validate_test_profile, test_prompt_tuple
 from agent_orch.config import load_config
 from agent_orch.wsclient import _one_shot_rpc
 from agent_orch.send_boundary import defer_stream_token
@@ -177,7 +178,8 @@ class D2Journey:
         return rows[0] if rows else None
 
     def _spawn(self, window: LiveWindow, catalog: dict, label: str, provider: str, parent: str | None = None):
-        model, effort = catalog["profiles"]["desktop_manual"][provider]
+        profile = validate_test_profile(catalog.get("test_prompt_profile"))
+        model, effort = test_prompt_tuple(provider, profile)
         idempotency_key = uuid.uuid4().hex
         name = f"d2-live-{label}-{idempotency_key[:12]}"
         payload = {
@@ -199,6 +201,7 @@ class D2Journey:
         if account is not None:
             payload['account'] = account
         owned = window.spawn(payload)
+        self.result["test_profile"] = profile
         self.owned[owned.stream_id] = {
             "label": label, "provider": provider, "request_id": owned.request_id,
             "idempotency_key": owned.idempotency_key, "stream_id": owned.stream_id,

@@ -1578,3 +1578,32 @@ def test_exact_provider_manifest_uses_shared_reviewed_snapshot():
     assert metadata["codex"]["pin_digest"]==digest(pin)
     assert all("minimum_version" not in entry for entry in metadata.values())
     assert metadata["claude"]["artifacts"]==pin["providers"]["claude"]["artifacts"]
+
+
+def test_archive_and_installed_helpers_bind_matching_private_test_settings(tmp_path):
+    repo = tmp_path / 'repo'
+    shared = repo / 'services/_shared'
+    shared.mkdir(parents=True)
+    source = SCRIPT.parents[2] / '_shared'
+    for name in ('spawn_profiles.py', 'spawn_defaults.json'):
+        shutil.copy2(source / name, shared / name)
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Pentacle Agent',
+        '-c', 'user.email=agent@users.noreply.github.com', 'commit', '-qm', 'fixture'], check=True)
+    commit = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+    overlay = json.dumps({'schema_version': 1, 'profiles': {'test_prompt': {
+        'codex': {'model': 'gpt-5.6-luna', 'effort': 'low'}}}}).encode()
+    bundle = tmp_path / 'bundle'; bundle.mkdir()
+    manifest = installer._archive(repo, commit, bundle, spawn_settings=overlay)
+    assert manifest['test_settings'] == {
+        'spawn_defaults.json': installer._sha256(shared / 'spawn_defaults.json'),
+        'spawn_defaults.local.json': hashlib.sha256(overlay).hexdigest()}
+    target = installer.Target('fixture', 'localhost', str(tmp_path / 'releases'), True)
+    release = Path(installer.stage_helper_source(target, bundle, commit, manifest))
+    installed = release / 'app/services/_shared/spawn_defaults.local.json'
+    assert installed.read_bytes() == overlay
+    installer.verify_helper_source(target, commit, manifest)
+    installed.chmod(0o600); installed.write_bytes(overlay + b' ')
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.verify_helper_source(target, commit, manifest)
