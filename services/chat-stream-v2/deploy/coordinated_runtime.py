@@ -213,6 +213,42 @@ class Runtime:
                     "mode": info.st_mode & 0o777, "uid": info.st_uid}
         return {"path": str(path), "saved": None, "sha256": None, "mode": None, "uid": os.getuid()}
 
+    def installed_prior_bundle(self, sha, bundle, policy, scope, qualification):
+        """Preserve the qualified immutable prior instead of restamping it."""
+        host = scope["local_hosts"][0]
+        target = self.installer.Target(host, "localhost",
+            str(helper_release_root(policy["executors"][host]["script"])), True)
+        release = Path(target.root) / sha
+        if not release.exists() and not release.is_symlink():
+            return None
+        manifest = json.loads((release / "manifest.json").read_bytes())
+        if not isinstance(manifest, dict) or manifest.get("commit") != sha:
+            raise Invalid("installed prior manifest source mismatch")
+        self.installer.verify_helper_source(target, sha, manifest)
+        if qualification.get("receipt"):
+            accepted = read_json(qualification["receipt"])
+            if accepted.get("source", {}).get("target", {}).get("manifest") != manifest:
+                raise Invalid("installed prior differs from qualified manifest")
+        for name in ("pentacle.tar", "manifest.json"):
+            atomic_bytes(bundle / name, (release / name).read_bytes())
+        if (file_digest(bundle / "pentacle.tar") != manifest["archive_sha256"]
+                or read_json(bundle / "manifest.json") != manifest):
+            raise Invalid("installed prior archive changed during capture")
+        # Verify the entire source against the accepted Git SHA, independently
+        # of the installed manifest. Private overlay/dependency payloads remain
+        # hash-bound by the original archive and are never rewritten.
+        git_archive = bundle / "git-source.tar"
+        self.checked(("git", "archive", "--format=tar", "--output", str(git_archive), sha))
+        with tarfile.open(git_archive) as expected, tarfile.open(bundle / "pentacle.tar") as actual:
+            source_files = {m.name: expected.extractfile(m).read() for m in expected if m.isfile()}
+            installed_files = {m.name: actual.extractfile(m).read() for m in actual if m.isfile()}
+        if (any(installed_files.get(name) != data for name, data in source_files.items())
+                or any(name not in source_files and not name.startswith("runtime-deps/")
+                       and name != "services/_shared/spawn_defaults.local.json" for name in installed_files)):
+            raise Invalid("installed prior archive differs from Git source")
+        self.installer.verify_helper_source(target, sha, manifest)
+        return manifest
+
     def prepare(self, intent, folder):
         self.d.verify_release_checkout(self.repo, self.runner)
         if self.repo == self.controller or self.controller.is_relative_to(self.repo):
@@ -271,7 +307,10 @@ class Runtime:
         for direction, sha in (("target", intent["target_sha"]), ("prior", intent["prior_sha"])):
             bundle = folder / (direction + "-bundle")
             bundle.mkdir(mode=0o700)
-            manifest = self.installer._archive(self.repo, sha, bundle, provider_cli_pin=accounts["pin"], spawn_settings=overlay)
+            manifest = (self.installed_prior_bundle(sha, bundle, policy, scope, prior_qualification)
+                        if direction == "prior" else None)
+            if manifest is None:
+                manifest = self.installer._archive(self.repo, sha, bundle, provider_cli_pin=accounts["pin"], spawn_settings=overlay)
             snapshot = folder / (direction + "-source")
             snapshot.mkdir(mode=0o700)
             with tarfile.open(bundle / "pentacle.tar") as archive:
