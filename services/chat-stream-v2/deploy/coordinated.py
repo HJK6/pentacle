@@ -19,7 +19,7 @@ import uuid
 
 
 INTENT_SCHEMA = "pentacle.coordinated-deploy.intent.v1"
-RECEIPT_SCHEMA = "pentacle.coordinated-deploy.receipt.v1"
+RECEIPT_SCHEMA = "pentacle.coordinated-deploy.receipt.v2"
 PHASES = {"prepared", "discarded", "stopping", "stopped", "switching", "verifying", "committed",
           "rolling_back", "rolled_back", "recovery_required"}
 TERMINAL = {"committed", "rolled_back", "discarded"}
@@ -404,8 +404,10 @@ class Transaction:
             self.adapter.revalidate_stopped(receipt, rollback=True)
             self.adapter.switch(receipt, rollback=True)
             result = self.adapter.start_verify(receipt, rollback=True)
-            if result.get("outcome") != "passed":
-                raise Invalid("prior health failed after restoration")
+            if (result.get("outcome") != "passed"
+                    or (result.get("restoration") or {}).get("outcome") != "passed"
+                    or (result.get("model_canary") or {}).get("outcome") != "not_run_by_design"):
+                raise Invalid("prior no-input restoration failed or missing")
             self.phase(journal, "rolled_back", rollback_result=result,
                        restored=self.adapter.current(receipt), rollback_failure=None)
         except Exception as exc:
@@ -428,7 +430,8 @@ class Transaction:
         return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
                 "phase": journal["phase"], "outcome": "passed" if success else "failed",
                 "scope": "declared_optional_exclusions" if scoped else "full_matrix",
-                "full_fleet_acceptance": success and not scoped,
+                "full_fleet_acceptance": success and not scoped and not explicit_rollback,
+                "verification_kind": "restoration" if explicit_rollback else "model_canary",
                 "forward_failure": journal.get("forward_failure"), "rollback_failure": journal.get("rollback_failure"),
                 "journal_failure": journal.get("journal_failure"),
                 "verification": journal.get("rollback_result" if explicit_rollback else "result"),

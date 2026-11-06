@@ -35,15 +35,28 @@ its binding/config pins; a provider-tuple file must match the test profile.
 Native operation receipts retain the profile used before execution, including
 on resume. Native host `cells.*.model/effort` no longer select a test model.
 
-Deployment preparations seal test profile JSON beside their existing receipts,
-including per-cell tuples and settings/resolver identity. `--test-profile-snapshot PATH` accepts this derived artifact in the fleet runner's dry and live modes.
-The deployer verifies the sealed file; each live cell compares it with the
-daemon catalog before spawning and proves requested/effective tuples before
-cleanup. Forward and rollback each retain their prepared snapshots. Legacy
-direct deployment also stamps both directions and rechecks settings before
-activation. A prior without profile/snapshot support refuses before a stop or
-prompt; it requires an explicitly qualified compatible prior. A previous
-one-time model exception grants no exception to this check.
+Forward deployment preparations seal test profile JSON, per-cell tuples and
+settings/resolver identity. `--test-profile-snapshot PATH` accepts that derived
+artifact in the fleet runner's dry and live modes. The deployer verifies it;
+each forward cell checks the live catalog and requested/effective tuple before
+cleanup. Missing/invalid target settings and drift still refuse before inference.
+
+Daemon rollback sends no model input. A known-good prior needs its accepted
+production forward qualification and exact source gate, but no test-profile API,
+sealed runner or model smoke. After restoring the owned source/settings/policy/
+helper bindings and launchd preimages, recovery proves fresh boot/PID/birth/SHA,
+account/catalog readback and one raw zero-input spawn-to-ready-and-owned-close
+per included host/provider/account binding. Fresh strict helper/native dispatch
+proof, attributed slow-consumer checks and fenced cleanup remain mandatory.
+The CLI's baseline injection and fleet smoke's marker-sending `promptless` mode
+are not zero-input probes.
+
+Rollback records restoration acceptance separately from model canaries not run
+by design. It does not certify inference auth/quota/availability or reply delivery,
+and never implies fresh full-fleet model acceptance. Automatic recovery preserves
+the failed forward outcome. Old receipts stay immutable under their pinned
+controller and original policy; new coordinated receipts use schema v2 and
+unsupported receipts fail closed. No new flag or model exception is required.
 
 The existing immutable installer distributes and verifies matching shared
 settings, including private overlays. Coordinated transactions preserve overlay

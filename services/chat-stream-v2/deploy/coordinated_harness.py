@@ -322,7 +322,12 @@ class Rehearsal:
         if welcome.get("runtime_sha") != expected or ready["loaded_policy"] != c.file_digest(self.policy):
             raise c.Invalid("disposable runtime/policy readback mismatch")
         if self.fail_forward and not rollback: raise c.Invalid("controlled post-switch failure")
-        return {"outcome": "passed", "runtime": ready, "native_boundary": "mocked", "fleet_readiness": "not_tested"}
+        result = {"outcome": "passed", "runtime": ready, "native_boundary": "mocked", "fleet_readiness": "not_tested"}
+        if rollback:
+            # The disposable adapter proves ordering only; native input is mocked.
+            result.update(restoration={"outcome":"passed", "scope":"disposable_ordering"},
+                          model_canary={"outcome":"not_run_by_design"})
+        return result
 
     def close(self):
         self.stop(None)

@@ -76,7 +76,8 @@ class Counterparts:
         self.pid = 222 if rollback else 333
         for step in ("readback", "dispatch", "canary", "slow_consumer", "cleanup"):
             self.event(step + "_" + direction)
-        return {"outcome": "passed"}
+        return ({"outcome":"passed", "restoration":{"outcome":"passed"},
+                 "model_canary":{"outcome":"not_run_by_design"}} if rollback else {"outcome":"passed"})
 
     def validate_recovery(self, receipt, journal):
         self.event("validate_recovery")
@@ -453,6 +454,15 @@ def runtime_preparation(tmp_path, monkeypatch):
             "source": {"sha_before": sha, "sha_after": sha, "clean_before": True, "clean_after": True},
             "tiers": [{"tier": tier, "passed": True} for tier in ("unit", "smoke")], "passed": True})
         intent["gate_evidence" if direction == "target" else "prior_gate_evidence"] = str(path)
+    # This preparation fixture represents an already production-qualified prior.
+    # The no-inference rollback contract binds that historical witness, not just Git.
+    rows = [{"host":b["host"], "provider":b["provider"], "prompt_mode":mode,
+             "outcome":"passed", "account_binding":b}
+            for b in config["bindings"] for mode in ("prompted","promptless")]
+    d._write_stamp(fixture.repo, service, {"sha":fixture.prior,
+        "daemon_runtime_readback":{"sha":fixture.prior},
+        "daemon_boot_readback":{"outcome":"observed"},
+        "fleet_smoke":{"outcome":"passed", "cells":rows}})
     monkeypatch.setenv("HOME", str(fixture.home))
     yield runtime, fixture, intent, root
     fixture.close()
@@ -493,7 +503,7 @@ def test_runtime_prepare_rejects_other_entrypoint_prefixes_before_staging(runtim
     assert before == (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
 
 
-def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch(runtime_preparation):
+def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch(runtime_preparation, monkeypatch):
     import time
     runtime, fixture, intent, root = runtime_preparation
     plan = private_json(root / "intent.json", intent)
@@ -543,6 +553,47 @@ def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch
             return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True, "status": "PASS", "cells": rows}), "")
         return actual_runner(argv, cwd)
     runtime.runner = runner
+    # Intercept only the daemon wire/provider boundary. Run the real no-input
+    # verifier, ownership fence and helper subprocess/artifact proof on rollback.
+    from contextlib import contextmanager
+    from deploy import restoration
+    from _shared.spawn_profiles import catalog
+    @contextmanager
+    def connection(url, token, timeout, registry):
+        registry.configure_runtime({"capabilities":{"close_expected_generation":True}})
+        rows = []
+        def rpc(payload, prefix):
+            assert payload["type"] not in {"send","resume"}
+            assert not set(payload) & {"initial_prompt","brief","role","text"}
+            if prefix == "spawn_catalog_get": return catalog()
+            if prefix == "account":
+                return {"type":"account.ok", "accounts":c.read_json(fixture.b.config)["bindings"]}
+            if prefix == "list_sessions": return {"type":"list_sessions.ok", "active":rows}
+            if prefix == "spawn":
+                sealed = c.load_receipt(receipt_path)
+                raw = next(b for b in sealed["accounts"]["selected_bindings"] if b["provider"]==payload["provider"])
+                helper = {**sealed["source"]["prior"]["original_helpers"][raw["host"]],
+                          **c.read_json(fixture.policy)["executors"][raw["host"]]}
+                proof = runtime.remote_json(helper, [helper["python"], helper["script"], "verify-artifact",
+                    "--provider", raw["provider"], "--account", raw["alias"], "--login-generation", raw["generation"],
+                    "--operation-id", "zero-input-launch", "--pin-json", json.dumps(sealed["accounts"]["pin"])])
+                from provider_accounts import Binding
+                with sqlite3.connect(sealed["accounts"]["database"]) as conn:
+                    conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("provider_cli.verified:"+Binding(**raw).key,
+                        json.dumps({"proof":proof, "verified_at":time.time()})))
+                row = {"stream_id":"fixture:"+payload["session_name"], "host":"fixture",
+                       "session_name":payload["session_name"], "session_generation":"fresh-rollback",
+                       "account_binding":raw, "bootstrap_state":"ready"}
+                rows.append(row); return row
+            if prefix == "close": rows.clear(); return {"type":"close.ok"}
+            raise AssertionError(prefix)
+        def register(payload, result): registry.register_spawn(payload, result, rows[0])
+        register.prepare_owned_spawn = registry.prepare_spawn
+        def close(stream):
+            registry.close(stream, inventory=lambda deadline:rows,
+                send_close=lambda payload:rpc(payload,"close"), wait_gone=lambda owned,deadline:not rows, timeout=1)
+        yield rpc, lambda stream:None, lambda *a:pytest.fail("no model response expected"), register, close
+    monkeypatch.setattr(restoration, "_operator_connection", connection)
     with c.transaction_lock(runtime.repo) as folder:
         tx = c.Transaction(runtime, folder)
         tx.prepare(plan, receipt_path)
@@ -930,7 +981,7 @@ def test_test_settings_and_snapshot_drift_refuse_before_stop(runtime_preparation
     assert not runtime.stopped
 
 
-def test_actual_legacy_dry_plan_without_profile_is_not_rollback_compatible(runtime_preparation):
+def test_legacy_dry_plan_still_refuses_forward_model_smoke(runtime_preparation):
     runtime, fixture, intent, root = runtime_preparation
     scope = c.host_scope(intent['machines_file'], [])
     legacy = {'source': intent['machines_file'], 'hosts': ['fixture'], 'optional_hosts': [],
