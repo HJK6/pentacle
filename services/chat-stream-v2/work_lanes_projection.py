@@ -16,7 +16,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_lead_lost, lane_progress
+from work_lane_progress import lane_state, members_working, lane_progress
 from store_work_lane_episodes import LaneEpisodeSink
 
 LANE_FRAME_CAP = 64
@@ -113,30 +113,19 @@ def attribute_members(members: list[dict[str, Any]], sessions_by_stream: dict[st
     return out
 
 
-def _members_working(lane: dict[str, Any], sessions_by_stream: dict[str, dict[str, Any]]) -> bool:
-    from store_specs import effective_assignment
-    from store_work_lanes import lead_static_eligible
-
-    members = {member["spec_id"] for member in lane.get("_members") or []}
-    return any(row.get("status") == "open" and effective_assignment(row) in members
-               and lead_static_eligible(row, lane.get("owner_kind"))
-               for row in sessions_by_stream.values())
-
-
 def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
                  *, index_available: bool | None = None, all_members: bool = False,
                  sessions_by_stream: dict[str, dict[str, Any]] | None = None,
                  questions_by_spec: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    stored = lane["work_state"]
-    state, reason = stored, lane.get("work_state_reason")
+    lane = dict(lane)
+    # Store rows carry authoritative uncapped attendance. Pure callers may supply
+    # their session census explicitly; presence never overrides stored ownership.
+    if "_members_working" not in lane:
+        lane["_members_working"] = members_working(lane, list((sessions_by_stream or {}).values()))
+    state, reason = lane_state(lane)
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
     if sessions_by_stream is not None:
         progress["members"] = attribute_members(progress["members"], sessions_by_stream, questions_by_spec)
-    if lane_lead_lost(lane) and not lane.get("_qualifies"):
-        # An unexpected owner loss is a fault the FD repairs, never an intentional pause.
-        state, reason = "active", "lead_lost"
-    elif stored == "paused" and _members_working(lane, sessions_by_stream or {}):
-        state, reason = "active", "members_working"
     return {
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
         "state": state, "state_reason": reason, "blocker": lane.get("blocker"),
@@ -253,6 +242,10 @@ class WorkLanesInventory:
         self.refresh()
         if self._task is not None:
             await asyncio.shield(self._task)
+        # The ordinary drain isolates errors from inventory consumers. A close
+        # caller needs positive refresh evidence before using a cached status.
+        if self.specs is not None and self._index_dirty:
+            raise RuntimeError("work_index_refresh_pending")
 
     def refresh(self) -> None:
         """Coalesced, non-blocking: reconcile lead loss then emit if changed.

@@ -183,10 +183,11 @@ does not resume a task, switch models, or produce a completion report.
 
 `agent-orch work owed --json` clears assignment debt on the normal accepted
 observation scan when source is fresh, has a revision, and is `completed`,
-`deprecated` or `backlog`, including work already settled before assignment.
-Backlog is deferred work. Other dispositions still require the existing
-witnessed transition or changed valid blocked declaration. Unusable source
-cannot clear debt from cached status; a later healthy scan can repair it.
+`deprecated`, `backlog`, `ready_for_dev`, `blocked` or `needs_qa`, including
+work already settled before assignment. `analysis` and `in_progress` remain
+active. Unusable source cannot clear debt from cached status; a later healthy
+scan can repair it. Lead, nexus and planner close checks also retain unresolved
+assignment history; see [Lead disposition and close](docs/lead-dispositions.md).
 
 `agent-orch work unattended --json` lists fresh `in_progress` work without a
 qualifying live lead or Nexus. Missing records do not degrade this list when
@@ -220,7 +221,9 @@ are required and audited. Protected assistants and leads or visible chats of
 open operator-owned lanes are refused, including with force or confirmation
 flags. Idle, child/spawn, external close-ruling and process-death checks still
 apply; a missing terminal report uses the audited exact-generation waiver, and
-a lead with pending disposition keeps owed debt with FD custody. Binding,
+an ordinary accountable-owner close requires a fresh disposition or live
+same-spec successor. Explicit `--force` recovery of the FD's own proven busy
+child retains owed debt with FD custody; a reason and request id are required. Binding,
 generation and lane ownership are rechecked under the close fence before
 termination. Audit rows are `manager_close*` with `actor_kind=front_desk`. See
 [Fleet lifecycle authority](../../docs/assistant.md#fleet-lifecycle-authority).

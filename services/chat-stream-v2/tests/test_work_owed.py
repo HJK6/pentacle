@@ -32,7 +32,7 @@ async def end(store, row, kind="operator_close"):
         pane_status="pane_dead", expected_generation=row["session_generation"], close_kind=kind)
 
 
-@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog", "blocked", "ready_for_dev", "needs_qa"])
 @pytest.mark.parametrize("known", [False, True])
 @pytest.mark.parametrize("arrival", ["before_assignment", "during_assignment", "after_close"])
 def test_fresh_settled_source_prevents_or_clears_debt(status, known, arrival):
@@ -41,7 +41,7 @@ def test_fresh_settled_source_prevents_or_clears_debt(status, known, arrival):
         store = Store(); store.start()
         try:
             if known:
-                await observe(store, "blocked", "baseline", 90)
+                await observe(store, "in_progress", "baseline", 90)
             if arrival == "before_assignment":
                 await observe(store, status, "settled", 100)
             owner = await lead(store)
@@ -66,7 +66,7 @@ def test_fresh_settled_source_prevents_or_clears_debt(status, known, arrival):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog", "blocked", "ready_for_dev", "needs_qa"])
 @pytest.mark.parametrize("known", [False, True])
 def test_old_registry_repairs_on_unchanged_healthy_scan_after_restart(tmp_path, status, known):
     from work_owed import STATE_KEY
@@ -104,7 +104,7 @@ def test_old_registry_repairs_on_unchanged_healthy_scan_after_restart(tmp_path, 
     asyncio.run(seed()); asyncio.run(repair())
 
 
-@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog"])
+@pytest.mark.parametrize("status", ["completed", "deprecated", "backlog", "blocked", "ready_for_dev", "needs_qa"])
 @pytest.mark.parametrize("quality", ["stale", "missing", "ambiguous", "unavailable", "no_revision"])
 def test_cached_settled_status_cannot_clear_unusable_source(status, quality):
     async def run():
@@ -139,10 +139,10 @@ def test_cached_settled_status_cannot_clear_unusable_source(status, quality):
     ("backlog", None, [("in_progress", None)], 1),
     ("in_progress", None, [("blocked", None), ("in_progress", None)], 1),
     ("backlog", None, [("in_progress", None), ("backlog", None)], 0),
-    ("blocked", "2026-10-25 authority — old reason", [("blocked", "2026-10-25 authority — old reason")], 1),
+    ("blocked", "2026-10-25 authority — old reason", [("blocked", "2026-10-25 authority — old reason")], 0),
     ("blocked", "2026-10-25 authority — old reason", [("blocked", "2026-10-25 authority — new reason")], 0),
     ("analysis", None, [("backlog", None)], 0),
-    ("blocked", None, [("blocked", None)], 1),
+    ("blocked", None, [("blocked", None)], 0),
 ])
 def test_accepted_revision_counterexamples(baseline, park, changes, owed):
     async def run():
@@ -174,14 +174,14 @@ def test_untouched_work_has_no_assignment_debt(status):
             assert (await store.work_owed())["total"] == 0
             owner = await lead(store)
             await end(store, owner, "session_close")
-            assert (await store.work_owed())["total"] == int(status != "backlog")
+            assert (await store.work_owed())["total"] == int(status == "analysis")
         finally:
             store.stop()
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("status", ["blocked", "analysis", "ready_for_dev", "needs_qa"])
-def test_other_dispositions_still_require_witnessed_status_transition(status):
+def test_fresh_nonactive_status_disposes_but_analysis_remains_active(status):
     async def run():
         store = Store(); store.start()
         try:
@@ -189,7 +189,7 @@ def test_other_dispositions_still_require_witnessed_status_transition(status):
             owner = await lead(store)
             await observe(store, status, "accepted-transition", 101)
             await end(store, owner)
-            assert (await store.work_owed())["total"] == 0
+            assert (await store.work_owed())["total"] == int(status == "analysis")
         finally:
             store.stop()
     asyncio.run(run())
@@ -235,12 +235,12 @@ def test_unknown_baseline_first_discovery_stale_and_restart_retain_debt(tmp_path
         store = Store(path); store.start()
         try:
             owner = await lead(store)
-            await observe(store, "blocked", "first-discovery", 100)
+            await observe(store, "in_progress", "first-discovery", 100)
             await end(store, owner)
             result = await store.work_owed()
             assert result["total"] == result["unknown_count"] == 1
             assert result["quality"] == "degraded"
-            await observe(store, "blocked", "first-discovery", 110, available=False)
+            await observe(store, "in_progress", "first-discovery", 110, available=False)
             assert (await store.work_owed())["unknown_count"] == 1
         finally:
             store.stop()
@@ -248,9 +248,9 @@ def test_unknown_baseline_first_discovery_stale_and_restart_retain_debt(tmp_path
         store = Store(path); store.start()
         try:
             assert (await store.work_owed())["total"] == 1
-            await observe(store, "blocked", "first-discovery", 120)
+            await observe(store, "in_progress", "first-discovery", 120)
             assert (await store.work_owed())["unknown_count"] == 1
-            await observe(store, "analysis", "accepted-post-start-transition", 130)
+            await observe(store, "ready_for_dev", "accepted-post-start-transition", 130)
             assert (await store.work_owed())["total"] == 0
         finally:
             store.stop()

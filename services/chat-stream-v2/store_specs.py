@@ -157,6 +157,18 @@ def effective_assignment(row: dict[str, Any] | None) -> str | None:
 UNASSIGNED = ""
 
 
+def task_owner(row: dict[str, Any] | None) -> bool:
+    """Accountable attendance, shared by lane progress and disposition history."""
+    from assistant_policy import AssistantPolicy
+    return bool(row and row.get("status") == "open"
+                and row.get("role") in {"lead", "nexus", "planner"}
+                and not row.get("presumed_dead_at")
+                and row.get("provider") != "composite"
+                and not str(row.get("stream_id") or "").endswith(":assistant")
+                and not AssistantPolicy(None, "").protects(row)
+                and effective_assignment(row))
+
+
 def carried_assignment(row: dict[str, Any] | None) -> str | None:
     """What a handoff successor inherits: the assignment, or an explicit unassignment."""
     if row and row.get("assigned_spec_id") == UNASSIGNED:

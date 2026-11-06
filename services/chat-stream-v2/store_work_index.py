@@ -122,9 +122,10 @@ class WorkIndexStoreMixin:
         from work_owed import owed_dispositions_conn
         return await self.submit(lambda conn: owed_dispositions_conn(conn, now=now, root_binding=root_binding))
 
-    async def lead_close_context(self, stream, generation):
+    async def lead_close_context(self, stream, generation, *, pending_only=True, observation_available=True):
         from work_owed import lead_close_context_conn
-        return await self.submit(lambda conn: lead_close_context_conn(conn, stream, generation))
+        return await self.submit(lambda conn: lead_close_context_conn(conn, stream, generation, pending_only=pending_only,
+                                                                     observation_available=observation_available))
 
     async def front_desk_disposition_custody(self, stream, generation):
         from work_owed import front_desk_custody_conn

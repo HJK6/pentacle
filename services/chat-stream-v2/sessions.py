@@ -1413,15 +1413,17 @@ class Sessions:
             restored = self._cache(row)
             return {"restored": True, "already_open": False, "liveness": "alive", "session": restored}
 
-    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, custody=False):
-        if close_kind not in {"session_close", "manager_close"} or not generation or (
-                custody and close_kind == "manager_close"):
-            # The current FD's explicit close records debt custody at admission.
-            return
+    async def _guard_lead_disposition(self, host, name, generation, close_kind, *, operator_confirm=False):
+        if close_kind not in {"session_close", "manager_close", "idle_reap"} or not generation:
+            return True, True
+        # Confirmed offline retirement preserves recovery custody.
+        if self.hosts is not None and not self.hosts.is_local(host) and (operator_confirm or close_kind == "manager_close"):
+            if not await self.hosts.probe_once(host):
+                return True, True
         stream = f"{host}:{name}"
-        context = await self.store.lead_close_context(stream, generation)
+        context = await self.store.lead_close_context(stream, generation, pending_only=False)
         if context is None:
-            return
+            return False, True
         if close_kind == "manager_close":
             try:
                 tmux = self.hosts.tmux_for(host) if self.hosts is not None and not self.hosts.is_local(host) else self.tmux
@@ -1435,7 +1437,8 @@ class Sessions:
             except Exception:
                 state = "unknown"
             if state == "gone":
-                return  # Only confirmed absence makes this an involuntary close.
+                return True, True  # Only confirmed absence makes this an involuntary close.
+        observation_available = True
         refresh = getattr(self, "refresh_work_for_close", None)
         if refresh is not None:
             try:
@@ -1443,11 +1446,15 @@ class Sessions:
             except Exception:
                 # An unavailable refresh cannot turn cached progress into a
                 # disposition. The caller retains the operator-close recovery.
-                pass
-        context = await self.store.lead_close_context(stream, generation)
+                observation_available = False
+        await self._check_lead_disposition(stream, generation, observation_available=observation_available)
+        return False, observation_available
+
+    async def _check_lead_disposition(self, stream, generation, *, observation_available=True):
+        context = await self.store.lead_close_context(stream, generation, observation_available=observation_available)
         if context is not None:
             from work_owed import disposition_commands
-            raise VerbError("lead_close_requires_disposition", "Lead disposition is pending; move the item, assign a successor, or use an authorized operator close.",
+            raise VerbError("lead_close_requires_disposition", "Task disposition is pending; publish a non-active status or assign a live same-spec owner.",
                 spec_id=context["spec_id"], observed_status=context["status"],
                 observed_at=context["observed_at"], pending=True,
                 next_commands=disposition_commands(context))
@@ -1467,7 +1474,7 @@ class Sessions:
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
         admission_guard: Any = None,
-        disposition_custody: bool = False,
+        busy_override_recovery: bool = False,
     ) -> dict[str, Any]:
         """Serialize one lifecycle operation for this host/session name.
 
@@ -1499,13 +1506,23 @@ class Sessions:
             self.assistant.guard_close(row, close_kind)
             if expected_generation is None and row is not None:
                 expected_generation = self._row_generation(row)
+            recovery, observation_available = False, True
             if row and row.get("status") == "open" and (
                 expected_generation is None or self._row_generation(row) == expected_generation
             ):
                 # Do not hold the shared graph lock during the bounded index
                 # wait. Target generation is rechecked again below before kill.
-                await self._guard_lead_disposition(host, session_name, self._row_generation(row), close_kind,
-                                                   custody=disposition_custody)
+                if busy_override_recovery and close_kind == "manager_close":
+                    # The server admits only an explicit current-FD own-child
+                    # force request. Fresh busy proof distinguishes recovery
+                    # from ordinary disposition; unknown capture grants neither.
+                    await self._probe_capture_liveness(host, session_name, row)
+                    recovery = self._capture_liveness(sid, row) == "idle" and row.get("working") is True
+                    operator_override = recovery
+                if not recovery:
+                    recovery, observation_available = await self._guard_lead_disposition(
+                        host, session_name, self._row_generation(row), close_kind,
+                        operator_confirm=operator_confirm)
             # Admission and termination share the same graph fence as reparent
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.
@@ -1516,6 +1533,9 @@ class Sessions:
                 if row and row.get("status") == "open":
                     if expected_generation is not None and self._row_generation(row) != expected_generation:
                         return await self._stale_close_result(sid, row)
+                    if not recovery:
+                        await self._check_lead_disposition(sid, self._row_generation(row),
+                            observation_available=observation_available)
                 if row is None or row.get("status") == "open":
                     await self._guard_child_preservation(sid)
                 return await self._close_locked(

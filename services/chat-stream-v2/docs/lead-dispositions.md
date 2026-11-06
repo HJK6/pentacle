@@ -1,50 +1,56 @@
 # Lead disposition and close
 
-A current assigned lead or nexus cannot voluntarily close its sole fresh
-`in_progress` assignment. The close waits for one refresh through the existing
-work-index drain, bounded to thirty seconds, then returns
-`lead_close_requires_disposition` if the observation is unchanged. The reply
-contains the spec, observed status/time and recovery commands with the observed
-document revisions. `pending: true` means the disposition remains outstanding;
-an unavailable publisher or an uncertain same-ID request grants no close.
-The target generation is pinned before that wait even when the request omits it.
+An effective assigned lead, nexus or planner owns its task, including hidden
+seats. Voluntary close of a sole owner requires a fresh accepted non-active
+spec status or another live same-spec owner. `analysis` and `in_progress` are
+active; `backlog`, `ready_for_dev`, `blocked`, `needs_qa`, `completed` and
+`deprecated` are dispositions. No additional move is required for work already
+settled in one of those statuses.
 
-Move the item through the memory publisher with `reason`, `next_action` and
-requesting-stream attribution, or assign a successor with
-`agent-orch spec assign <successor> <spec>`. A move counts after the daemon
-observes it. The existing authenticated operator route, or an explicit
-`--operator-confirm` close by the verified direct parent, ends the assignment
-and retains any owed disposition. A self-supplied confirmation, force flag or
-historical move receipt cannot bypass the gate. Existing assistant protection,
-generation, child-preservation and local/remote close checks still apply.
+The existing close guard waits for one work-index refresh, bounded to thirty
+seconds, then returns `lead_close_requires_disposition` while active or unknown
+work remains. Missing, stale, ambiguous, unavailable or pending observations
+refuse before termination. The reply names the spec, observed status/time and
+publisher commands with the observed document revisions. A publisher timeout or
+uncertain same-ID request grants no close. The target generation is pinned
+before the wait. The graph lock is released during refresh and held for the
+final ownership/successor check through termination; assignment and role changes
+use the same fence.
 
-Only an open, non-presumed-dead lead/nexus with the effective assignment is a
-successor. Authority tags alone, QA/planner/worker roles, closed seats and other
-assignments do not qualify. Only positively confirmed gone manager panes bypass
-the disposition check; uncertain liveness keeps it active. Other involuntary
-close kinds proceed through their existing lifecycle checks.
-Stale or unavailable work observations allow the close and retain unknown debt.
+Publish a legitimate disposition with reason, next action and requesting-stream
+attribution, or use `agent-orch spec assign <successor> <spec>`. The daemon must
+observe the result. It never moves a spec automatically. A successor is an open,
+non-presumed-dead, non-protected, non-composite lead/nexus/planner effectively
+assigned to the same spec. Authority tags, QA/worker roles, reports and prose
+custody do not qualify. Closing one parallel owner leaves the others tracked.
 
-Each effective assignment starts an episode with the current accepted
-observation revision or an unknown baseline. An accepted revision transition
-away from `in_progress`, or a newly changed valid blocked `parked:` declaration,
-provides disposition evidence. First discovery of an unknown status, an
-unchanged park, a report, delivery or an unrelated revision edit does not.
-Re-entry into `in_progress` invalidates earlier evidence. Untouched backlog and
-blocked items with no assignment episode owe nothing.
+Ordinary parent/FD `--operator-confirm`, approved close rulings and done or
+aborted reports do not waive disposition. The configured FD uses this guard
+even for its own children. An explicit FD `--force` request with a reason and
+request id may recover its own freshly proven busy child, preserving disposition
+debt with FD custody. It cannot recover another parent's child this way; idle or
+unknown capture does not waive disposition. The current FD binding, target
+generation, parentage and absence of live children/pending spawns are rechecked
+at final admission. Elevated seat credentials remain seat
+credentials even when marked `operator_authenticated`. Genuine connection-bound
+operator recovery, confirmed gone manager panes, existing offline/deferred
+retirement and failed-spawn cleanup keep their recovery paths and durable owed
+custody. Uncertain liveness does not prove death. Existing assistant protection,
+generation, child-preservation and local/remote checks still apply.
 
-An ended episode without a successor or disposition creates debt against its
-parent, falling back to current front-desk custody. Unknown baselines and
-unusable ending observations remain conservative through restart, stale scans
-and root-generation changes. A later accepted disposition or new effective
-lead clears debt. Bookkeeping uses the existing work-index state JSON; it adds
-no table, service or background timer. Rollback may ignore this additive
-metadata without deleting it.
+Each assignment starts an episode in the existing work-index state JSON.
+Unassignment, detachment, reassignment or a role change retains unresolved debt
+for that stream and generation; ordinary close checks current assignments and
+that history. A fresh settled disposition clears debt, including on first
+discovery, and a return to an active status invalidates it. A live effective
+successor also clears debt. No table, service or background timer is added.
 
-`agent-orch work owed --json` reads the full persisted population. The enabled
-`lane_digest` includes totals, per-repo counts, the oldest eight, unknown count
-and query command. Nonempty debt recurs at each deadline after the prior digest
-is delivered; a pending/in-flight digest keeps its retries. Unknown debt is
-degraded. Disabled delivery is exposed as disabled. An empty fresh population
-returns to change-only delivery after one clearing update. Child report-ready
-notices include `owes_disposition_on_close`; reporting alone clears nothing.
+`agent-orch work owed --json` reads the full persisted population. Ended episodes
+without disposition or succession retain parent or current front-desk custody
+through restart and root-generation changes. Unknown debt remains degraded.
+The existing `lane_digest` includes totals, per-repo counts, the oldest eight,
+unknown count and query command. Nonempty debt recurs after prior delivery;
+pending digests retain their retries. Disabled delivery is exposed. A fresh
+empty population returns to change-only delivery after one clearing update.
+Child report-ready notices include `owes_disposition_on_close`; reporting alone
+clears nothing. Rollback preserves the additive history.

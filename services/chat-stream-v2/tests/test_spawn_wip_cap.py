@@ -71,6 +71,13 @@ async def setup(root, store, monkeypatch, resolved_role=None):
     sessions = Sessions(store, tmux=tmux, local_host=HOST)
     specs = SpecsSubsystem(memory_root=root, session_summaries=lambda: [], changed_callback=lambda _: None)
     ctl = SpawnCtl(store, sessions, tmux=tmux, specs=specs)
+    from test_work_owed import observe
+    for status in ('backlog', 'ready_for_dev', 'blocked', 'needs_qa', 'completed', 'deprecated'):
+        for path in sorted((root / 'work' / status).glob('*/spec.md')):
+            # Admission fixtures intentionally keep only their small parser
+            # input. Seed the accepted literal status, not a fabricated move.
+            identity = 'spec_' + path.parent.name
+            await observe(store, status, 'literal-fixture-' + identity, 100, identity=identity)
 
     async def launch(msg, host, name):
         return 'run', {}, ({'role': resolved_role} if resolved_role is not None else {})
@@ -92,7 +99,15 @@ def message(spec_id, role='lead', keyed=True):
 async def cleanup(store, sessions, tmux):
     expected = len(await store.list_sessions('open'))
     for row in await store.list_sessions('open'):
-        await sessions.close(row['host'], row['session_name'])
+        # This helper owns only the synthetic admission counterparts. Confirm
+        # their death before using the existing involuntary retirement path;
+        # an ordinary owner close must retain its disposition guard.
+        await tmux.kill_session(row['session_name'])
+        assert await tmux.session_state(row['session_name']) == 'gone'
+        await sessions.mark_closed(row['host'], row['session_name'],
+                                   reason='confirmed owned fixture teardown',
+                                   expected_generation=row['session_generation'],
+                                   reap_status='unknown')
     assert await store.list_sessions('open') == []
     assert not tmux.alive
     print(json.dumps({'cleanup': 'spawn', 'expected_seats': expected, 'closed_seats': expected,

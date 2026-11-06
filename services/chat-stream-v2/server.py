@@ -5539,7 +5539,9 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         caller_stream_id = str(auth.get("stream_id") or "").strip()
         claimed_stream_id = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "").strip()
-        operator_authenticated = bool(auth.get("operator_authenticated"))
+        operator_authenticated = bool(auth.get("operator_authenticated")
+            and not auth.get("token_verified") and not auth.get("scoped_principal")
+            and not auth.get("stream_id") and auth.get("operator_principal"))
         expired_self_close = False
         if auth.get("reason_code") == TOKEN_REASON_EXPIRED and self.store is not None:
             token = msg.get("stream_token")
@@ -5614,10 +5616,6 @@ class Server:
                 close_kind = "manager_close"
             else:
                 coordinator_authorized = True
-        if coordinator_authorized and msg.get("operator_confirm") is True:
-            # The existing explicit parent-authorized operator route is an
-            # involuntary close. A self-supplied flag never acquires it.
-            close_kind = "operator_close"
         claim_verified: str | None = None
         claim_mismatch: dict[str, Any] | None = None
         if isinstance(msg.get("ac_claim"), dict) and self.ledger is not None:
@@ -5673,6 +5671,11 @@ class Server:
             expected_generation = manager_generation
             defer_if_working = False
             attribution["defer_if_working"] = False
+        fd_busy_override = bool(
+            manager_generation is not None and self.sessions.assistant.front_desk_mode
+            and msg.get("force") is True
+            and self.sessions.assistant.manager_request_code(msg) is None
+            and isinstance(target, dict) and target.get("parent_stream_id") == caller_stream_id)
         close = functools.partial(
             self.sessions.close,
             host,
@@ -5689,14 +5692,15 @@ class Server:
             and manager_generation is None,
             defer_if_working=defer_if_working,
             attribution=attribution,
-            # An explicit current-FD close of a lead with pending disposition
-            # is involuntary; its debt stays owed with FD custody.
-            disposition_custody=manager_generation is not None and self.sessions.assistant.front_desk_mode,
+            # Only an explicit own-busy-child force request may use recovery;
+            # ordinary FD closes use the same disposition guard as parents.
+            busy_override_recovery=fd_busy_override,
             admission_guard=(
                 (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
-                else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
+                else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth,
+                    busy_override=fd_busy_override)
             ),
         )
         if manager_generation is None:
@@ -5840,11 +5844,15 @@ class Server:
 
     async def _manager_close_admission(
         self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,
-        expected_generation: str, auth: dict[str, Any],
+        expected_generation: str, auth: dict[str, Any], *, busy_override: bool = False,
     ) -> None:
         waived = await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
         if (row or {}).get("status") == "closed":
             return
+        if busy_override and (row or {}).get("parent_stream_id") != auth.get("stream_id"):
+            await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation,
+                                      result="refused", refusal_code="close_unauthorized")
+            raise VerbError("close_unauthorized", "FD busy override requires its own child")
         if waived:
             await self._manager_audit("close_report_waived", msg, auth, f"{host}:{name}",
                                       expected_generation, result="admitted")

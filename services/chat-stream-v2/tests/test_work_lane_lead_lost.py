@@ -241,3 +241,62 @@ async def test_lead_lost_alerts_the_fd_directly_with_repair(tmp_path, monkeypatc
         assert not [r for r in await notices(s) if json.loads(r["metadata"]).get("typed_digest")]
         assert not await s.composite.front_desk_digest._rows("fixture:v2-test")
         assert (await s.store.get_work_lane(lane["lane_id"]))["lane"]["work_state"] == "active"
+
+@pytest.mark.parametrize("stored", ["active", "paused", "legacy"])
+def test_parallel_member_owners_share_projection_fault_and_stale_predicate(stored, tmp_path):
+    from test_work_owed import observe
+    path = str(tmp_path / "member-owned.db")
+    facts = {}
+    async def body(env):
+        historical = await env.seat("historical", role="lead", parent_stream_id=FD)
+        specs = ["spec_demo__parallel_a", "spec_demo__parallel_b"]
+        lane = await env.adopt(key="stream:parallel", state="active" if stored == "active" else "paused",
+                               lead=historical, members=specs)
+        lid = facts["lid"] = lane["lane"]["lane_id"]
+        await env.store.submit(lambda c: c.execute("UPDATE v2_work_lane_events SET created_at='2026-01-01T00:00:00Z' WHERE lane_id=?", (lid,)))
+        await env.store.mark_closed("host-a", "historical", closed_at="2026-01-01T00:00:00Z", pane_status="pane_dead")
+        if stored == "legacy":
+            def legacy(conn):
+                with conn:
+                    conn.execute("UPDATE v2_assistant_composite_lanes SET work_state_reason='lead_lost' WHERE lane_id=?", (lid,))
+            await env.store.submit(legacy)
+        await drain(env.store)
+        for spec in specs:
+            await observe(env.store, "in_progress", "accepted-" + spec, 100, identity=spec)
+        for name, role, spec in zip(("parallel-lead", "parallel-planner"), ("lead", "planner"), specs):
+            await env.seat(name, role=role, visibility="hidden", assigned_spec_id=spec, parent_stream_id=FD)
+        await drain(env.store)
+        assert all(item["cleared_at"] for item in await episodes(env.store, lid))
+        rows = await env.store.work_lane_rows()
+        row = next(row for row in rows if row["lane_id"] == lid)
+        shown = presented(row)
+        assert (shown["state"], shown["state_reason"]) == ("active", "members_working")
+        assert shown["stale"] is True
+        census = {f"{seat['host']}:{seat['session_name']}": seat for seat in await env.store.list_sessions("open")}
+        detail = project_lane(row, None, "2026-10-08T00:00:00Z", all_members=True, sessions_by_stream=census)
+        assert [{seat["stream_id"] for seat in member["seats"]} for member in detail["members"]] == [
+            {"host-a:parallel-lead"}, {"host-a:parallel-planner"}]
+        stale = await episodes(env.store, lid, "stale")
+        assert len(stale) == 1 and stale[0]["cleared_at"] is None
+        # A completed member cannot activate, but the parallel planner remains.
+        await observe(env.store, "completed", "completed-a", 101, identity=specs[0])
+        await env.store.mark_closed("host-a", "parallel-lead", closed_at="2026-01-02T00:00:00Z", pane_status="pane_dead")
+        await drain(env.store)
+        row = next(row for row in await env.store.work_lane_rows() if row["lane_id"] == lid)
+        assert presented(row)["state_reason"] == "members_working"
+        census = {f"{seat['host']}:{seat['session_name']}": seat for seat in await env.store.list_sessions("open")}
+        detail = project_lane(row, None, "2026-10-08T00:00:00Z", all_members=True, sessions_by_stream=census)
+        assert detail["members"][0]["seats_total"] == 0
+        assert detail["members"][1]["seats"][0]["stream_id"] == "host-a:parallel-planner"
+        await observe(env.store, "completed", "completed-b", 102, identity=specs[1])
+        await drain(env.store)
+        row = next(row for row in await env.store.work_lane_rows() if row["lane_id"] == lid)
+        assert presented(row)["state_reason"] != "members_working"
+        assert all(item["cleared_at"] for item in await episodes(env.store, lid, "stale"))
+    run(body, path)
+    async def restarted(env):
+        await drain(env.store)
+        row = next(row for row in await env.store.work_lane_rows() if row["lane_id"] == facts["lid"])
+        assert presented(row)["state_reason"] != "members_working"
+        assert all(item["cleared_at"] for item in await episodes(env.store, facts["lid"], "stale"))
+    run(restarted, path)
