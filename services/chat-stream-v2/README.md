@@ -210,23 +210,20 @@ terminalize a pending notice to obtain fresh debt delivery.
 
 ## Front desk close authority
 
-The verified current direct-primary front desk may use
+The verified current direct-primary front desk is the lifecycle principal:
 `agent-orch close <stream> --expected-generation <generation> --reason "Operator <directive-id>: close absorbed kickoff; custody with FD"`
-after inspecting the target and confirming that the cited instruction covers it.
-The reason and request identity are required and audited; a citation alone
-does not authorize other seats. This exception covers top-level visible seats
-without a handoff source. Protected assistants and leads or visible chats of
+closes any ownership shape (non-child, another parent's hidden child, a
+top-level handoff successor) after the FD inspects the target and confirms the
+cited instruction covers it. Authority follows the binding; rebind, handoff,
+restore and host transfer need no designation. The reason and request identity
+are required and audited. Protected assistants and leads or visible chats of
 open operator-owned lanes are refused, including with force or confirmation
-flags. Existing idle, child/spawn, report, disposition, external close-ruling
-and process-death checks still apply. Binding, generation and current lane
-ownership are rechecked under the close fence before termination.
-
-This is close-only authority. It does not designate a lifecycle manager,
-waive reports, grant reparent or descendant cleanup, or complete a lane/spec.
-Self, direct-parent, authenticated operator and designated-manager paths
-retain their existing behavior. Admission and outcome use `fd_close` audit
-rows with the verified actor/target generations, reason and request identity;
-close attribution records `actor_kind=front_desk`.
+flags. Idle, child/spawn, external close-ruling and process-death checks still
+apply; a missing terminal report uses the audited exact-generation waiver, and
+a lead with pending disposition keeps owed debt with FD custody. Binding,
+generation and lane ownership are rechecked under the close fence before
+termination. Audit rows are `manager_close*` with `actor_kind=front_desk`. See
+[Fleet lifecycle authority](../../docs/assistant.md#fleet-lifecycle-authority).
 
 ## Tests and supported integrations
 

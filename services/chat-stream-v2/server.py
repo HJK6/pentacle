@@ -4229,6 +4229,13 @@ class Server:
             "tell_id": tell_reply.get("tell_id"),
         }
 
+    def _front_desk_composite(self) -> Any:
+        """The primary composite when its direct binding names the FD."""
+        composite = self.sessions.assistant.front_desk
+        if composite is None or not self.sessions.assistant.front_desk_mode or not composite.enabled:
+            return None
+        return composite
+
     async def _on_tell(self, msg: dict[str, Any]) -> dict[str, Any]:
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_tell(msg)
@@ -4237,6 +4244,12 @@ class Server:
         composite = self._composite_for(target_stream_id)
         if composite is not None:
             return await self._composite_tell(composite, target_stream_id, msg)
+        front_desk = self._front_desk_composite()
+        if front_desk is not None and target_stream_id in await self.store.front_desk_aliases():
+            # The current or a proved former FD seat id is a logical FD address:
+            # canonicalize before physical routing, even if the old seat is open.
+            return await self._composite_tell(front_desk, front_desk.config.stream_id,
+                                              {**msg, "_fd_requested_to": target_stream_id})
         # Suppression is applied by Comms.tell, after its route/body/Codex guards
         # and under the tell_id idempotency ledger.
         return await self.comms.tell(msg)
@@ -4271,6 +4284,8 @@ class Server:
         delivered = await self._deliver_composite_tell(
             composite, composite_stream_id, from_stream_id, body, tell_id, str(msg.get("request_id") or ""),
             service_ingress_body=msg.get("_wmi_brief_ingress_body"),
+            requested_to=str(msg.get("_fd_requested_to") or msg.get("to_stream_id") or composite_stream_id),
+            auth=auth,
         )
         if delivered is not None:
             return delivered
@@ -4288,7 +4303,8 @@ class Server:
     async def _deliver_composite_tell(
         self, composite: Any, composite_stream_id: str, from_stream_id: str,
         body: str, tell_id: str, request_id: str,
-        *, service_ingress_body: str | None = None,
+        *, service_ingress_body: str | None = None, requested_to: str | None = None,
+        auth: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Deliver one composite tell to the current bound pane.
 
@@ -4314,10 +4330,19 @@ class Server:
             # The pane was replaced without a rebind: refuse the stale generation.
             raise VerbError("assistant_direct_generation_conflict",
                             "assistant binding generation is stale")
+        logical = None
+        if composite is self._front_desk_composite():
+            # FD tell identity is the logical destination, not this seat, so a
+            # retry after a rebind replays the committed outcome.
+            verified = str((auth or {}).get("stream_id") or "") if (auth or {}).get("token_verified") else ""
+            logical = {"name": composite.config.name, "requested": requested_to or composite_stream_id,
+                       "binding_revision": binding.get("revision"), "sender": verified or from_stream_id,
+                       "aliases": await self.store.front_desk_aliases()}
         reply = await self.comms.tell({
             "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
             "from_stream_id": from_stream_id or composite_stream_id, "message": body,
             "tell_id": tell_id, "request_id": request_id,
+            **({"_logical_front_desk": logical} if logical else {}),
             # Only authenticated service dispatch or its durable queue entry
             # supplies the sanitized original. Never infer trust from a header.
             "_wmi_brief_ingress_body": service_ingress_body,
@@ -4335,7 +4360,8 @@ class Server:
             delivered["front_desk_hold_id"] = reply["front_desk_hold_id"]
         # Preserve the committed-but-not-yet-proven acknowledgement for callers
         # which must not resend an already committed brief.
-        for key in ("action_committed", "action_status", "confirmation_status", "confirmation_pending", "do_not_resubmit"):
+        for key in ("action_committed", "action_status", "confirmation_status", "confirmation_pending",
+                    "do_not_resubmit", "duplicate"):
             if key in reply:
                 delivered[key] = reply[key]
         return delivered
@@ -4470,7 +4496,10 @@ class Server:
         # A transient physical-target copy: never the caller's object, and no
         # private marker survives (only the server-derived peer context).
         physical = {key: value for key, value in msg.items() if not str(key).startswith("_")}
-        physical.update(to_stream_id=target, host=host, session_name=name, _auth_context=peer)
+        physical.update(to_stream_id=target, host=host, session_name=name, _auth_context=peer,
+                        _assistant_alias_binding={"name": composite.env_config.name,
+                            "env_binding": composite._env_binding(), "stream_id": target,
+                            "generation": generation, "revision": binding.get("revision")})
         if isinstance(msg.get("inbox"), dict):
             physical["inbox"] = {**msg["inbox"], "to": target}
         return await self._on_send(physical)
@@ -5535,7 +5564,6 @@ class Server:
         close_kind = "session_close"
         coordinator_authorized = False
         manager_generation: str | None = None
-        fd_generation: str | None = None
         ruling_manager_close = (
             self.lane_rulings is not None
             and msg.get("_ruling_release") is self.lane_rulings
@@ -5559,19 +5587,12 @@ class Server:
                 if operator_authenticated:
                     close_kind = "operator_close"
                 elif await self.sessions.assistant.manager_holds(auth):
-                    # Fenced to the generation read now; every lifecycle fence
-                    # is re-checked under the lifecycle lock before any kill.
+                    # The current FD binding (or legacy holder), fenced to the
+                    # generation read now; every lifecycle fence and the
+                    # principal are re-checked under the lifecycle and graph
+                    # locks before any kill.
                     manager_generation = expected_generation or self._manager_target_generation(target)
                     close_kind = "manager_close"
-                elif await self._fd_close_caller(auth):
-                    fd_generation = expected_generation or self._manager_target_generation(target)
-                    try:
-                        await self._fd_close_fences(msg, auth, target_stream_id, target, fd_generation)
-                    except Exception as exc:
-                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
-                                                   "refused" if isinstance(exc, VerbError) else "failed",
-                                                   getattr(exc, "code", "fd_close_failed"))
-                        raise
                 else:
                     # A seat token proves only that seat's identity. Visibility
                     # and a caller-supplied confirmation bit do not promote it
@@ -5585,6 +5606,12 @@ class Server:
                         "close_unauthorized",
                         "close requires a verified self, direct-parent, or authenticated operator",
                     )
+            elif (self.sessions.assistant.front_desk_mode and not operator_authenticated
+                  and await self.sessions.assistant.manager_holds(auth)):
+                # The current FD closing its own child takes the one FD close
+                # path; parentage never narrows FD-held authority or its fences.
+                manager_generation = expected_generation or self._manager_target_generation(target)
+                close_kind = "manager_close"
             else:
                 coordinator_authorized = True
         if coordinator_authorized and msg.get("operator_confirm") is True:
@@ -5603,12 +5630,7 @@ class Server:
         if self.lane_rulings is not None and msg.get("_ruling_release") is not self.lane_rulings:
             target_row = await self.store.fetch_session(host, name)
             target_generation = str((target_row or {}).get("session_generation") or "")
-            pinned_generation = manager_generation or fd_generation
-            if target_generation and pinned_generation is not None and target_generation != pinned_generation:
-                if fd_generation is not None:
-                    await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
-                                               "refused", "lifecycle_generation_mismatch")
-                    raise VerbError("lifecycle_generation_mismatch", "FD target generation changed before ruling")
+            if target_generation and manager_generation is not None and target_generation != manager_generation:
                 await self._manager_audit("close", msg, auth, target_stream_id, target_generation,
                                           result="refused", refusal_code="lifecycle_generation_mismatch")
                 raise VerbError("lifecycle_generation_mismatch", "manager target generation changed before ruling")
@@ -5619,14 +5641,8 @@ class Server:
                         target_generation=target_generation, auth=auth,
                     )
                 except ValueError as exc:
-                    if fd_generation is not None:
-                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
-                                                   "refused", str(exc))
                     raise VerbError(str(exc), str(exc)) from exc
                 if ruling_hold is not None:
-                    if fd_generation is not None:
-                        await self._fd_close_audit(msg, auth, target_stream_id, fd_generation,
-                                                   "refused", "close_pending_ruling")
                     return ruling_hold
         defer_if_working = bool(msg.get("defer_if_working"))
         if expired_self_close:
@@ -5634,9 +5650,7 @@ class Server:
         elif close_kind == "operator_close" and not coordinator_authorized:
             actor_kind, auth_kind = "operator", "operator_authenticated"
         elif close_kind == "manager_close":
-            actor_kind, auth_kind = "manager", "token_verified"
-        elif fd_generation is not None:
-            actor_kind, auth_kind = "front_desk", "token_verified"
+            actor_kind, auth_kind = self.sessions.assistant.manager_kind, "token_verified"
         elif coordinator_authorized:
             actor_kind, auth_kind = "parent", "token_verified"
         else:
@@ -5653,10 +5667,10 @@ class Server:
             "request_id": str(msg.get("request_id") or ""),
             "defer_if_working": defer_if_working,
         }
-        if manager_generation is not None or fd_generation is not None:
+        if manager_generation is not None:
             # Live panes require fresh idle proof. Initially offline peers may
             # record a generation-fenced retirement intent, never claimed death.
-            expected_generation = manager_generation or fd_generation
+            expected_generation = manager_generation
             defer_if_working = False
             attribution["defer_if_working"] = False
         close = functools.partial(
@@ -5667,27 +5681,25 @@ class Server:
             expected_generation=expected_generation,
             close_kind=close_kind,
             requires_idle=bool(msg.get("requires_idle") or msg.get("reap"))
-            or manager_generation is not None or fd_generation is not None,
+            or manager_generation is not None,
             operator_override=bool(msg.get("operator_override"))
             and (operator_authenticated or coordinator_authorized)
-            and manager_generation is None and fd_generation is None,
+            and manager_generation is None,
             operator_confirm=msg.get("operator_confirm") is True
-            and manager_generation is None and fd_generation is None,
+            and manager_generation is None,
             defer_if_working=defer_if_working,
             attribution=attribution,
+            # An explicit current-FD close of a lead with pending disposition
+            # is involuntary; its debt stays owed with FD custody.
+            disposition_custody=manager_generation is not None and self.sessions.assistant.front_desk_mode,
             admission_guard=(
-                (lambda row: self._fd_close_admission(msg, auth, target_stream_id, row, fd_generation))
-                if fd_generation is not None else
                 (lambda row: self._seat_close_admission(auth, caller_stream_id, target_stream_id, row))
                 if manager_generation is None and auth.get('token_verified')
                 else None if manager_generation is None
                 else lambda row: self._manager_close_admission(msg, host, name, row, manager_generation, auth)
             ),
         )
-        if fd_generation is not None:
-            result = await _finish_despite_cancel(
-                self._fd_close_locked(close, msg, auth, target_stream_id, fd_generation))
-        elif manager_generation is None:
+        if manager_generation is None:
             result = await close()
         else:
             # The grant cannot change between the manager's admission, the kill
@@ -5730,76 +5742,6 @@ class Server:
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
 
-    async def _fd_close_caller(self, auth: dict[str, Any]) -> bool:
-        """The effective primary FD binding, at its verified open generation."""
-        composite = self.assistant_composite
-        if (auth.get("token_verified") is not True or composite is None
-                or not composite.enabled or not composite.env_config.direct_primary):
-            return False
-        try:
-            binding = await self.store.get_assistant_binding(
-                env_binding=composite._env_binding(), name=composite.env_config.name)
-            if (auth.get("stream_id"), auth.get("session_generation")) != (
-                    binding.get("stream_id"), binding.get("generation")) or not binding.get("generation"):
-                return False
-            actor = await self.store.fetch_session(*self.sessions.split(binding["stream_id"]))
-            return bool(actor and actor.get("status") == "open"
-                        and actor.get("session_generation") == binding["generation"])
-        except Exception:  # unreadable authority grants nothing
-            return False
-
-    async def _fd_close_fences(self, msg, auth, target, row, generation):
-        if not await self._fd_close_caller(auth):
-            raise VerbError("fd_close_authority_required", "current bound FD generation required")
-        if code := self.sessions.assistant.manager_request_code(msg):
-            raise VerbError(code, "FD close requires an explicit directive reason and request id")
-        if str((row or {}).get("session_generation") or "") != generation:
-            raise VerbError("lifecycle_generation_mismatch", "FD target generation changed")
-        if row.get("status") == "closed":
-            return  # Receipt only; Sessions preserves generation-fenced repeat semantics.
-        self.sessions.assistant.guard_close(row, "session_close")
-        if (row.get("status") != "open" or row.get("parent_stream_id")
-                or row.get("handoff_from_stream_id")
-                or (row.get("visibility") or "default") not in {"default", "visible"}):
-            raise VerbError("close_unauthorized",
-                            "close requires a verified self, direct-parent, or authenticated operator")
-        # All ownership mutations share Sessions' graph fence. An unavailable
-        # authoritative read propagates before admission; it cannot grant close.
-        for lane in await self.store.work_lane_rows():
-            if lane.get("owner_kind") == "operator" and target in {
-                    lane.get("bound_stream_id"), lane.get("visible_chat_stream_id")}:
-                raise VerbError("close_operator_lane_protected", "open operator-owned lane requires its own close confirmation")
-
-    async def _fd_close_admission(self, msg, auth, target, row, generation):
-        # Runs under lifecycle + graph locks, held through the existing kill
-        # ladder. Rebind, transfer and lane mutations cannot cross this fence.
-        await self._fd_close_fences(msg, auth, target, row, generation)
-        if row.get("status") != "closed":
-            await self._fd_close_audit(msg, auth, target, generation, "admitted")
-
-    async def _fd_close_audit(self, msg, auth, target, generation, result, code=None):
-        revision = (await self.store.lifecycle_authority_current())["revision"]
-        await self.store.lifecycle_authority_audit(
-            action="fd_close", actor_kind="front_desk", actor_identity=auth.get("stream_id"),
-            actor_generation=auth.get("session_generation"), target_stream_id=target,
-            target_generation=generation, old_revision=revision, new_revision=revision,
-            reason=msg.get("reason"), request_id=msg.get("request_id"), result=result, refusal_code=code)
-
-    async def _fd_close_locked(self, close, msg, auth, target, generation):
-        try:
-            result = await close()
-        except Exception as exc:
-            await self._fd_close_audit(msg, auth, target, generation,
-                                       "refused" if isinstance(exc, VerbError) else "failed",
-                                       getattr(exc, "code", "fd_close_failed"))
-            raise
-        applied = not (result.get("failed") or result.get("deferred")
-                       or result.get("already_closed") or result.get("stale_generation"))
-        await self._fd_close_audit(msg, auth, target, generation,
-                                   "applied" if applied else "failed" if result.get("failed") else "refused",
-                                   None if applied else str(result.get("reason") or "close_not_applied")[:200])
-        return result
-
     async def _seat_close_admission(self, auth, caller, target, row):
         # Runs after acquiring the target lifecycle and graph locks, directly
         # before termination. Admission-time parentage is only an observation.
@@ -5832,11 +5774,12 @@ class Server:
 
     async def _manager_audit(self, action: str, msg: dict[str, Any], auth: dict[str, Any],
                              target: str, generation: str | None, *, result: str,
-                             refusal_code: str | None = None, actor_kind: str = "manager") -> None:
-        """Audit a lifecycle action under the grant revision current at write time.
+                             refusal_code: str | None = None, actor_kind: str | None = None) -> None:
+        """Audit a lifecycle action under the policy revision current at write time.
 
         Only the server-verified seat identity is recorded, never wire claims.
         """
+        actor_kind = actor_kind or self.sessions.assistant.manager_kind
         revision = (await self.store.lifecycle_authority_current())["revision"]
         await self.store.lifecycle_authority_audit(
             action=f"manager_{action}", actor_kind=actor_kind,
@@ -5871,28 +5814,44 @@ class Server:
             code = "lifecycle_target_unavailable"
         elif generation != expected_generation:
             code = "lifecycle_generation_mismatch"
+        elif action == "close" and target.get("status") == "closed":
+            return False  # Receipt only; Sessions keeps generation-fenced repeat semantics.
         if code is None:
             children = await self.sessions._live_children(sid)
             pending = await self.sessions._pending_child_spawns(sid)
             code = await self.sessions.assistant.manager_fences(
                 target, generation, msg, children=children, pending_spawns=pending,
                 allow_unavailable=action == "close")
+        if code is None and action == "close" and str((target or {}).get("status") or "") == "open":
+            # Closing a seat never closes an operator lane; that keeps its own
+            # confirmation. An unavailable authoritative read propagates.
+            if await self._operator_lane_protects(sid):
+                code = "close_operator_lane_protected"
         if code is not None:
             await self._manager_audit(action, msg, auth, sid, generation, result="refused", refusal_code=code)
             raise VerbError(code, f"manager {action} refused: {code}")
         return await self.store.find_report(
             sid, statuses=INSPECT_TERMINAL_STATUSES, session_generation=generation) is None
 
+    async def _operator_lane_protects(self, sid: str) -> bool:
+        return any(lane.get("owner_kind") == "operator" and sid in {
+            lane.get("bound_stream_id"), lane.get("visible_chat_stream_id")}
+            for lane in await self.store.work_lane_rows())
+
     async def _manager_close_admission(
         self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,
         expected_generation: str, auth: dict[str, Any],
     ) -> None:
         waived = await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
+        if (row or {}).get("status") == "closed":
+            return
         if waived:
             await self._manager_audit("close_report_waived", msg, auth, f"{host}:{name}",
                                       expected_generation, result="admitted")
         # Durable attribution precedes the effect: an audit failure refuses the close.
         await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation, result="admitted")
+        if self.sessions.assistant.front_desk_mode and (row or {}).get("status") == "open":
+            await self.store.front_desk_disposition_custody(f"{host}:{name}", expected_generation)
 
     async def _on_assistant_lifecycle(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Operator designate/revoke and holder transfer of lifecycle authority."""
@@ -5902,6 +5861,7 @@ class Server:
             if not (auth.get("operator_authenticated") or auth.get("token_verified") or (auth.get("peer_loopback") and auth.get("local_admin_verified"))):
                 raise VerbError("authentication_required", "lifecycle inspect requires an authenticated caller")
             reply = {"type": "assistant.lifecycle.ok", "action": "inspect",
+                     "effective": await self.store.lifecycle_authority_effective(),
                      "grant": await self.store.lifecycle_authority_current(),
                      "audit": await self.store.lifecycle_authority_audit_rows(limit=20)}
             target = str(msg.get("target_stream_id") or "").strip()

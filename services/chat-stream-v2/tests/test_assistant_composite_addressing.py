@@ -47,7 +47,8 @@ class _Harness:
         self.composite: AssistantComposite | None = None
         self.gen: dict[str, str] = {}
 
-    async def start(self, *, bound_generation: str | None = None, digest: bool = False) -> None:
+    async def start(self, *, bound_generation: str | None = None, digest: bool = False,
+                    front_desk: bool = False) -> None:
         for stream in (SEAT_A, SEAT_B, SENDER):
             row = await self.sessions.open(HOST, stream.split(":", 1)[1], provider="claude",
                                           pane_status="pane_alive")
@@ -64,6 +65,9 @@ class _Harness:
         self.server = Server(store=self.store, sessions=self.sessions, comms=self.comms, local_host=HOST)
         self.server.assistant_composites = {ALIAS: self.composite}
         self.server.assistant_composite = self.composite
+        if front_desk:
+            # Production wiring (main.py): the primary binding names the FD.
+            self.sessions.assistant.front_desk = self.composite
         if digest:
             # Production wiring (main.py): tells reach the digest through the
             # ingress policy, sends through Comms.front_desk_digest.
@@ -656,10 +660,10 @@ def test_allowlisted_service_keeps_its_unchanged_payload_allowlist(tmp_path, mon
     _run(tmp_path, body)
 
 
-def test_alias_send_sampled_at_a_completes_at_a_across_concurrent_rebind(tmp_path):
-    """One binding sample per attempt, no at-effect fence: a rebind to B after
-    the sample but before ordinary send completes still lands at A. The next
-    attempt samples B."""
+def test_alias_send_refuses_before_input_when_binding_changes_after_sample(tmp_path):
+    """One binding sample per attempt plus a final binding fence before input:
+    a rebind to B after the sample but before input sends nothing and returns
+    an explicit stale-binding result. The next attempt samples B."""
     async def body(h):
         ordinary_send = h.comms.send
 
@@ -669,13 +673,13 @@ def test_alias_send_sampled_at_a_completes_at_a_across_concurrent_rebind(tmp_pat
 
         h.comms.send = rebind_then_send
         raced = await h.send(request_id="request-example-1")
-        assert raced["to_stream_id"] == SEAT_A and raced["delivery"] == "landed"
+        assert raced["to_stream_id"] == SEAT_A and raced["delivery"] == "not_landed"
+        assert raced["reason"] == "assistant_binding_stale"
         assert (await h.composite.binding())["stream_id"] == SEAT_B
         h.comms.send = ordinary_send
         later = await h.send(request_id="request-example-2")
-        assert later["to_stream_id"] == SEAT_B
-        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 1)
-        assert await h.receipts(SEAT_A) == (1, 2)
+        assert later["to_stream_id"] == SEAT_B and later["delivery"] == "landed"
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (0, 1)
         assert await h.receipts(SEAT_B) == (1, 2)
     _run(tmp_path, body)
 
@@ -702,6 +706,114 @@ def test_alias_send_preserves_payload_fields_into_ordinary_send(tmp_path):
                            ("meta", {"example": True}), ("msg_id", 101), ("text", BODY),
                            ("from_stream_id", SENDER)):
             assert physical[key] == value, key
-        assert [key for key in physical if key.startswith("_")] == ["_auth_context"]
+        assert [key for key in physical if key.startswith("_")] == ["_auth_context", "_assistant_alias_binding"]
+        assert physical["_assistant_alias_binding"]["stream_id"] == SEAT_A
         assert physical["_auth_context"]["operator_authenticated"] is False
     _run(tmp_path, body)
+
+
+# -- logical front-desk tells follow the current binding (spec 2026-11) ------
+
+async def _move(h, stream):
+    await h.store.recover_assistant_binding(name=ALIAS, target_stream_id=stream, target_generation=h.gen[stream])
+    await h.composite.load_binding()
+
+
+def test_fd_tells_to_old_seat_composite_and_alias_reach_current_binding_once(tmp_path):
+    async def body(h):
+        await h.move_to_b()  # A stays open
+        for i, target in enumerate((SEAT_A, COMPOSITE_CHAT, ALIAS)):
+            reply = await h.tell(to_stream_id=target, tell_id=f"fd-tell-{i}")
+            assert reply["type"] == "tell.ok" and reply["delivery_status"] == "delivered", reply
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (0, 3)
+        # Ordinary seat traffic stays ordinary.
+        await h.server._on_tell({"to_stream_id": SENDER, "text": "worker note", "tell_id": "plain",
+                                 "from_stream_id": SEAT_B, "_auth_context": {
+                                     "token_verified": True, "stream_id": SEAT_B,
+                                     "session_generation": h.gen[SEAT_B]}})
+        assert h.inputs_at(SENDER) == 1
+        # Second swap back to A: the B seat id is now the alias.
+        await _move(h, SEAT_A)
+        await h.tell(to_stream_id=SEAT_B, tell_id="fd-tell-back")
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 3)
+        first, back = [(await h.store.get_tell_delivery(t))["delivery"] for t in ("fd-tell-0", "fd-tell-back")]
+        assert (first["requested_to_stream_id"], first["to_stream_id"], first["logical_front_desk"]) == (
+            SEAT_A, SEAT_B, ALIAS)
+        assert back["to_stream_id"] == SEAT_A
+    _run(tmp_path, body, front_desk=True)
+
+
+def test_fd_tell_retry_after_rebind_replays_and_changed_body_or_sender_conflicts(tmp_path):
+    async def body(h):
+        first = await h.tell(to_stream_id=SEAT_A, tell_id="fd-retry")
+        assert h.inputs_at(SEAT_A) == 1
+        await h.move_to_b()
+        again = await h.tell(to_stream_id=SEAT_A, tell_id="fd-retry")
+        assert again["duplicate"] is True and again["delivery_status"] == first["delivery_status"]
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 0)
+        await _refused(h.tell(to_stream_id=SEAT_A, tell_id="fd-retry", text="different body"), "tell_id_conflict")
+        other = {"token_verified": True, "stream_id": SEAT_B, "session_generation": h.gen[SEAT_B]}
+        await _refused(h.server._on_tell({"to_stream_id": SEAT_A, "text": "synthetic status", "tell_id": "fd-retry",
+                                          "from_stream_id": SEAT_B, "_auth_context": other}), "tell_id_conflict")
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 0)
+    _run(tmp_path, body, front_desk=True)
+
+
+@pytest.mark.parametrize("attempted,replays", [(SEAT_A, True), (SENDER, False)])
+def test_fd_legacy_physical_tell_receipt_matches_only_with_proved_provenance(tmp_path, attempted, replays):
+    from comms import payload_digest
+    async def body(h):
+        text = "synthetic status"
+        await h.store.put_tell_delivery("legacy-tell", {
+            "payload_digest": payload_digest(attempted, text),
+            "reply": {"type": "tell.ok", "tell_id": "legacy-tell", "delivery_status": "delivered",
+                      "to_stream_id": attempted, "submission_confirmed": True},
+            "delivery": {"tell_id": "legacy-tell", "to_stream_id": attempted, "text": text,
+                         "from_stream_id": SENDER,
+                         "delivery_status": "delivered", "submission_confirmed": True}})
+        await h.move_to_b()
+        if replays:
+            assert (await h.tell(to_stream_id=SEAT_A, tell_id="legacy-tell"))["duplicate"] is True
+        else:
+            await _refused(h.tell(to_stream_id=SEAT_A, tell_id="legacy-tell"), "tell_id_conflict")
+        assert h.inputs_at(SEAT_B) == 0
+    _run(tmp_path, body, front_desk=True)
+
+
+def test_fd_tell_to_closed_former_seat_and_unbound_queue(tmp_path):
+    async def body(h):
+        await h.move_to_b()
+        await h.store.update_session(HOST, "seat-a", status="closed")
+        await h.tell(to_stream_id=SEAT_A, tell_id="after-close")
+        assert h.inputs_at(SEAT_B) == 1
+        await h.store.update_session(HOST, "seat-b", status="closed")
+        queued = await h.tell(to_stream_id=SEAT_A, tell_id="unbound")
+        assert queued["delivery_status"] == "queued_unbound"
+        assert h.inputs_at(SEAT_B) == 1
+    _run(tmp_path, body, front_desk=True)
+
+
+@pytest.mark.parametrize("attempted", [False, True])
+def test_fd_child_report_notice_follows_binding_unless_an_attempt_is_recorded(tmp_path, attempted):
+    from outbound_notices import OutboundNoticeConfig, OutboundNoticeQueue
+    async def body(h):
+        queue = OutboundNoticeQueue(h.store, h.comms, config=OutboundNoticeConfig(lease_s=.1, max_attempts=2))
+        await queue.enqueue(kind="report", dedupe_key="report:r1", recipient_stream_id=SEAT_A,
+                            body="[child_report_ready] synthetic", tell_id="notice-r1",
+                            source_stream_id=SENDER, metadata={"report_id": "r1"})
+        if attempted:  # an uncertain physical attempt at A stays fenced to A
+            await h.store.put_tell_delivery("notice-r1", {"payload_digest": "x", "reply": {}, "delivery": {
+                "tell_id": "notice-r1", "to_stream_id": SEAT_A, "delivery_status": "proof_unavailable"}})
+        await h.move_to_b()
+        await queue.drain_once(force=True)
+        row = await h.store.submit(lambda c: dict(c.execute(
+            "SELECT recipient_stream_id FROM v2_outbound_notices WHERE notice_id='notice-r1'").fetchone()))
+        assert row["recipient_stream_id"] == (SEAT_A if attempted else SEAT_B)
+        assert h.inputs_at(SEAT_B) == (0 if attempted else 1)
+        # An ordinary worker's report notice keeps its physical recipient.
+        await queue.enqueue(kind="report", dedupe_key="report:r2", recipient_stream_id=SENDER,
+                            body="[child_report_ready] worker", tell_id="notice-r2", source_stream_id=SEAT_B,
+                            metadata={"report_id": "r2"})
+        await queue.drain_once(force=True)
+        assert h.inputs_at(SENDER) == 1
+    _run(tmp_path, body, front_desk=True)

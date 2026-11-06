@@ -1236,13 +1236,13 @@ def test_binding_reply_carries_the_restore_status(tmp_path, monkeypatch):
     run(tmp_path, monkeypatch, body)
 
 
-# -- lifecycle-manager grant across an automatic restore ---------------------- #
+# -- front-desk authority across a restore (binding-derived) ------------------ #
 
 CONSENT = "consent-fixture-1"
 
 
 async def designate(rig, stream_id=SEAT, generation=G0, revision=5):
-    """Seed an operator-designated grant with its consent-linked audit row."""
+    """Seed a legacy grant row (a pre-binding designation) with its audit row."""
     def _op(conn):
         conn.execute(
             "INSERT INTO v2_lifecycle_manager(id,stream_id,session_generation,revision,updated_at) "
@@ -1262,89 +1262,65 @@ async def grant(rig):
     return await rig.store.submit(lambda c: lifecycle_authority.current(c))
 
 
-async def continuity_audit(rig):
+async def binding_changes(rig):
     return await rig.store.submit(lambda c: [dict(r) for r in c.execute(
-        "SELECT action,actor_kind,actor_identity,actor_generation,target_stream_id,target_generation,"
-        "old_revision,new_revision,prior_stream_id,prior_generation,request_id,result,refusal_code,"
-        "consent_id FROM v2_lifecycle_authority_audit WHERE action='restore_continuity' ORDER BY id")])
+        "SELECT actor_kind,actor_identity,actor_generation,target_stream_id,target_generation,"
+        "prior_stream_id,prior_generation,request_id,result,caller_claims FROM v2_lifecycle_authority_audit "
+        "WHERE action='fd_binding_change' ORDER BY id")])
 
 
-def test_automatic_restore_carries_the_grant_to_the_resumed_generation(tmp_path, monkeypatch):
+def front_desk(rig):
+    rig.store.lifecycle_front_desk = lifecycle_authority.front_desk_spec(rig.composite)
+
+
+@pytest.mark.parametrize("trigger", ["auto", "manual"])
+@pytest.mark.parametrize("legacy", [None, SEAT, OTHER])
+def test_restored_generation_has_fd_authority_without_a_grant_copy(tmp_path, monkeypatch, trigger, legacy):
     async def body(rig):
         await rig.start()
-        await designate(rig)
+        front_desk(rig)
+        if legacy:
+            await designate(rig, stream_id=legacy, generation=G0 if legacy == SEAT else "9" * 32)
+        before = await grant(rig)
         await rig.kill()
+        if trigger == "manual":
+            await rig.restore.manual("restore", "req-manual-1")
         assert (await rig.restore.advance())["state"] == "restored"
         episode = (await rig.episodes())[0]
         new = episode["last_generation"]
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": new, "revision": 6}
-        # The resumed generation holds manager authority; the dead one does not.
+        assert await grant(rig) == before  # nothing is copied or moved
         assert await rig.store.lifecycle_authority_holder(SEAT, new) is True
         assert await rig.store.lifecycle_authority_holder(SEAT, G0) is False
-        assert await continuity_audit(rig) == [{
-            "action": "restore_continuity", "actor_kind": "daemon",
-            "actor_identity": "daemon:assistant-restore", "actor_generation": G0,
-            "target_stream_id": SEAT, "target_generation": new, "old_revision": 5, "new_revision": 6,
-            "prior_stream_id": SEAT, "prior_generation": G0,
-            "request_id": f"assistant-restore:{episode['episode_id']}", "result": "applied",
-            "refusal_code": None, "consent_id": CONSENT}]
-        assert (episode["grant_stream_id"], episode["grant_generation"], episode["grant_revision"]) == (SEAT, G0, 5)
-        assert episode["grant_carry"] == "applied"
-        bound = (await rig.audit("bound"))[0]
-        assert json.loads(bound["detail_json"])["grant_carry"] == "applied"
-        assert "grant moved with the seat (revision 6)" in rig.notices[0][1]
-        # A later pass changes nothing.
+        assert await rig.store.lifecycle_authority_holder(OTHER, "9" * 32) is False
+        assert episode["grant_stream_id"] is None and episode["grant_carry"] == "binding_derived"
+        rows = await binding_changes(rig)
+        assert [(r["actor_identity"], r["prior_generation"], r["target_generation"], r["request_id"], r["result"])
+                for r in rows] == [("daemon:assistant-restore", G0, new,
+                                    f"assistant-restore:{episode['episode_id']}", "applied")]
+        assert "Front-desk authority follows the binding." in rig.notices[0][1]
         await rig.restore.advance()
-        assert (await grant(rig))["revision"] == 6 and len(await continuity_audit(rig)) == 1
-    run(tmp_path, monkeypatch, body)
+        assert len(await binding_changes(rig)) == 1
+    run(tmp_path, monkeypatch, body, auto=trigger == "auto")
 
 
-@pytest.mark.parametrize("holder", [None, OTHER])
-def test_no_matching_grant_restores_chat_only(tmp_path, monkeypatch, holder):
+def test_revocation_persists_across_a_restore(tmp_path, monkeypatch):
     async def body(rig):
         await rig.start()
-        if holder:
-            await designate(rig, stream_id=holder, generation="9" * 32)
-        before = await grant(rig)
+        front_desk(rig)
+        await designate(rig, stream_id=None, generation=None, revision=7)
         await rig.kill()
         assert (await rig.restore.advance())["state"] == "restored"
         episode = (await rig.episodes())[0]
-        assert await grant(rig) == before
-        assert episode["grant_stream_id"] is None and episode["grant_carry"] == "skipped:no_grant"
-        assert await continuity_audit(rig) == []
-        assert "grant is not restored" in rig.notices[0][1]
-    run(tmp_path, monkeypatch, body)
-
-
-@pytest.mark.parametrize("change,expected", [
-    (dict(stream_id=None, generation=None, revision=6), {"stream_id": None, "session_generation": None, "revision": 6}),
-    (dict(stream_id=OTHER, generation="9" * 32, revision=6), {"stream_id": OTHER, "session_generation": "9" * 32, "revision": 6}),
-    (dict(stream_id=SEAT, generation=G0, revision=6), {"stream_id": SEAT, "session_generation": G0, "revision": 6}),
-])
-def test_grant_changed_during_the_episode_is_never_overwritten(tmp_path, monkeypatch, change, expected):
-    """Revoked, replaced, or re-issued to the same holder while the seat was down."""
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
-        await rig.kill()
-        assert (await rig.restore._create("auto"))["state"] == "pending"
-        await designate(rig, **change)
-        assert (await rig.restore.advance())["state"] == "restored"
-        episode = (await rig.episodes())[0]
-        assert await grant(rig) == expected
-        assert episode["grant_carry"] == "skipped:grant_changed"
-        rows = await continuity_audit(rig)
-        assert [(r["result"], r["refusal_code"], r["new_revision"]) for r in rows] == [("refused", "grant_changed", None)]
+        assert await grant(rig) == {"stream_id": None, "session_generation": None, "revision": 7}
         assert await rig.store.lifecycle_authority_holder(SEAT, episode["last_generation"]) is False
-        assert (await rig.composite.binding())["generation"] == episode["last_generation"]
-        assert "grant is not restored" in rig.notices[0][1]
+        assert len(await binding_changes(rig)) == 1
     run(tmp_path, monkeypatch, body)
 
 
-def test_binding_moved_supersedes_and_leaves_the_grant(tmp_path, monkeypatch):
+def test_binding_moved_supersedes_and_the_newer_binding_keeps_authority(tmp_path, monkeypatch):
     async def body(rig):
         await rig.start()
-        await designate(rig)
+        front_desk(rig)
         await rig.kill()
         assert (await rig.restore._create("auto"))["state"] == "pending"
         await rig.store.open_session(LOCAL, "other", provider="claude", role="lead", pane_status="pane_alive",
@@ -1353,73 +1329,16 @@ def test_binding_moved_supersedes_and_leaves_the_grant(tmp_path, monkeypatch):
         await rig.restore.advance()
         episode = (await rig.episodes())[0]
         assert (episode["state"], episode["reason"], episode["grant_carry"]) == ("superseded", "binding_moved", None)
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert await continuity_audit(rig) == []
+        assert await binding_changes(rig) == []
+        assert await rig.store.lifecycle_authority_holder(OTHER, "9" * 32) is True
+        assert await rig.store.lifecycle_authority_holder(SEAT, episode["last_generation"]) is False
     run(tmp_path, monkeypatch, body)
 
 
-def test_operator_started_restore_does_not_carry(tmp_path, monkeypatch):
+def test_replay_after_a_later_revoke_does_not_reaudit_or_reenable(tmp_path, monkeypatch):
     async def body(rig):
         await rig.start()
-        await designate(rig)
-        await rig.kill()
-        reply = await rig.restore.manual("restore", "req-manual-1")
-        assert reply["restore"]["trigger"] == "manual"
-        assert (await rig.restore.advance())["state"] == "restored"
-        episode = (await rig.episodes())[0]
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert episode["grant_stream_id"] is None and episode["grant_carry"] == "skipped:not_automatic"
-        assert await continuity_audit(rig) == []
-    run(tmp_path, monkeypatch, body, auto=False)
-
-
-def test_retried_episode_does_not_carry(tmp_path, monkeypatch):
-    """An operator retry turns the episode manual; authority then needs the operator."""
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
-        await rig.kill()
-        rig.spawnctl.mode = "rollback"
-        for _ in range(4):
-            await rig.restore.advance()
-            rig.clock.advance(700)
-        assert (await rig.restore.advance())["state"] == "degraded"
-        rig.spawnctl.mode = "ok"
-        await rig.restore.manual("retry", "req-retry-1")
-        assert (await rig.restore.advance())["state"] == "restored"
-        episode = (await rig.episodes())[0]
-        assert episode["trigger"] == "manual" and episode["grant_carry"] == "skipped:not_automatic"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-    run(tmp_path, monkeypatch, body)
-
-
-def test_failed_attempts_then_success_carry_from_the_original_generation(tmp_path, monkeypatch):
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
-        await rig.kill()
-        rig.spawnctl.mode = "rollback"
-        await rig.restore.advance()
-        failed = (await rig.episodes())[0]
-        assert failed["state"] == "pending" and failed["last_generation"] != G0
-        # The failed boot never held the grant.
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        rig.spawnctl.mode = "ok"
-        rig.clock.advance(60)
-        assert (await rig.restore.advance())["state"] == "restored"
-        episode = (await rig.episodes())[0]
-        assert episode["attempt_seq"] == 2 and episode["last_generation"] not in {G0, failed["last_generation"]}
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": episode["last_generation"], "revision": 6}
-        rows = await continuity_audit(rig)
-        assert [(r["prior_generation"], r["target_generation"], r["result"]) for r in rows] == [
-            (G0, episode["last_generation"], "applied")]
-    run(tmp_path, monkeypatch, body)
-
-
-def test_replay_after_a_later_revoke_does_not_reapply(tmp_path, monkeypatch):
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
+        front_desk(rig)
         await rig.kill()
         assert (await rig.restore.advance())["state"] == "restored"
         episode = (await rig.episodes())[0]
@@ -1427,58 +1346,16 @@ def test_replay_after_a_later_revoke_does_not_reapply(tmp_path, monkeypatch):
         again = await rig.store.restore_assistant_binding(
             episode_id=episode["episode_id"], env_binding=rig.composite._env_binding())
         assert again["outcome"] == "duplicate"
-        assert await grant(rig) == {"stream_id": None, "session_generation": None, "revision": 7}
-        assert len(await continuity_audit(rig)) == 1
+        assert await rig.store.lifecycle_authority_holder(SEAT, episode["last_generation"]) is False
+        assert len(await binding_changes(rig)) == 1
     run(tmp_path, monkeypatch, body)
 
 
-def test_resumed_seat_that_may_not_hold_authority_restores_chat_only(tmp_path, monkeypatch):
+def test_externally_resumed_seat_gets_no_authority_without_a_binding(tmp_path, monkeypatch):
+    """A manual resume at its own generation supersedes the episode; the binding names G0."""
     async def body(rig):
         await rig.start()
-        await designate(rig)
-        await rig.kill()
-        rig.spawnctl.row_overrides = {"role": "worker"}
-        assert (await rig.restore.advance())["state"] == "restored"
-        episode = (await rig.episodes())[0]
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert episode["grant_carry"] == "skipped:authority_target_ineligible"
-        assert [(r["result"], r["refusal_code"]) for r in await continuity_audit(rig)] == [
-            ("refused", "authority_target_ineligible")]
-    run(tmp_path, monkeypatch, body)
-
-
-def test_any_recipient_refusal_skips_the_carry(tmp_path, monkeypatch):
-    """The carry uses the existing recipient check and honours whatever it refuses."""
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
-        await rig.kill()
-        monkeypatch.setattr(lifecycle_authority, "eligible", lambda *a: "authority_target_not_ready")
-        assert (await rig.restore.advance())["state"] == "restored"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert (await rig.episodes())[0]["grant_carry"] == "skipped:authority_target_not_ready"
-    run(tmp_path, monkeypatch, body)
-
-
-def test_other_provider_session_never_binds_or_carries(tmp_path, monkeypatch):
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
-        await rig.kill()
-        rig.spawnctl.row_overrides = {"claude_session_id": "99999999-2222-4333-8444-555555555555"}
-        status = await rig.restore.advance()
-        assert status["state"] == "pending" and status["reason"] == "holder_lost"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert (await rig.composite.binding())["generation"] == G0
-        assert await continuity_audit(rig) == []
-    run(tmp_path, monkeypatch, body)
-
-
-def test_externally_resumed_seat_never_carries(tmp_path, monkeypatch):
-    """A manual resume at its own generation supersedes the episode; no authority follows it."""
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
+        front_desk(rig)
         await rig.kill()
         assert (await rig.restore._create("auto"))["state"] == "pending"
         await rig.store.open_session(
@@ -1487,39 +1364,20 @@ def test_externally_resumed_seat_never_carries(tmp_path, monkeypatch):
         rig.tmux.states["fd"] = "alive"
         status = await rig.restore.advance()
         assert status["state"] != "restored"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
         assert await rig.store.lifecycle_authority_holder(SEAT, "7" * 32) is False
-        assert await continuity_audit(rig) == []
+        assert await binding_changes(rig) == []
     run(tmp_path, monkeypatch, body)
 
 
-def test_episode_without_captured_grant_restores_chat_only(tmp_path, monkeypatch):
-    """An episode created before this change has no captured grant; nothing is inferred."""
+def test_failure_inside_the_bind_transaction_rolls_back_binding_and_audit(tmp_path, monkeypatch):
     async def body(rig):
         await rig.start()
-        await designate(rig)
-        await rig.kill()
-        assert (await rig.restore._create("auto"))["state"] == "pending"
-        def _op(conn):
-            conn.execute("UPDATE v2_assistant_restore_episode SET grant_stream_id=NULL,"
-                         "grant_generation=NULL,grant_revision=NULL")
-            conn.commit()
-        await rig.store.submit(_op)
-        assert (await rig.restore.advance())["state"] == "restored"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
-        assert (await rig.episodes())[0]["grant_carry"] == "skipped:no_grant"
-    run(tmp_path, monkeypatch, body)
-
-
-def test_failure_inside_the_bind_transaction_rolls_back_binding_and_grant(tmp_path, monkeypatch):
-    async def body(rig):
-        await rig.start()
-        await designate(rig)
+        front_desk(rig)
         await rig.kill()
         real = lifecycle_authority.audit
 
         def failing(conn, **fields):
-            if fields.get("action") == "restore_continuity":
+            if fields.get("action") == "fd_binding_change":
                 raise RuntimeError("fixture: crash before commit")
             return real(conn, **fields)
         monkeypatch.setattr(lifecycle_authority, "audit", failing)
@@ -1527,15 +1385,14 @@ def test_failure_inside_the_bind_transaction_rolls_back_binding_and_grant(tmp_pa
             await rig.restore.advance()
         episode = (await rig.episodes())[0]
         assert episode["state"] == "spawned" and episode["grant_carry"] is None
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": G0, "revision": 5}
         assert (await rig.composite.binding())["generation"] == G0
         assert await rig.audit("bound") == []
-        # The next boot continues the recorded episode and carries once.
+        # The next boot continues the recorded episode and audits once.
         monkeypatch.setattr(lifecycle_authority, "audit", real)
         rig.restore = rig.owner()
         assert (await rig.restore.advance())["state"] == "restored"
-        assert await grant(rig) == {"stream_id": SEAT, "session_generation": episode["last_generation"], "revision": 6}
-        assert len(rig.spawnctl.sent) == 1 and len(await continuity_audit(rig)) == 1
+        assert await rig.store.lifecycle_authority_holder(SEAT, episode["last_generation"]) is True
+        assert len(rig.spawnctl.sent) == 1 and len(await binding_changes(rig)) == 1
     run(tmp_path, monkeypatch, body)
 
 

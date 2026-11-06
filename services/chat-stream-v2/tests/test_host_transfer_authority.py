@@ -18,6 +18,13 @@ from test_assistant_recovery_command import fixture, OLD, NEW, CHILD, ADVISOR, C
 from work_lane_link import link_specs
 
 
+async def holder(store,front_desk):
+    """Who holds lifecycle authority: the binding-derived FD, or the legacy grant."""
+    if front_desk:
+        return (await store.lifecycle_authority_effective())['holder_stream_id']
+    return (await store.lifecycle_authority_current())['stream_id']
+
+
 def checkpoint_pointers(store,members=(OLD,ADVISOR)):
     path=Path(store.path).parent/'checkpoint.md'
     path.write_text('Commission: fixture transfer; spec: fixture; stage: preparation; obligations: none; owner: fixture.\n')
@@ -44,9 +51,10 @@ async def dispatch(store, source, principal, body="Move the whole desk to the ot
     return route
 
 
-def test_current_fd_can_request_one_daemon_transfer(tmp_path):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_current_fd_can_request_one_daemon_transfer(tmp_path,front_desk):
     async def run():
-        async with fixture(tmp_path, authority=True) as (store, server, composite, gateway, manifest, recovery):
+        async with fixture(tmp_path, authority=True,front_desk=front_desk) as (store, server, composite, gateway, manifest, recovery):
             token = await source_token(store)
             old = await store.fetch_session('node-a', 'old')
             await dispatch(store, old, 'operator:'+gateway.ceremony.cid)
@@ -172,9 +180,10 @@ def test_transfer_preparation_carries_recorded_alias_before_custody(tmp_path, mo
     asyncio.run(run())
 
 
-def test_atomic_custody_including_live_retired_source_and_restart(tmp_path):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_atomic_custody_including_live_retired_source_and_restart(tmp_path,front_desk):
     async def run():
-        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+        async with fixture(tmp_path,authority=True,front_desk=front_desk) as (store,server,composite,gateway,_,__):
             row,msg,auth,claim=await claim_bundle(store,server,gateway,composite)
             parts=await prepare_bundle(store,server,row)
             for p in parts:
@@ -183,7 +192,7 @@ def test_atomic_custody_including_live_retired_source_and_restart(tmp_path):
             assert result['state']=='committed'
             fd=next(p for p in parts if p['source']==OLD)
             advisor=next(p for p in parts if p['source']==ADVISOR)
-            assert (await store.lifecycle_authority_current())['stream_id']==fd['target']
+            assert await holder(store,front_desk)==fd['target']
             assert (await composite.binding())['stream_id']==fd['target']
             assert await store.get('assistant.authority.stream_id')==advisor['target']
             assert (await store.fetch_session('node-b','child'))['parent_stream_id']==fd['target']
@@ -196,7 +205,12 @@ def test_atomic_custody_including_live_retired_source_and_restart(tmp_path):
             assert (await store.submit(lambda c:transfer.transaction(c,claim,server.operator_credential_registry)))['receipt']==result['receipt']
             store.stop();store.start()
             assert await store.transfer_authority_state(OLD,auth['session_generation'])=='retired'
-            assert (await store.lifecycle_authority_current())['stream_id']==fd['target']
+            assert await holder(store,front_desk)==fd['target']
+            if front_desk:  # the policy row never moved; the transition is audited once
+                assert (await store.lifecycle_authority_current())['stream_id']==OLD
+                changes=[r for r in await store.lifecycle_authority_audit_rows(limit=50) if r['action']=='fd_binding_change']
+                assert [(r['prior_stream_id'],r['target_stream_id'],r['reason'],r['request_id']) for r in changes]==[
+                    (OLD,fd['target'],'host transfer',row['command_id'])]
     asyncio.run(run())
 
 
@@ -298,9 +312,10 @@ def test_nonoperator_origin_cannot_claim(tmp_path,principal,code):
     asyncio.run(run())
 
 
-def test_opted_in_emergency_revoke_retires_pin_and_pending_migration(tmp_path):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_opted_in_emergency_revoke_retires_pin_and_pending_migration(tmp_path,front_desk):
     async def run():
-        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+        async with fixture(tmp_path,authority=True,front_desk=front_desk) as (store,server,composite,gateway,_,__):
             row,_,auth,_=await claim_bundle(store,server,gateway,composite)
             result=await server._on_assistant_lifecycle({'action':'revoke','emergency':True,
                 'retire_fd_generation':True,'composite_stream_id':CHAT,
@@ -364,9 +379,10 @@ def test_one_use_command_and_changed_retry_fail_closed(tmp_path):
     asyncio.run(run())
 
 
-def test_successor_has_immediate_close_and_adoption_old_socket_denied(tmp_path):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_successor_has_immediate_close_and_adoption_old_socket_denied(tmp_path,front_desk):
     async def run():
-        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+        async with fixture(tmp_path,authority=True,front_desk=front_desk) as (store,server,composite,gateway,_,__):
             oldtoken=await source_token(store)
             row,_,auth,_=await claim_bundle(store,server,gateway,composite)
             parts=await prepare_bundle(store,server,row)
@@ -403,9 +419,10 @@ def emergency_message(row, auth):
 
 
 @pytest.mark.parametrize('change',['generation','target','revision','seat'])
-def test_emergency_revoke_bad_binding_preserves_every_authority(tmp_path,change):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_emergency_revoke_bad_binding_preserves_every_authority(tmp_path,change,front_desk):
     async def run():
-        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+        async with fixture(tmp_path,authority=True,front_desk=front_desk) as (store,server,composite,gateway,_,__):
             row,_,auth,_=await claim_bundle(store,server,gateway,composite)
             msg=emergency_message(row,auth)
             if change=='generation': msg['target_generation']='stale'
@@ -450,9 +467,10 @@ def test_emergency_revoke_receipt_replay_and_atomic_fault(tmp_path,monkeypatch):
 
 
 @pytest.mark.parametrize('winner',['commit','revoke'])
-def test_concurrent_transfer_and_emergency_revoke_has_one_winner(tmp_path,winner):
+@pytest.mark.parametrize('front_desk',[False,True],ids=['legacy','fd'])
+def test_concurrent_transfer_and_emergency_revoke_has_one_winner(tmp_path,winner,front_desk):
     async def run():
-        async with fixture(tmp_path,authority=True) as (store,server,composite,gateway,_,__):
+        async with fixture(tmp_path,authority=True,front_desk=front_desk) as (store,server,composite,gateway,_,__):
             row,_,auth,_=await claim_bundle(store,server,gateway,composite)
             parts=await prepare_bundle(store,server,row)
             lock=server.host_transfer.actor_lock((OLD,auth['session_generation']))
@@ -472,7 +490,7 @@ def test_concurrent_transfer_and_emergency_revoke_has_one_winner(tmp_path,winner
             grant=await store.lifecycle_authority_current()
             if winner=='commit':
                 assert command['state']=='committed',outcomes
-                assert grant['stream_id']==next(p['target'] for p in parts if p['source']==OLD)
+                assert await holder(store,front_desk)==next(p['target'] for p in parts if p['source']==OLD)
             else:
                 assert command['state']=='cancelled',outcomes
                 assert grant['stream_id'] is None

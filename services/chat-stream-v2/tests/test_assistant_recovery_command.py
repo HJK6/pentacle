@@ -82,7 +82,8 @@ class FixtureGateway:
 
 
 @asynccontextmanager
-async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind_host="127.0.0.1", legacy_watch_custody=False, account_alias=None):
+async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind_host="127.0.0.1", legacy_watch_custody=False,
+                  front_desk=False, account_alias=None):
     db = tmp_path / "sessions.db"
     store = Store(str(db)); store.start()
     if legacy_watch_custody:
@@ -133,6 +134,9 @@ async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind
         await store.lifecycle_authority_mutate({"action":"designate","target_stream_id":OLD,
             "target_generation":old["session_generation"],"expected_revision":0,"request_id":"initial-designation",
             "reason":"Fixture initial designation"},{**OPERATOR,"_consent_id":"fixture-initial"},sessions.assistant.role)
+        if front_desk:
+            # Direct-binding mode: the designation above is now a policy row only.
+            sessions.assistant.front_desk = composite
         await sessions.refresh()
         port = await server.bind()
         inputs = {"sessions_db":str(db),"binding_name":"fixture","predecessor":OLD,

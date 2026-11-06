@@ -216,57 +216,6 @@ RESTORE_TERMINAL_STATES = ("restored", "superseded", "degraded")
 RESTORE_ACTOR = "daemon:assistant-restore"
 
 
-def _carry_restore_grant(conn: sqlite3.Connection, episode: dict[str, Any], request_id: str) -> str:
-    """Move the lifecycle-manager grant with an automatically restored seat.
-
-    Runs inside the bind transaction, after the binding moved. The grant moves
-    only when this episode is still the daemon's own automatic one, recorded
-    the grant on its dead seat when it was created, and that exact grant
-    (stream, generation, revision) is still current. Anything else leaves the
-    grant row untouched and the restore chat-only. Returns ``applied`` or
-    ``skipped:<reason>``.
-    """
-    if episode["trigger"] != "auto":
-        return "skipped:not_automatic"
-    captured = (episode.get("grant_stream_id"), episode.get("grant_generation"), episode.get("grant_revision"))
-    if (None in captured or captured[0] != episode["stream_id"]
-            or captured[1] != episode["generation"]):
-        return "skipped:no_grant"
-    stream_id, old_generation, old_revision = str(captured[0]), str(captured[1]), int(captured[2])
-    new_generation = str(episode["last_generation"])
-    base = dict(action="restore_continuity", actor_kind="daemon", actor_identity=RESTORE_ACTOR,
-                actor_generation=old_generation, target_stream_id=stream_id,
-                target_generation=new_generation, old_revision=old_revision,
-                prior_stream_id=stream_id, prior_generation=old_generation,
-                reason=f"automatic assistant restore episode {int(episode['episode_id'])}",
-                request_id=request_id)
-    grant = lifecycle_authority.current(conn)
-    if (grant["stream_id"], grant["session_generation"], grant["revision"]) != (
-            stream_id, old_generation, old_revision):
-        lifecycle_authority.audit(conn, **base, result="refused", refusal_code="grant_changed")
-        return "skipped:grant_changed"
-    # The restore never resumes a role-protected seat, so only `lead` qualifies.
-    code = lifecycle_authority.eligible(conn, stream_id, new_generation, "")
-    if code:
-        lifecycle_authority.audit(conn, **base, result="refused", refusal_code=code)
-        return f"skipped:{code}"
-    # The operator consent that designated this holder stays on the record.
-    consent = conn.execute(
-        "SELECT consent_id FROM v2_lifecycle_authority_audit WHERE result='applied' "
-        "AND new_revision=? AND target_stream_id=? AND target_generation=? ORDER BY id DESC LIMIT 1",
-        (old_revision, stream_id, old_generation),
-    ).fetchone()
-    moved = conn.execute(
-        "UPDATE v2_lifecycle_manager SET session_generation=?, revision=?, updated_at=? "
-        "WHERE id=1 AND stream_id=? AND session_generation=? AND revision=?",
-        (new_generation, old_revision + 1, time.time(), stream_id, old_generation, old_revision),
-    )
-    if moved.rowcount != 1:
-        lifecycle_authority.audit(conn, **base, result="refused", refusal_code="grant_changed")
-        return "skipped:grant_changed"
-    lifecycle_authority.audit(conn, **base, new_revision=old_revision + 1, result="applied",
-                              consent_id=consent[0] if consent else None)
-    return "applied"
 _STREAM_RE = re.compile(r"[a-z][a-z0-9_-]*:[A-Za-z0-9_.:-]+\Z")
 _GENERATION_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
@@ -409,7 +358,39 @@ def _configured_spec_authorized(
     )
 
 
+def front_desk_aliases_conn(conn: sqlite3.Connection, front_desk: dict[str, Any] | None) -> set[str]:
+    """Seat ids the daemon's own records prove were bound as the primary FD.
+
+    Sources: the primary env pin and binding row, and lifecycle
+    binding-change and legacy grant-move audit rows (primary-only), less any
+    seat bound to another assistant name. Rebind audit rows name no
+    assistant, so they are never evidence. Never role, title or message
+    text. Historical ids are tell aliases only; they confer no authority.
+    """
+    if not front_desk:
+        return set()
+    name = front_desk["name"]
+    aliases: set[str] = set()
+    env_stream = str((front_desk.get("env_binding") or {}).get("stream_id") or "")
+    if env_stream:
+        aliases.add(env_stream)
+    other: set[str] = set()
+    for row in conn.execute("SELECT name,stream_id FROM v2_assistant_direct_binding"):
+        if row[1]:
+            (aliases if row[0] == name else other).add(str(row[1]))
+    for row in conn.execute(
+            "SELECT prior_stream_id,target_stream_id FROM v2_lifecycle_authority_audit WHERE result='applied' "
+            "AND action IN ('fd_binding_change','host_transfer','handoff_transfer')"):
+        aliases.update(str(v) for v in row if v)
+    return aliases - other
+
+
 class AssistantBindingStoreMixin:
+    async def front_desk_aliases(self) -> set[str]:
+        def _op(conn: sqlite3.Connection) -> set[str]:
+            return front_desk_aliases_conn(conn, lifecycle_authority.configured(conn))
+        return await self.submit(_op)
+
     async def record_scoped_owner(self, *, kind: str, key: str, credential_id: str) -> None:
         """Bind a blob sha or request id to the scoped credential that created it.
 
@@ -547,6 +528,7 @@ class AssistantBindingStoreMixin:
                 _live_seat(actor)
                 if actor["session_generation"] != actor_generation:
                     raise ValueError("assistant_rebind_actor_generation_mismatch")
+                handoff_proved = False
                 if actor_stream_id != old["stream_id"] or actor_generation != old["generation"]:
                     handoff = conn.execute(
                         "SELECT 1 FROM v2_assistant_direct_handoff_proofs "
@@ -558,6 +540,7 @@ class AssistantBindingStoreMixin:
                         actor, authorized_spec_ids, allow_hidden=name == primary_assistant_name(),
                     ):
                         raise ValueError("assistant_rebind_unauthorized")
+                    handoff_proved = handoff is not None
                 if clear:
                     if old["source"] != "durable":
                         raise ValueError("assistant_rebind_clear_unavailable")
@@ -607,6 +590,12 @@ class AssistantBindingStoreMixin:
                     (request_id, digest, actor_stream_id, actor_generation, json.dumps(old),
                      json.dumps(new), "ok", json.dumps(receipt), stamp),
                 )
+                if name == primary_assistant_name():
+                    lifecycle_authority.binding_change(
+                        conn, old=old, new=new, binding_revision=new["revision"], actor_kind="seat",
+                        actor_identity=actor_stream_id, actor_generation=actor_generation,
+                        reason="managed handoff" if handoff_proved else "assistant rebind",
+                        request_id=request_id)
                 conn.commit()
                 return receipt
             except ValueError as exc:
@@ -625,7 +614,7 @@ class AssistantBindingStoreMixin:
                 conn.rollback()
                 raise
 
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             result = await self.submit(_op)
         if result.get("error_code"):
             raise ValueError(result["error_code"])
@@ -658,12 +647,17 @@ class AssistantBindingStoreMixin:
                     "revision=excluded.revision,updated_at=excluded.updated_at",
                     (name, target_stream_id, generation, revision, _stamp()),
                 )
+                if name == primary_assistant_name():
+                    lifecycle_authority.binding_change(
+                        conn, old=old, new={"stream_id": target_stream_id, "generation": generation},
+                        binding_revision=revision, actor_kind="daemon", actor_identity="daemon:assistant-recovery",
+                        actor_generation=None, reason="daemon recovery rebind", request_id=None)
                 conn.commit()
                 return {"stream_id": target_stream_id, "generation": generation, "revision": revision}
             except BaseException:
                 conn.rollback()
                 raise
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             return await self.submit(_op)
 
     # -- daemon-owned restore of the bound seat (assistant_restore.py) --------
@@ -781,13 +775,9 @@ class AssistantBindingStoreMixin:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 stamp = _stamp()
-                # Only the daemon's own automatic episode records the grant its
-                # dead seat holds; that record is what the bind may later carry.
-                grant = lifecycle_authority.current(conn)
-                held = (trigger == "auto" and grant["stream_id"] == stream_id
-                        and grant["session_generation"] == generation)
-                captured = ((stream_id, generation, int(grant["revision"])) if held
-                            else (None, None, None))
+                # Authority follows the binding; nothing is captured to carry.
+                # The legacy grant columns stay for old readers.
+                captured = (None, None, None)
                 try:
                     cursor = conn.execute(
                         "INSERT OR IGNORE INTO v2_assistant_restore_episode"
@@ -1023,7 +1013,14 @@ class AssistantBindingStoreMixin:
                 receipt = {"type": "assistant.rebind.ok", "request_id": request_id,
                            "old_binding": old, "new_binding": new, "duplicate": False}
                 rebind_audit("ok", new, receipt)
-                grant_carry = _carry_restore_grant(conn, episode, request_id)
+                grant_carry = None
+                if name == primary_assistant_name():
+                    lifecycle_authority.binding_change(
+                        conn, old=old, new=new, binding_revision=new["revision"], actor_kind="daemon",
+                        actor_identity=RESTORE_ACTOR, actor_generation=episode["generation"],
+                        reason=f"assistant restore episode {episode_id} ({episode['trigger']})",
+                        request_id=request_id)
+                    grant_carry = "binding_derived"
                 result = finish("bound", None, "bound", "ok", new,
                                 {"outcome": "ok", "duplicate": False, "receipt": receipt},
                                 grant_carry=grant_carry)
@@ -1032,7 +1029,7 @@ class AssistantBindingStoreMixin:
             except BaseException:
                 conn.rollback()
                 raise
-        async with self.session_graph_lock:
+        async with self.front_desk_fence(), self.session_graph_lock:
             return await self.submit(_op)
 
     async def restore_reset_budget(

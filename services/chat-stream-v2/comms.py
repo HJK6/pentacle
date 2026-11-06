@@ -583,17 +583,24 @@ class Comms:
         # bare body and this build would otherwise hash header+body — is still
         # recognized as the same payload instead of a spurious tell_id_conflict.
         # Only the injected wire text carries the peer-provenance envelope.
-        digest = payload_digest(str(route["final_target"]), body)
+        logical = msg.get("_logical_front_desk")
+        logical = logical if isinstance(logical, dict) else None
+        digest = self._logical_digest(msg, logical, body) if logical else payload_digest(str(route["final_target"]), body)
         wire = self._peer_delivery_wire(msg, "tell", tell_id, body)
 
         prior = await self.store.get_tell_delivery(tell_id)
         if prior is not None:
-            self._assert_same_payload(tell_id, digest, prior)
-            async with self._pane_input_lock(str(route["final_target"])):
-                prior = await self.store.get_tell_delivery(tell_id)
+            # A logical FD retry after a rebind returns the original committed
+            # outcome; an attempt is reconciled at the seat it was made on.
+            matched = self._same_logical_payload(tell_id, digest, prior, logical, body) if logical else digest
+            if not logical:
                 self._assert_same_payload(tell_id, digest, prior)
+            attempted = str((prior.get("delivery") or {}).get("to_stream_id") or "") if logical else ""
+            async with self._pane_input_lock(attempted or str(route["final_target"])):
+                prior = await self.store.get_tell_delivery(tell_id)
+                self._assert_same_payload(tell_id, matched, prior)
                 prior = (await self.store.promote_tell_delivery(
-                    tell_id, digest, reconcile=True)) or prior
+                    tell_id, matched, reconcile=True)) or prior
             return {**prior["reply"], "duplicate": True}
         pending = self._inflight.get(tell_id)
         if pending is not None:
@@ -632,6 +639,7 @@ class Comms:
                             "to_stream_id": str(route["final_target"]),
                             "original_to_stream_id": str(route["original_target"]),
                             "route_hops": list(route.get("hops") or []),
+                            **self._logical_receipt(logical),
                             "text": wire,
                             "delivery_status": suppressed["delivery_status"],
                             "assistant_backend_ingress": suppressed.get("assistant_backend_ingress"),
@@ -915,6 +923,7 @@ class Comms:
             "to_stream_id": str(route["final_target"]),
             "original_to_stream_id": str(route["original_target"]),
             "route_hops": list(route.get("hops") or []),
+            **self._logical_receipt(msg.get("_logical_front_desk")),
             "text": body,
             "delivery_status": delivery_status,
             "delivery_attempts": attempts,
@@ -965,6 +974,7 @@ class Comms:
                      confirmation_pending=True, confirmation_status="pending", do_not_resubmit=True,
                      reconcile="tell_id_evidence_only", **watermark_fields(watermark))
         delivery = {"tell_id":tell_id, "to_stream_id":str(route["final_target"]), "text":body,
+            **self._logical_receipt(msg.get("_logical_front_desk")),
             "from_stream_id":str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
             "delivery_status":"proof_unavailable", "submission_confirmed":False, "submission_attempts":0,
             "delivered_at":None, "request_payload_hash":digest,
@@ -1023,6 +1033,41 @@ class Comms:
             f"tell_id {tell_id} was already used for a different message or a different "
             "target stream; reusing an idempotency key requires an identical payload",
         )
+
+    @staticmethod
+    def _logical_digest(msg: dict[str, Any], logical: dict[str, Any], body: str) -> str:
+        """FD tell identity: authenticated sender, logical destination and body."""
+        sender = str(logical.get("sender") or msg.get("from_stream_id") or "")
+        return payload_digest(f"front-desk:{logical['name']}\x00{sender}", body)
+
+    def _same_logical_payload(self, tell_id, digest, prior, logical, body) -> str:
+        """The stored digest a logical FD retry matches, or tell_id_conflict.
+
+        A row written before logical FD identity hashed its physical seat; it
+        matches only when that seat is a proved primary binding, its retained
+        sender is this sender and the body is the same. Ambiguous evidence
+        fails closed.
+        """
+        if not isinstance(prior, dict):
+            raise self._conflict(tell_id)
+        if prior.get("payload_digest") == digest:
+            return digest
+        delivery = prior.get("delivery") or {}
+        attempted = str(delivery.get("to_stream_id") or "")
+        sender = str(logical.get("sender") or "")
+        if (attempted and attempted in logical.get("aliases", ())
+                and sender and str(delivery.get("from_stream_id") or "") == sender
+                and delivery.get("logical_front_desk") is None
+                and prior.get("payload_digest") == payload_digest(attempted, body)):
+            return str(prior["payload_digest"])
+        raise self._conflict(tell_id)
+
+    @staticmethod
+    def _logical_receipt(logical: Any) -> dict[str, Any]:
+        if not isinstance(logical, dict):
+            return {}
+        return {"logical_front_desk": logical["name"], "requested_to_stream_id": logical.get("requested"),
+                "binding_revision": logical.get("binding_revision")}
 
     def _assert_same_payload(self, tell_id: str, digest: str, prior: dict[str, Any]) -> None:
         """A stored record that predates the envelope has no digest to compare,
@@ -1952,8 +1997,13 @@ class Comms:
                 or queued_operation is not None or queued_binding
                 or (row or {}).get("provider") == "claude" else nullcontext()
             )
+            # An alias send holds the FD gate through physical input, so a
+            # rebind commits either before its binding check or after the
+            # paste. Gate before lifecycle, as for binding writers.
+            binding_gate = (self.store.front_desk_fence()
+                            if isinstance(plan.message.get("_assistant_alias_binding"), dict) else nullcontext())
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
-            async with lifecycle, self._pane_input_lock(target):
+            async with binding_gate, lifecycle, self._pane_input_lock(target):
                 if queued_operation is not None:
                     policy = getattr(self, "queued_send_now", None)
                     current = await self.store.fetch_session(host, name) or {}
@@ -1984,6 +2034,16 @@ class Comms:
                             "Direct assistant target generation changed before delivery",
                             phase="not_started",
                         )
+                fence = plan.message.get("_assistant_alias_binding")
+                if isinstance(fence, dict):
+                    # `send assistant` sampled the binding once; a rebind before
+                    # input refuses rather than silently redirecting the send.
+                    current = await self.store.get_assistant_binding(
+                        env_binding=fence["env_binding"], name=fence["name"])
+                    if any(current.get(k) != fence[k] for k in ("stream_id", "generation", "revision")):
+                        raise VerbError("assistant_binding_stale",
+                                        "assistant binding changed before input; nothing was sent; retry",
+                                        phase="not_started", retryable=True)
                 await self._assert_claude_send_ready(plan.route)
                 account_runtime = getattr(self, "account_runtime", None)
                 if account_runtime is not None:

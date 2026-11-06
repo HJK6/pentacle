@@ -189,11 +189,17 @@ class FrontDeskDigest:
         now = time.time() if now is None else now
         deadline_s = self.deadline_s()
         def op(conn):
+            import store_lifecycle_authority
+            from store_assistant_binding import front_desk_aliases_conn
+            # Held rows were never attempted, so rows held for a proved former
+            # FD seat fold for the current binding with their original deadline.
+            recipients = sorted({target} | front_desk_aliases_conn(conn, store_lifecycle_authority.configured(conn)))
+            marks = ','.join('?' * len(recipients))
             with conn:
                 pending = [dict(row) for row in conn.execute(
-                    "SELECT * FROM v2_outbound_notices WHERE kind=? AND recipient_stream_id=? "
+                    f"SELECT * FROM v2_outbound_notices WHERE kind=? AND recipient_stream_id IN ({marks}) "
                     "AND delivered_at IS NULL AND terminal_at IS NULL ORDER BY created_at,notice_id",
-                    (HELD_KIND, target))]
+                    (HELD_KIND, *recipients))]
                 typed = [row for row in pending if json.loads(row.get('metadata') or '{}').get('error_alert_v1')]
                 pending = [row for row in pending if row not in typed]
                 self._fold_errors(conn, typed, target, generation, now, deadline_s)
@@ -202,8 +208,8 @@ class FrontDeskDigest:
                 oldest = datetime.fromisoformat(pending[0]['created_at'].replace('Z', '+00:00')).timestamp()
                 # Turning admission off also drains the pre-existing backlog
                 # on the next sweep. A restart retains the original deadline;
-                # held rows from a prior generation of this same target are
-                # folded for its current binding rather than stranded forever.
+                # held rows from a prior generation or a prior bound seat are
+                # folded for the current binding rather than stranded forever.
                 if self.enabled() and now < oldest + deadline_s:
                     return
                 nid, body = self._block(pending)

@@ -306,6 +306,9 @@ class HostTransfer:
             if self.server.notify is not None:
                 await stack.enter_async_context(self.server.notify._host_transfer_lock)
             await stack.enter_async_context(composite._binding_lock)
+            if self.store.front_desk_effect_gate.locked():
+                raise journal.TransferError('transfer_effect_busy')
+            await stack.enter_async_context(self.store.front_desk_fence())
             await stack.enter_async_context(sessions.assistant.lock)
             await stack.enter_async_context(sessions.assistant.authority_lock)
             parts=await self.store.submit(lambda c: journal.seats(c,row['command_id']))
