@@ -565,7 +565,8 @@ print(json.dumps({'identity':provider_cli_artifact.code_identity(),'python':sys.
         rows = []
         for line in result.stdout.splitlines():
             parts = line.strip().split(None, 3)
-            if len(parts) != 4 or not all(p.isdigit() for p in parts[:3]):
+            if (len(parts) != 4 or not all(re.fullmatch(r"[0-9]+", p) for p in parts[:2])
+                    or not re.fullmatch(r"-?[0-9]+", parts[2])):
                 raise Invalid("process provenance is unreadable")
             rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
         return rows
