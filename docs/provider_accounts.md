@@ -13,6 +13,8 @@ QA and evaluator commissions. Ordinary lineage, spec and phase checks still
 apply. A role name, claimed stream ID, watcher or generic service token grants
 no launch authority. Default changes, login, enrollment and repin remain limited
 to the authenticated front-desk binding and its existing successor authority.
+Authenticated operators can also read the inventory used by the pickers. Inventory
+authorization failures remain visible instead of presenting an empty account list.
 
 ```sh
 agent-orch account status --host host-a --provider codex
@@ -49,6 +51,11 @@ its prior bytes on rollback; declared-exclusion runs preserve the existing job.
 Qualified release inputs put the canary map in `activation.accounts`; it is part
 of the qualification identity. Legacy full-matrix deployment accepts repeatable
 `--account` and retains its map in the stamp and installed smoke job.
+On a subsequent forward legacy deployment, omitting `--account` resets smoke
+selection to configured legacy defaults (including `PENTACLE_SMOKE_ACCOUNTS`
+from the daemon environment, when set); it does not inherit the previous stamped map.
+The installed scheduled smoke map is replaced accordingly. Repeat the declarations
+to keep an explicit map across forward deployments. Rollback uses its recorded map.
 Startup tuple probes select the tuple's alias explicitly. Wrapper/delivery probes
 and event-push canaries accept the same map. Daily-retro settings accept optional
 `account` and retain it in the original idempotent intent.

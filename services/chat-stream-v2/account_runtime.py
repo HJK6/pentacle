@@ -392,7 +392,10 @@ class AccountRuntime:
                 # watcher principal may submit observations/trusted failures.
                 if action!="probe": raise AccountError("account_observation_unauthorized")
                 await self._front_desk(auth)
-        elif action in {"status","report-failure"}:
+        elif action=="status":
+            if auth.get("token_verified") is not True and auth.get("operator_authenticated") is not True:
+                raise AccountError("account_control_unauthorized")
+        elif action=="report-failure":
             if auth.get("token_verified") is not True: raise AccountError("account_control_unauthorized")
         else: raise AccountError("account_action_invalid")
         allowed={"type","action","request_id","operation_id","provider","account","host","login_generation",

@@ -53,6 +53,11 @@ map; rollback restores the job preimage. Qualified canaries use release-input
 `activation.accounts`, included in their qualification identity. Legacy full-matrix
 activation accepts repeatable `--account` declarations; it cannot override a sealed
 coordinated intent or qualification input. Omitted maps preserve legacy defaults.
+For a new forward legacy deployment, omitted `--account` resets selection to those
+defaults and replaces the scheduled map; it does not inherit a prior stamped map.
+The legacy configuration may supply `PENTACLE_SMOKE_ACCOUNTS` through the daemon environment.
+Repeat the declarations when the next deployment should retain explicit selection.
+Rollback uses the map recorded in its stamp.
 
 FD is the release owner for the deploy gate-evidence choice. When a fresh,
 accepted local v2-merge receipt names the exact public candidate SHA, clean

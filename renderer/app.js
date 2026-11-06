@@ -7127,6 +7127,7 @@ function renderSpawnProfileOptions(container) {
     updateNewSessionStatus(`Provider changed to ${newSessionSelection.provider}.`);
   });
   container.querySelector('#spawn-model')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
     const model = event.target.value;
     const next = catalogTuple(selection.provider, { model, effort: selection.effort });
     newSessionSelection = { ...next, ...(selection.account !== undefined ? { account: selection.account } : {}) };
@@ -7136,6 +7137,7 @@ function renderSpawnProfileOptions(container) {
     updateNewSessionStatus(`Version changed to ${modelLabel(model)}.`);
   });
   container.querySelector('#spawn-effort')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
     newSessionSelection = { ...selection, effort: event.target.value };
     saveSpawnPreference(newSessionSelection.provider, newSessionSelection);
     newSessionError = '';
@@ -7143,6 +7145,7 @@ function renderSpawnProfileOptions(container) {
     updateNewSessionStatus(`Effort changed to ${event.target.value}.`);
   });
   container.querySelector('#spawn-account')?.addEventListener('change', (event) => {
+    const selection = newSessionSelection;
     newSessionSelection = { ...selection, account: event.target.value || undefined };
     updateNewSessionStatus(`Account: ${event.target.value || 'host default'}.`);
   });

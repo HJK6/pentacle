@@ -199,7 +199,11 @@ function createCcHandlers({
     target.handle('chat-stream:spawn-catalog', () => command(async () => {
       const [catalog, accounts] = await Promise.all([
         chatStreamClient.getSpawnCatalog(),
-        chatStreamClient.getProviderAccounts?.().catch(() => null),
+        chatStreamClient.getProviderAccounts?.().catch(error => {
+          // Keep protocol refusals visible instead of presenting a default-only picker.
+          if (error?.type === 'account.error' || error?.error_code || error?.code) throw error;
+          return null;
+        }),
       ]);
       return { catalog: accounts ? { ...catalog, account_status: accounts } : catalog };
     }));

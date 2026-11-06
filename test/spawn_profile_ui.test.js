@@ -53,7 +53,7 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel(''), '');
 });
 
-function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = []) {
+function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = [], submissions = []) {
   const dom = new JSDOM('<main><h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div></main>');
   const catalog = catalogOverride || {
     profiles: { desktop_manual: { [selection.provider]: [selection.model, selection.effort] } },
@@ -64,7 +64,15 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
     'selectionForProvider', 'renderNewSessionModal',
     'newSessionSelection', 'newSessionCatalog', 'newSessionError', 'newSessionLocation',
-    `${extractFunction('spawnAccountControl')}; ${extractFunction('renderSpawnProfileOptions')}; return { render: renderSpawnProfileOptions, selection: () => newSessionSelection };`,
+    'submissions',
+    `let newSessionSubmitting = false; let newSessionSubmitToken = 0;
+     const state = { slots: [null] };
+     const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
+     const waitForNewSessionSpawn = promise => promise; const NEW_SESSION_LONG_WAIT_MS = 100;
+     const hideNewSessionModal = () => {};
+     ${extractFunction('spawnAccountControl')}; ${extractFunction('renderSpawnProfileOptions')};
+     ${extractFunction('newSession')};
+     return { render: renderSpawnProfileOptions, selection: () => newSessionSelection, submit: () => newSession() };`,
   )(
     dom.window.document,
     String,
@@ -90,10 +98,36 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     catalog,
     '',
     'fixture-host',
+    submissions,
   );
   const container = dom.window.document.getElementById('profile');
   controller.render(container);
-  return { dom, container, selection: controller.selection };
+  return { dom, container, selection: controller.selection, submit: controller.submit };
+}
+
+for (const control of ['effort', 'model']) {
+  for (const previousAccount of [undefined, 'primary']) {
+    test(`account choice survives ${control} edit and submit (previous ${previousAccount || 'default'})`, async () => {
+      const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: previousAccount };
+      const models = { 'gpt-6.1-sol': { efforts: ['high', 'medium'] }, 'gpt-6.1-terra': { efforts: ['high', 'medium'] } };
+      const catalog = { profiles: { desktop_manual: { codex: ['gpt-6.1-sol', 'high'] } }, models: { codex: models },
+        account_status: { accounts: ['primary', 'spare'].map(alias => ({ host: 'fixture-host', provider: 'codex',
+          alias, active: true, enabled: true, health: 'healthy' })) } };
+      const submissions = [];
+      const ui = renderProfileForTest(selection, models, [], catalog, [], submissions);
+      const account = ui.container.querySelector('#spawn-account');
+      account.value = 'spare'; account.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      const edit = ui.container.querySelector('#spawn-' + control);
+      edit.value = control === 'effort' ? 'medium' : 'gpt-6.1-terra';
+      edit.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      await ui.submit();
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0].account, 'spare');
+      assert.equal(submissions[0][control], edit.value);
+    });
+  }
 }
 
 test('account picker uses active target aliases, submits the selection, and exposes unsupported providers', () => {
