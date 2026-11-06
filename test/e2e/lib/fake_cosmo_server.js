@@ -40,7 +40,9 @@ function createSeed(today, vocabulary) {
     event(104, dayOffset(today, 2), '09:00', 'Synthetic shared', vocabulary.bothWho, { scope: 'shared' }),
     event(105, assistantDay, '10:00', 'Synthetic assistant day', 'operator', { created_by: vocabulary.assistant }),
   ];
-  return { today, month: today.slice(0, 7), assistantDay, lists, events, server_now: `${today}T12:00:00Z` };
+  const routines = [{ id: 201, list: 'chores', label: 'Synthetic routine', scope: 'operator',
+    created_by: vocabulary.assistant, next_due: dayOffset(today, 3), paused: false, item_id: null }];
+  return { today, month: today.slice(0, 7), assistantDay, lists, events, routines, server_now: `${today}T12:00:00Z` };
 }
 function keysAre(value, keys) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(','); }
 function createFakeCosmo({ today = chicagoDay(), vocabulary = readCosmoVocabulary(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
@@ -61,6 +63,10 @@ function createFakeCosmo({ today = chicagoDay(), vocabulary = readCosmoVocabular
     if (!/^Bearer \S+$/.test(authorization)) return result(401);
     const delay = delays.findIndex(x => x.method === method && x.path === route);
     if (delay >= 0) await sleep(delays.splice(delay, 1)[0].ms);
+    if (method === 'GET' && route === '/routines') {
+      if (body !== null || parsed.search) return result(400);
+      return result(200, { items: structuredClone(seed.routines), server_now: seed.server_now });
+    }
     const listMatch = route.match(/^\/lists\/(tasks|grocery|meals|chores|study)\/items$/);
     if (listMatch) {
       const list = listMatch[1];

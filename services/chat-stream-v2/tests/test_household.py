@@ -91,6 +91,7 @@ def cosmo():
     for name in ("tasks", "grocery", "meals", "chores", "study"):
         fake.routes[("GET", f"/lists/{name}/items")] = (200, {"items": [], "server_now": "s"})
     fake.routes[("GET", "/events")] = (200, {"items": [], "server_now": "s"})
+    fake.routes[("GET", "/routines")] = (200, {"items": [], "server_now": "s"})
     yield fake
     fake.close()
 
@@ -202,7 +203,7 @@ def test_dispatch_operator_connection_reaches_cosmo(adapter, cosmo):
                                           websocket=peer))
     assert frames[0]["type"] == "household.snapshot.ok", frames
     assert frames[0]["request_id"] == "o1"
-    assert len(cosmo.calls) == 7
+    assert len(cosmo.calls) == 8
 
 
 def test_dispatch_registered_on_real_server():
@@ -225,7 +226,7 @@ def test_snapshot_defaults_to_chicago_month_and_next_week(adapter, cosmo):
     assert [e["id"] for e in result["events"]] == [4, 5]
     ranges = sorted((c["query"]["from"][0], c["query"]["to"][0]) for c in cosmo.calls if c["path"] == "/events")
     assert ranges == [("2026-10-01", "2026-10-31"), ("2026-10-06", "2026-10-13")]
-    assert len(cosmo.calls) == 7
+    assert len(cosmo.calls) == 8
     assert all(c["method"] == "GET" for c in cosmo.calls)
 
 
@@ -527,3 +528,33 @@ def test_unset_self_person_is_unavailable_with_zero_requests(cosmo, token_file, 
             call(adapter, verb, **VERBS[verb])
         assert code_of(exc) == "unavailable"
     assert cosmo.calls == []
+
+
+def test_snapshot_includes_neutral_routines(adapter, cosmo):
+    cosmo.routes[("GET", "/routines")] = (200, {"items": [
+        {"id": 9, "list": "chores", "label": "Clean fountain", "scope": "owner",
+         "created_by": "app", "next_due": "2026-11-12", "paused": False, "item_id": None},
+        {"id": 10, "scope": "other", "created_by": "app"},
+    ]})
+    out = call(adapter, "household.snapshot")
+    assert out["routines"] == [{"id": 9, "list": "chores", "label": "Clean fountain",
+        "scope": "private", "created_by": "app", "next_due": "2026-11-12",
+        "paused": False, "item_id": None}]
+    assert all(c["method"] == "GET" for c in cosmo.calls)
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"items": None}, {"items": [None]}, {"items": [{"scope": "owner", "id": 1}]}])
+def test_required_routine_read_malformed_fails_snapshot(adapter, cosmo, payload):
+    from sessions import VerbError
+    cosmo.routes[("GET", "/routines")] = (200, payload)
+    with pytest.raises(VerbError) as exc:
+        call(adapter, "household.snapshot")
+    assert exc.value.code == "unavailable"
+
+
+def test_required_routine_read_failure_is_not_empty_success(adapter, cosmo):
+    from sessions import VerbError
+    cosmo.routes[("GET", "/routines")] = (503, {"items": []})
+    with pytest.raises(VerbError) as exc:
+        call(adapter, "household.snapshot")
+    assert exc.value.code == "unavailable"
