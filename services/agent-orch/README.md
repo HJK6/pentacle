@@ -41,8 +41,9 @@ change updates source only; installing the client is a separate rollout.
 
 → See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for system context. Setup guide: see [../../docs/agent_orchestration_setup.md](../../docs/agent_orchestration_setup.md) for installing `chat_streamd`, `agent-orch`, per-machine config, autostart, and smoke tests. That guide installs the CLI into the checkout-local virtual environment; `bash services/agent-orch/install.sh` is an alternative user-level install that needs Python 3.12 or later (3.13 on macOS).
 
-Optional named subscription accounts are default OFF. The front desk can choose
-`spawn --account`, change a host/provider default with `account default set`, or
+Optional named subscription accounts are default OFF. Authorized launch callers can choose
+`spawn --account` for immediate, delayed or recurring work. The front desk can
+change a host/provider default with `account default set`, or
 carry a conversation through `spawn --handoff --handoff-from ... --account ...`.
 See [named provider accounts](../../docs/provider_accounts.md) for authority,
 setup, usage, targeted re-login and rollback.

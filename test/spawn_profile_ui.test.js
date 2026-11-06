@@ -53,18 +53,26 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel(''), '');
 });
 
-function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = []) {
+function renderProfileForTest(selection, models, emissions, catalogOverride = null, providerSelections = [], submissions = []) {
   const dom = new JSDOM('<main><h1 id="new-session-title"></h1><p id="new-session-subtitle"></p><div id="profile"></div></main>');
   const catalog = catalogOverride || {
     profiles: { desktop_manual: { [selection.provider]: [selection.model, selection.effort] } },
     models: { [selection.provider]: models },
   };
-  const renderSpawnProfileOptions = new Function(
+  const controller = new Function(
     'document', 'esc', 'modelLabel', 'updateNewSessionStatus',
     'catalogTuple', 'catalogProviders', 'providerLabelForHero', 'saveSpawnPreference',
     'selectionForProvider', 'renderNewSessionModal',
-    'newSessionSelection', 'newSessionCatalog', 'newSessionError',
-    `${extractFunction('renderSpawnProfileOptions')}; return renderSpawnProfileOptions;`,
+    'newSessionSelection', 'newSessionCatalog', 'newSessionError', 'newSessionLocation',
+    'submissions',
+    `let newSessionSubmitting = false; let newSessionSubmitToken = 0;
+     const state = { slots: [null] };
+     const window = { cc: { chatSpawnV2: async request => { submissions.push(request); return { ok: true }; } } };
+     const waitForNewSessionSpawn = promise => promise; const NEW_SESSION_LONG_WAIT_MS = 100;
+     const hideNewSessionModal = () => {};
+     ${extractFunction('spawnAccountControl')}; ${extractFunction('renderSpawnProfileOptions')};
+     ${extractFunction('newSession')};
+     return { render: renderSpawnProfileOptions, selection: () => newSessionSelection, submit: () => newSession() };`,
   )(
     dom.window.document,
     String,
@@ -89,11 +97,61 @@ function renderProfileForTest(selection, models, emissions, catalogOverride = nu
     selection,
     catalog,
     '',
+    'fixture-host',
+    submissions,
   );
   const container = dom.window.document.getElementById('profile');
-  renderSpawnProfileOptions(container);
-  return { dom, container };
+  controller.render(container);
+  return { dom, container, selection: controller.selection, submit: controller.submit };
 }
+
+for (const control of ['effort', 'model']) {
+  for (const previousAccount of [undefined, 'primary']) {
+    test(`account choice survives ${control} edit and submit (previous ${previousAccount || 'default'})`, async () => {
+      const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', account: previousAccount };
+      const models = { 'gpt-6.1-sol': { efforts: ['high', 'medium'] }, 'gpt-6.1-terra': { efforts: ['high', 'medium'] } };
+      const catalog = { profiles: { desktop_manual: { codex: ['gpt-6.1-sol', 'high'] } }, models: { codex: models },
+        account_status: { accounts: ['primary', 'spare'].map(alias => ({ host: 'fixture-host', provider: 'codex',
+          alias, active: true, enabled: true, health: 'healthy' })) } };
+      const submissions = [];
+      const ui = renderProfileForTest(selection, models, [], catalog, [], submissions);
+      const account = ui.container.querySelector('#spawn-account');
+      account.value = 'spare'; account.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      const edit = ui.container.querySelector('#spawn-' + control);
+      edit.value = control === 'effort' ? 'medium' : 'gpt-6.1-terra';
+      edit.dispatchEvent(new ui.dom.window.Event('change'));
+      assert.equal(ui.selection().account, 'spare');
+      await ui.submit();
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0].account, 'spare');
+      assert.equal(submissions[0][control], edit.value);
+    });
+  }
+}
+
+test('account picker uses active target aliases, submits the selection, and exposes unsupported providers', () => {
+  const selection = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' };
+  const catalog = { profiles: { desktop_manual: { codex: [selection.model, 'high'] } },
+    models: { codex: { [selection.model]: { efforts: ['high'] } } }, account_status: {
+      defaults: [{ host: 'fixture-host', provider: 'codex', alias: 'primary' }], accounts: [
+        { host: 'fixture-host', provider: 'codex', alias: 'spare', active: true, enabled: true, health: 'healthy' },
+        { host: 'fixture-host', provider: 'codex', alias: 'parked', active: true, enabled: false, health: 'parked' },
+        { host: 'other-host', provider: 'codex', alias: 'foreign', active: true, enabled: true, health: 'healthy' },
+      ],
+    } };
+  const ui = renderProfileForTest(selection, catalog.models.codex, [], catalog);
+  const picker = ui.container.querySelector('#spawn-account');
+  assert.deepEqual([...picker.options].map(o => o.value), ['', 'spare', 'parked']);
+  assert.match(picker.options[0].textContent, /primary/);
+  assert.equal(picker.options[2].disabled, true);
+  picker.value = 'spare'; picker.dispatchEvent(new ui.dom.window.Event('change'));
+  assert.equal(ui.selection().account, 'spare');
+  const cursor = renderProfileForTest({ provider: 'cursor', model: 'auto', effort: 'default' },
+    { auto: { efforts: ['default'] } }, []);
+  assert.equal(cursor.container.querySelector('#spawn-account').disabled, true);
+  assert.match(cursor.container.querySelector('#spawn-account').textContent, /unsupported/);
+});
 
 test('spawn picker displays mapped labels while retaining raw option values and emitted selections', () => {
   const claudeEmissions = [];
@@ -321,9 +379,9 @@ test('spawn picker stays catalog-driven — model list and efforts derive from t
   assert.match(app, /const efforts = entries\[selection\.model\]\?\.efforts/);
 });
 
-test('manual spawn UI exposes three labelled native controls and modal live status', () => {
+test('manual spawn UI exposes account and native controls with modal live status', () => {
   const labels = [...app.matchAll(/<label[^>]*>([^<]+)<\/label>/g)].map((match) => match[1]);
-  assert.deepEqual(labels, ['Provider', 'Model', 'Effort']);
+  assert.deepEqual(labels, ['Account', 'Provider', 'Model', 'Effort']);
   assert.doesNotMatch(app, /id="spawn-family"/);
   assert.match(app, /id="spawn-provider"/);
   assert.match(app, /<select id="spawn-provider"/);
@@ -451,7 +509,8 @@ test('post-spawn uses selection.provider, not a bare undeclared agent identifier
 test('manual spawn leaves failure notification to the daemon terminal frame', () => {
   const source = app.slice(app.indexOf('async function newSession('), app.indexOf('\nasync function newTerminalSession('));
   assert.match(source, /newSessionError = result\?\.error\?\.message \|\| result\?\.error/);
-  assert.doesNotMatch(source, /showToast/);
+  const failure = source.slice(source.indexOf('if (!result?.ok)'), source.indexOf('if (!result.session)'));
+  assert.doesNotMatch(failure, /showToast/);
   assert.doesNotMatch(app, /aria-label="Starting"/);
 });
 

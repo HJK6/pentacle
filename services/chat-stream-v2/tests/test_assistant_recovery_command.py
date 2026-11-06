@@ -83,7 +83,7 @@ class FixtureGateway:
 
 @asynccontextmanager
 async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind_host="127.0.0.1", legacy_watch_custody=False,
-                  front_desk=False):
+                  front_desk=False, account_alias=None):
     db = tmp_path / "sessions.db"
     store = Store(str(db)); store.start()
     if legacy_watch_custody:
@@ -102,7 +102,12 @@ async def fixture(tmp_path, *, tmux=None, authority=False, questions=False, bind
         for sid in (OLD,NEW,CHILD,ADVISOR):
             host,name = sid.split(":",1)
             tmux.live.add(name)
+            account = None
+            if account_alias:
+                from test_account_rotation import binding
+                account = binding(account_alias, host=host).public()
             await store.open_session(host,name,provider="codex",role="lead",visibility="default",
+                account_binding=account,
                 pane_status="pane_alive",bootstrap_state="ready",effective_model="gpt-6.1-sol",effective_effort="medium",
                 parent_stream_id=OLD if sid in (CHILD,ADVISOR) else None,
                 spec_id=SPEC if sid == NEW else None,
@@ -465,6 +470,49 @@ def test_start_uses_one_stable_authenticated_top_level_intent(tmp_path,monkeypat
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('account,expected', [(None, 'spare'), ('primary', 'primary')])
+def test_recovery_start_carries_source_or_requested_account(tmp_path, account, expected):
+    async def run():
+        async with fixture(tmp_path, account_alias='spare') as (store, _, _, g, m, _):
+            m['authorization']['spawn'] = 'fixture-commission'
+            m['spawn_spec_ids'] = [SPEC]
+            m['target'].update(python='python3', script='/private/recovery.py',
+                manifest='/private/manifest.json', journal='/private/journal.json')
+            if account:
+                m['target']['account'] = account
+            seen = []
+            async def launched(payload):
+                seen.append(payload)
+                assert payload.get('account') == expected
+                row = await store.open_session('node-b', 'account-created', provider='codex',
+                    visibility='default', effective_model='gpt-6.1-sol', effective_effort='medium',
+                    account_binding={'host': 'node-b', 'provider': 'codex', 'alias': expected,
+                        'generation': 'target-login'})
+                return {'state': 'ready', 'admitted_count': 1, 'stream_id': row['stream_id'], 'session': row}
+            g.spawn = launched
+            path = tmp_path/'account-start.json'
+            result = await recovery.Recovery(m, g, path).start()
+            assert result['state'] == 'ready' and len(seen) == 1
+            assert await recovery.Recovery(m, g, path).start() == result
+            assert len(seen) == 1
+            await store.open_session('node-b', 'account-created', account_binding={
+                'host': 'node-b', 'provider': 'codex', 'alias': 'other', 'generation': 'other-login'})
+            with pytest.raises(recovery.Refused, match='successor_generation_changed'):
+                await recovery.Recovery(m, g, path).start()
+    asyncio.run(run())
+
+
+def test_recovery_advance_refuses_account_mismatch_before_effects(tmp_path):
+    async def run():
+        async with fixture(tmp_path, account_alias='spare') as (_, _, _, g, m, _):
+            m['target']['account'] = 'primary'
+            r = recovery.Recovery(m, g, tmp_path/'account-advance.json')
+            with pytest.raises(recovery.Refused, match='successor_account_binding_mismatch'):
+                await r.advance()
+            assert not r.j['receipts'] and not r.j.get('intents')
+    asyncio.run(run())
+
+
 def test_pending_child_spawn_fences_retirement(tmp_path):
     async def run():
         async with fixture(tmp_path) as (store,_,composite,g,m,r):
@@ -500,6 +548,7 @@ def test_top_level_spawn_retains_executor_wire_authentication(tmp_path,monkeypat
             monkeypatch.delenv("AGENT_ORCH_STREAM_TOKEN_FILE",raising=False)
             monkeypatch.setenv("AGENT_ORCH_TOKEN","")
             real=recovery.Gateway(m)
+            real.snapshot=g.snapshot  # Local snapshot counterpart for the external snapshot command.
             result=await recovery.Recovery(m,real,tmp_path/"authenticated-start.json").start()
             assert result["state"]=="ready" and len(captured)==1
             assert captured[0]["_auth_context"]["token_verified"] is True

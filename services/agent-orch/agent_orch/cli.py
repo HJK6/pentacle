@@ -885,6 +885,8 @@ def schedule_recurring_add(args: argparse.Namespace) -> int:
         **prompt_payload,
     }
     self_close = _resolve_self_close_on_completion(args, visibility=visibility, parent=lineage, handoff=False)
+    if getattr(args, "account", None) is not None:
+        payload["account"] = args.account
     if self_close is not None:
         payload["self_close_on_completion"] = self_close
     spec_ids = list(args.spec_id or [])
@@ -935,6 +937,7 @@ def schedule_recurring_set(args: argparse.Namespace) -> int:
         ("provider", "provider"), ("model", "model"), ("effort", "effort"), ("host", "target_host"),
         ("role", "role"), ("phase", "phase"), ("visibility", "visibility"), ("parent", "parent"),
         ("objective", "objective"),
+        ("account", "account"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -1121,9 +1124,6 @@ def spawn(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-    if scheduled and getattr(args, "account", None) is not None:
-        print("agent-orch spawn: explicit account choice requires an immediate front-desk spawn", file=sys.stderr)
-        return 2
     if scheduled and not handoff:
         if getattr(args, "resume", None) is not None:
             return _fresh_schedule_validation_error(
@@ -1308,6 +1308,8 @@ def spawn(args: argparse.Namespace) -> int:
             "handoff": handoff,
             **resolved_spawn,
         }
+        if getattr(args, "account", None) is not None:
+            payload["account"] = args.account
         # Presence is part of the audit truth: JSON null means the caller omitted
         # that override, while the resolved tuple below records what will launch.
         payload.update(requested_spawn_tuple)
@@ -5346,7 +5348,7 @@ def build_parser() -> argparse.ArgumentParser:
             timer_parser.add_argument("--repeat", action="store_true")
 
     spawn_parser = subparsers.add_parser("spawn")
-    spawn_parser.add_argument("--account", help="Named account for this launch (front desk only); omitted uses host/provider default.")
+    spawn_parser.add_argument("--account", help="Named account within existing launch authority; retained for delayed/recurring work. Omitted fresh launches use the target default.")
     spawn_parser.add_argument("--no-watch", action="store_true", help="Skip the default parent watch")
     spawn_parser.add_argument("--provider", help="Required except for --handoff, which inherits the retiring stream provider.")
     spawn_parser.add_argument(
@@ -5562,6 +5564,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--tz", help="IANA zone (default America/Chicago)")
         parser.add_argument("--days", help="weekly only: comma list, e.g. mon,wed")
         parser.add_argument("--provider", required=creating)
+        parser.add_argument("--account", help="named provider account retained until fire")
         parser.add_argument("--model")
         parser.add_argument("--effort")
         parser.add_argument("--host")

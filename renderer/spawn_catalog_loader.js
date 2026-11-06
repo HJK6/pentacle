@@ -8,8 +8,8 @@ function createSpawnCatalogLoader(fetchCatalog) {
   let cachedCatalog = null;
   let inFlight = null;
 
-  async function load() {
-    if (cachedCatalog) return { ok: true, catalog: cachedCatalog };
+  async function load({ refresh = false } = {}) {
+    if (cachedCatalog && !refresh) return { ok: true, catalog: cachedCatalog };
     if (!inFlight) {
       inFlight = Promise.resolve()
         .then(() => fetchCatalog())

@@ -118,12 +118,17 @@ class RestoreSpawn:
         return {'outcomes': outcomes, 'reservations': list(self.reservations)}
 
 
-async def restore_rig(tmp_path):
+async def restore_rig(tmp_path, account=None):
     from assistant_authority_restore import AuthorityRestore
     from test_assistant_lane_rulings import _set_seat
     store = Store(':memory:'); store.start()
     fake = RestoreSpawn()
     root, advisor, server, _ = await _rulings_rig(store, spawnctl=fake)
+    if account:
+        from test_account_rotation import binding
+        advisor = await store.open_session('fixture-advisor', 'astra',
+            session_generation='bound-advisor', provider='codex',
+            account_binding=binding(account, host='fixture-advisor').public())
     server.local_host = 'fixture-advisor'
     server.sessions.tmux = AlivePane()
     brief = tmp_path / 'restore-brief'; brief.write_text('brief')
@@ -141,12 +146,21 @@ async def restore_rig(tmp_path):
     return store, root, advisor, server, fake, restore, now, brief
 
 
-def test_never_admitted_restart_replays_frozen_payload_same_key(tmp_path):
+@pytest.mark.parametrize('account', [None, 'spare'])
+def test_never_admitted_restart_replays_frozen_payload_same_key(tmp_path, account):
     from assistant_authority_restore import AuthorityRestore
     async def run():
-        store, root, advisor, server, fake, restore, now, brief = await restore_rig(tmp_path)
+        store, root, advisor, server, fake, restore, now, brief = await restore_rig(tmp_path, account=account)
         try:
             before = fake.calls[0]
+            assert before.get('account') == account
+            if account:
+                from account_runtime import AccountRuntime
+                from provider_accounts import AccountError
+                runtime = AccountRuntime(store, server.sessions, policy={'enabled': True})
+                await runtime.authorize_choice(before)
+                with pytest.raises(AccountError, match='account_control_unauthorized'):
+                    await runtime.authorize_choice({**before, 'account': 'other'})
             brief.write_text('changed after admission')
             restarted = AuthorityRestore(server, inhibit_path=None, clock=lambda: now[0])
             server.authority_restore = restarted

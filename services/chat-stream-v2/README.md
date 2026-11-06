@@ -519,7 +519,8 @@ their owner outside this public source tree.
 
 ### Native Codex cwd trust and late delivery
 
-Before a configured Codex launch, the target host seeds the realpath cwd in
+After account launch admission, the target host seeds the realpath cwd in the
+selected binding's `home/config.toml`. Unbound legacy launches use
 `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). A file lock protects
 idempotent writes; unrelated configuration bytes are preserved. The existing
 command-line trust override remains. Invalid or unsupported project-table

@@ -111,6 +111,7 @@ class Settings:
     self_assignment_exclusions: list[str] = field(default_factory=list)
     producers: list[str] = field(default_factory=lambda: ["sol"])
     usage_spec_id: str | None = None
+    account: str | None = None
 
     @classmethod
     def load(cls, path):
@@ -141,6 +142,9 @@ class Settings:
         if producers != ["sol"]:
             raise ValueError("producers must be exactly [sol]")
         usage_spec_id = data.get("usage_spec_id")
+        if "account" in data:
+            from provider_accounts import _component
+            _component(data["account"])
         if usage_spec_id is not None and not valid_work_id(usage_spec_id):
             raise ValueError("usage_spec_id must be one valid work ID or null")
         return cls(memory, state, data["ws_url"], Path(data["token_path"]), data["host"],
@@ -148,7 +152,7 @@ class Settings:
                    Path(data["primary_store"]) if data.get("primary_store") else None,
                    Path(data["primary_archive"]) if data.get("primary_archive") else None,
                    data.get("primary_composite") or os.environ.get("PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID", ""),
-                   exclusions, producers, usage_spec_id)
+                   exclusions, producers, usage_spec_id, data.get("account"))
 
     def rpc(self):
         return Config(self.ws_url, self.token_path.read_text().strip(), self.host,
@@ -1784,10 +1788,24 @@ class Pipeline:
             raise RuntimeError("current assistant binding unavailable")
         return binding
 
+    def _check_worker_account(self, stage):
+        if self.settings.account is None:
+            return
+        admitted = stage.get('admission') or {}
+        row = admitted.get('session') or {}
+        actual = row.get('account_binding') or admitted.get('account_binding') or {}
+        if (actual.get('alias') != self.settings.account or actual.get('host') != self.settings.host
+                or actual.get('provider') != 'codex' or not actual.get('generation')):
+            raise RuntimeError('producer account binding mismatch; retained owned admission requires cleanup')
+
     async def worker(self, manifest, name, prior=None):
         root = self.settings.state_root / "runs" / manifest["run_id"]
         receipt_path = root / f"{name}.json"
         stage = read(receipt_path, {})
+        if stage and stage.get("payload", {}).get("account") != self.settings.account:
+            raise ValueError("retained producer account intent mismatch; reconcile and close the original admission")
+        if stage.get('stream_id'):
+            self._check_worker_account(stage)
         daily = daily_manifest(manifest)
         if daily and self.settings.producers != ["sol"]:
             raise ValueError("producers must be exactly [sol]")
@@ -1830,6 +1848,8 @@ class Pipeline:
                                  "initial_prompt": worker_prompt(self.settings, manifest, name, input_path)}}
             if daily:
                 stage["payload"]["spec_id"] = self.settings.usage_spec_id
+            if self.settings.account is not None:
+                stage["payload"]["account"] = self.settings.account
             atomic(receipt_path, stage)  # Intent survives interruption before/after admission.
         if not stage.get("stream_id"):
             # Repeating the exact spawn key is the existing admission reconciliation contract.
@@ -1841,6 +1861,7 @@ class Pipeline:
             atomic(receipt_path, stage)
             if admitted.get("type") != "spawn.ok" or not stage["stream_id"] or not stage["generation"]:
                 raise RuntimeError(f"{name} admission indeterminate; exact intent retained")
+            self._check_worker_account(stage)
         if not stage.get("generation"):
             raise RuntimeError("owned generation unproven; cleanup and new admission blocked")
         deadline = monotonic() + 3600

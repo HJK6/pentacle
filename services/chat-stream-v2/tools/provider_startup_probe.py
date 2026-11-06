@@ -113,9 +113,8 @@ class ProviderStartupProbe:
     def verify_spawn(self, result):
         actual = (result.get("session") or {}).get("account_binding")
         expected = self.binding.public()
-        # The scratch daemon selects its configured default; only its revision
-        # differs from the immutable enrollment receipt. Never send an account
-        # override through the operator wire (that choice belongs to the FD).
+        # The canonical runner supplies this tuple's alias explicitly. Compare
+        # all immutable enrollment fields independently of host defaults.
         if (not isinstance(actual, dict)
                 or {k: v for k, v in actual.items() if k != "default_revision"}
                 != {k: v for k, v in expected.items() if k != "default_revision"}):
