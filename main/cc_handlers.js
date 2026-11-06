@@ -201,7 +201,7 @@ function createCcHandlers({
         chatStreamClient.getSpawnCatalog(),
         chatStreamClient.getProviderAccounts?.().catch(() => null),
       ]);
-      return { catalog: { ...catalog, account_status: accounts || null } };
+      return { catalog: accounts ? { ...catalog, account_status: accounts } : catalog };
     }));
     target.handle('chat-stream:spawn', async (_event, request, legacyHostId) => {
       const input = request && typeof request === 'object' ? request : { provider: request, host: legacyHostId };

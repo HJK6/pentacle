@@ -34,6 +34,24 @@ test('real main IPC returns the renderer catalog and preserves spawn host and tu
   assert.equal(calls[0].host, 'workstation');
   assert.equal(calls[0].catalogVersion, 'public-v1');
 });
+test('real account status enriches the catalog without mutating its source', async () => {
+  const catalog = { profiles: { desktop_manual: {} }, catalog_version: 'public-v1' };
+  const accounts = { accounts: [{ provider: 'codex', host: 'workstation', alias: 'spare' }] };
+  const invoke = harness({ getSpawnCatalog: async () => catalog, getProviderAccounts: async () => accounts });
+  const result = await invoke('chat-stream:spawn-catalog');
+  assert.equal(result.ok, true);
+  assert.notEqual(result.catalog, catalog);
+  assert.equal(result.catalog.account_status, accounts);
+  assert.equal(Object.hasOwn(catalog, 'account_status'), false);
+});
+test('an unavailable account lookup preserves the legacy catalog object', async () => {
+  const catalog = { profiles: { desktop_manual: {} }, catalog_version: 'public-v1' };
+  const invoke = harness({ getSpawnCatalog: async () => catalog,
+    getProviderAccounts: async () => { throw new Error('fixture unavailable'); } });
+  const result = await invoke('chat-stream:spawn-catalog');
+  assert.equal(result.ok, true);
+  assert.equal(result.catalog, catalog);
+});
 test('real main forwards send correlations and reports disconnected failures without synthetic events', async () => {
   let sent;
   const invoke = harness({ sendMessage: async (value) => { sent = value; throw new Error('Stream disconnected'); } });

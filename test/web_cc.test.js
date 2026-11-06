@@ -123,6 +123,34 @@ test('hostId defaults match preload for every defaulted argument', () => {
   assert.deepEqual(transport.fires[0].args, [0, 'up', 1], 'scroll defaults to one line, as preload does');
 });
 
+test('web and preload newSession preserve omission arity and explicit accounts', async () => {
+  const transport = fakeTransport();
+  const web = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
+  const calls = [];
+  const context = {
+    require(name) {
+      if (name === 'electron') return { ipcRenderer: { invoke: (method, ...args) => {
+        calls.push({ method, args }); return Promise.resolve();
+      } } };
+      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
+      return require(name);
+    },
+    window: {}, process,
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'), context);
+  for (const cc of [web, context.window.cc]) {
+    await cc.newSession('codex');
+    await cc.newSession('codex', 'peer', undefined);
+    await cc.newSession('codex', 'peer', 'spare');
+    await cc.newSession('codex', 'peer', null);
+  }
+  const expected = [['codex', 'local'], ['codex', 'peer'], ['codex', 'peer', 'spare'], ['codex', 'peer', null]];
+  for (const captured of [transport.calls, calls]) {
+    assert.ok(captured.every(({ method }) => method === 'pty:new-session'));
+    assert.deepEqual(captured.map(({ args }) => args), expected);
+  }
+});
+
 test('chat send/spawn reach the bridge with the right method and host mapping', () => {
   // The web CDP gate does not exercise a live send-turn (no public spawn/ingest
   // fixture — see spec_pentacle__web_mode_e2e_gate_2026_09 § Findings), so the
