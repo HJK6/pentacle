@@ -15,8 +15,9 @@ The shipped settings use Haiku/low, Luna/low, and Flash Lite/default. Gemini
 tests are not activated by this configuration. Cursor tests are disabled with
 `null` until a verified lowest-tier tuple is supported. Missing, partial,
 unknown, disabled, or unsupported entries refuse before a prompt; there is no
-work-profile fallback. Picker visibility does not determine native or explicit
-test tuple support. Ordinary work defaults and handoff inheritance are unchanged.
+work-profile fallback. An invalid test policy appears as `test_prompt_error`
+in the catalog while ordinary work profiles remain available. Picker visibility
+does not determine native or explicit test tuple support. Ordinary work defaults and handoff inheritance are unchanged.
 
 `agent-orch profiles` exposes `profiles.test_prompt` and `test_prompt_profile`.
 The latter carries canonical provider pairs, their digest, settings byte hashes,

@@ -682,3 +682,24 @@ def test_test_profile_missing_file_and_disabled_provider_refuse(test_policy_file
 def test_haiku_all_installed_efforts_validate_at_shared_boundary():
     for effort in ("low", "medium", "high", "xhigh", "max"):
         assert resolve_spawn(provider="claude", model="claude-haiku-5-5", effort=effort)["effort"] == effort
+
+
+@pytest.mark.parametrize("case", ["missing", "partial", "unsupported"])
+def test_catalog_preserves_work_profiles_when_test_policy_cannot_launch(test_policy_file, case):
+    path, raw = test_policy_file
+    if case == "missing":
+        raw["profiles"].pop("test_prompt")
+    elif case == "partial":
+        raw["profiles"]["test_prompt"] = {"codex": {"effort": "low"}}
+    else:
+        raw["profiles"]["test_prompt"]["codex"]["model"] = "unsupported-model"
+    path.write_text(json.dumps(raw))
+    result = catalog()
+    assert "test_prompt" not in result["profiles"]
+    assert "test_prompt_profile" not in result
+    assert result["test_prompt_error"]["code"]
+    assert result["profiles"]["desktop_manual"]["codex"] == ("gpt-6-luna", "max")
+    assert result["spawn_defaults"]["profiles"]["agent_orch"] == raw["profiles"]["agent_orch"]
+    assert resolve_spawn(provider="codex")["effort"] == "max"
+    with pytest.raises(SpawnProfileError):
+        spawn_profiles.test_prompt_tuple("codex")

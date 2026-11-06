@@ -1781,8 +1781,13 @@ def _apply_post_activation(
                     expected_start=active_start, prior_pid=prior_pid,
                     prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
                 )
-                stamp["fleet_smoke"] = (_fleet_smoke_verdict(smoke, machines_file, required_cells, accounts=smoke_accounts, test_profile=stamp.get("test_profile"))
-                    if smoke_accounts else _fleet_smoke_verdict(smoke, machines_file, required_cells, test_profile=stamp.get("test_profile")))
+                verdict_options = {}
+                if smoke_accounts:
+                    verdict_options["accounts"] = smoke_accounts
+                if "test_profile" in stamp:
+                    verdict_options["test_profile"] = stamp["test_profile"]
+                stamp["fleet_smoke"] = _fleet_smoke_verdict(
+                    smoke, machines_file, required_cells, **verdict_options)
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
                     if smoke_accounts:
                         _install_fleet_smoke_schedule(repo, runner, smoke_accounts)

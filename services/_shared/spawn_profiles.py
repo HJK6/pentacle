@@ -533,23 +533,20 @@ def validate_v2(*, schema: str, provider: str, model: str, effort: str,
 
 def catalog() -> dict:
     config = load_spawn_config()
-    test_profile = resolve_test_profile()
-    return {
+    result = {
         "schema_version": "CatalogV1",
         "catalog_version": CATALOG_VERSION,
         "profiles": {
             profile: {provider: _default_tuple(provider, None) for provider in config["providers"] if provider in MODELS}
             for profile in PROFILES
-        } | {"test_prompt": {p: (v["model"], v["effort"]) if v else None
-                              for p, v in test_profile["providers"].items()}},
-        "test_prompt_profile": test_profile,
+        },
         "spawn_defaults": {
             "schema_version": config["schema_version"],
             "max_concurrent_boots": config["max_concurrent_boots"],
             "spawn_queue_timeout_seconds": config["spawn_queue_timeout_seconds"],
             "providers": config["providers"],
             "host_overrides": config.get("host_overrides", {}),
-            "profiles": {**config.get("profiles", {}), "test_prompt": test_profile["providers"]},
+            "profiles": config.get("profiles", {}),
         },
         "models": MODELS,
         "available_models": {
@@ -557,6 +554,22 @@ def catalog() -> dict:
             for provider, model_ids in _available_model_ids(config).items()
         },
     }
+
+    try:
+        test_profile = resolve_test_profile()
+    except SpawnProfileError as exc:
+        # A missing/invalid test policy disables test consumers, while the
+        # existing ordinary work catalog remains usable with older policies.
+        # Test builders require a validated snapshot and never fall back.
+        result["test_prompt_error"] = {"code": exc.code, "message": str(exc)}
+    else:
+        result["profiles"]["test_prompt"] = {
+            provider: (pair["model"], pair["effort"]) if pair else None
+            for provider, pair in test_profile["providers"].items()}
+        result["test_prompt_profile"] = test_profile
+        result["spawn_defaults"]["profiles"] = {
+            **config.get("profiles", {}), "test_prompt": test_profile["providers"]}
+    return result
 
 
 def unspawnable_gap(provider: str, known_ids) -> set[str]:
