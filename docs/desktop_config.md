@@ -72,6 +72,7 @@ orange/purple the flower. Renaming a host preserves its ornament.
 | `chatStream.heartbeatMs` | Number; 30000 | Socket heartbeat interval, clamped to 5000–120000 ms. Nonfinite input uses 30000. |
 | `chatStream.openedByLocal` | Boolean; false | When true and hostMap.local exists, subscribe only to sessions opened by that identity. |
 | `chatStream.snapshot` | Boolean; true | Set false to omit the initial snapshot. Normal desktop setup should retain true. |
+| `chatStream.accountLabels` | Object of provider → account alias → display label; `{}` | Private presentation labels for healthy account options. Example: `{codex: {primary: 'operator', secondary: 'collaborator'}}`. An email value displays its local-part; omitted labels use the alias. The host default is preselected without an extra option. Display labels never change account identity or host defaults. |
 | `tmux` | String; `tmux` | Local executable and default remote tmux executable. |
 | `hosts` | Object of host ID → transport object; `{}` | SSH terminal transports for nonlocal IDs. Each entry has `host` (required string), `user` (local OS username), `port` (22), `tmux` (top-level tmux). |
 | `remote` | Transport object; absent | Legacy transport for the literal ID `remote`, also the client-mode marker. Fields match a hosts entry. |

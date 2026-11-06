@@ -7067,6 +7067,8 @@ function renderNewSessionAgentOptions(container) {
     </button>${spawnAccountControl(agent.id, newSessionLocation, undefined, `terminal-account-${agent.id}`)}</div>`
   )).join('');
 
+  container.querySelectorAll('[data-account-selection]').forEach(control => { control.value = control.dataset.accountSelection; });
+
   container.querySelectorAll('[data-agent]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (newSessionTerminalMode) {
@@ -7080,13 +7082,19 @@ function renderNewSessionAgentOptions(container) {
 }
 
 function spawnAccountControl(provider, host, selected, id = 'spawn-account') {
-  const supported = ['codex', 'claude'].includes(provider);
+  if (!['codex', 'claude'].includes(provider)) return '';
   const status = newSessionCatalog?.account_status;
-  const aliases = (status?.accounts || []).filter(row => row.host === host && row.provider === provider && row.active);
+  const aliases = (status?.accounts || []).filter(row => row.host === host && row.provider === provider
+    && row.active && row.enabled && row.health === 'healthy');
   const defaultAlias = (status?.defaults || []).find(row => row.host === host && row.provider === provider)?.alias;
-  const label = supported ? `Host default${defaultAlias ? ` (${defaultAlias})` : ''}` : 'Named accounts unsupported';
-  return `<div class="spawn-profile-row"><label for="${esc(id)}">Account</label><select id="${esc(id)}" class="spawn-profile-control" aria-label="Account"${supported ? '' : ' disabled'}>
-    <option value="">${esc(label)}</option>${aliases.map(row => `<option value="${esc(row.alias)}"${row.alias === selected ? ' selected' : ''}${row.enabled && row.health === 'healthy' ? '' : ' disabled'}>${esc(row.alias)}${row.enabled && row.health === 'healthy' ? '' : ` (${esc(row.health || 'unavailable')})`}</option>`).join('')}</select></div>`;
+  const value = selected ?? defaultAlias ?? '';
+  const labels = CONFIG.chatStream?.accountLabels?.[provider] || {};
+  return `<div class="spawn-profile-row"><label for="${esc(id)}">Account</label><select id="${esc(id)}" class="spawn-profile-control" aria-label="Account" data-account-selection="${esc(value)}"${aliases.length ? '' : ' disabled'}>
+    ${aliases.map(row => {
+      const label = typeof labels[row.alias] === 'string' && labels[row.alias].trim()
+        ? labels[row.alias].trim().split('@')[0] : row.alias;
+      return `<option value="${esc(row.alias)}"${row.alias === value ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('')}</select></div>`;
 }
 
 function renderSpawnProfileOptions(container) {
@@ -7123,6 +7131,7 @@ function renderSpawnProfileOptions(container) {
       <div class="spawn-profile-row"><label for="spawn-effort">Effort</label><select id="spawn-effort" class="spawn-profile-control" aria-label="Reasoning effort">${efforts.map((effort) => `<option value="${esc(effort)}"${effort === selection.effort ? ' selected' : ''}>${esc(effort)}</option>`).join('')}</select></div>
       ${spawnAccountControl(selection.provider, newSessionLocation, selection.account)}
     </div>`;
+  container.querySelectorAll('[data-account-selection]').forEach(control => { control.value = control.dataset.accountSelection; });
   container.querySelector('#spawn-provider')?.addEventListener('change', (event) => {
     newSessionSelection = selectionForProvider(event.target.value);
     saveSpawnPreference(newSessionSelection.provider, newSessionSelection);
@@ -7282,6 +7291,8 @@ async function newSession(options = {}, locationOverride = null) {
     : (newSessionSelection || selectionForProvider(input.provider || spawnPreferences().defaultProvider || 'codex'));
   const selection = selected && { ...selected, ...(input.account !== undefined ? { account: input.account } : {}) };
   if (!selection) return null;
+  const defaultAlias = newSessionCatalog?.account_status?.defaults?.find(row => row.host === location && row.provider === selection.provider)?.alias;
+  const account = selection.account === defaultAlias ? undefined : selection.account;
   const profileDefault = newSessionCatalog.profiles?.desktop_manual?.[selection.provider] || [];
   const myToken = ++newSessionSubmitToken;
   newSessionSubmitting = true;
@@ -7301,7 +7312,7 @@ async function newSession(options = {}, locationOverride = null) {
         provider: selection.provider,
         model: selection.model,
         effort: selection.effort,
-        ...(selection.account !== undefined ? { account: selection.account } : {}),
+        ...(account !== undefined ? { account } : {}),
         spawnProfile: 'desktop_manual',
         catalogVersion: newSessionCatalog.catalog_version,
         resolutionSource: input.provider && input.model && input.effort
@@ -7389,7 +7400,8 @@ async function newTerminalSession(agent = 'codex', locationOverride = null, acco
   const location = locationOverride || newSessionLocation || 'local';
   hideNewSessionModal();
   const slot = placementSlot(state.workspace, state.slots);
-  const result = await window.cc.newSession(agent, location, account);
+  const defaultAlias = newSessionCatalog?.account_status?.defaults?.find(row => row.host === location && row.provider === agent)?.alias;
+  const result = await window.cc.newSession(agent, location, ...(account !== undefined && account !== defaultAlias ? [account] : []));
   if (!result) return;
   if (result.accountBinding?.alias) showToast(`Started account ${result.accountBinding.alias}`);
   const sessionName = result.sessionName || result;

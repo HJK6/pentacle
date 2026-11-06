@@ -101,6 +101,7 @@ module.exports = {
     // heartbeatMs: 30000, // default 30000; clamped to 5000..120000 ms
     // openedByLocal: false, // default false; true filters by hostMap.local
     // snapshot: true, // default true; false omits the initial inventory snapshot
+    // accountLabels: { codex: { primary: 'operator', secondary: 'collaborator' } }, // private display labels; default {}
     // token: '', // legacy inline token; v2 credentials must use tokenPath
     // tokenPath: '~/.config/pentacle/desktop.token', // example path; absent falls back to ~/.config/pentacle-stream/token
 
