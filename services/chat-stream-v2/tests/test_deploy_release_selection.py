@@ -296,10 +296,21 @@ def test_actual_child_non_green_cannot_certify_or_rollback_healthy_source(admitt
 
 
 @pytest.mark.parametrize('isolated_release', ['selection'], indirect=True)
-def test_rollback_needs_fresh_receipts_and_uses_actual_recorded_preimage(admitted_transaction, request):
+def test_rollback_needs_fresh_receipts_and_uses_actual_recorded_preimage(admitted_transaction, request, monkeypatch):
     from .test_release_selection import _write
+    from deploy.restoration import qualified_prior
     t = admitted_transaction
+    module, repo, service = t['module'], t['repo'], t['service']
+    # This rollback journey needs a qualified actual prior. Other journeys keep
+    # isolated_release's deliberately stale stamp and all their refusal controls.
+    prior_stamp = module._read_stamp(repo, service)
+    prior_stamp.update(sha=t['prior'], daemon_runtime_readback={'sha':t['prior']},
+        daemon_boot_readback={'outcome':'observed'}, fleet_smoke={'outcome':'passed','cells':[]})
+    module._write_stamp(repo, service, prior_stamp)
+    t['before'] = module._stamp_path(repo, service).read_bytes()
     first = t['activate']()
+    # The real forward writer persists qualification usable by later rollback.
+    assert qualified_prior(module._read_stamp(repo, service), t['target'], [])['sha'] == t['target']
     assert first['prior_sha'] == t['prior'] and first['sha'] == t['target']
     # A target receipt cannot qualify the actual recorded rollback source.
     with pytest.raises(t['module'].DeployError, match='stale seam identity|candidate mismatch'):
@@ -315,10 +326,26 @@ def test_rollback_needs_fresh_receipts_and_uses_actual_recorded_preimage(admitte
             row['receipt'] = _write(Path(row['receipt']['path']), observed)
     t['freeze']()
     t['module']._checked(('git', 'checkout', '--detach', t['target']), t['repo'], t['module']._run)
+    # Fresh source/seam receipts cannot qualify an unproven production prior.
+    unqualified = json.loads(json.dumps(first))
+    unqualified['prior_qualification']['stamp'].pop('daemon_boot_readback')
+    module._write_stamp(repo, service, unqualified)
+    refused_preimage = module._stamp_path(repo, service).read_bytes()
+    with pytest.raises(module.DeployError, match='prior lacks accepted production forward qualification'):
+        t['activate'](rollback=True)
+    assert module._stamp_path(repo, service).read_bytes() == refused_preimage
+    assert module._git(repo, 'rev-parse', 'HEAD', runner=module._run) == t['target']
+    assert len([c for c in t['calls'] if 'kickstart' in c]) == 1
+    module._write_stamp(repo, service, first)
+    # Synthetic provider/OS peers establish transaction mechanics, not readiness.
+    monkeypatch.setattr(module, '_verify_direct_restoration', lambda *_a, **_k:
+        {'outcome':'passed', 'mode':'zero_input', 'synthetic':True})
     rolled = t['activate'](rollback=True)
     assert rolled['sha'] == t['prior'] and rolled['prior_sha'] == t['target']
     assert 'post_activation_error' not in rolled
-    assert rolled['fleet_smoke']['outcome'] == 'passed'
+    assert rolled['restoration'] == {'outcome':'passed', 'mode':'zero_input', 'synthetic':True}
+    assert rolled['model_canary']['outcome'] == 'not_run_by_design'
+    assert rolled['full_fleet_acceptance'] is False and 'fleet_smoke' not in rolled
     assert t['module']._git(t['repo'], 'rev-parse', 'HEAD', runner=t['module']._run) == t['prior']
     assert len([c for c in t['calls'] if 'kickstart' in c]) == 2
     _record_transaction(request, t, rolled)

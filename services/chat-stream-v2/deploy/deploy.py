@@ -1672,6 +1672,33 @@ def _install_fleet_smoke_schedule(repo: Path, runner: Runner, accounts: Sequence
     _checked(("launchctl", "bootstrap", domain, str(schedule)), repo, runner)
 
 
+def _verify_direct_restoration(service, repo, stamp, boot, runner, runtime=None):
+    """Use the coordinated controller's exact no-input/dispatch proof policy."""
+    from deploy.coordinated_runtime import Runtime, code_identity_at
+    from deploy.restoration import qualified_prior
+    # This module can be loaded by a test/module entry point under another name.
+    if runtime is None:
+        runtime = Runtime(sys.modules[__name__], service, repo, runner,
+                          stream=str(stamp.get("deployer_stream_id") or ""), boot_wait_seconds=0)
+    plist = _launchd_plist(service.launchd_label)
+    env = plist.get("EnvironmentVariables", {})
+    machines = env.get("PENTACLE_MACHINES_FILE", "")
+    policy = coordinated.read_json(env.get("PENTACLE_PROVIDER_ACCOUNT_POLICY", ""))
+    scope = coordinated.host_scope(machines, [])
+    accounts = runtime.account_snapshot(policy, runtime.database(plist),
+        accounts=stamp.get("smoke_accounts"), scope=scope)
+    bindings = [b for b in accounts["selected_bindings"] if b["host"] in scope["included_hosts"]]
+    reference = stamp["restored_qualification"]
+    qualified_prior(reference["stamp"], stamp["sha"], bindings)
+    runtime.verification_started = time.time()
+    source = {"sha":stamp["sha"], "code_identity":code_identity_at(repo, stamp["sha"], runner)}
+    receipt = {"accounts":accounts, "scope":scope, "transaction_directory":str(_stamp_path(repo, service).parent)}
+    result = runtime.restoration_proof(receipt, source, boot)
+    if runtime.account_snapshot(policy, runtime.database(plist), accounts=stamp.get("smoke_accounts"), scope=scope) != accounts:
+        raise DeployError("account/pin/binding drift during restoration")
+    return result
+
+
 def _apply_post_activation(
     service: ServiceConfig,
     repo: Path,
@@ -1686,6 +1713,7 @@ def _apply_post_activation(
     verify_boot: Callable[..., BootReadback] = verify_fresh_daemon_log_line,
     verify_runtime: Callable[..., tuple[bool, dict[str, object]]] = _verify_runtime_sha,
     activated_plist_digest: str | None = None,
+    restoration_runtime=None,
 ) -> None:
     """Restart the daemon and classify the result onto `stamp`. NEVER raises.
 
@@ -1735,35 +1763,40 @@ def _apply_post_activation(
                     if not machines_path.is_absolute():
                         machines_path = repo / machines_path
                     machines_file = str(machines_path.resolve())
-                selection = stamp.get("release_selection")
-                required_cells = None
-                smoke_args = ()
-                if selection is not None:
-                    identity = selection["identity"]
-                    activation = identity["activation"]
-                    required_cells = identity["required_cells"]
-                    smoke_args = (activation["url"], activation["host"])
-                smoke_accounts = (selection['identity']['activation'].get('accounts', [])
-                                  if selection is not None else stamp.get('smoke_accounts', []))
-                smoke_args += tuple(arg for entry in smoke_accounts for arg in ('--account', entry))
-                if "test_profile" in stamp:
-                    frozen_profile = _write_test_profile(repo, service, stamp["test_profile"])
-                    if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
-                        raise DeployError("test profile/settings drift before canary")
-                    smoke_args += ("--test-profile-snapshot", str(frozen_profile))
-                smoke = runner(
-                    (
-                        "/usr/bin/env",
-                        "-u", "PENTACLE_MACHINES_JSON",
-                        "-u", "PENTACLE_SMOKE_HOSTS",
-                        "-u", "PENTACLE_SMOKE_ACCOUNTS",
-                        f"PENTACLE_MACHINES_FILE={machines_file}",
-                        str(_venv_python(repo, service)),
-                        str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
-                        *smoke_args,
-                    ),
-                    repo,
-                )
+                if stamp.get("verification_kind") == "restoration":
+                    stamp["restoration"] = _verify_direct_restoration(service, repo, stamp, readback, runner, restoration_runtime)
+                    stamp["model_canary"] = {"outcome":"not_run_by_design"}
+                    stamp["full_fleet_acceptance"] = False
+                else:
+                    selection = stamp.get("release_selection")
+                    required_cells = None
+                    smoke_args = ()
+                    if selection is not None:
+                        identity = selection["identity"]
+                        activation = identity["activation"]
+                        required_cells = identity["required_cells"]
+                        smoke_args = (activation["url"], activation["host"])
+                    smoke_accounts = (selection['identity']['activation'].get('accounts', [])
+                                      if selection is not None else stamp.get('smoke_accounts', []))
+                    smoke_args += tuple(arg for entry in smoke_accounts for arg in ('--account', entry))
+                    if "test_profile" in stamp:
+                        frozen_profile = _write_test_profile(repo, service, stamp["test_profile"])
+                        if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
+                            raise DeployError("test profile/settings drift before canary")
+                        smoke_args += ("--test-profile-snapshot", str(frozen_profile))
+                    smoke = runner(
+                        (
+                            "/usr/bin/env",
+                            "-u", "PENTACLE_MACHINES_JSON",
+                            "-u", "PENTACLE_SMOKE_HOSTS",
+                            "-u", "PENTACLE_SMOKE_ACCOUNTS",
+                            f"PENTACLE_MACHINES_FILE={machines_file}",
+                            str(_venv_python(repo, service)),
+                            str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
+                            *smoke_args,
+                        ),
+                        repo,
+                    )
                 guard = stamp.get("restart_guard") or {}
                 activation = stamp.get("restart_activation") or {}
                 no_outgoing_writer = (
@@ -1781,18 +1814,19 @@ def _apply_post_activation(
                     expected_start=active_start, prior_pid=prior_pid,
                     prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
                 )
-                verdict_options = {}
-                if smoke_accounts:
-                    verdict_options["accounts"] = smoke_accounts
-                if "test_profile" in stamp:
-                    verdict_options["test_profile"] = stamp["test_profile"]
-                stamp["fleet_smoke"] = _fleet_smoke_verdict(
-                    smoke, machines_file, required_cells, **verdict_options)
-                if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
+                if stamp.get("verification_kind") != "restoration":
+                    verdict_options = {}
                     if smoke_accounts:
-                        _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
-                    else:
-                        _install_fleet_smoke_schedule(repo, runner)
+                        verdict_options["accounts"] = smoke_accounts
+                    if "test_profile" in stamp:
+                        verdict_options["test_profile"] = stamp["test_profile"]
+                    stamp["fleet_smoke"] = _fleet_smoke_verdict(
+                        smoke, machines_file, required_cells, **verdict_options)
+                    if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
+                        if smoke_accounts:
+                            _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
+                        else:
+                            _install_fleet_smoke_schedule(repo, runner)
         # Persist the classified record inside the same never-raising boundary. A stamp-write
         # failure after activation must not escape as a refusal either — record it and make one
         # best-effort retry so the error itself is captured; main() still prints the returned
@@ -2086,11 +2120,15 @@ def _deploy_legacy(
     if not rollback and _code_identity_at(repo, prior_sha, runner) != _code_identity_at(repo, sha, runner):
         raise DeployError("code identity changes require an admitted coordinated plan before checkout mutation")
 
-    prior_profile = None
+    restoration_runtime = None
     if service.name == "chat-streamd-v2":
-        prior_profile = _release_test_profile(repo, service, runner)
-        if rollback and prior_profile != prior_stamp.get("test_profile"):
-            raise DeployError("test profile/settings drift before rollback")
+        from deploy.restoration import qualified_prior, qualification_stamp
+    if rollback and service.name == "chat-streamd-v2":
+        # Bind the controller and all no-input proof imports before checkout;
+        # the restored prior may predate these modules and APIs.
+        from deploy.coordinated_runtime import Runtime
+        restoration_runtime = Runtime(sys.modules[__name__], service, repo, runner,
+            stream=deployer_stream_id or "", boot_wait_seconds=boot_wait_seconds)
     with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
         _checked(("git", "checkout", "--detach", sha), repo, runner)
         verify_log_guard(log_guard_dir if log_guard_dir is not None else service.log_guard_dir)
@@ -2124,10 +2162,8 @@ def _deploy_legacy(
             raise DeployError("release selection: seam evidence requires actual release inputs")
 
         profile = None
-        if service.name == "chat-streamd-v2":
+        if service.name == "chat-streamd-v2" and not rollback:
             profile = _release_test_profile(repo, service, runner)
-            if rollback and profile != prior_stamp.get("prior_test_profile"):
-                raise DeployError("rollback test profile differs from frozen prior")
             if selection is not None and profile != selection["identity"]["test_profile"]:
                 raise DeployError("release selection test profile/settings drift")
         log_paths = _daemon_log_paths(service)
@@ -2150,7 +2186,9 @@ def _deploy_legacy(
             "selective_qualification": "admitted" if selection is not None else "not_enabled",
         }
         if profile is not None:
-            stamp.update(test_profile=profile, prior_test_profile=prior_profile)
+            stamp.update(test_profile=profile)
+        if rollback and service.name == "chat-streamd-v2":
+            stamp["verification_kind"] = "restoration"
         ancestry = coordinated.legacy_guard(repo, prior_stamp, rollback=rollback)
         if ancestry:
             stamp["coordinated_receipt"] = ancestry
@@ -2173,6 +2211,15 @@ def _deploy_legacy(
                 except (ValueError, OSError) as exc:
                     raise DeployError('invalid deployment account mapping: ' + str(exc)) from exc
                 stamp['smoke_accounts'] = entries
+        if service.name == "chat-streamd-v2":
+            if rollback:
+                qualification = prior_stamp.get("prior_qualification")
+                if not isinstance(qualification, dict) or qualification.get("sha") != sha:
+                    raise DeployError("rollback lacks prior production qualification")
+                qualified_prior(qualification.get("stamp", {}), sha, [])
+                stamp["restored_qualification"] = qualification
+            else:
+                stamp["prior_qualification"] = {"sha": prior_sha, "stamp": qualification_stamp(prior_stamp)}
         activation_runtime_manifest = runtime_manifest(repo, service, runner)
         stamp["activation_runtime_manifest"] = activation_runtime_manifest
         if not skip_kickstart:
@@ -2282,6 +2329,7 @@ def _deploy_legacy(
             boot_wait_seconds=boot_wait_seconds,
             runner=runner,
             activated_plist_digest=activated_plist_digest,
+            **({"restoration_runtime":restoration_runtime} if restoration_runtime is not None else {}),
         )
     return stamp
 
@@ -2423,6 +2471,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{slow_consumer.get('queue_depth_warnings', 0)} queue-depth warnings.",
             file=sys.stderr,
         )
+    if stamp.get("verification_kind") == "restoration":
+        restoration = stamp.get("restoration") or {}
+        if restoration.get("outcome") != "passed":
+            print("rollback applied; no-input restoration proof failed or missing; model canaries were not run", file=sys.stderr)
+            return EXIT_FLEET_SMOKE_FAILED
+        return EXIT_OK
     smoke = stamp.get("fleet_smoke") or {}
     if smoke.get("outcome") == FLEET_SMOKE_PARTIAL:
         print(

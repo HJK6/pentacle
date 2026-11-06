@@ -176,7 +176,8 @@ python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
 
 Preparation stages full immutable helper source, tests the existing configured
 interpreters and read-only native artifacts, validates target/prior gate evidence
-and both target smoke plans, and saves private preimages. It changes no active
+and the sealed forward smoke plan, binds the prior's production forward
+qualification, and saves private preimages. No prior runner/profile API is required. It changes no active
 policy, source, launchd state, CLI launcher, pin or account generation. It needs
 the owner's explicit host-staging/probe authority. Keep its directories through
 handoff; there is no automatic garbage collection.
@@ -220,8 +221,9 @@ not bypass any older coordinated ancestry in the live deployment stamp.
 
 Exit **11** means committed scoped success (or successful explicit restoration)
 with declared optional exclusions and `full_fleet_acceptance=false`. It requires
-every included cell to pass and preserves four `SKIPPED_DECLARED` rows per
-excluded host. Only a coordinated consumer that validates receipt digest,
+every included forward model cell or rollback no-input binding cell to pass.
+Forward smoke preserves four `SKIPPED_DECLARED` rows per excluded host;
+rollback records the same excluded scope without inventing model-cell passes. Only a coordinated consumer that validates receipt digest,
 committed phase, admitted exclusions and complete included evidence may accept
 11; generic release gates continue to require 0. Scoped deployment never changes
 the recurring smoke schedule or satellite admission/pins.
@@ -232,7 +234,26 @@ to success. Inspect the journal and returned receipt, and GATE the owner when
 recovery is required. A stale receipt or post-commit source/policy/plist drift
 refuses before stop; prepare a new transaction rather than overwriting later
 work. Explicit rollback restores original source/policy/plist/stamp bytes and
-verifies prior health under the same declared canary scope.
+verifies fresh prior health/PID/birth/served SHA, restored bindings/catalog and
+one zero-input launch/readiness/owned-close for every included selected
+host/provider/account binding. Fresh strict native/helper dispatch proof and
+attributed slow-consumer/cleanup checks remain required. Raw RPC sends no
+prompt, brief, role baseline or subsequent input; the existing `promptless`
+smoke does send a marker and is not used for rollback.
+
+The rollback result reports `restoration` acceptance with `model_canary` not run
+by design. Even a full-scope restoration sets `full_fleet_acceptance=false`:
+inference authentication/quota/availability, replies and response-driven pressure
+were not retested. Forward verification retains its cheap sealed full matrix.
+The daemon transaction restores source, private policy/original helper bindings,
+plist/environment, collector/stamp/settings and applicable schedule preimages.
+Installed CLI launcher pointers, native binaries and provider pins remain outside
+this transaction and must stay unchanged; persistent state must remain readable
+by the prior. CLI operations remain separately owned.
+
+New preparations write receipt schema v2. Older sealed receipts are recovered
+using their pinned original controller and policy, without rewriting seals or
+silently interpreting an old receipt under the new verification contract.
 
 The reusable offline rehearsal is `PYTHONPATH=services/chat-stream-v2:services
 python -m deploy.coordinated_harness --root /absolute/empty/owned/scratch`.

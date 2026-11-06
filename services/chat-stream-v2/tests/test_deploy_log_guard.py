@@ -141,6 +141,10 @@ sys.exit(payload['returncode'])
     # (no spurious reload); out-of-band drift is covered by its own test below.
     module._write_stamp(repo, service, {
         "sha": "c" * 40, "prior_sha": target,
+        # Prior production qualification is carried by new daemon deploys.
+        "prior_qualification": {"sha":target, "stamp":{"sha":target,
+            "daemon_runtime_readback":{"sha":target}, "daemon_boot_readback":{"outcome":"observed"},
+            "fleet_smoke":{"outcome":"passed", "cells":[]}}},
         "test_profile": resolve_test_profile(),
         "prior_test_profile": resolve_test_profile(),
         "requirements_hash": module._sha256(repo / service.requirements_path),

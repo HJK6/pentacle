@@ -236,6 +236,9 @@ class Runtime:
         scope = host_scope(intent["machines_file"], intent["excluded_hosts"])
         accounts = self.account_snapshot(policy, self.database(plist),
             accounts=intent.get('smoke_accounts'), scope=scope)
+        from deploy.restoration import qualified_prior
+        prior_qualification = qualified_prior(self.d._read_stamp(self.repo, self.service),
+            intent["prior_sha"], [b for b in accounts["selected_bindings"] if b["host"] in scope["included_hosts"]])
         arguments = plist.get("ProgramArguments", [])
         self.d._validate_v2_launchd_program(self.repo, arguments)
         # Match packet/activation-evidence.py's optional unbuffered prefix.
@@ -273,16 +276,16 @@ class Runtime:
             snapshot.mkdir(mode=0o700)
             with tarfile.open(bundle / "pentacle.tar") as archive:
                 archive.extractall(snapshot, filter="data")
-            # Both runners must understand and validate the sealed profile before
-            # any helper staging, stop, or inference. Old priors refuse here.
-            profile_plan = self.smoke_plan(snapshot, scope, machine_copy,
-                                           accounts=intent.get('smoke_accounts', []))
-            profile_path = folder / (direction + "-test-profile.json")
-            atomic_json(profile_path, profile_plan["test_profile"])
-            sealed_plan = self.smoke_plan(snapshot, scope, machine_copy,
-                accounts=intent.get('smoke_accounts', []), test_profile=profile_path)
-            if profile_plan != sealed_plan:
-                raise Invalid("runner cannot honor sealed test profile")
+            # Only forward inference needs a sealed profile or runner API.
+            if direction == "target":
+                profile_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                                               accounts=intent.get('smoke_accounts', []))
+                profile_path = folder / "target-test-profile.json"
+                atomic_json(profile_path, profile_plan["test_profile"])
+                sealed_plan = self.smoke_plan(snapshot, scope, machine_copy,
+                    accounts=intent.get('smoke_accounts', []), test_profile=profile_path)
+                if profile_plan != sealed_plan:
+                    raise Invalid("runner cannot honor sealed test profile")
             identity = code_identity_at(self.repo, sha, self.runner)
             if file_digest(snapshot / self.service.requirements_path) != file_digest(self.repo / self.service.requirements_path):
                 raise Invalid("dependency changes require a separately provisioned compatible interpreter")
@@ -308,25 +311,24 @@ class Runtime:
                                                hosts[host].get("ssh_target") is None)
                 release = self.installer.stage_helper_source(target, bundle, sha, manifest)
                 helper = {"target": vars(target), "python": str(python), "script": release + "/app/" + HELPER}
-                helper["proof"] = self.helper_proof(helper, accounts, identity, manifest, sha)
-                if helper["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
+                helper["proof"] = self.helper_proof(helper, accounts, identity, manifest, sha, test_profile=direction == "target")
+                if direction == "target" and helper["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
                     raise Invalid("staged native helper test settings mismatch")
                 helpers[host] = helper
             source[direction] = {"sha": sha, "snapshot": str(snapshot), "manifest": manifest,
-                "code_identity": identity, "helpers": helpers,
-                "runner_sha256": file_digest(snapshot / RUNNER),
-                "test_profile": {"path": str(profile_path), "sha256": file_digest(profile_path)},
-                "smoke_plan": sealed_plan}
+                "code_identity": identity, "helpers": helpers}
+            if direction == "target":
+                source[direction].update(runner_sha256=file_digest(snapshot / RUNNER),
+                    test_profile={"path": str(profile_path), "sha256": file_digest(profile_path)},
+                    smoke_plan=sealed_plan)
             daemon_helper = {**helpers[scope["local_hosts"][0]], "python": str(self.d._venv_python(self.repo, self.service))}
             source[direction]["daemon_interpreter"] = {"helper": daemon_helper,
-                "proof": self.helper_proof(daemon_helper, accounts, identity, manifest, sha, closure_only=True)}
+                "proof": self.helper_proof(daemon_helper, accounts, identity, manifest, sha, closure_only=True, test_profile=direction == "target")}
             if direction == "prior":
                 originals = {}
                 for host, staged in helpers.items():
                     original = {"target": staged["target"], **policy["executors"][host]}
                     original["proof"] = self.helper_proof(original, accounts, identity, manifest, sha, verify_release=False)
-                    if original["proof"]["closure"].get("test_profile") != profile_plan["test_profile"]:
-                        raise Invalid("original rollback helper test settings mismatch")
                     originals[host] = original
                 source[direction]["original_helpers"] = originals
         post_policy = copy.deepcopy(policy)
@@ -337,7 +339,7 @@ class Runtime:
         atomic_bytes(post_policy_path, post_policy_bytes)
         post_plist_path = folder / "daemon.after"
         atomic_bytes(post_plist_path, plistlib.dumps(candidate_plist))
-        prepared = {"scope": scope, "origin": origin, "machines_snapshot": str(machine_copy), "machines_sha256": file_digest(machine_copy),
+        prepared = {"prior_qualification": prior_qualification, "scope": scope, "origin": origin, "machines_snapshot": str(machine_copy), "machines_sha256": file_digest(machine_copy),
                 "accounts": accounts, "source": source, "gates": evidence, "preimages": preimages,
                 "post_policy": {"path": str(post_policy_path), "sha256": file_digest(post_policy_path)},
                 "post_plist": {"path": str(post_plist_path), "sha256": file_digest(post_plist_path)}}
@@ -420,10 +422,10 @@ class Runtime:
                 record("response_invalid")
             raise Invalid("helper proof response invalid") from exc
 
-    def helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False):
+    def helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False, test_profile=False):
         try:
             return self._helper_proof(helper, accounts, identity, manifest, sha,
-                                      verify_release=verify_release, closure_only=closure_only)
+                                      verify_release=verify_release, closure_only=closure_only, test_profile=test_profile)
         except Invalid:
             raise
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -431,7 +433,7 @@ class Runtime:
         except Exception as exc:
             raise Invalid("helper closure/artifact verification failed: " + type(exc).__name__) from exc
 
-    def _helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False):
+    def _helper_proof(self, helper, accounts, identity, manifest, sha, *, verify_release=True, closure_only=False, test_profile=False):
         target = self.installer.Target(**helper["target"])
         if verify_release:
             self.installer.verify_helper_source(target, sha, manifest)
@@ -440,7 +442,10 @@ class Runtime:
 import hashlib,importlib.metadata,json,pathlib,site,sys
 app=pathlib.Path(sys.argv[1]); sys.path[:0]=[str(app/'services/chat-stream-v2'),str(app/'services'),str(app/'services/agent-orch')]
 import provider_account_host,account_executor,provider_cli_artifact,account_runtime,main
-from _shared.spawn_profiles import resolve_test_profile
+profile={}
+if sys.argv[2] == 'forward':
+    from _shared.spawn_profiles import resolve_test_profile
+    profile['test_profile']=resolve_test_profile()
 origins={}; dependencies={}
 for name,module in list(sys.modules.items()):
     value=getattr(module,'__file__',None)
@@ -452,12 +457,12 @@ for name,module in list(sys.modules.items()):
         if path.is_file() and any(path.is_relative_to(pathlib.Path(root).resolve()) for root in site.getsitepackages()):
             dependencies[name]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 exe=pathlib.Path(sys.executable).resolve()
-print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_artifact.code_identity(),'python':sys.executable,
- 'real_python':str(exe),'python_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),
- 'version':sys.version,'modules':origins,'dependency_files':dependencies,
- 'dependencies':sorted((d.metadata['Name'],d.version) for d in importlib.metadata.distributions())}))
+print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),python=sys.executable,
+ real_python=str(exe),python_sha256=hashlib.sha256(exe.read_bytes()).hexdigest(),
+ version=sys.version,modules=origins,dependency_files=dependencies,
+ dependencies=sorted((d.metadata['Name'],d.version) for d in importlib.metadata.distributions()))))
 '''
-        closure = self.remote_json(helper, [helper["python"], "-I", "-c", program, app])
+        closure = self.remote_json(helper, [helper["python"], "-I", "-c", program, app, "forward" if test_profile else "closure"])
         if closure.get("identity") != identity or closure.get("python") != helper["python"]:
             raise Invalid("staged helper identity/interpreter mismatch")
         if closure_only:
@@ -533,7 +538,7 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
             if file_digest(private_file(receipt[key]["path"])) != receipt[key]["sha256"]:
                 raise Invalid("sealed postimage drift")
 
-    def validate_common(self, receipt):
+    def validate_common(self, receipt, *, forward=True):
         if (self.d._git(self.controller, "rev-parse", "HEAD", runner=self.runner) != receipt["intent"]["controller_sha"]
                 or self.d._dirty_entries(self.controller, self.runner)):
             raise Invalid("controller source drift")
@@ -583,11 +588,12 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
                     or set(source["helpers"]) != set(scope["included_hosts"])
                     or source["code_identity"] != code_identity_at(self.repo, sha, self.runner)):
                 raise Invalid("sealed source substitution")
-            profile = source.get("test_profile", {})
-            if (profile.get("path") != str(folder / (direction + "-test-profile.json"))
-                    or file_digest(private_file(profile["path"])) != profile.get("sha256")
-                    or read_json(profile["path"]) != source["smoke_plan"]["test_profile"]):
-                raise Invalid("sealed test profile drift")
+            if direction == "target" and forward:
+                profile = source.get("test_profile", {})
+                if (profile.get("path") != str(folder / "target-test-profile.json")
+                        or file_digest(private_file(profile["path"])) != profile.get("sha256")
+                        or read_json(profile["path"]) != source["smoke_plan"]["test_profile"]):
+                    raise Invalid("sealed test profile drift")
             for host, helper in source["helpers"].items():
                 old = original_policy["executors"][host]
                 root = str(helper_release_root(old["script"]))
@@ -612,6 +618,12 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
         accounts = self.account_snapshot(policy, receipt["accounts"]["database"], accounts=receipt["intent"].get("smoke_accounts"), scope=receipt["scope"])
         if accounts != receipt["accounts"]:
             raise Invalid("provider pin/account generation drift")
+        from deploy.restoration import qualified_prior
+        original_stamp = receipt["preimages"]["stamp"]
+        stamp = read_json(original_stamp["saved"]) if original_stamp["saved"] else {}
+        if qualified_prior(stamp, receipt["intent"]["prior_sha"], [b for b in accounts["selected_bindings"]
+                if b["host"] in scope["included_hosts"]]) != receipt["prior_qualification"]:
+            raise Invalid("prior qualification substitution")
         for direction in ("target", "prior"):
             gate = receipt["gates"][direction]
             if file_digest(gate["path"]) != gate["sha256"]:
@@ -624,27 +636,29 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
             rollback_from_sha=self.git("rev-parse", "HEAD"), sessions_db=Path(receipt["accounts"]["database"]))
 
     def revalidate(self, receipt, *, forward):
-        self.validate_common(receipt)
+        self.validate_common(receipt, forward=forward)
         now = self.current(receipt)
         if now["sha"] != receipt["intent"]["prior_sha"] or any(now["files"][key] != value["sha256"] for key, value in receipt["preimages"].items()):
             raise Invalid("source/policy/plist/stamp drift after preparation")
         if self.d._dirty_entries(self.repo, self.runner):
             raise Invalid("release checkout drift")
-        for source in receipt["source"].values():
+        for direction in (("target", "prior") if forward else ("prior",)):
+            source = receipt["source"][direction]
             for helper in source["helpers"].values():
-                if self.helper_proof(helper, receipt["accounts"], source["code_identity"], source["manifest"], source["sha"]) != helper["proof"]:
+                if self.helper_proof(helper, receipt["accounts"], source["code_identity"], source["manifest"], source["sha"], test_profile=direction == "target") != helper["proof"]:
                     raise Invalid("staged helper proof drift")
             daemon = source["daemon_interpreter"]
-            if self.helper_proof(daemon["helper"], receipt["accounts"], source["code_identity"], source["manifest"], source["sha"], closure_only=True) != daemon["proof"]:
+            if self.helper_proof(daemon["helper"], receipt["accounts"], source["code_identity"], source["manifest"], source["sha"], closure_only=True, test_profile=direction == "target") != daemon["proof"]:
                 raise Invalid("daemon interpreter/dependency drift")
         prior = receipt["source"]["prior"]
         for helper in prior["original_helpers"].values():
             if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"], verify_release=False) != helper["proof"]:
                 raise Invalid("original helper proof drift before stop")
-        source = receipt["source"]["target"]
-        if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
-            raise Invalid("runner plan drift")
-        self.guard(receipt)
+        if forward:
+            source = receipt["source"]["target"]
+            if self.smoke_plan(source["snapshot"], receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
+                raise Invalid("runner plan drift")
+        self.guard(receipt, rollback=not forward)
 
     def process_rows(self):
         result = self.checked(("ps", "-ax", "-o", "pid=,ppid=,uid=,command="))
@@ -733,7 +747,7 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
     def revalidate_stopped(self, receipt, rollback=False):
         if not self.stopped:
             raise Invalid("source/policy switch requires proven process exit")
-        self.validate_common(receipt)
+        self.validate_common(receipt, forward=not rollback)
         if self.d._dirty_entries(self.repo, self.runner):
             raise Invalid("release source drift while stopping")
         self.guard(receipt, rollback=True)
@@ -762,7 +776,7 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
                 atomic_bytes(receipt['preimages']['schedule']['path'], Path(receipt['post_schedule']['path']).read_bytes())
 
     def validate_recovery(self, receipt, journal):
-        self.validate_common(receipt)
+        self.validate_common(receipt, forward=False)
         if self.d._dirty_entries(self.repo, self.runner):
             raise Invalid("unrelated release source changes block recovery")
         now = self.current(receipt)
@@ -786,7 +800,7 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
                 raise Invalid("unrelated policy/plist/schedule/stamp drift blocks recovery")
 
     def validate_restored(self, receipt, journal):
-        self.validate_common(receipt)
+        self.validate_common(receipt, forward=False)
         if self.current(receipt) != journal.get("restored"):
             raise Invalid("restored state drift")
 
@@ -813,22 +827,31 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
         confirmed, runtime = self.d._verify_runtime_sha(source["sha"], boot.pid)
         if not confirmed:
             raise Invalid("loaded runtime SHA not confirmed")
-        self.validate_common(receipt)
-        if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
-            raise Invalid("installed smoke runner drift")
-        if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
-            raise Invalid("pre-canary runner plan drift")
-        smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]), self.repo)
-        self.validate_common(receipt)
-        verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
-                    declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
+        self.validate_common(receipt, forward=not rollback)
+        restoration = None
+        if rollback:
+            restoration = self.restoration_proof(receipt, source, boot)
+            verdict = None
+        else:
+            if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
+                raise Invalid("installed smoke runner drift")
+            if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
+                raise Invalid("pre-canary runner plan drift")
+            smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]), self.repo)
+            verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
+                        declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
+        self.validate_common(receipt, forward=not rollback)
         slow = self.d._scan_slow_consumer_window(self.service, self.log_offsets,
             expected_pid=boot.pid, expected_start=self.d._process_start(boot.pid, self.runner),
             prior_pid=self.old_pid, prior_start=self.old_start, no_outgoing_writer=self.old_pid is None, runner=self.runner)
         dispatch = self.dispatched_proofs(receipt, source, boot)
-        result = {"outcome": "passed" if verdict["outcome"] == "passed" and slow.get("outcome") == "passed" else "failed",
-                  "boot": boot.as_stamp(), "runtime": runtime, "fleet_smoke": verdict, "slow_consumer": slow,
+        result = {"outcome": "passed" if (restoration if rollback else verdict)["outcome"] == "passed" and slow.get("outcome") == "passed" else "failed",
+                  "boot": boot.as_stamp(), "runtime": runtime, "slow_consumer": slow,
                   "helper_dispatch": dispatch}
+        if rollback:
+            result.update(restoration=restoration, model_canary={"outcome":"not_run_by_design"})
+        else:
+            result["fleet_smoke"] = verdict
         if result['outcome'] == 'passed' and 'post_schedule' in receipt:
             label = 'com.pentacle.spawn-fleet-smoke'
             self.runner(('launchctl', 'bootout', self.d._launchctl_target(label)), self.repo)
@@ -845,6 +868,29 @@ print(json.dumps({'test_profile':resolve_test_profile(),'identity':provider_cli_
             row = receipt["preimages"]["stamp"]
             if row["saved"]: atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
             else: Path(row["path"]).unlink(missing_ok=True)
+        return result
+
+    def restoration_proof(self, receipt, source, boot):
+        from deploy.restoration import verify_no_input
+        bindings = [b for b in receipt["accounts"]["selected_bindings"]
+                    if b["host"] in receipt["scope"]["included_hosts"] and b["enabled"]]
+        result = verify_no_input(bindings, Path(receipt["transaction_directory"]) / "rollback-owned")
+        expected = {(b["host"], b["provider"], b["alias"], b["generation"]) for b in bindings}
+        cells = result.get("cells", [])
+        if (result.get("outcome") != "passed" or len(cells) != len(expected)
+                or {(b.get("host"), b.get("provider"), b.get("alias"), b.get("generation")) for b in cells} != expected
+                or any(b.get("outcome") != "passed" or b.get("cleanup") != "passed"
+                       or not b.get("session_generation") for b in cells)):
+            raise Invalid("incomplete no-input restoration proof")
+        result.update(included_hosts=receipt["scope"]["included_hosts"],
+                      excluded_hosts=receipt["scope"].get("excluded_hosts", []),
+                      full_fleet_acceptance=False,
+                      runtime={"sha":source["sha"], "pid":boot.pid,
+                               "birth":self.d._process_start(boot.pid, self.runner)})
+        if not result["runtime"]["birth"]:
+            raise Invalid("restored daemon birth unavailable")
+        # Same verifier as forward smoke; only the launch source differs.
+        result["helper_dispatch"] = self.dispatched_proofs(receipt, source, boot)
         return result
 
     def dispatched_proofs(self, receipt, source, boot):
