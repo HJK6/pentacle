@@ -6944,11 +6944,15 @@ function selectionForProvider(provider, preferred = null) {
   const remembered = preferred || (newSessionSelection?.provider === provider ? newSessionSelection : null)
     || spawnPreferences().byProvider?.[provider];
   const entries = newSessionCatalog?.models?.[visibleProvider] || {};
+  let tuple;
   if (visibleProvider !== provider || (remembered && !entries[remembered.model]?.efforts?.includes(remembered.effort))) {
     const [model, definition] = Object.entries(entries)[0] || [];
-    return catalogTuple(visibleProvider, { model, effort: definition?.efforts?.[0] });
+    tuple = catalogTuple(visibleProvider, { model, effort: definition?.efforts?.[0] });
+  } else {
+    tuple = catalogTuple(provider, remembered);
   }
-  return catalogTuple(provider, remembered);
+  return tuple && { ...tuple, ...(tuple.provider === provider && remembered?.account !== undefined
+    ? { account: remembered.account } : {}) };
 }
 
 function catalogProviders(catalog) {
