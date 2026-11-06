@@ -9,37 +9,43 @@ from pathlib import Path
 import sys
 
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
+from comms import Comms
+from ledger import Ledger
 from server import Server
 from sessions import Sessions
 from store import Store, STREAM_TOKEN_HASH_VERSION
 import household_due_reminders as tool
 
 
-class DeskSink:
-    def __init__(self):
-        self.receipts = {}
+class DeskSink(Comms):
+    """Keep real route/digest/ledger behavior; capture only the pane delivery."""
+    def __init__(self, store, sessions):
+        super().__init__(store, sessions, None)
         self.calls = []
-        self.assistant_ingress_policy = None
 
-    async def tell(self, msg):
-        key = msg["tell_id"]
-        if key not in self.receipts:
-            self.calls.append(dict(msg))
-            self.receipts[key] = {"type": "tell.ok", "tell_id": key, "delivery_status": "delivered",
-                                  "action_committed": True, "ledger_row_id": len(self.calls)}
-        return self.receipts[key]
+    async def _deliver_tell(self, msg, tell_id, route, wire, digest):
+        self.calls.append(dict(msg))
+        reply = {"type": "tell.ok", "tell_id": tell_id, "delivery_status": "delivered",
+                 "action_committed": True, "submission_confirmed": True}
+        record = {"payload_digest": digest, "reply": reply, "delivery": {
+            "tell_id": tell_id, "from_stream_id": msg["from_stream_id"],
+            "to_stream_id": route["final_target"], "original_to_stream_id": route["original_target"],
+            "text": wire, "delivery_status": "delivered", "submission_confirmed": True,
+            **self._logical_receipt(msg.get("_logical_front_desk"))}}
+        reply["ledger_row_id"] = await self.store.put_tell_delivery(tell_id, record)
+        return reply
 
 
 def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypatch):
     original_run = tool.subprocess.run
-    def checked_run(*args, **kwargs):
-        result = original_run(*args, **kwargs)
-        assert result.returncode == 0, (result.stdout, result.stderr)
-        return result
-    monkeypatch.setattr(tool.subprocess, "run", checked_run)
+    children = []
+    def recorded_run(*args, **kwargs):
+        children.append((args[0], kwargs["env"]))
+        return original_run(*args, **kwargs)
+    monkeypatch.setattr(tool.subprocess, "run", recorded_run)
     async def journey():
         store = Store(str(tmp_path / "sessions.db")); store.start()
-        sink = DeskSink(); server = None; composite = None
+        sink = None; server = None; composite = None
         try:
             host = "fixture-host"; first = "fixture-host:desk-a"; second = "fixture-host:desk-b"
             seats = {}
@@ -70,12 +76,13 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
                 pushed.append(payload)
             composite.reply_push = push
             sessions = Sessions(store, tmux=None, local_host=host)
+            sink = DeskSink(store, sessions)
             sessions.assistant.front_desk = composite
             await sessions.refresh()
-            server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, comms=sink, local_host=host)
+            server = Server(host="127.0.0.1", port=0, store=store, sessions=sessions, comms=sink, ledger=Ledger(store, sessions, sink), local_host=host)
             server.assistant_composite = composite
             port = await server.bind()
-            # Redirect only the CLI's credential-store location to fixture storage.
+            # The real CLI authenticates only through these fixture seat token files.
             # Production credential bytes and HOME are never read or changed here.
             cli = tmp_path / "fixture_cli.py"
             cli.write_text("from agent_orch.cli import main\nraise SystemExit(main())\n")
@@ -89,6 +96,9 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
             assert first_reply["type"] == "assistant.publish.ok" and not first_reply["duplicate"]
             replay = await asyncio.to_thread(wrapper.publish, key, text)
             assert replay["duplicate"] and replay["event_id"] == first_reply["event_id"]
+            # Commit a real BLOCKER but simulate losing its local receipt before handoff.
+            await asyncio.to_thread(wrapper.tell, "household-due:blocker:fixture", "BLOCKER Synthetic Cosmo failure")
+            assert len(sink.calls) == 1
             # Rebind the real binding store without a model or credential provisioning.
             binding = await composite.binding()
             await store.rebind_assistant(env_binding=composite._env_binding(), actor_stream_id=first,
@@ -104,6 +114,12 @@ def test_exact_cli_auth_publication_replay_rebind_and_blocker(tmp_path, monkeypa
             assert len(pushed) == 1
             receipt = await asyncio.to_thread(wrapper.tell, "household-due:blocker:fixture", "BLOCKER Synthetic Cosmo failure")
             assert receipt["type"] == "tell.ok" and len(sink.calls) == 1
+            assert receipt["reconciled"] is True
+            assert receipt["original_receipt"]["tell"]["from_stream_id"] == first
+            ledger_calls = [(args, env) for args, env in children if args[2:4] == ["ledger", "get"]]
+            assert len(ledger_calls) == 1
+            assert ledger_calls[0][1]["AGENT_ORCH_STREAM_ID"] == second
+            assert ledger_calls[0][1]["AGENT_ORCH_TOKEN"] == ""
             await asyncio.to_thread(wrapper.tell, "household-due:blocker:fixture", "BLOCKER Synthetic Cosmo failure")
             assert len(sink.calls) == 1
             # Missing current-seat credentials refuse outbound publication and tell.

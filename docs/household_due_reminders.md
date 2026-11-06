@@ -99,7 +99,11 @@ occurrences suppress their routine projection; pausing hides a projection while
 an existing open occurrence remains due.
 
 Each failed run records a safe error class and durable BLOCKER with an evidence
-path. The same timer retries unacknowledged alerts even outside the send window.
+path. An eligible digest attempts delivery before pending alert retries. If a
+frozen BLOCKER conflicts after FD handoff, one existing `ledger get` read under
+the current seat may recover its original committed receipt, requiring the same
+ID/body and canonical logical-FD payload hash. Missing or mismatched evidence
+keeps the alert unacknowledged; no new key or former-seat credential is used. The same timer retries unacknowledged alerts even outside the send window.
 Noon closes an unconfirmed day as `missed`; restart detects missed days since
 `not_before` and alerts without replaying old digests. A powered-off host alerts
 on recovery. The FD retains the first-delivery fallback and must reconcile any

@@ -344,3 +344,76 @@ def test_fd_failure_rehearsals_cannot_poison_production_blocker_keys(config, tmp
     tool.run(config, now, to_fd=True, state_root=str(tmp_path / "rehearsal-a"), reader=failed_read, publisher=sink)
     tool.run(config, now, reader=failed_read, publisher=sink)
     assert set(sink.told) == before
+
+
+def test_ready_digest_precedes_failed_pending_alert_retry(config):
+    events = []
+    class OrderedSink(Sink):
+        def publish(self, key, body):
+            events.append("publish")
+            return super().publish(key, body)
+        def tell(self, key, body):
+            events.append("tell")
+            return super().tell(key, body)
+    sink = OrderedSink(); sink.fail_publish = True; sink.fail_tell = True
+    assert invoke(config, population([row()]), sink)["status"] == "failed"
+    sink.fail_publish = False; events.clear()
+    assert invoke(config, population([row()]), sink)["status"] == "delivered"
+    assert events[0] == "publish"
+    assert state(config)["days"][DAY]["status"] == "delivered"
+    assert all(record["receipt"] is None for record in state(config)["alerts"].values())
+
+
+@pytest.mark.parametrize("bad", ["hash", "body", "tell_id", "sender", "status", "row_id", "read_only", "source", "outer_id"])
+def test_blocker_reconciliation_rejects_unproved_or_foreign_ledger(config, monkeypatch, bad):
+    from comms import payload_digest
+    config["binding_name"] = "assistant"
+    wrapper = tool.Publisher(config)
+    monkeypatch.setattr(wrapper, "binding", lambda: {"stream_id": "fixture-host:desk-b"})
+    monkeypatch.setattr(wrapper, "seat_env", lambda binding: {"AGENT_ORCH_STREAM_ID": binding["stream_id"], "AGENT_ORCH_TOKEN": ""})
+    key = "household-due:blocker:fixture"; body = "BLOCKER Synthetic failure"; sender = "fixture-host:desk-a"
+    record = {"tell_id": key, "text": body, "from_stream_id": sender, "ledger_row_id": 1,
+              "delivery_status": "delivered", "request_payload_hash": payload_digest("front-desk:assistant\0"+sender, body)}
+    receipt = {"type": "ledger_get.ok", "tell_id": key, "read_only": True, "source": "v2_tell_deliveries", "tell": record}
+    if bad == "hash": record["request_payload_hash"] = "wrong"
+    elif bad == "body": record["text"] = "Other body"
+    elif bad == "tell_id": record["tell_id"] = "other-key"
+    elif bad == "sender": record["from_stream_id"] = "other-host:desk"
+    elif bad == "status": record["delivery_status"] = "pasted_unsubmitted"
+    elif bad == "row_id": record["ledger_row_id"] = False
+    elif bad == "read_only": receipt["read_only"] = False
+    elif bad == "source": receipt["source"] = "other-table"
+    else: receipt["tell_id"] = "other-key"
+    reads = []
+    def rpc(args, env=None):
+        assert env["AGENT_ORCH_STREAM_ID"] == "fixture-host:desk-b" and env["AGENT_ORCH_TOKEN"] == ""
+        if args[0] == "tell": raise tool.Failure("tell_id_conflict")
+        reads.append(args)
+        return receipt
+    monkeypatch.setattr(wrapper, "rpc", rpc)
+    with pytest.raises(tool.Failure, match="tell_unconfirmed"):
+        wrapper.tell(key, body)
+    assert reads == [["ledger", "get", key]]
+
+
+def test_missing_committed_ledger_keeps_same_alert_unacknowledged(config, monkeypatch):
+    wrapper = tool.Publisher(config)
+    monkeypatch.setattr(wrapper, "binding", lambda: {"stream_id": "fixture-host:desk-b"})
+    monkeypatch.setattr(wrapper, "seat_env", lambda binding: {})
+    reads = []; attempts = []
+    def rpc(args, env=None):
+        if args[0] == "tell":
+            attempts.append(args)
+            raise tool.Failure("tell_id_conflict")
+        reads.append(args)
+        raise tool.Failure("rpc_refused")  # ledger_get.error: tell_not_found
+    monkeypatch.setattr(wrapper, "rpc", rpc)
+    def failed_read(route): raise tool.Failure("cosmo_read_failed")
+    now = datetime.fromisoformat(DAY+"T08:00:00-06:00")
+    for _ in range(2):
+        assert tool.run(config, now, reader=failed_read, publisher=wrapper)["status"] == "failed"
+    alerts = state(config)["alerts"]
+    assert list(alerts) == [f"household-due:blocker:{DAY}:cosmo_read_failed"]
+    assert next(iter(alerts.values()))["receipt"] is None
+    assert len(reads) == 2 and len(attempts) == 2
+    assert attempts[0] == attempts[1]

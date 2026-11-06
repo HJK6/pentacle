@@ -214,6 +214,8 @@ class Publisher:
         except (OSError, subprocess.TimeoutExpired, ValueError):
             raise Failure("rpc_unconfirmed") from None
         if child.returncode != 0 or not isinstance(body, dict):
+            if isinstance(body, dict) and body.get("type") == "tell.error" and body.get("error_code") == "tell_id_conflict":
+                raise Failure("tell_id_conflict")
             raise Failure("rpc_refused")
         return body
 
@@ -268,11 +270,40 @@ class Publisher:
 
     def tell(self, tell_id, message):
         binding = self.binding()
-        reply = self.rpc(["tell", "assistant", message, "--tell-id", tell_id], self.seat_env(binding))
+        try:
+            reply = self.rpc(["tell", "assistant", message, "--tell-id", tell_id], self.seat_env(binding))
+        except Failure as exc:
+            if str(exc) != "tell_id_conflict" or not message.startswith("BLOCKER "):
+                raise
+            return self._reconcile_blocker(tell_id, message)
         if reply.get("type") != "tell.ok" or not (reply.get("action_committed") is True or reply.get("action_status") == "committed"
                                                   or reply.get("delivery_status") in ("persisted", "delivered", "landed")):
             raise Failure("tell_unconfirmed")
         return reply
+
+    def _reconcile_blocker(self, tell_id, message):
+        # A tell's existing logical-FD digest includes its authenticated sender.
+        # After handoff, recover the original committed receipt rather than
+        # changing the frozen ID/body or borrowing the former seat's credential.
+        reply = self.rpc(["ledger", "get", tell_id], self.seat_env(self.binding()))
+        record = reply.get("tell")
+        if not isinstance(record, dict):
+            raise Failure("tell_unconfirmed")
+        sender = record.get("from_stream_id")
+        if not isinstance(sender, str) or not sender.startswith(self.config["host_id"] + ":"):
+            raise Failure("tell_unconfirmed")
+        # comms.py::_logical_digest / payload_digest is SHA256(target NUL body).
+        expected_hash = digest(f"front-desk:{self.config['binding_name']}\0{sender}\0{message}")
+        peer_text = f"[from {sender}] [tell:{tell_id}]\n{message}"
+        if (reply.get("type") != "ledger_get.ok" or reply.get("read_only") is not True
+                or reply.get("source") != "v2_tell_deliveries" or reply.get("tell_id") != tell_id
+                or record.get("tell_id") != tell_id or record.get("text") not in (message, peer_text)
+                or record.get("request_payload_hash") != expected_hash
+                or record.get("delivery_status") not in ("delivered", "persisted", "committed_pending_proof")
+                or type(record.get("ledger_row_id")) is not int or record["ledger_row_id"] < 1):
+            raise Failure("tell_unconfirmed")
+        return {"type": "tell.ok", "tell_id": tell_id, "action_committed": True,
+                "delivery_status": record["delivery_status"], "reconciled": True, "original_receipt": reply}
 
 
 def atomic_json(path: Path, value):
@@ -358,11 +389,12 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
                     alert(state, prior_day, "missed", str(path), alert_namespace)
                 missed += timedelta(days=1)
             save()
-        flush_alerts(state, save, publisher)
         if local.date() < first or local.hour < 8:
+            flush_alerts(state, save, publisher)
             return {"status": "before_window"}
         record = state["days"].get(day, {})
         if record.get("status") in ("delivered", "empty", "missed"):
+            flush_alerts(state, save, publisher)
             return {"status": record["status"]}
         if local.hour >= 12:
             state["days"][day] = {**record, "status": "missed"}
@@ -393,8 +425,10 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
             error = str(exc) if isinstance(exc, Failure) else "unexpected_failure"
             alert(state, day, error, str(path), alert_namespace)
             save()
-            flush_alerts(state, save, publisher)
             return {"status": "failed", "error": error}
+        finally:
+            # An eligible digest always gets its attempt before alert retries.
+            flush_alerts(state, save, publisher)
 
 
 def main(argv=None):
