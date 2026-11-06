@@ -119,6 +119,7 @@ class Household:
             ("GET", "/events?" + urlencode({"from": first.isoformat(), "to": last.isoformat()}), None),
             ("GET", "/events?" + urlencode({"from": today.isoformat(),
                                             "to": (today + timedelta(days=7)).isoformat()}), None),
+            ("GET", "/routines", None),
         ]
         try:
             replies = await asyncio.wait_for(
@@ -135,12 +136,14 @@ class Household:
         lists = {name: [item for row in bodies[i]["items"] if row.get("done_at") is None
                         for item in [self._item(row)] if item is not None]
                  for i, name in enumerate(LISTS)}
-        events = {row["id"]: event for body in bodies[len(LISTS):] for row in body["items"]
+        events = {row["id"]: event for body in bodies[len(LISTS):len(LISTS) + 2] for row in body["items"]
                   for event in [self._event(row)] if event is not None}
         ordered = sorted(events.values(), key=lambda e: (e.get("date") or "", e.get("time") or "", e["id"]))
         return {"type": "household.snapshot.ok", "today": today.isoformat(), "month": first.strftime("%Y-%m"),
                 "people": {"partner": self.partner_name},
-                "lists": lists, "events": ordered, "server_now": bodies[len(LISTS)].get("server_now")}
+                "lists": lists, "events": ordered,
+                "routines": [out for row in bodies[-1]["items"] for out in [self._routine(row)] if out is not None],
+                "server_now": bodies[len(LISTS)].get("server_now")}
 
     async def item_add(self, msg: dict[str, Any]) -> dict[str, Any]:
         fields = _fields(msg, required=("list", "label"))
@@ -201,6 +204,24 @@ class Household:
 
     def _item(self, row: dict[str, Any]) -> dict[str, Any] | None:
         return self._common(row)
+
+    def _routine(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(row, dict) or not isinstance(row.get("scope"), str):
+            raise VerbError("unavailable", "household store unavailable")
+        out = self._common(row)
+        if out is None:
+            return None
+        try:
+            day = row["next_due"]
+            valid_day = isinstance(day, str) and _DAY.fullmatch(day) and date.fromisoformat(day)
+        except (KeyError, ValueError):
+            valid_day = False
+        if (type(row.get("id")) is not int or row["id"] < 1 or row.get("list") not in LISTS
+                or not isinstance(row.get("label"), str) or not row["label"].strip()
+                or not valid_day or type(row.get("paused")) is not bool or "item_id" not in row
+                or (row["item_id"] is not None and (type(row["item_id"]) is not int or row["item_id"] < 1))):
+            raise VerbError("unavailable", "household store unavailable")
+        return out
 
     def _event(self, row: dict[str, Any]) -> dict[str, Any] | None:
         out = self._common(row)

@@ -34,6 +34,11 @@ test('fake speaks exact Cosmo routes for all six daemon verbs with auth-presence
   const f = fixture();
   for (const list of Object.keys(f.seed.lists)) assert.equal((await request(f, 'GET', `/lists/${list}/items`)).body.items.length, 2);
   assert.equal((await request(f, 'GET', '/events?from=2099-06-15&to=2099-06-15')).body.items.length, 2);
+  const routines = await request(f, 'GET', '/routines');
+  assert.equal(routines.status, 200); assert.deepEqual(routines.body.items, f.seed.routines);
+  assert.equal(routines.body.server_now, f.seed.server_now);
+  routines.body.items[0].label = 'Changed response copy';
+  assert.equal(f.seed.routines[0].label, 'Synthetic routine');
   const added = await request(f, 'POST', '/lists/grocery/items', { label: 'Synthetic addition' });
   assert.equal(added.status, 201); assert.equal(added.body.list, 'grocery');
   assert.equal(added.body.scope, 'operator'); assert.equal(added.body.created_by, 'app');
@@ -43,7 +48,7 @@ test('fake speaks exact Cosmo routes for all six daemon verbs with auth-presence
   assert.equal(event.status, 201); assert.equal(event.body.who, vocabulary.partnerWho);
   assert.equal((await request(f, 'DELETE', `/events/${event.body.id}`)).status, 204);
   const log = (await request(f, 'GET', '/__fixture/calls')).body.calls;
-  assert.equal(log.length, 11); assert.ok(log.every(x => x.authPresent === true));
+  assert.equal(log.length, 12); assert.ok(log.every(x => x.authPresent === true));
   assert.ok(log.every(x => !('authorization' in x)));
   assert.ok(!JSON.stringify(log).includes('synthetic-test-only'));
 });
@@ -54,6 +59,10 @@ test('fixture rejects wrong fields, missing bearer and unsupported routes', asyn
   assert.equal((await request(f, 'POST', '/events', { date: today, title: 'Synthetic', who: 'self' })).status, 400);
   assert.equal((await request(f, 'PATCH', '/lists/items/1/done', {})).status, 400);
   assert.equal((await request(f, 'GET', '/events?from=2099-06-01&to=2099-06-30&scope=shared')).status, 400);
+  assert.equal((await f.dispatch({ method: 'GET', url: '/routines' })).status, 401);
+  assert.equal((await request(f, 'GET', '/routines?scope=shared')).status, 400);
+  assert.equal((await request(f, 'GET', '/routines', {})).status, 400);
+  assert.equal((await request(f, 'POST', '/routines')).status, 404);
   assert.equal((await request(f, 'GET', '/elsewhere')).status, 404);
 });
 test('one-shot delay commits once before its eventual reply and never delays readback', async () => {
