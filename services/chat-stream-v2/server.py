@@ -5539,7 +5539,9 @@ class Server:
         auth = msg.get("_auth_context") if isinstance(msg.get("_auth_context"), dict) else {}
         caller_stream_id = str(auth.get("stream_id") or "").strip()
         claimed_stream_id = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "").strip()
-        operator_authenticated = bool(auth.get("operator_authenticated"))
+        operator_authenticated = bool(auth.get("operator_authenticated")
+            and not auth.get("token_verified") and not auth.get("scoped_principal")
+            and not auth.get("stream_id") and auth.get("operator_principal"))
         expired_self_close = False
         if auth.get("reason_code") == TOKEN_REASON_EXPIRED and self.store is not None:
             token = msg.get("stream_token")
@@ -5614,10 +5616,6 @@ class Server:
                 close_kind = "manager_close"
             else:
                 coordinator_authorized = True
-        if coordinator_authorized and msg.get("operator_confirm") is True:
-            # The existing explicit parent-authorized operator route is an
-            # involuntary close. A self-supplied flag never acquires it.
-            close_kind = "operator_close"
         claim_verified: str | None = None
         claim_mismatch: dict[str, Any] | None = None
         if isinstance(msg.get("ac_claim"), dict) and self.ledger is not None:

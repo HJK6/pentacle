@@ -18,7 +18,7 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
-from work_lane_progress import lane_lead_lost
+from work_lane_progress import lane_lead_lost, members_working
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
@@ -435,9 +435,12 @@ def work_lane_rows_conn(conn, *, include_done: bool = False) -> list[dict[str, A
     marks = ",".join("?" for _ in states)
     lanes = [dict(r) for r in conn.execute(
         f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
+    from work_owed import _owners
+    owners = [value[2] for value in _owners(conn).values()]
     for lane in lanes:
         lane["_members"] = members_conn(conn, lane)
         lane["_work_index_available"] = index_available
+        lane["_members_working"] = members_working(lane, owners)
         marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
         fd_stamp = conn.execute(
             f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
@@ -643,7 +646,11 @@ def _assigned_seats_conn(conn, spec_ids: list[str]) -> list[dict[str, str]]:
 
 def _lead_lost_conn(lane: dict[str, Any], conn) -> bool:
     lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
-    return lane_lead_lost({**lane, "_qualifies": work_lane_lead_qualifies(lane, lead)})
+    from work_owed import _owners
+    observed = {**lane, "_members": members_conn(conn, lane),
+                "_work_index_available": bool(_state_conn(conn)["available"])}
+    return lane_lead_lost({**observed, "_qualifies": work_lane_lead_qualifies(lane, lead),
+                          "_members_working": members_working(observed, [value[2] for value in _owners(conn).values()])})
 
 
 def _override_audit(actor: str, generation: str, action: str, prior: str, nxt: str,

@@ -408,7 +408,8 @@ class UIVerbs:
             # Only the work assignment ends; authority tags are untouched.
             if await self.store.fetch_session(host, name) is None:
                 raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
-            updated = await self.store.update_session(host, name, assigned_spec_id=UNASSIGNED)
+            async with self.sessions._graph_lock:
+                updated = await self.store.update_session(host, name, assigned_spec_id=UNASSIGNED)
             self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=UNASSIGNED)
             return {"type": "session.spec_update.ok", "request_id": rid, "action": action, "session": updated}
         if not SPEC_ID_RE.fullmatch(spec_id):
@@ -491,16 +492,17 @@ class UIVerbs:
                 assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
-        updated = await self.store.update_session(
-            host,
-            name,
-            expected_spec_source=source_check,
-            spec_id=first_spec_id,
-            spec_ids=spec_ids,
-            spec_resolution=resolver(first_spec_id) if first_spec_id else None,
-            spec_binding_provenance=bindings,
-            assigned_spec_id=assigned,
-        )
+        async with self.sessions._graph_lock:
+            updated = await self.store.update_session(
+                host,
+                name,
+                expected_spec_source=source_check,
+                spec_id=first_spec_id,
+                spec_ids=spec_ids,
+                spec_resolution=resolver(first_spec_id) if first_spec_id else None,
+                spec_binding_provenance=bindings,
+                assigned_spec_id=assigned,
+            )
         if updated is None:
             raise VerbError("session_not_found", "session disappeared during spec update", stream_id=stream_id)
         self.sessions.apply_durable(

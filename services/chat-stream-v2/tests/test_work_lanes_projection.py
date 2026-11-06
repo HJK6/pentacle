@@ -220,7 +220,7 @@ def _assert_working(lane):
     assert (lane["state"], lane["state_reason"]) == ("active", "members_working")
 
 
-@pytest.mark.parametrize("role", ["lead", "nexus"])
+@pytest.mark.parametrize("role", ["lead", "nexus", "planner"])
 def test_members_working_red_hidden(role):
     frame = _frame(_working_lane(), [_working_seat(role=role)])
     _assert_working(frame["lanes"][0])
@@ -228,8 +228,8 @@ def test_members_working_red_hidden(role):
 
 
 def test_members_working_red_operator_parentless():
-    _assert_working(_frame(_working_lane(owner="operator"),
-                           [_working_seat(role="worker", visibility="default", parent_stream_id=None)])["lanes"][0])
+    assert _frame(_working_lane(owner="operator"),
+                  [_working_seat(role="worker", visibility="default", parent_stream_id=None)])["lanes"][0]["state"] == "paused"
 
 
 @pytest.mark.parametrize("beyond", ["member", "seat"])
@@ -297,7 +297,7 @@ def test_members_working_control_ineligible(seat):
 
 def test_members_working_control_hidden_operator_and_assignment():
     from store_specs import effective_assignment
-    assert _frame(_working_lane(owner="operator"), [_working_seat()])["lanes"][0]["state"] == "paused"
+    _assert_working(_frame(_working_lane(owner="operator"), [_working_seat()])["lanes"][0])
     assert effective_assignment(_working_seat(assigned_spec_id=None, spec_ids=["spec_demo__item0"])) == "spec_demo__item0"
 
 
@@ -307,7 +307,7 @@ def test_members_working_control_precedence_and_signature():
     assert _frame(_working_lane(state="blocked"), [seat])["lanes"][0]["state"] == "blocked"
     assert _frame(_working_lane(state="done"), [seat])["lanes"] == []
     lost = _frame(_working_lane(reason="lead_lost"), [seat])["lanes"][0]
-    assert (lost["state"], lost["state_reason"]) == ("active", "lead_lost")
+    _assert_working(lost)
     assert frame_signature(_frame(_working_lane(), [{**seat, "last_activity": "a"}])) == frame_signature(
         _frame(_working_lane(), [{**seat, "last_activity": "b"}]))
 
@@ -320,3 +320,23 @@ def test_members_working_red_single_tag_legacy():
 def test_members_working_control_protected(monkeypatch):
     monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "lead")
     assert _frame(_working_lane(), [_working_seat()])["lanes"][0]["state"] == "paused"
+
+
+@pytest.mark.parametrize("stored", ["active", "paused"])
+@pytest.mark.parametrize("quality,status,working", [
+    ("fresh", "completed", False), ("fresh", "deprecated", False),
+    ("fresh", "in_progress", True), ("stale", "completed", True),
+    ("missing", "missing", True), ("ambiguous", "ambiguous", True),
+])
+def test_member_owner_precedes_history_but_fresh_terminal_does_not_activate(stored, quality, status, working):
+    lane = _working_lane(state=stored)
+    lane["_members"][0].update(status=status, observation={"quality": quality},
+                              source_changed_at="2026-10-01T00:00:00Z")
+    lane["_work_index_available"] = True
+    result = _frame(lane, [_working_seat(role="planner")])["lanes"][0]
+    if working:
+        _assert_working(result)
+        assert result["stale"] is True
+    else:
+        assert result["state_reason"] != "members_working"
+        assert result["stale"] is False

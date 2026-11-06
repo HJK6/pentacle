@@ -6,7 +6,7 @@ import copy
 import json
 from pathlib import PurePath
 
-from store_specs import effective_assignment, _hydrate_spec_row, _row
+from store_specs import effective_assignment, task_owner, _hydrate_spec_row, _row
 from store_work_index import _state_conn
 from _shared.work_observations import timestamp
 
@@ -36,10 +36,11 @@ def _owners(conn):
     owners = {}
     for raw in conn.execute("SELECT s.*,g.generation AS session_generation FROM sessions s "
                             "JOIN v2_session_generations g USING(host,session_name) "
-                            "WHERE s.status='open' AND s.role IN ('lead','nexus')"):
+                            "WHERE s.status='open' AND s.role IN ('lead','nexus','planner')"):
         row = _hydrate_spec_row(_row(raw))
+        row["stream_id"] = f"{row['host']}:{row['session_name']}"
         spec = effective_assignment(row)
-        if spec and not row.get("presumed_dead_at"):
+        if task_owner(row):
             stream = f"{row['host']}:{row['session_name']}"
             key = json.dumps([spec, stream, row["session_generation"]], separators=(",", ":"))
             owners[key] = (spec, stream, row)
@@ -61,26 +62,19 @@ def _observation(conn, state, spec):
             "document_revisions": record.get("document_revisions") or {}}
 
 
+DISPOSITION_STATUSES = {"backlog", "ready_for_dev", "blocked", "needs_qa", "completed", "deprecated"}
+
+
 def _advance(episode, observation):
-    """Only a witnessed revision transition can establish disposition evidence."""
-    if not observation["known"]:
-        return
-    prior = episode.get("previous") or {}
-    if observation["status"] == "in_progress":
-        episode["disposition"] = None
-    elif prior.get("known") and prior.get("revision") != observation["revision"]:
-        moved = prior.get("status") != observation["status"]
-        parked = (observation["status"] == "blocked" and observation.get("parked")
-                  and prior.get("parked") != observation["parked"])
-        if moved or parked:
-            episode["disposition"] = observation["revision"]
-    episode["previous"] = observation
+    # A settled accepted status is evidence even on first observation. An active
+    # revision invalidates an earlier disposition; uncertainty never clears debt.
+    if observation["known"]:
+        episode["disposition"] = observation["revision"] if _disposed(episode, observation) else None
+        episode["previous"] = observation
 
 
 def _disposed(episode, observation):
-    return bool(observation["known"] and (
-        observation["status"] in {"completed", "deprecated", "backlog"}
-        or (episode.get("disposition") and observation["status"] != "in_progress")))
+    return bool(observation["known"] and observation["status"] in DISPOSITION_STATUSES)
 
 
 def reconcile_dispositions_conn(conn, now):
@@ -214,32 +208,31 @@ def owed_dispositions_conn(conn, *, now=None, root_binding=None):
             "query": "agent-orch work owed --json", "items": items}
 
 
+def _close_obligations(conn, stream, generation, *, pending_only=True, observation_available=True):
+    """Current assignment plus unresolved history of this exact generation."""
+    state = _state_conn(conn)
+    owners = _owners(conn)
+    own = {spec for spec, sid, row in owners.values()
+           if sid == stream and row["session_generation"] == generation}
+    registry = _registry(state)
+    own.update(episode["spec_id"] for kind in ("episodes", "owed") for episode in registry[kind].values()
+               if (episode["closing_stream_id"], episode["session_generation"]) == (stream, generation))
+    for spec in sorted(own):
+        successor = any(other_spec == spec and sid != stream for other_spec, sid, _ in owners.values())
+        observation = _observation(conn, state, spec)
+        if not observation_available:
+            observation = {**observation, "known": False, "status": "unknown", "revision": None}
+        if not pending_only or (not successor and not _disposed({}, observation)):
+            yield {"spec_id": spec, "stream_id": stream, "session_generation": generation, **observation}
+
+
 def owes_on_close_conn(conn, stream, generation):
-    state = _state_conn(conn)
-    owners = _owners(conn)
-    own = [(key, spec) for key, (spec, sid, row) in owners.items()
-           if sid == stream and row["session_generation"] == generation]
-    for key, spec in own:
-        if any(other_spec == spec and sid != stream for other_spec, sid, _ in owners.values()):
-            continue
-        observation = _observation(conn, state, spec)
-        episode = _registry(state)["episodes"].get(key)
-        if not _disposed(episode or {}, observation):
-            return True
-    return False
+    return next(_close_obligations(conn, stream, generation), None) is not None
 
 
-def lead_close_context_conn(conn, stream, generation):
-    state = _state_conn(conn)
-    owners = _owners(conn)
-    own = [(spec, row) for spec, sid, row in owners.values()
-           if sid == stream and row["session_generation"] == generation]
-    for spec, row in own:
-        observation = _observation(conn, state, spec)
-        if (observation["known"] and observation["status"] == "in_progress"
-                and not any(other_spec == spec and sid != stream for other_spec, sid, _ in owners.values())):
-            return {"spec_id": spec, "stream_id": stream, "session_generation": generation, **observation}
-    return None
+def lead_close_context_conn(conn, stream, generation, *, pending_only=True, observation_available=True):
+    return next(_close_obligations(conn, stream, generation, pending_only=pending_only,
+                                  observation_available=observation_available), None)
 
 
 def disposition_commands(context):
@@ -249,7 +242,7 @@ def disposition_commands(context):
     stem = folder.name
     root = folder.parents[2] if len(folder.parents) >= 3 else PurePath("/memory")
     client = str(root / "scripts/memory_client.py")
-    expected = {f"work/in_progress/{stem}/{name}": revision
+    expected = {f"work/{folder.parent.name}/{stem}/{name}": revision
                 for name, revision in context["document_revisions"].items()}
     move = {"item_id": context["spec_id"], "status": "backlog", "expected": expected,
             "requesting_stream_id": context["stream_id"],
@@ -257,13 +250,13 @@ def disposition_commands(context):
     commands = []
     if len(expected) != 2:
         commands.extend(f"python3 {shlex.quote(client)} read <<'JSON'\n"
-                        + json.dumps({"path": f"work/in_progress/{stem}/{name}"}) + "\nJSON"
+                        + json.dumps({"path": f"work/{folder.parent.name}/{stem}/{name}"}) + "\nJSON"
                         for name in ("spec.md", "summary.md"))
     if len(expected) == 2:
         commands.append(f"python3 {shlex.quote(client)} move <<'JSON'\n" + json.dumps(move) + "\nJSON")
     commands.extend([
         f"agent-orch spec assign <successor> {context['spec_id']}",
-        "Authorized parent/FD: agent-orch close --operator-confirm --expected-generation "
+        "After an accepted disposition or live successor: agent-orch close --expected-generation "
         + shlex.quote(context["session_generation"]) + " " + shlex.quote(context["stream_id"]),
     ])
     return commands
