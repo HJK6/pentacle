@@ -1,3 +1,4 @@
+from _shared.spawn_profiles import resolve_test_profile
 """The fleet smoke's authoritative event snapshot must wait for the turn to settle.
 
 Claude appends a SYSTEM turn-duration record ("Worked for 2s") a few
@@ -106,3 +107,21 @@ def test_row_after_the_bound_is_never_accepted(validate, monkeypatch):
     with pytest.raises(RuntimeError, match="did not settle"):
         run()
     assert socket.snapshots == 1
+
+
+def test_real_smoke_payload_uses_test_profile_before_any_provider_call():
+    """The launch builder must not inherit an operator's desktop work tuple."""
+    captured = []
+    def rpc(payload, expected):
+        if payload['type'] == 'spawn_catalog_get':
+            return {'test_prompt_profile': resolve_test_profile(), 'type': 'spawn_catalog_get.ok', 'catalog_version': 'fixture',
+                    'profiles': {'desktop_manual': {'codex': ['gpt-6.1-sol', 'high']},
+                                 'test_prompt': {'codex': ['gpt-6-luna', 'low']}}}
+        captured.append(payload)
+        raise RuntimeError('intercepted before provider execution')
+    with pytest.raises(RuntimeError, match='intercepted before provider execution'):
+        spawn_fleet_smoke.run_cell('fixture', 'codex', 'prompted', rpc=rpc,
+            wait_ready=lambda *_: None, wait_event=lambda *_: None,
+            verify_teardown=lambda *_: None)
+    assert (captured[0]['model'], captured[0]['effort']) == ('gpt-6-luna', 'low')
+    assert captured[0]['resolution_source'] == 'explicit_override'

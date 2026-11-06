@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -398,7 +399,7 @@ def _fleet_smoke_hosts(machines_file: str) -> tuple[tuple[str, ...], tuple[str, 
 def _fleet_smoke_verdict(
     result: subprocess.CompletedProcess[str], machines_file: str,
     required_cells: list[dict[str, str]] | None = None,
-    *, declared_exclusions: list[dict[str, str]] | None = None, accounts: Sequence[str] = (),
+    *, declared_exclusions: list[dict[str, str]] | None = None, accounts: Sequence[str] = (), test_profile=None,
 ) -> dict[str, object]:
     """Combine every smoke evidence channel; missing cells can never turn green.
 
@@ -448,6 +449,12 @@ def _fleet_smoke_verdict(
             choices = account_map(list(accounts), tuple(sorted(expected)))
         except ValueError as exc:
             issues.append('invalid_smoke_accounts: ' + str(exc))
+    if test_profile is not None:
+        from _shared.spawn_profiles import validate_test_profile
+        try:
+            test_profile = validate_test_profile(test_profile)
+        except ValueError as exc:
+            issues.append("invalid_test_profile: " + str(exc))
     cells: dict[tuple[str, str, str], dict[str, object]] = {}
     severity = {"passed": 0, "unreachable": 1, "untested": 2, "failed": 3}
     seen_pass_rows = set()
@@ -474,6 +481,19 @@ def _fleet_smoke_verdict(
                         or actual.get('host') != key[0] or actual.get('provider') != key[1]
                         or not actual.get('generation')):
                     row = {**row, 'outcome': 'failed', 'reason': 'account_binding_mismatch'}
+            if test_profile is not None and str(row.get("outcome", "")).lower() == "passed":
+                from _shared.spawn_profiles import test_prompt_tuple
+                try:
+                    model, effort = test_prompt_tuple(key[1], test_profile)
+                    proof = row.get("tuple_evidence") or {}
+                    if (row.get("test_profile") != test_profile
+                            or (row.get("model"), row.get("effort")) != (model, effort)
+                            or any(proof.get(k) != v for k, v in
+                                (("requested_model", model), ("requested_effort", effort),
+                                 ("effective_model", model), ("effective_effort", effort)))):
+                        raise ValueError("requested/effective tuple or settings mismatch")
+                except ValueError:
+                    row = {**row, "outcome": "failed", "reason": "test_profile_mismatch"}
             outcome = str(row.get("outcome") or "").lower()
             classification = str(row.get("class") or "").lower()
             reason = str(row.get("reason") or row.get("stage") or "")
@@ -1726,6 +1746,11 @@ def _apply_post_activation(
                 smoke_accounts = (selection['identity']['activation'].get('accounts', [])
                                   if selection is not None else stamp.get('smoke_accounts', []))
                 smoke_args += tuple(arg for entry in smoke_accounts for arg in ('--account', entry))
+                if "test_profile" in stamp:
+                    frozen_profile = _write_test_profile(repo, service, stamp["test_profile"])
+                    if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
+                        raise DeployError("test profile/settings drift before canary")
+                    smoke_args += ("--test-profile-snapshot", str(frozen_profile))
                 smoke = runner(
                     (
                         "/usr/bin/env",
@@ -1756,8 +1781,13 @@ def _apply_post_activation(
                     expected_start=active_start, prior_pid=prior_pid,
                     prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
                 )
-                stamp["fleet_smoke"] = (_fleet_smoke_verdict(smoke, machines_file, required_cells, accounts=smoke_accounts)
-                    if smoke_accounts else _fleet_smoke_verdict(smoke, machines_file, required_cells))
+                verdict_options = {}
+                if smoke_accounts:
+                    verdict_options["accounts"] = smoke_accounts
+                if "test_profile" in stamp:
+                    verdict_options["test_profile"] = stamp["test_profile"]
+                stamp["fleet_smoke"] = _fleet_smoke_verdict(
+                    smoke, machines_file, required_cells, **verdict_options)
                 if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
                     if smoke_accounts:
                         _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
@@ -1992,6 +2022,35 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
         raise DeployError(str(exc)) from exc
 
 
+def _release_test_profile(repo, service, runner, *, snapshot=None):
+    """Ask the actual release runner to validate its settings, without a prompt."""
+    command = (str(_venv_python(repo, service)),
+        str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
+        "--dry-run", "ws://127.0.0.1:0", "profile-check",
+        *(("--test-profile-snapshot", str(snapshot)) if snapshot else ()))
+    result = _checked(command, repo, runner)
+    from _shared.spawn_profiles import validate_test_profile
+    try:
+        profile = validate_test_profile(json.loads(result.stdout)["test_profile"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise DeployError("release runner lacks compatible test_prompt settings") from exc
+    if snapshot is None:
+        with tempfile.TemporaryDirectory(prefix="pentacle-release-test-profile-") as directory:
+            frozen = Path(directory) / "test-profile.json"
+            coordinated.atomic_json(frozen, profile)
+            if _release_test_profile(repo, service, runner, snapshot=frozen) != profile:
+                raise DeployError("release runner cannot honor sealed test profile")
+    return profile
+
+
+def _write_test_profile(repo, service, profile):
+    from _shared.spawn_profiles import validate_test_profile
+    path = _stamp_path(repo, service).with_name(service.name + ".test-profile.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    coordinated.atomic_json(path, validate_test_profile(profile))
+    return path
+
+
 def _deploy_legacy(
     service: ServiceConfig,
     *,
@@ -2027,6 +2086,11 @@ def _deploy_legacy(
     if not rollback and _code_identity_at(repo, prior_sha, runner) != _code_identity_at(repo, sha, runner):
         raise DeployError("code identity changes require an admitted coordinated plan before checkout mutation")
 
+    prior_profile = None
+    if service.name == "chat-streamd-v2":
+        prior_profile = _release_test_profile(repo, service, runner)
+        if rollback and prior_profile != prior_stamp.get("test_profile"):
+            raise DeployError("test profile/settings drift before rollback")
     with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
         _checked(("git", "checkout", "--detach", sha), repo, runner)
         verify_log_guard(log_guard_dir if log_guard_dir is not None else service.log_guard_dir)
@@ -2059,6 +2123,13 @@ def _deploy_legacy(
         elif "seam_results" in evidence:
             raise DeployError("release selection: seam evidence requires actual release inputs")
 
+        profile = None
+        if service.name == "chat-streamd-v2":
+            profile = _release_test_profile(repo, service, runner)
+            if rollback and profile != prior_stamp.get("prior_test_profile"):
+                raise DeployError("rollback test profile differs from frozen prior")
+            if selection is not None and profile != selection["identity"]["test_profile"]:
+                raise DeployError("release selection test profile/settings drift")
         log_paths = _daemon_log_paths(service)
         log_path = log_paths[0] if log_paths else None
         if log_path is None and not skip_kickstart:
@@ -2078,6 +2149,8 @@ def _deploy_legacy(
             "gates": gates,
             "selective_qualification": "admitted" if selection is not None else "not_enabled",
         }
+        if profile is not None:
+            stamp.update(test_profile=profile, prior_test_profile=prior_profile)
         ancestry = coordinated.legacy_guard(repo, prior_stamp, rollback=rollback)
         if ancestry:
             stamp["coordinated_receipt"] = ancestry
@@ -2184,6 +2257,10 @@ def _deploy_legacy(
                 _validate_selected_activation(selection, repo, service)
             except (release_selection.Invalid, OSError, ValueError, KeyError, TypeError) as exc:
                 raise DeployError(str(exc)) from exc
+        if profile is not None:
+            if _release_test_profile(repo, service, runner) != profile:
+                raise DeployError("test profile/settings drift before activation")
+            _write_test_profile(repo, service, profile)
         _write_stamp(repo, service, stamp)
         transaction.commit()
     if not skip_kickstart:

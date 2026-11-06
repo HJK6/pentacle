@@ -481,6 +481,7 @@ def probe_cell(host: str, mode: str, args, output: Path) -> dict:
 
             evidence["cell"] = smoke.run_cell(
                 host, "claude", mode, rpc=capture_rpc, wait_ready=wait_ready, wait_event=wait_event,
+                test_profile_snapshot=getattr(args, "test_profile", None),
                 **({"account": args.accounts[(host, "claude")]} if getattr(args, 'accounts', None) else {}),
                 verify_teardown=close, register_owned=register, close_owned=close,
                 prepare_owned_spawn=prepare, validate_session=validate,
@@ -546,8 +547,9 @@ def main() -> int:
         args.foreground_jobs[host] = command
     if args.journeys and set(args.foreground_jobs) != set(args.hosts):
         parser.error('journeys requires a finite foreground-job declaration for every selected host')
+    args.test_profile = smoke.resolve_test_profile()
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
-    result = {"runtime": runtime_binding(args.runtime_checkout, args.candidate_sha, args.daemon_pid), "cells": []}
+    result = {"runtime": runtime_binding(args.runtime_checkout, args.candidate_sha, args.daemon_pid), "cells": [], "test_profile": args.test_profile}
     for host in args.hosts:
         for mode in smoke.PROMPT_MODES:
             output = args.evidence_dir / f"{host}-{mode}"

@@ -30,6 +30,21 @@
         "confirmation_flag": "--confirm-model-change",
         "confirmation_flag_effect": "suppress_warning"
       }
+    },
+    "test_prompt": {
+      "claude": {
+        "model": "claude-haiku-5-5",
+        "effort": "low"
+      },
+      "codex": {
+        "model": "gpt-6-luna",
+        "effort": "low"
+      },
+      "gemini": {
+        "model": "gemini-3.5-flash-lite",
+        "effort": "default"
+      },
+      "cursor": null
     }
   }
 }

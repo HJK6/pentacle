@@ -15,7 +15,7 @@ def test_host_final_home_activation_idempotence_and_wrong_login_isolation(tmp_pa
         "executable":"/bin/echo","version":"fixture","executable_sha256":digest,"platform":platform,
         "model":"fixture-model","effort":"high","cwd":str(tmp_path)} for alias in ("primary","spare")}
     config={"host":"host-a","registry":str(private/"registry.json"),"root":str(private/"homes"),"cells":cells}
-    calls=[]; wrong=[False]
+    calls=[]; wrong=[False]; native=[]
     def login(account,*args):
         calls.append(account.home)
         if account.provider=='codex' or account.platform=='wsl':
@@ -24,12 +24,22 @@ def test_host_final_home_activation_idempotence_and_wrong_login_isolation(tmp_pa
         return 'ok'
     def observation(account):
         return {"provider_id":"foreign" if wrong[0] else f"id-{account.alias}","pool_id":f"pool-{account.alias}","auth_mode":"subscription"}
-    def run(argv,**kwargs): return SimpleNamespace(returncode=0,stdout='fixture' if argv[-1]=='--version' else 'OK')
+    def run(argv,**kwargs):
+        native.append(argv)
+        return SimpleNamespace(returncode=0,stdout='fixture' if argv[-1]=='--version' else 'OK')
     host=NativeHost(config,run=run,login=login,observation=observation)
     def request(alias,op,generation,expected='unenrolled',action='enroll'):
         return host.handle(action,provider=provider,alias=alias,expected_generation=expected,operation_id=op,generation=generation)
     first=request('primary','one','first')
     assert first['outcome']=='ok' and '/primary/first' in first['binding']['home']
+    from _shared.spawn_profiles import test_prompt_tuple
+    expected_model, expected_effort = test_prompt_tuple(provider, first['test_profile'])
+    turn = next(argv for argv in native if 'Reply exactly OK' in argv)
+    assert turn[turn.index('--model') + 1] == expected_model
+    assert expected_effort == 'low'
+    if provider == 'claude': assert turn[turn.index('--effort') + 1] == expected_effort
+    else: assert 'model_reasoning_effort="low"' in turn
+
     assert request('primary','one','first')==first and len(calls)==1
     peer=request('spare','two','peer')
     assert peer['outcome']=='ok'

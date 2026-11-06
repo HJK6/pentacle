@@ -136,7 +136,7 @@ def test_native_enrollment_writes_only_final_generation(tmp_path, outcome):
         return SimpleNamespace(returncode=0, stdout="fixture-1" if argv[-1] == "--version" else "OK")
     def attempt():
         return enroll(registry, draft, expected_provider_id="id-a", browser_authorize=lambda *_: None,
-                      login=login, identity=identity, model="fixture-model", effort="high", cwd=str(tmp_path), run=run)
+                      login=login, identity=identity, model="gpt-6-luna", effort="low", cwd=str(tmp_path), run=run)
     if outcome == "ok": assert attempt() == registry.active("codex", "primary", "host-a")
     else:
         with pytest.raises(AccountError): attempt()
@@ -173,7 +173,7 @@ def test_first_enrollment_can_pin_native_uuid_after_verified_login_identity(tmp_
     def run(argv,**kwargs): return SimpleNamespace(returncode=0,stdout="fixture" if argv[-1]=="--version" else "OK")
     def identity(account): return {"provider_id":"new-native-id","pool_id":"pool-a","auth_mode":"subscription","email_verified":True}
     result=enroll(registry,draft,expected_provider_id=None,browser_authorize=lambda *a:None,
-        login=login,identity=identity,model="fixture-model",effort="high",cwd=str(tmp_path),run=run)
+        login=login,identity=identity,model="gpt-6-luna",effort="low",cwd=str(tmp_path),run=run)
     assert result.provider_id=="new-native-id"
 
 

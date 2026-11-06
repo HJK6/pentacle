@@ -132,7 +132,7 @@ def test_coordinated_schedule_switch_and_rollback_restore_owned_preimage(tmp_pat
     assert value['EnvironmentVariables']['PENTACLE_SMOKE_ACCOUNTS'] == 'codex=spare,claude=primary'
     assert str(snapshot) not in value['ProgramArguments'][-1]
     preimages = {}
-    for key in ('policy', 'plist', 'collector', 'stamp', 'schedule'):
+    for key in ('policy', 'plist', 'collector', 'stamp', 'schedule', 'test_settings'):
         before = tmp_path/(key+'.before'); before.write_bytes(b'original '+key.encode())
         preimages[key] = {'path': str(tmp_path/(key+'.live')), 'saved': str(before), 'mode': 0o600}
     receipt = {'source': {'target': source, 'prior': {'sha': 'a'*40, 'original_helpers': {}}},
@@ -143,3 +143,5 @@ def test_coordinated_schedule_switch_and_rollback_restore_owned_preimage(tmp_pat
     assert Path(preimages['schedule']['path']).read_bytes() == after.read_bytes()
     runtime.switch(receipt, rollback=True)
     assert Path(preimages['schedule']['path']).read_bytes() == b'original schedule'
+    assert Path(preimages['test_settings']['path']).read_bytes() == b'original test_settings'
+    assert Path(preimages['test_settings']['path']).stat().st_mode & 0o777 == 0o600

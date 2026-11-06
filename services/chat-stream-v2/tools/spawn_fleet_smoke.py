@@ -24,6 +24,8 @@ for _path in (SERVICE_DIR, SERVICES_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+from _shared.spawn_profiles import resolve_test_profile, validate_test_profile, test_prompt_tuple
+
 from boot_ready import codex_reset_interstitial_visible  # noqa: E402
 from machines import load_machines  # noqa: E402
 from tools.disposable_smoke import publish_smoke_card  # noqa: E402
@@ -244,6 +246,7 @@ def run_cell(
     capture_pane=None,
     validate_session=None,
     provider_probe=None,
+    test_profile_snapshot=None,
 ) -> dict[str, object]:
     """Run one matrix cell; a created stream is always closed and verified."""
     stream_id = ""
@@ -261,9 +264,13 @@ def run_cell(
         catalog = rpc({"type": "spawn_catalog_get"}, "spawn_catalog_get")
         if catalog.get("type") != "spawn_catalog_get.ok":
             raise RuntimeError(str(catalog))
-        model, effort = catalog["profiles"]["desktop_manual"][provider]
-        if provider_probe is not None:
-            model, effort = provider_probe.model, provider_probe.effort
+        current_profile = validate_test_profile(catalog.get("test_prompt_profile"))
+        profile = current_profile if test_profile_snapshot is None else validate_test_profile(test_profile_snapshot)
+        if profile != current_profile:
+            raise ValueError("test profile/settings drift before spawn")
+        model, effort = test_prompt_tuple(provider, profile)
+        if provider_probe is not None and (model, effort) != (provider_probe.model, provider_probe.effort):
+            raise ValueError("provider tuple conflicts with test_prompt settings")
         stage = "spawn"
         if inject_stage == stage:
             raise RuntimeError("forced failure")
@@ -351,6 +358,15 @@ def run_cell(
                 if isinstance(gate, dict) and not gate.get("passed", True):
                     stage = gate_name
                     raise RuntimeError(f"{gate_name}: {json.dumps(gate, sort_keys=True)}")
+        stage = "tuple"
+        tuple_inventory = rpc({"type": "list_sessions"}, "list_sessions")
+        tuple_row = next((r for r in tuple_inventory.get("active", []) if r.get("stream_id") == stream_id), {})
+        tuple_evidence = {k: tuple_row.get(k) for k in
+                          ("requested_model", "requested_effort", "effective_model", "effective_effort")}
+        if any(tuple_evidence[k] != value for k, value in
+               (("requested_model", model), ("requested_effort", effort),
+                ("effective_model", model), ("effective_effort", effort))):
+            raise RuntimeError("requested/effective test tuple mismatch")
         if account is not None:
             stage = "account"
             inventory = rpc({"type": "list_sessions"}, "list_sessions")
@@ -409,6 +425,7 @@ def run_cell(
     if inject_stage == "teardown":
         raise RuntimeError("teardown: forced failure")
     result = {"host": host, "provider": provider, "prompt_mode": prompt_mode, "stream_id": stream_id,
+              "model": model, "effort": effort, "test_profile": profile, "tuple_evidence": tuple_evidence,
               "account": account, "account_selection": "explicit" if account is not None else "default"}
     if actual_binding is not None:
         result["account_binding"] = actual_binding
@@ -937,6 +954,7 @@ def run_matrix(
     allow_legacy_close: bool = False,
     provider_probe=None,
     accounts=None,
+    test_profile_snapshot=None,
 ) -> list[dict[str, object]]:
     if cells is None:
         cells = smoke_plan()["cells"]
@@ -952,6 +970,12 @@ def run_matrix(
         accounts[key] = provider_probe.binding.alias
     if accounts and set(accounts) != {(h, p) for h, p, _ in cells}:
         raise ValueError("explicit account map must cover exactly the included cells")
+    # Freeze once for the matrix. Each cell compares the live catalog to this
+    # snapshot before spawning, so a mid-run settings change fails closed.
+    test_profile_snapshot = (resolve_test_profile() if test_profile_snapshot is None
+                             else validate_test_profile(test_profile_snapshot))
+    for _, provider, _ in cells:
+        test_prompt_tuple(provider, test_profile_snapshot)
     failures: list[dict[str, str]] = []
     for host, provider, prompt_mode in cells:
         account = accounts.get((host, provider))
@@ -969,6 +993,7 @@ def run_matrix(
                 try:
                     result = run_cell(
                         host, provider, prompt_mode, rpc=rpc, wait_ready=wait_ready,
+                        test_profile_snapshot=test_profile_snapshot,
                         wait_event=wait_event, verify_teardown=close_owned,
                         register_owned=register_owned, close_owned=close_owned,
                         prepare_owned_spawn=getattr(register_owned, "prepare_owned_spawn", None),
@@ -1082,6 +1107,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="operator credential for the explicitly selected endpoint")
     parser.add_argument("--provider-tuple", type=Path, default=None,
                         help="private pinned local Codex binding/config input; requires URL and HOST")
+    parser.add_argument("--test-profile-snapshot", type=Path,
+                        help="sealed derived test-profile JSON; freezes this run")
     parser.add_argument("--account", action="append", default=None,
                         help="PROVIDER=ALIAS or HOST/PROVIDER=ALIAS; repeat to cover every included cell")
     parser.add_argument(
@@ -1092,8 +1119,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if (args.provider_tuple is not None or args.token_path is not None) and (args.url is None or args.host is None or args.dry_run):
         parser.error("--provider-tuple and --token-path require explicit URL and HOST, without --dry-run")
-    if args.dry_run and args.url is not None:
-        parser.error("--dry-run accepts no URL or HOST")
     optional_hosts = ()
     if args.host is not None:
         # Both positionals present: single post-deploy canary cell.
@@ -1111,21 +1136,23 @@ def main(argv: list[str] | None = None) -> int:
                                list(filter(None, os.environ.get("PENTACLE_SMOKE_ACCOUNTS", "").split(","))), cells)
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
-    if args.host is None:
-        if args.dry_run:
-            print(json.dumps({
-                "source": plan["source"],
-                "hosts": plan["hosts"],
-                "optional_hosts": plan["optional_hosts"],
-                "excluded_present": plan["excluded_present"],
-                "excluded_absent": plan["excluded_absent"],
-                "cells": [{"host": host, "provider": provider, "prompt_mode": mode,
-                           "account": accounts.get((host, provider)),
-                           "account_selection": "explicit" if accounts else "default"}
-                          for host, provider, mode in plan["cells"]],
-                "dry_run": True,
-            }, sort_keys=True))
-            return 0
+    profile = (validate_test_profile(json.loads(args.test_profile_snapshot.read_text()))
+               if args.test_profile_snapshot else resolve_test_profile())
+    for _, provider, _ in cells:
+        test_prompt_tuple(provider, profile)
+    if args.dry_run:
+        print(json.dumps({
+            **({key: plan[key] for key in ("source", "hosts", "optional_hosts", "excluded_present", "excluded_absent")}
+               if args.host is None else {"hosts": [args.host]}),
+            "test_profile": profile,
+            "cells": [{"host": host, "provider": provider, "prompt_mode": mode,
+                       "model": test_prompt_tuple(provider, profile)[0],
+                       "effort": test_prompt_tuple(provider, profile)[1],
+                       "profile_sha256": profile["profile_sha256"],
+                       "account": accounts.get((host, provider)),
+                       "account_selection": "explicit" if accounts else "default"}
+                      for host, provider, mode in cells], "dry_run": True}, sort_keys=True))
+        return 0
     provider_probe = None
     native_identity = None
     if args.provider_tuple is not None:
@@ -1146,6 +1173,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence: list[dict[str, object]] = []
     results = run_matrix(
         url, args.token_path or DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
+        test_profile_snapshot=profile,
         allow_legacy_close=args.allow_legacy_close,
         **({"accounts": accounts} if accounts else {}),
         **({"provider_probe": provider_probe} if provider_probe is not None else {}),

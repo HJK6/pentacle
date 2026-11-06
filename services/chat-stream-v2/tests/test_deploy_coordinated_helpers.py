@@ -531,7 +531,16 @@ def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch
                     conn.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("provider_cli.verified:" + Binding(**raw).key,
                         json.dumps({"proof": proof, "verified_at": time.time()})))
                 conn.commit()
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True, "status": "PASS", "cells": _rows("fixture")}), "")
+            direction = "target" if fixture.git("rev-parse", "HEAD") == fixture.target else "prior"
+            profile = sealed["source"][direction]["smoke_plan"]["test_profile"]
+            from _shared.spawn_profiles import test_prompt_tuple
+            rows = _rows("fixture")
+            for row in rows:
+                model, effort = test_prompt_tuple(row["provider"], profile)
+                row.update(model=model, effort=effort, test_profile=profile,
+                    tuple_evidence={"requested_model": model, "requested_effort": effort,
+                                    "effective_model": model, "effective_effort": effort})
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True, "status": "PASS", "cells": rows}), "")
         return actual_runner(argv, cwd)
     runtime.runner = runner
     with c.transaction_lock(runtime.repo) as folder:
@@ -903,3 +912,33 @@ def test_credential_forms_are_redacted_in_refusal_and_prepared_journal(transacti
     assert 'account_busy' in str(caught.value)
     assert journal['phase'] == 'prepared' and journal['history'] == ['prepared']
     assert adapter.calls == ['prepare']
+
+
+@pytest.mark.parametrize('drift', ['sealed_profile', 'settings'])
+def test_test_settings_and_snapshot_drift_refuse_before_stop(runtime_preparation, drift):
+    runtime, fixture, intent, root = runtime_preparation
+    folder = root / 'profile-drift'; folder.mkdir(mode=0o700)
+    receipt = {'intent': intent, 'transaction_directory': str(folder), **runtime.prepare(intent, folder)}
+    runtime.guard = lambda *a, **k: {'sole_deployer': True}
+    if drift == 'sealed_profile':
+        path = Path(receipt['source']['target']['test_profile']['path'])
+        data = c.read_json(path); data['profile_sha256'] = '0' * 64; c.atomic_json(path, data)
+    else:
+        (fixture.repo / 'services/_shared/spawn_defaults.local.json').write_text('{}')
+    with pytest.raises(c.Invalid): runtime.revalidate(receipt, forward=True)
+    assert fixture.git('rev-parse', 'HEAD') == fixture.prior
+    assert not runtime.stopped
+
+
+def test_actual_legacy_dry_plan_without_profile_is_not_rollback_compatible(runtime_preparation):
+    runtime, fixture, intent, root = runtime_preparation
+    scope = c.host_scope(intent['machines_file'], [])
+    legacy = {'source': intent['machines_file'], 'hosts': ['fixture'], 'optional_hosts': [],
+        'excluded_present': [], 'excluded_absent': [],
+        'cells': [{'host': 'fixture', 'provider': p, 'prompt_mode': m}
+                  for p in ('claude', 'codex') for m in ('prompted', 'promptless')]}
+    # The legacy runner is the counterpart; use the real scope/profile validator.
+    runtime.checked = lambda *a, **k: subprocess.CompletedProcess([], 0, json.dumps(legacy), '')
+    with pytest.raises(c.Invalid, match='compatible test profile'):
+        runtime.smoke_plan(fixture.repo, scope, intent['machines_file'])
+    assert not runtime.stopped
