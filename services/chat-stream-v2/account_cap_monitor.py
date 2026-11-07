@@ -59,6 +59,8 @@ class CapMonitor:
             envelope=await self.runtime.store.get_tell_delivery(receipt["id"])
             delivery=(envelope or {}).get('delivery') or {}
             reply=(envelope or {}).get('reply') or {}
+            if (reply.get('phase')=='not_started' and reply.get('delivery_status')=='not_landed'
+                    and reply.get('submission_confirmed') is False): return False
             confirmed=reply.get('submission_confirmed') is True
             submitted=_epoch_from_iso(reply.get('delivery_ack_at') or delivery.get('delivered_at'))
             wire=delivery.get('text')
@@ -165,6 +167,10 @@ class CapMonitor:
                 await self.suppressed(row)
                 if not await self.eligible(metadata): continue
                 state=await self.state(stream,generation)
+                if state.get('flag_id'):
+                    old=await runtime.store.outbound_notice_for_dedupe(state['flag_id'])
+                    if old and old.get('terminal_reason')=='primary_generation_changed' and not await runtime.store.get_tell_delivery(state['flag_id']):
+                        state=await self.patch(stream,generation,{'flag_id':None})
                 digest=hashlib.sha256((value['id']+stream+generation).encode()).hexdigest()[:32]
                 reminder_id='cap-reminder-'+digest
                 if state.get('episode_id')!=value['id']:
@@ -181,7 +187,8 @@ class CapMonitor:
                 elif not state.get('flag_id') and await self.eligible(metadata,flag=True):
                     primary=await runtime.primary_pair()
                     if not primary: continue
-                    flag_id='cap-blocker-'+digest
+                    target=hashlib.sha256((primary[0]+primary[1]).encode()).hexdigest()[:12]
+                    flag_id='cap-blocker-'+digest+'-'+target
                     await self.outbound.enqueue(kind=FLAG,dedupe_key=flag_id,tell_id=flag_id,
                         recipient_stream_id=primary[0],source_stream_id=stream,
                         metadata=dict(metadata,recipient_generation=primary[1]),

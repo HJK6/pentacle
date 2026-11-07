@@ -158,6 +158,12 @@ def test_owned_reminder_and_blocker_use_actual_durable_notice_and_input_routes(t
             assert len(ids)==1 and await outbound.deliver_now(ids[0])
             await runtime.tick();clock[0]+=121;sample();await runtime.tick()
             ids=await store.list_outbound_notice_ids(limit=10,now=time.time(),kinds={FLAG},force=True)
+            assert len(ids)==1
+            await store.open_session('host-a','new-primary',provider='codex',session_generation='new-primary-one')
+            runtime.server.assistant_composite._env_binding=lambda:{'stream_id':'host-a:new-primary','generation':'new-primary-one'}
+            assert not await outbound.deliver_now(ids[0])
+            await runtime.tick()
+            ids=await store.list_outbound_notice_ids(limit=10,now=time.time(),kinds={FLAG},force=True)
             assert len(ids)==1 and await outbound.deliver_now(ids[0])
             assert len(tmux.pastes)==2 and 'BLOCKER' in tmux.pastes[-1]
         finally: store.stop()

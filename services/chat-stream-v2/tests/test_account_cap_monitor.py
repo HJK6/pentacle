@@ -164,3 +164,19 @@ def test_fresh_below_cap_ends_episode_and_a_new_operator_receipt_renews_suppress
             sample();assert await runtime.cap_monitor.suppressed(runtime.sessions.get(worker['stream_id']))
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_proved_no_input_tell_receipt_does_not_suppress_cap_notice():
+    async def run():
+        store,runtime,clock,worker,notices,sample,_=await fixture()
+        try:
+            await operator_input(runtime,worker,clock,confirmed=False)
+            def prove(a):
+                raw=a.conn.execute("SELECT reply FROM v2_tell_deliveries WHERE tell_id='operator-one'").fetchone()
+                import json
+                value=json.loads(raw[0]);value['reply'].update(phase='not_started',delivery_status='not_landed')
+                a.conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id='operator-one'",(json.dumps(value),));a.conn.commit()
+            await runtime.run(prove)
+            assert not await runtime.cap_monitor.suppressed(runtime.sessions.get(worker['stream_id']))
+        finally: store.stop()
+    asyncio.run(run())
