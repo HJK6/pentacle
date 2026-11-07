@@ -5001,7 +5001,8 @@ class Server:
         if self.store is None:
             raise VerbError("unavailable", "report store is unavailable")
         auth = msg.get("_auth_context") or {}
-        if not (auth.get("service_authenticated") and auth.get("service_actor") == WORK_REPORT_READER):
+        service_reader = auth.get("service_authenticated") and auth.get("service_actor") == WORK_REPORT_READER
+        if not service_reader:
             self._work_lanes_reader(msg, require_inventory=False)
         report_id = msg.get("report_id")
         if any(not key.startswith("_") and key not in {
@@ -5018,9 +5019,39 @@ class Server:
             raise VerbError("unavailable", "report store is unavailable") from exc
         if report is None:
             raise VerbError("not_found", "no ingested report with this report_id")
-        return {"type": "work.report.get.ok", **{key: report.get(key) for key in (
+        response = {"type": "work.report.get.ok", **{key: report.get(key) for key in (
             "report_id", "status", "from_stream_id", "provenance_qualified_spec_ids", "created_at",
         )}}
+        # The dedicated reader may verify protected releases. Other metadata
+        # readers retain their original response, and opaque payload stays private.
+        extras = report.get("extras")
+        review = extras.get("qa_review") if isinstance(extras, dict) else None
+        if (service_reader and report.get("status") == "done"
+                and report.get("qa_verdict") in {"accept", "reject"}
+                and isinstance(report.get("target_sha"), str)
+                and re.fullmatch(r"[a-fA-F0-9]{40}", report["target_sha"])
+                and isinstance(report.get("session_generation"), str) and report["session_generation"].strip()
+                and isinstance(review, dict)
+                and review.get("candidate_identity") == report["target_sha"]
+                and isinstance(review.get("reviewed_scope"), str) and review["reviewed_scope"].strip()
+                and re.fullmatch(r"[a-f0-9]{64}", str(review.get("gate_evidence_digest") or ""))
+                and type(review.get("commission_msg_id")) is int and review["commission_msg_id"] >= 0):
+            # A self-described role or commission number is not a commission.
+            # Match the existing durable identity, including its captured generation.
+            commission = await self.store.submit(lambda conn: conn.execute(
+                "SELECT coordinator, spec_id, phase FROM v2_qa_commissions "
+                "WHERE reviewer=? AND generation=? AND msg_id=?",
+                (report["from_stream_id"], report["session_generation"], review["commission_msg_id"]),
+            ).fetchone())
+            qualified = report.get("provenance_qualified_spec_ids")
+            if (commission is not None and commission["coordinator"] != report["from_stream_id"]
+                    and isinstance(qualified, list) and commission["spec_id"] in qualified
+                    and commission["phase"] != "spec"):
+                response.update({key: report[key] for key in ("qa_verdict", "target_sha", "session_generation")})
+                response["qa_review"] = {key: review[key] for key in (
+                    "reviewed_scope", "candidate_identity", "gate_evidence_digest", "commission_msg_id",
+                )}
+        return response
 
     async def _on_work_owed(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg, require_inventory=False)
