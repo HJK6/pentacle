@@ -577,9 +577,7 @@ DB. Review the concrete rollback artifact before activation.
   - It reports missing `## Acceptance Criteria`, missing `**Status** —`, and, for open specs, missing `**Next action** —`. It also reports a last `remaining_work_h` declaration that is not numeric, not `n/a — umbrella|coordination` and not `unknown — <reason>`. Each finding carries its exact fix.
   - `unknown — <reason>` stays a null estimate on the wire, so the `estimate_missing` FLAG keeps it visible.
   - A new commission's reply and `spec assign` carry the result as a warning, never a refusal.
-  - A `done|progress` report from an open lead seat with a persisted assignment (the owner) is refused with `work_checkpoint_invalid` when its record fails. The refusal is traced like other rejected terminal reports, and nothing is persisted.
-  - `error`/`aborted` reports, replays of stored reports and other seats are never refused. An unreadable memory root returns `unverifiable`.
-  - Accepted owner reports return and store `work_checkpoint` (state, facts, deficiencies) in `extras`, outside the replay identity.
+  - Reports from an open lead with a persisted assignment carry `work_checkpoint` (state, facts, deficiencies) as diagnostic information and store it in `extras`, outside the replay identity. Invalid formatting does not prevent report ingestion; an unreadable memory root returns `unverifiable`. Replays and other seats are unchanged.
 
 ## Member attribution
 
