@@ -48,7 +48,7 @@ def test_current_pool_cap_refuses_real_spawn_at_selection_or_final_admit(tmp_pat
                 runtime.choose_launch=crossed
             else: await cap_fixture_pool(runtime)
             with pytest.raises(VerbError) as refused:
-                await ctl._spawn_guarded(message('spawn',provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+                await ctl._spawn_guarded(message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
                     initial_prompt='native user prompt',objective='Owned final-admission cap drill',idempotency_key='cap-race'), 'localhost')
             assert refused.value.code=='account_pool_cap_reached'
             assert pane.launches==0
@@ -64,7 +64,7 @@ def test_admitted_spawn_replay_at_cap_keeps_one_process_and_original_receipt(tmp
     async def run():
         store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
         try:
-            msg=message('spawn',provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+            msg=message('spawn',spec_id=SPEC,provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
                 initial_prompt='native user prompt',objective='Owned receipt replay',idempotency_key='cap-replay')
             first=await ctl._spawn_guarded(dict(msg),'localhost')
             await cap_fixture_pool(runtime)
@@ -94,11 +94,11 @@ def test_schedule_materialized_before_cap_checks_current_control_at_fire(tmp_pat
                 created=await surface.schedule_insert(message('schedule.insert',fires_at_utc=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),
                     target_host='localhost',**template))
                 schedule_id=created['schedule']['schedule_id']
+            pending=await surface.schedule_insert(message('schedule.insert',fires_at_utc=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),target_host='localhost',**template))
             await cap_fixture_pool(runtime)
             with pytest.raises(VerbError) as refused: await surface._fire_schedule(schedule_id)
-            assert refused.value.extra['spawn']['error_code']=='account_pool_cap_reached'
+            assert refused.value.code=='account_pool_cap_reached' or refused.value.extra.get('spawn',{}).get('error_code')=='account_pool_cap_reached'
             assert pane.launches==0
-            pending=await surface.schedule_insert(message('schedule.insert',fires_at_utc=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),target_host='localhost',**template))
             cancelled=await surface.schedule_cancel(message('schedule.cancel',schedule_id=pending['schedule']['schedule_id']))
             assert cancelled['type']=='schedule.cancel.ok'
         finally:

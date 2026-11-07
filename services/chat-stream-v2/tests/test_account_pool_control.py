@@ -253,3 +253,35 @@ def test_input_exemptions_and_exact_generation_override_revoke_without_child_inh
                 await runtime.operation(dict(command,enabled=False))
         finally: store.stop()
     asyncio.run(run())
+
+
+def test_current_advisor_binding_exempts_both_directions_but_never_mutates_controls():
+    async def run():
+        from types import SimpleNamespace
+        from assistant_lane_rulings import AssistantLaneRulings
+        store,runtime=await setup(initialize_pin=False)
+        try:
+            await seed(runtime)
+            runtime.server.store=store;runtime.server.sessions=runtime.sessions
+            composite=runtime.server.assistant_composite
+            composite.config=SimpleNamespace(direct_primary=True,direct_primary_stream_id=AUTH['stream_id'],
+                                             direct_primary_generation=AUTH['session_generation'])
+            composite.env_config.authority_stream_id='host-a:advisor'
+            runtime.server.lane_rulings=AssistantLaneRulings(runtime.server)
+            advisor=await store.open_session('host-a','advisor',provider='codex',session_generation='advisor-one',
+                account_binding=binding().public(),pane_status='pane_alive')
+            worker=await store.open_session('host-a','worker',provider='codex',session_generation='worker-one',account_binding=binding().public())
+            auth=dict(PEER,stream_id='host-a:advisor',session_generation='advisor-one')
+            async with runtime.input_guard(worker,message={'_auth_context':auth}): pass
+            async with runtime.input_guard(advisor,message={'_auth_context':PEER}): pass
+            with pytest.raises(VerbError,match='account_control_unauthorized'):
+                await runtime.operation(setter(_auth_context=auth))
+            for value in ('disabled','host-a:missing'):
+                await store.put('assistant.authority.stream_id',value)
+                with pytest.raises(AccountError,match='pool_at_cap'):
+                    async with runtime.input_guard(worker,message={'_auth_context':auth}): pass
+            await store.put('assistant.authority.stream_id','host-a:advisor')
+            with pytest.raises(AccountError,match='pool_at_cap'):
+                async with runtime.input_guard(worker,message={'_auth_context':dict(auth,session_generation='old')}): pass
+        finally: store.stop()
+    asyncio.run(run())

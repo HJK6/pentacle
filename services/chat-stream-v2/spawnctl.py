@@ -2105,7 +2105,7 @@ class SpawnCtl:
                 payload=prior.get('payload') or {}
                 if isinstance(payload,str): payload=json.loads(payload)
                 generation=(payload.get('open_fields') or {}).get('session_generation')
-                admitted=bool(prior.get('tmux_created') or (retained['kind']=='terminal' and prior.get('state') in {'ready','started'}))
+                admitted=bool(prior.get('tmux_created') or (retained['kind']=='terminal' and prior.get('state')=='delivered'))
                 if generation and not admitted:
                     admitted=await self.store.submit(lambda c:c.execute('SELECT 1 FROM kv WHERE k=?',
                         (f"provider_cli.admission:{host}:{prior['session_name']}:{generation}",)).fetchone() is not None)
@@ -3281,7 +3281,7 @@ class SpawnCtl:
                 )
                 initial_proof_timeout_s = SPAWN_SUBMISSION_PROOF_BOUND_S
                 input_runtime=getattr(self,"account_runtime",None)
-                async with (input_runtime.input_guard({**open_flds,"host":host,"stream_id":stream_id})
+                async with (input_runtime.input_guard({**open_flds,"host":host,"stream_id":stream_id},phase="admitted_spawn")
                             if input_runtime is not None else nullcontext()):
                     await tmux.paste(name, brief)
             finally:
@@ -4865,7 +4865,7 @@ class SpawnCtl:
         ):
             return ("indeterminate", "live_pane_unproven", "spawn_fence_lost before resumed delivery"), receipt
         input_runtime=getattr(self,"account_runtime",None)
-        async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {})
+        async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {},phase="admitted_spawn")
                     if input_runtime is not None else nullcontext()):
             await tmux.paste(name, brief)
         log.info("adoption pasted the never-delivered brief once for %s", stream_id)
