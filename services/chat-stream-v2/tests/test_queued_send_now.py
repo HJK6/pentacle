@@ -17,12 +17,46 @@ async def qualified_source(_row):
 AUTH = {'operator_authenticated': True, 'operator_principal': 'operator:fixture'}
 
 
-async def setup(path=':memory:', provider='codex'):
+@pytest.mark.parametrize('provider',['claude','codex'])
+def test_real_operator_send_now_retains_cap_exemption_through_native_control_and_continue(provider):
+    async def run():
+        from dataclasses import replace
+        from account_runtime import AccountRuntime
+        from test_account_rotation import binding,observation
+        account=replace(binding(host='fixture',provider=provider),version=PINS[provider][0],
+                        executable_sha256=PINS[provider][1],executable='/fixture-only')
+        h=await setup(provider=provider,account=account.public())
+        runtime=AccountRuntime(h.store,h.sessions,policy={'enabled':True})
+        runtime.comms=h.comms;h.comms.account_runtime=runtime
+        try:
+            await runtime.run(lambda a:a.register(account))
+            now=runtime.clock();obs=observation(account);obs['observed_at']=now
+            obs['windows']['weekly'].update(pct=100,reset_at=now+1000)
+            await runtime.record_observation(account,obs)
+            from test_account_pool_control import control
+            def seed(a):
+                a.conn.execute('INSERT INTO kv VALUES (?,?)',(f'account.pool-control:{provider}:{account.pool_id}',json.dumps(control())))
+                a.conn.commit()
+            await runtime.run(seed)
+            auth=dict(AUTH,credential_id='fixture')
+            with patch('queued_send_now.claude_composer_empty',return_value=True):
+                await h.controller.send(message(_auth_context=auth))
+            assert h.tmux.keys
+            if provider=='codex':
+                await signal(h,'turn_aborted');await intake(h)
+                h.tmux.screen='OpenAI Codex\n› \n  gpt-6-test high'
+                await settle(h)
+                assert h.tmux.pastes==['continue']
+        finally: await finish(h)
+    asyncio.run(run())
+
+
+async def setup(path=':memory:', provider='codex',account=None):
     h = Harness(path)
     await h.store.open_session('fixture', 'v2-capacity', provider=provider,
         pane_pid='8123', pane_status='pane_alive', bootstrap_state='ready',
         observer_binding={'generation': GEN, 'pane_pid': '8123'}, session_generation=GEN,
-        account_binding={'version': PINS[provider][0], 'executable_sha256': PINS[provider][1], 'executable': '/fixture-only'})
+        account_binding=account or {'version': PINS[provider][0], 'executable_sha256': PINS[provider][1], 'executable': '/fixture-only'})
     await h.open(reopen=True)
     h.controller = QueuedSendNow(h.store, h.sessions, h.comms, h.tmux,
         source_snapshot=qualified_source, owner='owner-1', verify_executable=lambda row: asyncio.sleep(0, result=True))

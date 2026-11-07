@@ -2096,6 +2096,20 @@ class SpawnCtl:
             "_defer_launch_token_stage": True,
             **({"_account_resume_binding": resume_prior_row.get("account_binding")} if resume_prior_row else {}),
         }
+        # Cap decisions do not relaunch or invalidate a known admitted receipt.
+        # A pending intent with no account admission still runs current checks.
+        if idempotency_key:
+            retained=await self.store.spawn_record_for_key(host,idempotency_key)
+            if retained:
+                prior=retained['row']
+                payload=prior.get('payload') or {}
+                if isinstance(payload,str): payload=json.loads(payload)
+                generation=(payload.get('open_fields') or {}).get('session_generation')
+                admitted=bool(prior.get('tmux_created') or (retained['kind']=='terminal' and prior.get('state')=='delivered'))
+                if generation and not admitted:
+                    admitted=await self.store.submit(lambda c:c.execute('SELECT 1 FROM kv WHERE k=?',
+                        (f"provider_cli.admission:{host}:{prior['session_name']}:{generation}",)).fetchone() is not None)
+                if admitted: launch_msg['_account_admitted_replay']=True
         if policy is not None and policy.is_daff_backend(resume_prior_row):
             launch_msg["visibility"] = "hidden"
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
@@ -2104,6 +2118,9 @@ class SpawnCtl:
         finally:
             tmux_transport._ACTIVE_LAUNCH_TMUX.reset(launch_context)
         deferred_launch_plan = resolution.pop("_deferred_launch_plan", None)
+        if launch_msg.get("_pool_spawn_override"):
+            resolution["pool_override"]={**launch_msg["_pool_spawn_override"],
+                                         "payload_hash":self._spawn_payload_hash(msg)}
 
         async def recorded_reply() -> dict[str, Any] | None:
             # Mirror the store's live/retained replay eligibility. A lookup
@@ -3016,7 +3033,11 @@ class SpawnCtl:
         if account_runtime is not None and open_flds.get("account_binding"):
             from provider_accounts import AccountError
             try:
-                await account_runtime.admit_launch({**open_flds, "host":host, "stream_id":f"{host}:{name}"})
+                override=resolution.get("pool_override")
+                if override and override["payload_hash"]!=self._spawn_payload_hash(msg):
+                    raise AccountError("account_pool_override_stale")
+                await account_runtime.admit_launch({**open_flds, "host":host, "stream_id":f"{host}:{name}"},
+                    message={**msg,"_pool_spawn_override":override} if override else msg)
             except AccountError as exc:
                 raise VerbError(str(exc),str(exc),**exc.context) from None
         if provider == "codex" and not str(msg.get("command") or "").strip():
@@ -3260,7 +3281,7 @@ class SpawnCtl:
                 )
                 initial_proof_timeout_s = SPAWN_SUBMISSION_PROOF_BOUND_S
                 input_runtime=getattr(self,"account_runtime",None)
-                async with (input_runtime.input_guard({**open_flds,"host":host,"stream_id":stream_id})
+                async with (input_runtime.input_guard({**open_flds,"host":host,"stream_id":stream_id},phase="admitted_spawn")
                             if input_runtime is not None else nullcontext()):
                     await tmux.paste(name, brief)
             finally:
@@ -4844,7 +4865,7 @@ class SpawnCtl:
         ):
             return ("indeterminate", "live_pane_unproven", "spawn_fence_lost before resumed delivery"), receipt
         input_runtime=getattr(self,"account_runtime",None)
-        async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {})
+        async with (input_runtime.input_guard(await self.store.fetch_session(host,name) or {},phase="admitted_spawn")
                     if input_runtime is not None else nullcontext()):
             await tmux.paste(name, brief)
         log.info("adoption pasted the never-delivered brief once for %s", stream_id)

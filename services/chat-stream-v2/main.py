@@ -405,6 +405,7 @@ async def run(args: argparse.Namespace) -> int:
     account_runtime = AccountRuntime(store, sessions,
         policy=load_policy(os.environ.get("PENTACLE_PROVIDER_ACCOUNT_POLICY")))
     account_runtime.attach(server, spawnctl, comms)
+    account_runtime.cap_monitor.attach(outbound)
     from account_executor import AccountExecutor
     account_runtime.executor = AccountExecutor(account_runtime, hosts)
     # Fixed two-assistant map.  The primary reads the existing unprefixed
@@ -762,6 +763,7 @@ async def run(args: argparse.Namespace) -> int:
     # Presence remains observation-only; the durable reconciler owns the
     # thresholded state transition and the read-only reconcile.status verb.
     presence = None
+    account_runtime.cap_monitor.sample_max_age=presence_config.working_active_ttl_s
     if not args.disable_remote_presence:
         presence = RemotePresence(
             sessions, hosts, config=presence_config, broadcast=server.broadcast,

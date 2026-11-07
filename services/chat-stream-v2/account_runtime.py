@@ -71,6 +71,8 @@ class AccountRuntime:
         self.pin_lock=asyncio.Lock()
         self.pin_inputs=_PinInputBarrier()
         self._home_inputs={}
+        from account_cap_monitor import CapMonitor
+        self.cap_monitor=CapMonitor(self)
 
     def home_inputs(self,binding):
         from provider_cli_maintenance import scope
@@ -219,20 +221,64 @@ class AccountRuntime:
                 raise AccountError("account_resume_cross_home_forbidden")
             from provider_cli_pin import check
             await self.run(lambda a:check(a,binding))
+            await self._pool_launch(binding,message)
             return binding
         if message.get("resume_session_id"):
             raise AccountError("account_resume_cross_home_forbidden")
         binding=await self.run(lambda accounts:accounts.select(host=host,provider=provider,alias=message.get("account")))
         from provider_cli_pin import check
         await self.run(lambda a:check(a,binding))
+        await self._pool_launch(binding,message)
         log.info("subsystem=provider_accounts bug_ref=explicit_account_selection action=selected host=%s provider=%s account=%s generation=%s selection=%s",
                  host,provider,binding.alias,binding.generation,"explicit" if "account" in message else "default")
         return binding
 
+    async def _control_actor(self,auth):
+        from account_pool_control import operator
+        if operator(auth): return {"principal":auth["operator_principal"]}
+        await self._front_desk(auth)
+        return {"stream_id":auth["stream_id"],"session_generation":auth["session_generation"]}
+
+    def _control_authorizer(self,auth):
+        """Re-read current assistant binding and generation inside the write transaction."""
+        def check(conn):
+            from account_pool_control import operator
+            if operator(auth): return
+            from store_assistant_binding import _binding_conn, _seat_conn
+            composite=self.server.assistant_composite if self.server else None
+            if not composite or not composite.enabled or not composite.env_config.direct_primary:
+                raise AccountError("account_control_unauthorized")
+            current=_binding_conn(conn,composite._env_binding(),name=composite.env_config.name)
+            row=_seat_conn(conn,current["stream_id"])
+            if (auth.get("token_verified") is not True or not row or row["status"]!="open"
+                    or (auth.get("stream_id"),auth.get("session_generation"))!=(current["stream_id"],current["generation"])
+                    or row["session_generation"]!=current["generation"]):
+                raise AccountError("account_control_unauthorized")
+        return check
+
+    async def _pool_launch(self,binding,message):
+        from account_pool_control import assert_eligible
+        if message.get('_account_admitted_replay') is True: return
+        override=None
+        if "pool_override_reason" in message or "pool_authority_ref" in message:
+            if any(not isinstance(message.get(k),str) or not message[k].strip()
+                   for k in ("pool_override_reason","pool_authority_ref")):
+                raise AccountError("account_request_invalid")
+            actor=await self._control_actor(message.get("_auth_context") or {})
+            def make(a):
+                from account_pool_control import read,pool_key
+                self._control_authorizer(message.get("_auth_context") or {})(a.conn)
+                current=read(a,pool_key(binding.provider,binding.pool_id)) or {}
+                return {"provider":binding.provider,"pool_id":binding.pool_id,"control_revision":current.get("revision",0),
+                        "actor":actor,"reason":message["pool_override_reason"],"authority_ref":message["pool_authority_ref"]}
+            override=await self.run(make)
+            message["_pool_spawn_override"]=override
+        await self.run(lambda a:assert_eligible(a,binding,now=self.clock(),override=override))
+
     async def bind_launch(self,row):
         if row.get("account_binding"): await self.run(lambda accounts:accounts.bind_session(row))
 
-    async def admit_launch(self,row):
+    async def admit_launch(self,row,*,message=None):
         """Read-only host verification, then one serialized durable launch decision."""
         if not row.get("account_binding"): return
         from provider_cli_pin import check, digest, canonical,consumer_current
@@ -247,6 +293,7 @@ class AccountRuntime:
             def commit(a):
                 from account_store import transaction
                 with transaction(a.conn):
+                    from account_pool_control import assert_eligible
                     current=check(a,binding)
                     hold=a.conn.execute("SELECT held_until FROM v2_spawn_admission_hold WHERE host=?",(binding.host,)).fetchone()
                     if hold and hold[0]>self.clock(): raise AccountError("provider_cli_pin_unavailable",reason="admission_hold")
@@ -262,11 +309,18 @@ class AccountRuntime:
                                                (binding.host,binding.provider)).fetchone()
                         if not default or tuple(default)!=(binding.alias,binding.default_revision):
                             raise AccountError("account_default_stale")
+                    admission_key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
+                    admitted=a.conn.execute("SELECT v FROM kv WHERE k=?",(admission_key,)).fetchone()
+                    override=(message or {}).get("_pool_spawn_override")
+                    if not admitted:
+                        if override: self._control_authorizer((message or {}).get("_auth_context") or {})(a.conn)
+                        assert_eligible(a,binding,now=self.clock(),override=override)
                     a._bind_session(row)
                     key="provider_cli.admission:"+row["stream_id"]+":"+row["session_generation"]
                     data=({"revision":pin["revision"],"digest":digest(pin),"artifact":proof,
                            "binding_key":binding.key} if pin is not None else
                           {"mode":"pre_enforcement","mode_epoch":self._health_epoch,"binding_key":binding.key})
+                    if override: data["pool_override"]=override
                     prior=a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone()
                     if prior and pin is None:
                         historical=json.loads(prior[0])
@@ -350,7 +404,7 @@ class AccountRuntime:
                 raise AccountError("provider_cli_pin_mismatch",reason="resource_hash_mismatch")
 
     @asynccontextmanager
-    async def input_guard(self,row):
+    async def input_guard(self,row,*,message=None,phase="not_started",claim=False):
         # Remote preparation must never hold the fleet pin decision lock/barrier.
         await self.before_input(row)
         async with self.maintenance_guard(row):
@@ -358,7 +412,103 @@ class AccountRuntime:
                 async with self.pin_lock:
                     # Recheck after preparation and barrier admission; this path cannot invoke SSH.
                     await self.before_input(row,verify=False)
+                    if phase=="not_started":
+                        await self.cap_input(row,message or {},claim=claim)
                 yield  # The caller scopes this to one physical action, never evidence waiting.
+
+    async def cap_exemptions(self):
+        """Current open generations of the primary and existing advisor binding."""
+        return await self.run(lambda a:self._cap_exemptions_conn(a.conn))
+
+    async def primary_pair(self):
+        def current(a):
+            from store_assistant_binding import _binding_conn,_seat_conn
+            composite=self.server.assistant_composite if self.server else None
+            if not composite or not composite.enabled or not composite.env_config.direct_primary: return None
+            value=_binding_conn(a.conn,composite._env_binding(),name=composite.env_config.name)
+            row=_seat_conn(a.conn,value['stream_id'])
+            if row and row['status']=='open' and row['session_generation']==value['generation']:
+                return value['stream_id'],value['generation']
+        return await self.run(current)
+
+    def _cap_exemptions_conn(self,conn):
+        from store_assistant_binding import _binding_conn,_seat_conn
+        result=set()
+        composite=self.server.assistant_composite if self.server else None
+        if composite and composite.enabled and composite.env_config.direct_primary:
+            current=_binding_conn(conn,composite._env_binding(),name=composite.env_config.name)
+            if current.get("stream_id"):
+                row=_seat_conn(conn,current["stream_id"])
+                if row and row.get("status")=="open" and row.get("session_generation")==current["generation"]:
+                    result.add((current["stream_id"],current["generation"]))
+        advisor=getattr(self.server,"lane_rulings",None)
+        if advisor:
+            current=advisor.binding_conn(conn)
+            if current.get("state") in {"ready","same_primary"}:
+                row=_seat_conn(conn,current["stream_id"])
+                if row and row.get("status")=="open" and row.get("session_generation")==current["generation"]:
+                    result.add((current["stream_id"],current["generation"]))
+        return result
+
+    async def cap_input(self,row,message,*,claim=False):
+        from account_pool_control import operator,read,write,seat_key,eligibility,NOTICE_TOKEN
+        if not row: return
+        stream=row.get("stream_id") or f"{row['host']}:{row['session_name']}"
+        generation=row.get("session_generation")
+        auth=message.get("_auth_context") or {}
+        if message.get("_pool_notice_token") is NOTICE_TOKEN:
+            notice={"kind":message['_pool_notice_kind'],"metadata":message['_pool_notice_metadata'],
+                    "recipient_stream_id":stream}
+            decision=await self.cap_monitor.guard(notice)
+            if decision:
+                raise AccountError("pool_notice_stale" if decision.action=='terminal' else "pool_notice_deferred")
+        if not row.get("account_binding"): return
+        source=(auth.get("stream_id"),auth.get("session_generation"))
+        reason=None
+        if operator(auth): reason="direct_operator_order"
+        elif message.get("_pool_notice_token") is NOTICE_TOKEN: reason="pool_control_notice"
+        def check(a):
+            from store_assistant_binding import _seat_conn
+            target=_seat_conn(a.conn,stream)
+            if not target or target.get("status")!="open" or target.get("session_generation")!=generation:
+                raise AccountError("account_seat_generation_stale")
+            exemptions=self._cap_exemptions_conn(a.conn)
+            if message.get('_pool_notice_token') is NOTICE_TOKEN:
+                metadata=message['_pool_notice_metadata']
+                source_row=_seat_conn(a.conn,metadata['stream'])
+                state=read(a,f"account.cap-seat:{metadata['stream']}:{metadata['generation']}") or {}
+                directed=state.get('operator_input') or {}
+                boundary=state.get('idle_boundary') or {}
+                source_override=read(a,seat_key(metadata['stream'],metadata['generation'])) or {}
+                if (not source_row or source_row['status']!='open' or source_row['session_generation']!=metadata['generation']
+                        or (metadata['stream'],metadata['generation']) in exemptions or source_override.get('enabled')
+                        or (directed and boundary.get('operator_id')!=directed['id'])
+                        or eligibility(a,metadata['provider'],metadata['pool_id'],now=self.clock())['code']!='account_pool_cap_reached'):
+                    raise AccountError('pool_notice_deferred')
+            assistant_reason="assistant_recipient" if (stream,generation) in exemptions else (
+                "assistant_sender" if auth.get("token_verified") is True and source in exemptions else None)
+            override=read(a,seat_key(stream,generation))
+            current_reason=reason or assistant_reason or ("seat_override" if override and override["enabled"] else None)
+            if not current_reason:
+                binding=row["account_binding"]
+                result=eligibility(a,binding["provider"],binding["pool_id"],now=self.clock())
+                if not result["eligible"]:
+                    code={"account_pool_blocked":"pool_blocked","account_pool_cap_reached":"pool_at_cap",
+                          "account_pool_meter_unavailable":"pool_usage_unknown"}[result.pop("code")]
+                    result.pop("eligible")
+                    raise AccountError(code,**result,submission_confirmed=False,delivery="not_landed",
+                        retryable=False,nonretryable=True,do_not_retry=True,queued_for_redelivery=False)
+            if claim and current_reason=="direct_operator_order":
+                from account_store import transaction
+                with transaction(a.conn):
+                    key=f"account.cap-seat:{stream}:{generation}"
+                    state=read(a,key) or {}
+                    state["operator_input"]={"id":str(message.get("tell_id") or message.get("request_id") or ""),
+                        "kind":"tell" if message.get("tell_id") else "send", "claimed_at":self.clock(),
+                        "reason":"direct_operator_order","generation":generation}
+                    write(a,key,state)
+            return current_reason
+        return await self.run(check,settle_on_cancel=claim)
 
     async def _front_desk(self,auth):
         composite=self.server.assistant_composite if self.server else None
@@ -382,7 +532,9 @@ class AccountRuntime:
 
     async def _operation(self,message):
         action=message.get("action","status"); auth=message.get("_auth_context") or {}
-        if action in {"pin-set","pin-status"}:
+        if action in {"pool-control-set","seat-override-set"}:
+            actor=await self._control_actor(auth)
+        elif action in {"pin-set","pin-status"}:
             from provider_cli_pin import privileged
             if not privileged(auth): await self._front_desk(auth)
         elif action in {"default-set","relogin","revalidate-health","upgrade","repin"}: await self._front_desk(auth)
@@ -410,7 +562,15 @@ class AccountRuntime:
                             "initial_parked_cells","expected_readiness_digest"})
         if action=="observation": allowed.add("observation")
         if action=="revalidate-health": allowed.add("expected_revision")
+        if action=="pool-control-set":
+            allowed.update({"pool_id","expected_revision","blocked","stop_pct","window","authority_ref","supersedes_authority_ref"})
+        if action=="seat-override-set":
+            allowed.update({"stream","expected_generation","expected_revision","enabled","authority_ref"})
         if any(not str(k).startswith("_") and k not in allowed for k in message): raise AccountError("account_request_invalid")
+        if action in {"pool-control-set","seat-override-set"}:
+            from account_pool_control import mutate
+            result=await self.run(lambda a:mutate(a,message,actor,now=self.clock(),authorize=self._control_authorizer(auth)),settle_on_cancel=True)
+            return {"type":"account.ok",**result}
         if action in {"pin-set","pin-status"}:
             from provider_cli_pin import privileged,set_pin,status
             if action=="pin-set":
@@ -427,6 +587,17 @@ class AccountRuntime:
             return result
         if action=="status":
             result=await self.run(lambda a:a.readback(now=self.clock()))
+            def seats(a):
+                from store_assistant_binding import _seat_conn
+                values=[]
+                for raw in a.conn.execute("SELECT v FROM kv WHERE k LIKE 'account.seat-override:%'"):
+                    value=json.loads(raw[0]); target=_seat_conn(a.conn,value['stream'])
+                    values.append(dict(value,active=bool(value['enabled'] and target and target['status']=='open'
+                        and target['session_generation']==value['generation'])))
+                return values
+            result["seat_overrides"]=await self.run(seats)
+            result["cap_seats"]=await self.run(lambda a:[json.loads(row[0]) for row in a.conn.execute(
+                "SELECT v FROM kv WHERE k LIKE 'account.cap-seat:%'")])
             filters={"host":message.get("host"),"provider":message.get("provider"),"alias":message.get("account")}
             result["accounts"]=[row for row in result["accounts"] if all(v is None or row.get(k)==v for k,v in filters.items())]
             result["defaults"]=[row for row in result["defaults"] if all(v is None or row.get(k)==v for k,v in filters.items())]
@@ -593,8 +764,10 @@ class AccountRuntime:
         return {**result,"cells":cells,"fleet_complete":bool(cells) and all(c["state"]=="ready" and not c["pending_operations"] for c in cells)}
 
     async def tick(self):
-        # Observation only. Errors never select, re-login or migrate an agent.
+        # Collection never selects, re-logins or migrates an agent.
         if (not self._stopping and self.executor and self.policy.get("enabled") is True
                 and self.clock()>=self._next_probe and (not self._collector_task or self._collector_task.done())):
             self._next_probe=self.clock()+60
             self._collector_task=asyncio.create_task(self.executor.collect_all(),name="account-observations")
+        if not self._stopping:
+            await self.cap_monitor.tick()

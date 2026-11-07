@@ -381,7 +381,7 @@ def test_spawn_parser_fresh_schedule_matrix_is_total_over_live_actions():
         "client_only": {"--timeout", "--allow-past-time", "--allow-far-future"},
         "request_identity": {"--request-id"},
         "rejected": {"--resume", "--confirm-model-change", "--idempotency-key", "--cwd",
-                     "--handoff-from"},
+                     "--handoff-from", "--pool-override-reason", "--pool-authority-ref"},
     }
     classified = [flag for values in groups.values() for flag in values]
     assert set(classified) == live_flags

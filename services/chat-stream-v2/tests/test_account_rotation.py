@@ -107,6 +107,6 @@ def test_readback_keeps_caps_shared_and_missing_windows_unknown():
     accounts.observe(binding().key,partial,now=NOW)
     result=accounts.readback(now=NOW)
     pool=next(p for p in result["quota_pools"] if p["pool_id"]=="pool-primary")
-    assert pool["cap"]=={"weekly":37} and not pool["fresh"]
+    assert pool["cap"] is None and pool["legacy_cap"]=={"weekly":37} and not pool["fresh"]
     missing=next(a for a in result["accounts"] if a["provider"]=="claude")
     assert missing["health"]=="unconfigured" and missing["pool_id"] is None

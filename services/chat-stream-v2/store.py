@@ -5968,6 +5968,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # onto its own stale accepted claim). A prior attempt that truly landed
             # would already have made THIS attempt coalesce and append a mirrored
             # landed row, so 'newest is not_landed' reliably means not-yet-landed.
+            # A policy refusal is a terminal result for this exact request ID.
+            # A sender-chosen new ID retains ordinary failed-send recovery.
+            from account_pool_control import POOL_ERRORS
+            exact=history_query(conn,"SELECT rowid AS receipt_rowid,* FROM v2_send_receipts "
+                "WHERE to_stream_id=? AND request_id=? ORDER BY rowid DESC LIMIT 1",(target,request)).fetchone()
+            if exact is not None and exact['reason'] in POOL_ERRORS:
+                return {"coalesced":True,"winner":_send_receipt_row(exact,include_rowid=True)}
             latest = history_query(conn,
                 """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                    WHERE to_stream_id=?

@@ -22,7 +22,7 @@ def history(tmp_path):
     conn = sqlite3.connect(database)
     conn.row_factory = sqlite3.Row
     ledger = AccountStore(conn, {"enabled": True})
-    conn.execute("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
     conn.execute(SPAWN_ADMISSION_HOLD_DDL)
     pin = release_pair()
     conn.executemany("INSERT INTO kv VALUES (?,?)", [

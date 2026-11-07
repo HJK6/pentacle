@@ -389,6 +389,10 @@ class QueuedSendNow:
                          "native_executable_file_id": source.get("native_executable_file_id"),
                          "watermark": max((e["daemon_seq"] for e in events), default=0),
                          "state": "dispatch_claimed", "created_at": time.time()}
+            from account_pool_control import operator
+            if operator(auth):
+                operation['operator_provenance']={k:auth.get(k) for k in (
+                    'operator_authenticated','operator_principal','credential_id','operator_authority_source')}
             operation, claimed = await self._record(key, expected={"queued"}, update=operation)
             if not claimed:
                 return self._reply(msg, operation, reason="operation_replay")
@@ -402,7 +406,7 @@ class QueuedSendNow:
                 keys = ("C-x", "C-s") if route == "claude-native" else ("Escape",)
                 if account_runtime is not None:
                     try:
-                        async with account_runtime.input_guard(row):
+                        async with account_runtime.input_guard(row,message={'_auth_context':auth,'request_id':request},claim=True):
                             result = await tmux.run("send-keys", "-t", f"={name}:", *keys)
                     except AccountError as exc:
                         await self._record(key, expected={"dispatch_claimed"},update={"state":"cancelled","reason":str(exc)})
@@ -453,7 +457,8 @@ class QueuedSendNow:
             result = await self.comms.send({"host": host, "session_name": name,
                 "text": "continue", "request_id": operation["continue_request_id"],
                 "_queued_send_now_operation": key,
-                "_auth_context": {"service_authenticated": True, "service_actor": "daemon:send-now"}})
+                "_auth_context": {"service_authenticated": True, "service_actor": "daemon:send-now",
+                                  **(operation.get('operator_provenance') or {})}})
             if result.get("delivery") != "not_landed":
                 update = {"state": "continue_pending_proof", "reason": None}
             elif result.get("reason") == "queued_continue_cancelled":

@@ -60,7 +60,7 @@ LIVE_OVERLAY_FIELDS = frozenset({
     "mirror_generation", "local_mirror_generation", "capture_liveness",
     "observer_source", "host_status", "host_status_reason",
     "genuine_activity_at", "genuine_activity_generation", "watch_working_at",
-    "operator_activity_at", "operator_activity_generation", "capture_generation",
+    "operator_activity_at", "operator_activity_generation", "capture_generation", "capture_observed_at",
 })
 
 log = logging.getLogger("chat_streamd_v2.sessions")
