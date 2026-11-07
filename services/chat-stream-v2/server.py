@@ -5035,12 +5035,22 @@ class Server:
                 and review.get("candidate_identity") == report["target_sha"]
                 and isinstance(review.get("reviewed_scope"), str) and review["reviewed_scope"].strip()
                 and re.fullmatch(r"[a-f0-9]{64}", str(review.get("gate_evidence_digest") or ""))
-                and ("commission_msg_id" not in review or type(review["commission_msg_id"]) is int
-                     and review["commission_msg_id"] >= 0)):
-            response.update({key: report[key] for key in ("qa_verdict", "target_sha", "session_generation")})
-            response["qa_review"] = {key: review[key] for key in (
-                "reviewed_scope", "candidate_identity", "gate_evidence_digest", "commission_msg_id",
-            ) if key in review}
+                and type(review.get("commission_msg_id")) is int and review["commission_msg_id"] >= 0):
+            # A self-described role or commission number is not a commission.
+            # Match the existing durable identity, including its captured generation.
+            commission = await self.store.submit(lambda conn: conn.execute(
+                "SELECT coordinator, spec_id, phase FROM v2_qa_commissions "
+                "WHERE reviewer=? AND generation=? AND msg_id=?",
+                (report["from_stream_id"], report["session_generation"], review["commission_msg_id"]),
+            ).fetchone())
+            qualified = report.get("provenance_qualified_spec_ids")
+            if (commission is not None and commission["coordinator"] != report["from_stream_id"]
+                    and isinstance(qualified, list) and commission["spec_id"] in qualified
+                    and commission["phase"] != "spec"):
+                response.update({key: report[key] for key in ("qa_verdict", "target_sha", "session_generation")})
+                response["qa_review"] = {key: review[key] for key in (
+                    "reviewed_scope", "candidate_identity", "gate_evidence_digest", "commission_msg_id",
+                )}
         return response
 
     async def _on_work_owed(self, msg: dict[str, Any]) -> dict[str, Any]:

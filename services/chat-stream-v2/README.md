@@ -12,10 +12,12 @@ authenticated metadata callers receive `report_id`, `status`, `from_stream_id`,
 Only the existing `work-report-reader` service identity additionally receives
 well-formed typed evidence for a finished QA report: `qa_verdict`, `target_sha`,
 the report's `session_generation`, and `qa_review` containing only
-`reviewed_scope`, `candidate_identity`, `gate_evidence_digest` and the optional
+`reviewed_scope`, `candidate_identity`, `gate_evidence_digest` and
 `commission_msg_id`. Candidate identity must equal the full target SHA; scope
 and generation must be nonempty, the evidence digest must be SHA256, and a
-present commission ID must be a nonnegative integer. Missing or malformed
+commission ID must be a nonnegative integer matching an existing independent
+commission for that reviewer generation and provenance-qualified spec; a
+spec-phase review does not authorize final release. Missing or malformed
 evidence leaves the original metadata response intact. No opaque extras,
 report body, request hash or credentials are exposed. The service's existing
 authentication and single-verb restriction are unchanged.

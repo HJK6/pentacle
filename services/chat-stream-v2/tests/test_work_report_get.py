@@ -159,6 +159,10 @@ def test_typed_qa_evidence_is_service_only_and_minimized(tmp_path, monkeypatch):
         server = None
         try:
             sessions = await setup(store)
+            await store.update_session('host-a', 'reporter', spec_ids=['spec_demo__item_00'], spec_binding_provenance=[{
+                'spec_id': 'spec_demo__item_00', 'provenance': 'spawn_explicit',
+                'granting_principal': 'operator', 'granted_at': '2026-10-22T19:00:00Z'}])
+            await sessions.refresh()
             snapshot = await Ledger(store, sessions=sessions)._report_routing_snapshot('host-a:reporter')
             review = {'candidate_identity': 'a' * 40, 'reviewed_scope': '{"exact":"manifest"}',
                       'gate_evidence_digest': 'b' * 64, 'commission_msg_id': 0,
@@ -166,6 +170,11 @@ def test_typed_qa_evidence_is_service_only_and_minimized(tmp_path, monkeypatch):
             saved = await store.put_report(payload('qa-evidence', qa_verdict='accept', target_sha='a' * 40,
                 extras={'qa_review': review, 'private_extra': 'must-not-return'},
                 details={'private_body': 'must-not-return'}), routing_snapshot=snapshot)
+            await store.submit(lambda conn: conn.execute(
+                "INSERT INTO v2_qa_commissions (reviewer,generation,msg_id,coordinator,coordinator_generation,"
+                "spec_id,surface,cycle,payload_hash,created_at,phase) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (saved['from_stream_id'], saved['session_generation'], 0, 'host-a:parent', 'parent-generation',
+                 'spec_demo__item_00', 'rule-release', 1, 'fixture-commission-hash', 1, 'code')))
             server = Server(store=store, sessions=sessions)
             peer = Peer('127.0.0.1')
             async def rpc(kind, **extra):
@@ -175,7 +184,7 @@ def test_typed_qa_evidence_is_service_only_and_minimized(tmp_path, monkeypatch):
                              subscribe={'snapshot': False, 'mode': 'rpc'}))['type'] == 'ready'
             response = await rpc('work.report.get', report_id=saved['report_id'])
             expected_review = {k: review[k] for k in ('candidate_identity', 'reviewed_scope', 'gate_evidence_digest', 'commission_msg_id')}
-            assert response['qa_review'] == expected_review
+            assert response.get('qa_review') == expected_review, {'response': response, 'saved': saved}
             assert response['qa_verdict'] == 'accept'
             assert response['target_sha'] == 'a' * 40
             assert response['session_generation'] == saved['session_generation']
@@ -189,6 +198,17 @@ def test_typed_qa_evidence_is_service_only_and_minimized(tmp_path, monkeypatch):
                                                        '_auth_context': {'operator_authenticated': True}})
             assert set(legacy) == {'type', 'report_id', 'status', 'from_stream_id',
                                   'provenance_qualified_spec_ids', 'created_at'}
+            # Immutable generation, spec provenance and independent commission are required.
+            for field, value in [('generation', 'other-generation'), ('spec_id', 'spec_demo__other'),
+                                 ('coordinator', saved['from_stream_id']), ('phase', 'spec')]:
+                prior = await store.submit(lambda conn: conn.execute(
+                    'SELECT generation,spec_id,coordinator,phase FROM v2_qa_commissions').fetchone())
+                await store.submit(lambda conn: conn.execute(f'UPDATE v2_qa_commissions SET {field}=?', (value,)))
+                refused = await rpc('work.report.get', report_id=saved['report_id'])
+                assert 'qa_review' not in refused
+                await store.submit(lambda conn: conn.execute(f'UPDATE v2_qa_commissions SET {field}=?', (prior[field],)))
+            await store.submit(lambda conn: conn.execute('DELETE FROM v2_qa_commissions'))
+            assert 'qa_review' not in await rpc('work.report.get', report_id=saved['report_id'])
         finally:
             if server: await server.close()
             store.stop()
