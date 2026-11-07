@@ -1,6 +1,6 @@
 # Cosmic theme guide
 
-The cosmic theme is a scoped presentation layer for the desktop chat surface. It provides palette, type, spacing, machine-token, status, and severity values without coupling the renderer to a particular host.
+The cosmic theme is a scoped presentation layer for the browser chat surface. It provides palette, type, spacing, machine-token, status, and severity values without coupling the renderer to a particular host.
 
 For asset replacement, app-wide colors, rebuild and reset instructions, see
 [BRANDING in setup](pentacle_setup.md#branding). App appearance and scoped chat
@@ -10,7 +10,7 @@ palettes are separate; update both when changing the overall brand.
 
 The `.cosmic` root exposes `--cosmic-*` variables. Keep non-chat application styles in the ordinary root layer so the theme can be enabled or removed without changing layout code.
 
-The desktop resolves cosmetic sigils separately from machine names. Stable sigil names are `djinni`, `sun`, `mage`, and `flower`. Host labels and colors come from desktop configuration; sigils do not define a machine inventory. See [desktop configuration](desktop_config.md).
+The browser resolves cosmetic sigils separately from machine names. Stable sigil names are `djinni`, `sun`, `mage`, and `flower`. Host labels and colors come from web host configuration; sigils do not define a machine inventory. See [web configuration](desktop_config.md).
 
 ## Components
 

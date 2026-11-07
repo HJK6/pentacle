@@ -20,7 +20,7 @@ The service owns interpretation, quote data and short spoken feedback. The publi
 client includes no private endpoint, model credential, speaker destination or raw
 audio. Older services and manual spawning preserve their prior behavior.
 
-The web host uses the shared `web_cc` spawn/catalog RPC and `cc_handlers` routes. Enable the microphone in a private local web profile pointing at the existing loopback service; keep automatic microphone process spawning disabled. No Electron packaging or installed-client update is needed.
+The web host uses the shared `web_cc` spawn/catalog RPC and `cc_handlers` routes. Enable the microphone in a private local web profile pointing at the existing loopback service; keep automatic microphone process spawning disabled.
 
 
 In web mode, microphone status and controls travel over the authenticated host

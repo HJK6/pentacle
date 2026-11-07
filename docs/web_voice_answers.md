@@ -2,9 +2,8 @@
 
 Record one take while paging through the assistant chat's durable question
 cards. Use the card-header microphone, speak on each relevant page, then choose
-**Done**. Capture, upload and transcription reuse `renderer/web_voice.js` on
-both Electron and the served web client. The deck always uses browser capture
-mode; it never toggles the room microphone or needs the mic server. In the web client
+**Done**. Capture, upload and transcription reuse `renderer/web_voice.js` in the
+web client. The deck uses browser capture mode; it never toggles the room microphone or needs the mic server. In the web client
 the MIC panel Source picks which local input it captures from; see
 [Web microphone Source](web_mic_source.md).
 
@@ -120,7 +119,7 @@ bound-item count without syncing unrelated mobile changes.
 
 Capture uses the existing secure-context and `mediaDevices.getUserMedia`
 checks, including their existing disabled-control explanation. This feature
-adds no permission handler, blanket Electron media grant, CSP,
+adds no permission handler, CSP,
 Permissions-Policy, origin change or different-origin frame. Browser permission,
 the served origin and the actual response headers must be checked, not inferred
 from a successful build or from loopback access.

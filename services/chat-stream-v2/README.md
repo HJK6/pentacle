@@ -1,6 +1,6 @@
 # Chat stream daemon
 
-The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated desktop/mobile transport.
+The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated web/mobile transport.
 
 ## Accepted report evidence
 
@@ -46,7 +46,7 @@ session and tmux ownership checks still apply before survivor signals.
 `close` requests carrying `progeny_stream_id` are refused before teardown with
 `close_progeny_unsupported`; use `spawn --handoff` for succession.
 
-Use the complete [local startup recipe](../../README.md#local-setup) first. It aligns the desktop and daemon host identity (`local`), native transcript directory, loopback endpoint and desktop credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
+Use the complete [local startup recipe](../../README.md#quick-start) first. It aligns the web host and daemon host identity (`local`), native transcript directory, loopback endpoint and web host credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
 ## Work index polling
 
@@ -63,7 +63,7 @@ duration is logged as `work index phase=worktree_sweep duration_s=...`.
 
 Without peer configuration, the daemon runs locally. To keep specs and QA records outside the checkout, configure the documented memory root for the orchestration CLI and daemon. Do not put transcripts, credentials, runtime databases or real work receipts in the public source tree.
 
-`python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The desktop smoke explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
+`python services/chat-stream-v2/main.py --help` lists runtime options. `--port 0 --db :memory:` is useful for a temporary probe; ephemeral sessions alone do not isolate every optional service database. The web gate explicitly sets separate session, notification, asset and blob paths and uses its own tmux socket.
 
 ## Waiting for notification answers
 
@@ -85,7 +85,7 @@ includes the adopted inventory. Authentication challenges are created after this
 wait; disconnecting during startup releases the pending handler.
 
 SHA resolution keeps its existing checkout, deploy-stamp and VERSION fallbacks.
-If none provides an identity, the daemon logs that limitation. The desktop's
+If none provides an identity, the daemon logs that limitation. The web host's
 five-second welcome timeout can still require a reconnect during an unusually
 slow startup; the existing git lookup timeout is ten seconds.
 
@@ -108,7 +108,7 @@ Before downgrading to an older daemon, retain or explicitly disposition queued
 recovery inputs and unresolved spawn handles without replay: older binaries do
 not enforce the new route-origin fence.
 
-## Desktop and mobile credentials
+## Web and mobile credentials
 
 Unauthenticated local bootstrap is only for actual loopback peers whose
 WebSocket handshake omits `Origin` (native CLI tools and the Node web bridge).
@@ -117,7 +117,7 @@ same authentication as a remote peer for reads, snapshots and broadcasts.
 Authenticated browser/mobile clients continue to use their existing credentials.
 This isolates websites; it is not authentication against other local processes.
 
-`tools/operator_auth_cli.py issue --client-kind pentacle` issues a desktop credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store desktop credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the desktop config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
+`tools/operator_auth_cli.py issue --client-kind pentacle` issues a web host credential; `--client-kind pentacle-mobile` issues a separate mobile credential. The JSON output's `code` field is secret. Store web host credentials in a mode-0600 file under a mode-0700 directory and point `chatStream.tokenPath` at its canonical path. Do not place a v2 credential inline in the web host config. The CLI's `list`, `revoke` and `rotate` commands manage credentials in the daemon's registry.
 
 For the mobile app, create a **single-use enrollment link** on the daemon host,
 as the same OS user running the daemon. This is separate from the raw credential
@@ -163,7 +163,7 @@ still do whatever an operator credential can, and only `send` text is labelled.
 ## Remote session interrupt
 
 `send.interrupt` targets a session by `host` and `session_name`. For a configured
-remote host, updated web and desktop clients also send the selected open row's
+remote host, updated web clients also send the selected open row's
 `expected_session_generation`. They capture that value before handing the
 request to an asynchronous bridge and retain it for a retry. A remote request
 without the selected generation returns `generation_required`; the daemon does
@@ -278,7 +278,7 @@ The retained source checkpoint resumes missing primary messages without clearing
 history. Restart recovery can drain that checkpoint independently of discovery;
 verify that the source returns to live capture after recovery completes.
 
-Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the real desktop smoke. Fixtures must use invented content and valid public wire identifiers.
+Run the final merge gate from a clean checkout; it produces a source-bound evidence file outside the repository. The macOS preflight requires the [127.0.0.2 loopback alias](deploy/loopback-alias/README.md). See [public runtime boundaries](../../docs/public_release.md) for unsupported private integrations and the web gate. Fixtures must use invented content and valid public wire identifiers.
 
 Public CI sets the existing unit-only budget `V2_UNIT_TIMEOUT_S=1200`; smoke and
 soak limits keep their defaults. Pytest scratch is separate from

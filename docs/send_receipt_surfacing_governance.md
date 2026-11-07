@@ -29,7 +29,7 @@ Client captions for the latest uncorrelated client-origin row: `provider_queued`
 
 ## Pre-admission refusal recovery
 
-The web/desktop main client retries a send once after 250 ms only for the
+The web client retries a send once after 250 ms only for the
 current pending request's exact `send.error`, `error_code: server_overloaded`,
 `retryable: true` refusal. This daemon frame is emitted before admission to the
 handler. The retry preserves the serialized payload, request/logical IDs and

@@ -10,8 +10,8 @@ separate chat-core checkout.
 Set up Pentacle Web (the recommended client), mobile, or both. The daemon runs
 on the computer where your coding agents work; Pentacle Web (a browser/PWA
 served by the Node web host on that computer) and the phone are clients of that
-daemon. The Electron desktop app is deprecated; do not set it up for new users. Start with one host named `local` and one
-working provider. Add other hosts later.
+daemon. Start with one host named `local` and one working provider. Add other
+hosts later.
 
 The daemon and web host run on macOS and Linux. An iPhone build needs a Mac
 with Xcode. Use an existing authenticated Claude or Codex CLI, or let the agent
@@ -38,11 +38,10 @@ Keep the defaults if the owner has no preference.
    whether a daemon already listens on the intended port. Preserve existing
    configuration and user files. Do not start a duplicate daemon or replace a
    working credential unnecessarily.
-2. **Prepare the daemon host.** Follow [Local setup](README.md#local-setup):
+2. **Prepare the daemon host.** Follow [Quick start](README.md#quick-start):
    Node.js 22.12+, Python 3.11+, tmux, dependencies and provider paths. Use a
    private workspace outside this checkout. For mobile-only use, the daemon
-   needs the Python dependencies, tmux and provider CLI; installing or running
-   the Electron desktop is not needed.
+   needs the Python dependencies, tmux and provider CLI; the web host is optional.
 3. **Configure one consistent host.** Use `--local-host local`, `local` in client
    host lists, the real provider executable paths, and the real transcript
    directory. Store the database/config/credentials outside the public repo.
@@ -51,8 +50,7 @@ Keep the defaults if the owner has no preference.
 4. **Set up Pentacle Web.** Issue its daemon credential, build it with
    `npm run build:web` and serve it with `node server` as in the README (behind `tailscale serve` with identity auth for
    remote use — see [server/README.md](server/README.md)); open the URL in a
-   browser or install it as a PWA. The Electron desktop app is deprecated (no
-   upgrades); set it up only if the owner explicitly asks for it. Sessions open in Chat by
+   browser or install it as a PWA. Sessions open in Chat by
    default (`features.defaultChatView: false` for Terminal-first); the chat-first look
    (`features.chatFirstStyle`) is optional and off by default. See [workspace](docs/chat_first_workspace.md).
    Read [config reference](docs/desktop_config.md). For multiple hosts,

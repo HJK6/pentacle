@@ -1,6 +1,6 @@
-# Desktop chat UI shared core
+# Pentacle Web chat UI shared core
 
-The desktop chat surface is organized around a small shared state contract. The renderer owns DOM presentation and host integration; a pure store owns normalized session state, transcript rows, optimistic sends, and reconnect reconciliation.
+The browser chat surface is organized around a small shared state contract. The renderer owns DOM presentation and host integration; a pure store owns normalized session state, transcript rows, optimistic sends, and reconnect reconciliation.
 
 ## Boundaries
 
@@ -10,7 +10,11 @@ The desktop chat surface is organized around a small shared state contract. The 
 | store controller | applies snapshots/events and exposes selectors |
 | view helpers | derive display rows, status labels, and question payloads |
 | renderer | mounts HTML, handles user input, and emits accessibility state |
-| host adapter | supplies configuration, theme, and IPC seams |
+| host adapter | supplies configuration, theme, and the WebSocket RPC bridge |
+
+`renderer/web_cc.js` supplies `window.cc` over the same-origin `/cc`
+WebSocket. The Node web host uses `main/cc_handlers.js` and a shared daemon
+connection; the browser does not read the host credential file.
 
 The store must not read the DOM or a private filesystem. The renderer must not reach into the daemon's database. This separation makes reducer tests deterministic and lets a fixture transport drive the same UI as a real websocket.
 
@@ -29,7 +33,7 @@ Runtime text is treated as untrusted input. HTML helpers escape text, links acce
 
 ## Send lifecycle
 
-An optimistic send starts as `queued`, becomes `dispatched` after the transport accepts it, and ends as `acked`, `echoed`, or `failed`. A reconnect may replay only explicitly retry-safe survivors with the original request id. A daemon restart marks ambiguous sends indeterminate so the user can choose whether to retry. An explicit retry creates a new request id.
+An optimistic send starts as `queued`, becomes `dispatched` after the transport accepts it, and ends as `acked`, `echoed`, or `failed`. A reconnect may replay only explicitly retry-safe survivors with the original request id. A brief normal daemon restart can recover an eligible send under its original IDs after authenticated readiness; unresolved ambiguous sends remain visible for explicit recovery. An explicit retry creates a new request id.
 
 ## Composer modes on agent chats
 
@@ -61,11 +65,11 @@ The sidebar orders rows by open question, working state, recent activity, and st
 
 ## Public adapter contract
 
-The shared core may be supplied by a package or by a small reviewed adapter. The desktop entrypoint should depend only on the published reducer, selector, and question-formatting interfaces. A fixture adapter may implement the same functions with synthetic sessions so the renderer can be developed without a private submodule or remote service.
+The shared core may be supplied by a package or by a small reviewed adapter. The browser entrypoint should depend only on the published reducer, selector, and question-formatting interfaces. A fixture adapter may implement the same functions with synthetic sessions so the renderer can be developed without a private submodule or remote service.
 
-## Mobile parity in desktop and web
+## Shared transcript rendering
 
-Both hosts use `renderer/src/shared_transcript_view.ts`. Tool output and subagent
+Pentacle Web uses `renderer/src/shared_transcript_view.ts`. Tool output and subagent
 messages honor the core disclosure preview and expose the full escaped body
 through keyboard-accessible expansion. Expansion follows the stream and row
 identity across refreshes. File actions retain their body, and code activity and
@@ -81,7 +85,7 @@ remain outside the transcript.
 Delivery captions consume the core receipt; failure and cancellation override a
 stale caption. The renderer never infers Sent from elapsed time or an RPC result.
 Normal assistant text uses Rajdhani at 14.5px/22px and user text uses JetBrains
-Mono at 13px/20px. Desktop compact density remains available at 12px/18px.
+Mono at 13px/20px. Compact density remains available at 12px/18px.
 
 ## Question completion and recovery
 
@@ -109,7 +113,7 @@ resolution reply is lost, Check answer status reconciles `prompt.list` before
 resubmission; reconnect also retries that reconciliation. Existing stale-pane
 and text-send-failure recovery retains the serialized answer in the composer.
 
-Desktop supports the public v2 single question per durable notification and
+Pentacle Web supports the public v2 single question per durable notification and
 multiple simultaneous notifications. Nested durable child-question protocols
 are not assumed. Unsupported entries cannot silently settle a parent.
 

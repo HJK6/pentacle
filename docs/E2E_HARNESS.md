@@ -2,6 +2,29 @@
 
 The public harness is provider-free and uses a disposable local daemon. It validates the shipped websocket and renderer contracts with synthetic sessions; it does not connect to a production service or collect live user content.
 
+## Owned browser gate
+
+Run `npm run build:web` and `node test/e2e/web_gate.js` from the public
+checkout. The gate requires Node dependencies, provisioned Python daemon
+dependencies, Chrome/Chromium, tmux and zsh. `--python` selects an explicitly
+provisioned Python environment. The default gate seeds disposable sessions and
+transcripts, starts an owned loopback daemon and web host, and drives the served
+page over CDP. It reports named assertions and cleans up its own browser,
+daemon, listeners, fixtures and tmux sessions; it needs no phone or native app.
+
+Renderer contract cases use fresh raw frames and fake send/cancel bridges
+through real controls. They prove renderer ordering, duplicate suppression,
+stop retry states and returned draft presentation, not transport delivery, a
+steering ledger, reconnect semantics or silent half-open recovery. Separate
+public replay/paging/reconnect tests cover their named contracts. Reload restores
+browser state and bridges around isolated cases. Inspect the actual failed
+assertion before classifying a product or harness failure; a process or build
+readback alone is not functional proof.
+
+Use the default owned gate for automation. External `--profile` configurations
+are operator-provided live inputs and need separate resource authority. Keep raw
+receipts outside shared memory and retain only location/hash metadata there.
+
 ## Supported entry: `scripts/gate_env.py`
 
 The web gate and web-selected npm tests require the optional `node-pty` module and fail as setup when it is absent.
@@ -453,7 +476,7 @@ coverage below.
 
 #### Commands and collection
 
-Run from the repository root after [installing the prerequisites](../README.md#local-setup)
+Run from the repository root after [installing the prerequisites](../README.md#quick-start)
 and dependencies with `npm ci`. The complete candidate gates are:
 
 ```sh

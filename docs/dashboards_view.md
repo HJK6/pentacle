@@ -20,8 +20,7 @@ controls are unchanged; `panel-dashboards`, `dashboard-list` and
 Use the existing exported configuration object in a private file selected by
 `PENTACLE_CONFIG=/absolute/path/pentacle.config.local.js`; the loader does not
 merge an overlay with the example configuration. See
-[Desktop configuration](desktop_config.md). Restart the desktop, or restart the
-web host and reload its page, after profile changes.
+[Web configuration](desktop_config.md). Restart the web host and reload its page, after profile changes.
 
 | Key | Effect |
 | --- | --- |

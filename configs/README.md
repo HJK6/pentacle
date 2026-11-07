@@ -1,8 +1,6 @@
 # Web host profiles
 
-The supported desktop client is the browser/PWA served by Pentacle's web host.
-The Electron app is deprecated and receives no further upgrades, packaging or
-rollout. Configure the host with `node server --profile <name>`. The name resolves
+Pentacle Web is the browser/PWA served by the web host. Configure the host with `node server --profile <name>`. The name resolves
 to `configs/<name>.local.js`, then `configs/<name>.js`; an argument containing a
 path separator or ending in `.js` is used verbatim. Keep private endpoints and
 topology in a gitignored `configs/<name>.local.js`; tracked examples stay
@@ -44,7 +42,7 @@ The web host's flags, wire protocol and security posture are in
 ## Fleet release targets
 
 `fleet_release.example.json` is a separate JSON example for the CLI fleet
-installer's explicit `--host-config` argument. It is not a desktop config or
+installer's explicit `--host-config` argument. It is not a web host config or
 a daemon machines file. Replace its SSH targets and absolute release roots
 with your own before running the installer; see
 [CLI deployment](../services/agent-orch/deploy/README.md).
@@ -53,6 +51,5 @@ with your own before running the installer; see
 
 Browser profiles use the shared client config fields documented in the
 [shared configuration reference](../docs/desktop_config.md), including host identity,
-terminal transport and optional features. That reference retains Electron
-history where needed; the supported setup and deployment path is the web host
+terminal transport and optional features. Setup and deployment use the web host
 described above.

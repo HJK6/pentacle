@@ -1,8 +1,19 @@
 # Public runtime and support boundary
 
-The public desktop uses the bundled `pentacle-chat-core` reducers, the desktop `ChatStoreController`, and the shared transcript view. `main/chat_stream_client.js` connects directly to the configured daemon; `main.js` adapts its replies to the renderer IPC contracts. There is no in-memory substitute for spawning, sending, naming, or closing sessions. Unavailable services return explicit errors.
+Pentacle Web uses the bundled `pentacle-chat-core` reducers, renderer
+`ChatStoreController` and shared transcript view. The Node web host connects to
+the configured daemon through `main/chat_stream_client.js` and exposes shared
+handlers through the per-connection `/cc` bridge. There is no in-memory
+substitute for spawning, sending, naming or closing sessions. Unavailable
+services return explicit errors.
 
-The daemon owns tmux session creation and session inventory. The desktop terminal adapter attaches a PTY to an existing daemon session, using local tmux or a configured SSH host. Closing a terminal attachment does not kill the daemon session. The renderer runs bundled local code with Node integration; navigation and new windows from web content are blocked. External HTTP(S) links open in the system browser.
+The daemon owns tmux session creation and inventory. The host's terminal adapter
+attaches a PTY to an existing session through its configured local or remote
+transport. Closing an attachment does not kill the daemon session. The renderer
+runs in the browser without Node integration; browser APIs handle clipboard,
+downloads and external HTTP(S) links. The host retains daemon credentials and
+strips them from browser configuration. Follow [web host security](../server/README.md#security--auth-and---bind)
+for authentication and routable binds.
 
 The public dashboard demo is standalone. A private dashboard hub, microphone backend, machine-specific deployment, and organization-specific automation are not included. Their presence in older architecture notes does not supply an integration. Keep their feature flags disabled until you implement/configure their adapters. The public window scheduler supports inline prompts; blob-backed scheduled prompts and installation attestations are explicitly rejected before persistence. Recovered unsupported rows fail closed. Authenticated operator schedule inventory includes bounded inline-prompt previews.
 
@@ -10,14 +21,21 @@ Provider protocol identifiers (`claude`, `fable`, `codex`), model IDs, RPC names
 
 ## Validation
 
-Desktop structured Chat is experimental and disabled in the shipped example.
-Terminal sessions are the default. The structured-view smoke explicitly opts
-in to `features.chatUi`; its passing result does not make that view the default
-or establish production readiness for every structured-chat interaction.
+Sessions open in Chat by default in the shipped example. Set
+`features.defaultChatView: false` for Terminal-first. Optional integrations
+remain subject to their configured feature flags and service availability.
 
-`npm test` exercises the real main IPC shape, renderer bundle/store/view, send receipt settlement, shared telemetry, and the existing renderer/main regression suites. `tools/public_desktop_smoke.py` adds a real Electron window, the real daemon accept loop and spawn/send handlers, an isolated tmux server, and a native provider fixture that writes USER and ASSIST JSONL. It verifies actual assistant DOM content and then stops its daemon to verify disconnected sends fail. Cleanup kills only its named tmux server and daemon process group and removes generated credentials; evidence remains in a temporary artifact directory.
+`npm test` exercises shared host handlers, the renderer bundle/store/view,
+send receipt settlement, telemetry and regression suites. The owned browser
+gate runs the served web bundle against disposable daemon/provider fixtures;
+see [the public harness](E2E_HARNESS.md) for commands, prerequisites, cleanup
+and the difference between synthetic coverage and live release proof.
 
-`scripts/run-tests.js` gives its Node test child a temporary `HOME` and `USERPROFILE` and removes that home after success or failure. Fake desktop handshakes can therefore write their runtime marker only inside that owned home. Tests that need home configuration provide explicit fixtures; the runner does not change the production handshake or marker path. `test/run_tests_home_isolation.test.js` checks both the successful and failing child paths against a disposable parent marker.
+`scripts/run-tests.js` gives its Node test child a temporary `HOME` and
+`USERPROFILE` and removes that home after success or failure. Tests that need
+home configuration provide explicit fixtures. The runner does not change the
+production handshake or marker path. `test/run_tests_home_isolation.test.js`
+checks successful and failing child paths against a disposable parent marker.
 
 `services/chat-stream-v2/tests/smoke/test_public_socket.py` supplies the daemon runner's public socket smoke tier. Default service tests use synthetic fixtures and exclude the long soak mark. Real-provider opt-ins need installed, authenticated CLIs; passing the deterministic fixture does not claim those providers were contacted.
 
@@ -25,7 +43,7 @@ The vendored core corresponds to public `HJK6/pentacle-chat-core` commit `add42a
 
 ## Public identity and fixture policy
 
-Machine identities come from configuration, never a built-in fleet. The CLI uses `AGENT_ORCH_HOST_ID`, then `local_host_id` in its user config, then a sanitized local hostname. Daemon launch uses `--local-host` and the configured machine allowlist. Desktop identity and appearance follow [desktop configuration](desktop_config.md).
+Machine identities come from configuration, never a built-in fleet. The CLI uses `AGENT_ORCH_HOST_ID`, then `local_host_id` in its user config, then a sanitized local hostname. Daemon launch uses `--local-host` and the configured machine allowlist. Web host identity and browser appearance follow [web configuration](desktop_config.md).
 
 Daemon activation and same-ref restarts use `services/chat-stream-v2/deploy/deploy.py`,
 including when a plist change requires a reload. The default log guard is the
@@ -101,4 +119,4 @@ An external `--allowlist /tmp/reviewed-fixtures.json` may extend the public fixt
 
 `python3 scripts/test_check_public_residue.py` proves an external invented-term scanner failure, removal and success against the same input; it also exercises six semantic mutations, invalid inputs, content-hash invalidation and exception limits. Live-provider test admission requires an explicit `PENTACLE_LIVE_TEST_HOSTS` allowlist or the existing deliberate force opt-in. Test resource accounting accepts `PENTACLE_TEST_LOCAL_HOST` as an optional local alias.
 
-Usage updates include `limits_health` alongside `limits`. A changed health record emits an update even when the last valid values remain the same; a healthy probe clears the error through the same path. Invalid state files retain the preceding valid frame and health. The desktop displays the retained values and escaped provider error according to the [limits contract](desktop_config.md).
+Usage updates include `limits_health` alongside `limits`. A changed health record emits an update even when the last valid values remain the same; a healthy probe clears the error through the same path. Invalid state files retain the preceding valid frame and health. The web renderer displays the retained values and escaped provider error according to the [limits contract](desktop_config.md).

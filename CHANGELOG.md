@@ -13,6 +13,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- 2026-11-07: Electron desktop app removed.
+
 ### Added
 
 - README rewritten around the control-plane overview: tagline, core principles, a layer table of how Pentacle fits together, and a shorter quick start.

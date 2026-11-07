@@ -221,7 +221,7 @@ object URL/download anchor is enabled. Files are application/octet-stream
  downloads, never PDF/archive/CAD/HTML/SVG previews. URLs are node-scoped and
 revoked when nodes are removed; late responses cannot resurrect detached links.
 Transient errors offer a retry; the exact blob_unknown refusal displays
-"File expired or unavailable" with no href. The shared Electron/web bridge now
+"File expired or unavailable" with no href. The web bridge
 preserves that stable error code without exposing arbitrary exception text.
 Images keep their existing viewer path.
 

@@ -1,6 +1,6 @@
 # Capability dashboard boundary
 
-The desktop may retain a generic capability dashboard, but a public build must show only data supplied by a reviewed adapter. If the adapter is absent, the dashboard reports `unavailable` instead of reconstructing private project state.
+The web client may retain a generic capability dashboard, but a public build must show only data supplied by a reviewed adapter. If the adapter is absent, the dashboard reports `unavailable` instead of reconstructing private project state.
 
 ## Public row contract
 

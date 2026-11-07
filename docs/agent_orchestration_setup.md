@@ -100,6 +100,6 @@ Then run one scratch spawn, send a fixture prompt, inspect the typed result, and
 | `unsupported_host` | Add the synthetic host to the local machines file. |
 | `host_offline` | Check the configured transport and executable paths. |
 | CLI not found in a pane | Install the CLI and ensure its bin directory is on `PATH`. |
-| Desktop disconnected | Verify `chatStream.url` and the daemon process. |
+| Web client disconnected | Verify `chatStream.url` and the daemon process. |
 
 All examples in this guide are local, deterministic fixtures. No private remote, promote, restart, or deploy procedure is part of the public setup.

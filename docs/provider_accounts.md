@@ -32,7 +32,7 @@ templates retain the alias and resolve its active generation at fire time, with
 current owner and pin/health checks. A default change cannot redirect an explicit
 schedule. Old rows and omitted selectors retain default-at-fire behavior.
 
-The desktop/web chat and terminal pickers expose aliases from account status,
+The web chat and terminal pickers expose aliases from account status,
 submit the optional scalar `account`, and display the actual bound alias. Voice
 actions can carry the same field. Cursor and Gemini do not support named accounts.
 

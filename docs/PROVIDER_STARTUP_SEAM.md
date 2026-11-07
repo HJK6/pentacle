@@ -39,9 +39,11 @@ only that host's Codex promptless cell. No-argument invocation retains the
 scheduled full-fleet behavior; it is unsuitable for this bounded check.
 
 Before invocation, the resource owner must provide an already provisioned
-account home/config under an explicit exclusive window and an owned candidate daemon. Reuse the scratch
-auth/store/port/tmux launch pattern in `tools/public_desktop_smoke.py`, replacing
-its provider fixture with the provisioned binding. Configure only the tested
+account home/config under an explicit exclusive window and an owned candidate
+daemon, with separate scratch credentials, stores, port and tmux resources.
+See [the daemon setup](../services/chat-stream-v2/README.md) and the
+[public harness isolation rules](E2E_HARNESS.md); its provider-free fixtures
+do not provision an installed provider account. Configure only the tested
 Codex binding in the scratch account policy and set its scratch default through
 the existing account/store tooling. No production configuration or default is
 changed. The smoke verifies the selected default instead of sending an account

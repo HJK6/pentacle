@@ -2,8 +2,7 @@
 
 Pentacle Web shows sessions in one to four panes. An optional chat-first look
 restyles the same workspace. Both use the existing daemon, sessions, chat core,
-questions and assets; there is no second chat backend. Electron shares the
-renderer but is deprecated; prefer the web host or installed PWA.
+questions and assets; there is no second chat backend.
 
 ## Panes (always on)
 
@@ -46,7 +45,7 @@ Appearance and feature choices remain in `pentacle.settings.v1`. In web Settings
 **Chat width** sets the shared maximum for the transcript and composer: **Narrow**
 (600px), **Default** (760px), or **Wide** (1000px). It applies immediately and
 restores on reload, including newly opened chat popouts. Smaller panes fit the
-available space. Electron keeps its 760px maximum.
+available space.
 
 These preferences are local to each browser profile, not synced across devices.
 Unsent drafts are stored in that profile's local storage, so do not use a
@@ -69,7 +68,7 @@ unchanged. Layout and behaviour are the same either way.
 ## Validation
 
 `node --test test/renderer_settings_chat_width.test.js` covers Chat width
-normalization, Settings interactions, storage failures and the Electron fallback.
+normalization, Settings interactions and storage failures.
 After `npm run prestart && npm run build:web`, run
 `node test/e2e/web_chat_width_gate.cjs <artifact-directory>` for Chromium layout,
 draft, reload, split-pane and popout checks against an owned disposable web host
