@@ -614,12 +614,11 @@ class Ledger:
 
     async def _owner_checkpoint(self, msg: dict[str, Any], report_id: str, from_stream_id: str,
                                 status: str) -> dict[str, Any] | None:
-        """Item (2): the spec owner's report cannot claim a checkpoint its source fails.
+        """Attach checkpoint diagnostics without blocking durable reports.
 
-        The owner is an open lead seat with a persisted assignment (the FD after
-        `spec assign` is one). Runs after attribution and before persistence; a
-        replay of an already-stored report is never re-gated. error/aborted are
-        never refused, and an unreadable memory root is reported, not refused."""
+        Only an open lead with a persisted assignment gets a checkpoint. A
+        stored report replay remains independent of subsequent source edits.
+        """
         if ":" not in from_stream_id or await self.store.get_report(report_id) is not None:
             return None
         row = await self.store.fetch_session(*from_stream_id.split(":", 1))
@@ -628,13 +627,6 @@ class Ledger:
             return None
         from _shared.work_checkpoint import work_checkpoint
         result = await asyncio.to_thread(work_checkpoint, spec_id)
-        if result["state"] == "invalid" and status in {"done", "progress"}:
-            fixes = "; ".join(item["fix"] for item in result["deficiencies"])
-            reason = f"work_checkpoint_invalid: {spec_id}: {fixes}"
-            await self._maybe_record_terminal_report_rejection(msg, reason)
-            raise self._error("work_checkpoint_invalid",
-                              f"{spec_id} does not show this checkpoint; fix and re-report: {fixes}",
-                              report_id, work_checkpoint=result)
         return result
 
     async def _authenticated_caller(self, msg: dict[str, Any]) -> str | None:
