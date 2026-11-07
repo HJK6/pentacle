@@ -15,7 +15,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ### Added
 
-- README opens with the control-plane overview: tagline, core principles and a layer table of how Pentacle fits together.
+- README rewritten around the control-plane overview: tagline, core principles, a layer table of how Pentacle fits together, and a shorter quick start.
 - Select a named provider account across launches, schedules, recovery, desktop/web controls, and smoke/deploy callers while preserving host defaults and session bindings.
 - Cursor CLI seats with the existing provider picker, queued terminal input, streamed chat/tool events, and pinned-release admission checks.
 
