@@ -29,6 +29,11 @@ class AccountError(ValueError):
         super().__init__(code)
         safe = {"host", "provider", "account", "reason", "expected_version", "observed_version", "next_action", "pin_revision"}
         self.context = {k:v for k,v in context.items() if k in safe and type(v) in {str, int}}
+        if code in {"pool_at_cap","pool_blocked","pool_usage_unknown","account_pool_blocked",
+                    "account_pool_cap_reached","account_pool_meter_unavailable","account_control_revision_conflict"}:
+            fields={"pool_id","control_revision","current_revision","authority_ref","observed_at","reset_at","reset_id",
+                    "window","submission_confirmed","delivery","retryable","nonretryable","do_not_retry","queued_for_redelivery"}
+            self.context.update({k:v for k,v in context.items() if k in fields and (v is None or type(v) in {str,int,float,bool})})
 
 
 def _serialized(method):

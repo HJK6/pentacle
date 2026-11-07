@@ -14,6 +14,7 @@ import sqlite3
 from provider_accounts import AccountError, Binding, _component
 
 DDL = """
+CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS v2_account_bindings (
     binding_key TEXT PRIMARY KEY, provider TEXT NOT NULL, alias TEXT NOT NULL,
     host TEXT NOT NULL, generation TEXT NOT NULL, pool_id TEXT NOT NULL,
@@ -177,12 +178,20 @@ class AccountStore:
             self.conn.execute("UPDATE v2_account_bindings SET health='identity_conflict', "
                 "health_revision=health_revision+1 WHERE binding_key=?",(key,))
             allowed["collection"]="identity_conflict"
+        raw=self.conn.execute("SELECT data FROM v2_account_observations WHERE binding_key=?",(key,)).fetchone()
+        previous=json.loads(raw[0]) if raw else {}
+        known=set(previous.get("observed_window_keys") or [])
+        if allowed['collection']=='ok' and number(allowed.get('observed_at')) and isinstance(allowed.get('windows'),dict):
+            for name,window in allowed['windows'].items():
+                if (isinstance(name,str) and name and isinstance(window,dict) and number(window.get('pct'))
+                        and 0<=window['pct']<=100 and number(window.get('reset_at'))
+                        and window['reset_at']>allowed['observed_at'] and isinstance(window.get('reset_id'),str) and window['reset_id']):
+                    known.add(name)
+        allowed['observed_window_keys']=sorted(known)
         if allowed["collection"]=="failed":
             code=observation.get("error_code")
             if isinstance(code,str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}",code):
                 allowed["error_code"]=code
-            raw=self.conn.execute("SELECT data FROM v2_account_observations WHERE binding_key=?",(key,)).fetchone()
-            previous=json.loads(raw[0]) if raw else {}
             if (all(previous.get(k)==allowed[k] for k in ("provider_id","pool_id","auth_mode"))
                     and previous.get("collection") in {"ok","failed"}
                     and number(previous.get("observed_at")) and previous.get("windows")):
@@ -233,8 +242,7 @@ class AccountStore:
                 best=max(retained,key=lambda a:a["observation"]["observed_at"],default=None)
             data=best["observation"] if best else None
             age=now-data["observed_at"] if data else None
-            # Freshness is informational and uses the collector's existing cadence;
-            # it never admits/denies a launch or asserts zero usage for missing data.
+            # Use the collector's existing cadence; missing data never means zero.
             max_age=self.policy.get("observation_max_age",600)
             windows=data.get("windows") if data else None
             complete=isinstance(windows,dict) and bool(windows) and all(
@@ -248,5 +256,8 @@ class AccountStore:
                 "error_codes":{a["host"]+":"+provider+":"+a["alias"]+":"+a["generation"]:a["observation"]["error_code"]
                     for a in sources if isinstance(a["observation"],dict) and a["observation"].get("error_code")},
                 "identity_conflict":conflict,
-                "cap":self.policy.get("account_caps",{}).get(provider,{}).get(pool)})
+                "legacy_cap":self.policy.get("account_caps",{}).get(provider,{}).get(pool)})
+            from account_pool_control import read, pool_key, eligibility
+            pools[-1]["cap"]=read(self,pool_key(provider,pool))
+            pools[-1]["eligibility"]=eligibility(self,provider,pool,now=now,measured=pools[-1])
         return {"accounts":accounts,"quota_pools":pools,"defaults":self.defaults(),"enabled":self.policy.get("enabled") is True}

@@ -111,6 +111,7 @@ class _RemoteCaptureState:
     last_activity: str = ""
     observer_source: str = "reconciler-fallback"
     capture_liveness: str = ""
+    capture_observed_at: float = 0
 
 
 async def _noop_broadcast(_frame: dict[str, Any]) -> None:
@@ -776,6 +777,7 @@ class RemotePresence:
             return 0
         state = self._capture_state.setdefault(key, _RemoteCaptureState())
         state.capture_liveness = liveness
+        state.capture_observed_at = self._now_ms()/1000
         if liveness == "idle":
             return await self._apply_capture_state(
                 self.sessions.get(sid) or {}, key, state, pane=pane, preview=preview, live=live,
@@ -927,6 +929,7 @@ class RemotePresence:
         )
         overlay = {
             "capture_generation": key[1] if state.capture_liveness == "idle" else None,
+            "capture_observed_at": state.capture_observed_at,
             "preview": state.preview,
             "working": state.working,
             "working_label": state.working_label,

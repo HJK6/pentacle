@@ -3,6 +3,39 @@ import pytest
 from agent_orch import cli
 
 
+def test_fixed_pool_and_generation_override_fields_use_existing_account_rpc(monkeypatch,capsys):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,'load_config',lambda:object())
+    monkeypatch.setattr(stream_id,'discover_leader_stream_id_short',lambda _:'host-a:front-desk')
+    seen=[]
+    async def rpc(config,payload,**kwargs): seen.append(payload);return {'type':'account.ok'}
+    monkeypatch.setattr(wsclient,'account_once',rpc)
+    pool=['account','pool-control-set','--provider','codex','--pool-id','pool-primary','--expected-revision','0',
+          '--operation-id','pool-order','--blocked','false','--stop-pct','100','--window','codex:10080',
+          '--reason','bounded ceiling','--authority-ref','operator-order']
+    args=cli.build_parser().parse_args(pool)
+    assert args.func(args)==0
+    assert seen[-1]['stop_pct']==100 and seen[-1]['blocked'] is False
+    assert seen[-1]['window']=='codex:10080' and 'login_generation' not in seen[-1]
+    seat=['account','seat-override-set','--stream','host-a:worker','--expected-generation','worker-one',
+          '--expected-revision','0','--operation-id','seat-order','--enabled','true','--reason','owned exception',
+          '--authority-ref','operator-order']
+    args=cli.build_parser().parse_args(seat)
+    assert args.func(args)==0 and seen[-1]['enabled'] is True
+    assert seen[-1]['expected_generation']=='worker-one' and 'login_generation' not in seen[-1]
+
+
+@pytest.mark.parametrize('pct',['nan','inf','-1','101'])
+def test_pool_cli_rejects_nonfinite_and_out_of_range_before_transport(pct,monkeypatch):
+    from agent_orch import config,stream_id,wsclient
+    monkeypatch.setattr(config,'load_config',lambda:object())
+    monkeypatch.setattr(stream_id,'discover_leader_stream_id_short',lambda _:'host-a:front-desk')
+    async def forbidden(*args,**kwargs): raise AssertionError('invalid control reached transport')
+    monkeypatch.setattr(wsclient,'account_once',forbidden)
+    args=cli.build_parser().parse_args(['account','pool-control-set','--blocked','false','--stop-pct',pct,'--window','weekly'])
+    assert args.func(args)==2
+
+
 def upgrade_args():
     return ["account", "upgrade", "--host", "host-target", "--provider", "codex", "--account", "ours",
         "--login-generation", "old", "--new-generation", "new", "--operation-id", "upgrade-one",
