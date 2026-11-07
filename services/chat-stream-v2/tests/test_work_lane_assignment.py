@@ -1,4 +1,4 @@
-"""Item (1): a new managed commission names one assigned spec in an open product lane.
+"""Acceptance owners require work links; parented supporting roles inherit optional attribution.
 
 Lane tracking minimal A1-A5 with QA corrections R1, R4, R5, R6.
 """
@@ -37,8 +37,8 @@ async def lane(store, lane_id, *members, state="active"):
     await store.submit(op)
 
 
-async def seat(store, name, *spec_ids, assigned=None, role="lead"):
-    row = await store.open_session(HOST, name, provider="claude", role=role, spec_ids=list(spec_ids),
+async def seat(store, name, *spec_ids, assigned=None, role="lead", visibility="hidden"):
+    row = await store.open_session(HOST, name, provider="claude", role=role, visibility=visibility, spec_ids=list(spec_ids),
                                    spec_binding_provenance=[{"spec_id": s, "provenance": "spawn_explicit",
                                                              "granting_principal": "operator",
                                                              "granted_at": "2026-10-09T00:00:00Z"}
@@ -85,7 +85,7 @@ async def test_unlinked_explicit_commission_is_refused_before_any_pane(env):
     ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-home", home)
     caller = await seat(env.store, "caller", home, assigned=home)
-    err = await refused(ctl, agent(caller, spec=target))
+    err = await refused(ctl, agent(caller, spec=target, role="lead"))
     assert err.code == "work_lane_assignment_unlinked"
     # The repair names the caller's home lane and only the new member.
     assert f"agent-orch work-lane add-member wl-home {target}" in str(err)
@@ -113,7 +113,7 @@ async def test_portfolio_parent_without_assignment_requires_spec_id(env):
     ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-p", *specs)
     caller = await seat(env.store, "fd", *specs)  # multi-tag, unassigned (legacy portfolio)
-    err = await refused(ctl, agent(caller))
+    err = await refused(ctl, agent(caller, role="lead"))
     assert err.code == "work_assignment_required"
     assert "--spec-id" in str(err) and "3 specs" in str(err)
     assert tmux.created == 0
@@ -189,7 +189,7 @@ async def test_operator_elevated_seat_token_is_still_managed(env):
     target = item(env.root, "demo__target")
     ctl, _sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     caller = await seat(env.store, "caller", target, assigned=target)
-    msg = agent(caller, spec=target)
+    msg = agent(caller, spec=target, role="lead")
     msg["_auth_context"].update(operator_authenticated=True, operator_authority_source="stream_token")
     assert (await refused(ctl, msg)).code == "work_lane_assignment_unlinked"
 
@@ -216,7 +216,7 @@ async def test_done_lane_membership_is_not_a_link(env):
     ctl, _sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-old", target, state="done")
     caller = await seat(env.store, "caller", target, assigned=target)
-    assert (await refused(ctl, agent(caller, spec=target))).code == "work_lane_assignment_unlinked"
+    assert (await refused(ctl, agent(caller, spec=target, role="lead"))).code == "work_lane_assignment_unlinked"
 
 
 @pytest.mark.asyncio
@@ -295,8 +295,8 @@ async def test_unassign_of_a_single_spec_seat_sticks_through_handoff(env):
     reply = await spec_update(env, ctl, sessions, "unassign", lead[0], auth=operator)
     assert reply["session"]["spec_ids"] == [keep] and effective_assignment(reply["session"]) is None
     assert await env.store.submit(lambda c: _assigned_seats_conn(c, [keep])) == []  # no longer "in use"
-    # A new commission from it must name its spec; the tag is not an implicit assignment.
-    assert (await refused(ctl, agent(lead, name="kid"))).code == "work_assignment_required"
+    # A new lead commission must name its spec; the tag is not an implicit assignment.
+    assert (await refused(ctl, agent(lead, name="kid", role="lead"))).code == "work_assignment_required"
     # A handoff successor inherits the unassignment, even when it names specs.
     for name, extra in (("succ-a", {}), ("succ-b", {"spec_id": other})):
         msg = agent(lead, parent=False, name=name, handoff=True, handoff_from_stream_id=lead[0], **extra)
@@ -332,3 +332,43 @@ def test_removing_a_live_assignment_needs_a_recorded_reason():
         await env.op("set_members", {"members": [], "no_spec_reason": "Paused intake."},
                      lane=lid, version=done["lane"]["version"])
     run(body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["worker", "evaluator", "planner", "reviewer-advisory", None])
+@pytest.mark.parametrize("attribution", ["none", "portfolio", "unlinked"])
+async def test_parented_supporting_spawn_needs_no_manual_work_link(env, role, attribution):
+    specs = [] if attribution == "none" else [item(env.root, f"demo__support_{i}") for i in range(2)]
+    ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
+    caller = await seat(env.store, "operator-chat", *specs, role=None, visibility="visible")
+    if attribution == "portfolio":
+        await lane(env.store, "wl-support", *specs)
+    msg = agent(caller, role=role, key="support-key")
+    if role is None:
+        msg.pop("role")
+    if attribution == "unlinked":
+        msg["spec_id"] = specs[0]
+    reply = await ctl.spawn(msg, HOST)
+    row = await env.store.fetch_session(HOST, "child")
+    assert reply["type"] == "spawn.ok"
+    assert row["parent_stream_id"] == caller[0]
+    assert row["objective"] == msg["objective"]
+    assert row["spec_ids"] == (specs[:1] if attribution == "unlinked" else specs)
+    if attribution == "portfolio":
+        assert row["assigned_spec_id"] is None
+        assert all(b["provenance"] == "parent_inherited" for b in row["spec_binding_provenance"])
+        assert [l["lane_id"] for l in await env.store.open_lanes_for_spec(row["spec_ids"][0])] == ["wl-support"]
+    again = await ctl.spawn(msg, HOST)
+    assert again["stream_id"] == reply["stream_id"] and tmux.created == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role,extra,resolved_role", [
+    ("lead", {}, None), ("qa", {}, None), ("worker", {"phase": "qa"}, None),
+    (None, {"qa_spec_id": "spec_demo__review"}, None), ("worker", {}, "lead"),
+])
+async def test_acceptance_spawns_still_require_work_binding(env, role, extra, resolved_role):
+    ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch, resolved_role=resolved_role)
+    caller = await seat(env.store, "operator-chat", role=None)
+    assert (await refused(ctl, agent(caller, role=role, **extra))).code == "work_assignment_required"
+    assert tmux.created == 0

@@ -2142,7 +2142,15 @@ class SpawnCtl:
                 if replay := await recorded_reply():
                     return replay
                 raise VerbError(decision["error_code"], decision["message"], wip=decision)
-        if new_work_commission(msg, resume=resume_session_id is not None):
+        work_role = open_overrides.get("role", msg.get("role"))
+        supporting = (
+            bool(msg.get("parent_stream_id"))
+            and work_role in {None, "", "worker", "evaluator", "planner", "reviewer-advisory"}
+            and not qa_dispatch.classified(msg, {"role": work_role, "phase": msg.get("phase")})
+        )
+        # Supporting work carries the existing inherited attribution without
+        # requiring a manual assignment or lane link. Acceptance owners retain it.
+        if new_work_commission(msg, resume=resume_session_id is not None) and not supporting:
             refusal = await self._work_link_refusal(msg, spec_binding)
             if refusal is not None:
                 # As above: a same-key caller may have been admitted meanwhile.
