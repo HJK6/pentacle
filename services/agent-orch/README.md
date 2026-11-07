@@ -2,6 +2,16 @@
 
 Direct CLI for orchestrating agent sessions through `chat_streamd`. Lets one agent spawn, drive, and observe other agents without the leader's LLM context having to read raw tmux scrollback.
 
+## Supporting spawn admission
+
+An immediate parented worker, evaluator, planner, advisory reviewer (`reviewer-advisory`),
+or helper without a role can spawn with an objective and no manual spec
+assignment or open-lane link. Available parent spec tags and their lane
+attribution are inherited through the existing binding; an unbound parent
+produces an unbound child. Explicit spec tags still resolve normally.
+Lead and QA commissions retain their work binding. Identity, lifecycle,
+objective, provider/account and QA integrity checks remain in force.
+
 ## Outbound credentials
 
 `agent_orch/send_boundary.py` owns credential loading and websocket serialization.
