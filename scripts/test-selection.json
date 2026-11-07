@@ -92,8 +92,6 @@
   "boundaries": {
     "client_wire_render": {
       "paths": [
-        "main.js",
-        "preload.js",
         "renderer/*",
         "web/*",
         "server/*",

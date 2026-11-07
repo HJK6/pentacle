@@ -10,10 +10,10 @@
 //             { id, ok: false, error: { message, code } }
 //   push      { event, args }                 host → browser
 //
-// `send`-mode methods (pty:write, pty:resize, …) mirror ipcRenderer.send: they
-// are fire-and-forget and get no response, exactly as in Electron.
+// `send`-mode methods (pty:write, pty:resize, …) are fire-and-forget
+// and get no response.
 //
-// Each connection gets a stand-in for Electron's `event.sender`, which is what
+// Each connection gets its own `event.sender` adapter, which is what
 // makes per-tab isolation fall out for free: main/terminal_adapter.js keys its
 // slots by `event.sender.id` and pushes pty output through `event.sender.send`,
 // so one tab's terminals and output can never reach another's. Closing a socket
@@ -38,7 +38,7 @@ function createWsBridge({ table, logger = console } = {}) {
     }
   }
 
-  /** Electron's `event.sender`, as much of it as the handlers actually use. */
+  /** Per-connection sender interface used by the shared handlers. */
   function createSender(socket) {
     let destroyed = false;
     const listeners = new Map();

@@ -1,15 +1,14 @@
 // In-DOM toast notifications for the renderer.
 //
 // WHY this exists: the renderer used to surface errors with the browser-native
-// window.alert(). On Windows/Electron, dismissing a native JS dialog leaves
+// window.alert(). On Windows, dismissing a native JS dialog leaves
 // Chromium swallowing the Space (and sometimes Enter) key until the OS window
 // blurs and refocuses — the "spacebar stops working after an error popup" bug.
 // A pure-DOM toast never invokes the native dialog manager and never takes
 // keyboard focus, so the terminal keeps focus and Space keeps working.
 //
-// CommonJS to match every other renderer module (app.js require()s this); the
-// main window runs nodeIntegration:true, contextIsolation:false, so require is
-// available at runtime. No native dialog API (alert/confirm/prompt) and no
+// CommonJS so app.js can bundle this module. No native dialog API
+// (alert/confirm/prompt) and no
 // element .focus() may be introduced here without reintroducing the bug.
 
 const CONTAINER_ID = 'toast-container';

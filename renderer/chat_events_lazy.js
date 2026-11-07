@@ -5,7 +5,7 @@
 // The hello snapshot ships no events under events_mode:'summary'; chat-view
 // slots fetch their stream's recent ring on demand via this module. The
 // daemon's request_stream_events RPC is bridged into the renderer through
-// `window.cc.requestStreamEvents`; on success the Electron-main client
+// `window.cc.requestStreamEvents`; on success the host client
 // merges the ring into its own buffer and re-emits a snapshot payload that
 // re-enters applyChatStreamPayload, repopulating `state.chatStream.events`.
 

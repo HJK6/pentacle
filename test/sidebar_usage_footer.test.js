@@ -147,13 +147,9 @@ test('limits health is validated and shown as text without a polling timer', () 
 });
 
 test('limits panel has a single source: the daemon frame, no local IPC path', () => {
-  const main = read('main.js');
-  const preload = read('preload.js');
   const app = read('renderer/app.js');
 
   // The local IPC limits path is deleted; the daemon hello/limits.update frame is the only source.
-  assert.doesNotMatch(main, /limits:get|limits-state:get|getLimitsData|getLimitsStateData/);
-  assert.doesNotMatch(preload, /limits:get|limits-state:get|getLimits\b|getLimitsState/);
   assert.doesNotMatch(app, /getLimitsState|getLimitsData|fetchUsage/);
   // The panel never repolls or clears itself on an interval; it repaints from daemon frames only.
   assert.match(app, /renderLimits\(\s*payload\.limits,\s*/);

@@ -26,22 +26,6 @@ const escapeHtml = assetRenderer.escapeHtml;
 const renderMarkdown = assetRenderer.renderMarkdownHtml;
 const renderAsset = assetRenderer.renderAsset;
 
-function expandHome(filePath, osMod) {
-  if (!filePath) return filePath;
-  if (!String(filePath).startsWith('~')) return filePath;
-  const home = osMod && typeof osMod.homedir === 'function' ? osMod.homedir() : '';
-  return String(filePath).replace(/^~(?=$|\/|\\)/, home);
-}
-
-function readTokenFile(filePath, fsMod, osMod) {
-  if (!filePath || !fsMod || typeof fsMod.readFileSync !== 'function') return '';
-  try {
-    return fsMod.readFileSync(expandHome(filePath, osMod), 'utf8').trim();
-  } catch (_) {
-    return '';
-  }
-}
-
 function browserRequire(name) {
   try {
     if (typeof require === 'function') return require(name);
@@ -53,38 +37,16 @@ function loadRuntime(win) {
   const override = win && win.__PI_CONTROL_TEST_RUNTIME;
   if (override) return { ...override };
 
-  const fsMod = browserRequire('fs');
-  const osMod = browserRequire('os');
-  const pathMod = browserRequire('path');
-  let cfg = {};
-  try {
-    const loader = browserRequire('../../config-loader') || browserRequire('../config-loader');
-    const base = pathMod && typeof __dirname !== 'undefined'
-      ? pathMod.join(__dirname, '..', '..')
-      : undefined;
-    if (loader && typeof loader.loadConfig === 'function') cfg = loader.loadConfig(base).config || {};
-  } catch (_) {
-    cfg = {};
-  }
-
-  // Prefer the dashboardHub config preload.js already loaded into window.HOST.
-  // require() resolution from a <script src> renderer is brittle across asar
-  // packaging; window.HOST.dashboardHubConfig is always populated by preload
-  // when the host config has a dashboardHub section.
-  const hubCfg = (win && win.HOST && win.HOST.dashboardHubConfig)
-    || cfg.dashboardHub
-    || {};
-  const readTokenPath = hubCfg.readTokenPath || '~/.dashboard-hub/read-token';
-  const writeTokenPath = hubCfg.writeTokenPath || '~/.dashboard-hub/write-token';
+  const hubCfg = (win && win.HOST && win.HOST.dashboardHubConfig) || {};
   return {
     hubUrl: String(hubCfg.url || '').replace(/\/+$/, ''),
-    readToken: readTokenFile(readTokenPath, fsMod, osMod),
-    writeToken: readTokenFile(writeTokenPath, fsMod, osMod),
+    readToken: '',
+    writeToken: '',
     fetch: win && win.fetch ? win.fetch.bind(win) : (typeof fetch === 'function' ? fetch : null),
     EventSource: win && win.EventSource ? win.EventSource : (typeof EventSource !== 'undefined' ? EventSource : null),
     // In-DOM, promise-based confirm (renderer/confirm_dialog.js, loaded as a
     // global). NOT native window.confirm() -- that opens Chromium's native
-    // dialog manager and traps the Space key on Windows/Electron after dismiss.
+    // dialog manager and traps the Space key on Windows after dismiss.
     // Returns Promise<boolean>; call sites await it.
     confirmAction: (msg) => {
       const fn = (win && typeof win.confirmDialog === 'function') ? win.confirmDialog : null;

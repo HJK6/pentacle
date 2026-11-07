@@ -1,6 +1,6 @@
 'use strict';
 
-// Preserve the daemon's stable refusal code through both Electron and web IPC.
+// Preserve the daemon's stable refusal code through the web handler.
 // Do not expose free-form server/transport exception text in this file boundary.
 async function fetchBlobReply(client, blobSha) {
   try { return { ok: true, ...await client.fetchBlob({ blobSha }) }; }

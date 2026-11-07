@@ -156,8 +156,7 @@
           },
           "default_patterns": [
             "test/*.test.js",
-            "test/*.test.ts",
-            "test/e2e/terminal_interaction_runtime/*.test.js"
+            "test/*.test.ts"
           ],
           "timeout_s": 900,
           "max_timeout_s": 7200,
@@ -223,7 +222,10 @@
         },
         "web-gate": {
           "kind": "web_gate",
-          "pass_env": ["PENTACLE_WEB_GATE_SCENARIOS", "PENTACLE_WEB_GATE_CONSUMER_ROOT"],
+          "pass_env": [
+            "PENTACLE_WEB_GATE_SCENARIOS",
+            "PENTACLE_WEB_GATE_CONSUMER_ROOT"
+          ],
           "needs": [
             "python",
             "node",

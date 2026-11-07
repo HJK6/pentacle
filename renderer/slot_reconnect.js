@@ -15,9 +15,6 @@
 // new socket: tmux redraws to the reattached client and input flows again — no
 // xterm rebuild and no slot view-mode change. This mirrors what close/reopen
 // does, minus the teardown.
-//
-// Desktop never reaches this: Electron's ipcRenderer transport does not drop, so
-// preload.js exposes onReconnect as a no-op and app.js never calls this there.
 
 function reattachTerminalSlotsAfterReconnect(args) {
   const { slots = [], botSlots = {}, terminals = {}, cc, logger = console } = args || {};

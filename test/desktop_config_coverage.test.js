@@ -5,7 +5,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 
 test('desktop config reference and example cover every directly read top-level key', () => {
-  const files = ['renderer/app.js', 'main.js', 'preload.js', 'hosts.js', ...fs.readdirSync(path.join(root, 'main')).filter(n => n.endsWith('.js')).map(n => `main/${n}`)];
+  const files = ['renderer/app.js', 'hosts.js', ...fs.readdirSync(path.join(root, 'main')).filter(n => n.endsWith('.js')).map(n => `main/${n}`)];
   const keys = new Set();
   for (const file of files) {
     const source = fs.readFileSync(path.join(root, file), 'utf8');
@@ -21,7 +21,7 @@ test('desktop config reference and example cover every directly read top-level k
 });
 
 test('desktop authored production files contain no anonymized identity residue', () => {
-  const files = ['main.js', 'preload.js', 'config-loader.js', 'hosts.js', 'pentacle.config.example.js', 'README.md', 'SETUP.md', 'AGENT_SETUP.md', 'docs/desktop_config.md'];
+  const files = ['config-loader.js', 'hosts.js', 'pentacle.config.example.js', 'README.md', 'SETUP.md', 'AGENT_SETUP.md', 'docs/desktop_config.md'];
   function collect(dir) {
     for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
       if (entry.name === 'dist') continue; // generated bundle contains separately owned chat-core

@@ -6,8 +6,8 @@
       "path": "test/fixtures/root_runner/base-discovered.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "2c7e229e0249356ccb77744ff098fa8b3be2937b4d495937c886c235d6a544fa",
-      "bytes": 5548,
+      "sha256": "b898a74617f275558495603fe490bef7fe5910969c9c559691864f405b529983",
+      "bytes": 5357,
       "purpose": "Runner negative control or pinned repository discovery expectation; authored for TH-H1"
     },
     {

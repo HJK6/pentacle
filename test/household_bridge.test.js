@@ -2,9 +2,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
 const chatStreamClient = require('../main/chat_stream_client');
 const { createCcHandlers, createCollector } = require('../main/cc_handlers');
 const { buildCc, createTransport } = require('../renderer/web_cc');
@@ -204,28 +201,6 @@ test('web cc exposes householdCommand with exact arguments and no reply rewritin
   assert.equal(await cc.householdCommand('household.item.done', fields), reply);
   assert.equal(await cc.householdCommand('household.snapshot'), reply);
   assert.deepEqual(calls, [['chat-stream:household', 'household.item.done', fields],
-    ['chat-stream:household', 'household.snapshot', {}]]);
-});
-
-test('Electron preload exposes householdCommand with the same invocation contract', async () => {
-  const calls = [];
-  const reply = { ok: true, reply: { type: 'household.snapshot.ok', snapshot: {} } };
-  const ipcRenderer = { on() {}, send() {}, removeAllListeners() {},
-    invoke(...args) { calls.push(args); return Promise.resolve(reply); } };
-  const context = {
-    require(name) {
-      if (name === 'electron') return { ipcRenderer };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {}, process,
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'), context,
-    { filename: 'preload.js' });
-  const fields = { event_id: 'fixture-event' };
-  assert.equal(await context.window.cc.householdCommand('household.event.remove', fields), reply);
-  assert.equal(await context.window.cc.householdCommand('household.snapshot'), reply);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['chat-stream:household', 'household.event.remove', fields],
     ['chat-stream:household', 'household.snapshot', {}]]);
 });
 

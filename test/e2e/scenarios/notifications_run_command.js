@@ -1,6 +1,6 @@
 // Walk: notifications_run_command — verifies the Notifications dashboard renders
 // the run_command action button + the running/done/failed result states in the
-// REAL Electron renderer (shared shared-dashboards), and that clicking the
+// REAL browser renderer (shared shared-dashboards), and that clicking the
 // run_command button fires resolve(id, 'run_command') through ctx.actions.
 // Companion to notifications_board.js; covers public-ui-regression.
 const SCENARIO_META = { target_compat: ['hostc', 'hosta', 'hostb'], requires: [], providers: ['claude'] };

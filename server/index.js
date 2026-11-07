@@ -4,8 +4,7 @@
 // ── Pentacle headless web host ───────────────────────────────────────────────
 // Serves the esbuild-bundled renderer over HTTP and exposes the same
 // `window.cc` surface over a websocket, owning the tmux attachments and the
-// single chat-stream connection that the Electron main process owns on the
-// desktop.
+// single chat-stream connection to the daemon.
 //
 //   node server --profile <name> [--port 7795] [--bind 127.0.0.1]
 //

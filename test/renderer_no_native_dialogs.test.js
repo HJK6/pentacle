@@ -7,7 +7,7 @@ const path = require('node:path');
 // tree (renderer/**/*.js, recursive), including renderer/dashboards/.
 //
 // WHY the ban: native window.alert/confirm/prompt open Chromium's native dialog
-// manager. On Windows/Electron, dismissing one leaves the renderer swallowing
+// manager. On Windows, dismissing one leaves the renderer swallowing
 // the Space (and sometimes Enter) key until the window blurs/refocuses — the
 // "spacebar stops working after a popup" bug. Use renderer/toast.js (showToast)
 // for notifications and renderer/confirm_dialog.js (confirmDialog) for

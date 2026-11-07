@@ -23,15 +23,13 @@ function functionBody(source, name) {
 }
 
 test('desktop transcript summarizer entry points are retired', () => {
-  const main = readRepoFile('main.js') + readRepoFile('main/cc_handlers.js');
+  const main = readRepoFile('main/cc_handlers.js');
   const renderer = readRepoFile('renderer/app.js');
-  const preload = readRepoFile('preload.js');
 
   assert.doesNotMatch(main, /generateTitleWithCodex/);
   assert.doesNotMatch(main, /tmux:maybe-title-session/);
   assert.doesNotMatch(main, /heuristicTitleFromTranscript|buildTitlePrompt|llmAttempts/);
   assert.doesNotMatch(renderer, /maybeTitleSession/);
-  assert.doesNotMatch(preload, /maybeTitleSession/);
 });
 
 test('session creation no longer writes the New Chat tmux title', () => {

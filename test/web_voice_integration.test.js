@@ -3,12 +3,12 @@ const assert = require('node:assert/strict');
 const { installRenderer, mountRaceSlot } = require('./helpers/renderer_chat');
 const client = require('../main/chat_stream_client');
 const { createCcHandlers, createCollector } = require('../main/cc_handlers');
-test('actual web composer never toggles the room mic; desktop still does', () => {
-  for (const isWeb of [true, false]) {
+test('actual web composer never toggles the room mic', () => {
+  for (const isWeb of [true]) {
     const { context, dom } = installRenderer(); dom.window.HOST.isWeb = isWeb; mountRaceSlot(context);
     let clicks = 0; dom.window.document.getElementById('mic-btn-toggle').onclick = () => clicks++;
     dom.window.document.querySelector('.slot-chat-compose-mic').click();
-    assert.equal(clicks, isWeb ? 0 : 1);
+    assert.equal(clicks, 0);
   }
 });
 test('shared host handler and client pass voice metadata to ordinary and composite sends', async () => {

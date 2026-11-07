@@ -1,5 +1,5 @@
 /*
- * Cosmic / Arcane theme token layer for the Pentacle desktop (Electron) renderer.
+ * Cosmic / Arcane theme token layer for the Pentacle browser renderer.
  *
  * public token layer (cosmic-parity): ports public companion's `public theme tokens` design
  * tokens + vendored fonts into the renderer as a SCOPED CSS layer.

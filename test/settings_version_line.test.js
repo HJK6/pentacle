@@ -71,7 +71,7 @@ test('shortSha and fullSha both read "unknown" for an empty or malformed SHA', (
 test('chat-stream client resolves its build SHA across packaged/web/source', () => {
   const client = read('main/chat_stream_client.js');
   assert.match(client, /function resolveBuildSha\(\)/);
-  assert.match(client, /pentacleBuildSha/); // packaged Electron
+  assert.match(client, /pentacleBuildSha/); // package metadata
   assert.match(client, /build-sha\.txt/); // archived web release (export-subst)
   assert.match(client, /rev-parse', 'HEAD'/); // source checkout fallback
 });

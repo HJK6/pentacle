@@ -14,9 +14,6 @@
 // artifact is discoverable by the same artifact viewer the mobile
 // `artifacts/mobile-screens/` gate uses (public artifact viewer).
 //
-// The HTML pages are the screenshot SOURCE: scripts/capture-cosmic-baselines.js
-// loads each one in a headless Electron window and captures the baseline PNG.
-//
 // Regenerate with:  npm run mockups:cosmic        (HTML states + manifest)
 //                   npm run mockups:cosmic:png     (HTML + baseline PNGs)
 //

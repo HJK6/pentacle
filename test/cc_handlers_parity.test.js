@@ -1,8 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
+const { buildCc } = require('../renderer/web_cc');
 
 const {
   createCcHandlers,
@@ -12,10 +10,9 @@ const {
   UNIMPLEMENTED,
   UNCALLED,
   PUSH_EVENTS,
-  PRELOAD_LOCAL,
 } = require('../main/cc_handlers');
 
-// The table exactly as main.js and server/ build it.
+// The table exactly as the web host builds it.
 function fullTable() {
   const stubClient = new Proxy({}, { get: () => async () => ({}) });
   const collector = createCollector();
@@ -23,51 +20,43 @@ function fullTable() {
   return collector.table;
 }
 
-// Run preload.js for real and record which channel (and which IPC verb) each
-// window.cc method reaches for. A regex over the source would miss the
-// indirection; calling the methods cannot drift from what the renderer does.
-function preloadSurface() {
+// Run the browser surface with an in-process recorder; no socket is created.
+// Calling the real methods preserves channel/mode coverage without a preload.
+const BROWSER_LOCAL = new Set([
+  'writeClipboard', 'readClipboard', 'openExternal', 'reloadApp',
+  'openMeeting', 'closeMeeting', 'saveImage', 'showContextMenu',
+  'chatPopoutContext', 'onReconnect', 'onDisconnect', 'webConnectionState',
+]);
+function browserSurface() {
   let recorded = [];
-  const ipcRenderer = {
-    invoke(channel) { recorded.push({ mode: 'invoke', channel }); return Promise.resolve(); },
-    send(channel) { recorded.push({ mode: 'send', channel }); },
+  const transport = {
+    call(channel) { recorded.push({ mode: 'invoke', channel }); return Promise.resolve(); },
+    fire(channel) { recorded.push({ mode: 'send', channel }); },
     on(channel) { recorded.push({ mode: 'on', channel }); },
-    removeAllListeners() {},
+    onReconnect() {}, onDisconnect() {},
   };
-  const context = {
-    require(name) {
-      if (name === 'electron') return { clipboard: { writeText() {}, readText: () => '' }, ipcRenderer };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {},
-    process,
-    console,
-  };
-  vm.runInNewContext(
-    fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'),
-    context,
-    { filename: 'preload.js' },
-  );
-
+  const cc = buildCc(transport, {
+    clipboard: { writeText() {}, readText: () => '' },
+    reload() {}, config: { features: { mic: true } },
+  });
   const surface = new Map();
-  for (const [name, fn] of Object.entries(context.window.cc)) {
+  for (const [name, fn] of Object.entries(cc)) {
     if (typeof fn !== 'function') continue;
     recorded = [];
-    try { fn(() => {}); } catch (_) { /* argument shape is irrelevant here */ }
+    fn(() => {});
     surface.set(name, recorded.slice());
   }
   return surface;
 }
 
 const TABLE = fullTable();
-const SURFACE = preloadSurface();
+const SURFACE = browserSurface();
 
 test('every window.cc method is accounted for by exactly one contract', () => {
   const unresolved = [];
   for (const [name, calls] of SURFACE) {
     if (calls.length === 0) {
-      if (!PRELOAD_LOCAL[name]) unresolved.push(`${name}: no IPC channel and not listed in PRELOAD_LOCAL`);
+      if (!BROWSER_LOCAL.has(name)) unresolved.push(`${name}: no transport channel and not listed in BROWSER_LOCAL`);
       continue;
     }
     for (const { mode, channel } of calls) {
@@ -82,13 +71,13 @@ test('every window.cc method is accounted for by exactly one contract', () => {
   assert.deepEqual(unresolved, [], 'window.cc drifted from main/cc_handlers.js');
 });
 
-test('invoke/send mode matches preload for every handled channel', () => {
+test('invoke/send mode matches the browser for every handled channel', () => {
   const mismatched = [];
   for (const [name, calls] of SURFACE) {
     for (const { mode, channel } of calls) {
       if (mode === 'on' || !TABLE[channel]) continue;
       if (TABLE[channel].mode !== mode) {
-        mismatched.push(`${name}: preload uses ipcRenderer.${mode}('${channel}') but the table declares '${TABLE[channel].mode}'`);
+        mismatched.push(`${name}: browser uses ${mode}('${channel}') but the table declares '${TABLE[channel].mode}'`);
       }
     }
   }
@@ -102,7 +91,8 @@ test('no handler is unreachable from window.cc except the documented ones', () =
   for (const calls of SURFACE.values()) {
     for (const { channel } of calls) reachable.add(channel);
   }
-  const orphans = Object.keys(TABLE).filter((channel) => !reachable.has(channel) && !UNCALLED[channel]);
+  // saveImage is a browser-local download; the host retains its existing handler.
+  const orphans = Object.keys(TABLE).filter((channel) => !reachable.has(channel) && !UNCALLED[channel] && channel !== 'pty:save-image');
   assert.deepEqual(orphans, [], 'these handlers are registered but no window.cc method calls them');
 });
 
@@ -111,12 +101,12 @@ test('the documented sets describe reality and nothing more', () => {
   for (const calls of SURFACE.values()) {
     for (const { channel } of calls) channels.add(channel);
   }
-  for (const [label, set] of [['WEB_LOCAL', WEB_LOCAL], ['WEB_UNSUPPORTED', WEB_UNSUPPORTED], ['UNIMPLEMENTED', UNIMPLEMENTED]]) {
+  for (const [label, set] of [['UNIMPLEMENTED', UNIMPLEMENTED]]) {
     const stale = Object.keys(set).filter((c) => !channels.has(c));
-    assert.deepEqual(stale, [], `${label} lists channels preload no longer has`);
+    assert.deepEqual(stale, [], `${label} lists channels the browser no longer has`);
   }
   assert.deepEqual(PUSH_EVENTS.filter((c) => !channels.has(c)), []);
-  assert.deepEqual(Object.keys(PRELOAD_LOCAL).filter((n) => !SURFACE.has(n)), []);
+  assert.deepEqual([...BROWSER_LOCAL].filter((name) => !SURFACE.has(name)), []);
   assert.deepEqual(Object.keys(UNCALLED).filter((c) => !TABLE[c]), [], 'UNCALLED lists channels that are not registered');
   // UNIMPLEMENTED must never overlap a channel that IS served.
   assert.deepEqual(Object.keys(UNIMPLEMENTED).filter((c) => TABLE[c]), []);
@@ -151,34 +141,12 @@ test('the clipboard is never routed over the wire', () => {
   }
 });
 
-test('every refusable channel records the mode preload actually uses', () => {
-  // The bridge refuses by this mode; getting it wrong would push an
-  // unsolicited error frame at a send-mode caller that never asked for a reply.
-  const preloadMode = new Map();
-  for (const calls of SURFACE.values()) {
-    for (const { mode, channel } of calls) if (mode !== 'on') preloadMode.set(channel, mode);
-  }
-  const wrong = [];
+test('every refusable channel records a reason', () => {
+  // Browser-local methods do not send these channels. Keep the shared refusal
+  // metadata assertion; the removed preload's IPC modes are no longer a surface.
   for (const [label, set] of [['WEB_LOCAL', WEB_LOCAL], ['WEB_UNSUPPORTED', WEB_UNSUPPORTED]]) {
     for (const [channel, entry] of Object.entries(set)) {
       assert.equal(typeof entry.reason, 'string', `${label}.${channel} needs a reason`);
-      if (entry.mode !== preloadMode.get(channel)) {
-        wrong.push(`${label}.${channel}: declared '${entry.mode}', preload uses '${preloadMode.get(channel)}'`);
-      }
     }
   }
-  assert.deepEqual(wrong, []);
-});
-
-test('main.js registers the native channels and nothing the shared module owns', () => {
-  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  const registered = [...main.matchAll(/ipcMain\.(?:handle|on)\('([^']+)'/g)].map((m) => m[1]).sort();
-  const native = [...Object.keys(WEB_LOCAL), ...Object.keys(WEB_UNSUPPORTED)]
-    .filter((c) => c !== 'clipboard:read-text' && c !== 'clipboard:write-text' && c !== 'context-menu')
-    .sort();
-  assert.deepEqual(registered, native,
-    'main.js must register exactly the Electron-native channels; everything else belongs to main/cc_handlers.js');
-  // The clipboard pair comes from its own bridge, and context-menu has no
-  // handler on either transport.
-  assert.match(main, /registerClipboardIpc\(ipcMain, clipboard\)/);
 });

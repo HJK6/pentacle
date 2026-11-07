@@ -1,10 +1,8 @@
 'use strict';
 
 // ── Browser implementation of window.cc / window.HOST ────────────────────────
-// Method-for-method with preload.js, over the websocket the headless host
-// serves at /cc. renderer/app.js is not forked: it sees the same names, the
-// same argument shapes, and the same "invoke returns a promise, send returns
-// nothing" split.
+// Uses the websocket the headless host serves at /cc. Invoke-mode calls return
+// promises; send-mode calls return nothing.
 //
 // Installed SYNCHRONOUSLY, before any renderer script runs, because app.js
 // reads window.cc and window.HOST at module scope. Calls made before the socket
@@ -23,8 +21,7 @@ const { createBrowserPopouts, parseAssetContext } = require('./browser_popouts')
 
 function chatPopoutContextFromSearch(search) {
   // URLSearchParams already percent-decodes the value. Decoding a second time
-  // (as preload.js must, because its argv value is still raw) would eat a
-  // literal % in a title and can turn a valid context into null.
+  // would eat a literal % in a title and can turn a valid context into null.
   const raw = new URLSearchParams(search || '').get('pentacle-chat-popout');
   if (!raw) return null;
   try {
@@ -147,28 +144,25 @@ function createTransport({ url, logger = console } = {}) {
         else queued.push(frame);
       });
     },
-    /** send-mode: fire-and-forget, returns undefined exactly like ipcRenderer.send. */
+    /** send-mode: fire-and-forget, returns undefined. */
     fire(method, ...args) {
       const frame = { method, args };
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
       else queued.push(frame);
       return undefined;
     },
-    /** Replaces any previous handler, mirroring preload's removeAllListeners. */
+    /** Replaces any previous handler for the event. */
     on(event, handler) { listeners.set(event, handler); },
     /**
      * Register a callback fired on every socket RE-open (not the first
-     * connect). Web-only: preload.js has no equivalent because the desktop's
-     * ipcRenderer transport never drops, so app.js code guarded by
-     * `window.cc.onReconnect?.(…)` is a no-op on the desktop.
+     * connect), so app.js can restore state after a host connection drops.
      */
     onReconnect(handler) { reconnectHandler = handler; },
     onDisconnect(handler) { disconnectHandler = handler; },
     /**
      * Deliver an event to the local listener as if the host had pushed it. The
-     * web context menu uses this to fire `assign-slot`/`action` — on the desktop
-     * the native menu emits those from the main process; in the browser the menu
-     * is local, so it drives the very same listeners `app.js` registered.
+     * web context menu uses this to fire `assign-slot`/`action` through the
+     * listeners registered by app.js.
      */
     emit(event, ...args) {
       const handler = listeners.get(event);
@@ -179,8 +173,7 @@ function createTransport({ url, logger = console } = {}) {
   };
 }
 
-// The viewer's clipboard, never the host's. readClipboard is async here, which
-// matches the public preload (it invokes clipboard:read-text).
+// The viewer's clipboard, never the host's. Clipboard reads are asynchronous.
 function browserClipboard() {
   return {
     async writeText(text) {
@@ -208,14 +201,6 @@ function browserClipboard() {
   };
 }
 
-// ── Native-method browser behaviours ─────────────────────────────────────────
-// The desktop serves these through Electron (a native window, menu, or a host
-// file write). None has a host equivalent for a browser viewer, so the web
-// layer answers them here rather than round-tripping to a channel the host
-// refuses or that would act on the host. main/cc_handlers.js keeps them in its
-// WEB_UNSUPPORTED / served tables (the parity test's invariant); only the shim
-// behaviour changes.
-
 // Last position a context menu was requested at, captured in installWebCc so the
 // menu can open under the pointer. Defaults keep it usable in tests with no DOM.
 const contextMenuPointer = { x: 0, y: 0 };
@@ -234,8 +219,7 @@ function showWebToast(message, { document: doc = (typeof document !== 'undefined
 }
 
 // The viewer's browser, not the host's disk: hand the pasted image to the viewer
-// as a download instead of writing it into the host's tmpdir (what pty:save-image
-// does on the desktop).
+// as a download instead of writing it into the host's tmpdir.
 function browserDownloadImage(base64Data, { document: doc = (typeof document !== 'undefined' ? document : null) } = {}) {
   if (!doc || !doc.body) return { ok: false, error: 'no document' };
   try {
@@ -312,8 +296,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
   const fire = transport.fire.bind(transport);
   const on = transport.on.bind(transport);
   const emit = transport.emit ? transport.emit.bind(transport) : () => {};
-  // Meeting/mic are surfaced only where the desktop would surface them — behind
-  // the mic feature flag — so a build without it stays silent.
+  // Meeting/mic notices respect the mic feature flag.
   const micFeature = !!(config && config.features && config.features.mic);
   const notInWeb = (label) => { if (micFeature) showWebToast(`${label} is not available in web mode`); };
 
@@ -353,8 +336,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
 
     killTmuxSession: (hostId, sessionName) => call('tmux:kill-session', hostId, sessionName),
     setWindowTitle: (hostId, sessionName, title, source) => call('tmux:set-window-title', hostId, sessionName, title, source || 'manual'),
-    // The pasted image goes to the viewer's browser as a download, not to the
-    // host's tmpdir (what pty:save-image does on the desktop).
+    // Download the pasted image in the viewer's browser.
     saveImage: (base64Data) => Promise.resolve(browserDownloadImage(base64Data)),
 
     getConfig: () => {
@@ -469,8 +451,7 @@ function buildCc(transport, { clipboard, chatPopoutContext, assetPopoutContext =
     getAssistantBinding: () => call('chat-stream:assistant-binding'),
     listUiReviewArtifacts: () => call('ui-review:list-artifacts'),
 
-    // The desktop pops a native menu; the browser renders an HTML one that
-    // fires the same assign-slot / action events into app.js's listeners.
+    // The HTML menu fires assign-slot / action events into app.js listeners.
     showContextMenu: (sessionName, displayName, hostId) => {
       const items = webContextMenuItems(sessionName, displayName, hostId || 'local', emit);
       renderWebContextMenu(items, { x: contextMenuPointer.x, y: contextMenuPointer.y });

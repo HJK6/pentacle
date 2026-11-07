@@ -43,7 +43,7 @@ test('loadConfig returns warnings and writes them to stderr', (t) => {
 });
 
 // Regression guard (public_e2e_harness): a config missing dark/terminal crashed
-// the app at launch (main.js `backgroundColor: CONFIG.dark.bg` → "Cannot read
+// the renderer at launch (`backgroundColor: CONFIG.dark.bg` → "Cannot read
 // properties of undefined (reading 'bg')", no usable window). The packaged app
 // is the trap (its resolved config can differ from dev). Pentacle is dark-only;
 // there is no light theme block.
