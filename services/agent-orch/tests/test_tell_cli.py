@@ -9,6 +9,17 @@ from agent_orch import cli
 from agent_orch.config import Config
 
 
+def test_pool_refusal_is_nonzero_and_attempted_once(monkeypatch,capsys,tmp_path):
+    calls=[]
+    async def refuse(config,request,timeout):
+        calls.append(request)
+        return {'type':'tell.error','error_code':'pool_at_cap','retryable':False,'queued_for_redelivery':False}
+    monkeypatch.setattr(cli,'load_config',lambda:Config('ws://test','tok','hostb',tmp_path))
+    monkeypatch.setattr(cli,'tell_once',refuse)
+    assert cli.tell(_args(from_stream_id='hostb:codex-a'))!=0
+    assert len(calls)==1 and json.loads(capsys.readouterr().out)['error_code']=='pool_at_cap'
+
+
 def _args(**overrides):
     data = {
         "peer_stream_id": "hostb:codex-b",

@@ -6,7 +6,7 @@ import uuid
 
 def register(subparsers):
     parser = subparsers.add_parser("account", help="daemon-owned provider account controls")
-    parser.add_argument("action", choices=("default", "status", "relogin", "upgrade", "repin", "pin-status", "pin-set", "probe", "revalidate-health", "report-failure", "observe-failure"))
+    parser.add_argument("action", choices=("default", "status", "relogin", "upgrade", "repin", "pin-status", "pin-set", "pool-control-set", "seat-override-set", "probe", "revalidate-health", "report-failure", "observe-failure"))
     parser.add_argument("--provider", choices=("codex", "claude"))
     parser.add_argument("--account")
     parser.add_argument("default_action", nargs="?", choices=("set",))
@@ -19,6 +19,15 @@ def register(subparsers):
     parser.add_argument("--expected-version")
     parser.add_argument("--expected-executable-sha256")
     parser.add_argument("--expected-revision", type=int)
+    parser.add_argument("--pool-id")
+    parser.add_argument("--blocked", choices=("true","false"))
+    parser.add_argument("--stop-pct", help="finite ceiling 0..100, or none")
+    parser.add_argument("--window", help="exact observed window key, or none")
+    parser.add_argument("--authority-ref")
+    parser.add_argument("--supersedes-authority-ref")
+    parser.add_argument("--stream")
+    parser.add_argument("--expected-generation")
+    parser.add_argument("--enabled", choices=("true","false"))
     parser.add_argument("--pin-file", help="reviewed exact pair JSON snapshot")
     parser.add_argument("--target-pin-file", help="immutable revision-one target for a pre-enforcement repin")
     parser.add_argument("--initial-parked-cells-file", help="explicit initial-only cell decisions JSON array")
@@ -65,6 +74,24 @@ def execute(args):
                   "expected_pin_digest", "reconcile_of", "expected_origin_digest", "supersede_repin", "recover_receipt", "expected_raw_digest", "expected_high_water_revision","expected_readiness_digest"):
         value = getattr(args, field, None)
         if value is not None: payload[field] = value
+    for field in ("pool_id","authority_ref","supersedes_authority_ref","stream","expected_generation"):
+        value=getattr(args,field,None)
+        if value is not None: payload[field]=value
+    try:
+        if args.action=="pool-control-set":
+            if args.blocked is None or args.stop_pct is None or args.window is None: raise ValueError()
+            payload.update(blocked=args.blocked=="true",stop_pct=None if args.stop_pct=="none" else float(args.stop_pct),
+                           window=None if args.window=="none" else args.window)
+            import math
+            if payload["stop_pct"] is not None and (not math.isfinite(payload["stop_pct"]) or not 0<=payload["stop_pct"]<=100): raise ValueError()
+        if args.action=="seat-override-set":
+            if args.enabled is None: raise ValueError()
+            payload["enabled"]=args.enabled=="true"
+        if args.action in {"pool-control-set","seat-override-set"} and (
+                args.expected_revision is None or args.expected_revision<0 or not all((args.operation_id,args.reason,args.authority_ref))):
+            raise ValueError()
+    except ValueError:
+        _print_response({"type":"account.error","error_code":"account_request_invalid"}); return 2
     try:
         from pathlib import Path
         def unique(pairs):
@@ -95,7 +122,7 @@ def execute(args):
         _print_response({"type":"account.error","error_code":"account_request_invalid"}); return 2
     if (args.action == "default") != (args.default_action == "set"):
         _print_response({"type": "account.error", "error_code": "account_action_invalid"}); return 2
-    if args.action not in {"status","pin-status","pin-set"}:
+    if args.action not in {"status","pin-status","pin-set","pool-control-set","seat-override-set"}:
         payload.setdefault("login_generation", "active")
     try:
         timeout = args.timeout if args.timeout is not None else (330 if args.action in {"repin","relogin"} or
@@ -135,4 +162,7 @@ def usage(args):
         for pool in result["quota_pools"]:
             print(f'{pool["provider"]} {pool["pool_id"]}: ' + ("fresh" if pool["fresh"] else "unknown/stale") +
                   f' (age_seconds={pool.get("age_seconds")})')
+            if "cap" in pool:
+                print("  cap="+json.dumps(pool["cap"],separators=(",",":"))+" eligibility="+
+                      json.dumps(pool.get("eligibility"),separators=(",",":")))
     return 0

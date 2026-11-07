@@ -203,10 +203,17 @@ class AssistantLaneRulings:
         await self.store.submit(op)
 
     async def binding(self) -> dict[str, Any]:
+        return await self.store.submit(self.binding_conn)
+
+    def binding_conn(self,conn) -> dict[str, Any]:
+        """Same existing binding, readable within an account/input transaction."""
+        from store_assistant_binding import _seat_conn, front_desk_aliases_conn
+        import store_lifecycle_authority as lifecycle_authority
         composite = self._composite()
         if composite is None or not composite.enabled or not composite.config.direct_primary:
             return {"state": "unconfigured", "source": "none", "stream_id": "", "generation": ""}
-        value = await self.store.get("assistant.authority.stream_id")
+        raw=conn.execute("SELECT v FROM kv WHERE k='assistant.authority.stream_id'").fetchone()
+        value=raw[0] if raw else None
         source = "kv" if value is not None else "env"
         selected = str(value if value is not None else composite.env_config.authority_stream_id).strip()
         if not selected:
@@ -217,14 +224,14 @@ class AssistantLaneRulings:
             raise ValueError("assistant_authority_stream_id_invalid")
         if selected == composite.config.direct_primary_stream_id or (
                 self.server.sessions.assistant.front_desk_mode
-                and selected in await self.store.front_desk_aliases()):
+                and selected in front_desk_aliases_conn(conn,lifecycle_authority.configured(conn))):
             # A selection of a proved FD seat is the logical primary, so it
             # follows the binding; an independent advisor stays independent.
             return {"state": "same_primary", "source": source,
                     "stream_id": composite.config.direct_primary_stream_id,
                     "generation": composite.config.direct_primary_generation}
         host, _, name = selected.partition(":")
-        seat = await self.store.fetch_session(host, name)
+        seat = _seat_conn(conn,selected)
         generation = str((seat or {}).get("session_generation") or "")
         available = bool(seat and seat.get("status") == "open"
                          and seat.get("pane_status") == "pane_alive"

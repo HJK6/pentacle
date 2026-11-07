@@ -1107,6 +1107,9 @@ def spawn(args: argparse.Namespace) -> int:
     handoff = bool(getattr(args, "handoff", False))
     top_level = bool(getattr(args, "top_level", False))
     scheduled = bool(getattr(args, "at", None) or getattr(args, "delay", None))
+    if scheduled and (getattr(args,"pool_override_reason",None) or getattr(args,"pool_authority_ref",None)):
+        print("agent-orch spawn: one-spawn pool overrides require an immediate spawn",file=sys.stderr)
+        return 2
     if getattr(args, "at", None) and getattr(args, "delay", None):
         print("agent-orch spawn: validation failed: --at and --delay are mutually exclusive", file=sys.stderr)
         return 2
@@ -1385,6 +1388,8 @@ def spawn(args: argparse.Namespace) -> int:
     }
     if getattr(args, "account", None) is not None:
         payload["account"] = args.account
+    for field in ("pool_override_reason","pool_authority_ref"):
+        if getattr(args,field,None) is not None: payload[field]=getattr(args,field)
     if spec_ids:
         payload["spec_id"] = spec_ids[0]
         if len(spec_ids) > 1:
@@ -5349,6 +5354,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     spawn_parser = subparsers.add_parser("spawn")
     spawn_parser.add_argument("--account", help="Named account within existing launch authority; retained for delayed/recurring work. Omitted fresh launches use the target default.")
+    spawn_parser.add_argument("--pool-override-reason",help="Current primary/operator: override one spawn's pool control")
+    spawn_parser.add_argument("--pool-authority-ref",help="Authority receipt for that one spawn")
     spawn_parser.add_argument("--no-watch", action="store_true", help="Skip the default parent watch")
     spawn_parser.add_argument("--provider", help="Required except for --handoff, which inherits the retiring stream provider.")
     spawn_parser.add_argument(

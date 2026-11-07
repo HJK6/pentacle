@@ -20,6 +20,94 @@ from test_qa_dispatch_counter import state, LEAD, SPEC, TOKEN
 from test_window_schedule_contract import FakeComms
 
 
+async def cap_fixture_pool(runtime,*,pct=21,revision=0):
+    from test_account_rotation import observation
+    from test_account_pool_control import OPERATOR
+    account=await runtime.run(lambda a:a.bound(binding('spare',host='localhost').key))
+    now=runtime.clock();obs=observation(account)
+    obs.update(observed_at=now)
+    obs['windows']['weekly'].update(pct=pct,reset_at=now+1000)
+    await runtime.record_observation(account,obs)
+    if revision==0:
+        await runtime.operation(dict(action='pool-control-set',provider='codex',pool_id=account.pool_id,
+            expected_revision=0,operation_id='fixture-cap',blocked=False,stop_pct=21,window='weekly',
+            reason='owned cap drill',authority_ref='fixture-order',_auth_context=OPERATOR))
+
+
+@pytest.mark.parametrize('race',[False,True])
+def test_current_pool_cap_refuses_real_spawn_at_selection_or_final_admit(tmp_path,race):
+    async def run():
+        store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
+        try:
+            if race:
+                choose=runtime.choose_launch
+                async def crossed(**kwargs):
+                    selected=await choose(**kwargs)
+                    await cap_fixture_pool(runtime)
+                    return selected
+                runtime.choose_launch=crossed
+            else: await cap_fixture_pool(runtime)
+            with pytest.raises(VerbError) as refused:
+                await ctl._spawn_guarded(message('spawn',provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+                    initial_prompt='native user prompt',objective='Owned final-admission cap drill',idempotency_key='cap-race'), 'localhost')
+            assert refused.value.code=='account_pool_cap_reached'
+            assert pane.launches==0
+            assert not [row for row in await store.list_sessions() if (row.get('account_binding') or {}).get('alias')=='spare']
+        finally:
+            for task in tuple(ctl._background_spawns): task.cancel()
+            await asyncio.gather(*tuple(ctl._background_spawns),return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
+def test_admitted_spawn_replay_at_cap_keeps_one_process_and_original_receipt(tmp_path):
+    async def run():
+        store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
+        try:
+            msg=message('spawn',provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+                initial_prompt='native user prompt',objective='Owned receipt replay',idempotency_key='cap-replay')
+            first=await ctl._spawn_guarded(dict(msg),'localhost')
+            await cap_fixture_pool(runtime)
+            replay=await ctl._spawn_guarded(dict(msg),'localhost')
+            assert first['stream_id']==replay['stream_id'] and pane.launches==1
+        finally:
+            for task in tuple(ctl._background_spawns): task.cancel()
+            await asyncio.gather(*tuple(ctl._background_spawns),return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('recurring',[False,True])
+def test_schedule_materialized_before_cap_checks_current_control_at_fire(tmp_path,recurring):
+    async def run():
+        store,runtime,pane,ctl,surface,message=await fixture(tmp_path)
+        try:
+            template=dict(provider='codex',account='spare',model='gpt-6.1-sol',effort='high',
+                spec_ids=[SPEC],initial_prompt='native user prompt',objective='Owned scheduled cap drill')
+            if recurring:
+                created=await surface.recurring_create(message('schedule.recurring.create',name='owned-rule',every='daily',
+                    at_time='00:00',timezone='UTC',parent='none',target_host='localhost',**template))
+                materialized=await surface.recurring_run(message('schedule.recurring.run',recurring_id=created['recurring']['recurring_id']))
+                schedule_id=materialized['schedule_id']
+                await surface.recurring_pause(message('schedule.recurring.pause',recurring_id=created['recurring']['recurring_id']))
+            else:
+                created=await surface.schedule_insert(message('schedule.insert',fires_at_utc=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),
+                    target_host='localhost',**template))
+                schedule_id=created['schedule']['schedule_id']
+            await cap_fixture_pool(runtime)
+            with pytest.raises(VerbError) as refused: await surface._fire_schedule(schedule_id)
+            assert refused.value.extra['spawn']['error_code']=='account_pool_cap_reached'
+            assert pane.launches==0
+            pending=await surface.schedule_insert(message('schedule.insert',fires_at_utc=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),target_host='localhost',**template))
+            cancelled=await surface.schedule_cancel(message('schedule.cancel',schedule_id=pending['schedule']['schedule_id']))
+            assert cancelled['type']=='schedule.cancel.ok'
+        finally:
+            for task in tuple(ctl._background_spawns): task.cancel()
+            await asyncio.gather(*tuple(ctl._background_spawns),return_exceptions=True)
+            store.stop()
+    asyncio.run(run())
+
+
 async def fixture(tmp_path):
     store, sessions, _, comms, _, server = await state(tmp_path/'state.db')
     class Catalog:

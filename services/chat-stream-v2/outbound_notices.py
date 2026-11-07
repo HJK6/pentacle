@@ -66,6 +66,8 @@ _NON_URGENT_KINDS = frozenset({
 })
 
 _TERMINAL_CODES = frozenset({
+    "pool_at_cap", "pool_blocked", "pool_usage_unknown",
+    "pool_notice_stale",
     "bad_request",
     "from_stream_id_forbidden",
     "tell_id_conflict",
@@ -353,6 +355,12 @@ class OutboundNoticeQueue:
             import json
             metadata = row.get('metadata') or '{}'
             metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if kind in {"account_cap_reminder","account_cap_blocker"}:
+                from account_pool_control import NOTICE_TOKEN
+                message.update(_pool_notice_token=NOTICE_TOKEN,_pool_notice_metadata=metadata,_pool_notice_kind=kind)
+                if kind=="account_cap_blocker":
+                    from front_desk_digest import WAKE_TOKEN
+                    message['_front_desk_wake_token']=WAKE_TOKEN
             if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
@@ -401,6 +409,10 @@ class OutboundNoticeQueue:
         except Exception as exc:  # noqa: BLE001 - durable failure state below
             code = str(getattr(exc, "code", "") or "")
             reason = str(exc)[:400]
+            if code=="pool_notice_deferred":
+                await self.store.fail_outbound_notice(str(row['notice_id']),owner=self.owner,error=code,
+                    next_attempt_at=time.time()+NOTICE_INTERVAL_S,next_action='wait for fresh autonomous evidence',count_attempt=False)
+                return "retry"
             if code in _TERMINAL_CODES:
                 await self._terminal(row, reason, "inspect the terminal notice reason and recipient lifecycle")
                 return "terminal"
@@ -409,6 +421,10 @@ class OutboundNoticeQueue:
 
         if isinstance(reply, dict) and reply.get("assistant_backend_ingress") == "persisted_suppressed":
             await self._terminal(row, "persisted_suppressed", "routine ingress persisted without provider delivery")
+            return "terminal"
+        from account_pool_control import POOL_ERRORS
+        if isinstance(reply,dict) and reply.get("error_code") in POOL_ERRORS:
+            await self._terminal(row,reply["error_code"],"pool refusal is terminal; inspect current account status")
             return "terminal"
         if not (isinstance(reply, dict) and reply.get("delivery_status") == "delivered"):
             proof_pending = (

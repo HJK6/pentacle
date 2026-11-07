@@ -28,6 +28,7 @@ expired; backoff on failure; kill switch `--disable-notification-expiry`.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 import qa_dispatch
 
@@ -100,6 +101,7 @@ def is_codex_usage_command(value: object) -> bool:
 
 
 CODEX_INITIAL_PROMPT_PENDING = "initial_prompt_pending"
+_POOL_INPUT_MESSAGE = ContextVar("pool_input_message",default=None)
 
 
 def _verified_operator_provenance(msg: dict[str, Any]) -> bool:
@@ -569,6 +571,7 @@ class Comms:
         ``pasted_unsubmitted`` and a same-ID replay performs no input.
         """
         tell_id = str(msg.get("tell_id") or "").strip() or uuid.uuid4().hex[:12]
+        msg={**msg,"tell_id":tell_id}
         try:
             route, body = await self._route(msg)
         except VerbError as exc:
@@ -619,6 +622,7 @@ class Comms:
         self._inflight[tell_id] = (digest, fut)
         outcome: tuple[str, Any] = ("error", VerbError("delivery_failed", "tell did not complete"))
         try:
+            await self._pool_ingress(str(route["final_target"]),msg)
             policy = self.assistant_ingress_policy
             if callable(policy):
                 # The policy sees the caller's tell_id only when one was supplied;
@@ -660,6 +664,11 @@ class Comms:
             outcome = ("ok", reply)
             return reply
         except Exception as exc:
+            from account_pool_control import POOL_ERRORS
+            if isinstance(exc,VerbError) and exc.code in POOL_ERRORS:
+                reply=await self._pool_tell_refusal(msg,tell_id,route,digest,exc)
+                outcome=("ok",reply)
+                return reply
             if isinstance(exc, VerbError) and exc.code == CODEX_RESET_BLOCKED:
                 await self._record_blocked_input(
                     msg, tell_id, exc, verb="tell", receipt=False,
@@ -919,6 +928,7 @@ class Comms:
         enqueued_at = iso_now()
         delivery = {
             "tell_id": tell_id,
+            "cap_input_reason":msg.get('_pool_input_reason'),
             "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
             "to_stream_id": str(route["final_target"]),
             "original_to_stream_id": str(route["original_target"]),
@@ -1411,11 +1421,14 @@ class Comms:
                     await self._validate_assistant_request_target(msg, route)
                 if before_paste is not None:
                     await before_paste(watermark)
-        confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
-            tmux, name, body, provider, bool(msg.get("urgent")), target,
-            durable_proof=msg.get("_durable_notice_proof") is True,
-            before_paste=prepare,
-        )
+        token=_POOL_INPUT_MESSAGE.set(msg)
+        try:
+            confirmed, attempts, active_draft, proof, watermark = await self._inject_body(
+                tmux, name, body, provider, bool(msg.get("urgent")), target,
+                durable_proof=msg.get("_durable_notice_proof") is True,
+                before_paste=prepare,
+            )
+        finally: _POOL_INPUT_MESSAGE.reset(token)
         return confirmed, attempts, provider, active_draft, proof, watermark
 
     async def _prepare_answer_input(
@@ -1467,7 +1480,7 @@ class Comms:
                 await self._assert_codex_pane_input_safe(stream_id, before)
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(stream_id):
+            async with self._account_input_guard(stream_id,claim=True):
                 await tmux.paste(name, body)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(body), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
@@ -1477,7 +1490,7 @@ class Comms:
             return confirmed, 1, False, proof, watermark
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._watermark_before_action(stream_id)
-        async with self._account_input_guard(stream_id):
+        async with self._account_input_guard(stream_id,claim=True):
             if before_paste is not None:
                 await before_paste(watermark)
             await tmux.paste(name, body)
@@ -1768,8 +1781,27 @@ class Comms:
         except Exception as exc:  # noqa: BLE001 - public send error is stable
             raise VerbError("paste_failed", str(exc), phase="enter_failed") from exc
 
+    async def _pool_ingress(self,target,message):
+        runtime=getattr(self,"account_runtime",None)
+        if runtime is None: return
+        from provider_accounts import AccountError
+        try:
+            reason=await runtime.cap_input(await self.store.fetch_session(*self.sessions.split(target)) or {},message)
+            if reason=="direct_operator_order": message["_pool_input_reason"]=reason
+            return reason
+        except AccountError as exc:
+            raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
+
+    async def _pool_tell_refusal(self,msg,tell_id,route,digest,exc):
+        reply={"type":"tell.error","error_code":exc.code,"error":exc.code,"tell_id":tell_id,
+               "to_stream_id":route["final_target"],"delivery_status":"not_landed",**exc.extra}
+        await self.store.put_tell_delivery(tell_id,{"payload_digest":digest,"reply":reply,
+            "delivery":{"tell_id":tell_id,"to_stream_id":route["final_target"],"text":"",
+                        "delivery_status":"not_landed","submission_confirmed":False,"reason":exc.code}})
+        return reply
+
     @asynccontextmanager
-    async def _account_input_guard(self,target,*,phase="not_started"):
+    async def _account_input_guard(self,target,*,phase="not_started",claim=False):
         runtime=getattr(self,"account_runtime",None)
         if runtime is None:
             yield
@@ -1777,7 +1809,8 @@ class Comms:
         from provider_accounts import AccountError
         host,name=self.sessions.split(target)
         try:
-            async with runtime.input_guard(await self.store.fetch_session(host,name) or {}):
+            async with runtime.input_guard(await self.store.fetch_session(host,name) or {},
+                    message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim):
                 yield
         except AccountError as exc:
             if str(exc)=="provider_cli_input_maintenance" and phase!="not_started":
@@ -1786,6 +1819,11 @@ class Comms:
             raise VerbError(str(exc),str(exc),phase=phase,**exc.context) from None
 
     async def _attempt_send_delivery(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
+        token=_POOL_INPUT_MESSAGE.set(plan.message)
+        try: return await self._attempt_send_delivery_bound(plan)
+        finally: _POOL_INPUT_MESSAGE.reset(token)
+
+    async def _attempt_send_delivery_bound(self, plan: SendPlan) -> tuple[bool, int, bool, str, str | None]:
         """Submit one prepared plan: one paste, then at most one Enter retry."""
         target = str(plan.route["final_target"])
         host, name = self.sessions.split(target)
@@ -1806,7 +1844,7 @@ class Comms:
 
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(target):
+            async with self._account_input_guard(target,claim=True):
                 pane_mode_reason = await tmux.paste(name, plan.wire_text)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
@@ -1822,7 +1860,7 @@ class Comms:
 
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
-        async with self._account_input_guard(target):
+        async with self._account_input_guard(target,claim=True):
             pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -1890,6 +1928,9 @@ class Comms:
     ) -> dict[str, Any]:
         """Append the receipt record; nothing in this lane updates a prior row."""
         from_stream_id, actor_stream_id, actor_trusted = self._send_provenance(plan.message)
+        from account_pool_control import operator
+        if operator(plan.message.get("_auth_context") or {}):
+            plan.meta["pool_input"]={"reason":"direct_operator_order","wire_text":plan.wire_text}
         return await self.store.append_send_receipt(
             to_stream_id=str(plan.route["final_target"]),
             request_id=request_id,
@@ -1954,6 +1995,11 @@ class Comms:
             result["attempts"] = attempts
         if reason:
             result["reason"] = reason
+        from account_pool_control import POOL_ERRORS
+        if reason in POOL_ERRORS:
+            result.update(plan.meta.get("pool_refusal",{}))
+            result.update(error_code=reason,retryable=False,nonretryable=True,do_not_retry=True,
+                          queued_for_redelivery=False,phase="not_started")
         if provider_queued:
             result["provider_queued"] = True
         if action_committed:
@@ -2066,6 +2112,9 @@ class Comms:
         except VerbError as exc:
             phase = str(exc.extra.get("phase") or "body_maybe_pasted")
             if phase == "not_started":
+                plan.meta['pool_input_not_started']=True
+                from account_pool_control import POOL_ERRORS
+                if exc.code in POOL_ERRORS: plan.meta["pool_refusal"]=exc.extra
                 return await self._send_result(
                     plan, request_id=request_id, receipt_id=receipt_id,
                     state="not_landed", delivery="not_landed", submission_confirmed=False,
@@ -2125,7 +2174,7 @@ class Comms:
             provider_queued=provider_queued,
         )
 
-    async def _prompt_in_native_queue(self, target: str, provider: str, wire_text: str) -> bool:
+    async def _prompt_in_native_queue(self, target: str, provider: str, wire_text: str, *, strict=False) -> bool:
         """One post-delivery capture: is the prompt held in the native queue?
 
         Purely informational; any capture failure answers False so the send's
@@ -2138,6 +2187,7 @@ class Comms:
             tmux = self.hosts.tmux_for(host) if self.hosts is not None else self.spawnctl.tmux
             pane = await tmux.capture(name)
         except Exception:  # noqa: BLE001 - informational probe only
+            if strict: raise
             return False
         return isinstance(pane, str) and prompt_in_native_queue(pane, wire_text, provider)
 
@@ -2177,6 +2227,11 @@ class Comms:
         # A replay of a send the provider holds in its native queue stays queued.
         # The winner may itself be a replay ("coalesced_replay:<id>;provider_queued").
         winner_reason = str(winner.get("reason") or "")
+        from account_pool_control import POOL_ERRORS
+        if winner_reason in POOL_ERRORS:
+            plan.meta['pool_refusal']=(winner.get('meta') or {}).get('pool_refusal') or {'reason':winner_reason}
+            return await self._send_result(plan,request_id=request_id,receipt_id=receipt_id,
+                state='not_landed',delivery='not_landed',submission_confirmed=False,reason=winner_reason,attempts=0)
         winner_queued = winner_reason == "provider_queued" or winner_reason.endswith(";provider_queued")
         await self._append_send_receipt(
             plan, request_id=request_id, receipt_id=receipt_id,
@@ -2272,6 +2327,13 @@ class Comms:
             return await self._coalesced_send_result(
                 plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
             )
+        try: await self._pool_ingress(target,msg)
+        except VerbError as exc:
+            from account_pool_control import POOL_ERRORS
+            if exc.code not in POOL_ERRORS: raise
+            plan.meta["pool_refusal"]=exc.extra
+            return await self._send_result(plan,request_id=request_id,receipt_id=receipt_id,
+                state="not_landed",delivery="not_landed",submission_confirmed=False,reason=exc.code,attempts=0)
         if self.front_desk_digest is not None:
             held = await self.front_desk_digest.ingress(
                 target_stream_id=target, body=plan.body, msg=msg, verb="send",
