@@ -2,6 +2,29 @@
 
 The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated desktop/mobile transport.
 
+## Accepted report evidence
+
+`work.report.get` reads an immutable ingested report by `report_id`. Existing
+authenticated metadata callers receive `report_id`, `status`, `from_stream_id`,
+`provenance_qualified_spec_ids` and `created_at`. Missing reports remain
+`not_found`; unavailable storage remains `unavailable`.
+
+Only the existing `work-report-reader` service identity additionally receives
+well-formed typed evidence for a finished QA report: `qa_verdict`, `target_sha`,
+the report's `session_generation`, and `qa_review` containing only
+`reviewed_scope`, `candidate_identity`, `gate_evidence_digest` and the optional
+`commission_msg_id`. Candidate identity must equal the full target SHA; scope
+and generation must be nonempty, the evidence digest must be SHA256, and a
+present commission ID must be a nonnegative integer. Missing or malformed
+evidence leaves the original metadata response intact. No opaque extras,
+report body, request hash or credentials are exposed. The service's existing
+authentication and single-verb restriction are unchanged.
+
+A consumer admitting a protected release must require ACCEPT and bind the
+reviewer's immutable evidence to its exact candidate bytes, affected paths and
+base revisions, while retaining spec provenance, reviewer independence and
+commission checks. A completed report or free-form scope alone is insufficient.
+
 [Named provider accounts](../../docs/provider_accounts.md) are optional and
 default OFF. Their launch, transcript, usage and recovery consumers must be
 compatible before enabling the host's named-account controls.
