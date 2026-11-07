@@ -1,6 +1,49 @@
 # Pentacle
 
-Pentacle is a terminal workspace for coding agents, work specifications and review evidence. **Pentacle Web is the recommended way to install and use Pentacle**: a browser (or installed PWA) served by the Node web host (`node server`) on the computer running your agents, so the app ships once on that host and every device just reloads. This repository includes that web host, the Python daemon that runs your agent sessions, and a deprecated Electron desktop app. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon from your phone.
+**A control plane for your AI agents.**
+
+Run a fleet of coding agents across machines, providers and accounts. They
+share one memory, follow enforced process, and report to one always-on agent
+you talk to.
+
+## Core principles
+
+1. **One fleet, any provider.** Claude, Codex, Cursor, Gemini and ChatGPT
+   agents are interchangeable workers. The control plane is the constant.
+2. **Memory outlives the session.** Shared memory, work specs and procedures
+   live outside any single agent or context window. Every agent starts from
+   the same truth.
+3. **Work is tracked, not trusted.** Every task is a spec with a status,
+   evidence and independent QA. Nothing is done because an agent said so.
+4. **Rules are enforced, not prompted.** Roles, procedures, QA gates and usage
+   limits are checked by the daemon. An agent cannot talk its way around them.
+5. **Agents talk to agents.** Any agent can message, spawn, commission and
+   report to any other agent in the fleet, on any machine.
+6. **One point of contact.** An always-on assistant triages, delegates and
+   answers. You never have to find the right agent.
+7. **Manage from anywhere.** Web, mobile and voice. Read status, answer a
+   question or approve from your phone.
+
+## How it fits together
+
+Each layer builds on the one below it.
+
+| Layer | What it is | Included |
+| --- | --- | --- |
+| Hosts and accounts | Your machines, provider CLIs and pooled accounts | [Machines and `agent-orch` setup](docs/agent_orchestration_setup.md), [provider accounts](docs/provider_accounts.md), [usage accounting](docs/usage_accounting.md), outside agents such as a [ChatGPT Dot agent](docs/connect-a-dot-agent.md) or a [friend agent](docs/connect-a-friend-agent.md) |
+| Shared memory | Work specs, procedures and evidence, synced to every host | [Process workspace](PROCESS.md) with spec templates, lifecycle directories and validation tools |
+| Daemon | One Python daemon that runs sessions, spawns agents, carries messages and enforces the rules | [Communication contract](docs/communication_contract.md), [reports and assets](docs/report_assets.md), [governance tripwires](docs/governance_tripwires.md), [admission guards](docs/completion-admission-guards.md) |
+| Work tracking | Work streams (lanes), specs, QA gates, evidence and dashboards | [Work lanes](docs/web_work_lanes.md), [specs dashboard](docs/specs_dashboard.md), [dashboards](docs/dashboards_view.md) |
+| Assistant | The always-on agent you talk to: triage, delegation, follow-ups, durable questions | [Assistant](docs/assistant.md), [recovery](docs/assistant_recovery.md) and [transfer](docs/assistant_transfer.md) |
+| Surfaces | Web, mobile, terminal and voice | [Pentacle Web](server/README.md), [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile), [voice answers](docs/web_voice_answers.md), [room microphone](docs/room_mic_conversation.md) |
+
+This repository holds the daemon, the `agent-orch` command-line client, the
+process workspace and Pentacle Web. **Pentacle Web is the recommended way to
+install and use Pentacle**: a browser (or installed PWA) served by the Node web
+host (`node server`) on the computer running your agents, so the app ships once
+on that host and every device just reloads. [Pentacle
+Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon
+from your phone.
 
 > **The Electron desktop app is deprecated** — no further upgrades, packaging or rollout, and it is not recommended for new installs. Use Pentacle Web for daily work; run the daemon and open the served URL in a browser. The desktop source remains available; see [Desktop (deprecated)](#desktop-deprecated) and [web host setup](server/README.md).
 
@@ -36,7 +79,7 @@ For an external assistant using a host-provisioned message service, see
 
 | Repository | What it provides | Do I need to clone it? |
 | --- | --- | --- |
-| [pentacle](https://github.com/HJK6/pentacle) | Web client + daemon (and the deprecated Electron desktop app) | Yes, on the computer running your agents. The daemon serves the web client; the desktop app is deprecated. |
+| [pentacle](https://github.com/HJK6/pentacle) | Daemon, `agent-orch` CLI, process workspace and Pentacle Web (plus the deprecated Electron desktop app) | Yes, on the computer running your agents. The daemon serves the web client; the desktop app is deprecated. |
 | [pentacle-mobile](https://github.com/HJK6/pentacle-mobile) | Mobile app | Only if you want to build the phone app. |
 | [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core) | Shared chat model and rendering library | No. Both clients already vendor a copy in `pentacle-chat-core/`; normal dependency installation uses it automatically. Clone upstream only to work on the library itself. |
 
