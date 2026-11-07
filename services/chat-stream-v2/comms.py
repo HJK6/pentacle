@@ -571,7 +571,6 @@ class Comms:
         ``pasted_unsubmitted`` and a same-ID replay performs no input.
         """
         tell_id = str(msg.get("tell_id") or "").strip() or uuid.uuid4().hex[:12]
-        msg={**msg,"tell_id":tell_id}
         try:
             route, body = await self._route(msg)
         except VerbError as exc:
@@ -656,6 +655,7 @@ class Comms:
                     await self._stamp_milestone_status(msg, body)
                     outcome = ("ok", reply)
                     return reply
+            msg={**msg,"tell_id":tell_id}
             async with self._pane_input_lock(str(route["final_target"])):
                 await self._validate_assistant_request_target(msg, route)
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
