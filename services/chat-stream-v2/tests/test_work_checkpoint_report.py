@@ -40,23 +40,14 @@ def report(status, report_id):
 
 
 @pytest.mark.asyncio
-async def test_owner_done_with_malformed_source_is_refused_then_accepted_after_fix(memory):
+@pytest.mark.parametrize("status", ["done", "progress"])
+async def test_owner_report_with_malformed_source_is_durable_with_warning(memory, status):
     store, ledger = await ledger_with({"role": "lead", "assigned_spec_id": "spec_demo__bridge"})
     try:
-        with pytest.raises(VerbError) as exc:
-            await ledger.report(report("done", "r-1"))
-        assert exc.value.code == "work_checkpoint_invalid"
-        assert "**Status** —" in str(exc.value) and "as_of 2026-10-15, provisional" in str(exc.value)
-        assert await store.get_report("r-1") is None
-        (memory / "spec.md").write_text(FIXED_SPEC)
-        (memory / "summary.md").write_text(LABELLED)
-        reply = await ledger.report(report("done", "r-1"))
-        assert reply["work_checkpoint"]["state"] == "valid"
-        assert reply["work_checkpoint"]["facts"]["next_action_text"] == "Join the deck."
-        assert (await store.get_report("r-1"))["extras"]["work_checkpoint"]["state"] == "valid"
-        # A later spec regression never refuses the replay of a stored report.
-        (memory / "summary.md").write_text(PROSE)
-        assert (await ledger.report(report("done", "r-1")))["report_id"] == "r-1"
+        reply = await ledger.report(report(status, "r-1"))
+        assert reply["work_checkpoint"]["state"] == "invalid"
+        assert (await store.get_report("r-1"))["extras"]["work_checkpoint"]["state"] == "invalid"
+        assert (await ledger.report(report(status, "r-1")))["report_id"] == "r-1"
     finally:
         store.stop()
 
