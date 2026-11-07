@@ -1,52 +1,67 @@
 # Pentacle
 
-Pentacle is a terminal workspace for coding agents, work specifications and review evidence. **Pentacle Web is the recommended way to install and use Pentacle**: a browser (or installed PWA) served by the Node web host (`node server`) on the computer running your agents, so the app ships once on that host and every device just reloads. This repository includes that web host, the Python daemon that runs your agent sessions, and a deprecated Electron desktop app. [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) connects to the same daemon from your phone.
+**A control plane for your AI agents.**
 
-> **The Electron desktop app is deprecated** — no further upgrades, packaging or rollout, and it is not recommended for new installs. Use Pentacle Web for daily work; run the daemon and open the served URL in a browser. The desktop source remains available; see [Desktop (deprecated)](#desktop-deprecated) and [web host setup](server/README.md).
+Run a fleet of coding agents across machines, providers and accounts. They
+share one memory, follow enforced process, and report to one always-on agent
+you talk to.
 
-Sessions open in **Chat** by default (choose **Terminal** under Settings → Default view). The workspace shows one to four panes, and a first visit opens the assistant chat; see [workspace controls](docs/chat_first_workspace.md). Mobile is a separate client and is unaffected by these settings.
+## Core principles
 
-## See the workspace
+1. **One fleet, any provider.** Claude, Codex, Cursor, Gemini and ChatGPT
+   agents are interchangeable workers. The control plane is the constant.
+2. **Memory outlives the session.** Shared memory, work specs and procedures
+   live outside any single agent or context window. Every agent starts from
+   the same truth.
+3. **Work is tracked, not trusted.** Every task is a spec with a status,
+   evidence and independent QA. Nothing is done because an agent said so.
+4. **Rules are enforced, not prompted.** Roles, procedures, QA gates and usage
+   limits are checked by the daemon. An agent cannot talk its way around them.
+5. **Agents talk to agents.** Any agent can message, spawn, commission and
+   report to any other agent in the fleet, on any machine.
+6. **One point of contact.** An always-on assistant triages, delegates and
+   answers. You never have to find the right agent.
+7. **Manage from anywhere.** Web, mobile and voice. Read status, answer a
+   question or approve from your phone.
 
-A single-machine example with invented sessions and conversation text. Machine
-icons hide automatically when the workspace has one host.
+## How it fits together
+
+Each layer builds on the one below it.
+
+| Layer | What it is | Included |
+| --- | --- | --- |
+| Hosts and accounts | Your machines, provider CLIs and pooled accounts | [Machines and `agent-orch` setup](docs/agent_orchestration_setup.md), [provider accounts](docs/provider_accounts.md), [usage accounting](docs/usage_accounting.md), outside agents such as a [ChatGPT Dot agent](docs/connect-a-dot-agent.md) or a [friend agent](docs/connect-a-friend-agent.md) |
+| Shared memory | Work specs, procedures and evidence, synced to every host | [Process workspace](PROCESS.md) with spec templates, lifecycle directories and validation tools |
+| Daemon | One Python daemon that runs sessions, spawns agents, carries messages and enforces the rules | [Communication contract](docs/communication_contract.md), [reports and assets](docs/report_assets.md), [governance tripwires](docs/governance_tripwires.md), [admission guards](docs/completion-admission-guards.md) |
+| Work tracking | Work streams (lanes), specs, QA gates, evidence and dashboards | [Work lanes](docs/web_work_lanes.md), [specs dashboard](docs/specs_dashboard.md), [dashboards](docs/dashboards_view.md) |
+| Assistant | The always-on agent you talk to: triage, delegation, follow-ups, durable questions | [Assistant](docs/assistant.md), [recovery](docs/assistant_recovery.md) and [transfer](docs/assistant_transfer.md) |
+| Surfaces | Web, mobile, terminal and voice | [Pentacle Web](server/README.md), [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile), [voice answers](docs/web_voice_answers.md), [room microphone](docs/room_mic_conversation.md) |
+
+## See it
+
+A single-machine example with invented sessions and conversation text.
 
 ![Pentacle Web chat view showing a sample website launch conversation](docs/images/onboarding-chat.png)
 
-[New Chat and terminal screenshots](docs/screenshots.md) show the other views.
-Agents also publish reviewable reports and assets — see the
-[reports and assets showcase](docs/reports_showcase.md).
+More views: [New Chat and terminal screenshots](docs/screenshots.md), and the
+[reports and assets showcase](docs/reports_showcase.md) for what agents
+publish back to you.
 
-## Getting started
+## Quick start
 
-The easiest setup is to start a coding agent such as Fable or Astra and give it
-[AGENT_SETUP.md](AGENT_SETUP.md). That separate guide contains the agent's full
-setup checklist. Have your provider account ready; login or device approvals
-may need your attention. The manual steps are below: install, start the daemon,
-then serve and open Pentacle Web.
+The fastest route is to hand a coding agent [AGENT_SETUP.md](AGENT_SETUP.md).
+It holds the full setup checklist. Keep your provider account ready; sign-in
+and device approvals may need you.
 
-For a phone, see [Pentacle Mobile](https://github.com/HJK6/pentacle-mobile).
+The manual route is: install, issue a credential, start the daemon, serve
+Pentacle Web.
 
-To connect a ChatGPT "Dot" agent to your own fleet for large assignments, see
-[Connect a ChatGPT Dot agent](docs/connect-a-dot-agent.md).
-For an external assistant using a host-provisioned message service, see
-[Connect a friend agent](docs/connect-a-friend-agent.md).
+**Prerequisites.** macOS or Linux, Node.js 22.12+, Python 3.11+, tmux, and at
+least one signed-in agent CLI (`claude` or `codex`). On Windows run the daemon
+and tmux inside WSL and set `localWsl` in the config, or point terminals at a
+separate SSH host; the commands below assume a macOS, Linux or WSL shell.
 
-## Which repositories do I need?
-
-| Repository | What it provides | Do I need to clone it? |
-| --- | --- | --- |
-| [pentacle](https://github.com/HJK6/pentacle) | Web client + daemon (and the deprecated Electron desktop app) | Yes, on the computer running your agents. The daemon serves the web client; the desktop app is deprecated. |
-| [pentacle-mobile](https://github.com/HJK6/pentacle-mobile) | Mobile app | Only if you want to build the phone app. |
-| [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core) | Shared chat model and rendering library | No. Both clients already vendor a copy in `pentacle-chat-core/`; normal dependency installation uses it automatically. Clone upstream only to work on the library itself. |
-
-## Local setup
-
-See the [configuration reference](docs/desktop_config.md) for host defaults, optional mic/limits setup, warnings and upgrade behavior; the web host loads the same config.
-
-Use macOS or Linux with Node.js 22.12 or newer, Python 3.11 or newer, tmux and at least one configured agent CLI (`claude` or `codex`). Authenticate the CLI with your own account before using it through Pentacle. On Windows, run the daemon and tmux inside WSL and set `localWsl` in the config so local terminals attach through `wsl.exe`, or configure a separate SSH terminal host; the shell commands below target macOS/Linux (or a WSL shell).
-
-From this repository:
+**1. Install.** From this repository:
 
 ```sh
 npm ci
@@ -58,14 +73,18 @@ chmod 700 "$HOME/.config/pentacle"
 cp pentacle.config.example.js "$HOME/.config/pentacle/pentacle.config.js"
 ```
 
-Issue the web host's daemon credential without printing it to your terminal (the path matches `chatStream.tokenPath` in the example config):
+**2. Issue the web host's daemon credential** without printing it (the path
+matches `chatStream.tokenPath` in the example config):
 
 ```sh
 python services/chat-stream-v2/tools/operator_auth_cli.py issue --client-kind pentacle --label web |
   python -c 'import json,os,pathlib,sys; p=pathlib.Path.home()/".config/pentacle/desktop.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,json.load(sys.stdin)["code"].encode()); os.close(fd); p.chmod(0o600)'
 ```
 
-Start the daemon in one terminal. The `local` identity matches the example config; the provider binaries come from your PATH, and transcripts remain in the provider's native directories.
+**3. Start the daemon** in one terminal. `local` is the host identity in the
+example config; provider binaries come from your PATH and transcripts stay in
+each provider's native directory. Pick another port here and in the config if
+7791 is taken.
 
 ```sh
 python services/chat-stream-v2/main.py --host 127.0.0.1 --port 7791 \
@@ -74,35 +93,46 @@ python services/chat-stream-v2/main.py --host 127.0.0.1 --port 7791 \
   --spawn-cwd "$HOME/workspace" --projects-root "$HOME/.claude/projects"
 ```
 
-An absent provider resolves to an empty binary and cannot be launched; use the provider you installed. Choose a different port in both the daemon command and private config if 7791 is already in use. In another terminal, from the repository:
-
-Build Pentacle Web, then serve it. Open the printed `http://127.0.0.1:7795` in a browser (and, if you like, install it as a PWA). To reach it from other devices, put it behind `tailscale serve` with Tailscale identity — see [web host setup](server/README.md) for `--auth`, `--origin`, `--allow-login` and the security boundary.
+**4. Build and serve Pentacle Web** in another terminal, then open the printed
+`http://127.0.0.1:7795` (install it as a PWA if you like):
 
 ```sh
 npm run build:web
 PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" node server --port 7795
 ```
 
-Use **New Chat**, select `local`, then the provider/model. The picker uses the
-catalog's `available_models` projection, while the daemon retains its broader
-compatibility catalog for existing sessions and explicit handoffs. Sessions
-open in the configured Default view. A disconnected daemon produces an error and creates no
-synthetic session. Keep the daemon running while using the web client or mobile.
-On the first landed operator turn, a visible top-level session receives a
-provisional durable title and status card; the provider may replace that
-summary, and later status changes publish to Web immediately.
+Use **New Chat**, pick `local`, then a provider and model. Keep the daemon
+running while any client is open. To reach Pentacle Web from other devices,
+put it behind `tailscale serve` with Tailscale identity; [web host
+setup](server/README.md) covers `--auth`, `--origin`, `--allow-login` and the
+security boundary. For a phone, install
+[Pentacle Mobile](https://github.com/HJK6/pentacle-mobile) against the same
+daemon.
 
-An optional chat-first look (warm Light/Dark palette, workspace typography and sidebar styling) is off by default. Enable **Chat-first style** in Settings and reload, or set `features.chatFirstStyle: true` in your private config. A saved Settings choice is preserved.
+## Configuration
 
-The private config selects `chatStream.url`, `chatStream.tokenPath`, host labels, terminal transports and optional features. The token must be a regular mode-0600 file inside a mode-0700 directory, using a path without symbolic-link ancestors. Do not commit credentials or runtime databases. See [daemon setup and remote clients](services/chat-stream-v2/README.md) and [public support boundaries](docs/public_release.md).
+The private config (`$HOME/.config/pentacle/pentacle.config.js`) selects the
+daemon URL and token path, host labels, terminal transports and optional
+features; see the [configuration reference](docs/desktop_config.md). The token
+must be a regular mode-0600 file in a mode-0700 directory with no symbolic-link
+ancestors. Never commit credentials or runtime databases.
 
-### Desktop (deprecated)
+Sessions open in **Chat** by default; choose **Terminal** under Settings →
+Default view. The workspace shows one to four panes and a first visit opens the
+assistant chat ([workspace controls](docs/chat_first_workspace.md)). An
+optional chat-first look is off by default; enable **Chat-first style** in
+Settings or set `features.chatFirstStyle: true`.
 
-The Electron desktop app still starts from the same config, but it receives no upgrades and is not recommended for new users. Use Pentacle Web instead unless you already depend on the desktop app:
+More: [daemon setup and remote clients](services/chat-stream-v2/README.md),
+[public support boundaries](docs/public_release.md).
 
-```sh
-PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
-```
+## Repositories
+
+| Repository | What it provides | Clone it? |
+| --- | --- | --- |
+| [pentacle](https://github.com/HJK6/pentacle) | Daemon, `agent-orch` CLI, process workspace and Pentacle Web | Yes, on the computer running your agents. |
+| [pentacle-mobile](https://github.com/HJK6/pentacle-mobile) | Phone client | Only to build the phone app. |
+| [pentacle-chat-core](https://github.com/HJK6/pentacle-chat-core) | Shared chat model and rendering library | No. Both clients vendor a copy in `pentacle-chat-core/`. Clone upstream only to work on the library. |
 
 ## Build and test
 
@@ -114,15 +144,38 @@ python -m pytest services/agent-orch/tests
 python tools/public_desktop_smoke.py       # real Electron + isolated daemon/provider
 ```
 
-The daemon tests exercise both Bash and Zsh remote shells; install both before running them (`sudo apt-get install bash zsh` on Debian/Ubuntu). The desktop smoke requires an available graphical desktop, tmux and lsof. It uses an isolated tmux socket, temporary credentials and deterministic provider JSONL; it never launches your paid provider CLI. The default Python suite excludes the explicitly marked long-running soak tier. Tests needing real provider CLIs are opt-in with `PENTACLE_LIVE_TESTS=1`.
+The daemon tests exercise both Bash and Zsh remote shells; install both first
+(`sudo apt-get install bash zsh` on Debian/Ubuntu). The desktop smoke needs a
+graphical desktop, tmux and lsof; it uses an isolated tmux socket, temporary
+credentials and deterministic provider JSONL, and never launches your paid
+provider CLI. The default Python suite excludes the long-running soak tier.
+Tests that need real provider CLIs are opt-in with `PENTACLE_LIVE_TESTS=1`.
 
-The certified daemon runner is `python services/chat-stream-v2/tools/run_gate.py merge` from a clean Git checkout. It runs unit and socket smoke tiers and writes evidence outside the repository. On macOS its multi-bind preflight requires the documented [loopback alias](services/chat-stream-v2/deploy/loopback-alias/README.md). CI runs these same public checks.
+The certified daemon runner is `python services/chat-stream-v2/tools/run_gate.py merge`
+from a clean Git checkout. It runs the unit and socket smoke tiers and writes
+evidence outside the repository. On macOS its multi-bind preflight requires the
+documented [loopback alias](services/chat-stream-v2/deploy/loopback-alias/README.md).
+CI runs these same public checks.
 
 ## Work process
 
-Start with [PROCESS.md](PROCESS.md), [workspace setup](process/README.md) and [AGENTS.md](AGENTS.md). The included process supplies spec templates, lifecycle directories, validation and search tools, development and QA guidelines, and optional daemon-backed agent coordination. Copy the process workspace to a private directory before adding real work or receipts.
+Start with [PROCESS.md](PROCESS.md), [workspace setup](process/README.md) and
+[AGENTS.md](AGENTS.md). The included process supplies spec templates,
+lifecycle directories, validation and search tools, development and QA
+guidelines, and optional daemon-backed agent coordination. Copy the process
+workspace to a private directory before adding real work or receipts.
+
+## Desktop (deprecated)
+
+The Electron desktop app still starts from the same config but receives no
+upgrades, packaging or rollout, and is not recommended for new installs. Use
+Pentacle Web unless you already depend on it:
+
+```sh
+PENTACLE_CONFIG="$HOME/.config/pentacle/pentacle.config.js" npm start
+```
 
 ## Contributions
 
-PRs, feature requests, and bug reports are welcome — open an issue or pull
-request at <https://github.com/HJK6/pentacle/issues>.
+PRs, feature requests and bug reports are welcome at
+<https://github.com/HJK6/pentacle/issues>.
