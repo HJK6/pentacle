@@ -28,14 +28,18 @@ receipts outside shared memory and retain only location/hash metadata there.
 ## Scheduled strict-full soak
 
 The nightly soak uses `tools/nightly_journey.py admit --job nightly-soak` and
-`report`, with a 2400-second child process-group bound and a 600-second window
-reserve. The FD owns `~/.pentacle/nightly-journey/window.json`: `host` must match
+`report`, with a 2400-second bound and a 600-second window reserve. TERM starts
+30 seconds before the bound for runner-owned cleanup; a birth-verified process
+tree snapshot contains nested sessions before the final cutoff. The FD owns
+`~/.pentacle/nightly-journey/window.json`: `host` must match
 the execution host; `start_utc` is `HH:MM`, `duration_s` is seconds,
 `valid_until` is a `YYYY-MM-DD` date at most 30 days ahead, `held_until` is null
 or an aware ISO timestamp, and `issued_by` names the issuing FD. Missing,
 malformed, expired, held, out-of-window or too-short windows block execution.
 One fire-time process snapshot also blocks active `gate_env.py`, `run_gate.py`
-or deploy commands; an unavailable process table blocks too. FD records certified
+or Python deployment scripts / `-m deploy.deploy` in the executable's first three
+argv positions; remote commands and agent prompt text do not block. An unavailable
+process table blocks too. FD records certified
 windows, quiet orders, heavy slots and deployments in `held_until`.
 
 Install the tracked `deploy/nightly-soak/run-nightly-soak.sh` and render

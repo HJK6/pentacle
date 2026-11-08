@@ -90,46 +90,115 @@ def fire_guard():
         columns = line.split(None, 2)
         if len(columns) != 3 or int(columns[0]) == os.getpid():
             continue
-        # Match executable/script tokens, not prose in an agent's instructions.
+        # Inspect only the local executable's first three argv positions.
         try:
             tokens = shlex.split(columns[2])
         except ValueError:
             tokens = columns[2].split()
-        for token in tokens:
-            name = Path(token).name
-            if name in ("gate_env.py", "run_gate.py", "deploy.py") or name == "deploy":
+        if not tokens:
+            continue
+        executable = Path(tokens[0]).name
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable):
+            script = tokens[2] if len(tokens) > 2 and tokens[1] in ("-u", "-B", "-I", "-s", "-S") else (tokens[1] if len(tokens) > 1 else "")
+            if (Path(script).name in ("gate_env.py", "run_gate.py", "deploy.py")
+                    or tokens[1:3] == ["-m", "deploy.deploy"]):
                 return "BLOCKED:active_gate_or_deploy"
     return "ADMIT"
 
 
-def bounded(command, envelope_s, receipt_path):
-    """Run a new, owned process group; SIGKILL that group at its hard bound.
+def process_table(timeout):
+    """Birth-pinned ancestry, including descendants that create new sessions."""
+    result = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart="],
+                            text=True, capture_output=True, check=True, timeout=timeout,
+                            env=dict(os.environ, TZ="UTC0", LC_ALL="C"))
+    table = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4:
+            pid, parent, group = map(int, parts[:3])
+            table[pid] = {"parent": parent, "group": group, "birth": parts[3]}
+    return table
 
-    start_new_session makes the child's PID its group ID. Never signal any
-    pre-existing group. Persist timeout evidence before the caller reports it.
+
+def owned_descendants(table, root, retained=None):
+    owned = {pid: row for pid, row in (retained or {}).items()
+             if pid in table and table[pid]["birth"] == row["birth"]}
+    if retained is None and root in table:
+        owned[root] = table[root]
+    while True:
+        extra = {pid: row for pid, row in table.items() if pid not in owned and row["parent"] in owned}
+        if not extra:
+            return owned
+        owned.update(extra)
+
+
+def bounded(command, envelope_s, receipt_path):
+    """Bound the actual runner topology, including its nested sessions.
+
+    TERM begins inside the envelope so run_gate can reap its own registry.
+    Before the terminal cutoff, birth-verified descendants are killed too.
+    Never discover ownership by argv text or signal a pre-existing group.
     """
     path = Path(receipt_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"envelope_s": envelope_s, "terminated_at_bound": False, "finished": False}
     path.write_text(json.dumps(record))
     started = clock.monotonic()
+    deadline = started + envelope_s
+    grace = min(30, envelope_s / 3)
+    verify_reserve = min(5, envelope_s / 8)
     child = subprocess.Popen(command, start_new_session=True)
     def interrupted(signum, _frame):
         raise InterruptedError(f"bound supervisor received signal {signum}")
     prior = signal.signal(signal.SIGTERM, interrupted)
-    try:
-        rc = child.wait(timeout=envelope_s)
-    except subprocess.TimeoutExpired:
-        record["terminated_at_bound"] = True
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
-        rc = 2
-    except BaseException:
+    owned = None
+    def stop_owned():
+        nonlocal owned
+        # Snapshot while the leader still owns its descendants, before TERM
+        # permits them to reparent. Retain birth identity across that change.
         try:
-            os.killpg(child.pid, signal.SIGKILL)
+            table = process_table(max(0.01, min(5, (deadline - clock.monotonic()) / 3)))
+            owned = owned_descendants(table, child.pid)
+            record["owned_at_stop"] = owned
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            record.setdefault("cleanup_errors", []).append(type(exc).__name__)
+            owned = {}
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        try:
+            child.wait(timeout=max(0, deadline - verify_reserve - clock.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            table = process_table(max(0.01, min(5, deadline - clock.monotonic())))
+            survivors = owned_descendants(table, child.pid, owned)
+            # Signal only processes whose retained birth still matches. A
+            # verified private group leader also owns any new group members.
+            for pid, row in survivors.items():
+                try:
+                    if row["group"] == pid:
+                        os.killpg(pid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            record["killed_owned_pids"] = list(survivors)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            record.setdefault("cleanup_errors", []).append(type(exc).__name__)
+        # The Popen-owned leader is safe to signal while it is still unreaped.
+        if child.poll() is None:
+            child.kill()
         child.wait()
+    try:
+        rc = child.wait(timeout=max(0, deadline - grace - clock.monotonic()))
+    except subprocess.TimeoutExpired:
+        record["terminated_at_bound"] = True
+        stop_owned()
+        rc = 2
+    except BaseException:
+        stop_owned()
         raise
     finally:
         signal.signal(signal.SIGTERM, prior)

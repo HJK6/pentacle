@@ -79,10 +79,28 @@ def test_cli_admit_never_executes_on_block(window, monkeypatch, capsys):
     assert capsys.readouterr().out.strip() == "BLOCKED:active_gate_or_deploy"
 
 
-@pytest.mark.parametrize("script", ["gate_env.py", "run_gate.py", "deploy.py", "deploy"])
+@pytest.mark.parametrize("script", ["gate_env.py", "run_gate.py", "deploy.py"])
 def test_fire_guard_active_process(monkeypatch, script):
-    monkeypatch.setattr(sa.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=f"123 python /fixture/{script} --run\n"))
+    monkeypatch.setattr(sa.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=f"123 python python /fixture/{script} --run\n"))
     assert sa.fire_guard() == "BLOCKED:active_gate_or_deploy"
+
+
+@pytest.mark.parametrize("args", ["python -m deploy.deploy --run", "python3.13 -u /fixture/gate_env.py --run"])
+def test_fire_guard_python_positions(monkeypatch, args):
+    monkeypatch.setattr(sa.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=f"123 python {args}\n"))
+    assert sa.fire_guard() == "BLOCKED:active_gate_or_deploy"
+
+
+@pytest.mark.parametrize("args", [
+    "codex --prompt deploy gate_env.py run_gate.py",
+    "claude --prompt deploy gate_env.py run_gate.py",
+    "ssh fixture python /fixture/gate_env.py",
+    "python /fixture/unrelated.py deploy gate_env.py",
+    "python -c 'print(\"deploy\")' gate_env.py",
+])
+def test_fire_guard_ignores_prompt_data_and_remote_commands(monkeypatch, args):
+    monkeypatch.setattr(sa.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=f"123 program {args}\n"))
+    assert sa.fire_guard() == "ADMIT"
 
 
 def test_fire_guard_clear_and_unavailable(monkeypatch):
@@ -108,6 +126,21 @@ def test_bound_success(tmp_path):
     path = tmp_path / "bound.json"
     assert sa.bounded([sys.executable, "-c", "pass"], 2, path) == 0
     assert json.loads(path.read_text())["terminated_at_bound"] is False
+
+
+def test_bound_contains_term_resistant_separate_sessions(tmp_path):
+    marker = tmp_path / "escaped"
+    descendant = f"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(1); open({str(marker)!r},'w').write('escaped')"
+    child = f"import subprocess,sys,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); subprocess.Popen([sys.executable,'-c',{descendant!r}],start_new_session=True); time.sleep(10)"
+    receipt = tmp_path / "bound.json"
+    assert sa.bounded([sys.executable, "-c", child], 0.6, receipt) == 2
+    value = json.loads(receipt.read_text())
+    assert value["terminated_at_bound"] and len(value["owned_at_stop"]) >= 2
+    assert len(value["killed_owned_pids"]) >= 2
+    assert not value.get("cleanup_errors")
+    assert value["elapsed_s"] < 0.6
+    time.sleep(0.7)
+    assert not marker.exists()
 
 
 @pytest.fixture
