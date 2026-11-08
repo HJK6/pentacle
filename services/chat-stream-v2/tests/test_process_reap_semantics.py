@@ -224,6 +224,8 @@ def test_saved_sessions_capture_reopens_and_reaps_with_recording_sink(tmp_path, 
     ("clock_step", "boot_clock_changed"),
     ("clock_step_during_read", "clock_provenance_unknown"),
     ("snapshot_pid_reuse", "identity_drift"),
+    ("malformed_snapshot", "identity_drift"),
+    ("malformed_boot", "clock_provenance_unknown"),
 ])
 def test_saved_alternate_proof_reaches_only_the_allowed_signal_sink(tmp_path, case, reason):
     import asyncio
@@ -248,6 +250,8 @@ def test_saved_alternate_proof_reaches_only_the_allowed_signal_sink(tmp_path, ca
             # A backward-step replacement may appear older than capture. Boot
             # sec/usec provenance must still refuse it before signal intent.
             boot = BOOT.replace("1780000000", "1780000010")
+        elif case == "malformed_boot":
+            boot = "{ sec = unreadable, usec = 123 }"
         utc = f"42420 1 501 42420 42420 {UTC} owned-synthetic\n"
         local = utc.replace(UTC, LOCAL)
         snapshot = {"utc": utc, "local": local, "utc_after": utc,
@@ -256,6 +260,8 @@ def test_saved_alternate_proof_reaches_only_the_allowed_signal_sink(tmp_path, ca
             snapshot["boot_after"] = BOOT.replace("1780000000", "1780000010")
         elif case == "snapshot_pid_reuse":
             snapshot["utc_after"] = utc.replace("16:00:00", "16:00:01")
+        elif case == "malformed_snapshot":
+            snapshot["utc"] = None
         deliveries = []
         class Terminal:
             async def run(self, *args, **kwargs): return 0, ""

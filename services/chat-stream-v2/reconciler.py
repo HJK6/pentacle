@@ -772,6 +772,11 @@ class SessionReconciler:
         if comparison is not None and comparison[0] == 0:
             try:
                 observed = json.loads(comparison[1])
+                if not isinstance(observed, dict) or not all(
+                    isinstance(observed.get(key), str)
+                    for key in ("utc", "local", "utc_after", "boot_before", "boot_after")
+                ):
+                    raise ValueError("incomplete comparison observation")
                 utc = prockill.parse_process_records(observed["utc"])
                 local = prockill.parse_process_records(observed["local"])
                 utc_after = prockill.parse_process_records(observed["utc_after"])
@@ -884,7 +889,11 @@ class SessionReconciler:
                 deferred.append({**item, "reap_reason": "identity_drift"})
                 continue
             if not prockill.boot_matches(proof.get("boot_id"), boot):
-                reason = "boot_clock_changed" if prockill.darwin_boot(proof.get("boot_id")) is not None else "identity_drift"
+                old_clock = prockill.darwin_boot(proof.get("boot_id"))
+                new_clock = prockill.darwin_boot(boot)
+                reason = ("boot_clock_changed" if old_clock is not None and new_clock is not None
+                          else "clock_provenance_unknown" if old_clock is not None or new_clock is not None
+                          else "identity_drift")
                 deferred.append({**item, "reap_reason": reason})
                 continue
             refusal = self._birth_refusal(host, proof, current, boot)

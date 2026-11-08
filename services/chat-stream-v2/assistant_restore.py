@@ -98,66 +98,19 @@ PSResult = tuple[int, str, str]
 
 
 async def run_ps(pid: str, *, ps_bin: str = "ps", timeout_s: float = PS_TIMEOUT_S) -> tuple[PSResult, ...]:
-    """Observe the two supported birth renderings on the process's host.
-
-    Empty TZ is not host-local on Darwin. Explicitly remove it for that read;
-    keep the persisted producer and the daemon's own environment untouched.
-    """
-    from prockill import terminate_and_reap
-    results = []
-    for zone in ("UTC0", None):
-        env = {**os.environ, "LC_ALL": "C"}
-        if zone is None:
-            env.pop("TZ", None)
-        else:
-            env["TZ"] = zone
-        proc = await asyncio.create_subprocess_exec(
-            ps_bin, "-o", "lstart=", "-p", pid, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
-        except BaseException:
-            await terminate_and_reap(proc)
-            raise
-        value = (int(proc.returncode or 0), out.decode(errors="replace"), err.decode(errors="replace"))
-        if value == (1, "", ""):
-            # A hidden/permission-limited ps row is not kernel absence. EPERM
-            # (or mere PID existence) still supplies no comparable birth.
-            try:
-                os.kill(int(pid), 0)
-            except ProcessLookupError:
-                pass
-            except (OSError, ValueError):
-                value = (2, "", "process_absence_unproven")
-            else:
-                value = (2, "", "process_absence_unproven")
-        results.append(value)
-    return tuple(results)
+    """Comparison observations; persisted producer rendering is unchanged."""
+    from prockill import start_observations
+    return await start_observations(pid, ps_bin=ps_bin, timeout_s=timeout_s)
 
 
 def classify_ps(rc: int, stdout: str, stderr: str, recorded_start: str) -> str:
-    """``gone`` / ``alive`` / ``unknown`` for one explicit ``ps`` observation.
-
-    Only no such pid (exit 1 with no output) proves absence. A live PID with
-    a different printed birth has no comparable replacement provenance in an
-    observer binding; it stays unknown, including for manual restore/replay.
-    """
-    if rc == 1:
-        # "No such pid" prints nothing at all; whitespace is still output.
-        return "gone" if stdout == "" and stderr == "" else "unknown"
-    if rc == 0 and stderr == "":
-        # Exactly one line; blank lines around it are not ignored.
-        lines = stdout.splitlines()
-        if len(lines) != 1:
-            return "unknown"
-        try:
-            datetime.strptime(_normalize_start(lines[0]), "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            return "unknown"
-        if not _normalize_start(recorded_start):
-            return "unknown"
-        return "alive" if _normalize_start(lines[0]) == _normalize_start(recorded_start) else "unknown"
+    """Only definitive absence is gone; unmatched live birth remains unknown."""
+    from prockill import birth_matches, classify_start_observation
+    state, start = classify_start_observation(rc, stdout, stderr)
+    if state == "absent":
+        return "gone"
+    if state == "record" and birth_matches(recorded_start, start):
+        return "alive"
     return "unknown"
 
 
@@ -516,13 +469,9 @@ class AssistantRestore:
             return "gone", None
         # A well-formed record with an unmatched birth is distinct from a
         # failed probe. Neither is death proof and neither permits replay.
-        for rc, out, err in observations:
-            if rc == 0 and not err and len(out.splitlines()) == 1:
-                try:
-                    datetime.strptime(_normalize_start(out), "%a %b %d %H:%M:%S %Y")
-                except ValueError:
-                    continue
-                return "unknown", "process_identity_incomparable"
+        from prockill import classify_start_observation
+        if any(classify_start_observation(*value)[0] == "record" for value in observations):
+            return "unknown", "process_identity_incomparable"
         return "unknown", "process_probe_unknown"
 
     async def _attempt_recorded_failed(self, row: dict[str, Any], episode: dict[str, Any]) -> bool:

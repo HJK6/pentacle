@@ -411,7 +411,7 @@ def test_close_persists_descendant_survivor_proof(monkeypatch: pytest.MonkeyPatc
         }
 
     async def boot() -> str:
-        return "boot-1"
+        return "12345678-1234-1234-1234-123456789abc"
 
     monkeypatch.setattr(sessions_mod.prockill, "process_records", records)
     monkeypatch.setattr(sessions_mod.prockill, "boot_id", boot)
@@ -483,7 +483,7 @@ def test_reap_reason_separates_inventory_incomplete_from_process_observed_alive(
             [{"pid": 101, "reap_reason": "inventory_incomplete"}],
             [],
             {},
-            "boot-1",
+            "12345678-1234-1234-1234-123456789abc",
         )
         assert safe == []
         assert deferred[0]["reap_reason"] == "inventory_incomplete"

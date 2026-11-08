@@ -664,7 +664,7 @@ class _ClosedSurvivorHosts(_FakeHosts):
     def __init__(self, tmux: _FakeTmux, process_text: str) -> None:
         super().__init__(tmux, online=True)
         self.process_text = process_text
-        self.boot = "boot-1"
+        self.boot = "12345678-1234-1234-1234-123456789abc"
         self.signals: list[tuple[str, list[int], int]] = []
 
     async def run_command(self, host: str, *args: str, **kwargs: object) -> tuple[int, str]:
@@ -728,7 +728,7 @@ def _proof(
         "start_id": start_id, "command": command,
     }
     return prockill.identity_proof(
-        host="hosta", boot="boot-1", record=record,
+        host="hosta", boot="12345678-1234-1234-1234-123456789abc", record=record,
         tmux_session=session, tmux_pane=pane, tty=tty, tmux_socket=socket,
     )
 
