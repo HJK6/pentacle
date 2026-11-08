@@ -169,7 +169,7 @@ class LineageCatalog(_FdCatalog):
         return "resolved" if spec_id in {FD_SPEC, UI_SPEC} else "zero_matches"
 
 
-async def scheduled_fixture(monkeypatch, tmp_path):
+async def scheduled_fixture(monkeypatch, tmp_path, *, recovery_spec=FD_SPEC, specs=None):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from window_schedule import WindowSchedule
@@ -181,16 +181,21 @@ async def scheduled_fixture(monkeypatch, tmp_path):
     tmux.store = store
     sessions = Sessions(store, tmux=tmux, local_host="localhost")
     _front_desk_composite(store, sessions)
+    if recovery_spec != FD_SPEC:
+        from assistant_composite import AssistantComposite, AssistantCompositeConfig
+        sessions.assistant.front_desk = AssistantComposite(store, config=AssistantCompositeConfig(
+            enabled=True, stream_id="fixture-chat:assistant",
+            rebind_authorized_spec_ids=frozenset({recovery_spec})))
     owner = await store.open_session(
         "localhost", "owner", provider="claude", visibility="default", pane_status="pane_alive",
         effective_model="claude-opus-5-5", effective_effort="medium",
-        spec_id=UI_SPEC, spec_ids=[UI_SPEC, FD_SPEC], qualified_spec_ids=[UI_SPEC, FD_SPEC],
+        spec_id=UI_SPEC, spec_ids=[UI_SPEC, recovery_spec], qualified_spec_ids=[UI_SPEC, recovery_spec],
         spec_binding_provenance=[{"spec_id": sid, "provenance": "parent_inherited",
                                   "granting_principal": "localhost:fd", "granted_at": "2026-11-08T00:00:00Z"}
-                                 for sid in (UI_SPEC, FD_SPEC)], assigned_spec_id=UI_SPEC)
-    await link_specs(store, FD_SPEC, UI_SPEC)
+                                 for sid in (UI_SPEC, recovery_spec)], assigned_spec_id=UI_SPEC)
+    await link_specs(store, recovery_spec, UI_SPEC)
     await sessions.refresh()
-    ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=LineageCatalog())
+    ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=specs or LineageCatalog())
     ctl.visibility_launches = _spy_operator_facing(monkeypatch)
     ctl.visibility_opens = []
     real_open = sessions.open
@@ -208,6 +213,79 @@ async def scheduled_fixture(monkeypatch, tmp_path):
     surface.mark_store_ready()
     auth = {"token_verified": True, "stream_id": "localhost:owner", "session_generation": owner["session_generation"]}
     return store, sessions, ctl, surface, auth
+
+
+@pytest.mark.parametrize("mode", ["once", "recurring-create", "recurring-update"])
+@pytest.mark.parametrize("folder_repo,declared_repo", [
+    ("example-recovery", "example_recovery"),
+    ("example_recovery", "example-recovery"),
+])
+@pytest.mark.parametrize("prefix", ["", "spec_"])
+def test_scheduled_recovery_alias_retains_original_selection(
+    monkeypatch, tmp_path, mode, folder_repo, declared_repo, prefix,
+):
+    """Use a real document identity snapshot, not a family-equivalence stub."""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    from _shared.specs_service import SpecsSubsystem
+
+    recovery = f"spec_{declared_repo}__cold"
+    alias = f"{prefix}{folder_repo}__cold"
+    memory = tmp_path / "alias-memory"
+    for folder, identity in [("example__ui", UI_SPEC), (f"{folder_repo}__cold", recovery)]:
+        path = memory / "work" / "in_progress" / folder / "spec.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nid: {identity}\n---\n")
+    specs = SpecsSubsystem(memory_root=memory.resolve(), session_summaries=lambda: [],
+                           changed_callback=lambda ids: None)
+
+    async def run():
+        store, sessions, ctl, surface, auth = await scheduled_fixture(
+            monkeypatch, tmp_path, recovery_spec=recovery, specs=specs)
+        try:
+            base = {"from_stream_id": "localhost:owner", "_auth_context": auth}
+            request = {**base, "request_id": str(uuid.uuid4()), "provider": "claude",
+                       "model": "claude-opus-5-5", "effort": "medium", "visibility": "default",
+                       "spec_ids": [UI_SPEC, alias], "objective": "Run explicitly selected recovery",
+                       "initial_prompt": "Continue the admitted recovery."}
+            if mode == "once":
+                request["fires_at_utc"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+                created = await surface.schedule_insert(request)
+                schedule_id = created["schedule"]["schedule_id"]
+            else:
+                request.update(name="Explicit recovery alias", every="daily", at_time="02:00", parent="none")
+                if mode == "recurring-update":
+                    request.pop("spec_ids")  # Owner fallback must not prove recovery.
+                created = await surface.recurring_create(request)
+                recurring_id = created["recurring"]["recurring_id"]
+                if mode == "recurring-update":
+                    original = await surface._get_receipt(request["request_id"], "row_committed")
+                    assert json.loads(original["measured_state_json"])["configured_recovery_explicit_spec_ids"] == []
+                    await surface.recurring_update({**base, "recurring_id": recurring_id,
+                                                    "spec_ids": [UI_SPEC, alias]})
+                occurrence = await surface.recurring_run({**base, "recurring_id": recurring_id})
+                schedule_id = occurrence["schedule_id"]
+            await surface._fire_schedule(schedule_id)
+            await asyncio.gather(*list(ctl._background_spawns))
+            child = next(row for row in sessions.list_open() if row["stream_id"] != "localhost:owner")
+            assert child["qualified_spec_ids"] == [UI_SPEC, recovery]
+            assert child["visibility"] == "hidden"
+            assert ctl.visibility_launches == [False]
+            assert ctl.visibility_opens[0]["first_open"]["visibility"] == "hidden"
+            assert ctl.visibility_opens[0]["retained_intent"]["visibility"] == "hidden"
+            provenance = {entry["spec_id"]: entry["provenance"] for entry in child["spec_binding_provenance"]}
+            assert provenance[recovery] == "spawn_explicit"
+            assert child["assigned_spec_id"] == UI_SPEC
+            before = await store.get_assistant_binding(env_binding={})
+            rebound = await store.rebind_assistant(
+                env_binding={}, actor_stream_id=child["stream_id"], actor_generation=child["session_generation"],
+                target_stream_id=child["stream_id"], target_generation=child["session_generation"],
+                request_id="explicit-alias-recovery", expected_revision=before["revision"],
+                authorized_spec_ids=frozenset({recovery}))
+            assert rebound["new_binding"]["stream_id"] == child["stream_id"]
+        finally:
+            store.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("explicit,corruption", [

@@ -498,8 +498,14 @@ class WindowSchedule:
     def _explicit_recovery_selection(self, requested, binding) -> list[str]:
         composite = getattr(getattr(self.sessions, "assistant", None), "front_desk", None)
         configured = composite.env_config.rebind_authorized_spec_ids if composite else frozenset()
-        selected = set(normalize_spec_ids(requested))
-        return [sid for sid in binding.get("qualified_spec_ids", []) if sid in selected and sid in configured]
+        if not normalize_spec_ids(requested):
+            return []
+        # Admission resolved exactly this explicit selection from one identity
+        # snapshot. Its binding already contains canonical document IDs, including
+        # proved folder aliases; comparing their original spellings loses proof.
+        # Callers keep owner fallback empty here, and omitted recurring edits reuse
+        # the prior receipt subset rather than treating merged template IDs as explicit.
+        return [sid for sid in binding.get("qualified_spec_ids", []) if sid in configured]
 
     @staticmethod
     def _recovery_measurement(row, subset, *, owner_generation=None):
