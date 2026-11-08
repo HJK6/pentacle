@@ -494,10 +494,10 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
     hostPort = await freePort();
     let profile = args.profile;
     if (!profile && !args.servedUrl) {
-      if (!args.scenarios.length || args.scenarios.includes('design-gallery')) await require('./lib/design_gallery_fixture.cjs').buildDesignGalleryFixture(scratch);
       runtime.fakeCosmo = await startFakeCosmo();
       runtime.modelerFixture = await startHostedModelerFixture(scratch, hostPort);
       daemon = await startDaemon(args, scratch, runtime);
+      if (!args.scenarios.length || args.scenarios.includes('design-gallery')) await require('./lib/design_gallery_fixture.cjs').buildDesignGalleryFixture(scratch);
       runtime.fixtureDaemonPort = daemon.port;
       profile = writeProfile(scratch, daemon.port, runtime.modelerFixture.url);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);

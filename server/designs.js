@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { createLibraryReader, contained, sha256, ID, HASH } = require('../lib/design_library.cjs');
+const { createLibraryReader, contained, fileState, ID, HASH } = require('../lib/design_library.cjs');
 
 function publicItem(item, kind) {
   const out = { id: item.id, title: item.title, kind, entry: item.entry, surface: item.surface || item.screen || '', variant: item.variant || '', group: item.group || '', viewport: item.viewport, approval_ref: item.approval_ref || null, compatibility: item.compatibility, generated: item.generated || null, screenshots: item.screenshots || [], video: item.video || null, prototype: !!item.prepared };
@@ -49,21 +49,27 @@ function createDesignRoutes({ libraryRoot } = {}) {
       const ext = path.extname(asset).toLowerCase();
       const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.mp4': 'video/mp4' }[ext];
       if (!type) throw new Error('unsupported media');
-      const data = fs.readFileSync(contained(loaded.dir, asset));
-      if (sha256(data) !== manifest.files.find(f => f.path === asset)?.sha256) throw new Error('media changed');
+      const file = contained(loaded.dir, asset), size = manifest.files.find(f => f.path === asset)?.size;
       const headers = { 'content-type': type, 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff', 'accept-ranges': 'bytes' };
       const range = req.headers.range;
-      let start = 0, end = data.length - 1;
+      let start = 0, end = size - 1;
       if (range) {
         const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-        if (!match || (!match[1] && !match[2])) { res.writeHead(416, { ...headers, 'content-range': `bytes */${data.length}` }).end(); return true; }
+        if (!match || (!match[1] && !match[2])) { res.writeHead(416, { ...headers, 'content-range': `bytes */${size}` }).end(); return true; }
         if (match[1]) { start = Number(match[1]); end = match[2] ? Math.min(Number(match[2]), end) : end; }
-        else start = Math.max(0, data.length - Number(match[2]));
-        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= data.length || Number(match[2]) === 0 && !match[1]) { res.writeHead(416, { ...headers, 'content-range': `bytes */${data.length}` }).end(); return true; }
-        headers['content-range'] = `bytes ${start}-${end}/${data.length}`;
+        else start = Math.max(0, size - Number(match[2]));
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size || Number(match[2]) === 0 && !match[1]) { res.writeHead(416, { ...headers, 'content-range': `bytes */${size}` }).end(); return true; }
+        headers['content-range'] = `bytes ${start}-${end}/${size}`;
       }
       headers['content-length'] = end - start + 1;
-      res.writeHead(range ? 206 : 200, headers).end(head ? undefined : data.subarray(start, end + 1));
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      if (fileState(fs.fstatSync(fd, { bigint: true })) !== loaded.fileStates.get(asset)) { fs.closeSync(fd); throw new Error('media changed'); }
+      res.writeHead(range ? 206 : 200, headers);
+      if (head || size === 0) { fs.closeSync(fd); res.end(); }
+      else {
+        const stream = fs.createReadStream(file, { fd, autoClose: true, start, end, highWaterMark: 64 * 1024 });
+        stream.on('error', () => res.destroy()); res.on('close', () => stream.destroy()); stream.pipe(res);
+      }
     } catch { json(res, 404, { error: 'design unavailable or still syncing' }, head); }
     return true;
   }

@@ -100,3 +100,21 @@ test('a source edit invalidates inherited approval evidence and cannot publish t
   const unsafe = path.join(root, 'unsafe'), outside = path.join(root, 'outside'); fs.mkdirSync(unsafe); fs.mkdirSync(outside); fs.symlinkSync(outside, path.join(unsafe, 'projects'));
   assert.throws(() => L.publishRevision({ dir: original.dir, library: unsafe }), /unsafe publication/); assert.equal(fs.readdirSync(outside).length, 0);
 });
+test('nested transfer/conflict files do not hide canonical content and conflicts are visible', async t => {
+  const root = scratch(t), library = path.join(root, 'library'), r = await fixture.revision(root);
+  L.publishRevision({ dir: r.dir, library }); const reader = L.createLibraryReader(library); reader.selected('example');
+  const source = path.join(library, 'projects/example/revisions', r.manifest.revision_id, 'source');
+  fs.writeFileSync(path.join(source, '.syncthing.index.html.tmp'), 'partial');
+  fs.writeFileSync(path.join(source, 'index.sync-conflict-20261108-123000-DEVICE.html'), 'conflicting copy');
+  const catalog = reader.catalog(); assert.equal(catalog.projects[0].manifest?.revision_id, r.manifest.revision_id); assert.equal(catalog.projects[0].sync, 'conflict');
+  fs.chmodSync(path.join(source, 'index.html'), 0o644); // owned corruption fixture only
+  fs.writeFileSync(path.join(source, 'index.html'), 'canonical corruption'); assert.equal(reader.selected('example').manifest, null, 'canonical corruption must still refuse serving');
+});
+test('a declared missing image is indexed as an incomplete draft and never selects current', async t => {
+  const root = scratch(t), library = path.join(root, 'library'), current = await fixture.revision(path.join(root, 'current')); L.publishRevision({ dir: current.dir, library });
+  const source = path.join(root, 'missing'); const d = fixture.drop(source, { complete: false }); fs.unlinkSync(path.join(source, 'payload/index.html'));
+  d.files = []; d.missing_paths = ['missing.png']; d.views[0].entry = 'missing.png'; L.atomicJson(path.join(source, 'drop.json'), d);
+  const imported = L.importDrop({ drop: source, staging: path.join(root, 'staging') }); const prepared = await P.prepareRevision(imported.dir);
+  assert.equal(prepared.views[0].compatibility.status, 'incomplete'); assert.match(prepared.views[0].compatibility.reason, /missing\.png/);
+  L.finalize(imported.dir); assert.equal(L.publishRevision({ dir: imported.dir, library }).current, false); assert.equal(L.createLibraryReader(library).selected('example').manifest.revision_id, current.manifest.revision_id);
+});

@@ -28,3 +28,16 @@ test('gallery renders empty, search and unavailable mode states without inventin
   [...refs.root.querySelectorAll('.dg-modes button')].find(b => b.textContent === 'Flow video').click(); assert.match(refs.root.querySelector('.dg-stage').textContent, /No flow video/);
   library.unmountGallery(refs); dom.window.close();
 });
+test('saved History reload fetches the retained manifest before displaying revision content', async () => {
+  const dom = new JSDOM('<main></main>', { url: 'https://app.example.test/designs/' }), old = 'b'.repeat(64);
+  const data = structuredClone(catalog); data.projects[0].revisions = [{ revision_id: old, source_revision: 'old-A', complete: true }];
+  data.projects[0].manifest.views[0].title = 'Current B';
+  dom.window.sessionStorage.setItem('design-gallery.selection', JSON.stringify({ project: 'example', revision: old, item: 'home', kind: 'views', mode: 'screens' }));
+  let resolve, requested; const pending = new Promise(done => { resolve = done; });
+  const refs = library.mountGallery(dom.window.document.querySelector('main'), { fetch: url => { requested = url; return pending; } }); library.updateGallery(refs, data);
+  assert.equal(refs.root.querySelector('h1').textContent.includes('Current B'), false, 'must not show current while the older History choice is pending');
+  const retained = structuredClone(data.projects[0].manifest); retained.revision_id = old; retained.project_id = 'example'; retained.views[0].title = 'Retained A';
+  resolve({ ok: true, json: async () => retained }); await new Promise(done => setImmediate(done));
+  assert.equal(requested, '/api/designs/example/' + old); assert.equal(refs.root.querySelector('h1').textContent, 'Retained A'); assert.ok(refs.root.querySelector('img').src.includes('/' + old + '/')); assert.equal(refs.root.querySelector('[aria-label="History"]').value, old);
+  library.unmountGallery(refs); dom.window.close();
+});

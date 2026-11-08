@@ -11,11 +11,22 @@ function drop(root, { id = 'example', html = HTML, complete = true, approvalRef 
   L.atomicJson(path.join(root, 'drop.json'), descriptor); return descriptor;
 }
 async function revision(root, options = {}) {
-  const source = path.join(root, 'drop-' + (options.id || 'example')); drop(source, options);
+  const source = path.join(root, 'drop-' + (options.id || 'example')), descriptor = drop(source, options);
+  if (options.mediaBytes) {
+    descriptor.flows = [{ id: 'media', title: 'Synthetic transport fixture', entry: 'index.html', view_ids: ['home'], viewport: { width: 800, height: 600 }, steps: [{ action: 'assert', name: 'Fixture state', selector: '#state' }] }];
+    L.atomicJson(path.join(source, 'drop.json'), descriptor);
+  }
   const imported = L.importDrop({ drop: source, staging: path.join(root, 'staging') });
   const m = await require('../../lib/design_prepare.cjs').prepareRevision(imported.dir);
   fs.mkdirSync(path.join(imported.dir, 'screenshots')); fs.writeFileSync(path.join(imported.dir, 'screenshots', 'home.png'), PNG);
   m.views[0].screenshots = [{ name: 'Home', path: 'screenshots/home.png' }]; m.state = 'recorded';
+  if (options.mediaBytes) {
+    fs.mkdirSync(path.join(imported.dir, 'videos'));
+    // Transport fixtures deliberately do not claim encoded recording proof.
+    fs.writeFileSync(path.join(imported.dir, 'videos/large.mp4'), Buffer.alloc(options.mediaBytes, 42));
+    fs.writeFileSync(path.join(imported.dir, 'videos/raw.webm'), 'synthetic transport fixture');
+    const flow = m.flows[0]; Object.assign(flow, { video: 'videos/large.mp4', recording: 'videos/raw.webm', screenshots: m.views[0].screenshots, generated: { input_id: m.input_id, preparation_hash: L.sha256(L.canonical(L.profileIdentity(m.profile))), viewport_hash: L.sha256(L.canonical(flow.viewport)), flow_hash: L.sha256(L.canonical(flow.steps)) } });
+  }
   L.atomicJson(path.join(imported.dir, 'manifest.json'), m); L.finalize(imported.dir);
   return { ...imported, manifest: L.readJson(path.join(imported.dir, 'manifest.json')) };
 }

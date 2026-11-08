@@ -12,6 +12,16 @@ async function designGallery(ctx) {
         await session.eval(`document.querySelector('[data-project="${id}"]').click()`);
         report.ok(`gallery ${width}: project ${id}`, await session.eval(`document.querySelector('[data-project="${id}"]').getAttribute('aria-pressed')==='true'`));
       }
+      await session.eval('[...document.querySelectorAll(".dg-kinds button")].find(b=>b.textContent==="Views").click()');
+      await session.eval('[...document.querySelectorAll(".dg-modes button")].find(b=>b.textContent==="Screens").click()');
+      const retainedId = await session.eval(`fetch('/api/designs').then(r=>r.json()).then(c=>c.projects.find(p=>p.id==='demo').revisions.find(r=>r.source_revision==='fixture-A').revision_id)`);
+      await session.eval(`(()=>{const history=document.querySelector('[aria-label="History"]');history.value=${JSON.stringify(retainedId)};history.dispatchEvent(new Event('change'))})()`);
+      await waitForValue(session, cdp, 'document.querySelector("h1")?.textContent', value => value === 'Retained A', { timeoutMs, label: 'retained history content' });
+      await session.send('Page.reload');
+      await waitForValue(session, cdp, 'document.querySelector("h1")?.textContent', value => value === 'Retained A', { timeoutMs, label: 'retained history restored after reload' });
+      report.ok(`gallery ${width}: History and media agree after reload`, await session.eval(`document.querySelector('[aria-label="History"]').value===${JSON.stringify(retainedId)} && document.querySelector('.dg-stage img').src.includes('/'+${JSON.stringify(retainedId)}+'/')`));
+      await session.eval(`(()=>{const history=document.querySelector('[aria-label="History"]');history.value='';history.dispatchEvent(new Event('change'))})()`);
+      await waitForValue(session, cdp, 'document.querySelector("h1")?.textContent', value => value === 'Current B', { timeoutMs, label: 'return to current history' });
       report.ok(`gallery ${width}: no horizontal overflow`, await session.eval('document.documentElement.scrollWidth<=window.innerWidth'));
       report.ok(`gallery ${width}: modes usable`, await session.eval('[...document.querySelectorAll(".dg-modes button")].every(b=>{const r=b.getBoundingClientRect();return r.width>=40&&r.left>=0&&r.right<=innerWidth})'));
       await session.eval('[...document.querySelectorAll(".dg-kinds button")].find(b=>b.textContent==="Flows").click()');

@@ -9,9 +9,9 @@ const { main } = require('../server');
 const L = require('../lib/design_library.cjs');
 const { revision } = require('./fixtures/design_library.cjs');
 
-async function start(t, mode = 'token') {
+async function start(t, mode = 'token', options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gallery-http-')), library = path.join(root, 'library');
-  const r = await revision(root); L.publishRevision({ dir: r.dir, library });
+  const r = await revision(root, options); L.publishRevision({ dir: r.dir, library });
   const profile = path.join(root, 'profile.cjs'), token = crypto.randomBytes(24).toString('hex');
   fs.writeFileSync(profile, `module.exports={appName:'DesignTest',agents:{},chatStream:{hosts:['local']},dashboards:{designLibraryRoot:${JSON.stringify(library)}}}`);
   fs.writeFileSync(path.join(root, 'token'), token);
@@ -40,4 +40,23 @@ test('media supports byte ranges and HEAD; raw sources, traversal, stale revisio
   for (const range of ['bytes=999999-', 'bytes=2-1', 'bytes=-0', 'bytes=0-1,3-4']) assert.equal((await fetch(h.url + route, { headers: { ...h.headers, range } })).status, 416);
   for (const bad of [`/design-media/example/${id}/source/index.html`, `/design-media/example/${id}/screenshots/%2e%2e%2fsource/index.html`, `/api/designs/example/${'a'.repeat(64)}/home`, `/api/designs/example/${id}/missing`]) assert.equal((await fetch(h.url + bad, { headers: h.headers })).status, 404);
   const png = path.join(h.library, 'projects/example/revisions', id, 'screenshots/home.png'); fs.writeFileSync(png, 'changed'); assert.equal((await fetch(h.url + route, { headers: h.headers })).status, 404);
+});
+test('large media HEAD and tiny ranges avoid whole-file buffering and repeated full verification', async t => {
+  const h = await start(t, 'token', { mediaBytes: 8 * 1024 * 1024 }), id = h.r.manifest.revision_id;
+  const original = fs.readFileSync, reads = [];
+  fs.readFileSync = function(file, ...args) { if (String(file).endsWith('videos/large.mp4')) reads.push(String(file)); return original.call(this, file, ...args); };
+  t.after(() => { fs.readFileSync = original; });
+  // Catalog discovery verifies a new immutable revision once; no readFileSync
+  // may allocate the complete media, including on that cold verification.
+  await fetch(h.url + '/api/designs', { headers: h.headers });
+  const originalOpen = fs.openSync, originalRead = fs.readSync, originalClose = fs.closeSync, mediaFds = new Set(); let verificationBytes = 0;
+  fs.openSync = function(file, ...args) { const fd = originalOpen.call(this, file, ...args); if (String(file).endsWith('videos/large.mp4')) mediaFds.add(fd); return fd; };
+  fs.readSync = function(fd, ...args) { const size = originalRead.call(this, fd, ...args); if (mediaFds.has(fd)) verificationBytes += size; return size; };
+  fs.closeSync = function(fd) { mediaFds.delete(fd); return originalClose.call(this, fd); };
+  t.after(() => { fs.openSync = originalOpen; fs.readSync = originalRead; fs.closeSync = originalClose; });
+  const route = h.url + `/design-media/example/${id}/videos/large.mp4`;
+  const head = await fetch(route, { method: 'HEAD', headers: h.headers }); assert.equal(head.status, 200); assert.equal(Number(head.headers.get('content-length')), 8 * 1024 * 1024);
+  const range = await fetch(route, { headers: { ...h.headers, range: 'bytes=0-3' } }); assert.equal(range.status, 206); assert.deepEqual(Buffer.from(await range.arrayBuffer()), Buffer.alloc(4, 42));
+  assert.deepEqual(reads, [], 'large media must use bounded hashing and ranged file streams, including cold discovery');
+  assert.equal(verificationBytes, 0, 'unchanged, previously verified media must not be fully rehashed for HEAD or seeking');
 });

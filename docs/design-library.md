@@ -171,6 +171,11 @@ returns item metadata and its prepared document when available. `GET`/`HEAD`
 `/design-media/<project>/<revision>/<asset>` serves only manifest-allowlisted
 PNG/JPEG/WebP/MP4 bytes with Range support. Authentication precedes all routes;
 invalid IDs, hash mismatches, symlinks and unavailable revisions refuse serving.
+Media uses bounded file streams for ranges; HEAD returns metadata without a
+media body. Cold integrity checks hash in 64 KiB chunks. Verified immutable
+revisions are reused only while canonical file identities, sizes and timestamps
+match; canonical changes force verification again. Nested Syncthing temporary
+and conflict copies never become canonical members, and conflicts remain visible.
 Source-relative Copy path is an explicit agent action, never navigation.
 
 ```sh

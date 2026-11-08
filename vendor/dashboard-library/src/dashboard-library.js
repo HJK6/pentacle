@@ -2785,7 +2785,7 @@
     container.replaceChildren(root);
     const storage = options.storage === undefined ? (() => { try { return doc.defaultView.sessionStorage; } catch { return null; } })() : options.storage;
     let saved; try { saved = JSON.parse(storage?.getItem('design-gallery.selection') || 'null'); } catch {}
-    const refs = { root, container, storage, fetch: options.fetch || doc.defaultView.fetch.bind(doc.defaultView), state: { project: '', revision: '', kind: 'views', item: '', mode: 'screens', query: '', ...saved }, catalog: { projects: [] }, disposed: false, generation: 0, displayKey: null, controller: null, historyManifest: null, lastCatalog: '' };
+    const refs = { root, container, storage, fetch: options.fetch || doc.defaultView.fetch.bind(doc.defaultView), state: { project: '', revision: '', kind: 'views', item: '', mode: 'screens', query: '', ...saved }, catalog: { projects: [] }, disposed: false, generation: 0, displayKey: null, controller: null, historyController: null, historyLoading: null, historyError: null, historyErrorKey: null, historyManifest: null, lastCatalog: '' };
     root.querySelector('.dg-search').value = refs.state.query;
     root.querySelector('.dg-search').addEventListener('input', e => { refs.state.query = e.target.value; renderGallery(refs); });
     return refs;
@@ -2796,7 +2796,7 @@
     refs.root.querySelectorAll('video').forEach(video => { video.pause(); video.removeAttribute('src'); video.load(); });
     refs.root.querySelectorAll('iframe').forEach(frame => { frame.removeAttribute('srcdoc'); frame.remove(); });
   }
-  function unmountGallery(refs) { if (!refs) return; refs.disposed = true; galleryCleanup(refs); refs.root.remove(); }
+  function unmountGallery(refs) { if (!refs) return; refs.disposed = true; refs.historyController?.abort(); galleryCleanup(refs); refs.root.remove(); }
   function galleryButton(refs, container, text, active, action) {
     const button = refs.root.ownerDocument.createElement('button'); button.type = 'button'; button.textContent = text; button.setAttribute('aria-pressed', String(!!active)); button.addEventListener('click', action); container.appendChild(button); return button;
   }
@@ -2807,13 +2807,35 @@
     if (snapshot === refs.lastCatalog) return;
     refs.lastCatalog = snapshot; refs.catalog = catalog; renderGallery(refs);
   }
+  function loadGalleryHistory(refs, project, revision) {
+    const key = project + ':' + revision;
+    if (refs.historyLoading === key || refs.historyErrorKey === key) return;
+    refs.historyController?.abort();
+    const controller = new AbortController(); refs.historyController = controller; refs.historyLoading = key; refs.historyError = null;
+    refs.fetch(`/api/designs/${project}/${revision}`, { signal: controller.signal }).then(async response => {
+      if (!response.ok) throw new Error('History revision unavailable or still syncing');
+      const value = await response.json();
+      if (value.revision_id !== revision || value.project_id !== project) throw new Error('History revision identity mismatch');
+      if (refs.disposed || controller.signal.aborted || refs.state.project !== project || refs.state.revision !== revision) return;
+      refs.historyManifest = value; refs.historyLoading = null; refs.historyErrorKey = null; renderGallery(refs);
+    }).catch(error => {
+      if (error.name === 'AbortError' || refs.disposed || controller.signal.aborted || refs.state.project !== project || refs.state.revision !== revision) return;
+      refs.historyLoading = null; refs.historyErrorKey = key; refs.historyError = error.message; renderGallery(refs);
+    });
+  }
   function renderGallery(refs) {
     if (refs.disposed) return;
     const { root, state } = refs, projects = refs.catalog.projects || [];
     if (!projects.some(p => p.id === state.project)) { state.project = projects[0]?.id || ''; state.revision = ''; refs.historyManifest = null; }
     const project = projects.find(p => p.id === state.project);
-    refs.manifest = refs.historyManifest?.revision_id === state.revision ? refs.historyManifest : project?.manifest;
-    if (state.revision && !project?.revisions?.some(r => r.revision_id === state.revision)) { state.revision = ''; refs.historyManifest = null; refs.manifest = project?.manifest; }
+    const historyKey = state.project + ':' + state.revision;
+    if (refs.historyLoading && refs.historyLoading !== historyKey) { refs.historyController?.abort(); refs.historyLoading = null; }
+    refs.manifest = !state.revision || state.revision === project?.manifest?.revision_id ? project?.manifest
+      : refs.historyManifest?.project_id === state.project && refs.historyManifest?.revision_id === state.revision ? refs.historyManifest : null;
+    if (state.revision && !refs.manifest) {
+      if (project?.revisions?.some(r => r.revision_id === state.revision)) loadGalleryHistory(refs, state.project, state.revision);
+      else { refs.historyErrorKey = historyKey; refs.historyError = 'Selected history revision is unavailable or still syncing'; }
+    }
     const manifest = refs.manifest;
     const projectNav = root.querySelector('.dg-projects'); projectNav.replaceChildren();
     projects.forEach(p => { const b = galleryButton(refs, projectNav, p.title, state.project === p.id, () => { Object.assign(state, { project: p.id, item: '', revision: '' }); refs.historyManifest = null; renderGallery(refs); }); b.dataset.project = p.id; });
@@ -2821,7 +2843,7 @@
     const kinds = root.querySelector('.dg-kinds'); kinds.replaceChildren();
     ['views', 'flows'].forEach(kind => galleryButton(refs, kinds, kind === 'views' ? 'Views' : 'Flows', state.kind === kind, () => { state.kind = kind; state.item = ''; renderGallery(refs); }));
     const all = manifest?.[state.kind] || [], items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
-    if (!all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
+    if (manifest && !all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
     const item = all.find(i => i.id === state.item);
     const list = root.querySelector('.dg-items'); list.replaceChildren();
     const groups = new Map();
@@ -2832,7 +2854,7 @@
       for (const row of rows) { const button = galleryButton(refs, group, '', row.id === state.item, () => { state.item = row.id; renderGallery(refs); }); button.className = 'dg-item'; button.dataset.item = row.id; const title = root.ownerDocument.createElement('span'); title.textContent = row.title; const status = root.ownerDocument.createElement('small'); status.textContent = row.approval_ref ? 'Approved source · ' + row.compatibility?.status : row.compatibility?.status || 'Pending generation'; button.append(title, status); }
     }
     if (!items.length) list.textContent = all.length ? 'No matching views or flows.' : 'No verified items yet.';
-    root.querySelector('h1').textContent = item?.title || (projects.length ? 'No verified selection' : 'Your design library is empty');
+    root.querySelector('h1').textContent = item?.title || (state.revision && !manifest ? 'Retained revision' : projects.length ? 'No verified selection' : 'Your design library is empty');
     root.querySelector('.dg-breadcrumb').textContent = [project?.title, item?.group || state.kind].filter(Boolean).join(' / ');
     const modes = root.querySelector('.dg-modes'); modes.replaceChildren();
     [['screens', 'Screens'], ['video', 'Flow video'], ['prototype', 'Prototype']].forEach(([mode, title]) => galleryButton(refs, modes, title, state.mode === mode, () => { state.mode = mode; renderGallery(refs); }));
@@ -2849,17 +2871,18 @@
     const currentOption = root.ownerDocument.createElement('option'); currentOption.value = ''; currentOption.textContent = 'Current verified revision'; history.appendChild(currentOption);
     for (const revision of project?.revisions || []) { const option = root.ownerDocument.createElement('option'); option.value = revision.revision_id; option.textContent = `${revision.source_revision} · ${revision.revision_id.slice(0, 8)}${revision.complete ? '' : ' · incomplete'}`; history.appendChild(option); }
     history.value = state.revision || '';
-    history.addEventListener('change', async () => {
-      const revision = history.value; refs.controller?.abort(); const controller = new AbortController(); refs.controller = controller;
-      if (!revision) { state.revision = ''; refs.historyManifest = null; renderGallery(refs); return; }
-      try { const response = await refs.fetch(`/api/designs/${state.project}/${revision}`, { signal: controller.signal }); if (!response.ok) throw new Error('History revision unavailable or still syncing'); const value = await response.json(); if (refs.disposed || controller.signal.aborted) return; state.revision = revision; refs.historyManifest = value; renderGallery(refs); } catch (e) { if (e.name !== 'AbortError') root.querySelector('.dg-sync').textContent = e.message; }
+    if (state.revision && !project?.revisions?.some(r => r.revision_id === state.revision) && state.revision !== project?.manifest?.revision_id) {
+      const option = root.ownerDocument.createElement('option'); option.value = state.revision; option.textContent = 'Unavailable revision ' + state.revision.slice(0, 8); history.appendChild(option); history.value = state.revision;
+    }
+    history.addEventListener('change', () => {
+      state.revision = history.value; refs.historyManifest = null; refs.historyError = null; refs.historyErrorKey = null; renderGallery(refs);
     });
     try { refs.storage?.setItem('design-gallery.selection', JSON.stringify(state)); } catch {}
-    const key = [state.project, manifest?.revision_id, state.kind, state.item, state.mode].join(':');
+    const key = [state.project, manifest?.revision_id, state.revision, refs.historyError, state.kind, state.item, state.mode].join(':');
     if (key === refs.displayKey) return;
     galleryCleanup(refs); refs.displayKey = key;
     const stage = root.querySelector('.dg-stage'); stage.replaceChildren();
-    if (!item) { stage.innerHTML = '<p class="dg-empty">Import a verified design revision to browse its views and flows.</p>'; return; }
+    if (!item) { const empty = root.ownerDocument.createElement('p'); empty.className = 'dg-empty'; empty.textContent = state.revision && !manifest ? refs.historyError || 'Loading retained revision…' : 'Import a verified design revision to browse its views and flows.'; stage.appendChild(empty); return; }
     const note = root.ownerDocument.createElement('p'); note.className = 'dg-note'; note.textContent = item.compatibility?.reason || 'Generation pending';
     if (state.mode === 'screens') {
       const grid = root.ownerDocument.createElement('div'); grid.className = 'dg-screens'; stage.appendChild(grid);

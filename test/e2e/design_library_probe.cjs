@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
+const { headlessChromeArgs } = require('./lib/chrome_launch.cjs');
 const L = require('../../lib/design_library.cjs');
 const P = require('../../lib/design_prepare.cjs');
 const R = require('../../lib/design_record.cjs');
@@ -21,7 +22,7 @@ async function run(argv) {
     dir = imported.dir; await P.prepareRevision(dir);
   }
   const m = L.readJson(path.join(dir, 'manifest.json'));
-  const browser = await chromium.launch(R.launchOptions()), receipts = [];
+  const browser = await chromium.launch({ ...R.launchOptions(), args: headlessChromeArgs([], { playwright: true }) }), receipts = [];
   try {
     const selected = m.views.filter(v => v.prepared && (options.all === 'true' || m.project_id === 'example' || ['mobile/Pentacle Prototype.html', 'web/Pentacle Desktop Chat v3.html', 'web/Pentacle Report.html', 'archive/Composer Explorations.html'].includes(v.entry)));
     for (const view of selected) {

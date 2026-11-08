@@ -11,6 +11,7 @@ function stripComments(source) {
     (all, literal) => literal || '');
 }
 const INVENTORY = {
+  'design_library_probe.cjs': 1,
   'compose_pills_proof.js': 1, 'send_refusal_gate.cjs': 1, 'web_host_recovery_gate.cjs': 1,
   'own_assistant_bootstrap_browser.cjs': 1, 'web_assistant_direct_entry_gate.cjs': 2,
   'web_chat_history_paging_gate.cjs': 1, 'web_chat_history_retention_gate.cjs': 1,
