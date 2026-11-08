@@ -272,6 +272,7 @@ class Report {
 // can run; hostNames names the web host for the room Source label.
 function writeProfile(scratch, daemonPort, modelerFixtureUrl = null, catalog = null, mic = null) {
   const dashboards = {
+    ...(fs.existsSync(path.join(scratch, 'design-library')) ? { designLibraryRoot: path.join(scratch, 'design-library') } : {}),
     // Dashboard scenarios opt in to a seeded catalog; the default gate
     // profile has no catalog (the public empty default).
     ...(catalog ? { catalogSpecId: catalog.specId, catalogRoot: catalog.root } : {}),
@@ -496,6 +497,7 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
       runtime.fakeCosmo = await startFakeCosmo();
       runtime.modelerFixture = await startHostedModelerFixture(scratch, hostPort);
       daemon = await startDaemon(args, scratch, runtime);
+      if (!args.scenarios.length || args.scenarios.includes('design-gallery')) await require('./lib/design_gallery_fixture.cjs').buildDesignGalleryFixture(scratch);
       runtime.fixtureDaemonPort = daemon.port;
       profile = writeProfile(scratch, daemon.port, runtime.modelerFixture.url);
       report.note(`seeded loopback daemon on 127.0.0.1:${daemon.port} (${daemon.seed})`);

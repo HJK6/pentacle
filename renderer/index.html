@@ -271,6 +271,7 @@
        any board that gates destructive actions (pi-control) so they never fall
        back to native window.confirm() and re-trap the Space key on Windows. -->
   <script src="confirm_dialog.js"></script>
+  <script src="../vendor/dashboard-library/dist/dashboard-library.js"></script>
 
   <!-- Shared dashboard definition layer (classic UMD global; MUST load before
        registry.js + boards so window.PublicDashDashboards exists at registration). -->
@@ -292,6 +293,7 @@
        Mirrors how dist/chat_core.bundle.js is loaded. -->
   <script src="dist/cosmic_tokens.bundle.js"></script>
   <script src="dist/cosmic_components.bundle.js"></script>
+  <script src="dashboards/ui-review.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
