@@ -46,6 +46,22 @@ def test_list_and_show_are_read_verbs(monkeypatch, capsys):
     assert sent[-1] == {"type": "work_lanes.show", "lane_id": "wl-1"}
 
 
+def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys):
+    member = {"spec_id": "spec_demo__detail", "status": "in_progress", "status_line": "Tests pass.",
+              "next_line": "Review the result.", "worked": {"active_h": 0.5},
+              "lead_seat": {"stream_id": "host-a:lead"},
+              "criteria": [{"title": "Check `code`", "disposition": "open"}],
+              "transitions": [{"status": "in_progress", "at": "2026-01-01"}]}
+    _wire(monkeypatch, {"type": "work_lanes.show.ok", "lane": {"lane_id": "wl-1"},
+                        "projection": {"lane_id": "wl-1", "icon": "phone"}, "members": [member]})
+    assert _run(["work-lane", "show", "wl-1"]) == 0
+    output = capsys.readouterr().out
+    assert "icon: phone" in output
+    for key in ("worked", "lead_seat", "status_line", "next_line", "criteria", "transitions"):
+        assert f"{key}:" in output
+    assert "Check `code`" in output and "Tests pass." in output
+
+
 def test_mutators_wrap_assistant_operation(monkeypatch):
     sent = _wire(monkeypatch, {"type": "assistant.operation.ok"})
     assert _run(["work-lane", "set-state", "wl-1", "--to", "done", "--outcome", "Shipped",

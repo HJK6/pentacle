@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "icons": [
+    {"key": "phone", "keywords": ["mobile", "phone", "ios", "android"]},
+    {"key": "flask", "keywords": ["test", "experiment", "harness"]},
+    {"key": "bug", "keywords": ["defect", "bug", "repair", "closure"]},
+    {"key": "cube", "keywords": ["3d", "print", "filament"]},
+    {"key": "bot", "keywords": ["automation", "bot", "agent"]},
+    {"key": "truck", "keywords": ["dispo", "delivery", "shipping"]},
+    {"key": "columns", "keywords": ["government", "contract"]},
+    {"key": "rocket", "keywords": ["deploy", "release", "launch"]},
+    {"key": "hammer", "keywords": ["build", "polish", "construction"]},
+    {"key": "eye", "keywords": ["observer", "monitor", "scry"]},
+    {"key": "camera", "keywords": ["camera", "image", "photo"]},
+    {"key": "cursor", "keywords": ["cursor", "editor"]},
+    {"key": "home", "keywords": ["house", "home", "household"]},
+    {"key": "book", "keywords": ["docs", "documentation", "memory", "book"]},
+    {"key": "chart", "keywords": ["trading", "market", "analytics", "chart"]},
+    {"key": "shield", "keywords": ["security", "audit", "guard"]},
+    {"key": "key", "keywords": ["credential", "auth", "key"]},
+    {"key": "leaf", "keywords": ["garden", "plant", "leaf"]},
+    {"key": "wrench", "keywords": ["tool", "fleet", "infrastructure"]},
+    {"key": "pentacle", "keywords": ["pentacle"]}
+  ]
+}

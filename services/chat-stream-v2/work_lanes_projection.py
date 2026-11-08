@@ -4,7 +4,7 @@ Pure functions build the ``work_lanes.inventory`` frame from stored lane rows
 (``Store.work_lane_rows``) and the in-memory session presence
 (``sessions.list_open()``).  ``WorkLanesInventory`` is the signature-deduped
 emitter beside ``InventoryEmitter``.  Wire contract:
-``docs/work-lanes.md`` and ``pentacle-chat-core/tests/fixtures/work-lanes-inventory.json``.
+``docs/web_work_lanes.md`` and ``pentacle-chat-core/tests/fixtures/work-lanes-inventory.json``.
 """
 from __future__ import annotations
 
@@ -14,10 +14,14 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from work_lane_progress import lane_state, members_working, lane_progress
 from store_work_lane_episodes import LaneEpisodeSink
+from _shared.lane_icons import resolve_icon
+from _shared.summary_prose import summary_line
+from work_lane_worked import WorkedCache
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -42,7 +46,7 @@ def _status_card(raw: Any) -> dict[str, Any]:
     card = _card(raw)
     step = None
     for item in card.get("plan") or []:
-        if isinstance(item, dict) and item.get("status") == "in_progress":
+        if isinstance(item, dict) and item.get("status") in {"active", "in_progress"}:
             step = item.get("text")
             break
     return {"goal": card.get("goal"), "active_step": step, "update": card.get("update"),
@@ -107,7 +111,18 @@ def attribute_members(members: list[dict[str, Any]], sessions_by_stream: dict[st
         seats = sorted(by_spec.get(member["spec_id"], []),
                        key=lambda seat: (_ROLE_ORDER.get(str(seat["role"] or ""), 9), seat["stream_id"]))
         question = (questions_by_spec or {}).get(member["spec_id"]) or {}
+        lead = next((seat for seat in seats if seat["role"] in {"lead", "nexus"}), None)
+        lead_seat = None
+        if lead:
+            row = sessions_by_stream[lead["stream_id"]]
+            card = _status_card(row.get("status_card"))
+            step = card["active_step"]
+            if isinstance(step, str) and len(step) > 120:
+                step = step[:119] + "…"
+            lead_seat = {key: lead[key] for key in ("stream_id", "host", "activity")}
+            lead_seat.update(provider=row.get("provider"), eta_at=card["eta_at"], active_step=step)
         out.append({**member, "seats": seats[:SEAT_CAP], "seats_total": len(seats),
+                    "lead_seat": lead_seat,
                     "open_questions": {"count": int(question.get("count") or 0),
                                        "first_question_id": question.get("first_question_id")}})
     return out
@@ -116,7 +131,8 @@ def attribute_members(members: list[dict[str, Any]], sessions_by_stream: dict[st
 def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str,
                  *, index_available: bool | None = None, all_members: bool = False,
                  sessions_by_stream: dict[str, dict[str, Any]] | None = None,
-                 questions_by_spec: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                 questions_by_spec: dict[str, dict[str, Any]] | None = None,
+                 worked_by_spec: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     lane = dict(lane)
     # Store rows carry authoritative uncapped attendance. Pure callers may supply
     # their session census explicitly; presence never overrides stored ownership.
@@ -126,8 +142,18 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
     if sessions_by_stream is not None:
         progress["members"] = attribute_members(progress["members"], sessions_by_stream, questions_by_spec)
+    progress["members"] = [{**{k: v for k, v in member.items()
+                               if all_members or k not in {"criteria", "transitions"}},
+                             "worked": (worked_by_spec or {}).get(member["spec_id"]),
+                             "lead_seat": member.get("lead_seat"),
+                             "status_line": summary_line(member.get("status_text")),
+                             "next_line": summary_line(member.get("next_action_text")),
+                             **({"criteria": member.get("criteria", []),
+                                 "transitions": member.get("transitions", [])} if all_members else {})}
+                            for member in progress["members"]]
     return {
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
+        "icon": resolve_icon(lane.get("icon"), lane.get("title")),
         "state": state, "state_reason": reason, "blocker": lane.get("blocker"),
         "owner_kind": lane.get("owner_kind"), "version": int(lane["version"]),
         "updated_at": lane.get("updated_at"), "first_admitted_at": lane.get("first_admitted_at"),
@@ -152,11 +178,12 @@ def server_order(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
                   now_iso: str | None = None, *, index_available: bool | None = None,
-                  questions_by_spec: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                  questions_by_spec: dict[str, dict[str, Any]] | None = None,
+                  worked_by_spec: dict[str, dict[str, Any] | None] | None = None) -> list[dict[str, Any]]:
     now_iso = now_iso or _iso_now()
     lanes = [project_lane(row, presence_by_stream.get(str(row.get("bound_stream_id") or "")), now_iso,
                           index_available=index_available, sessions_by_stream=presence_by_stream,
-                          questions_by_spec=questions_by_spec)
+                          questions_by_spec=questions_by_spec, worked_by_spec=worked_by_spec)
              for row in rows]
     return server_order(lanes)
 
@@ -164,10 +191,11 @@ def project_lanes(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict
 def build_frame(rows: list[dict[str, Any]], presence_by_stream: dict[str, dict[str, Any]],
                 *, now_iso: str | None = None, cap: int = LANE_FRAME_CAP,
                 work_index: dict[str, Any] | None = None,
-                questions_by_spec: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                questions_by_spec: dict[str, dict[str, Any]] | None = None,
+                worked_by_spec: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     lanes = [lane for lane in project_lanes(rows, presence_by_stream, now_iso,
              index_available=bool(work_index["available"]) if work_index is not None else None,
-             questions_by_spec=questions_by_spec)
+             questions_by_spec=questions_by_spec, worked_by_spec=worked_by_spec)
              if lane["state"] != "done"]
     counts = {"open": len(lanes), "active": 0, "paused": 0, "blocked": 0}
     for lane in lanes:
@@ -235,6 +263,10 @@ class WorkLanesInventory:
         self._epoch = 0
         self._index_lock = asyncio.Lock()
         self._watcher_start: asyncio.Task[None] | None = None
+        path = getattr(store, "path", None)
+        root = getattr(specs, "memory_root", None)
+        self.worked = WorkedCache(Path(path).parent if path and path != ":memory:" else None,
+                                  Path(root) / "work" if root else None, changed=self.refresh)
 
     async def refresh_for_close(self):
         """One caller waits on the existing coalesced drain, bounded by close."""
@@ -268,6 +300,9 @@ class WorkLanesInventory:
             try:
                 await self.reconcile_index()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
+                if self.worked.needs_refresh():
+                    rows = await self.store.work_lane_rows(include_done=True)
+                    self.worked.refresh({member["spec_id"] for row in rows for member in row.get("_members", [])})
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")
@@ -339,6 +374,7 @@ class WorkLanesInventory:
 
     async def stop(self) -> None:
         self._running = False
+        await self.worked.stop()
         self._epoch += 1
         tasks = [task for task in (self._periodic, self._task) if task is not None]
         for task in tasks:
@@ -365,6 +401,7 @@ class WorkLanesInventory:
         rows = await self.store.work_lane_rows()
         return build_frame(rows, presence_index(self.sessions.list_open()),
                            work_index=await self.store.work_index_status(),
+                           worked_by_spec=self.worked.values,
                            questions_by_spec=await self.questions_by_spec())
 
     async def list(self, *, include_done: bool = False, limit: int = 200,
@@ -373,6 +410,7 @@ class WorkLanesInventory:
         """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
         rows = await self.store.work_lane_rows(include_done=include_done)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()),
+                              worked_by_spec=self.worked.values,
                               questions_by_spec=await self.questions_by_spec())
         key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
         lanes.sort(key=key, reverse=True)
