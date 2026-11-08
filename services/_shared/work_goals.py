@@ -119,14 +119,15 @@ def wire_title(title: str) -> str:
 
 
 def goal_progress(members: list[dict], *, certain: bool = True) -> dict:
-    included = [member for member in members if member.get('status') != 'deprecated']
+    status = lambda member: member.get('_goal_status', member.get('status'))
+    included = [member for member in members if status(member) != 'deprecated']
     total = len(included)
-    done = sum(member.get('status') == 'completed' for member in included)
+    done = sum(status(member) == 'completed' for member in included)
     if total > MAX_COUNT:
         raise ValueError('work_lane_goal_count_overflow')
     fresh = certain and all(member.get('observation', {}).get('quality') == 'fresh' for member in included)
     state = ('not_started' if not total else 'done' if fresh and done == total
-             else 'not_started' if fresh and all(member.get('status') == 'backlog' for member in included)
+             else 'not_started' if fresh and all(status(member) == 'backlog' for member in included)
              else 'in_progress')
     return {'state': state, 'done': done, 'total': total}
 
@@ -153,7 +154,7 @@ def project_goals(lane: dict, *, all_goals: bool = False) -> dict:
     selected = goals if all_goals else sorted(
         sorted(goals, key=lambda goal: (goal['state'] != 'in_progress', *order(goal)))[:8], key=order)
     result = {'goals': selected, 'goals_total': len(goals)}
-    legacy = [member for member in members if not member.get('goal_id') and member.get('status') != 'deprecated']
+    legacy = [member for member in members if not member.get('goal_id') and member.get('_goal_status', member.get('status')) != 'deprecated']
     if legacy:
         result['default_goal'] = goal_progress(legacy, certain=lane.get('_work_index_available', False))
     if lane.get('_detail_revision'):

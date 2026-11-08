@@ -56,7 +56,12 @@ def effective_membership_conn(conn) -> dict:
     members = {}
     for identity, record in records.items():
         member = dict(record["member"])
-        epic = (record.get("last_good") or {}).get("_epic")
+        last_good = record.get("last_good") or {}
+        epic = last_good.get("_epic")
+        # Diagnostics keep the current missing/ambiguous status. Goal counts
+        # retain the known source contribution through settle and restart.
+        if last_good.get("status") is not None:
+            member["_goal_status"] = last_good["status"]
         goal = scoped.get(epic)
         if goal is not None:
             assigned[identity] = goal["facts"]["lane_id"]

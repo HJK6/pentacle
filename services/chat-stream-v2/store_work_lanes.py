@@ -448,16 +448,15 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
-def work_lane_rows_conn(conn, *, include_done: bool = False) -> list[dict[str, Any]]:
+def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
     snapshot = effective_membership_conn(conn)
     index_available = bool(snapshot["state"]["available"])
     marks = ",".join("?" for _ in states)
-    ids = [r[0] for r in conn.execute(
-        f"SELECT lane_id FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
-    prepare_hues_conn(conn, ids)
+    condition = f"work_state IN ({marks})" + (" AND lane_id=?" if lane_id is not None else "")
+    parameters = (*states, lane_id) if lane_id is not None else states
     lanes = [dict(r) for r in conn.execute(
-        f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
+        f"SELECT * FROM v2_assistant_composite_lanes WHERE {condition}", parameters)]
     from work_owed import _owners
     owners = [value[2] for value in _owners(conn).values()]
     for lane in lanes:
@@ -531,9 +530,8 @@ class _WorkLanesStoreMixin:
             updates = [{"update_id": e["update_id"], "kind": e["update_kind"],
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
-            row = next((row for row in work_lane_rows_conn(conn, include_done=True)
-                        if row["lane_id"] == lane_id), None)
-            state = _state_conn(conn)
+            prepare_hues_conn(conn, [lane_id])
+            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
             lane = lane_row_conn(conn, lane_id)
             return {"lane": lane, "events": events, "updates": updates,
                     "members": row["_members"] if row is not None else members_conn(conn, lane),
@@ -559,15 +557,28 @@ class _WorkLanesStoreMixin:
         return await self.submit(_op)
 
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
-        def _op(conn):
-            with hue_transaction(conn):
-                return work_lane_rows_conn(conn, include_done=include_done)
-        return await self.submit(_op)
+        # Internal attendance/episode/aggregation readers never allocate hues.
+        return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
 
-    async def work_lane_snapshot(self, *, include_done: bool = False):
+    async def work_lane_snapshot(self, *, include_done: bool = False,
+                                 select_rows: Callable | None = None):
+        """Select wire rows before lazy allocation, in one coherent writer turn.
+
+        The projection supplies a pure selection function; all rows remain in
+        the snapshot for uncapped inventory counts and membership aggregates.
+        """
         def _op(conn):
             with hue_transaction(conn):
-                return work_lane_rows_conn(conn, include_done=include_done), index_status_conn(conn)
+                rows = work_lane_rows_conn(conn, include_done=include_done)
+                if select_rows is not None:
+                    selected = select_rows(rows)
+                    prepare_hues_conn(conn, [row["lane_id"] for row in selected])
+                    # Authorized collider repair can affect an existing colour
+                    # outside this page; refresh colours without allocating it.
+                    hues = dict(conn.execute("SELECT lane_id,hue FROM v2_assistant_composite_lanes"))
+                    for row in rows:
+                        row["hue"] = hues.get(row["lane_id"])
+                return rows, index_status_conn(conn)
         return await self.submit(_op)
 
     async def work_lane_handoff(self, predecessor: str, successor: str) -> list[dict[str, Any]]:

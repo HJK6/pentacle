@@ -321,3 +321,41 @@ def test_owner_beyond_preview_drives_attendance_through_derived_membership(tmp_p
         carried = await env.store.open_lanes_for_spec('spec_demo__n64')
         assert [row['lane_id'] for row in carried] == [lane['lane_id']]
     run(body)
+
+
+@pytest.mark.parametrize('status', ['completed', 'deprecated'])
+@pytest.mark.parametrize('incident', ['missing', 'ambiguous'])
+def test_settled_uncertain_goal_keeps_last_good_contribution_and_restart(tmp_path, status, incident):
+    root, database = tmp_path / 'memory', str(tmp_path / 'state.db')
+    retained = {}
+    expected = ('in_progress', 1, 1) if status == 'completed' else ('not_started', 0, 0)
+    def check(shown):
+        member = shown['members'][0]
+        assert member['status'] == incident and member['observation']['quality'] == incident
+        goal = projected(shown)['goals'][0]
+        assert (goal['state'], goal['done'], goal['total']) == expected
+        assert '_goal_status' not in projected(shown)['members'][0]
+    async def first(env):
+        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        write_goal(root, lane['lane_id'])
+        folder = write_item(root, 'settled', status=status)
+        source = scanner(root)
+        await reconcile(env.store, source)
+        if incident == 'missing':
+            # Move the owned fixture outside the observed work tree.
+            folder.rename(tmp_path / 'retained-source')
+        else:
+            import shutil
+            duplicate = root / 'work' / status / 'demo__duplicate'
+            shutil.copytree(folder, duplicate)
+        await reconcile(env.store, source)
+        await reconcile(env.store, source)
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        check(shown)
+        retained.update(lane_id=lane['lane_id'], revision=projected(shown)['detail_revision'])
+    run(first, database)
+    async def second(env):
+        shown = await env.store.get_work_lane(retained['lane_id'])
+        check(shown)
+        assert projected(shown)['detail_revision'] == retained['revision']
+    run(second, database)

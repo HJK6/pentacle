@@ -438,15 +438,19 @@ class WorkLanesInventory:
             log.exception("work lanes question attribution unavailable")
             return None
 
-    async def _source_snapshot(self, *, include_done=False):
+    async def _source_snapshot(self, *, include_done=False, select_rows=None):
         snapshot = getattr(self.store, "work_lane_snapshot", None)
         if snapshot is not None:
-            return await snapshot(include_done=include_done)
+            return await snapshot(include_done=include_done, select_rows=select_rows)
         # Compatibility for consumers implementing the older Store protocol.
         return await self.store.work_lane_rows(include_done=include_done), await self.store.work_index_status()
 
     async def current(self) -> dict[str, Any]:
-        rows, work_index = await self._source_snapshot()
+        def select_rows(rows):
+            # Match build_frame's state/order/cap before any lazy hue write.
+            ordered = server_order([{**row, "state": lane_state(row)[0]} for row in rows])
+            return [row for row in ordered if row["state"] != "done"][:LANE_FRAME_CAP]
+        rows, work_index = await self._source_snapshot(select_rows=select_rows)
         return build_frame(rows, presence_index(self.sessions.list_open()),
                            work_index=work_index,
                            worked_by_spec=self.worked.values,
@@ -456,17 +460,24 @@ class WorkLanesInventory:
                    before_updated_at: str | None = None, before_lane_id: str | None = None,
                    members: bool = False) -> dict[str, Any]:
         """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
-        rows, work_index = await self._source_snapshot(include_done=include_done)
+        key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
+        def select_rows(rows):
+            ordered = sorted(rows, key=key, reverse=True)
+            if before_updated_at:
+                cursor = (before_updated_at, before_lane_id or "\uffff")
+                ordered = [row for row in ordered if key(row) < cursor]
+            return ordered[:limit]
+        rows, work_index = await self._source_snapshot(include_done=include_done, select_rows=select_rows)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()),
                               worked_by_spec=self.worked.values,
                               questions_by_spec=await self.questions_by_spec())
-        key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
-        lanes.sort(key=key, reverse=True)
+        page = select_rows(lanes)
+        # One lookahead determines continuation without allocating its hue.
+        more = sorted(lanes, key=key, reverse=True)
         if before_updated_at:
             cursor = (before_updated_at, before_lane_id or "\uffff")
-            lanes = [lane for lane in lanes if key(lane) < cursor]
-        page = lanes[:limit]
-        last = page[-1] if page and len(lanes) > limit else None
+            more = [lane for lane in more if key(lane) < cursor]
+        last = page[-1] if page and len(more) > limit else None
         return {"type": "work_lanes.list.ok", "include_done": include_done, "lanes": server_order(page),
                 "next_before_updated_at": str(last.get("updated_at") or "") if last else None,
                 "next_before_lane_id": last["lane_id"] if last else None,
