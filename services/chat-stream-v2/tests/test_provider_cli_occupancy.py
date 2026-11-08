@@ -72,7 +72,7 @@ async def occupancy_journey(tmp_path, monkeypatch, provider="codex", platform="m
             name=argv[argv.index("-t")+1][1:]; root=next(r for r,n in state.roots.items() if n==name)
             return SimpleNamespace(returncode=0, stdout=f"{root}|%{root}|/dev/ttys{root}|/fixture/tmux.sock|{name}\n")
         if argv[0] in {"cat","sysctl"}:
-            return SimpleNamespace(returncode=0, stdout="fixture-boot\n")
+            return SimpleNamespace(returncode=0, stdout="12345678-1234-1234-1234-123456789abc\n")
         return actual_run(argv, **kwargs)
     def probe(pid):
         assert pid in state.paths, "synthetic PID must never reach host procfs/libproc"
@@ -213,7 +213,7 @@ def test_native_repin_distinguishes_managed_home_from_unattributed_process(proof
                     if proof=="pane-mismatch":return SimpleNamespace(returncode=0,stdout="43|%43|/dev/ttys043|/fixture/tmux.sock|managed-other\n")
                     return SimpleNamespace(returncode=0,stdout="42|%42|/dev/ttys042|/fixture/tmux.sock|managed-other\n")
                 if argv[0] in {"cat","sysctl"}:
-                    return SimpleNamespace(returncode=0,stdout="" if proof=="missing-boot" else "fixture-boot\n")
+                    return SimpleNamespace(returncode=0,stdout="" if proof=="missing-boot" else "12345678-1234-1234-1234-123456789abc\n")
                 return actual_run(argv,**kwargs)
             host.run = running
             native.clear()
