@@ -106,8 +106,9 @@ not sender authority. Store projects `raw.input_provenance` from exact
 session-generation, watermark and once-consumed occurrence proof; client-supplied
 values are replaced. Proven operator dispatches take precedence over text that
 resembles a delivered wire. A later byte-identical quotation remains literal.
-The shared interpreter renders operator and unknown envelope-like input literally;
-unknown input is labeled without claiming a peer or operator identity.
+The web literal-render guard is not shipped and is deferred to the
+`web_literal_origin_rendering_2026_11` follow-up; existing web display behavior is
+retained. Daemon-side provenance is unchanged.
 
 Ordinary send captures its final wire, exact SHA-256, verified sender,
 destination generation and watermark before input in daemon-owned
