@@ -456,7 +456,7 @@ def test_flag_rejects_other_values(value):
 @pytest.mark.parametrize("rc,out,err,expected", [
     (1, "", "", "gone"),
     (0, f"{STARTED}\n", "", "alive"),
-    (0, "Thu Oct  8 09:00:00 2026\n", "", "gone"),       # pid reused by another process
+    (0, "Thu Oct  8 09:00:00 2026\n", "", "unknown"),    # no replacement provenance
     (0, "Thu Oct 8 01:47:01 2026", "", "alive"),          # whitespace-normalized equality
     (2, "", "", "unknown"),
     (1, "", "ps: illegal option", "unknown"),
@@ -678,12 +678,14 @@ def test_open_row_with_a_dead_pane_is_restored_without_the_reconciler(tmp_path, 
     run(tmp_path, monkeypatch, body)
 
 
-def test_pid_reuse_counts_as_gone(tmp_path, monkeypatch):
+def test_unmatched_live_pid_has_no_replacement_provenance(tmp_path, monkeypatch):
     async def body(rig):
         await rig.start()
         await rig.kill()
         rig.ps = PS_REUSED
-        assert (await rig.restore.advance())["state"] == "restored"
+        status = await rig.restore.advance()
+        assert (status["state"], status["reason"]) == ("waiting_evidence", "process_identity_incomparable")
+        assert await rig.episodes() == [] and rig.spawnctl.sent == []
     run(tmp_path, monkeypatch, body)
 
 
