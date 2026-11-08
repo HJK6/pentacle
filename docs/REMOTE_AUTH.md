@@ -23,7 +23,7 @@ provision seat credentials.
 
 Before exposing the daemon on a LAN or VPN for mobile, provision a separate
 operator credential for each UI client with `services/chat-stream-v2/tools/operator_auth_cli.py`.
-Desktop uses a private credential-envelope file configured with
+The web host uses a private credential-envelope file configured with
 `chatStream.tokenPath`. The UI answers the daemon's welcome challenge during
 hello. Invalid or absent authentication receives `hello.error`; it does not
 receive an inventory or subscribe to broadcasts.

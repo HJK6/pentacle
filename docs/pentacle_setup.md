@@ -1,15 +1,14 @@
 # Pentacle web client topology
 
 The supported desktop experience is Pentacle's web client in a browser or
-installed as a PWA. The Electron app is deprecated; it receives no further
-upgrades, packaging or rollout. The web host serves the renderer and connects to
+installed as a PWA. The web host serves the renderer and connects to
 the separately configured chat daemon, which owns agent processes and session
 working directories.
 
 ## Local setup
 
 Follow [developer onboarding](developer_onboarding.md) for a scratch daemon and
-web host. The root [local setup](../README.md#local-setup) is the complete
+web host. The root [quick start](../README.md#quick-start) is the complete
 developer walkthrough. The web host prints the local URL to open in a browser;
 for a shared HTTPS deployment, use the [web host guide](../server/README.md)
 and its authentication requirements.
@@ -75,8 +74,7 @@ in Settings to inspect both palettes. The build copies assets/CSS and bundles
 the token source; editing `renderer/dist/web/` directly is temporary. An already
 installed PWA may retain old icon resources even when a fresh browser tab shows
 the new artwork. First close/reopen that app and inspect its icon and taskbar
-pin. Confirm that the shortcut targets the browser app and the expected origin;
-an old Electron shortcut is a separate, retired installation.
+pin. Confirm that the shortcut targets the browser app and the expected origin.
 
 If the browser app retains the old icon, the bounded fallback is to remove and
 reinstall only that app from the same origin and browser profile, leaving any

@@ -1,6 +1,6 @@
 # Cosmic visual regression
 
-Visual regression tests for the desktop chat surface use only deterministic fixtures. They do not connect to a live daemon, install a package, or read another application.
+Visual regression tests for the browser chat surface use only deterministic fixtures. They do not connect to a live daemon, install a package, or read another application.
 
 ## Fixture matrix
 

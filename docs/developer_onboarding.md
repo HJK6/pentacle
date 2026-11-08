@@ -93,8 +93,7 @@ PENTACLE_CONFIG=/tmp/pentacle-example/pentacle.config.js node server --bind 127.
 
 Open the printed URL in a browser. A browser that supports web-app installation
 can add Pentacle to its app launcher; the installed PWA uses the same served web
-client and daemon. The Electron desktop app is deprecated and receives no further
-upgrades, packaging or rollout. A credentialed daemon requires its explicit
+client and daemon. A credentialed daemon requires its explicit
 private `chatStream.tokenPath`; keep that file outside the repository and follow
 the [web host authentication guide](../server/README.md).
 

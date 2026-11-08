@@ -1,4 +1,4 @@
-# Desktop runtime marker directory (TH-H3)
+# Web host runtime marker directory (TH-H3)
 
 PENTACLE_RUNTIME_DIR selects only the directory containing desktop-runtime.json. Unset or empty preserves exactly path.join(os.homedir(), '.pentacle'); a relative override remains relative to the process working directory. Other state, token and cache paths are unchanged.
 
@@ -25,4 +25,4 @@ Dot does not run the full Chrome/daemon web gate. Fleet owns that exact-head E2E
 
 ## Real hosts
 
-Leave PENTACLE_RUNTIME_DIR unset on real desktop and fleet hosts. Deploy and update tooling outside this repository reads the marker at the default path; with the variable set those readbacks would not see it and would time out. The override exists for gates, tests and sandboxes. The web gate gives both its main run and its chained history-retention stage their own owned temporary runtime directory.
+Leave PENTACLE_RUNTIME_DIR unset on real web and fleet hosts. Deploy and update tooling outside this repository reads the marker at the default path; with the variable set those readbacks would not see it and would time out. The override exists for gates, tests and sandboxes. The web gate gives both its main run and its chained history-retention stage their own owned temporary runtime directory.

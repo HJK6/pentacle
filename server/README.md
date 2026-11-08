@@ -1,20 +1,20 @@
 # Pentacle web host
 
-Serves the Pentacle renderer to a browser. This process does what the Electron
-main process does — owns the tmux attaches and the single chat-stream websocket
-connection — and exposes that to a page instead of to a BrowserWindow. Where it
-sits in the system is [`docs/ARCHITECTURE.md` § Web mode](../docs/ARCHITECTURE.md#web-mode-headless-host).
+Serves the Pentacle renderer to a browser or installed PWA. The Node host owns
+terminal attachments, shared request handlers and the chat-stream connection to
+the daemon. The browser calls it through `window.cc` over the `/cc` bridge. See
+[Pentacle architecture](../docs/ARCHITECTURE.md#web-host-and-browser-boundary).
 
 ## Prerequisites
 
-Node 20+ and `npm install` at the repo root. Beyond that: `tmux` on whichever
+Node.js 22.12+ and `npm ci` at the repo root. Beyond that: `tmux` on whichever
 host the terminals live on, Python 3 if you want to run the chat daemon locally,
 and Chrome or Chromium on `PATH` only if you intend to run the smoke.
 
 ## Run it
 
 ```bash
-npm install
+npm ci
 npm run web                       # build the bundle, then serve
 node server --profile <name>      # serve an already-built bundle
 ```
@@ -34,9 +34,10 @@ python3 services/chat-stream-v2/main.py --host 127.0.0.1 --port 7796 \
   --disable-outbound-notices --disable-remote-presence
 ```
 
-then point the host at it — `test/e2e/configs/web_mode_local_smoke.js` is
-exactly that config, so `node server --profile test/e2e/configs/web_mode_local_smoke.js`
-works as-is.
+then export `PENTACLE_SMOKE_PORT=7796` and point the host at the matching
+`test/e2e/configs/web_mode_local_smoke.js` profile:
+`node server --profile test/e2e/configs/web_mode_local_smoke.js`. Stop the owned
+daemon and remove its scratch directory when finished.
 
 ## Flags
 
@@ -58,8 +59,7 @@ the environment, then `pentacle.config.js`, then `pentacle.config.example.js`. A
 `using fallback configuration` and starts with a minimal built-in config, which
 is why an empty sidebar can mean a mistyped profile rather than a dead daemon.
 
-The profile is loaded through `config-loader` exactly as `main.js` loads it, so
-the browser sees the config the desktop would see. `get-config` and
+The host loads its profile through `config-loader`. `get-config` and
 `/api/config` both answer with the same computed object, and both strip
 `chatStream.token` and `chatStream.tokenPath` — the daemon credential never
 reaches a browser.
@@ -114,16 +114,16 @@ JSON, one message per frame. One socket per browser tab.
 { "event": "pty:data", "args": [0, "…"] }
 ```
 
-`method` is an IPC channel name from the shared definitions in
-[`main/cc_handlers.js`](../main/cc_handlers.js), which `main.js` registers on
-`ipcMain` and this host collects into a table. The `mode` mirrors `preload.js`:
+`method` is a channel name from the shared definitions in
+[`main/cc_handlers.js`](../main/cc_handlers.js), collected into a dispatch table.
+`renderer/web_cc.js` uses the corresponding call or fire-and-forget mode:
 
 - **invoke** channels answer exactly once, with `ok: true` and a `result` (a
   handler returning nothing answers `null`), or `ok: false` and an `error`.
 - **send** channels (`pty:write`, `pty:resize`, `pty:scroll`, `pty:tmux-send`,
   `pty:exit-copy-mode`, `perf-telemetry:record`, `context-menu`) are
   fire-and-forget and are **never** answered — including when the handler
-  throws — exactly as `ipcRenderer.send` behaves.
+  throws.
 
 Error codes: `bad_request` (unparseable frame or no `method`),
 `unknown_method`, `web_local`, `web_unsupported`, `handler_error`. A refusal
@@ -132,8 +132,7 @@ with silence, never an unsolicited error frame.
 
 ### Push routing
 
-Each connection gets a stand-in for Electron's `event.sender`, so the handlers
-route themselves. `main/terminal_adapter.js` keys its slots by
+Each connection gets its own `event.sender` interface for handler routing. `main/terminal_adapter.js` keys its slots by
 `event.sender.id` and pushes `pty:data` / `pty:exit` through
 `event.sender.send`, which means one tab's terminals and output can never reach
 another's — no slot bookkeeping lives in the bridge. Closing a socket fires the
@@ -159,9 +158,7 @@ So `renderer/web_cc.js` fires an `onReconnect` callback on every socket **re-ope
 (not the first connect), and `renderer/app.js` uses it to reset its
 connection-state version baseline and re-pull `chat-stream:get-state` — the same
 snapshot path startup uses — which re-enables the input and re-syncs the daemon
-inventory with no reload. The desktop `preload.js` exposes `onReconnect` as a
-no-op (its ipcRenderer transport never drops), so the surface stays at parity and
-desktop behaviour is unchanged. Regression coverage:
+inventory with no reload. Regression coverage:
 `test/e2e/lib/web_scenarios.js` (`host-restart-restores-input`, driven by
 `web_gate.js`'s host/daemon restart primitives) and the
 `test/chat_stream_connection_state.test.js` version-reset cases.
@@ -200,7 +197,7 @@ So `renderer/app.js`'s `onReconnect` does two things via `renderer/slot_reconnec
    trackers and re-runs the chat backfill so any new events land.
 
 This is the recovery the operator otherwise got by closing/reopening the slot,
-done automatically. Desktop never runs it (its `onReconnect` is the no-op).
+done automatically.
 Regression coverage: `test/e2e/lib/web_scenarios.js` (`slot-survives-cc-reconnect`,
 covering the terminal re-attach AND the chat transcript through a summary snapshot
 that omits the open stream), `test/slot_reconnect.test.js`, and the
@@ -213,10 +210,9 @@ refused; re-creating an already-owned slot is a replacement, not a new one.
 
 Host resolution covers `local`, `remote` (`config.remote`), an explicit
 `config.hosts` map, **and `config.peers`** — each peer becomes an SSH target
-keyed by its id (mirroring the Electron host registry in `hosts.js`), so a
-`peers` profile (e.g. workstation) is attachable in web mode at parity with the
-desktop. (Live attach to a *production* peer session is out of scope here — the
-smoke rule keeps shared daemons read-only.)
+keyed by its id, so a `peers` profile (e.g. workstation) is attachable in the
+browser. Live attachment to a production peer session needs separate resource
+authority; the owned gate uses disposable fixtures.
 
 ### What never reaches the host
 
@@ -228,25 +224,24 @@ smoke rule keeps shared daemons read-only.)
   viewer's — so the host refuses them rather than serving them.
 - **`WEB_UNSUPPORTED`** — no *host-side* equivalent, so the host refuses them,
   but the web layer answers each in the browser (§ Native-method browser
-  behaviours): `context-menu` → an HTML menu, `meeting:open` → a toast,
-  `meeting:close` → a no-op.
-- **`UNIMPLEMENTED`** — declared by `preload.js` but served by no main-process
-  handler on either transport (the two chat-popout channels and six dashboard
-  channels). These are pre-existing desktop gaps, listed so the parity test
-  fails if the set grows. The chat-popout pair is deferred to a web-mode popout
-  follow-up spec; the dashboards have no provider in the public desktop.
+  behaviours): `context-menu` → an HTML menu; both meeting methods show an
+  unavailable-feature notice when the mic feature is enabled.
+- **`UNIMPLEMENTED`** — retained channels without a host handler: two chat-popout
+  channels and six optional dashboard channels. The browser popout manager
+  handles chat popouts locally; its fallback transport channels remain
+  unimplemented. The listed dashboard RPCs have no public provider. The parity
+  tests keep these gaps explicit.
 
 ### Native-method browser behaviours
 
-Channels the desktop serves through Electron (a native window, menu, or a host
-file write) have no host equivalent for a browser viewer, so `renderer/web_cc.js`
-answers them locally — the host still refuses `WEB_UNSUPPORTED` as a safety net:
+Browser-local controls are implemented by `renderer/web_cc.js`; they must act
+on the viewer's browser rather than on the host machine. The host still refuses
+`WEB_UNSUPPORTED` channels as a safety net:
 
 - **`context-menu`** → an HTML menu (Open in slot 1–4 / Rename / Delete) that
   fires the same `assign-slot` / `action` events `app.js` already listens for.
-  (The public desktop registers no `context-menu` handler at all, so this is
-  net-new function rather than parity with a native menu.)
-- **`meeting:open`** → a "not available in web mode" toast when the mic feature is on.
+- **`meeting:open` / `meeting:close`** → a "not available in web mode" toast
+  when the mic feature is on; neither opens a native meeting window.
 - **`mic:start-server`** → explicit local-service recovery when the host profile
   enables `features.mic` and configures `mic.startCommand: {file, args}`. The
   executable must be absolute; arguments are fixed by the host, never the browser.
@@ -356,8 +351,8 @@ profile-switching UX.
 ## Build
 
 `npm run build:web` → `renderer/dist/web/`. `scripts/build-web.js` derives
-`web.html` from `renderer/index.html` rather than copying it, so the desktop and
-web pages cannot drift. The UMD and classic scripts (`confirm_dialog.js`, the
+`web.html` from `renderer/index.html` rather than maintaining a second source
+page. The UMD and classic scripts (`confirm_dialog.js`, the
 dashboard registry and boards, the prebuilt chat-core and cosmic bundles) stay
 `<script src>` tags — a CommonJS wrapper would redirect their `window` globals
 to `module.exports` — and `app.js` is bundled behind shims for `path` and
@@ -401,11 +396,11 @@ retained conservatively.
 | `test/web_auth.test.js` | the bind guard (routable bind refuses without a token), loopback-needs-none, `/login`, cookie-gated `/api` + `/cc`, and the `--token-path` flag |
 | `test/web_auth_tailscale.test.js` | `--auth tailscale`: flags and startup refusals, the identity predicate (IPv4/IPv6 fixtures, one field varied per case, repeated headers, non-loopback peer), HTTP 401/404, `/cc` 401 vs `403 origin_refused`, and forwarded-proto same-origin admission for `mic:start-server` / `mic:request` through a stand-in handler table |
 | `test/terminal_peer_host.test.js` | terminal host resolution for a `peers[]` profile entry (SSH target), plus local/remote and the unknown-host refusal |
-| `test/web_cc.test.js` | the browser shim: method parity with `preload.js`, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
-| `test/web_bundle.test.js` | no Electron/Node requires survive; the page ships everything it references |
+| `test/web_cc.test.js` | the browser shim: the `buildCc` surface and its shared channel contract, queueing, reject-on-drop, reconnect, and the native-method shims (toast, save-image download, context menu) |
+| `test/web_bundle.test.js` | no runtime Node requires survive; the page ships everything it references |
 | `test/closed_chat_slots.test.js` | retirement deadline, connection authority, generation replacement and slot isolation |
 | `test/renderer_clipboard_paste.test.js` | clipboard item precedence, files fallback, native text passthrough, selection replacement and single input update |
-| `test/e2e/web_wrap_paste_gate.test.js` | desktop/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
+| `test/e2e/web_wrap_paste_gate.test.js` | wide/phone wrapping in both themes, fenced-code scrolling, mixed paste/undo, decoding/limits, draft ownership, upload retry and ordinary/assistant sends |
 | `test/e2e/web_gate.js` | the deterministic web-mode E2E gate: seeds a loopback daemon and drives the served page in headless Chrome over CDP (`node test/e2e/web_gate.js`; `--profile <config.js>` runs against an external daemon by hand). Scenario functions live in `test/e2e/lib/web_scenarios.js`. Run by the `Public checks` workflow. |
 
 The hermetic web gate also creates two isolated durable questions, self-closes one
@@ -419,7 +414,7 @@ Run the clipboard/upload counterpart through the supported npm entry by selectin
 freshness controls, and `test/e2e/lib/render_proofs.test.js` for source-cohort,
 shortened-response and reused-fixture refusals. See the [gate entry](../docs/E2E_HARNESS.md).
 The former `web_wrap_paste_gate.cjs` path is retired; no wrapper or CJS runner
-exception remains. The same assertions cover both themes, desktop/phone geometry,
+exception remains. The same assertions cover both themes, wide/phone geometry,
 fenced code, clipboard limits/undo, draft routing, upload retry and assistant sends.
 For a product baseline RED, the renamed script retains `PENTACLE_WRAP_PASTE_ROOT`
 and `--expect-red`; its measurements must execute before an observed RED is claimed.

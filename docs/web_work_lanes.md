@@ -1,6 +1,6 @@
 # Work lanes in the web renderer
 
-The web/desktop renderer shows the daemon's first-class work lanes. The daemon owns lane identity, presented state (`active`, `paused`, `blocked`), count, order and tap target; the renderer only presents them. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
+The web renderer shows the daemon's first-class work lanes. The daemon owns lane identity, presented state (`active`, `paused`, `blocked`), count, order and tap target; the renderer only presents them. The wire contract and the shared fixture are in [work-lanes.md](../services/chat-stream-v2/docs/work-lanes.md) and `pentacle-chat-core/tests/fixtures/work-lanes-inventory.json`.
 
 ## Lane organization
 

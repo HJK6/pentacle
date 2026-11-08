@@ -1,13 +1,15 @@
-# Desktop configuration
+# Pentacle Web configuration
 
-Start with [Local setup](../README.md#local-setup), copy
+Start with [Quick start](../README.md#quick-start), copy
 `pentacle.config.example.js` to a private file, and select it with
-`PENTACLE_CONFIG=/absolute/path/desktop.config.js`. A config is a JavaScript
-module exporting an object. Restart the desktop after changing it.
+`PENTACLE_CONFIG=/absolute/path/pentacle.config.js`. A config is a JavaScript
+module exporting an object. Restart the web host after changing it. See the
+[web host guide](../server/README.md) for profile selection and browser authentication.
 
 The loader tries the explicit `PENTACLE_CONFIG` path alone when set. Otherwise
-it tries `pentacle.config.js` beside the app, then the bundled example. An
-explicit path typo is an error, not permission to silently use another config.
+it tries `pentacle.config.js` at the repository root, then the bundled example. An
+explicit path typo is an error. The web host reports it and serves a minimal
+fallback configuration without a daemon connection; it does not load another profile.
 The loader only backfills missing `dark` and `terminal` objects from the example;
 it does not merge the rest of an overlay with the example. The tables distinguish
 example values from behavior when a key is omitted.
@@ -37,13 +39,13 @@ a remote machine reachable.
 | `hostNames` | Object of host ID → string; omitted | Explicit display labels; otherwise uppercase the first character of the resolved identity. Remaining case and hyphens are preserved. Explicit labels are trimmed but retain case. |
 | `hostColors` | Object of host ID → colour token; omitted | Explicit colour; otherwise choose by roster index from `forest-green`, `royal-blue`, `red`, `orange`, wrapping after four hosts. |
 | `localHostId` | String; `chatStream.hostMap.local`, then `chatStream.localHost`, then `local` | Local presentation/microphone identity. It does not change the terminal transport. |
-| `chatStream.hosts` | String array; `['local']` | Ordered desktop host roster; order controls default colours. Use unique, nonempty IDs. |
+| `chatStream.hosts` | String array; `['local']` | Ordered browser host roster; order controls default colours. Use unique, nonempty IDs. |
 | `chatStream.localHost` | String; `local` | Local terminal identity, also the fallback local presentation identity. |
-| `chatStream.hostMap` | Object of desktop ID → daemon ID; `{}` | Exact routing aliases. Example: `{local: 'laptop', remote: 'workstation'}`. Overrides inference from the local identity. |
+| `chatStream.hostMap` | Object of client ID → daemon ID; `{}` | Exact routing aliases. Example: `{local: 'laptop', remote: 'workstation'}`. Overrides inference from the local identity. |
 
 `local` is an alias: with roster `['local','workstation']` and localHost
 `laptop`, its label/badge are Laptop/L. The resolved identity need not occupy a
-second roster entry. For labels and colours, a mapping under the desktop ID
+second roster entry. For labels and colours, a mapping under the client ID
 takes priority over one under its resolved identity. `localHostId` takes
 priority for the local display/mic identity; `hostMap` takes priority for
 routing. Reverse routing searches the configured roster for an exact mapped
@@ -64,25 +66,28 @@ orange/purple the flower. Renaming a host preserves its ornament.
 
 | Key | Type and default | Effect |
 | --- | --- | --- |
-| `chatStream` | Object; example values below | Connection, authentication, subscription and host settings. Omit `url` and public main does not connect. |
+| `chatStream` | Object; example values below | Connection, authentication, subscription and host settings. Omit `url` and the web host does not connect. |
 | `chatStream.url` | String; example `ws://127.0.0.1:7791` | Daemon WebSocket endpoint. |
 | `chatStream.tokenPath` | String; example `~/.config/pentacle/desktop.token`; omitted legacy fallback `~/.config/pentacle-stream/token` | Credential file. For v2, use a regular mode-0600 file in a mode-0700 directory without symbolic-link ancestors; Windows uses the equivalent private-file ACL checks. |
 | `chatStream.token` | String; absent | Legacy inline token, preferred over tokenPath if supplied. V2 credentials require a private tokenPath and cannot be inline. Do not commit either credential. |
-| `chatStream.recentLimit` | Number; main defaults to 500, caps at 500; renderer defaults to 5000 when omitted | Retained recent event limits. Use a positive integer; configure 500 for consistent desktop buffers. |
+| `chatStream.recentLimit` | Number; host defaults to 500, caps at 500; renderer defaults to 5000 when omitted | Retained recent event limits. Use a positive integer; configure 500 for consistent host buffers. |
 | `chatStream.heartbeatMs` | Number; 30000 | Socket heartbeat interval, clamped to 5000–120000 ms. Nonfinite input uses 30000. |
 | `chatStream.openedByLocal` | Boolean; false | When true and hostMap.local exists, subscribe only to sessions opened by that identity. |
-| `chatStream.snapshot` | Boolean; true | Set false to omit the initial snapshot. Normal desktop setup should retain true. |
+| `chatStream.snapshot` | Boolean; true | Set false to omit the initial snapshot. Normal web setup should retain true. |
 | `chatStream.accountLabels` | Object of provider → account alias → display label; `{}` | Private presentation labels for healthy account options. Example: `{codex: {primary: 'operator', secondary: 'collaborator'}}`. An email value displays its local-part; omitted labels use the alias. The host default is preselected without an extra option. Display labels never change account identity or host defaults. |
-| `tmux` | String; `tmux` | Local executable and default remote tmux executable. |
-| `hosts` | Object of host ID → transport object; `{}` | SSH terminal transports for nonlocal IDs. Each entry has `host` (required string), `user` (local OS username), `port` (22), `tmux` (top-level tmux). |
+| `tmux` | String; `tmux` | Local non-WSL tmux executable. |
+| `hosts` | Object of host ID → transport object; `{}` | SSH terminal transports for nonlocal IDs. Each entry has `host` (required string), `user` (local OS username), `port` (22), `tmux` (literal `tmux`). |
 | `remote` | Transport object; absent | Legacy transport for the literal ID `remote`, also the client-mode marker. Fields match a hosts entry. |
-| `localWsl` | Object; absent | Windows only: attach the local terminal inside a WSL distribution. `distro` (required) names the distribution, `user` the WSL account (omit for the distribution default), `tmux` the tmux executable inside it (top-level tmux). Every local tmux command runs as `wsl.exe -d <distro> [-u <user>] -- /bin/bash -lc '<tmux ...>'`. |
+| `localWsl` | Object; absent | Windows only: attach the local terminal inside a WSL distribution. `distro` (required) names the distribution, `user` the WSL account (omit for the distribution default), `tmux` the tmux executable inside it (default `tmux`). Every local tmux command runs as `wsl.exe -d <distro> [-u <user>] -- /bin/bash -lc '<tmux ...>'`. |
 
-Public main attaches terminals locally when the selected ID is `local` or
-equals chatStream.localHost. Other IDs need an entry in `hosts` (or `remote`
-for that alias). Host labels and `localHostId` do not alter this decision.
+The web host attaches terminals locally when the selected ID is `local` or
+equals chatStream.localHost. Other IDs need an entry in `hosts`, `remote`
+for that literal alias, or `peers[]`. Explicit `hosts` entries take precedence
+over peers. Peer entries require `id`, `host` and `user`; `local`, `remote`,
+incomplete and repeated peer IDs are skipped. Their port defaults to 22 and
+tmux to `tmux`. Host labels and `localHostId` do not alter this decision.
 On Windows, where the daemon and tmux usually live in WSL, set `localWsl.distro`
-so those local attachments run inside that distribution; without it, main runs
+so those local attachments run inside that distribution; without it, the web host runs
 the `tmux` executable on the Windows host directly.
 The daemon owns session creation, provider executables, working directories,
 provider models and effort. See [daemon setup](../services/chat-stream-v2/README.md).
@@ -107,16 +112,17 @@ provider models and effort. See [daemon setup](../services/chat-stream-v2/README
 | `features.mic` | Boolean; false | Microphone panel and voice controls; requires a running mic server. Reload after changing. |
 | `features.sourceTags` | Boolean; false | Host tags on sessions. Reload after changing. |
 | `features.showTurnDuration` | Boolean; false | Timing annotations in Chat; changes live. |
-| `features.assistantRole` | String; absent or empty | Private opt-in for a daemon session with exactly this existing `role`. That row pins first and cannot be deleted in desktop. Public examples leave it off; do not commit a private role value. |
+| `features.assistantRole` | String; absent or empty | Private opt-in for a daemon session with exactly this existing `role`. That row pins first and cannot be deleted in the browser. Public examples leave it off; do not commit a private role value. |
 | `features.assistantDirectTarget` | Object; absent | Optional temporary **web entry** alias: `{sourceStreamId, streamId, generation}`. The protected composite source row opens the exact ordinary target stream and generation when that target is online. Keep actual IDs in an ignored private web profile. Removing the object restores the prior entry route. |
 | `features.rawTmux` | Boolean; example false | Retained compatibility flag; currently unused. |
 | `mic` | Object; absent | Optional microphone settings below. |
 | `micServerUrl` | String; `http://127.0.0.1:7780` | Mic HTTP endpoint unless useStreamHost is enabled. |
 | `mic.useStreamHost` | Boolean; false | Derive `http://<chatStream.url hostname>:7780`. Missing/invalid chatStream URL falls back to micServerUrl. |
 | `mic.alwaysOnEnabled` | Boolean; false | Show the always-on controls. |
-| `mic.autoSpawn` | Boolean; helper default true | Compatibility-only in public main: the desktop probes the service; it does not start a mic server. |
+| `mic.autoSpawn` | Boolean; legacy compatibility input | Does not configure the web host's explicit microphone recovery action. |
+| `mic.startCommand` | Object; absent | Optional host-owned recovery command: absolute `file` path and string-array `args`. Requires `features.mic` and local mic mode (`useStreamHost` false). The host runs it only on a recovery request, with a 75-second timeout and readiness proof; it is stripped from browser configuration. |
 | `wakeWord` | String; absent | Text displayed in the sleeping mic state. Set it to the server's actual configured wake word. |
-| `machineStats` | Object; absent, ignored | Accepted compatibility key for old overlays. No fields in this object configure public desktop stats. |
+| `machineStats` | Object; absent, ignored | Accepted compatibility key for old overlays. No fields in this object configure web stats. |
 
 The direct assistant target is a temporary browser entry route, not a daemon
 alias. It uses the target's existing transcript, draft, questions, attachments,
@@ -148,44 +154,48 @@ enabling a flag does not install that collector. With a valid retained limits
 pair, collector errors keep the previous numeric values visible and show an
 error message above the cards. A successful refresh clears the error. Missing
 values remain dashes; a malformed limits/health pair cannot overwrite the last
-valid pair. The desktop displays diagnostic text as plain text, capped at 500
+valid pair. The browser displays diagnostic text as plain text, capped at 500
 characters. See [limits health contract](#limits-health-contract).
 
-## Other desktop inputs
+## Other configuration inputs
 
 | Key | Type and default | Effect |
 | --- | --- | --- |
-| `appName` | String; example `Pentacle` | Window/titlebar/application name. Keep it present in a custom overlay. |
-| `appId` | String; example `com.pentacle.app` | Compatibility metadata; runtime public main does not apply it. Packaging uses package.json build.appId. |
+| `appName` | String; example `Pentacle` | Browser document title. Keep it present in a custom overlay. |
+| `appId` | String; example `com.pentacle.app` | Accepted compatibility metadata; no web runtime effect. |
 | `agents` | Object keyed by provider; example claude/codex labels | Provider menu labels and optional initial text. Each entry accepts `label` (provider label), `startupMessage` (absent), `startupDelayMs` (1500). A configured startupMessage is sent after a new session attaches. |
 | `dark` | Theme object; bundled example | Retained theme input, backfilled as an object when missing. Public renderer appearance is controlled by Settings/CSS; this object does not override its palette. |
 | `terminal` | Xterm theme object; bundled example | Terminal colours. Recognized fields: background, foreground, cursor, cursorAccent, selectionBackground; black/red/green/yellow/blue/magenta/cyan/white and their bright-prefixed counterparts. Exact bundled hex defaults are in the example. Missing objects are backfilled; partial objects are not deep-merged. |
-| `artifactDirs` | String array; `[<working directory>/test/artifacts]` | Search roots for the retained local UI-review artifact helper. Leading `~` is expanded. |
-| `repoRoots` | String array; `[]` | Additional repository parents for the artifact helper; scans each child repository's .ui-review and test/artifacts directories. |
-| `dashboardHub` | Object; absent | Preload exposes it to optional dashboard adapters when `url` (string) is set. No bundled hub is started. Additional adapter-owned fields pass through. |
+| `artifactDirs` | String array; absent | Accepted compatibility key; no artifact-directory scanner is wired into the web host. |
+| `repoRoots` | String array; absent | Accepted compatibility key; no repository artifact scanner is wired into the web host. |
+| `dashboardHub` | Object; absent | The browser bridge exposes it to optional dashboard adapters when `url` (string) is set. No bundled hub is started. Additional adapter-owned fields pass through. |
 
-The retained `hosts.js` helper accepts the following legacy inputs. Current
-public main uses `hosts`, `remote`, `tmux` and `localWsl` through terminal_adapter
-instead; the other helper inputs do not configure that terminal path.
+The retained `hosts.js` helper accepts the following legacy inputs. The
+web host uses `hosts`, `remote`, `peers`, `tmux` and `localWsl` through
+`main/execution_host.js`; `localTmux` and `localSsh` do not configure that
+terminal path. Helper defaults below do not override the web transport defaults.
 
 | Key | Type and helper default | Effect |
 | --- | --- | --- |
 | `localTmux` | String; macOS `/opt/homebrew/bin/tmux`, otherwise `tmux` | Helper's local tmux executable. |
 | `localSsh` | Object; absent | Windows helper's local SSH: host required, port 2222, user from localWsl.user or null, tmux from localWsl.tmux or `tmux`. |
-| `localWsl` | Object; `{distro:'Ubuntu', user:null, tmux:'tmux'}` | Windows helper's WSL transport defaults. Public main reads the same `distro`, `user` and `tmux` fields for local terminal attachment (see the transport table above); the helper default distro does not apply there. |
-| `peers` | Object array; `[]` | Helper peer entries require id, host, user; port defaults 22 and tmux defaults `tmux`. |
+| `localWsl` | Object; `{distro:'Ubuntu', user:null, tmux:'tmux'}` | Windows helper's WSL transport defaults. The web host reads the same `distro`, `user` and `tmux` fields for local terminal attachment (see the transport table above); the helper default distro does not apply there. |
+| `peers` | Object array; `[]` | Helper peer entries require id, host, user; port defaults 22 and tmux defaults `tmux`. The web host also accepts peers, with the precedence and filtering described above. |
 
-Main adds these read-only IPC fields; they are not user-config keys:
+The host adds these read-only browser configuration fields; they are not user-config keys:
 `hostIds` (chatStream.hosts or `['local']`), `isClient` (remote present),
 `hostname` (OS hostname), `platform` (OS platform), `configError` (error message
-or null), and `configWarnings` (warning objects). Main removes chatStream token
-and tokenPath before returning its configuration over IPC.
+or null), `configWarnings` (warning objects), `buildId`, and `hostedDashboardAuthMode`.
+`publicConfig` removes `chatStream.token`, `chatStream.tokenPath`,
+`mic.startCommand` and `dashboards.catalogRoot` before sending configuration
+to the browser. Other configured fields are passed through: do not place
+additional secrets in the profile expecting them to be filtered.
 
 ## Configuration warnings
 
 Warnings are advisory and do not prevent launch. The loader returns
-`[{code, message}]`; main logs each code once per config path to stderr with a
-`desktop-config` prefix and returns the same warnings in get-config. A dedicated
+`[{code, message}]`; the loader logs each code once per config path to stderr with a
+`desktop-config` prefix. The host returns the same warnings in `get-config`. A dedicated
 banner shows their plain-text messages until reload; an empty list hides it.
 It is separate from the daemon connection-status banner.
 
@@ -200,8 +210,8 @@ reachability, credentials, every nested field, or completeness of host maps.
 
 ## Upgrading an existing install
 
-The web client updates on its public-code host. Electron remains maintained,
-with desktop upgrades on demand rather than per web landing.
+Build the browser assets with `npm run build:web`, restart the web host to
+serve the new build, and refresh the browser to load the new client code.
 
 Keep your private overlay outside the app/repository and keep selecting it with
 PENTACLE_CONFIG after replacing the package. Preserve hostNames, hostColors,
@@ -209,7 +219,7 @@ localHostId, hostMap, mic/micServerUrl and your feature flags when those explici
 choices differ from the defaults. A legacy machineStats object may remain but
 does not configure cards. Use config mappings for old local/remote aliases.
 
-Each terminal row has its own left/right divider in the shared desktop and web
+Each terminal row has its own left/right divider in the browser
 renderer. Drag a divider to adjust only that row. Double-click or double-tap it
 to reset that row to 50/50. With a divider focused, Left/Right adjust by two
 percentage points, Home/End move to the width limits, and Enter resets that row.
@@ -225,19 +235,19 @@ Preferred left fractions are saved as `appearance.gridColSplitTop` and
 adjustment or reset. Missing row preferences fall back to the older
 `appearance.gridColSplit` value, then 50/50. Invalid values use 50/50. Changing
 one row preserves the other row and unrelated settings; temporary width clamps
-never overwrite preferences. Each desktop profile or browser origin retains
+never overwrite preferences. Each browser origin retains
 its own settings across reloads.
 
 Settings overrides are stored under `pentacle.settings.v1` in the renderer's
 localStorage. They override config defaults both before and after asynchronous
 configuration arrives. A saved Default view or Chat-first style choice therefore
 survives an upgrade or config change; change it in Settings (Chat-first style
-needs a reload). Preserve the application profile to retain these overrides; a new
+needs a reload). Preserve the browser profile and site storage to retain these overrides; a new
 profile starts with config defaults.
 
 ## Limits health contract
 
-Desktop snapshots and limits.update frames carry a complete three-row limits
+Daemon snapshots and limits.update frames carry a complete three-row limits
 array ordered Claude (`claude`), Fable (`fable`), Codex (`codex`). Each row has
 id, label, pct, resets_at_iso, resets_text, upstream_reported_at, and probed_at.
 Percentages are null or integers 0–100. Timestamp/order/schema validation is
@@ -309,12 +319,12 @@ Each recording has its own completion guard. Identical consecutive messages are 
 
 ### Optional wake-to-assistant voice
 
-A separately installed compatible local mic service can expose natural wake capture. This desktop does not bundle that service or a speech model. Enable `features.mic`, configure the exact protected `features.assistantRole`, and explicitly set `mic.wakeTargetHost` to that assistant's canonical host ID. Keep `chatStream.snapshot` enabled (the default); `snapshot: false` is unsupported for wake delivery. Public defaults remain inactive.
+A separately installed compatible local mic service can expose natural wake capture. Pentacle Web does not bundle that service or a speech model. Enable `features.mic`, configure the exact protected `features.assistantRole`, and explicitly set `mic.wakeTargetHost` to that assistant's canonical host ID. Keep `chatStream.snapshot` enabled (the default); `snapshot: false` is unsupported for wake delivery. Public defaults remain inactive.
 
-When the service reports wake capture enabled, say **Hey Zephyr** (or the microphone service’s private `MIC_ASSISTANT_NAME`), speak the message, then pause and say **over**. The desktop uses fresh connected session inventory to select the unique current role holder on the configured host, regardless of the focused chat. Ambiguous or disconnected inventory defers delivery. The mic panel shows readiness, pending work and errors. Manual mic-button capture continues to send to its original chat.
+When the service reports wake capture enabled, say **Hey Zephyr** (or the microphone service’s private `MIC_ASSISTANT_NAME`), speak the message, then pause and say **over**. The browser uses fresh connected session inventory to select the unique current role holder on the configured host, regardless of the focused chat. Ambiguous or disconnected inventory defers delivery. The mic panel shows readiness, pending work and errors. Manual mic-button capture continues to send to its original chat.
 
 An unfinished wake capture is discarded after **30 seconds without an accepted speech segment**, returning to listening without sending text or copying to the clipboard. The monotonic idle clock starts at the wake and refreshes only when a nonempty, current, unsuppressed transcript is accepted; silence and rejected audio do not extend it. Speech still being transcribed when the timeout fires is discarded too. The bound exceeds the service's 15-second speech split plus recognition time: the measured maximum normal acceptance gap was 19.78 seconds across four intervals in two completed captures, so 30 seconds leaves pause headroom. A nonempty noise hallucination can still extend the deadline.
 
 Repeating the configured **Hey Zephyr** phrase at the start of a new segment replaces the unfinished wake capture, keeping only words after the new wake. A wake phrase quoted mid-segment or **Hey Pentacle** for separate local actions stays in the current wake text. If the pending-delivery queue is full, a new wake is refused and the existing unfinished capture keeps its deadline. Already completed pending messages survive re-arm and timeout. Manual, answer, followup and local-action captures keep their existing completion rules; shared local-action policy assigns local-action origin and therefore has no wake timeout.
 
-The service's completion claim is atomic across clients. The desktop holds one claimed message while waiting for an assistant and creates only one `sendTurn` for it; the existing chat send/retry lifecycle handles subsequent transport. Turning the mic Off cancels held work before the request, and service lifecycle changes invalidate older work. Pending and latest-claim review data are in memory; a service or desktop crash can lose an unsent claim. Review an unconfirmed claim in the local service and check the chat before explicitly retrying; the desktop does not reconstruct or automatically create a second message. Startup and persistent-mute behavior are controlled by the external service.
+The service's completion claim is atomic across clients. The browser holds one claimed message while waiting for an assistant and creates only one `sendTurn` for it; the existing chat send/retry lifecycle handles subsequent transport. Turning the mic Off cancels held work before the request, and service lifecycle changes invalidate older work. Pending and latest-claim review data are in memory; a service or browser crash can lose an unsent claim. Review an unconfirmed claim in the local service and check the chat before explicitly retrying; the browser does not reconstruct or automatically create a second message. Startup and persistent-mute behavior are controlled by the external service.
