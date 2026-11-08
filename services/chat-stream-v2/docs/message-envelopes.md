@@ -118,3 +118,5 @@ ambiguous evidence remains unknown. Tell uses the existing prepared/promoted
 ledger proof, retaining captured provenance through retries. An operator's
 correlated final answer survives a later proven peer/notice in the same turn;
 a peer-only turn publishes no coordination prose.
+
+When an unproven native TELL projects as a literal USER, daemon-owned `raw.input_source_kind` retains its native kind. Submission proof uses that original kind; a display projection cannot promote a non-USER event into USER proof. A finite Claude wrapper spanning adjacent native text blocks is decoded as one wrapper, with all original block spans retained.

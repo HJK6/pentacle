@@ -649,6 +649,7 @@ def _project_session_events_conn(
                       if raw.get("daemon_notice") else input_origin(conn, event, event.get("daemon_seq")))
             event = {**event, "raw": {**raw, "input_provenance": origin}}
             if event.get("kind") == "TELL" and origin["kind"] != "peer":
+                event["raw"]["input_source_kind"] = "TELL"
                 event["text"] = delivery_wire(event)
                 event["kind"] = "USER"
                 for key in ("sender", "peer_payload"):

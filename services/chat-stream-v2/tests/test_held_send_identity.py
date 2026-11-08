@@ -301,7 +301,7 @@ def test_backend_held_send_inflight_changed_wake_waits_for_original_commit(tmp_p
             _conflict(results[1])
             snapshot = await _snapshot(h)
             assert snapshot["counts"]["pane_submissions"] == 1
-            assert snapshot["receipts"] == 2  # independent wake acceptance + outcome
+            assert snapshot["receipts"] == 4  # claim + pre-input proof + native occurrence + outcome
             held = [e for e in snapshot["events"] if e.get("raw", {}).get("assistant_composite_routine_ingress")]
             assert len(held) == 1 and held[0]["text"] == "START: original routine"
     asyncio.run(run())

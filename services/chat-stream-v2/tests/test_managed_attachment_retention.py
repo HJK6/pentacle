@@ -68,8 +68,8 @@ def test_shared_chat_owners_archive_and_legacy(tmp_path):
             assert (await sweep(store,tmp_path))['deleted']==0
             await store.submit(lambda c:(c.execute("DELETE FROM session_event_tail WHERE identity='first'"),c.commit()))
             assert (await sweep(store,tmp_path))['deleted']==0
-            archive=tmp_path/'archive.db';c=sqlite3.connect(archive)
-            c.execute('CREATE TABLE session_event_tail(event_json TEXT)');c.execute('INSERT INTO session_event_tail VALUES(?)',(r['blob_sha'],));c.commit();c.close()
+            archive=tmp_path/'sessions_archive.db';c=sqlite3.connect(archive)
+            c.execute('INSERT INTO session_event_tail(stream_id,event_key,event_json,recorded_at) VALUES(?,?,?,?)',('fixture:chat','legacy',r['blob_sha'],0));c.commit();c.close()
             await store.submit(lambda c:(c.execute('DELETE FROM session_event_tail'),c.commit()))
             assert (await sweep(store,tmp_path,archive_path=archive))['deleted']==0
             c=sqlite3.connect(archive);c.execute('DELETE FROM session_event_tail');c.commit();c.close()

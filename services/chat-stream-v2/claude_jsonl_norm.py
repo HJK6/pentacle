@@ -419,7 +419,12 @@ def normalize_claude_jsonl_record(
                         legacy_input_events=legacy)
                     events.append(event)
                     pending.clear()
-            for ordinal, block in enumerate(_content_blocks(record)):
+            blocks = _content_blocks(record)
+            # A finite provider wrapper may frame several native text blocks.
+            # Decode that one wrapper together; tools still fence input groups.
+            whole_wrapper = (all(block.get("type") == "text" for block in blocks)
+                and normalize_provider_user_text(_to_text(blocks), provider="claude", authenticated=True)[1] is not None)
+            for ordinal, block in enumerate(blocks):
                 if block.get("type") == "tool_result":
                     flush()
                     text = _to_text(block.get("content"))
@@ -431,7 +436,7 @@ def normalize_claude_jsonl_record(
                 text = _to_text(block.get("text") or block.get("content") or "")
                 if not text:
                     continue
-                boundary = _input_boundary(text)
+                boundary = not whole_wrapper and _input_boundary(text)
                 if boundary:
                     flush()
                 pending.append((ordinal, text))

@@ -66,6 +66,20 @@ def test_native_text_blocks_preserve_boundary_and_order(provider, texts):
     assert [e['raw'].get('tell_id') for e in events] == [t.split('[tell:')[1].split(']')[0] if t.startswith('[from ') else None for t in texts]
 
 
+@pytest.mark.parametrize('body', ['literal operator body', '[from fixture:peer] [tell:framed]\npeer body'])
+def test_claude_finite_wrapper_across_native_blocks_keeps_source_spans(body):
+    parts = ['<pasted_content id="8d21">', body, '</pasted_content id="8d21">']
+    record = native_record('claude', parts, 'fragmented-wrapper')
+    events = normalize('claude', record)
+    assert len(events) == 1
+    assert events[0]['text'] == (body.split('\n', 1)[1] if body.startswith('[from ') else body)
+    assert events[0]['provider_wrapper']['id'] == '8d21'
+    assert events[0]['raw']['provider_content'] == '\n'.join(parts)
+    assert events[0]['raw']['source_record'] == record
+    assert events[0]['raw']['native_block_ordinals'] == [0, 1, 2]
+    assert events[0]['raw']['native_block_spans'] == [[i, 0, len(part)] for i, part in enumerate(parts)]
+
+
 def test_ordinary_send_captures_daemon_proof_before_native_input(tmp_path):
     async def run():
         h = _Harness(tmp_path)
