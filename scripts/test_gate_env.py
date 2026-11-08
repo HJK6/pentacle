@@ -152,7 +152,7 @@ class ConfigFailsClosed(Tmp):
         self.assertEqual(config["schema"], "pentacle.gate-env.v1")
         workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
                    if "unit_workers" in target}
-        self.assertEqual(workers, {name: 2 for name in ("v2-unit", "v2-merge", "v2-merge-capacity", "v2-merge-ci")})
+        self.assertEqual(workers, {"v2-unit": 2, "v2-merge": 2, "v2-merge-capacity": 2, "v2-merge-ci": 1})
 
     def test_malformed_variants_are_refused(self):
         bad = {

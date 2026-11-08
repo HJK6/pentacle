@@ -101,6 +101,10 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     assert job['timeout-minutes'] == 70
     argv = _invocations(step)['v2-merge-ci']
     target, command, _, env, _ = _trace('v2-merge-ci', argv, tmp_path)
+    assert target['unit_workers'] == 1
+    assert command[command.index('--unit-workers') + 1] == '1'
+    assert all(CONFIG['profiles']['pentacle']['targets'][name]['unit_workers'] == 2
+               for name in ('v2-unit', 'v2-merge', 'v2-merge-capacity'))
     assert target['tier_timeouts'] == {'unit':2100, 'smoke':900}
     assert target['timeout_s'] == target['max_timeout_s'] == 3000
     assert command[command.index('--deadline-seconds') + 1] == '3120'

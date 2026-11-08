@@ -183,7 +183,7 @@
           },
           "timeout_s": 3000,
           "max_timeout_s": 3000,
-          "unit_workers": 2
+          "unit_workers": 1
         },
         "cli-pytest": {
           "kind": "pytest_files",
