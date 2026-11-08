@@ -820,7 +820,7 @@ def open_fields(msg: dict[str, Any]) -> dict[str, Any]:
     fields["objective"] = msg.get("objective")
     fields["objective_source"] = msg.get("objective_source")
     fields["visibility"] = msg.get("visibility") or (
-        "hidden" if msg.get("parent_stream_id") and msg.get("role") != "nexus"
+        "hidden" if msg.get("parent_stream_id")
         and not (msg.get("handoff") or msg.get("handoff_from_stream_id")) else "default"
     )
     fields["no_watch"] = msg.get("no_watch") is True

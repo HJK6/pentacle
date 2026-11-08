@@ -100,7 +100,7 @@ def test_spawn_handoff_at_inserts_schedule_without_spawning(monkeypatch, tmp_pat
     assert captured["payload"]["handoff_from_stream_id"] == "hosta:codex-leader"
     assert captured["payload"]["handoff"] is True
     assert "requested_model" in captured["payload"] and captured["payload"]["requested_model"] is None
-    assert captured["payload"]["visibility"] == "default"
+    assert captured["payload"]["visibility"] is None
     assert "parent_stream_id" not in captured["payload"]
     printed = json.loads(capsys.readouterr().out)
     assert printed["schedule_id"] == "sch-1"

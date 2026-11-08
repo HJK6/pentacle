@@ -1285,7 +1285,7 @@ def spawn(args: argparse.Namespace) -> int:
     baseline_content = loaded_baseline.get("content") if loaded_baseline else None
     visibility = args.visibility
     if visibility is None:
-        visibility = "default" if (handoff or args.role == "nexus" or parent is None) else None
+        visibility = "default" if (not handoff and not getattr(args, "resume", None) and parent is None) else None
     raw_spec_ids = getattr(args, "spec_id", None)
     spec_ids = [raw_spec_ids] if isinstance(raw_spec_ids, str) else list(raw_spec_ids or [])
     if scheduled:

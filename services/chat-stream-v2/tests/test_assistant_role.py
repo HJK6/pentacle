@@ -211,7 +211,7 @@ def test_daff_hidden_launch_matches_primary_hidden_seat_instructions(monkeypatch
                                        projects_root=str(tmp_path / "projects"), agent_orch_bin_dir="/bin")
         ctl = SpawnCtl(store, sessions, tmux=LiveTmux(), machine=machine)
         for role, visible in (("partner-assistant", False), ("assistant", True)):
-            msg = {"role": role, "provider": "claude", "visibility": "default",
+            msg = {"role": role, "provider": "claude", "visibility": "default" if visible else "hidden",
                    "_auth_context": OPERATOR, "_defer_launch_token_stage": True}
             async with sessions.assistant.spawn(msg, HOST):
                 command, _, _ = await ctl._resolve_launch(msg, HOST, "fixture")
@@ -345,7 +345,8 @@ def test_front_desk_handoff_persists_hidden_without_role_env(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
-def test_front_desk_recovery_spec_hides_parentless_seat_before_binding_loads(monkeypatch, tmp_path):
+@pytest.mark.parametrize("requested", ["default", "nested", "hidden", None])
+def test_front_desk_recovery_spec_hides_parentless_seat_before_binding_loads(monkeypatch, tmp_path, requested):
     from test_spawn_resume import ResumeTmux, _install_successful_spawn, _machine
     monkeypatch.delenv("PENTACLE_ASSISTANT_ROLE", raising=False)
     monkeypatch.delenv("PENTACLE_ASSISTANT_DAFF_ROLE", raising=False)
@@ -364,14 +365,14 @@ def test_front_desk_recovery_spec_hides_parentless_seat_before_binding_loads(mon
             ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=_FdCatalog())
             _install_successful_spawn(ctl, sessions, tmux)
             base = {"provider": "claude", "model": "claude-opus-5-5", "effort": "medium",
-                    "spec_id": FD_SPEC, "visibility": "default", "_auth_context": OPERATOR}
+                    "spec_id": FD_SPEC, "visibility": requested, "_auth_context": OPERATOR}
             top = await ctl.spawn({**base, "request_id": "fd-recovery"}, "localhost")
             assert sessions.get(top["stream_id"])["visibility"] == "hidden"
             child = await ctl.spawn({**base, "request_id": "fd-child", "parent_stream_id": "localhost:parent",
                                      "role": "lead"}, "localhost")
-            assert sessions.get(child["stream_id"])["visibility"] == "default"
+            assert sessions.get(child["stream_id"])["visibility"] == (requested or "hidden")
             assert operator_facing[0] is False
-            assert operator_facing[1:] == [False]  # a parented seat is never operator-facing
+            assert operator_facing[1:] == [requested == "default"]
         finally:
             store.stop()
     asyncio.run(run())

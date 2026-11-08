@@ -338,13 +338,19 @@ def _live_seat(row: dict[str, Any] | None, *, target: bool = False) -> None:
 
 def _configured_spec_authorized(
     row: dict[str, Any], authorized_spec_ids: frozenset[str], *, allow_hidden: bool = False,
+    same_seat_restore: bool = False,
 ) -> bool:
-    if (not authorized_spec_ids or row["parent_stream_id"]
-            or row["visibility"] not in ({"default", "hidden"} if allow_hidden else {"default"})):
+    if (not authorized_spec_ids or row.get("parent_stream_id")
+            or row.get("visibility") not in ({"default", "hidden"} if allow_hidden else {"default"})
+            or (row.get("handoff_from_stream_id") and not same_seat_restore)):
         return False
     try:
-        qualified = json.loads(row["qualified_spec_ids"] or "[]")
-        provenance = json.loads(row["spec_binding_provenance"] or "[]")
+        qualified = row.get("qualified_spec_ids") or []
+        provenance = row.get("spec_binding_provenance") or []
+        if isinstance(qualified, str):
+            qualified = json.loads(qualified)
+        if isinstance(provenance, str):
+            provenance = json.loads(provenance)
     except (TypeError, ValueError):
         return False
     if not isinstance(qualified, list) or not isinstance(provenance, list):
@@ -352,7 +358,11 @@ def _configured_spec_authorized(
     matching = authorized_spec_ids.intersection(item for item in qualified if isinstance(item, str))
     return bool(matching) and any(
         isinstance(item, dict) and isinstance(item.get("spec_id"), str) and item["spec_id"] in matching
-        and item.get("provenance") in {"spawn_explicit", "drive_explicit", "handoff_inherited"}
+        and isinstance(item.get("provenance"), str)
+        and item.get("provenance") in (
+            {"spawn_explicit", "drive_explicit", "handoff_inherited"}
+            if same_seat_restore else {"spawn_explicit", "drive_explicit"}
+        )
         and isinstance(item.get("granting_principal"), str) and item["granting_principal"].strip()
         for item in provenance
     )
@@ -538,6 +548,8 @@ class AssistantBindingStoreMixin:
                     ).fetchone()
                     if handoff is None and not _configured_spec_authorized(
                         actor, authorized_spec_ids, allow_hidden=name == primary_assistant_name(),
+                        same_seat_restore=(actor_stream_id == old["stream_id"]
+                                           and target_stream_id == actor_stream_id and not clear),
                     ):
                         raise ValueError("assistant_rebind_unauthorized")
                     handoff_proved = handoff is not None

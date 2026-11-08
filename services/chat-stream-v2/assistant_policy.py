@@ -70,7 +70,7 @@ class AssistantPolicy:
         """True for a parentless local seat that is, or is becoming, the bound front desk.
 
         Independent of the role env: a handoff from the bound stream, the bound
-        stream itself (resume/restore), or a seat carrying a configured rebind spec.
+        stream itself (resume/restore), or a deliberately commissioned fresh recovery.
         """
         composite = self.front_desk
         if (composite is None or not composite.enabled or fields.get("parent_stream_id")
@@ -79,9 +79,13 @@ class AssistantPolicy:
         bound = composite.config.direct_primary_stream_id
         if bound and bound in (stream_id, fields.get("handoff_from_stream_id")):
             return True
-        qualified = fields.get("qualified_spec_ids")
-        return bool(isinstance(qualified, (list, tuple))
-                    and composite.env_config.rebind_authorized_spec_ids.intersection(qualified))
+        if fields.get("handoff_from_stream_id"):
+            return False
+        from store_assistant_binding import _configured_spec_authorized
+        return _configured_spec_authorized(
+            {**fields, "visibility": "hidden"},
+            composite.env_config.rebind_authorized_spec_ids, allow_hidden=True,
+        )
 
     @staticmethod
     def _error(code, message):
@@ -149,8 +153,6 @@ class AssistantPolicy:
             raise self._error("assistant_parent_invalid", "assistant must be a top-level session")
         if host != self.local_host:
             raise self._error("assistant_host_invalid", "assistant must run on the configured daemon host")
-        if self.is_daff_backend({"host": host, "role": role}):
-            msg["visibility"] = "hidden"
         async with self.lock:
             # Keep existing idempotent replay ahead of duplicate checks. A new
             # reservation is checked by SpawnCtl immediately before boot.
