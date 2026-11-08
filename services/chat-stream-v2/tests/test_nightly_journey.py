@@ -85,7 +85,7 @@ def test_fire_guard_active_process(monkeypatch, script):
     assert sa.fire_guard() == "BLOCKED:active_gate_or_deploy"
 
 
-@pytest.mark.parametrize("args", ["python -m deploy.deploy --run", "python3.13 -u /fixture/gate_env.py --run"])
+@pytest.mark.parametrize("args", ["python -m deploy.deploy --run", "python3.13 -u /fixture/gate_env.py --run", "/fixture/Python.app/Contents/MacOS/Python scripts/run_gate.py unit"])
 def test_fire_guard_python_positions(monkeypatch, args):
     monkeypatch.setattr(sa.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=f"123 python {args}\n"))
     assert sa.fire_guard() == "BLOCKED:active_gate_or_deploy"

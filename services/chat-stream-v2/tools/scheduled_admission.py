@@ -97,7 +97,7 @@ def fire_guard():
             tokens = columns[2].split()
         if not tokens:
             continue
-        executable = Path(tokens[0]).name
+        executable = Path(tokens[0]).name.lower()
         if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable):
             script = tokens[2] if len(tokens) > 2 and tokens[1] in ("-u", "-B", "-I", "-s", "-S") else (tokens[1] if len(tokens) > 1 else "")
             if (Path(script).name in ("gate_env.py", "run_gate.py", "deploy.py")
