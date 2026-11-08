@@ -81,6 +81,17 @@ class RecordingWitness:
         self.closed = True
 
 
+class AnchoredLadderTmux(LadderTmux):
+    """Explicit synthetic pane authority, only for synthetic process tables."""
+    async def close_pane_identity(self, name: str) -> dict[str, str] | None:
+        pane = await self.pane_identity(name)
+        if pane is None:
+            return None
+        return {**pane, "session_id": "$1", "server_pid": "1", "server_version": "3.7c",
+                "pane_dead": "0", "pane_pipe": "0", "pane_dead_status": "",
+                "pane_dead_signal": ""}
+
+
 class DecisionCaptureTmux(LadderTmux):
     def __init__(self, captures: list[str]) -> None:
         super().__init__(dies_on_graceful=True)
@@ -299,22 +310,25 @@ def _spawn_sigterm_ignoring_process() -> int:
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")  # deliberate fork+exec of an orphan
-def test_sigkill_by_pid_recovers_close_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unanchored_orphan_refuses_force_close(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sessions_mod, "CLOSE_GRACEFUL_CONFIRM_S", 0.2)
     monkeypatch.setattr(sessions_mod, "CLOSE_KILL_CONFIRM_S", 2.0)
     pid = _spawn_orphan()
     assert prockill.pid_alive(pid)
+    cleanup = prockill.ExitWitness(int(pid))
 
     async def go() -> None:
         tmux = LadderTmux(pid=pid, dies_on_graceful=False)  # tmux never confirms death
         result, store, alerts = await _close(tmux, "s-sigkill")
         try:
-            assert result["failed"] is False
-            assert result["session"]["status"] == "closed"
-            assert result["survivors"] == []
-            # The escalation actually ran: the child process is gone.
-            assert not prockill.pid_alive(pid)
-            assert alerts.emitted == []          # a clean kill raises no alert
+            assert result["failed"] is True
+            assert result["reason"] == "logical_ownership_unproven"
+            assert result["session"]["status"] == "open"
+            assert result["reap_status"] == "unknown"
+            assert all("ownership_proof_v2" not in item for item in result["survivors"])
+            # An owned test orphan is not thereby a logically anchored tmux pane.
+            assert not cleanup.exited()
+            assert [kind for kind, _ in alerts.emitted] == ["close_failed"]
         finally:
             store.stop()
 
@@ -322,9 +336,9 @@ def test_sigkill_by_pid_recovers_close_ok(monkeypatch: pytest.MonkeyPatch) -> No
         asyncio.run(go())
     finally:
         try:
-            os.kill(int(pid), 9)
-        except (ProcessLookupError, ValueError):
-            pass
+            cleanup.send(signal.SIGKILL)
+        finally:
+            cleanup.close()
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")  # deliberate child-process fixture
@@ -361,13 +375,13 @@ def test_close_reports_real_sigterm_ignoring_process_as_alive_survivor(
                 assert len(result["survivors"]) == 1
                 survivor = result["survivors"][0]
                 assert survivor["pid"] == pid
-                assert survivor["reap_reason"] == "process_observed_alive"
+                assert survivor["reap_reason"] == "logical_ownership_unproven"
                 assert real_pid_alive(str(pid))
 
                 reap = await store.get_session_reap(f"{HOST}:s-live-survivor")
                 assert reap is not None
                 assert reap["reap_status"] == "unknown"
-                assert reap["survivors"][0]["reap_reason"] == "process_observed_alive"
+                assert reap["survivors"][0]["reap_reason"] == "logical_ownership_unproven"
                 assert liveness_probes == [str(pid)]
             finally:
                 store.stop()
@@ -399,7 +413,7 @@ def test_dstate_carcass_marks_closed_and_alerts(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(prockill, "boot_id", boot)
 
     async def go() -> None:
-        tmux = LadderTmux(pid="999999", dies_on_graceful=False)
+        tmux = AnchoredLadderTmux(pid="999999", dies_on_graceful=False)
         result, store, alerts = await _close(tmux, "s-carcass")
         try:
             # A husk that can never run userspace again: the row is closed as
@@ -425,7 +439,7 @@ def test_no_deliverable_signal_is_close_failed_row_open(monkeypatch: pytest.Monk
         result, store, alerts = await _close(tmux, "s-failed")
         try:
             assert result["failed"] is True
-            assert "no deliverable signal" in result["reason"]
+            assert result["reason"] == "logical_ownership_unproven"
             # The row is LEFT OPEN — never closed over a maybe-live process.
             row = await store.fetch_session(HOST, "s-failed")
             assert row["status"] == "open"
@@ -437,8 +451,10 @@ def test_no_deliverable_signal_is_close_failed_row_open(monkeypatch: pytest.Monk
 
 
 def test_close_persists_descendant_survivor_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    root_gone = False
+    handles = {}
     async def records() -> dict[int, dict[str, object]]:
-        return {
+        table = {
             100: {
                 "pid": 100, "ppid": 1, "uid": 501, "pgid": 100, "sid": 100,
                 "start_id": "Mon Jan 1 00:00:00 2026", "command": "target-shell",
@@ -448,6 +464,10 @@ def test_close_persists_descendant_survivor_proof(monkeypatch: pytest.MonkeyPatc
                 "start_id": "Mon Jan 1 00:00:01 2026", "command": "target-child",
             },
         }
+        if root_gone:
+            table.pop(100)
+            table[101]["ppid"] = 1
+        return table
 
     async def boot() -> str:
         return "12345678-1234-1234-1234-123456789abc"
@@ -459,11 +479,18 @@ def test_close_persists_descendant_survivor_proof(monkeypatch: pytest.MonkeyPatc
     class SurvivorWitness(RecordingWitness):
         def __init__(self, pid):
             super().__init__(pid)
-            self.terminal = pid == 100
+            handles[pid] = self
     monkeypatch.setattr(prockill, "ExitWitness", SurvivorWitness)
 
+    class Tmux(AnchoredLadderTmux):
+        async def kill_session(self, name):
+            nonlocal root_gone
+            root_gone = True
+            handles[100].terminal = True
+            await super().kill_session(name)
+
     async def go() -> None:
-        tmux = LadderTmux(pid="100", dies_on_graceful=True)
+        tmux = Tmux(pid="100", dies_on_graceful=True)
         result, store, _alerts = await _close(tmux, "s-survivor-proof")
         try:
             assert result["failed"] is False
@@ -545,7 +572,7 @@ def test_reap_reason_separates_inventory_incomplete_from_process_observed_alive(
     async def no_records(): return {}
     monkeypatch.setattr(prockill, "process_records", no_records)
     observed = asyncio.run(prockill.CapturedTree([101], {}, {}, False).readback())
-    assert observed["survivors"][0]["reap_reason"] == "process_observed_alive"
+    assert observed["survivors"][0]["reap_reason"] == "logical_ownership_unproven"
     assert observed["survivors"][0]["reap_reason"] != "inventory_incomplete"
     assert probes == ["101"]
 
@@ -968,7 +995,7 @@ def test_force_close_refuses_stale_captured_instance(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(prockill, "boot_id", boot)
     monkeypatch.setattr(prockill.os, "kill", lambda pid, sig: deliveries.append((pid, sig)) if sig else None)
     monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
-    tmux = LadderTmux(pid="990001")
+    tmux = AnchoredLadderTmux(pid="990001")
     receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture,
         _confirm_pane_gone=not_gone)
     state, _, _ = asyncio.run(Sessions._terminate_pane(receiver, "s-stale"))
@@ -997,7 +1024,9 @@ def _cohort_rig(monkeypatch, *, complete=True):
     proofs = {pid: prockill.identity_proof(host=HOST, boot="boot-1", record=rec,
               tmux_session="owned", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
               for pid, rec in original.items()}
-    return prockill.CapturedTree(list(original), original, proofs, complete), state, handles
+    cohort = prockill.CapturedTree(list(original), original, proofs, complete)
+    cohort.anchored = True  # component tests supply synthetic logical authority explicitly
+    return cohort, state, handles
 
 
 @pytest.mark.parametrize("field,value", [
@@ -1121,7 +1150,7 @@ def test_close_cancellation_closes_every_registered_witness(monkeypatch, where):
         async def cancelled(*_args): raise asyncio.CancelledError
         if where == "prepare": monkeypatch.setattr(prockill, "process_records", cancelled)
         from types import SimpleNamespace
-        tmux = LadderTmux(pid="990001")
+        tmux = AnchoredLadderTmux(pid="990001")
         if where == "grace": tmux.kill_session = cancelled
         receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture)
         with pytest.raises(asyncio.CancelledError):
@@ -1138,18 +1167,18 @@ def test_close_refusal_persists_open_obligation_and_retry_completes(monkeypatch)
         # Only root participates here. The child's record is foreign to this test's cohort.
         state["records"].pop(990002)
         state["boot"] = ""
-        tmux = LadderTmux(pid="990001")
+        tmux = AnchoredLadderTmux(pid="990001")
         store = Store(":memory:"); store.start()
         alerts = RecordingAlerts()
         sessions = Sessions(store=store, tmux=tmux, local_host=HOST, alerts=alerts)
         try:
             await _seed(store, "retry")
             result = await sessions.close(HOST, "retry")
-            assert result["failed"] and result["reason"] == "instance_authority_unproven"
+            assert result["failed"] and result["reason"] == "logical_ownership_unproven"
             assert (await store.fetch_session(HOST, "retry"))["status"] == "open"
             reap = await store.get_session_reap(f"{HOST}:retry")
             assert reap["reap_status"] == "unknown"
-            assert reap["survivors"][0]["reap_reason"] == "instance_authority_unproven"
+            assert reap["survivors"][0]["reap_reason"] == "logical_ownership_unproven"
             assert all(not h.sent and h.closed for h in handles.values())
             state["boot"] = "boot-1"
             def witness(pid):
@@ -1282,7 +1311,7 @@ def test_disposable_private_tmux_force_close_preserves_foreign_sentinel(
             monkeypatch.setattr(tmux, "kill_session", wedged_grace)
             if missing_pane_identity:
                 async def no_identity(_name): return None
-                monkeypatch.setattr(tmux, "pane_identity", no_identity)
+                monkeypatch.setattr(tmux, "close_pane_identity", no_identity)
             sessions = Sessions(store=store, tmux=tmux, local_host=HOST)
             capture = sessions._capture_tree_identity
             async def record_capture(*args):
@@ -1292,6 +1321,13 @@ def test_disposable_private_tmux_force_close_preserves_foreign_sentinel(
             monkeypatch.setattr(sessions, "_capture_tree_identity", record_capture)
             await _seed(store, "fence-owned")
             result = await sessions.close(HOST, "fence-owned")
+            if missing_pane_identity:
+                assert result["failed"] and result["reason"] == "logical_ownership_unproven"
+                assert not deliveries and result["reap_status"] == "unknown"
+                assert all("ownership_proof_v2" not in item for item in result["survivors"])
+                assert sentinel.poll() is None
+                assert await tmux.has_session("fence-owned")
+                return
             assert not result["failed"], result
             assert result["session"]["status"] == "closed"
             assert len(captured) >= 2 and set(deliveries) == set(captured)
@@ -1322,7 +1358,7 @@ def test_close_tmux_timeout_still_uses_independent_captured_authority(monkeypatc
             handles[pid] = handle
             return handle
         monkeypatch.setattr(prockill, "ExitWitness", witness)
-        tmux = LadderTmux(pid="990001")
+        tmux = AnchoredLadderTmux(pid="990001")
         tmux.kill_session = timeout
         receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture)
         state, _, reap = await Sessions._terminate_pane(receiver, "owned")
@@ -1393,6 +1429,8 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             if scenario in {"dead", "same_server_reuse"}: fields["pane_dead"] = "1"
             if scenario in {"status_zero", "same_server_reuse"}: fields["pane_dead_status"] = "0"
             if scenario == "signal": fields["pane_dead_signal"] = "term"
+            if scenario == "exit_during_registration" and self.reads > 1:
+                fields["pane_dead_status"] = "0"
             if scenario == "pipe": fields["pane_pipe"] = "1"
             if scenario == "unknown_version": fields["version"] = "unqualified"
             if scenario == "wrong_root": fields["pane_pid"] = str(root + 10)
@@ -1418,15 +1456,19 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             await _seed(store, "anchor-refusal")
             result = await sessions.close(HOST, "anchor-refusal")
             assert deliveries == [], (scenario, deliveries)
-            assert result["failed"] is not graceful
-            if not graceful: assert result["reason"] == "logical_ownership_unproven"
+            changed = (scenario.startswith("drift_") or scenario in {
+                "post_missing", "exit_during_registration", "wrong_root"})
+            succeeded = graceful and not changed
+            assert result["failed"] is not succeeded
+            if not succeeded: assert result["reason"] == "logical_ownership_unproven"
+            if changed: assert tmux.kills == 0  # never retarget a changed binding
             assert result["reap_status"] == "unknown"
             reap = await store.get_session_reap(f"{HOST}:anchor-refusal")
             assert reap is not None and reap["reap_status"] == "unknown"
             for item in reap["survivors"]:
                 assert "ownership_proof_v2" not in item
                 assert item["reap_reason"] == "logical_ownership_unproven"
-            if graceful:
+            if succeeded:
                 # Continue from the actual persisted close, through the ordinary reaper.
                 reaper = SessionReconciler(sessions, None)
                 async def inventory(_host): return [], await records(), "boot-fixture"
