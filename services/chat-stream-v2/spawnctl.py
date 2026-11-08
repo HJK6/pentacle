@@ -4161,7 +4161,7 @@ class SpawnCtl:
                 if not pid or pid != str(await tmux.pane_pid(name)):
                     return "deferred"
                 started = canonical_start(res.get("pane_started_at"))
-                if res.get("pane_started_at") and (not started or started != await self._pane_started_at(pid, host=host)):
+                if not started or started != await self._pane_started_at(pid, host=host):
                     return "deferred"
             if not await self._kill_uncommitted_pane(host, name, tmux, nonce=nonce):
                 return "deferred"

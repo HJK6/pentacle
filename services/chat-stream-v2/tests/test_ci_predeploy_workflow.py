@@ -147,7 +147,7 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
 def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(tmp_path, monkeypatch):
     from tests.cosmo_e2e import harness
     workflow, step = _step()
-    assert workflow['jobs']['daemon']['runs-on'] == 'ubuntu-latest'
+    assert workflow['jobs']['daemon']['runs-on'] == 'ubuntu-24.04'
     monkeypatch.delenv('COSMO_E2E_DISPOSABLE_BASE', raising=False)
     monkeypatch.setattr(harness, '_disposable_base', lambda: Path('/tmp').resolve())
     workspace = Path('/opt/ci-runner/_temp/gate-env/daemon')

@@ -687,3 +687,33 @@ def test_cancellation_tombstone_retains_nonce() -> None:
         finally:
             store.stop()
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("started,observed,expected", [
+    ("", "Mon Jan 1 00:00:00 2026", "deferred"),
+    ("   ", "Mon Jan 1 00:00:00 2026", "deferred"),
+    ("Mon Jan 1 00:00:00 2026", "", "deferred"),
+    ("Mon Jan 1 00:00:00 2026", "Mon Jan 1 00:00:01 2026", "deferred"),
+    ("Mon Jan 1 00:00:00 2026", "Mon Jan 1 00:00:00 2026", "released"),
+])
+def test_cancel_legacy_requires_nonempty_comparable_birth(monkeypatch, started, observed, expected):
+    async def go():
+        name = "legacy-cancel-birth"
+        tmux = ReconTmux()
+        store, _sessions, ctl = _ctl(tmux)
+        async def read_birth(*_args, **_kwargs): return observed
+        monkeypatch.setattr(ctl, "_pane_started_at", read_birth)
+        try:
+            tmux.live.add(name)
+            await store.reserve_stream_id(HOST, name, ttl_s=600, request_id="legacy", nonce="")
+            res = {"host": HOST, "session_name": name, "request_id": "legacy",
+                   "nonce": "", "pane_pid": "1234", "pane_started_at": started}
+            assert await ctl._cleanup_cancelled_spawn(res) == expected
+            if expected == "deferred":
+                assert tmux.kill_calls == 0 and name in tmux.live
+                assert any(r["session_name"] == name for r in await store.reservations(include_expired=True))
+            else:
+                assert tmux.kill_calls > 0 and name not in tmux.live
+        finally:
+            store.stop()
+    asyncio.run(go())
