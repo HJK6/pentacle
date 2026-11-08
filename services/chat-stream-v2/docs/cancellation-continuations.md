@@ -45,6 +45,13 @@ the timestamp preserved across equivalent terminal states. Progress is an
 explicit state transition; report ID replay does not insert or project again.
 No new schema, report ordering heuristic or recovery service is needed.
 
+The finite boundary explicitly excludes shutdown-wide task atomicity. Main's
+shutdown cancels background tasks before closing the Server listener
+(`main.py:1213–1226`). That ordering is an **unqualified risk**, not a proved
+lost outcome after restart. A demonstrated durable/projection loss after restart
+is the trigger to return that separate scope for qualification; request immunity
+does not certify shutdown behavior.
+
 ## Executable checks
 
 Use the supported `scripts/gate_env.py run --target v2-pytest` entry, selecting:
