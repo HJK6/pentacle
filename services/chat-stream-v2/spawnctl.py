@@ -4792,6 +4792,20 @@ class SpawnCtl:
                 name, str(session["provider"]), tmux,
                 absolute_deadline=time.monotonic() + ADOPTION_BOOT_DEADLINE_S,
             )
+            if ready.ready:
+                if await self._session_state_for_wait(name, tmux) == "gone":
+                    return "failed", "pane_died_during_boot", "promptless adopted pane died after readiness observation"
+                request_id = str((resume or {}).get("request_id") or "")
+                nonce = str((resume or {}).get("nonce") or "")
+                readable, observed_nonce = await self._tmux_nonce(name, tmux)
+                if (not request_id or not nonce or not readable or observed_nonce != nonce
+                        or not await self.store.owns_spawn_intent(host, name, request_id, nonce)
+                        or not await self._current_spawn_pane_verified_alive(
+                            host, name, tmux, expected_generation=str(session.get("session_generation") or ""),
+                        )
+                        or str(await tmux.pane_pid(name)) != str(session.get("pane_pid") or "")):
+                    return ("indeterminate", "provider_identity_unproven",
+                            "adopted_after_restart: promptless readiness pane identity is unverified")
             if not ready.ready:
                 if await self._session_state_for_wait(name, tmux) == "gone":
                     return "failed", "pane_died_during_boot", "promptless adopted pane died before readiness"

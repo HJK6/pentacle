@@ -972,6 +972,15 @@ class AperturePane(RegistrationFailureTmux):
         self.cleanup_unknown = cleanup_unknown
         self.captures = 0
 
+    async def pane_identity(self, name):
+        if not self.alive:
+            return None
+        return {"pane_id": "%1", "pane_pid": self._pid, "session_name": name}
+
+    async def kill_pane(self, pane_id):
+        assert pane_id == "%1"
+        await self.kill_session("adoption-aperture")
+
     async def capture(self, name):
         self.captures += 1
         return self.screen
@@ -1181,3 +1190,29 @@ def test_unreadable_pane_nonce_retains_recovery_without_cleanup():
     assert pane.alive and not pane.killed and not pane.pasted
     assert result["reconcile"] == {"adopted": 0, "released": 0}
     assert result["outcome"] is None and len(result["reservations"]) == 1
+
+
+@pytest.mark.parametrize("change", ["nonce", "pid", "dead"])
+def test_promptless_ready_observation_rechecks_original_pane_identity(change):
+    class ChangedDuringObservation(AperturePane):
+        async def capture(self, name):
+            if change == "nonce":
+                self.nonce = "FOREIGN"
+            elif change == "pid":
+                self._pid = "9999"
+            else:
+                self.alive = False
+            return "OpenAI Codex\n─────────\n› explain this codebase\n  gpt-5-codex high"
+
+    pane = ChangedDuringObservation()
+    result = asyncio.run(_aperture_reconcile(pane, admitted=True))
+    assert result["await"]["state"] != "ready", "ready chrome alone must not retire the original identity fence"
+    assert result["row"]["pane_pid"] == "4321"
+    assert not pane.pasted and not pane.killed
+    if change == "dead":
+        assert result["outcome"]["state"] == "failed"
+        assert result["row"]["bootstrap_state"] == "failed"
+    else:
+        assert result["outcome"]["state"] == "indeterminate"
+        assert result["row"]["bootstrap_state"] == "starting"
+        assert len(result["reservations"]) == 1

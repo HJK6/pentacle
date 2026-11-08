@@ -384,7 +384,8 @@ def test_real_pane_checkpoint_survives_private_daemon_restart(tmp_path, aperture
 
     name = "aperture-checkpoint"
     request = "checkpoint-request"
-    with rm.cell_env(tmp_path / "checkpoint", tmp_path / "evidence") as cell:
+    evidence = Path(os.environ.get("PENTACLE_GATE_EVIDENCE_DIR", str(tmp_path / "evidence"))) / f"adoption-crash-{aperture}"
+    with rm.cell_env(tmp_path / "checkpoint", evidence) as cell:
         if aperture == "before_generation":
             async def prior_row():
                 store = Store(cell.daemon.db)
@@ -452,3 +453,8 @@ def test_real_pane_checkpoint_survives_private_daemon_restart(tmp_path, aperture
             assert awaited["session"]["pane_pid"] == identity["pane_pid"]
             receipt = json.loads(after["outcomes"][0]["delivery_receipt"])
             assert receipt["state"] == "not_requested"
+    assert cell.daemon.proc is None and not cell.namespace.socket_path.exists()
+    (evidence / "cleanup.json").write_text(json.dumps({
+        "owned_daemon_pids": cell.daemon.pids, "daemon_stopped": True,
+        "owned_socket_gone": True, "owned_pane_count_after_cleanup": 0,
+    }, indent=2) + "\n")
