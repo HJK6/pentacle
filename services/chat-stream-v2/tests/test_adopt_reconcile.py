@@ -1138,3 +1138,46 @@ def test_unreadable_pre_admission_intent_fails_closed_without_default_registrati
     assert result["row"] is None and result["inventory"] == []
     assert result["outcome"]["state"] == "failed"
     assert not result["reservations"] and not pane.pasted
+
+
+def test_owned_pane_without_prior_row_is_admitted_once_and_ready():
+    pane = AperturePane(screen="OpenAI Codex\n─────────\n› explain this codebase\n  gpt-5-codex high")
+    result = asyncio.run(_aperture_reconcile(pane))
+    assert result["reconcile"] == {"adopted": 1, "released": 0}
+    assert pane.alive and not pane.killed and not pane.pasted
+    assert len(result["inventory"]) == 1
+    assert result["row"]["session_generation"] == "intended"
+    assert result["row"]["bootstrap_state"] == result["await"]["state"] == "ready"
+    assert result["outcome"]["delivery_receipt"]["state"] == "not_requested"
+    assert "delivery_ack_at" not in result["outcome"]["delivery_receipt"]
+    assert not result["reservations"]
+
+
+def test_promptless_pane_dying_during_readiness_reports_failed(monkeypatch):
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.01)
+
+    class DyingPane(AperturePane):
+        async def capture(self, name):
+            self.alive = False
+            return await super().capture(name)
+
+    pane = DyingPane()
+    result = asyncio.run(_aperture_reconcile(pane, admitted=True))
+    assert result["row"]["bootstrap_state"] == "failed"
+    assert result["outcome"]["state"] == "failed"
+    assert result["outcome"]["delivery_evidence"] == "pane_died_during_boot"
+    assert result["outcome"]["delivery_receipt"]["state"] == "not_requested"
+    assert result["await"]["type"] == "await_spawn.error"
+    assert not result["reservations"] and not pane.pasted
+
+
+def test_unreadable_pane_nonce_retains_recovery_without_cleanup():
+    class UnreadableNoncePane(AperturePane):
+        async def run(self, *args, **kwargs):
+            return 1, "nonce read unavailable"
+
+    pane = UnreadableNoncePane()
+    result = asyncio.run(_aperture_reconcile(pane, prior="retained"))
+    assert pane.alive and not pane.killed and not pane.pasted
+    assert result["reconcile"] == {"adopted": 0, "released": 0}
+    assert result["outcome"] is None and len(result["reservations"]) == 1
