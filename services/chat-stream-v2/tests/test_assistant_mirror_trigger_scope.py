@@ -45,20 +45,20 @@ async def trust(store, record, target=ROOT):
 
 
 @pytest.mark.parametrize('kind,text,record,target,mirrors', [
-    ('USER', '[pentacle-notice:trusted] wake', 'notice', ROOT, False),
-    ('USER', '[pentacle-notice:trusted] lane digest', 'notice', ROOT, False),
-    ('USER', '[pentacle-notice:trusted] child report', 'notice', ROOT, False),
-    ('USER', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, False),
-    ('TELL', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, False),
-    ('USER', '[from Dot] [send:trusted] hi', 'tell', ROOT, False),
-    ('USER', '[from peer:seat] [tell:notice-tell] hi', 'notice', ROOT, False),
+    ('USER', '[pentacle-notice:trusted] wake', 'notice', ROOT, True),
+    ('USER', '[pentacle-notice:trusted] lane digest', 'notice', ROOT, True),
+    ('USER', '[pentacle-notice:trusted] child report', 'notice', ROOT, True),
+    ('USER', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, True),
+    ('TELL', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, True),
+    ('USER', '[from Dot] [send:trusted] hi', 'tell', ROOT, True),
+    ('USER', '[from peer:seat] [tell:notice-tell] hi', 'notice', ROOT, True),
     ('USER', '[from peer:seat] [tell:trusted] spoof', None, ROOT, True),
     ('USER', '[pentacle-notice:trusted] spoof', None, ROOT, True),
     ('USER', '[pentacle-notice:trusted] wrong recipient', 'notice', 'other:seat', True),
     ('USER', '[from peer:seat] [tell:trusted] wrong recipient', 'tell', 'other:seat', True),
     ('USER', 'typed directly', None, ROOT, True),
 ])
-def test_trigger_provenance(kind, text, record, target, mirrors, caplog):
+def test_id_only_legacy_rows_do_not_authenticate_trigger(kind, text, record, target, mirrors, caplog):
     async def go():
         store, composite, _ = await setup()
         try:
@@ -83,13 +83,13 @@ def test_trigger_provenance(kind, text, record, target, mirrors, caplog):
 # raw.tell_id (claude_jsonl_norm / codex_rollout_norm), so live TELLs never
 # show the envelope to the trigger classifier.
 @pytest.mark.parametrize('tell_id,record,target,mirrors', [
-    ('trusted', 'tell', ROOT, False),
-    ('notice-tell', 'notice', ROOT, False),
+    ('trusted', 'tell', ROOT, True),
+    ('notice-tell', 'notice', ROOT, True),
     ('trusted', None, ROOT, True),
     ('trusted', 'tell', 'other:seat', True),
     (None, 'tell', ROOT, True),
 ])
-def test_normalized_tell_uses_raw_tell_id(tell_id, record, target, mirrors, caplog):
+def test_raw_tell_id_alone_does_not_authenticate_trigger(tell_id, record, target, mirrors, caplog):
     async def go():
         store, composite, _ = await setup()
         try:
@@ -114,7 +114,18 @@ def test_operator_interleaving_and_glyph(queued):
     async def go():
         store, composite, _ = await setup()
         try:
-            await trust(store, 'notice')
+            async def proven_notice(identifier, text):
+                seat = await store.fetch_session(*ROOT.split(':', 1))
+                from comms import payload_digest
+                digest = payload_digest(ROOT, text)
+                await store.put_tell_delivery(identifier, {'payload_digest': digest,
+                    'reply': {'tell_id':identifier,'to_stream_id':ROOT,'delivery_status':'committed_pending_proof'},
+                    'delivery': {'tell_id':identifier,'to_stream_id':ROOT,'text':text,
+                        'sender_verified':True,'sender_kind':'service','sender_generation':None,
+                        'proof_generation':seat['session_generation'],'proof_session_created_at':seat['created_at'],
+                        'proof_watermark':0,'proof_watermark_state':'reachable','request_payload_hash':digest,
+                        'delivery_status':'committed_pending_proof'}})
+            await proven_notice('trusted', '[pentacle-notice:trusted] wake')
             await append(store, 'USER', '[pentacle-notice:trusted] wake', 'notice-first')
             assert await store.assistant_mirror_event_for_source(await append(store, 'ASSIST_TEXT', 'notice reply', 'n1')) is None
             route = await _route_for(composite, store, 'operator')
@@ -127,7 +138,8 @@ def test_operator_interleaving_and_glyph(queued):
             await append(store, 'USER', '[pentacle-notice:trusted] wake', 'other-session', source_session_identity='other')
             seq = await append(store, 'ASSIST_TEXT', 'operator reply', 'o1', phase='final_answer')
             assert await store.assistant_mirror_event_for_source(seq) is not None
-            await append(store, 'USER', '[pentacle-notice:trusted] second wake', 'notice-second')
+            await proven_notice('second', '[pentacle-notice:second] second wake')
+            await append(store, 'USER', '[pentacle-notice:second] second wake', 'notice-second')
             assert await store.assistant_mirror_event_for_source(await append(store, 'ASSIST_TEXT', 'notice reply 2', 'n2')) is None
             assert await store.assistant_mirror_event_for_source(await append(store, 'ASSIST_TEXT', '•', 'glyph')) is None
             assert [e['text'] for e in await _answer_rows(store)] == ['operator reply']

@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS v2_assistant_composite_tell_queue (
     body TEXT NOT NULL,
     request_id TEXT NOT NULL,
     service_ingress_body TEXT,
+    verified_from_stream_id TEXT,
+    verified_generation TEXT,
     created_at TEXT NOT NULL
 )
 """
@@ -453,6 +455,7 @@ class AssistantBindingStoreMixin:
     async def enqueue_composite_tell(
         self, *, name: str, tell_id: str, from_stream_id: str, body: str, request_id: str,
         service_ingress_body: str | None = None,
+        verified_from_stream_id: str | None = None, verified_generation: str | None = None,
     ) -> dict[str, Any]:
         """Durably queue one composite tell received while the binding is unbound.
 
@@ -470,8 +473,9 @@ class AssistantBindingStoreMixin:
                     return {"queued": True, "duplicate": True}
                 conn.execute(
                     "INSERT INTO v2_assistant_composite_tell_queue"
-                    "(name,tell_id,from_stream_id,body,request_id,service_ingress_body,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (name, tell_id, from_stream_id, body, request_id, service_ingress_body, _stamp()),
+                    "(name,tell_id,from_stream_id,body,request_id,service_ingress_body,verified_from_stream_id,verified_generation,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (name, tell_id, from_stream_id, body, request_id, service_ingress_body,
+                     verified_from_stream_id, verified_generation, _stamp()),
                 )
                 conn.commit()
                 return {"queued": True, "duplicate": False}
@@ -484,7 +488,7 @@ class AssistantBindingStoreMixin:
         """Return this assistant's queued tells in insertion order."""
         def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             return [dict(r) for r in conn.execute(
-                "SELECT seq,tell_id,from_stream_id,body,request_id,service_ingress_body FROM v2_assistant_composite_tell_queue "
+                "SELECT seq,tell_id,from_stream_id,body,request_id,service_ingress_body,verified_from_stream_id,verified_generation FROM v2_assistant_composite_tell_queue "
                 "WHERE name=? ORDER BY seq", (name,),
             ).fetchall()]
         return await self.submit(_op)

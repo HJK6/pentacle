@@ -4,6 +4,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 /** Client policy authority for daemon-authenticated message-envelope tags. */
 export const PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES = {
+  peer_delivery: 'chat_prose',
   notice_marker: 'internal',
   notification_answer: 'structured_card',
   child_session_closed: 'structured_card',
@@ -914,6 +915,18 @@ export function interpretPentacleEvent(
   const source = String(event.raw?.source || '');
   const transport = String(event.raw?.transport || '');
   const userText = kind === 'USER' ? stripTerminalPromptPrefix(text) : text;
+
+  const origin = event.raw?.input_provenance;
+  if ((kind === 'USER' || kind === 'TELL') && origin && typeof origin === 'object' && 'kind' in origin && 'verified' in origin) {
+    if (origin.kind === 'operator' && origin.verified === true) {
+      return interpreted(event, 'user-message', 'bubble:user', 'user', '', text, false,
+        'Daemon-correlated operator input; envelope-like text remains literal.');
+    }
+    if (origin.kind === 'unknown' || origin.verified !== true) {
+      return interpreted(event, 'unknown', 'bubble:agent', 'system', 'Unknown source', text, false,
+        'Input has no unique authenticated dispatch or delivery occurrence.', text);
+    }
+  }
 
   const hasEnvelopeField = kind === 'USER' && Object.prototype.hasOwnProperty.call(event, 'message_envelope');
   const taggedEnvelope = hasEnvelopeField ? validMessageEnvelope(event) : null;

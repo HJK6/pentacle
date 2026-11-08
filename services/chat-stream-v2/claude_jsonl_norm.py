@@ -126,38 +126,24 @@ _HIDDEN_SYSTEM_SUBTYPES: set[str] = set()
 # The newline after the anchor is REQUIRED (the daemon always emits `\n` before the
 # payload): without it, human prose like "[from bob] [send:notes] please send them"
 # would be misclassified as a peer delivery.
-_PEER_TELL_RE = re.compile(
-    r"^\[from (?P<sender>[^\]]+)\] \[(?:tell|send):(?P<tell_id>[^\]]+)\]"
-    r"(?: enqueued_at=(?P<enqueued_at>[^\s]+))?\r?\n(?P<payload>[\s\S]*)$"
-)
-
-
-_PEER_DELIVERY_HEADER_RE = re.compile(
-    r"^\[from [^\]\r\n]+\] \[(?:tell|send):[^\]\r\n]+\](?: enqueued_at=\S+)?\r?\n"
-)
-
-
 def strip_peer_delivery_envelope(text: str) -> str:
-    """Remove a leading peer-delivery header, leaving the payload. A bare (unstamped)
-    body is returned unchanged. Shared by comms (proof/gate) and the send-receipt
-    projection so a stamped wire and its header-stripped normalized event correlate."""
-    return _PEER_DELIVERY_HEADER_RE.sub("", str(text or ""), count=1)
+    from message_envelopes import strip_peer_delivery
+    return strip_peer_delivery(text)
 
 
 def _parse_peer_tell(text: str) -> dict[str, str] | None:
-    match = _PEER_TELL_RE.match(str(text or "").strip())
-    if match is None:
+    from message_envelopes import parse_peer_delivery
+    match = parse_peer_delivery(text)
+    if match is None or not match["payload"]:
         return None
-    payload = match.group("payload").strip()
-    if not payload:
-        return None
-    return {
-        "sender": match.group("sender"),
-        "tell_id": match.group("tell_id"),
-        "enqueued_at": match.group("enqueued_at") or "",
-        "payload": payload,
-        "wire_text": text,
-    }
+    return {"sender": match["sender"], "tell_id": match["id"],
+            "enqueued_at": match["enqueued_at"] or "", "payload": match["payload"], "wire_text": text}
+
+
+def _input_boundary(text: str) -> bool:
+    from message_envelopes import parse_peer_delivery
+    content, _ = normalize_provider_user_text(text, provider="claude", authenticated=True)
+    return parse_peer_delivery(content) is not None or content.startswith("[pentacle-notice:")
 
 
 def _format_turn_duration_text(duration_ms: int, message_count: int | None) -> str:
@@ -302,6 +288,7 @@ def normalize_claude_jsonl_record(
     *,
     host: str,
     session_name: str,
+    _preserve_blocks: bool = True,
 ) -> list[dict]:
     """Map one JSONL record to zero-or-more wire payloads.
 
@@ -378,7 +365,9 @@ def normalize_claude_jsonl_record(
         )
         # Kind is part of durable ingest identity. Historical queued peers and
         # synthetic prompts remain USER; the shared interpreter handles them.
-        peer_tell = None if queued else _parse_peer_tell(content)
+        peer_tell = None if queued else _parse_peer_tell(content if _preserve_blocks else content.strip())
+        if peer_tell is not None and not _preserve_blocks:
+            peer_tell = {**peer_tell, "payload": peer_tell["payload"].strip(), "wire_text": content}
         if queued:
             kind = "SYSTEM" if is_reserved_seat_injection(content) else "USER"
             event = make(kind, content, {"subtype": "queued-command", "queued_at": timestamp})
@@ -408,7 +397,47 @@ def normalize_claude_jsonl_record(
             log_provider_classification("image-meta-suppressed")
             return []
         if isinstance(content, str):
-            return _stamp_jsonl_event_identity([make_user(content)], record_uuid)
+            event = make_user(content)
+            if _preserve_blocks:
+                legacy = normalize_claude_jsonl_record(record, host=host, session_name=session_name,
+                                                      _preserve_blocks=False)
+                event["raw"].update(native_input_version=1, source_record=record,
+                    native_block_ordinals=[0], native_block_spans=[[0, 0, len(content)]], legacy_input_events=legacy)
+            return _stamp_jsonl_event_identity([event], record_uuid)
+        if _preserve_blocks:
+            events: list[dict] = []
+            pending: list[tuple[int, str]] = []
+            legacy = normalize_claude_jsonl_record(record, host=host, session_name=session_name,
+                                                  _preserve_blocks=False)
+            def flush() -> None:
+                if pending:
+                    event = make_user("\n".join(text for _, text in pending))
+                    event["raw"].update(native_input_version=1, source_record=record,
+                        native_block_ordinals=[ordinal for ordinal, _ in pending],
+                        native_block_spans=[[ordinal, 0, len(text)] for ordinal, text in pending],
+                        legacy_input_events=legacy)
+                    events.append(event)
+                    pending.clear()
+            for ordinal, block in enumerate(_content_blocks(record)):
+                if block.get("type") == "tool_result":
+                    flush()
+                    text = _to_text(block.get("content"))
+                    events.append(make("TOOL_RESULT", text, {"tool_use_id": block.get("tool_use_id"),
+                        "tool_content": text, "is_error": bool(block.get("is_error")),
+                        "native_input_version": 1, "source_record": record,
+                        "native_block_ordinals": [ordinal], "legacy_input_events": legacy}))
+                    continue
+                text = _to_text(block.get("text") or block.get("content") or "")
+                if not text:
+                    continue
+                boundary = _input_boundary(text)
+                if boundary:
+                    flush()
+                pending.append((ordinal, text))
+                if boundary:
+                    flush()
+            flush()
+            return _stamp_jsonl_event_identity(events, record_uuid)
         events: list[dict] = []
         user_text: list[str] = []
         for block in _content_blocks(record):
@@ -441,10 +470,13 @@ def normalize_claude_jsonl_record(
             prompt = str(attachment.get("prompt") or "")
             if not prompt:
                 return []
-            return _stamp_jsonl_event_identity(
-                [make_user(prompt, queued=True)],
-                record_uuid,
-            )
+            event = make_user(prompt, queued=True)
+            if _preserve_blocks:
+                legacy = normalize_claude_jsonl_record(record, host=host, session_name=session_name,
+                                                      _preserve_blocks=False)
+                event["raw"].update(native_input_version=1, source_record=record,
+                    native_block_ordinals=[0], native_block_spans=[[0, 0, len(prompt)]], legacy_input_events=legacy)
+            return _stamp_jsonl_event_identity([event], record_uuid)
         return []
 
     if record_type != "assistant":

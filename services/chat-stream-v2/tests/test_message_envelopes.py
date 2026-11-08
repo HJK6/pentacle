@@ -43,6 +43,7 @@ def test_registry_entries_are_immutable_and_have_render_policy() -> None:
 
     assert isinstance(MESSAGE_ENVELOPES, tuple)
     assert {entry.kind for entry in MESSAGE_ENVELOPES} == {
+        "peer_delivery",
         "notice_marker",
         "notification_answer",
         "child_session_closed",
@@ -183,7 +184,7 @@ def test_every_notice_kind_wins_over_authenticated_provider_wrapper(case, padded
     from claude_jsonl_norm import normalize_claude_jsonl_records
     from message_envelopes import annotate_message_envelope, MESSAGE_ENVELOPES
     assert {c['kind'] for c in CORPUS['notice_cases']} == {
-        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind != 'claude_pasted_content'}
+        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind not in {'claude_pasted_content', 'peer_delivery'}}
     body = case['wire_text']
     raw = f'<pasted_content id="8d21">\n{body}\n</pasted_content id="8d21">'
     if padded:

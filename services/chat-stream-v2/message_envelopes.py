@@ -388,7 +388,37 @@ def _match_claude_pasted_content(
     return None
 
 
+_PEER_DELIVERY = re.compile(
+    r"^\[from (?P<sender>[^\]\r\n]+)\] \[(?P<anchor>tell|send):(?P<id>[^\]\r\n]+)\]"
+    r"(?: enqueued_at=(?P<enqueued_at>\S+))?\r?\n(?P<payload>[\s\S]*)$"
+)
+
+
+def _build_peer_delivery(*, from_stream_id: str, anchor: str, anchor_id: str, payload: str, **_: Any) -> str:
+    if anchor not in {"tell", "send"}:
+        raise ValueError("peer delivery anchor must be tell or send")
+    return f"[from {from_stream_id}] [{anchor}:{anchor_id}]\n{payload}"
+
+
+def _match_peer_delivery(text: str, **_: Any) -> dict[str, Any] | None:
+    match = _PEER_DELIVERY.fullmatch(str(text or ""))
+    if match is None:
+        return None
+    return {"kind": "peer_delivery", **match.groupdict(), "wire_text": text}
+
+
+def parse_peer_delivery(text: str) -> dict[str, Any] | None:
+    """Decode a candidate only. Exact daemon occurrence proof supplies origin."""
+    return _match_peer_delivery(text)
+
+
+def strip_peer_delivery(text: str) -> str:
+    match = parse_peer_delivery(text)
+    return match["payload"] if match else str(text or "")
+
+
 MESSAGE_ENVELOPES = (
+    MessageEnvelopeEntry("peer_delivery", _build_peer_delivery, _match_peer_delivery, "chat_prose"),
     MessageEnvelopeEntry("notice_marker", _build_notice_marker, _match_notice_marker, "internal"),
     MessageEnvelopeEntry("notification_answer", _build_notification_answer, _match_notification_answer, "structured_card"),
     MessageEnvelopeEntry("child_session_closed", _build_child_session_closed, _match_child_session_closed, "structured_card"),

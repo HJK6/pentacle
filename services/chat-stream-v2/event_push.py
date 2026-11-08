@@ -670,6 +670,11 @@ class EventPush:
         # envelope registry to Claude events before persistence and broadcast.
         # Identity was computed from the source above; annotation is additive.
         try:
+            expanded = []
+            for entry in entries:
+                segments = await self.store.prepare_native_input_events([entry["event"]])
+                expanded.extend({**entry, "event": segment, "identity": _identity_key(segment)} for segment in segments)
+            entries = expanded
             for entry in entries:
                 entry["event"] = await self.store.stamp_event_with_send_receipt(entry["event"])
                 if entry["event"].get("provider") == "claude":

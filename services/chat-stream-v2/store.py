@@ -641,7 +641,23 @@ def _project_session_events_conn(
 ) -> list[dict[str, Any]]:
     """Project immutable history, including metadata on old stamped USER rows."""
     projected = _project_daemon_notice_events_conn(conn, events)
+    from tell_proof import input_origin, delivery_wire
     for index, event in enumerate(projected):
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        if event.get("kind") in {"USER", "TELL"}:
+            origin = ({"kind": "service", "verified": True, "generation": None}
+                      if raw.get("daemon_notice") else input_origin(conn, event, event.get("daemon_seq")))
+            event = {**event, "raw": {**raw, "input_provenance": origin}}
+            if event.get("kind") == "TELL" and origin["kind"] != "peer":
+                event["text"] = delivery_wire(event)
+                event["kind"] = "USER"
+                for key in ("sender", "peer_payload"):
+                    event["raw"].pop(key, None)
+                if (event.get("message_envelope") or {}).get("kind") == "peer_delivery":
+                    event.pop("message_envelope", None)
+                if origin["kind"] == "unknown":
+                    event["raw"].update(subsystem="mixed_input", bug_ref="unproven_input_origin")
+            projected[index] = event
         request_id = str(event.get("request_id") or "")
         receipt_id = str(event.get("receipt_id") or "")
         if event.get("kind") != "USER" or not receipt_id or not _SEND_REQUEST_ID_RE.fullmatch(request_id):
@@ -1752,6 +1768,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             }:
                 # Legacy sender/header text cannot prove service admission.
                 conn.execute("ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN service_ingress_body TEXT")
+            queue_columns = {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_composite_tell_queue)")}
+            for column in ("verified_from_stream_id", "verified_generation"):
+                if column not in queue_columns:
+                    conn.execute(f"ALTER TABLE v2_assistant_composite_tell_queue ADD COLUMN {column} TEXT")
             conn.execute(SCOPED_OWNERSHIP_DDL)
             conn.execute(RULING_REQUESTS_DDL)
             if "covered" not in {r[1] for r in conn.execute("PRAGMA table_info(v2_assistant_lane_rulings)")}:
@@ -2155,63 +2175,53 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 recorded_at=recorded_at,
             )
 
+    def _assistant_turn_inputs_conn(self, conn, source_stream_id, session_created_at,
+                                    source_event_id, transcript, window_start=0):
+        """Inputs in the existing assistant turn window, nearest first."""
+        current = conn.execute("SELECT json_extract(event_json,'$.raw.jsonl_record_uuid') FROM session_event_tail WHERE event_id=?",
+                               (source_event_id,)).fetchone()
+        current_record = str(current[0] or "") if current else ""
+        boundary = conn.execute(
+            "SELECT MAX(event_id) FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+            "AND (?='' OR COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>?) "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "AND (json_extract(event_json,'$.raw.phase')='final_answer' "
+            "OR json_extract(event_json,'$.raw.stop_reason')='end_turn')",
+            (source_stream_id, session_created_at, source_event_id, transcript, current_record, current_record),
+        ).fetchone()[0]
+        return conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id>? AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 ORDER BY event_id DESC",
+            (source_stream_id, session_created_at, max(window_start, boundary or 0), source_event_id, transcript),
+        ).fetchall()
+
     def _assistant_mirror_trigger_conn(
         self, conn: sqlite3.Connection, *, composite_stream_id: str,
         source_stream_id: str, source_generation: str, session_created_at: str,
         source_event_id: int, transcript: Any,
     ) -> str:
-        """Classify the nearest primary USER/TELL in this source transcript."""
+        """A proven operator remains owner across later excluded inputs."""
         if not isinstance(transcript, str) or not transcript:
             return "unknown"
-        trigger = conn.execute(
-            "SELECT event_json FROM session_event_tail WHERE stream_id=? "
-            "AND session_created_at=? AND event_id<? "
-            "AND json_extract(event_json,'$.raw.source_session_identity')=? "
-            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
-            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
-            "ORDER BY event_id DESC LIMIT 1",
-            (source_stream_id, session_created_at, source_event_id, transcript),
-        ).fetchone()
-        if trigger is None:
+        from tell_proof import input_origin, delivery_wire
+        excluded = False
+        for row in self._assistant_turn_inputs_conn(conn, source_stream_id, session_created_at,
+                                                    source_event_id, transcript):
+            event = json.loads(row["event_json"])
+            if not str(delivery_wire(event) or "").strip():
+                continue
+            origin = input_origin(conn, event, row["event_id"])
+            if origin["kind"] == "operator":
+                return "operator"
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                excluded = True
+                continue
             return "unknown"
-        event = json.loads(trigger["event_json"])
-        text = event.get("text")
-        if not isinstance(text, str):
-            return "unknown"
-        if event.get("kind") == "USER" and conn.execute(
-            "SELECT 1 FROM v2_assistant_composite_routes WHERE stream_id=? "
-            "AND routing_state='resolved' AND route_target=? AND route_target_generation=? "
-            "AND json_extract(route_json,'$.admission_mode')='direct_primary' "
-            "AND json_extract(route_json,'$.direct_envelope.wire_body')=? LIMIT 1",
-            (composite_stream_id, source_stream_id, source_generation, text),
-        ).fetchone() is not None:
-            return "operator"
-        # Normalized TELLs carry the stripped envelope identity in raw.tell_id.
-        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
-        tell_id = raw.get("tell_id") if event.get("kind") == "TELL" else None
-        peer = re.match(r"^\[from [^\]\r\n]+\]\s+\[(?:tell|send):([^\]\s]+)\]", text)
-        notice = re.match(r"^\[pentacle-notice:([^\]\s]+)\]", text)
-        if isinstance(tell_id, str) and tell_id:
-            peer_id = tell_id
-        else:
-            peer_id = peer.group(1) if peer else None
-        identifier = peer_id or (notice.group(1) if notice else None)
-        if identifier is None:
-            return "unknown"
-        if conn.execute(
-            "SELECT 1 FROM v2_outbound_notices WHERE recipient_stream_id=? "
-            "AND (notice_id=? OR tell_id=?) LIMIT 1",
-            (source_stream_id, identifier, identifier),
-        ).fetchone() is not None:
-            return "excluded"
-        if peer_id and conn.execute(
-            "SELECT 1 FROM v2_tell_deliveries WHERE tell_id=? "
-            "AND (json_extract(reply,'$.delivery.to_stream_id')=? "
-            "OR json_extract(reply,'$.reply.to_stream_id')=?)",
-            (identifier, source_stream_id, source_stream_id),
-        ).fetchone() is not None:
-            return "excluded"
-        return "unknown"
+        return "excluded" if excluded else "unknown"
 
     def _project_dispatch_turn_final_conn(
         self, conn: sqlite3.Connection, composite_stream_id: str, *, composite_created_at: str,
@@ -2219,35 +2229,28 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         window_start: int, source_event: dict[str, Any], source_event_id: int, body: str,
         recorded_at: float,
     ) -> bool:
-        """Project a landed, unpublished dispatch's own turn final as an acknowledgment.
-
-        The candidate is the newest primary input (USER, or a normalized TELL) in
-        this turn window, chosen before any dispatch test; it is a trigger only when
-        its optimistic_id names a dispatch.  A USER row that never reached the tail
-        could let a final attach to an older dispatch in the same window; the log
-        line carries both event ids so that residual stays auditable.
-        """
-        candidate = conn.execute(
-            "SELECT event_id,json_extract(event_json,'$.kind') AS kind,"
-            "json_extract(event_json,'$.optimistic_id') AS optimistic_id "
-            "FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
-            "AND event_id>? AND event_id<? "
-            "AND json_extract(event_json,'$.raw.source_session_identity')=? "
-            "AND json_extract(event_json,'$.kind') IN ('USER','TELL') "
-            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
-            "ORDER BY event_id DESC LIMIT 1",
-            (source_stream_id, session_created_at, window_start, source_event_id, transcript),
-        ).fetchone()
-        if (candidate is None or candidate["kind"] != "USER"
-                or not isinstance(candidate["optimistic_id"], str) or not candidate["optimistic_id"]):
-            return False
-        route = conn.execute(
-            "SELECT dispatch_id,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
-            "WHERE stream_id=? AND dispatch_id=? AND routing_state='resolved' "
-            "AND route_target=? AND route_target_generation=? AND delivery_state='landed' "
-            "AND json_extract(route_json,'$.admission_mode')='direct_primary'",
-            (composite_stream_id, candidate["optimistic_id"], source_stream_id, source_generation),
-        ).fetchone()
+        """Project the proven operator dispatch across later excluded peer inputs."""
+        from tell_proof import input_origin, operator_dispatch, delivery_wire
+        route = None
+        for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, session_created_at,
+                                                          source_event_id, transcript, window_start):
+            event = json.loads(candidate["event_json"])
+            if not str(delivery_wire(event) or "").strip():
+                continue
+            origin = input_origin(conn, event, candidate["event_id"])
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                continue
+            if origin["kind"] != "operator":
+                return False
+            dispatch = operator_dispatch(conn, source_stream_id, delivery_wire(event), source_generation)
+            route = conn.execute(
+                "SELECT dispatch_id,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
+                "WHERE stream_id=? AND dispatch_id=? AND routing_state='resolved' "
+                "AND route_target=? AND route_target_generation=? AND delivery_state='landed' "
+                "AND json_extract(route_json,'$.admission_mode')='direct_primary'",
+                (composite_stream_id, dispatch["dispatch_id"], source_stream_id, source_generation),
+            ).fetchone() if dispatch else None
+            break
         if route is None:
             return False
         dispatch_id = str(route["dispatch_id"])
@@ -4258,6 +4261,20 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     return _decode_tell_envelope(conn.execute(
                         "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
                         (tell_id,)).fetchone())
+                if reconcile and delivery.get("delivery_status") == "delivered":
+                    from tell_proof import retained_proof
+                    exact = retained_proof(conn, payload)
+                    if exact is None:
+                        conn.rollback()
+                        return None
+                    reply.update(exact)
+                    delivery.update(exact)
+                    conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id=?",
+                                 (json.dumps(payload, separators=(",", ":")), tell_id))
+                    conn.commit()
+                    return _decode_tell_envelope(conn.execute(
+                        "SELECT rowid AS ledger_row_id,reply,created_at FROM v2_tell_deliveries WHERE tell_id=?",
+                        (tell_id,)).fetchone())
                 if (
                     reply.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
                     or delivery.get("delivery_status") not in COMMITTED_PENDING_PROOF_STATUSES
@@ -5579,9 +5596,24 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return True
         return False
 
+    async def prepare_native_input_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from tell_proof import split_native_input
+        return await self.submit(lambda conn: [segment for event in events
+                                                for segment in split_native_input(conn, event)])
+
     @staticmethod
     def _insert_session_event_conn(conn, stream_id, session_created_at, event, identity):
         """The shared insert/dedupe floor for live and retained transcript reads."""
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        if raw.get("native_input_version") == 1:
+            # A pre-upgrade record is immutable. All its new segments inherit
+            # the original record's replay floor, including changed event kinds.
+            from ingest import _identity_key
+            for legacy in raw.get("legacy_input_events") or []:
+                row = conn.execute("SELECT event_json FROM session_event_tail WHERE stream_id=? AND identity=? LIMIT 1",
+                                   (stream_id, _identity_key(legacy))).fetchone()
+                if row and not (json.loads(row[0]).get("raw") or {}).get("native_input_version"):
+                    return None
         event_json = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
         cur = conn.execute(
             "INSERT OR IGNORE INTO session_event_tail "
@@ -6459,19 +6491,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     (host, session_name),
                 ).fetchone()
                 session_created_at = str(row["created_at"] or "") if row else ""
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO session_event_tail(
-                    stream_id, session_created_at, event_key, event_json, event_ts,
-                    recorded_at, identity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (stream_id, session_created_at, event_key, event_json,
-                 event.get("timestamp"), recorded_at, identity),
-            )
-            # lastrowid is the AUTOINCREMENT event_id only on a real insert; an
-            # IGNORE'd duplicate leaves it stale, so gate on rowcount.
-            event_id = int(cur.lastrowid) if cur.rowcount > 0 else None
+            event_id = self._insert_session_event_conn(conn, stream_id, session_created_at, event, identity)
             if event_id is not None and self._recorded_by_other_lifecycle_conn(
                     conn, stream_id, session_created_at, identity, event_id):
                 event_id = None  # re-read history of a resumed seat; kept, not new
@@ -6495,14 +6515,46 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         The promotion rechecks original text, digest, watermark and generation;
         an ingest envelope alone never establishes delivery.
         """
+        from tell_proof import send_proofs, delivery_wire, retained_proof
+        target = str(event.get("stream_id") or "")
+        wire = delivery_wire(event)
+        def bind_send_occurrence(conn):
+            if not isinstance(wire, str):
+                return
+            for payload, row in send_proofs(conn, target, wire):
+                proof = retained_proof(conn, payload)
+                if proof is None or payload["delivery"].get("proof_event_id") is not None:
+                    continue
+                meta = json.loads(row["meta_json"])
+                meta["_input_proof"].update(proof)
+                _insert_send_receipt_row(conn, to_stream_id=row["to_stream_id"], request_id=row["request_id"],
+                    receipt_id=row["receipt_id"], state=row["state"], optimistic_id=row["optimistic_id"],
+                    wire_digest=row["wire_digest"], display_text=row["display_text"], content_kind=row["content_kind"],
+                    attachments_json=row["attachments_json"], delivery=row["delivery"],
+                    submission_confirmed=bool(row["submission_confirmed"]), reason=row["reason"],
+                    attempts=row["attempts"], created_at=iso_now(), from_stream_id=row["from_stream_id"],
+                    actor_stream_id=row["actor_stream_id"], actor_trusted=bool(row["actor_trusted"]),
+                    meta_json=json.dumps(meta, separators=(",", ":")))
+        await self.submit(bind_send_occurrence)
         raw = event.get("raw")
         tell_id = raw.get("tell_id") if event.get("kind") == "TELL" and isinstance(raw, dict) else None
+        if (not isinstance(tell_id, str) or not tell_id) and event.get("kind") == "USER":
+            # Queued native inputs retain their historical USER identity. Decode
+            # only a candidate; promotion still requires exact occurrence proof.
+            from message_envelopes import parse_peer_delivery
+            candidate = parse_peer_delivery(wire) if isinstance(wire, str) else None
+            if candidate:
+                tell_id = candidate["id"]
+            elif isinstance(wire, str) and wire.startswith("[pentacle-notice:"):
+                tell_id = await self.submit(lambda conn: next((row[0] for row in conn.execute(
+                    "SELECT tell_id FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
+                    "AND json_extract(reply,'$.delivery.text')=?", (target, wire))), None))
         if not isinstance(tell_id, str) or not tell_id:
             return
         prior = await self.get_tell_delivery(tell_id)
         if (prior is not None and isinstance(prior.get("delivery"), dict)
                 and isinstance(prior.get("payload_digest"), str)
-                and prior["delivery"].get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES
+                and prior["delivery"].get("delivery_status") in COMMITTED_PENDING_PROOF_STATUSES | {"delivered"}
                 and not (prior["delivery"].get("delivery_status") == "proof_unavailable"
                          and prior["delivery"].get("submission_attempts") == 0)
                 and not prior["delivery"].get("notification_answer_generation")

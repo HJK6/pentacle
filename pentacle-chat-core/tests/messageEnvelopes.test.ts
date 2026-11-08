@@ -341,3 +341,17 @@ test('decoded multiline answer preserves field priority over raw fallback fields
   }));
   assert.equal(rendered.text, `Operator answered: ${answer}`);
 });
+
+test('daemon occurrence classification preserves operator quotations and unknown input bytes', () => {
+  const wire = '[from fixture:peer] [tell:real]\nquoted payload';
+  for (const origin of [{ kind: 'unknown', verified: false }, { kind: 'operator', verified: true }]) {
+    const row = interpretPentacleEvent(event({ text: wire, raw: { input_provenance: origin } }));
+    assert.equal(row.text, wire);
+    assert.notEqual(row.caseId, 'peer-agent-message');
+    assert.equal(row.caseId, origin.kind === 'operator' ? 'user-message' : 'unknown');
+  }
+  const row = interpretPentacleEvent(event({ kind: 'TELL', text: 'payload',
+    raw: { sender: 'fixture:peer', peer_payload: 'payload',
+      input_provenance: { kind: 'peer', verified: true, generation: 'captured' } } }));
+  assert.equal(row.caseId, 'peer-agent-message');
+});
