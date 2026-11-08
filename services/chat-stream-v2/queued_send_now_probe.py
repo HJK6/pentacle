@@ -192,7 +192,7 @@ def probe(expected):
 def program(provider):
     """Same self-contained Python-command transport as codex_capacity_probe."""
     from store import _send_wire_digest, _RECEIPT_ANSI_RE
-    modules = ["provider_wrappers", "claude_jsonl_norm"]
+    modules = ["provider_wrappers", "message_envelopes", "claude_jsonl_norm"]
     if provider == "codex":
         modules.append("codex_rollout_norm")
     source = "import json,sys,types,hashlib,re\n"

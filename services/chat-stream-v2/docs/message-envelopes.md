@@ -83,3 +83,41 @@ notes keep their existing rendering.
 cover producer, matcher, annotation and ingest. Core and transcript-view tests
 assert exact LF text; the hermetic web scenario `multiline-notification-answer`
 checks the real compact answer row after scratch-daemon ingest and transport.
+
+## Mixed native input and peer provenance
+
+The `peer_delivery` registry entry owns the unchanged wire
+`[from <stream>] [tell:<id>]\n<payload>` (and the existing `send` anchor).
+Comms and both Claude/Codex adapters use that builder/decoder. A submitted
+pre-enveloped peer body is literal payload inside the actual sender's outer
+stamp. Its whitespace and inner claims are preserved.
+
+Native text blocks are decoded before joining; only adjacent ordinary blocks
+merge. Tool-result, notice and peer boundaries retain their order. A single
+coalesced block splits only at unique exact spans supported by retained
+pre-input delivery or dispatch evidence. Unresolved boundaries keep their exact
+bytes with an unknown-origin diagnostic. Raw metadata retains the native record,
+wrapper, block ordinals and segment spans. Existing event identities and a
+retained split recipe make interrupted/restarted and overlapping ingest stable;
+records already persisted before this change are neither split again nor rewritten.
+
+A textual header or authenticated satellite connection supplies a candidate,
+not sender authority. Store projects `raw.input_provenance` from exact
+session-generation, watermark and once-consumed occurrence proof; client-supplied
+values are replaced. Proven operator dispatches take precedence over text that
+resembles a delivered wire. A later byte-identical quotation remains literal.
+The web literal-render guard is not shipped and is deferred to the
+`web_literal_origin_rendering_2026_11` follow-up; existing web display behavior is
+retained. Daemon-side provenance is unchanged.
+
+Ordinary send captures its final wire, exact SHA-256, verified sender,
+destination generation and watermark before input in daemon-owned
+`_input_proof` JSON on the existing append-only receipt log. Occurrence binding
+also appends a receipt. This private field is excluded from public/client metadata;
+retry/coalescing does not create a fresh physical occurrence. Legacy, stale or
+ambiguous evidence remains unknown. Tell uses the existing prepared/promoted
+ledger proof, retaining captured provenance through retries. An operator's
+correlated final answer survives a later proven peer/notice in the same turn;
+a peer-only turn publishes no coordination prose.
+
+When an unproven native TELL projects as a literal USER, daemon-owned `raw.input_source_kind` retains its native kind. Submission proof uses that original kind; a display projection cannot promote a non-USER event into USER proof. A finite Claude wrapper spanning adjacent native text blocks is decoded as one wrapper, with all original block spans retained.

@@ -241,8 +241,19 @@ async def append_ingested_event(
     routing_integrity: Any = None,
     lifecycle: dict[str, Any] | None = None,
     sessions: Any = None,
+    _segments_prepared: bool = False,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
+    if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
+        segments = await store.prepare_native_input_events([payload])
+        last = None
+        for segment in segments:
+            seq = await append_ingested_event(store, broadcast, segment, recent_limit=recent_limit,
+                routing_integrity=routing_integrity, lifecycle=lifecycle, sessions=sessions,
+                _segments_prepared=True)
+            if seq is not None:
+                last = seq
+        return last
     stream_id = str(payload.get("stream_id") or "")
     raw_identity = _identity_key(payload)
     corrected = annotate_message_envelope(
@@ -785,6 +796,7 @@ class Ingest:
                 payloads = normalize_codex_rollout_record(
                     record, host=host, session_name=name, session_id=st.session_id,
                 )
+                payloads = await self.store.prepare_native_input_events(payloads)
                 if payloads and len(entries) + len(payloads) > budget:
                     # Leave this record and the rest of the span for next pass.
                     capped = True

@@ -235,9 +235,9 @@ def test_repeated_disconnected_sends_land_once_without_stale_bindings(tmp_path, 
                     while daemon._detached_send_tasks:
                         await asyncio.sleep(.001)
                 rows = await receipts(request_id)
-                assert [row["state"] for row in rows] == ["accepted", "landed"], rows
-                assert [row["delivery"] for row in rows] == ["accepted", "landed"], rows
-                assert [row["submission_confirmed"] for row in rows] == [0, 1], rows
+                assert [row["state"] for row in rows] == ["accepted", "accepted", "landed"], rows
+                assert [row["delivery"] for row in rows] == ["accepted", "accepted", "landed"], rows
+                assert [row["submission_confirmed"] for row in rows] == [0, 0, 1], rows
                 assert len({row["receipt_id"] for row in rows}) == 1
                 assert len(provider.pastes) == cycle + 1
                 counts.append(binding_counts())
@@ -260,14 +260,14 @@ def test_repeated_disconnected_sends_land_once_without_stale_bindings(tmp_path, 
                 assert len(queried["receipts"]) == 1
                 assert queried["receipts"][0]["state"] == "landed"
                 # Existing replay semantics append one mirrored landed row,
-                # without a second accepted claim or a second delivery.
+                # without a second logical claim or a second delivery.
                 replay_rows = await receipts(request_id)
-                assert replay_rows[:2] == rows
-                assert len(replay_rows) == 3
-                assert replay_rows[2]["state"] == replay_rows[2]["delivery"] == "landed"
-                assert replay_rows[2]["submission_confirmed"] == 1
-                assert replay_rows[2]["reason"] == f"coalesced_replay:{request_id}"
-                assert queried["receipts"][0]["receipt_id"] == replay_rows[2]["receipt_id"]
+                assert replay_rows[:3] == rows
+                assert len(replay_rows) == 4
+                assert replay_rows[3]["state"] == replay_rows[3]["delivery"] == "landed"
+                assert replay_rows[3]["submission_confirmed"] == 1
+                assert replay_rows[3]["reason"] == f"coalesced_replay:{request_id}"
+                assert queried["receipts"][0]["receipt_id"] == replay_rows[3]["receipt_id"]
                 assert len(provider.pastes) == cycle + 1
                 assert provider.enters == enters_before_replay
                 await reconnected.close()

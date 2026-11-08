@@ -224,7 +224,7 @@ def test_alias_send_lands_at_a_with_ordinary_physical_receipt(tmp_path):
         assert result["to_stream_id"] == SEAT_A
         assert result["receipt_id"]
         assert h.inputs_at(SEAT_A) == 1
-        assert await h.receipts() == (1, 2)  # P1/R1/H2
+        assert await h.receipts() == (1, 3)  # Includes the daemon pre-input proof row.
         # Physical lookup only; no alias receipt projection.
         assert await h.store.get_send_receipt(SEAT_A, "request-example-1") is not None
         assert await h.store.get_send_receipt(ALIAS, "request-example-1") is None
@@ -238,11 +238,11 @@ def test_alias_send_same_request_at_a_coalesces(tmp_path):
         assert replay["coalesced"] is True and replay["do_not_resubmit"] is True
         assert replay["reconcile_command"] == f"agent-orch send-receipt {SEAT_A} request-example-1"
         assert h.inputs_at(SEAT_A) == 1
-        assert await h.receipts() == (2, 3)  # P1/R2/H3
+        assert await h.receipts() == (2, 4)  # Includes the daemon pre-input proof row.
         # A sequential independent invocation: fresh request, same msg_id/body.
         await h.send(request_id="request-example-2")
         assert h.inputs_at(SEAT_A) == 2
-        assert await h.receipts() == (3, 5)  # P2/R3/H5
+        assert await h.receipts() == (3, 7)  # Includes the daemon pre-input proof row.
     _run(tmp_path, body)
 
 
@@ -251,7 +251,7 @@ def test_alias_send_separate_invocation_same_msg_id_delivers_again(tmp_path):
         await h.send(request_id="request-example-1")
         await h.send(request_id="request-example-2")
         assert h.inputs_at(SEAT_A) == 2
-        assert await h.receipts() == (2, 4)  # P2/R2/H4: msg_id alone is not dedupe
+        assert await h.receipts() == (2, 6)  # Includes the daemon pre-input proof row.
     _run(tmp_path, body)
 
 
@@ -260,13 +260,13 @@ def test_alias_send_rotated_request_same_optimistic_id(tmp_path):
         await h.send(request_id="request-example-1", optimistic_id="optimistic-example-1")
         at_a = await h.send(request_id="request-example-2", optimistic_id="optimistic-example-1")
         assert at_a["coalesced"] is True
-        assert (h.inputs_at(SEAT_A), *await h.receipts()) == (1, 2, 3)
+        assert (h.inputs_at(SEAT_A), *await h.receipts()) == (1, 2, 4)
         await h.move_to_b()
         at_b = await h.send(request_id="request-example-3", optimistic_id="optimistic-example-1")
         assert at_b["to_stream_id"] == SEAT_B and not at_b.get("coalesced")
         assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 1)
-        assert await h.receipts() == (3, 5)  # P2/R3/H5: independent physical receipt at B
-        assert await h.receipts(SEAT_B) == (1, 2)
+        assert await h.receipts() == (3, 7)  # Includes the daemon pre-input proof row.
+        assert await h.receipts(SEAT_B) == (1, 3)
     _run(tmp_path, body)
 
 
@@ -278,9 +278,9 @@ def test_alias_send_same_identifiers_after_move_can_deliver_again(tmp_path):
         # Explicitly allowed: physical idempotency is target scoped.
         assert result["to_stream_id"] == SEAT_B and result["delivery"] == "landed"
         assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (1, 1)
-        assert await h.receipts() == (2, 4)  # P2/R2/H4, separate target receipts
-        assert await h.receipts(SEAT_A) == (1, 2)
-        assert await h.receipts(SEAT_B) == (1, 2)
+        assert await h.receipts() == (2, 6)  # Includes the daemon pre-input proof row.
+        assert await h.receipts(SEAT_A) == (1, 3)
+        assert await h.receipts(SEAT_B) == (1, 3)
     _run(tmp_path, body)
 
 
@@ -296,7 +296,7 @@ def test_alias_send_unbound_fails_before_acceptance(tmp_path):
         await h.move_to_b()
         result = await h.send(request_id="request-example-2")
         assert result["to_stream_id"] == SEAT_B and result["delivery"] == "landed"
-        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B), *await h.receipts()) == (0, 1, 1, 2)
+        assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B), *await h.receipts()) == (0, 1, 1, 3)
     _run(tmp_path, body)
 
 
@@ -331,7 +331,7 @@ def test_alias_send_digest_holds_routine_peer_and_plain_rebind_leaves_hold(tmp_p
         gate = await h.send(request_id="request-example-2", text="GATE: synthetic decision",
                             _auth_context=dual)
         assert gate["delivery"] == "landed" and h.inputs_at(SEAT_B) == 1
-        assert (h.inputs_at(SEAT_A), *await h.receipts(SEAT_A), *await h.receipts(SEAT_B)) == (0, 2, 3, 2, 4)
+        assert (h.inputs_at(SEAT_A), *await h.receipts(SEAT_A), *await h.receipts(SEAT_B)) == (0, 2, 3, 2, 5)
     _run(tmp_path, body, digest=True)
 
 
@@ -680,7 +680,7 @@ def test_alias_send_refuses_before_input_when_binding_changes_after_sample(tmp_p
         later = await h.send(request_id="request-example-2")
         assert later["to_stream_id"] == SEAT_B and later["delivery"] == "landed"
         assert (h.inputs_at(SEAT_A), h.inputs_at(SEAT_B)) == (0, 1)
-        assert await h.receipts(SEAT_B) == (1, 2)
+        assert await h.receipts(SEAT_B) == (1, 3)
     _run(tmp_path, body)
 
 

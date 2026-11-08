@@ -4,6 +4,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 
 /** Client policy authority for daemon-authenticated message-envelope tags. */
 export const PENTACLE_MESSAGE_ENVELOPE_RENDER_POLICIES = {
+  peer_delivery: 'chat_prose',
   notice_marker: 'internal',
   notification_answer: 'structured_card',
   child_session_closed: 'structured_card',

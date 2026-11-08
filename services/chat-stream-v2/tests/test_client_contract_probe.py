@@ -580,6 +580,26 @@ def test_single_oversized_event_backfills_without_blocking_history(
                         else:
                             event["kind"] = "TELL"
                             event["raw"]["peer_payload"] = large
+                    if i == 5 and oversized_field in {"peer_payload", "peer_payload_large"}:
+                        # This test exercises legacy peer display priority. Give
+                        # that synthetic peer a valid current delivery occurrence.
+                        from comms import payload_digest
+                        from message_envelopes import build_message_envelope
+                        target = await store.fetch_session("testhost", "v2-single-oversized")
+                        wire = build_message_envelope("peer_delivery", from_stream_id="testhost:peer",
+                            anchor="tell", anchor_id="backfill-fixture", payload=event["raw"]["peer_payload"])
+                        digest = payload_digest(stream_id, wire)
+                        event["raw"]["peer_wire_text"] = wire
+                        await store.put_tell_delivery("backfill-fixture", {"payload_digest": digest,
+                            "reply": {"tell_id": "backfill-fixture", "to_stream_id": stream_id,
+                                      "delivery_status": "committed_pending_proof"},
+                            "delivery": {"tell_id": "backfill-fixture", "to_stream_id": stream_id,
+                                "text": wire, "from_stream_id": "testhost:peer", "sender_verified": True,
+                                "sender_kind": "peer", "sender_generation": "synthetic-backfill-peer",
+                                "proof_generation": target["session_generation"],
+                                "proof_session_created_at": target["created_at"], "proof_watermark": 0,
+                                "proof_watermark_state": "reachable", "request_payload_hash": digest,
+                                "delivery_status": "committed_pending_proof"}})
                     await store.append_session_event(stream_id, event, identity=_identity_key(event), limit=500)
             return await store.fetch_session_event_tail(stream_id, limit=11)
         finally:

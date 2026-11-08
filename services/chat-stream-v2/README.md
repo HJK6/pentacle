@@ -275,6 +275,14 @@ That terminal negative retains the original tell without acknowledging or
 resubmitting it; current owed facts can use the next ordinary digest deadline.
 Incomplete, unavailable or changed evidence stays pending with a typed
 `absence_readback_unknown:<reason>` in the existing error/action fields.
+Tell ledger audit records expose `sender_verified`, `sender_kind` (`peer`,
+`operator`, `service`, `unknown`) and nullable `sender_generation`. These fields
+capture server-authenticated context at delivery; they are not reconstructed from
+current sessions. `from_stream_id` remains a display claim unless verification
+is true. Legacy rows default to false/unknown/null. Composite queued peers retain
+only their verified stream and generation in additive nullable queue columns;
+legacy queue rows receive no inferred identity or backfill.
+
 `agent-orch ledger get <tell_id>` remains read-only. Do not resend or manually
 terminalize a pending notice to obtain fresh debt delivery.
 

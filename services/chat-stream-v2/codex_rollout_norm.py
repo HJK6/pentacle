@@ -11,6 +11,7 @@ from typing import Any
 
 from claude_jsonl_norm import (
     _classify_user_string,
+    _input_boundary,
     _defined,
     _parse_peer_tell,
     _stamp_jsonl_event_identity,
@@ -116,6 +117,7 @@ def normalize_codex_rollout_record(
     host: str,
     session_name: str,
     session_id: str = "",
+    _preserve_blocks: bool = True,
 ) -> list[dict]:
     """Map one rollout record to zero-or-more wire payloads.
 
@@ -155,6 +157,13 @@ def normalize_codex_rollout_record(
         raw = dict(base_raw)
         if raw_extra:
             raw.update(_defined(raw_extra))
+        if (_preserve_blocks and kind in {"USER", "TELL"}
+                and record.get("type") == "response_item" and payload.get("role") == "user"):
+            original = _payload_text(payload)
+            raw.update(native_input_version=1, source_record=record,
+                native_block_ordinals=[0], native_block_spans=[[0, 0, len(original)]],
+                legacy_input_events=normalize_codex_rollout_record(record, host=host,
+                    session_name=session_name, session_id=session_id, _preserve_blocks=False))
         return {
             "host": host,
             "provider": "codex",
@@ -240,7 +249,40 @@ def normalize_codex_rollout_record(
             )
         if role != "user":
             return []
-        peer_tell = _parse_peer_tell(text)
+        if _preserve_blocks and isinstance(payload.get("content"), list):
+            legacy = normalize_codex_rollout_record(record, host=host, session_name=session_name,
+                                                   session_id=session_id, _preserve_blocks=False)
+            groups: list[list[tuple[int, str]]] = []
+            for ordinal, item in enumerate(payload["content"]):
+                if not isinstance(item, dict):
+                    continue
+                part = _to_text(item.get("text") or item.get("content") or "")
+                if not part:
+                    continue
+                if groups and not _input_boundary(part) and not _input_boundary(groups[-1][-1][1]):
+                    groups[-1].append((ordinal, part))
+                else:
+                    groups.append([(ordinal, part)])
+            events = []
+            for group in groups:
+                joined = "\n".join(part for _, part in group)
+                child = {**record, "payload": {**payload, "content": joined}}
+                normalized = normalize_codex_rollout_record(child, host=host, session_name=session_name,
+                            session_id=session_id, _preserve_blocks=True)
+                if not normalized:
+                    # Whitespace-only groups emit no event. The full original
+                    # record remains attached to each retained neighboring input.
+                    continue
+                event = normalized[0]
+                event["raw"].update(native_input_version=1, source_record=record,
+                    native_block_ordinals=[ordinal for ordinal, _ in group],
+                    native_block_spans=[[ordinal, 0, len(part)] for ordinal, part in group],
+                    legacy_input_events=legacy)
+                events.append(event)
+            return _stamp_jsonl_event_identity(events, record_uuid)
+        peer_tell = _parse_peer_tell(text if _preserve_blocks else text.strip())
+        if peer_tell is not None and not _preserve_blocks:
+            peer_tell = {**peer_tell, "payload": peer_tell["payload"].strip(), "wire_text": text}
         if peer_tell is not None:
             return _stamp_jsonl_event_identity(
                 [make("TELL", peer_tell["payload"], {

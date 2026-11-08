@@ -153,9 +153,14 @@ class DurableUserEventProof:
             return "unreachable", [], str(exc)
         except Exception as exc:  # noqa: BLE001 - proof failure remains pending
             return "unreachable", [], f"event_store_error:{exc}"
+        # UI projection can expose an unproven native TELL as literal USER.
+        # That display choice must not promote its transport proof eligibility.
         return "reachable", (
             [
-                event for event in events
+                {**event, "kind": "TELL"}
+                if event.get("kind") == "USER" and isinstance(event.get("raw"), dict)
+                   and event["raw"].get("input_source_kind") == "TELL" else event
+                for event in events
                 if isinstance(event, dict) and self._seq(event) > after
             ]
             if isinstance(events, list) else []

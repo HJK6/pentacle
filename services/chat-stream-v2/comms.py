@@ -173,7 +173,9 @@ def _same_submission_prompt(sent_text: str, echo_text: str) -> bool:
 # by the Codex normalizer), so the transcript renders it as a peer/agent row. The
 # matching strip helper (strip_peer_delivery_envelope) lives with the normalizer.
 def _peer_delivery_envelope(from_stream_id: str, anchor: str, anchor_id: str, payload: str) -> str:
-    return f"[from {from_stream_id}] [{anchor}:{anchor_id}]\n{payload}"
+    from message_envelopes import build_message_envelope
+    return build_message_envelope("peer_delivery", from_stream_id=from_stream_id, anchor=anchor,
+                                  anchor_id=anchor_id, payload=payload)
 
 
 class AttachmentValidationError(ValueError):
@@ -639,6 +641,7 @@ class Comms:
                         "delivery": {
                             "tell_id": tell_id,
                             "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
                             "to_stream_id": str(route["final_target"]),
                             "original_to_stream_id": str(route["original_target"]),
                             "route_hops": list(route.get("hops") or []),
@@ -930,6 +933,7 @@ class Comms:
             "tell_id": tell_id,
             "cap_input_reason":msg.get('_pool_input_reason'),
             "from_stream_id": str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
             "to_stream_id": str(route["final_target"]),
             "original_to_stream_id": str(route["original_target"]),
             "route_hops": list(route.get("hops") or []),
@@ -986,6 +990,7 @@ class Comms:
         delivery = {"tell_id":tell_id, "to_stream_id":str(route["final_target"]), "text":body,
             **self._logical_receipt(msg.get("_logical_front_desk")),
             "from_stream_id":str(msg.get("from_stream_id") or msg.get("actor_stream_id") or ""),
+            **self._tell_sender_provenance(msg),
             "delivery_status":"proof_unavailable", "submission_confirmed":False, "submission_attempts":0,
             "delivered_at":None, "request_payload_hash":digest,
             "proof_generation":original.get("session_generation"),
@@ -1183,6 +1188,18 @@ class Comms:
         return from_stream_id, actor_stream_id, actor_trusted
 
     @staticmethod
+    def _tell_sender_provenance(msg: dict[str, Any]) -> dict[str, Any]:
+        """Capture server-authenticated origin once; claims stay display-only."""
+        auth = msg.get("_auth_context")
+        auth = auth if isinstance(auth, dict) else {}
+        sender = str(msg.get("from_stream_id") or msg.get("actor_stream_id") or "")
+        peer = auth.get("token_verified") is True and bool(sender) and sender == auth.get("stream_id")
+        kind = ("peer" if peer else "operator" if auth.get("operator_authenticated") is True
+                else "service" if auth.get("service_authenticated") is True else "unknown")
+        return {"sender_verified": kind != "unknown", "sender_kind": kind,
+                "sender_generation": str(auth.get("session_generation") or "") or None if peer else None}
+
+    @staticmethod
     def _peer_delivery_wire(msg: dict[str, Any], anchor: str, anchor_id: str, payload: str) -> str:
         """Wrap ``payload`` in a `[from …]` envelope for a genuine bound peer, else
         return it unchanged.
@@ -1195,7 +1212,8 @@ class Comms:
         seat token → token_verified False, empty stream_id) and a system producer
         (whose service_actor is an unverified claim) are deliberately excluded, so
         neither can spoof a peer attribution. Daemon housekeeping
-        (`_durable_notice_proof`) and already-enveloped bodies are left bare.
+        (`_durable_notice_proof`) is left bare. Submitted envelope-like text
+        remains literal inside the actual sender stamp.
         """
         from_stream_id, _actor, _actor_trusted = Comms._send_provenance(msg)
         auth = msg.get("_auth_context")
@@ -1210,7 +1228,6 @@ class Comms:
             verified_peer
             and anchor_id
             and not msg.get("_durable_notice_proof")
-            and strip_peer_delivery_envelope(payload) == payload
         ):
             return _peer_delivery_envelope(from_stream_id, anchor, anchor_id, payload)
         return payload
@@ -2099,6 +2116,21 @@ class Comms:
                         raise VerbError(str(exc),str(exc),phase="not_started",**exc.context) from None
                 if self.capacity_retry is not None:
                     await self.capacity_retry.cancel_input(target)
+                # Persist the actual winning attempt's final-wire anchors before
+                # native input. Public/client metadata never supplies this key.
+                current = await self.store.fetch_session(host, name) or {}
+                watermark = await self.submission_proof.watermark(target)
+                plan.meta["_input_proof"] = {
+                    **self._tell_sender_provenance(plan.message),
+                    "from_stream_id": str(plan.message.get("from_stream_id") or ""),
+                    "to_stream_id": target, "proof_generation": current.get("session_generation"),
+                    "proof_session_created_at": current.get("created_at"),
+                    **watermark_fields(watermark),
+                    "wire_sha256": hashlib.sha256(plan.wire_text.encode("utf-8")).hexdigest(),
+                    "wire_length": len(plan.wire_text), "wire_text": plan.wire_text,
+                }
+                await self._append_send_receipt(plan, request_id=request_id, receipt_id=receipt_id,
+                    state="accepted", delivery="accepted", submission_confirmed=False, attempts=0)
                 confirmed, attempts, active_draft, provider, pane_mode_reason = await self._attempt_send_delivery(plan)
                 provider_queued = (
                     not active_draft and pane_mode_reason is None

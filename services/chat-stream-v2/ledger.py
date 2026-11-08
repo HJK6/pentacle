@@ -1219,6 +1219,9 @@ def _tell_audit_record(record: dict[str, Any]) -> dict[str, Any]:
         "ledger_row_id": int(row_id) if isinstance(row_id, int) and not isinstance(row_id, bool) else row_id,
         "tell_id": tell_id,
         "from_stream_id": str(delivery.get("from_stream_id") or ""),
+        "sender_verified": delivery.get("sender_verified") is True,
+        "sender_generation": delivery.get("sender_generation") if delivery.get("sender_verified") is True and delivery.get("sender_kind") == "peer" else None,
+        "sender_kind": delivery.get("sender_kind") if delivery.get("sender_verified") is True and delivery.get("sender_kind") in {"peer", "operator", "service"} else "unknown",
         "to_stream_id": str(delivery.get("to_stream_id") or reply.get("to_stream_id") or ""),
         "original_to_stream_id": str(
             delivery.get("original_to_stream_id")

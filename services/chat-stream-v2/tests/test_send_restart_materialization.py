@@ -151,15 +151,16 @@ async def _retry_once_and_coalesce(comms: Comms, store: Store, remote: FakeTmux,
     rows = await _history(store)
     assert [(row["state"], row["delivery"]) for row in rows] == [
         ("accepted", "accepted"), ("not_landed", "not_landed"),
-        ("accepted", "accepted"), ("accepted", "accepted"), ("landed", "landed"),
+        ("accepted", "accepted"), ("accepted", "accepted"),
+        ("accepted", "accepted"), ("landed", "landed"),
     ]
     assert rows[0] == claim
     assert rows[1]["reason"] == REASON
     assert rows[0]["receipt_id"] == rows[1]["receipt_id"]
-    assert rows[2]["receipt_id"] == rows[3]["receipt_id"] == rows[4]["receipt_id"] == landed["receipt_id"]
+    assert rows[2]["receipt_id"] == rows[3]["receipt_id"] == rows[4]["receipt_id"] == rows[5]["receipt_id"] == landed["receipt_id"]
     assert landed["receipt_id"] != claim["receipt_id"]
     assert rows[2]["wire_digest"] == claim["wire_digest"]
-    assert rows[3]["wire_digest"] == rows[4]["wire_digest"] != claim["wire_digest"]
+    assert rows[3]["wire_digest"] == rows[4]["wire_digest"] == rows[5]["wire_digest"] != claim["wire_digest"]
     duplicate = await comms.send(_payload())
     assert duplicate["coalesced"] is True
     assert duplicate["delivery"] == "landed"
@@ -167,7 +168,7 @@ async def _retry_once_and_coalesce(comms: Comms, store: Store, remote: FakeTmux,
     assert duplicate["receipt_id"] == landed["receipt_id"]
     assert len(remote.pastes) == 1 and remote.enters == 0
     final = await _history(store)
-    assert len(final) == 6 and final[:5] == rows
+    assert len(final) == 7 and final[:6] == rows
     assert final[-1]["state"] == final[-1]["delivery"] == "landed"
     assert final[-1]["reason"] == f"coalesced_replay:{REQUEST}"
     assert all(row["request_id"] == REQUEST for row in final)
@@ -244,7 +245,7 @@ def test_cancellation_after_paste_keeps_receipt_uncertain(tmp_path: Path) -> Non
             await asyncio.wait_for(remote.proof.wait(), 2)
             assert len(remote.pastes) == 1
             rows = await _history(store)
-            assert len(rows) == 2  # Initial claim and materialized wire update.
+            assert len(rows) == 3  # Claim, materialized wire, durable pre-input proof.
             await _cancel(task)
             assert await _history(store) == rows
             remote.release_proof.set()
@@ -254,7 +255,7 @@ def test_cancellation_after_paste_keeps_receipt_uncertain(tmp_path: Path) -> Non
             assert duplicate["do_not_resubmit"] is True
             assert len(remote.pastes) == 1 and remote.enters == 0
             final = await _history(store)
-            assert len(final) == 3 and final[:2] == rows
+            assert len(final) == 4 and final[:3] == rows
             assert all(row["state"] == row["delivery"] == "accepted" for row in final)
             assert all(row["reason"] != REASON for row in final)
         finally:

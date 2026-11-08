@@ -4294,6 +4294,8 @@ class Server:
             name=composite.config.name, tell_id=tell_id, from_stream_id=from_stream_id,
             body=body, request_id=str(msg.get("request_id") or ""),
             service_ingress_body=msg.get("_wmi_brief_ingress_body"),
+            verified_from_stream_id=str(auth.get("stream_id") or "") or None if auth.get("token_verified") is True else None,
+            verified_generation=str(auth.get("session_generation") or "") or None if auth.get("token_verified") is True else None,
         )
         return {
             "type": "tell.ok", "to_stream_id": composite_stream_id, "tell_id": tell_id,
@@ -4342,6 +4344,10 @@ class Server:
             "type": "tell", "to_stream_id": target, "host": host, "session_name": name,
             "from_stream_id": from_stream_id or composite_stream_id, "message": body,
             "tell_id": tell_id, "request_id": request_id,
+            "_auth_context": {key: (auth or {})[key] for key in (
+                "token_verified", "stream_id", "session_generation",
+                "operator_authenticated", "operator_principal", "service_authenticated", "service_actor",
+            ) if key in (auth or {})},
             **({"_logical_front_desk": logical} if logical else {}),
             # Only authenticated service dispatch or its durable queue entry
             # supplies the sanitized original. Never infer trust from a header.
@@ -4379,6 +4385,9 @@ class Server:
                     composite, composite.config.stream_id, row["from_stream_id"],
                     row["body"], row["tell_id"], row.get("request_id") or "",
                     service_ingress_body=row.get("service_ingress_body"),
+                    auth={"token_verified": True, "stream_id": row["verified_from_stream_id"],
+                          "session_generation": row["verified_generation"]}
+                    if row.get("verified_from_stream_id") and row.get("verified_generation") else None,
                 )
             except VerbError:
                 break

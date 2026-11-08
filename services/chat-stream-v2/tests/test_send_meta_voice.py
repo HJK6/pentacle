@@ -221,8 +221,12 @@ def test_ordinary_send_outcomes_history_and_replay_keep_request_meta(tmp_path, m
                 "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
                 (target, "send-voice-outcome"),
             )])
-            assert [row["state"] for row in original_rows] == ["accepted", "landed"]
-            assert [json.loads(row["meta_json"]) for row in original_rows] == [expected, expected]
+            assert [row["state"] for row in original_rows] == ["accepted", "accepted", "landed"]
+            private_meta = [json.loads(row["meta_json"]) for row in original_rows]
+            assert private_meta[0] == expected
+            assert [normalize_send_meta(meta) for meta in private_meta] == [expected] * 3
+            assert set(private_meta[1]) == set(expected) | {"_input_proof"}
+            assert private_meta[2] == private_meta[1]
             event = {
                 "kind": "USER", "stream_id": target, "provider": "claude",
                 "text": "voice transcript", "request_id": "send-voice-outcome",
@@ -236,6 +240,13 @@ def test_ordinary_send_outcomes_history_and_replay_keep_request_meta(tmp_path, m
             history = await store.fetch_session_event_tail(target, limit=50)
             assert history[0].get("meta", {}) == expected
             assert casts[0]["event"].get("meta", {}) == expected
+            after_ingest = await store.submit(lambda conn: [dict(row) for row in conn.execute(
+                "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
+                (target, "send-voice-outcome"),
+            )])
+            assert after_ingest[:3] == original_rows
+            assert len(after_ingest) == 4
+            assert json.loads(after_ingest[-1]["meta_json"])["_input_proof"]["proof_event_id"] == history[0]["daemon_seq"]
             # Identical body under another request and stream must never lend metadata.
             for other_target, other_request in [(target, "send-other-voice"), ("other:seat", "send-voice-outcome")]:
                 await store.append_send_receipt(
@@ -251,7 +262,7 @@ def test_ordinary_send_outcomes_history_and_replay_keep_request_meta(tmp_path, m
                 "SELECT * FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid",
                 (target, "send-voice-outcome"),
             )])
-            assert unchanged == original_rows
+            assert unchanged == after_ingest
         finally:
             store.stop()
 

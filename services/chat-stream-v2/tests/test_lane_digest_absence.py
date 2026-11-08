@@ -116,6 +116,12 @@ async def edit_notice(store, notice_id, field, value):
 async def archive_old_events(store, target, keep=2):
     from retention import EventSchema, _load_hot_table, archive_events
     def run(conn):
+        # Match RetentionService's release before attaching the same archive for writes.
+        conn.commit()
+        if conn.history_attachment_identity is not None:
+            conn.execute("DETACH DATABASE receipt_archive")
+            conn.history_attachment_identity = None
+            conn.history_schema_version = None
         _load_hot_table(conn, {target})
         return archive_events(conn, EventSchema(conn), conn.history_archive_path, keep, 500)
     return await store.submit(run)

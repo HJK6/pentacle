@@ -1707,7 +1707,7 @@ def test_satellite_captured_queued_notice_envelope_parity_and_replay() -> None:
 @pytest.mark.parametrize("queued", [False, True])
 def test_satellite_every_notice_envelope_parity(case, padded, queued) -> None:
     assert {c["kind"] for c in _WRAPPER_CORPUS["notice_cases"]} == {
-        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind != "claude_pasted_content"
+        entry.kind for entry in MESSAGE_ENVELOPES if entry.kind not in {"claude_pasted_content", "peer_delivery"}
     }
     text = f'<pasted_content id="bd91">\n{case["wire_text"]}\n</pasted_content id="bd91">'
     if padded:
@@ -1746,6 +1746,8 @@ def test_satellite_annotation_keeps_non_claude_and_non_user_payloads_unchanged()
                 assert result["inserted"] == 1
                 event = casts[-1]["event"]
                 expected = {k: v for k, v in payload.items() if k != "source_pane_pid"}
+                if payload.get("kind") == "USER":
+                    expected["raw"] = {**expected.get("raw", {}), "input_provenance": {"kind": "unknown", "verified": False}}
                 assert {k: v for k, v in event.items() if k != "daemon_seq"} == expected
         finally:
             store.stop()

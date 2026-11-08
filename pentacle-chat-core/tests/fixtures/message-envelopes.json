@@ -98,6 +98,28 @@
         "\n\n<pasted_content id=\"8768\">\nFixture display\n</pasted_content id=\"8769\">\n",
         "\n\n<pasted_content id=\"8769\">\nFixture display\n</pasted_content id=\"8769\">\ntail"
       ]
+    },
+    {
+      "key": "peer-delivery",
+      "kind": "peer_delivery",
+      "wire_text": "[from fixture:peer] [tell:peer-fixture]\nline one π\n[from literal] [tell:quoted]\nliteral payload",
+      "wire_sha256": "aa5e81072cc402d0c11603908be8c9b5334fbd32d24225a01253263a84e0e397",
+      "build_fields": {
+        "from_stream_id": "fixture:peer",
+        "anchor": "tell",
+        "anchor_id": "peer-fixture",
+        "payload": "line one π\n[from literal] [tell:quoted]\nliteral payload"
+      },
+      "expected_tag": {
+        "kind": "peer_delivery",
+        "id": "peer-fixture"
+      },
+      "render_policy": "chat_prose",
+      "expected_display": "line one π\n[from literal] [tell:quoted]\nliteral payload",
+      "negative_texts": [
+        "prefix [from fixture:peer] [tell:peer-fixture]\nline one π\n[from literal] [tell:quoted]\nliteral payload",
+        "[from fixture:peer] [tell:peer-fixture] no newline"
+      ]
     }
   ],
   "auxiliary": {
