@@ -2902,14 +2902,17 @@ async def close_once(
     progeny_stream_id: str | None = None,
     disposition_waived_reason: str | None = None,
     expected_generation: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    if request_id is not None and (not isinstance(request_id, str) or not request_id.strip()):
+        raise ValueError("close_request_id_required")
     if ":" not in stream_id:
         raise ValueError("invalid_stream_id")
     host, session_name = stream_id.split(":", 1)
     if not host or not session_name:
         raise ValueError("invalid_stream_id")
     ws = await _connect_rpc_ready(config, from_stream_id=from_stream_id or caller_stream_id)
-    request_id = f"close-{uuid.uuid4()}"
+    request_id = request_id if request_id is not None else f"close-{uuid.uuid4()}"
     try:
         payload: dict[str, Any] = {
             "type": "close",

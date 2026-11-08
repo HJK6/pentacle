@@ -199,6 +199,77 @@ def test_duplicate_request_and_ruling_reuse_approved_deferred_intent():
     asyncio.run(go())
 
 
+def test_close_client_lost_response_replays_original_id_after_restart(tmp_path, monkeypatch):
+    from agent_orch import wsclient
+    from agent_orch.config import Config
+
+    async def go():
+        async with journey(tmp_path / "retry.db") as env:
+            generation = (await env.store.fetch_session(HOST, "lane"))["session_generation"]
+            active = env
+            lost = True
+            frames = []
+
+            class Socket:
+                async def send(self, raw):
+                    frame = json.loads(raw)
+                    frames.append(frame)
+                    self.response = await active.server._on_close({**frame, "_auth_context": await active.auth("primary")})
+                    await active.rulings.stop()
+
+                async def recv(self):
+                    if lost:
+                        raise TimeoutError("response lost after durable admission")
+                    return json.dumps({**self.response, "request_id": frames[-1]["request_id"]})
+
+                async def close(self):
+                    pass
+
+            async def connect(*args, **kwargs):
+                return Socket()
+            monkeypatch.setattr(wsclient, "_connect_rpc_ready", connect)
+            config = Config("ws://fixture", "", HOST, tmp_path)
+
+            async def close(**overrides):
+                return await wsclient.close_once(config, TARGET, request_id="close-stable", expected_generation=generation,
+                    reason=overrides.get("reason", "accepted lane finished"), defer_if_working=True,
+                    from_stream_id=ROOT, caller_stream_id=ROOT)
+
+            with pytest.raises(TimeoutError):
+                await close()
+            env.rid = await env.store.submit(lambda c: c.execute(
+                "SELECT ruling_request_id FROM v2_assistant_lane_rulings WHERE request_key=?",
+                ("session_close:" + frames[0]["request_id"],)).fetchone()[0])
+            lost = False
+            assert (await env.approve())["state"] == "approved" and env.tmux.kills == 0
+            original = await env.row()
+            env.store.stop()
+            reopened = Store(str(tmp_path / "retry.db")); reopened.start()
+            active = Journey(reopened, env.tmux, env.config)
+            active.rid = env.rid
+            try:
+                replay = await close()
+                assert await reopened.submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 1
+                assert replay["ruling_request_id"] == env.rid and replay["state"] == "approved"
+                assert (await active.row())["intent_digest"] == original["intent_digest"]
+                with pytest.raises(VerbError, match="assistant_ruling_request_key_conflict"):
+                    await close(reason="changed reason")
+                env.tmux.text = "ready\n"
+                await active.sessions.refresh()
+                await active.rulings.tick()
+                assert (await close())["type"] == "close.ok"
+                assert env.tmux.kills == 1
+                counts = await reopened.submit(lambda c: (
+                    c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0],
+                    c.execute("SELECT count(*) FROM v2_assistant_lane_ruling_audit WHERE event='ruling'").fetchone()[0]))
+                assert counts == (1, 1)
+                assert {frame["request_id"] for frame in frames} == {"close-stable"}
+            finally:
+                await active.rulings.stop()
+                reopened.stop()
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize("capture_ok,text", [
     (True, "Working (esc to interrupt)\n"),
     (False, "ready\n"),

@@ -58,6 +58,19 @@ def _public_test_environment():
     yield
 
 
+@pytest.fixture
+def ruling_spec_root(tmp_path, monkeypatch):
+    """Ruling tests commission readable canonical work, without host memory."""
+    root = tmp_path / "ruling-memory"
+    for stem in ("demo__linked", "demo__other"):
+        folder = root / "work/in_progress" / stem
+        folder.mkdir(parents=True)
+        (folder / "spec.md").write_text(
+            f"---\nid: spec_{stem}\ntitle: Fixture work\nstatus: in_progress\n---\n## Goal\nImplement fixture work.\n")
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(root))
+    return root
+
+
 def pytest_configure(config) -> None:
     del config
 
