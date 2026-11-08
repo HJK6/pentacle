@@ -54,6 +54,7 @@ import store_usage
 import chat_recovery
 import store_capacity_retry
 import store_qa
+import spawn_creation
 import store_lifecycle_authority as lifecycle_authority
 import store_host_transfer as host_transfer
 from store_assistant_binding import (
@@ -3865,11 +3866,15 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # and record_spawn_intent runs before payload exists.
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
-            prior_intent = json.loads(res.get("payload") or "{}")
-            if "exchange_binding" in prior_intent:
-                prior_intent = {**payload, "exchange_binding": prior_intent["exchange_binding"]}
-            else:
-                prior_intent = payload
+            existing = json.loads(res.get("payload") or "{}")
+            prior_intent = dict(payload)
+            for key in ("exchange_binding", spawn_creation.KEY):
+                if key in existing:
+                    prior_intent[key] = existing[key]
+                elif res.get("payload") is not None and key == spawn_creation.KEY:
+                    # Refreshing an old intent cannot invent an empty completed
+                    # history for commands dispatched before this reader.
+                    prior_intent.pop(key, None)
             if prepared_qa is not None:
                 prepared_qa(conn)
             cursor = conn.execute(
@@ -3901,6 +3906,60 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 conn.execute("BEGIN IMMEDIATE")
                 return _op(conn)
         return await self.submit(transaction)
+
+    async def owns_unwitnessed_spawn_intent(
+        self, host: str, name: str, request_id: str, nonce: str, *, owner_instance_id: str,
+    ) -> bool:
+        """Reader-only prior may create only a current legacy intent."""
+        def operation(conn):
+            row = _spawn_reservation(conn, host, name, request_id, nonce)
+            if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
+                return False
+            try:
+                payload = json.loads(row.get("payload"))
+            except (ValueError, TypeError):
+                return False
+            return isinstance(payload, dict) and spawn_creation.KEY not in payload
+        return await self.submit(operation)
+
+    async def cancelled_creation_snapshot(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str,
+    ) -> dict[str, Any] | None:
+        def operation(conn):
+            row = _row(conn.execute(
+                "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                "AND request_id=? AND nonce=?", (host, session_name, request_id, nonce),
+            ).fetchone())
+            if (not row or str(row.get("owner_instance_id") or "") != owner_instance_id
+                    or not _spawn_cancelled(conn, host, session_name, request_id)):
+                return None
+            value = spawn_creation.witness(row.get("payload"))
+            return value if spawn_creation.terminal(value) else None
+        return await self.submit(operation)
+
+    async def release_cancelled_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, observed_witness: dict[str, Any],
+    ) -> bool:
+        """Compare the sealed witness observed BEFORE a fresh absence read."""
+        def operation(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _row(conn.execute(
+                    "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                    "AND request_id=? AND nonce=?", (host, session_name, request_id, nonce),
+                ).fetchone())
+                if (not row or str(row.get("owner_instance_id") or "") != owner_instance_id
+                        or not _spawn_cancelled(conn, host, session_name, request_id)):
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if not spawn_creation.terminal(value) or value != observed_witness:
+                    return False
+                conn.execute("DELETE FROM v2_stream_reservations WHERE host=? AND session_name=?",
+                             (host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
 
     async def mark_tmux_created(
         self, host: str, session_name: str, *,

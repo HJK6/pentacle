@@ -241,6 +241,15 @@ attributed slow-consumer/cleanup checks remain required. Raw RPC sends no
 prompt, brief, role baseline or subsequent input; the existing `promptless`
 smoke does send a marker and is not used for rollback.
 
+Remote-creation witness rollout requires a qualified compatible reader before
+any writer-enabled release. Seal that exact live reader as the writer release's
+prior and record the actual deploy-controller checkout/SHA separately from the
+smoke-runner hash. After witness production, the release owner must keep every
+selected target/prior compatible, including a new coordinated forward
+preparation; source does not enforce a minimum reader version. Follow the
+[cleanup compatibility contract](../../docs/remote-creation-cleanup.md) for
+receipt staleness, indefinite unknown obligations and further downgrade limits.
+
 The rollback result reports `restoration` acceptance with `model_canary` not run
 by design. Even a full-scope restoration sets `full_fleet_acceptance=false`:
 inference authentication/quota/availability, replies and response-driven pressure

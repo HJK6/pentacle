@@ -695,7 +695,10 @@ class AccountRuntime:
                 key="provider_cli.admission:"+sid+":"+generation
                 admitted=await self.run(lambda a:a.conn.execute("SELECT v FROM kv WHERE k=?",(key,)).fetchone())
                 if admitted:
-                    seats.append({**fields,"stream_id":sid,"creation_pending":True})
+                    cancelled = await self.store.spawn_cancelled(
+                        reservation["host"], reservation["session_name"], str(reservation.get("request_id") or ""))
+                    seats.append({**fields,"stream_id":sid,"creation_pending":True,
+                                  **({"cancelled_cleanup_pending":True} if cancelled else {})})
                     known.add((sid,generation))
             except (ValueError,TypeError,KeyError): continue
         cells=[]
@@ -753,7 +756,9 @@ class AccountRuntime:
                         observed_artifact=data.get("artifact",{})
                         old=observed_artifact.get("artifact")!=expected["artifacts"].get(observed_artifact.get("platform"))
                 if old: old_seats.append({"stream_id":seat["stream_id"],"generation":seat.get("session_generation"),
-                                         "creation_pending":bool(seat.get("creation_pending"))})
+                                         "creation_pending":bool(seat.get("creation_pending")),
+                                         **({"cancelled_cleanup_pending":True}
+                                            if seat.get("cancelled_cleanup_pending") else {})})
             cells.append({"host":row["host"],"provider":row["provider"],"account":row["alias"],
                 "generation":row["generation"],"expected_version":expected["version"] if expected else None,
                 "observed_version":observed,"online":online,"observation":row.get("observation"),
