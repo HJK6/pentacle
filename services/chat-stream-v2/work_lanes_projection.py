@@ -20,8 +20,10 @@ from typing import Any, Awaitable, Callable
 from work_lane_progress import lane_state, members_working, lane_progress
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
+from _shared.lane_hues import resolve_hue
 from _shared.summary_prose import summary_line
 from work_lane_worked import WorkedCache
+from _shared.work_goals import project_goals
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -134,6 +136,8 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                  questions_by_spec: dict[str, dict[str, Any]] | None = None,
                  worked_by_spec: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     lane = dict(lane)
+    if index_available is not None:
+        lane["_work_index_available"] = index_available
     # Store rows carry authoritative uncapped attendance. Pure callers may supply
     # their session census explicitly; presence never overrides stored ownership.
     if "_members_working" not in lane:
@@ -143,7 +147,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     if sessions_by_stream is not None:
         progress["members"] = attribute_members(progress["members"], sessions_by_stream, questions_by_spec)
     progress["members"] = [{**{k: v for k, v in member.items()
-                               if all_members or k not in {"criteria", "transitions"}},
+                               if not k.startswith("_") and (all_members or k not in {"criteria", "transitions"})},
                              "worked": (worked_by_spec or {}).get(member["spec_id"]),
                              "lead_seat": member.get("lead_seat"),
                              "status_line": summary_line(member.get("status_text")),
@@ -154,6 +158,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     return {
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
         "icon": resolve_icon(lane.get("icon"), lane.get("title")),
+        "hue": resolve_hue(lane.get("hue")),
         "state": state, "state_reason": reason, "blocker": lane.get("blocker"),
         "owner_kind": lane.get("owner_kind"), "version": int(lane["version"]),
         "updated_at": lane.get("updated_at"), "first_admitted_at": lane.get("first_admitted_at"),
@@ -164,8 +169,44 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
-        **progress,
+        **progress, **project_goals(lane, all_goals=all_members),
     }
+
+
+def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
+                     members_after=None, goal_filter=None) -> dict:
+    """A live cursor page; aggregate/goals/revision inputs were computed uncapped."""
+    from _shared.specs_parser import WORK_SPEC_ID_RE
+    if type(members_limit) is not int or not 1 <= members_limit <= 32:
+        raise ValueError("work_lane_members_limit_invalid")
+    if members_after is not None and (not isinstance(members_after, str)
+                                     or not WORK_SPEC_ID_RE.fullmatch(members_after)):
+        raise ValueError("work_lane_members_cursor_invalid")
+    if goal_filter is not None and (not isinstance(goal_filter, str)
+                                   or goal_filter not in {goal["goal_id"] for goal in projected.get("goals", [])}):
+        raise ValueError("work_lane_goal_filter_invalid")
+    selected = sorted((member for member in projected["members"]
+                       if goal_filter is None or member.get("goal_id") == goal_filter),
+                      key=lambda member: member["spec_id"])
+    total = len(selected)
+    remaining = [member for member in selected if members_after is None or member["spec_id"] > members_after]
+    page = remaining[:members_limit]
+    cursor = page[-1]["spec_id"] if page and len(remaining) > len(page) else None
+    projection = {**projected, "members": page, "members_total": total,
+                  "members_next": cursor}
+    lane = {key: value for key, value in shown["lane"].items()
+            if not key.startswith("_") and key not in {"members", "members_json", "hue_open_order"}}
+    lane["members"] = [member["spec_id"] for member in page]
+    response = {"type": "work_lanes.show.ok", "lane": lane, "projection": projection,
+                "events": shown["events"], "updates": shown["updates"], "members": page,
+                "members_total": total, "members_next": cursor,
+                "detail_revision": projected.get("detail_revision"),
+                "work_index": shown["_work_index"]}
+    # Use the actual normal response encoding's conservative ASCII size too:
+    # either encoding must fit the transport ceiling, never truncate goals.
+    if len(json.dumps(response).encode("utf-8")) > 4 * 1024 * 1024:
+        raise ValueError("work_lane_show_too_large")
+    return response
 
 
 def server_order(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -397,10 +438,21 @@ class WorkLanesInventory:
             log.exception("work lanes question attribution unavailable")
             return None
 
+    async def _source_snapshot(self, *, include_done=False, select_rows=None):
+        snapshot = getattr(self.store, "work_lane_snapshot", None)
+        if snapshot is not None:
+            return await snapshot(include_done=include_done, select_rows=select_rows)
+        # Compatibility for consumers implementing the older Store protocol.
+        return await self.store.work_lane_rows(include_done=include_done), await self.store.work_index_status()
+
     async def current(self) -> dict[str, Any]:
-        rows = await self.store.work_lane_rows()
+        def select_rows(rows):
+            # Match build_frame's state/order/cap before any lazy hue write.
+            ordered = server_order([{**row, "state": lane_state(row)[0]} for row in rows])
+            return [row for row in ordered if row["state"] != "done"][:LANE_FRAME_CAP]
+        rows, work_index = await self._source_snapshot(select_rows=select_rows)
         return build_frame(rows, presence_index(self.sessions.list_open()),
-                           work_index=await self.store.work_index_status(),
+                           work_index=work_index,
                            worked_by_spec=self.worked.values,
                            questions_by_spec=await self.questions_by_spec())
 
@@ -408,21 +460,28 @@ class WorkLanesInventory:
                    before_updated_at: str | None = None, before_lane_id: str | None = None,
                    members: bool = False) -> dict[str, Any]:
         """Page by the compound key (updated_at, lane_id) descending, so ties never drop lanes."""
-        rows = await self.store.work_lane_rows(include_done=include_done)
+        key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
+        def select_rows(rows):
+            ordered = sorted(rows, key=key, reverse=True)
+            if before_updated_at:
+                cursor = (before_updated_at, before_lane_id or "\uffff")
+                ordered = [row for row in ordered if key(row) < cursor]
+            return ordered[:limit]
+        rows, work_index = await self._source_snapshot(include_done=include_done, select_rows=select_rows)
         lanes = project_lanes(rows, presence_index(self.sessions.list_open()),
                               worked_by_spec=self.worked.values,
                               questions_by_spec=await self.questions_by_spec())
-        key = lambda lane: (str(lane.get("updated_at") or ""), lane["lane_id"])  # noqa: E731
-        lanes.sort(key=key, reverse=True)
+        page = select_rows(lanes)
+        # One lookahead determines continuation without allocating its hue.
+        more = sorted(lanes, key=key, reverse=True)
         if before_updated_at:
             cursor = (before_updated_at, before_lane_id or "\uffff")
-            lanes = [lane for lane in lanes if key(lane) < cursor]
-        page = lanes[:limit]
-        last = page[-1] if page and len(lanes) > limit else None
+            more = [lane for lane in more if key(lane) < cursor]
+        last = page[-1] if page and len(more) > limit else None
         return {"type": "work_lanes.list.ok", "include_done": include_done, "lanes": server_order(page),
                 "next_before_updated_at": str(last.get("updated_at") or "") if last else None,
                 "next_before_lane_id": last["lane_id"] if last else None,
-                "work_index": await self.store.work_index_status()}
+                "work_index": work_index}
 
     async def emit_if_changed(self) -> bool:
         async with self._lock:

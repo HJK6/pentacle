@@ -18,8 +18,8 @@ def validate_title(title: str) -> str:
     return title
 
 
-def validate_members(members, reason) -> tuple[list[str], str | None]:
-    if (not isinstance(members, list) or len(members) > 32
+def validate_members(members, reason, *, derived=False) -> tuple[list[str], str | None]:
+    if (not isinstance(members, list) or not derived and len(members) > 32
             or any(not isinstance(s, str) or not SPEC_ID_RE.fullmatch(s) for s in members)
             or len(set(members)) != len(members)):
         raise ValueError("work_lane_members_invalid")

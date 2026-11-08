@@ -208,7 +208,7 @@ def _transitions(tracking: str, created_at: str | None, status: str) -> list[dic
 def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     """Parse file-owned lane facts without inferring completion or estimates."""
     fm = load_frontmatter(spec_text)
-    load_frontmatter(summary_text)  # Both documents must parse coherently.
+    summary_fm = load_frontmatter(summary_text)  # Both documents must parse coherently.
     spec = _without_fences(spec_text)
     summary = _without_fences(summary_text)
     ac = _section(spec, "Acceptance Criteria")
@@ -255,7 +255,14 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
             else:
                 parked = f"{match[1]} {match[2]} — {' '.join(match[3].split())}"
     status_text, next_text = label("Status"), label("Next action")
-    return {"title": fm.get("title"), "status": status,
+    organization = {}
+    if "epic" in fm or "epic" in summary_fm:
+        epic = fm.get("epic")
+        organization["_epic"] = epic if isinstance(epic, str) else None
+        if (not isinstance(epic, str) or not re.fullmatch(r"epic_[a-z0-9_]+", epic)
+                or summary_fm.get("epic") != epic):
+            organization["_epic_error"] = "work_goal_pair_invalid"
+    return {"title": fm.get("title"), "status": status, **organization,
             "criteria": _criteria(ac, parked), "transitions": _transitions(tracking, fm.get("created_at"), status),
             "status_line": summary_line(status_text), "next_line": summary_line(next_text),
             **({"parked_declaration": parked} if parked else {}),

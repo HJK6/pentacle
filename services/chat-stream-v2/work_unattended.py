@@ -8,7 +8,7 @@ from pathlib import PurePath
 
 from store_specs import (effective_assignment, normalize_spec_ids, normalize_spec_binding_provenance,
                          _hydrate_spec_row, _row)
-from store_work_index import _state_conn, _observed_record, members_conn
+from store_work_index import _state_conn, _observed_record, members_conn, effective_membership_conn
 
 LABEL = "in_progress with no assigned implementation lead"
 REVIEW = "Review the report outcome and current item before selecting a disposition."
@@ -46,9 +46,10 @@ def unattended_work_conn(conn, *, now: float | None = None) -> dict:
     state = _state_conn(conn)
     owners = assigned_owners_conn(conn)
     referenced = set(owners) | disposition_spec_ids_conn(conn)
-    for lane in conn.execute("SELECT members_json FROM v2_assistant_composite_lanes "
+    membership = effective_membership_conn(conn)["membership"]
+    for lane in conn.execute("SELECT lane_id FROM v2_assistant_composite_lanes "
                              "WHERE work_state IS NOT NULL AND work_state!='done'"):
-        referenced.update(json.loads(lane[0] or "[]"))
+        referenced.update(membership.get(lane[0], []))
     items, omitted = [], []
     for raw in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations ORDER BY spec_id"):
         record = _observed_record(json.loads(raw[1]), state)

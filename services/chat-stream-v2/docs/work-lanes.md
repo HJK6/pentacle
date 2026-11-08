@@ -128,9 +128,9 @@ zero estimated members and complete coverage. `freshness_at` uses source changes
 operations, never sweep time. It is not a forecast.
 
 Inventory and list replies add `work_index {available,root_configured,
-snapshot_at,last_sweep_at,error}`. `show --members` returns all members (at most
-32) beside existing events and updates, in that same shape and order without
-a cursor. Increment 1 omits `completion_pending`, `lead_reported_done` and
+snapshot_at,last_sweep_at,error}`. Show returns a cursor page of at most 32
+members beside events and updates. CLI `show --members` accumulates a complete
+revision; the paging contract below applies to source-derived lanes of any size. Increment 1 omits `completion_pending`, `lead_reported_done` and
 `stale`; these arrive together with their semantics and delivery in increment 2.
 No completion is inferred from report prose.
 
@@ -139,14 +139,17 @@ No completion is inferred from report prose.
 Use `work-lane set-members <lane> --member spec_demo__bridge [--member ...]
 --expected-version N --request-id ID` for ordered full replacement. Only the
 authenticated current FD binding can write it. IDs are canonical, unique
-`spec_...` values; 1–32 members are allowed. Empty membership requires
+`spec_...` values; the legacy explicit subset permits 1–32 members. Source-derived
+membership is uncapped and moves only through the spec/summary epic reference;
+contradictory manual mutations fail with `work_lane_members_source_epic_required`. Empty membership requires
 `--no-spec-reason` (at most 280 characters). The daemon refuses newly added
 unresolved IDs with `work_lane_member_unresolved`; existing members are not
 rechecked, so a missing historical member can remain while another is added.
 
 For one addition, use `agent-orch work-lane add-member <lane_id> <spec_id>
 [--request-id ID]`. It reads the ordered members and version, appends the spec
-only if absent, and sends the existing `set_members` operation. One version
+only if absent, and sends the existing `set_members` operation. It accumulates
+all source-revision pages first so a preview cannot discard off-page members. One version
 conflict triggers a fresh read and one retry, preserving concurrent additions.
 Other refusals pass through, including `work_lane_members_unchanged` on a repeat.
 The default request ID hashes the lane ID, spec ID and version read; an explicit
@@ -413,8 +416,9 @@ suppresses interpreter bytecode writes. The command starts no Store, database,
 socket or watcher and loads no daemon/user configuration. It does not write
 files. It reuses the shared bounded observation scanner/parser and the daemon's
 `aggregate_members`, with no last-good snapshot. Explicit roots never fall back
-to environment roots. The scanner reads only status configuration and
-`work/<configured-status>/<folder>/{spec.md,summary.md}`; absent status config
+to environment roots. The scanner reads status configuration,
+`work/<configured-status>/<folder>/{spec.md,summary.md}` and bounded
+`epics/*.md` or `epics/*/epic.md` charter facts; absent status config
 uses the standard status list. Malformed config, escaping status names and
 symlinked root/ancestor, work, status, config, item or source paths are refused.
 Artifact/hidden/conflict directories and deeper trees are excluded. Coherent
@@ -428,7 +432,7 @@ Input has exactly these required keys:
 
 `lanes` is the complete product inventory, including done history, never routing
 rows. Composite/lane IDs are nonempty strings; state is active/paused/blocked/done.
-`members_total` is an integer 0–32 matching the ordered list of unique canonical
+`members_total` is a nonnegative integer matching the complete ordered list of unique canonical
 spec IDs. Lane identity is unique within a composite. Empty inventories and
 memberless lanes are valid. Extra/missing keys, duplicate JSON keys, nonfinite
 JSON numbers, malformed JSON, duplicate identities and count mismatches fail.
@@ -605,3 +609,95 @@ Lane `done` and session close do not parse spec acceptance Markdown or follow-up
 receipts and do not check source-file fingerprints. Owners record honest
 completion and remaining work in specs. Actor authorization, generation identity,
 lane version/CAS, ownership, idle/safety and child/report checks remain enforced.
+
+## Source-derived lane goals
+
+The epic charter owns goal identity/title, `lane_id`, optional rank/date/icon and
+observable done condition. The canonical spec's `epic` owns membership; its
+summary mirrors it. Flat `epics/*.md` (except README) and one-level
+`epics/*/epic.md` are scanned with coherent signatures and bounded no-symlink
+reads, never their artifact subtrees. Goal facts and last-good source hashes
+persist inside the existing work-index state. A missing root, invalid charter,
+unknown lane, duplicate identity or partial pair retains last-good organization
+and exposes uncertain quality. Legacy unscoped work keeps its explicit lane
+until the reviewed migration; no title inference or permanent catch-all is made.
+
+Every membership reader uses the same indexed resolver, including assignment,
+attendance, completion, episodes and report context. A valid scoped epic overrides
+stale explicit lane copies without changing execution owner or stored lane state.
+Changing a spec/summary epic pair moves that work; changing a charter lane moves
+its members. Such edits do not emit status/AC `item_change` events or advance
+work-progress freshness. Actual member-set replacement clears the former lane
+completion episode atomically, including replacement by already terminal work.
+
+`WorkLane.goals` contains at most eight records in inventory/list, with
+`goals_total` counting all named goals. Selection prefers `in_progress` goals,
+then rank/goal_id, and the selected records display in rank/goal_id order. Show
+includes every named goal. Each record has `goal_id`, title, state, done, total,
+rank and optional target_date/icon. `goal_id` is `g_` plus the first 24 lowercase
+SHA256 hex characters of the epic ID; collisions are typed diagnostics. Title
+is the longest Unicode-code-point prefix whose compact JSON string occupies at
+most 120 UTF-8 bytes; source text remains whole. Date is informational. Icon
+uses the existing `lane_icons.json` keys; omitted/null uses the consumer target
+glyph, with no title inference.
+
+Completed specs count as done and deprecated specs leave the denominator.
+Empty/all-deprecated goals are 0/0 not_started; fresh backlog-only goals are
+not_started; fresh positive all-completed goals are done; other or uncertain
+nonempty goals are in_progress. A transitional `default_goal` progress record
+covers only legacy unassigned members carried by this lane and is omitted when
+empty. No stored goal progress or extra goal registry exists.
+
+`detail_revision` is the full 64 lowercase SHA256 hex digest of canonical compact
+UTF-8 JSON: format version, ALL effective members' source IDs/epic/goal/hash and
+normalized quality/error, ALL lane epics' source IDs/hash/quality/error, and
+source availability. Sort inputs by source ID before hashing and compute before
+any page, goal selection or preview cap. It excludes scan clocks, presence,
+seats, lane versions and worked time. Equal-count off-preview source replacement
+changes it; no-op scans and display-only hue allocation do not.
+
+### Live detail pages
+
+`work_lanes.show` accepts `members_limit` integer1..32 (default32), optional
+`members_after` canonical spec-ID cursor and optional named `goal_id` filter.
+Members sort by spec ID; `members_total` counts the full filtered population and
+`members_next` is the last emitted ID when another page exists, otherwise null.
+Top-level members, projection members and raw lane member IDs contain the SAME
+page. Raw `members_json` is not duplicated. All aggregates, named goals and the
+source revision are computed from the uncapped same Store snapshot before
+filtering. An unknown goal or malformed cursor/limit fails explicitly. Show
+refuses an encoded response above the 4 MiB ceiling rather than truncating facts.
+
+Top-level and projected `detail_revision` agree. Accumulate only pages sharing
+one revision; changed revisions restart once from page one, and further churn
+requires Retry. There is no server snapshot session. CLI `show --members
+[--goal-id ID]` follows this rule and checks exact count/uniqueness; older
+nonpaged replies remain unchanged. Offline estimate manifests likewise require
+a complete unique list/count and have no 32-member restriction. Mobile paging
+is a separately shipped consumer prerequisite for broad migration.
+
+### Persisted lane hue
+
+Optional `WorkLane.hue` uses the single ordered 16-key `lane_hues.json` palette.
+Store writes assign the least-used key among all open first-class lanes,
+palette-order ties. Done/routing lanes do not reserve colours. Hue is never
+hand-set; invalid legacy values project null. Missing old values are assigned
+lazily to requested rows, in lane-ID order, inside the SQLite writer transaction.
+Concurrent first reads retain the persisted winner; two Store connections cannot
+both claim the final unused key.
+
+On any open-set change, duplicate hues are allowed only when all16 keys are used
+by open lanes. Otherwise only the most recent open entrant sharing a key moves
+to the least-used key, ties by palette order; repeat at most15 times. Creation,
+reopen and closure perform this repair atomically with state. Other changes
+preserve colour. Internal entry order is initialized globally for ALL historical
+lanes before new admission, by last genuine entry timestamp/lane ID, then each
+new entry gets MAX+1. Reads never become an entry. Restart and host transfer
+preserve hue/order. Allocation/repair adds no work events, CAS/freshness changes,
+source observation or goal digest input.
+
+Combined bounds remain <=800bytes/member added over the pre-fields baseline,
+<=2560bytes for the per-lane goal envelope (eight max records plus total/default/
+revision/key overhead), <=320KiB for16x8 and <=1.25MiB for64x8 correlated frames.
+These include goal icons, hue, Unicode/escaping and all previous fields. The
+4MiB show ceiling is separate; no field dropping or budget increase is allowed.

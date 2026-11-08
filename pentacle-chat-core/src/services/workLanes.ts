@@ -17,6 +17,9 @@ export const LANE_ICON_KEYS = [
   'hammer', 'eye', 'camera', 'cursor', 'home', 'book', 'chart', 'shield', 'key', 'leaf',
 ] as const;
 export type LaneIconKey = typeof LANE_ICON_KEYS[number];
+/** Ordered keys mirror the canonical lane_hues.json; parity is tested. */
+export const LANE_HUE_KEYS = ['violet', 'cyan', 'yellow', 'pink', 'mint', 'purple', 'sky', 'lime', 'magenta', 'aqua', 'sand', 'orchid', 'teal', 'rose', 'lavender', 'chartreuse'] as const;
+export type LaneHueKey = typeof LANE_HUE_KEYS[number];
 export const WORK_LANE_UPDATE_KINDS: readonly WorkLaneUpdateKind[] = [
   'major_decision', 'lane_started', 'lane_completed', 'lane_blocked', 'lane_unblocked', 'milestone',
 ];
@@ -55,8 +58,14 @@ export type WorkLaneSeat = {
   last_activity: string | null;
 };
 
+export type WorkLaneGoalProgress = { state: 'not_started' | 'in_progress' | 'done'; done: number; total: number };
+export type WorkLaneGoal = WorkLaneGoalProgress & {
+  goal_id: string; title: string; rank: number; target_date?: string; icon?: LaneIconKey | null;
+};
+
 export type WorkLaneMember = {
   spec_id: string;
+  goal_id?: string | null;
   title: string | null;
   status: string | null;
   terminal: 'completed' | 'deprecated' | null;
@@ -91,6 +100,7 @@ export type WorkLaneMember = {
 export type WorkLaneProgress = {
   members: WorkLaneMember[];
   members_total: number | null;
+  members_next?: string | null;
   no_spec_reason: string | null;
   items_total: number | null;
   items_completed: number | null;
@@ -116,8 +126,13 @@ export type WorkIndexStatus = {
 
 export type WorkLane = {
   lane_id: string;
+  goals?: WorkLaneGoal[];
+  goals_total?: number;
+  default_goal?: WorkLaneGoalProgress | null;
+  detail_revision?: string | null;
   title: string;
   icon?: LaneIconKey | null;
+  hue?: LaneHueKey | null;
   summary: string;
   state: WorkLaneState;
   state_reason: string | null;
@@ -249,6 +264,31 @@ function normalizeSeat(raw: unknown): WorkLaneSeat | null {
   };
 }
 
+const goalId = (value: unknown): string | null =>
+  typeof value === 'string' && /^g_[0-9a-f]{24}$/.test(value) ? value : null;
+const count = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2147483647 ? value : null;
+
+function normalizeGoalProgress(raw: unknown): WorkLaneGoalProgress | null {
+  if (!isRec(raw) || !['not_started', 'in_progress', 'done'].includes(raw.state as string)) return null;
+  const done = count(raw.done), total = count(raw.total);
+  if (done === null || total === null || done > total) return null;
+  return { state: raw.state as WorkLaneGoalProgress['state'], done, total };
+}
+
+function normalizeGoal(raw: unknown): WorkLaneGoal | null {
+  if (!isRec(raw)) return null;
+  const progress = normalizeGoalProgress(raw), id = goalId(raw.goal_id), rank = count(raw.rank);
+  if (!progress || !id || typeof raw.title !== 'string' || rank === null) return null;
+  const date = typeof raw.target_date === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(raw.target_date)
+    && raw.target_date.slice(0, 4) !== '0000' && Number.isFinite(Date.parse(raw.target_date))
+    && new Date(raw.target_date).toISOString().slice(0, 10) === raw.target_date ? raw.target_date : null;
+  return { ...progress, goal_id: id, title: raw.title, rank,
+    ...(date ? { target_date: date } : {}),
+    ...('icon' in raw ? { icon: typeof raw.icon === 'string' && LANE_ICON_KEYS.includes(raw.icon as LaneIconKey)
+      ? raw.icon as LaneIconKey : null } : {}) };
+}
+
 function normalizeMember(raw: unknown): WorkLaneMember | null {
   if (!isRec(raw)) return null;
   const specId = nonEmpty(raw.spec_id);
@@ -260,6 +300,7 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
   const questions = isRec(raw.open_questions) ? raw.open_questions : {};
   return {
     spec_id: specId,
+    goal_id: goalId(raw.goal_id),
     title: str(raw.title),
     status: str(raw.status),
     terminal: raw.terminal === 'completed' || raw.terminal === 'deprecated' ? raw.terminal : null,
@@ -294,6 +335,7 @@ function normalizeProgress(raw: Rec): WorkLaneProgress | null {
   return {
     members: (Array.isArray(raw.members) ? raw.members : []).map(normalizeMember).filter((m): m is WorkLaneMember => m !== null),
     members_total: finite(raw.members_total),
+    members_next: str(raw.members_next),
     no_spec_reason: str(raw.no_spec_reason),
     items_total: finite(raw.items_total),
     items_completed: finite(raw.items_completed),
@@ -329,8 +371,14 @@ function normalizeLane(raw: unknown): WorkLane | null {
   const last = raw.last_update;
   return {
     lane_id: laneId,
+    goals: (Array.isArray(raw.goals) ? raw.goals : []).map(normalizeGoal).filter((goal): goal is WorkLaneGoal => goal !== null),
+    goals_total: count(raw.goals_total) ?? 0,
+    default_goal: normalizeGoalProgress(raw.default_goal),
+    detail_revision: typeof raw.detail_revision === 'string' && /^[0-9a-f]{64}$/.test(raw.detail_revision)
+      ? raw.detail_revision : null,
     title: str(raw.title) ?? '',
     icon: typeof raw.icon === 'string' && LANE_ICON_KEYS.includes(raw.icon as LaneIconKey) ? raw.icon as LaneIconKey : null,
+    hue: typeof raw.hue === 'string' && LANE_HUE_KEYS.includes(raw.hue as LaneHueKey) ? raw.hue as LaneHueKey : null,
     summary: str(raw.summary) ?? '',
     state,
     state_reason: str(raw.state_reason),

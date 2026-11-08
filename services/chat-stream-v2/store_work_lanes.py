@@ -20,7 +20,8 @@ from typing import Any, Callable
 from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
 from work_lane_progress import lane_lead_lost, members_working
-from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
+from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
+                              effective_membership_conn, effective_member_ids, enrich_goals_conn)
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
 from work_lane_migration import upgrade_events
 from assistant_policy import AssistantPolicy
@@ -112,7 +113,14 @@ def member_conflicts_conn(conn, composite_stream_id: str, members: list[str],
                           target_lane_id: str | None = None, *, refuse: bool = False) -> list[dict[str, str]]:
     """One deterministic check, reused inside the writer transaction and previews."""
     wanted = set(members)
+    snapshot = effective_membership_conn(conn)
     conflicts = []
+    for identity in sorted(wanted):
+        target = snapshot["assigned"].get(identity)
+        if target is not None and target != target_lane_id:
+            if refuse:
+                raise ValueError("work_lane_members_source_epic_required: change the source epic to move goal-derived work")
+            conflicts.append({"spec_id": identity, "lane_id": target})
     if wanted:
         for raw in conn.execute(
                 "SELECT lane_id,members_json FROM v2_assistant_composite_lanes "
@@ -121,7 +129,7 @@ def member_conflicts_conn(conn, composite_stream_id: str, members: list[str],
             lane = dict(raw)
             if lane["lane_id"] != target_lane_id:
                 conflicts.extend({"spec_id": identity, "lane_id": lane["lane_id"]}
-                                 for identity in sorted(wanted.intersection(member_ids(lane))))
+                                 for identity in sorted(wanted.intersection(effective_member_ids(conn, lane, snapshot))))
     if conflicts and refuse:
         raise WorkLaneMemberConflict(conflicts[0]["lane_id"], conflicts[0]["spec_id"])
     return conflicts
@@ -139,7 +147,9 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
         if operation == "set_members" and lane["work_state"] != "done":
             if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 return
-            members, _ = validate_members(payload["members"], payload.get("no_spec_reason"))
+            snapshot = effective_membership_conn(conn)
+            derived = any(target == lane["lane_id"] for target in snapshot["assigned"].values())
+            members, _ = validate_members(payload["members"], payload.get("no_spec_reason"), derived=derived)
         elif operation == "set_state" and lane["work_state"] == "done" and payload.get("to") in OPEN_WORK_STATES:
             if set(payload) - {"to", "blocker", "outcome", "resolution", "reason", "operator_confirmation"}:
                 return
@@ -154,11 +164,16 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
                 _require_qualifying_lead(lane, conn)
             if payload["to"] == "blocked":
                 _text(payload.get("blocker"), UPDATE_TEXT_MAX, "work_lane_blocker_required", required=True)
-            members = member_ids(lane)
+            members = effective_member_ids(conn, lane)
     except ValueError:
         return  # Let the unchanged operation validator report its original error.
     if members is not None:
         member_conflicts_conn(conn, lane["stream_id"], members, lane["lane_id"], refuse=True)
+
+
+from store_work_index import index_status_conn
+from store_lane_hues import (ensure_lane_hues_schema, enter_open_conn, prepare_hues_conn,
+                             repair_hues_conn, hue_transaction)
 
 
 def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
@@ -172,6 +187,7 @@ def ensure_work_lane_schema(conn: sqlite3.Connection) -> None:
     ensure_work_lane_episodes_schema(conn)
     for ddl in WORK_LANE_INDEX_DDL:
         conn.execute(ddl)
+    ensure_lane_hues_schema(conn)
 
 
 def _now() -> str:
@@ -382,7 +398,8 @@ def lane_row_conn(conn, lane_id: str) -> dict[str, Any] | None:
     if row is None:
         return None
     lane = dict(row)
-    lane["members"] = member_ids(lane)
+    lane.pop("hue_open_order", None)
+    lane["members"] = effective_member_ids(conn, lane)
     return lane
 
 
@@ -431,16 +448,20 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
     )
 
 
-def work_lane_rows_conn(conn, *, include_done: bool = False) -> list[dict[str, Any]]:
+def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
-    index_available = bool(_state_conn(conn)["available"])
+    snapshot = effective_membership_conn(conn)
+    index_available = bool(snapshot["state"]["available"])
     marks = ",".join("?" for _ in states)
+    condition = f"work_state IN ({marks})" + (" AND lane_id=?" if lane_id is not None else "")
+    parameters = (*states, lane_id) if lane_id is not None else states
     lanes = [dict(r) for r in conn.execute(
-        f"SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ({marks})", states)]
+        f"SELECT * FROM v2_assistant_composite_lanes WHERE {condition}", parameters)]
     from work_owed import _owners
     owners = [value[2] for value in _owners(conn).values()]
     for lane in lanes:
-        lane["_members"] = members_conn(conn, lane)
+        lane["_members"] = members_conn(conn, lane, snapshot)
+        enrich_goals_conn(conn, lane, snapshot)
         lane["_work_index_available"] = index_available
         lane["_members_working"] = members_working(lane, owners)
         marks = ",".join("?" for _ in PRODUCT_OPERATIONS)
@@ -509,22 +530,61 @@ class _WorkLanesStoreMixin:
             updates = [{"update_id": e["update_id"], "kind": e["update_kind"],
                         "event_id": e["publication_event_id"], "ts": e["created_at"],
                         "source_id": e["source_id"]} for e in events if e.get("update_kind")]
-            return {"lane": lane, "events": events, "updates": updates, "members": members_conn(conn, lane)}
-        return await self.submit(_op)
+            prepare_hues_conn(conn, [lane_id])
+            row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
+            lane = lane_row_conn(conn, lane_id)
+            internal_members = row["_members"] if row is not None else members_conn(conn, lane)
+            # Public Store members retain the observation contract. Projection
+            # keeps its private last-good/freshness inputs in _projection_row.
+            public_members = [{key: value for key, value in member.items() if not key.startswith("_")}
+                              for member in internal_members]
+            return {"lane": lane, "events": events, "updates": updates,
+                    "members": public_members,
+                    "_projection_row": row, "_work_index": index_status_conn(conn)}
+        def coherent(conn):
+            with hue_transaction(conn):
+                return _op(conn)
+        return await self.submit(coherent)
 
     async def open_lanes_for_spec(self, spec_id: str) -> list[dict[str, Any]]:
         """Non-done product lanes whose membership names this canonical spec."""
         def _op(conn):
-            return [{"lane_id": r["lane_id"], "version": int(r["version"]), "title": r["title"],
-                     "members": member_ids(dict(r))}
-                    for r in conn.execute(
-                        "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ('active','paused','blocked')"
-                        " AND EXISTS (SELECT 1 FROM json_each(COALESCE(members_json,'[]')) WHERE value=?)"
-                        " ORDER BY lane_id", (spec_id,))]
+            snapshot = effective_membership_conn(conn)
+            result = []
+            for row in conn.execute(
+                    "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ('active','paused','blocked') ORDER BY lane_id"):
+                lane = dict(row)
+                identities = effective_member_ids(conn, lane, snapshot)
+                if spec_id in identities:
+                    result.append({"lane_id": lane["lane_id"], "version": int(lane["version"]),
+                                   "title": lane["title"], "members": identities})
+            return result
         return await self.submit(_op)
 
     async def work_lane_rows(self, *, include_done: bool = False) -> list[dict[str, Any]]:
+        # Internal attendance/episode/aggregation readers never allocate hues.
         return await self.submit(lambda conn: work_lane_rows_conn(conn, include_done=include_done))
+
+    async def work_lane_snapshot(self, *, include_done: bool = False,
+                                 select_rows: Callable | None = None):
+        """Select wire rows before lazy allocation, in one coherent writer turn.
+
+        The projection supplies a pure selection function; all rows remain in
+        the snapshot for uncapped inventory counts and membership aggregates.
+        """
+        def _op(conn):
+            with hue_transaction(conn):
+                rows = work_lane_rows_conn(conn, include_done=include_done)
+                if select_rows is not None:
+                    selected = select_rows(rows)
+                    prepare_hues_conn(conn, [row["lane_id"] for row in selected])
+                    # Authorized collider repair can affect an existing colour
+                    # outside this page; refresh colours without allocating it.
+                    hues = dict(conn.execute("SELECT lane_id,hue FROM v2_assistant_composite_lanes"))
+                    for row in rows:
+                        row["hue"] = hues.get(row["lane_id"])
+                return rows, index_status_conn(conn)
+        return await self.submit(_op)
 
     async def work_lane_handoff(self, predecessor: str, successor: str) -> list[dict[str, Any]]:
         """Decision D-2: lanes led by ``predecessor`` follow the handoff successor; state unchanged."""
@@ -795,13 +855,22 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         elif operation == "set_members":
             if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 raise ValueError("work_lane_payload_invalid")
-            members, reason = validate_members(payload["members"], payload.get("no_spec_reason"))
+            snapshot = effective_membership_conn(conn)
+            prior_members = effective_member_ids(conn, lane, snapshot)
+            derived = {identity for identity, target in snapshot["assigned"].items() if target == lane["lane_id"]}
+            members, reason = validate_members(payload["members"], payload.get("no_spec_reason"), derived=bool(derived))
+            if (not derived <= set(members) or any(snapshot["assigned"].get(identity, lane["lane_id"]) != lane["lane_id"]
+                                                  for identity in members)):
+                raise ValueError("work_lane_members_source_epic_required: change the source epic to move goal-derived work")
+            legacy = [identity for identity in members if identity not in derived]
+            if len(legacy) > 32:
+                raise ValueError("work_lane_members_invalid")
             removal_reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
-            in_use = _assigned_seats_conn(conn, [s for s in member_ids(lane) if s not in members])
-            if members == member_ids(lane) and reason == lane.get("no_spec_reason"):
+            in_use = _assigned_seats_conn(conn, [identity for identity in prior_members if identity not in members])
+            if members == prior_members and reason == lane.get("no_spec_reason"):
                 raise ValueError("work_lane_members_unchanged")
-            changes.update(members_json=_canonical(members), no_spec_reason=reason)
-            if members != member_ids(lane):
+            changes.update(members_json=_canonical(legacy), no_spec_reason=reason)
+            if members != prior_members:
                 # Membership is a new completion condition even if both sets
                 # are terminal. Clear atomically with the committed replacement;
                 # request replay/unchanged refusal returns before this point.
@@ -856,6 +925,13 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                            (*changes.values(), lane["lane_id"], lane["version"]))
         if cur.rowcount != 1:
             raise ValueError("assistant_lane_version_conflict")
+        lane = lane_row_conn(conn, lane["lane_id"])
+    if operation == "adopt" or (operation == "set_state" and
+            (prior_state == "done") != (lane["work_state"] == "done")):
+        if operation == "adopt" or lane["work_state"] != "done":
+            enter_open_conn(conn, lane["lane_id"])
+            prepare_hues_conn(conn, [lane["lane_id"]])
+        repair_hues_conn(conn)
         lane = lane_row_conn(conn, lane["lane_id"])
     if fault is not None:
         fault(operation)
