@@ -25,6 +25,45 @@ Use the default owned gate for automation. External `--profile` configurations
 are operator-provided live inputs and need separate resource authority. Keep raw
 receipts outside shared memory and retain only location/hash metadata there.
 
+## Scheduled strict-full soak
+
+The nightly soak uses `tools/nightly_journey.py admit --job nightly-soak` and
+`report`, with a 2400-second child process-group bound and a 600-second window
+reserve. The FD owns `~/.pentacle/nightly-journey/window.json`: `host` must match
+the execution host; `start_utc` is `HH:MM`, `duration_s` is seconds,
+`valid_until` is a `YYYY-MM-DD` date at most 30 days ahead, `held_until` is null
+or an aware ISO timestamp, and `issued_by` names the issuing FD. Missing,
+malformed, expired, held, out-of-window or too-short windows block execution.
+One fire-time process snapshot also blocks active `gate_env.py`, `run_gate.py`
+or deploy commands; an unavailable process table blocks too. FD records certified
+windows, quiet orders, heavy slots and deployments in `held_until`.
+
+Install the tracked `deploy/nightly-soak/run-nightly-soak.sh` and render
+`deploy/com.pentacle.nightly-soak.plist`'s `__PENTACLE_USER_HOME__` placeholder
+under an FD installation window, preserving preimages. Its 01:00 host-local
+fire fits the 05:30–11:30 UTC window in both seasons for America/Chicago.
+Local `~/.pentacle/nightly-soak/config.zsh` sets `CHECKOUT` (the existing pinned
+soak checkout), `TOOLS_ROOT` (accepted tools checkout), `PY` (provisioned service
+Python) and `MEMORY_ROOT` (publisher scripts). No deployment paths live in the
+tracked wrapper. The wrapper preserves its private HOME/TMPDIR/tmux and logs.
+Receipts live beside strict-full evidence at
+`~/.pentacle/soak/<UTC-run>/evidence/receipt.json`; primary/host outcomes remain
+separate from reporting errors. Each occurrence sends one landed
+`REPORT nightly-soak` line to the FD; FAIL/BLOCKED also requires a critical
+outbound notice with non-null `delivered_at`. FAIL files one publisher-deduped
+`pentacle__nightly_soak_<sig8>` item across dates and lifecycle moves. BLOCKED
+creates no defect item. Pause with
+`launchctl bootout gui/$(id -u)/com.pentacle.nightly-soak`; resume with
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pentacle.nightly-soak.plist`.
+The installed journey runner and its 03:00 job remain phase 2.
+
+For an admission-only rehearsal, use a fake file with the current host and
+`{"host":"<execution-host>","start_utc":"05:30","duration_s":21600,"valid_until":"2026-11-30","held_until":null,"issued_by":"test"}`,
+then `python3 tools/nightly_journey.py admit --job nightly-soak --window FILE --now-utc 2026-11-15T09:00:00Z`.
+Tests override `--notify-cmd`, `--publisher-cmd` and `--report-send-cmd`; the
+last command receives one RPC JSON object on stdin and returns JSON on stdout.
+Tests provide isolated `--notifications-db` and `--notices-db` for delivery proof.
+
 ## Supported entry: `scripts/gate_env.py`
 
 The web gate and web-selected npm tests require the optional `node-pty` module and fail as setup when it is absent.
