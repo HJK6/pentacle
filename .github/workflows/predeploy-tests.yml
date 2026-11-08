@@ -155,7 +155,7 @@ jobs:
         if-no-files-found: warn
         path: ${{ runner.temp }}/gate-evidence/${{ github.job }}/**
   daemon:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
     - uses: actions/checkout@v4
@@ -189,6 +189,28 @@ jobs:
           fi
         done
         exit 1
+    - name: Require qualified tmux 3.4
+      run: |
+        version="$(tmux -V)"
+        echo "$version"
+        if [ "$version" != "tmux 3.4" ]; then
+          echo "::error::Daemon close-anchor controls require qualified tmux 3.4."
+          exit 1
+        fi
+        tmux_socket_dir="$(mktemp -d)"
+        cleanup_tmux() {
+          tmux -S "$tmux_socket_dir/server" kill-server >/dev/null 2>&1 || true
+          rm -f "$tmux_socket_dir/server"
+          rmdir "$tmux_socket_dir"
+        }
+        trap cleanup_tmux EXIT
+        tmux -S "$tmux_socket_dir/server" -f /dev/null new-session -d -s close-ci 'exec sleep 60'
+        server_version="$(tmux -S "$tmux_socket_dir/server" display-message -p '#{version}')"
+        echo "tmux server $server_version"
+        if [ "$server_version" != "3.4" ]; then
+          echo "::error::Daemon close-anchor controls require server version 3.4."
+          exit 1
+        fi
     - name: Source integrity after setup
       run: python3 services/chat-stream-v2/tools/source_integrity.py --root "${GITHUB_WORKSPACE}"
     - name: Daemon merge checks
