@@ -17,7 +17,8 @@ def aggregate_members(members: list[dict[str, Any]], lane_updated_at: str | None
     ac = [m for m in members if m["status"] not in ("missing", "ambiguous") and m.get("ac_total") is not None]
     non_exempt = [m for m in opened if not m.get("estimate_exempt", False)]
     estimated = [m for m in non_exempt if m.get("estimate") is not None]
-    stamps = [str(m["source_changed_at"]) for m in members if m.get("source_changed_at")]
+    stamps = [str(m.get("_progress_changed_at", m.get("source_changed_at"))) for m in members
+              if m.get("_progress_changed_at", m.get("source_changed_at"))]
     if lane_updated_at:
         stamps.append(lane_updated_at)
     return {

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "palette": [
+    {
+      "key": "violet",
+      "hex": "#b59eff"
+    },
+    {
+      "key": "cyan",
+      "hex": "#55cfe7"
+    },
+    {
+      "key": "yellow",
+      "hex": "#edf25f"
+    },
+    {
+      "key": "pink",
+      "hex": "#f68ec5"
+    },
+    {
+      "key": "mint",
+      "hex": "#5fddbb"
+    },
+    {
+      "key": "purple",
+      "hex": "#d08cf2"
+    },
+    {
+      "key": "sky",
+      "hex": "#71c2f4"
+    },
+    {
+      "key": "lime",
+      "hex": "#91e25a"
+    },
+    {
+      "key": "magenta",
+      "hex": "#ec79e0"
+    },
+    {
+      "key": "aqua",
+      "hex": "#26d9d3"
+    },
+    {
+      "key": "sand",
+      "hex": "#d2df90"
+    },
+    {
+      "key": "orchid",
+      "hex": "#e2adeb"
+    },
+    {
+      "key": "teal",
+      "hex": "#34b2a1"
+    },
+    {
+      "key": "rose",
+      "hex": "#f5a3c1"
+    },
+    {
+      "key": "lavender",
+      "hex": "#d8c6f1"
+    },
+    {
+      "key": "chartreuse",
+      "hex": "#a4e444"
+    }
+  ],
+  "rules": "order is assignment tie-break order; none within 20 deg of the green/amber/question-blue/red state tokens; each >=4.5:1 on #0b110e"
+}

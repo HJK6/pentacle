@@ -113,13 +113,13 @@ class _BoundedSource:
     def is_symlink(self):
         return stat.S_ISLNK(self.stat().st_mode)
 
-    def read_bytes(self):
+    def read_bytes(self, *, limit=None):
         fd = os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("work_source_not_regular")
             with os.fdopen(fd, "rb", closefd=False) as source:
-                return source.read()
+                return source.read() if limit is None else source.read(limit + 1)
         finally:
             os.close(fd)
 
@@ -274,6 +274,7 @@ class SpecsSubsystem:
         self._debounce_generation = 0
         self._last_event_at = 0.0
         self._pending_spec_ids: set[str] = set()
+        self._pending_goal_change = False
         self._lock = threading.Lock()
         self._presentation_cache_lock = threading.Lock()
         self._folder_index_cache: dict[str, list[tuple[str, Path]]] | None = None
@@ -372,6 +373,52 @@ class SpecsSubsystem:
                     on_disk.append(child)
         return known + on_disk
 
+    def _scan_goal_candidates(self, now: float) -> dict:
+        from .work_goals import parse_goal_facts
+        from .work_observations import _signature
+        goals, errors = {}, {}
+        root = self.memory_root / "epics"
+        def read(fd, name, path):
+            source = _BoundedSource(fd, name)
+            try:
+                before = _signature(source)
+                data = source.read_bytes(limit=1024 * 1024)
+                if len(data) > 1024 * 1024:
+                    raise ValueError("work_goal_source_too_large")
+                facts = parse_goal_facts(data.decode("utf-8"))
+                quality = "fresh"
+                if before != _signature(source) or now - source.stat().st_mtime < self.debounce_s:
+                    quality = "stale"
+                item = {"quality": quality, "error": None if quality == "fresh" else "work_goal_unsettled",
+                        "facts": facts, "source_hash": hashlib.sha256(data).hexdigest(), "path": str(path)}
+                goals.setdefault(facts["epic_id"], []).append(item)
+            except SOURCE_READ_ERRORS + (TypeError,):
+                errors[str(path)] = {"quality": "error", "error": "work_goal_source_invalid"}
+        try:
+            with _bounded_directory(root) as fd:
+                for name in sorted(os.listdir(fd)):
+                    if name.startswith((".", "_")) or _is_spec_sync_conflict(name) or name == "README.md":
+                        continue
+                    mode = os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
+                    if name.endswith(".md"):
+                        read(fd, name, root / name)
+                    elif stat.S_ISDIR(mode):
+                        try:
+                            with _bounded_directory(root / name, parent_fd=fd) as nested:
+                                if "epic.md" in os.listdir(nested):
+                                    read(nested, "epic.md", root / name / "epic.md")
+                        except SOURCE_READ_ERRORS:
+                            errors[str(root / name / "epic.md")] = {"quality": "error", "error": "work_goal_source_invalid"}
+                    elif stat.S_ISLNK(mode):
+                        errors[str(root / name / "epic.md")] = {"quality": "error", "error": "work_goal_source_invalid"}
+        except FileNotFoundError:
+            return {"goal_candidates": {}, "goal_errors": {}, "goals_available": False,
+                    "goal_error": "work_goal_root_unavailable"}
+        except SOURCE_READ_ERRORS:
+            return {"goal_candidates": {}, "goal_errors": errors, "goals_available": False,
+                    "goal_error": "work_goal_root_unavailable"}
+        return {"goal_candidates": goals, "goal_errors": errors, "goals_available": True, "goal_error": None}
+
     def scan_work_observations(self, *, now: float | None = None) -> dict:
         """One depth-capped scan; no catalog or artifact reads and no persistence."""
         # A sweep also covers events missed on new/moved folders. Keep the
@@ -458,7 +505,8 @@ class SpecsSubsystem:
             return {"available": False, "root_configured": True,
                     "error": "work_scan_error:" + type(exc).__name__, "candidates": {}, "errors": {}, "scanned_at": now}
         return {"available": True, "root_configured": True, "error": None,
-                "candidates": candidates, "errors": errors, "scanned_at": now}
+                "candidates": candidates, "errors": errors, "scanned_at": now,
+                **self._scan_goal_candidates(now)}
 
     def _cached_work_candidate(self, folder, status, now, prior_cache, *, directory_fd=None):
         paths = (folder / "spec.md", folder / "summary.md")
@@ -517,6 +565,12 @@ class SpecsSubsystem:
                     if (folder.is_dir() and not folder.is_symlink() and not folder.name.startswith(("_", "."))
                             and not _is_spec_sync_conflict(folder)):
                         observer.schedule(handler, str(folder), recursive=False)
+            epic_root = self.memory_root / "epics"
+            if epic_root.is_dir() and not epic_root.is_symlink():
+                observer.schedule(handler, str(epic_root), recursive=False)
+                for directory in epic_root.iterdir():
+                    if directory.is_dir() and not directory.is_symlink() and not directory.name.startswith((".", "_")):
+                        observer.schedule(handler, str(directory), recursive=False)
             observer.start()
             self._observer = observer
             self._invalidate_presentation_cache()
@@ -559,10 +613,12 @@ class SpecsSubsystem:
             for spec_id in [self.spec_id_for_path(path)]
             if spec_id
         }
-        if not ids:
+        goal_change = any(path == self.memory_root / "epics" or self.memory_root / "epics" in path.parents for path in paths)
+        if not ids and not goal_change:
             return
         self._invalidate_presentation_cache()
         with self._lock:
+            self._pending_goal_change |= goal_change
             self._pending_spec_ids.update(ids)
             self._debounce_generation += 1
             self._last_event_at = self._monotonic()
@@ -585,9 +641,11 @@ class SpecsSubsystem:
                 self._debounce_timer.start()
                 return
             spec_ids = sorted(self._pending_spec_ids)
+            goal_change = self._pending_goal_change
+            self._pending_goal_change = False
             self._pending_spec_ids.clear()
             self._debounce_timer = None
-        if not spec_ids:
+        if not spec_ids and not goal_change:
             return
         self.changed_callback(spec_ids)
 

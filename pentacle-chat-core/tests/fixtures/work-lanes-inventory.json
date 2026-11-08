@@ -1054,6 +1054,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "active",
             "state_reason": "fd",
             "blocker": null,
@@ -1183,7 +1184,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 1,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -1319,6 +1327,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1462,7 +1471,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 1,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -1548,6 +1564,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "blocked",
             "state_reason": "fd",
             "blocker": "Materials needed.",
@@ -1621,7 +1638,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -1701,6 +1725,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1764,7 +1789,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -1844,6 +1876,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1907,7 +1940,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -1987,6 +2027,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2050,7 +2091,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -2110,6 +2158,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2143,7 +2192,9 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0
           }
         ],
         "counts": {
@@ -2229,6 +2280,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2302,7 +2354,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": null,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -2413,6 +2472,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2517,7 +2577,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": null,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 1,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -2628,6 +2695,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2732,7 +2800,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": true,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "done",
+              "done": 1,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -2846,6 +2921,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "active",
             "state_reason": "fd",
             "blocker": null,
@@ -2975,7 +3051,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": true
+            "stale": true,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 1,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -3094,6 +3177,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3202,7 +3286,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -3323,6 +3414,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3415,7 +3507,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -3565,6 +3664,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3696,7 +3796,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 3
+            }
           }
         ],
         "counts": {
@@ -3806,6 +3913,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3879,7 +3987,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 0,
+              "total": 1
+            }
           }
         ],
         "counts": {
@@ -4086,6 +4201,7 @@
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
             "icon": "hammer",
+            "hue": null,
             "state": "active",
             "state_reason": "members_working",
             "blocker": null,
@@ -4251,7 +4367,14 @@
             "freshness_at": "2026-01-02T00:00:00.000Z",
             "completion_pending": false,
             "lead_reported_done": null,
-            "stale": false
+            "stale": false,
+            "goals": [],
+            "goals_total": 0,
+            "default_goal": {
+              "state": "in_progress",
+              "done": 1,
+              "total": 2
+            }
           }
         ],
         "counts": {
@@ -4350,6 +4473,7 @@
           "title": "Mobile release",
           "summary": "",
           "icon": "phone",
+          "hue": null,
           "state": "active",
           "state_reason": "members_working",
           "blocker": null,
@@ -4427,7 +4551,14 @@
           "freshness_at": null,
           "completion_pending": null,
           "lead_reported_done": null,
-          "stale": false
+          "stale": false,
+          "goals": [],
+          "goals_total": 0,
+          "default_goal": {
+            "state": "in_progress",
+            "done": 0,
+            "total": 1
+          }
         }
       ],
       "counts": {
@@ -4451,6 +4582,7 @@
       "title": "Mobile release",
       "summary": "",
       "icon": "phone",
+      "hue": null,
       "state": "active",
       "state_reason": "members_working",
       "blocker": null,
@@ -4548,7 +4680,371 @@
       "freshness_at": null,
       "completion_pending": null,
       "lead_reported_done": null,
-      "stale": false
+      "stale": false,
+      "goals": [],
+      "goals_total": 0,
+      "default_goal": {
+        "state": "in_progress",
+        "done": 0,
+        "total": 1
+      }
+    }
+  },
+  "goals_v1": {
+    "lane": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "version": 1,
+      "work_state": "paused",
+      "icon": "phone",
+      "_members": [
+        {
+          "spec_id": "spec_demo__detail",
+          "status": "in_progress",
+          "terminal": null,
+          "ac_total": 2,
+          "ac_checked": 1,
+          "status_text": "Tests pass. Review pending",
+          "next_action_text": "Review the result.",
+          "criteria": [
+            {
+              "title": "Check `code`",
+              "disposition": "open"
+            },
+            {
+              "title": "Ship",
+              "disposition": "done"
+            }
+          ],
+          "transitions": [
+            {
+              "status": "backlog",
+              "at": "2026-01-01"
+            },
+            {
+              "status": "in_progress",
+              "at": "2026-01-03"
+            }
+          ],
+          "goal_id": "g_4ccd853b371f6fb56b7d4584"
+        }
+      ],
+      "hue": "chartreuse",
+      "_detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "_work_index_available": true,
+      "_goals": {
+        "epic_fixture_0": {
+          "facts": {
+            "lane_id": "wl-detail",
+            "title": "Finish fixture 0",
+            "rank": 0,
+            "icon": "cube",
+            "target_date": "2026-11-30"
+          },
+          "quality": "fresh"
+        },
+        "epic_fixture_1": {
+          "facts": {
+            "lane_id": "wl-detail",
+            "title": "Finish fixture 1",
+            "rank": 1,
+            "icon": null,
+            "target_date": "2026-11-30"
+          },
+          "quality": "fresh"
+        }
+      }
+    },
+    "sessions": {
+      "host-a:lead": {
+        "assigned_spec_id": "spec_demo__detail",
+        "role": "lead",
+        "host": "host-a",
+        "status": "open",
+        "provider": "codex",
+        "online": true,
+        "working": true,
+        "status_card": {
+          "eta_at": "2026-01-04T00:00:00Z",
+          "plan": [
+            {
+              "status": "active",
+              "text": "Review the result."
+            }
+          ]
+        }
+      }
+    },
+    "worked_by_spec": {
+      "spec_demo__detail": {
+        "elapsed_h": 3.5,
+        "censored": true,
+        "active_h": 0.5,
+        "seats": 2,
+        "qa_rounds": 1,
+        "as_of": "2026-01-03T00:00:00Z"
+      }
+    },
+    "now_iso": "2026-01-03T00:00:00Z",
+    "inventory_frame": {
+      "type": "work_lanes.inventory",
+      "lanes": [
+        {
+          "lane_id": "wl-detail",
+          "title": "Mobile release",
+          "summary": "",
+          "icon": "phone",
+          "hue": "chartreuse",
+          "state": "active",
+          "state_reason": "members_working",
+          "blocker": null,
+          "owner_kind": null,
+          "version": 1,
+          "updated_at": null,
+          "first_admitted_at": null,
+          "done_at": null,
+          "lead": null,
+          "visible_chat": {
+            "stream_id": null,
+            "generation": null,
+            "kind": "session",
+            "available": "unavailable"
+          },
+          "last_update": null,
+          "members": [
+            {
+              "spec_id": "spec_demo__detail",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_total": 2,
+              "ac_checked": 1,
+              "status_text": "Tests pass. Review pending",
+              "next_action_text": "Review the result.",
+              "goal_id": "g_4ccd853b371f6fb56b7d4584",
+              "seats": [
+                {
+                  "stream_id": "host-a:lead",
+                  "role": "lead",
+                  "host": "host-a",
+                  "visibility": null,
+                  "parent_stream_id": null,
+                  "activity": "working",
+                  "last_activity": null
+                }
+              ],
+              "seats_total": 1,
+              "lead_seat": {
+                "stream_id": "host-a:lead",
+                "host": "host-a",
+                "activity": "working",
+                "provider": "codex",
+                "eta_at": "2026-01-04T00:00:00Z",
+                "active_step": "Review the result."
+              },
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": {
+                "elapsed_h": 3.5,
+                "censored": true,
+                "active_h": 0.5,
+                "seats": 2,
+                "qa_rounds": 1,
+                "as_of": "2026-01-03T00:00:00Z"
+              },
+              "status_line": "Tests pass.",
+              "next_line": "Review the result."
+            }
+          ],
+          "members_total": 1,
+          "no_spec_reason": null,
+          "items_total": 1,
+          "items_completed": 0,
+          "items_dropped": 0,
+          "items_open": 1,
+          "items_unresolved": 0,
+          "ac_checked": 1,
+          "ac_total": 2,
+          "ac_members": 1,
+          "open_estimate_h": null,
+          "open_estimated": 0,
+          "estimate_complete": false,
+          "freshness_at": null,
+          "completion_pending": false,
+          "lead_reported_done": null,
+          "stale": false,
+          "goals": [
+            {
+              "goal_id": "g_4ccd853b371f6fb56b7d4584",
+              "title": "Finish fixture 0",
+              "state": "in_progress",
+              "done": 0,
+              "total": 1,
+              "rank": 0,
+              "icon": "cube",
+              "target_date": "2026-11-30"
+            },
+            {
+              "goal_id": "g_91716977daa6ddedd93acce6",
+              "title": "Finish fixture 1",
+              "state": "not_started",
+              "done": 0,
+              "total": 0,
+              "rank": 1,
+              "icon": null,
+              "target_date": "2026-11-30"
+            }
+          ],
+          "goals_total": 2,
+          "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "counts": {
+        "open": 1,
+        "active": 1,
+        "paused": 0,
+        "blocked": 0
+      },
+      "truncated": false,
+      "generated_at": "2026-01-03T00:00:00Z",
+      "work_index": {
+        "available": false,
+        "root_configured": false,
+        "snapshot_at": null,
+        "last_sweep_at": null,
+        "error": "work_index_unavailable"
+      }
+    },
+    "show_projection": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "summary": "",
+      "icon": "phone",
+      "hue": "chartreuse",
+      "state": "active",
+      "state_reason": "members_working",
+      "blocker": null,
+      "owner_kind": null,
+      "version": 1,
+      "updated_at": null,
+      "first_admitted_at": null,
+      "done_at": null,
+      "lead": null,
+      "visible_chat": {
+        "stream_id": null,
+        "generation": null,
+        "kind": "session",
+        "available": "unavailable"
+      },
+      "last_update": null,
+      "members": [
+        {
+          "spec_id": "spec_demo__detail",
+          "status": "in_progress",
+          "terminal": null,
+          "ac_total": 2,
+          "ac_checked": 1,
+          "status_text": "Tests pass. Review pending",
+          "next_action_text": "Review the result.",
+          "criteria": [
+            {
+              "title": "Check `code`",
+              "disposition": "open"
+            },
+            {
+              "title": "Ship",
+              "disposition": "done"
+            }
+          ],
+          "transitions": [
+            {
+              "status": "backlog",
+              "at": "2026-01-01"
+            },
+            {
+              "status": "in_progress",
+              "at": "2026-01-03"
+            }
+          ],
+          "goal_id": "g_4ccd853b371f6fb56b7d4584",
+          "seats": [
+            {
+              "stream_id": "host-a:lead",
+              "role": "lead",
+              "host": "host-a",
+              "visibility": null,
+              "parent_stream_id": null,
+              "activity": "working",
+              "last_activity": null
+            }
+          ],
+          "seats_total": 1,
+          "lead_seat": {
+            "stream_id": "host-a:lead",
+            "host": "host-a",
+            "activity": "working",
+            "provider": "codex",
+            "eta_at": "2026-01-04T00:00:00Z",
+            "active_step": "Review the result."
+          },
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": {
+            "elapsed_h": 3.5,
+            "censored": true,
+            "active_h": 0.5,
+            "seats": 2,
+            "qa_rounds": 1,
+            "as_of": "2026-01-03T00:00:00Z"
+          },
+          "status_line": "Tests pass.",
+          "next_line": "Review the result."
+        }
+      ],
+      "members_total": 1,
+      "no_spec_reason": null,
+      "items_total": 1,
+      "items_completed": 0,
+      "items_dropped": 0,
+      "items_open": 1,
+      "items_unresolved": 0,
+      "ac_checked": 1,
+      "ac_total": 2,
+      "ac_members": 1,
+      "open_estimate_h": null,
+      "open_estimated": 0,
+      "estimate_complete": false,
+      "freshness_at": null,
+      "completion_pending": false,
+      "lead_reported_done": null,
+      "stale": false,
+      "goals": [
+        {
+          "goal_id": "g_4ccd853b371f6fb56b7d4584",
+          "title": "Finish fixture 0",
+          "state": "in_progress",
+          "done": 0,
+          "total": 1,
+          "rank": 0,
+          "icon": "cube",
+          "target_date": "2026-11-30"
+        },
+        {
+          "goal_id": "g_91716977daa6ddedd93acce6",
+          "title": "Finish fixture 1",
+          "state": "not_started",
+          "done": 0,
+          "total": 0,
+          "rank": 1,
+          "icon": null,
+          "target_date": "2026-11-30"
+        }
+      ],
+      "goals_total": 2,
+      "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   }
 }
