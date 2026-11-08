@@ -53,6 +53,7 @@ import store_lifecycle_authority as lifecycle_authority
 import asyncio
 from contextlib import nullcontext
 import tmux_transport
+import spawn_creation
 import hashlib
 import json
 import logging
@@ -3046,6 +3047,10 @@ class SpawnCtl:
                 selected_home = (open_flds.get("account_binding") or {}).get("home")
                 await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd),
                     **({"code_home": selected_home} if selected_home else {}))
+        if host != self.sessions.local_host and not await self.store.owns_unwitnessed_spawn_intent(
+            host, name, request_id, nonce, owner_instance_id=self.instance_id,
+        ):
+            raise VerbError("spawn_fence_lost", "remote creation requires its witness-capable writer")
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart
@@ -4155,9 +4160,20 @@ class SpawnCtl:
                 host, name, reason="cancelled_before_bind", expected_generation=generation,
                 close_kind="spawn_rollback",
             )
-        await self.store.release_stream_id_fenced(
-            host, name, request_id, cleanup_confirmed=True,
-        )
+        if host != self.sessions.local_host:
+            owner = self.instance_id or str(res.get("owner_instance_id") or "")
+            nonce = str(res.get("nonce") or "")
+            witness = await self.store.cancelled_creation_snapshot(
+                host, name, request_id=request_id, nonce=nonce, owner_instance_id=owner,
+            )
+            if witness is None or await self._session_state_for_wait(name, tmux) != "gone":
+                return "deferred"
+            released = await self.store.release_cancelled_remote_creation(
+                host, name, request_id=request_id, nonce=nonce, owner_instance_id=owner,
+                observed_witness=witness,
+            )
+            return "released" if released else "deferred"
+        await self.store.release_stream_id_fenced(host, name, request_id, cleanup_confirmed=True)
         return "released"
 
     async def _reconcile_one_spawn_intent(self, res: dict[str, Any]) -> str:
@@ -5166,6 +5182,11 @@ class SpawnCtl:
                 "request_id": r.get("request_id"),
                 "idempotency_key": r.get("idempotency_key"),
                 "expires_at": r.get("expires_at"),
+                **({"cleanup": spawn_creation.cleanup_status(r.get("payload"))}
+                   if host != self.sessions.local_host and any(
+                       oc.get("state") == "cancelled" and oc.get("request_id") == r.get("request_id")
+                       for oc in resolved["tombstones"]
+                   ) else {}),
             }
             for r in resolved["reservations"]
         ]

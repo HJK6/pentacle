@@ -46,6 +46,10 @@ session and tmux ownership checks still apply before survivor signals.
 `close` requests carrying `progeny_stream_id` are refused before teardown with
 `close_progeny_unsupported`; use `spawn --handoff` for succession.
 
+Cancelled remote spawns retain exact cleanup ownership until creation commands
+are terminal and the pane is absent. See [remote creation cleanup](docs/remote-creation-cleanup.md)
+for status, persistent uncertainty and rollback requirements.
+
 Use the complete [local startup recipe](../../README.md#quick-start) first. It aligns the web host and daemon host identity (`local`), native transcript directory, loopback endpoint and web host credential. Python 3.11+ and tmux are required; provider CLIs require their own accounts and authentication.
 
 ## Work index polling
