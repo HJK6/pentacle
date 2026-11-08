@@ -4383,6 +4383,30 @@ class SpawnCtl:
             invalidated = "spawn_generation_changed"
         elif row and row.get("status") == "closed" and row.get("close_kind"):
             invalidated = "spawn_target_closed"
+        if (invalidated == "spawn_generation_changed" and row
+                and row.get("status") == "closed" and not row.get("close_kind")):
+            # A retained dead row cannot authorize replacing its generation.
+            # Retire only this request's exact nonce pane, keeping the prior
+            # row intact. An explicit close or an open successor stays on the
+            # existing refusal path below.
+            async with self.sessions._lifecycle_lock(host, name):
+                current = await self.store.fetch_session(host, name)
+                if (not current or current.get("status") != "closed"
+                        or current.get("close_kind")
+                        or current.get("session_generation") != row.get("session_generation")):
+                    return "deferred"
+                nonce = str(reservation.get("nonce") or "")
+                if not nonce or not await self.store.owns_spawn_intent(host, name, request_id, nonce):
+                    return "deferred"
+                cleaned = await self._kill_uncommitted_pane(host, name, tmux, nonce=nonce)
+                await self.store.set_spawn_outcome(
+                    host, name, "failed" if cleaned else "indeterminate", request_id=request_id,
+                    reason=("spawn_generation_changed: owned pre-admission pane cleaned"
+                            if cleaned else "spawn_generation_changed: owned pane cleanup unknown"),
+                    delivery_evidence="pane_cleanup_confirmed" if cleaned else "pane_cleanup_unknown",
+                    idempotency_key=idempotency_key, request_payload_hash=request_payload_hash,
+                )
+                return "released" if cleaned else "deferred"
         if invalidated:
             await self.store.set_spawn_outcome(
                 host, name, "failed", request_id=request_id, reason=invalidated,
@@ -4497,6 +4521,26 @@ class SpawnCtl:
         if (current is None or current.get("status") != "open"
                 or (expected_generation and current.get("session_generation") != expected_generation)):
             return "deferred"
+        if not brief:
+            receipt = dict(receipt) if isinstance(receipt, dict) else {}
+            receipt.update({"state": "not_requested", "delivery_status": "not_requested"})
+            if (state in {"delivered", "failed"}
+                    and str(current.get("provider") or "") in READY_PREDICATES
+                    and current.get("bootstrap_state") in {"starting", "unproven"}):
+                async with self.sessions._lifecycle_lock(host, name):
+                    ready_row = await self.store.fetch_session(host, name)
+                    if (not ready_row or ready_row.get("status") != "open"
+                            or ready_row.get("session_generation") != current.get("session_generation")):
+                        return "deferred"
+                    bootstrap = "ready" if state == "delivered" else "failed"
+                    updated = await self.store.update_session(
+                        host, name, expected_generation=str(ready_row.get("created_at") or ""),
+                        bootstrap_state=bootstrap,
+                    )
+                    if updated is None:
+                        return "deferred"
+                    self.sessions.apply_durable(f"{host}:{name}", bootstrap_state=bootstrap)
+                    receipt["bootstrap_state"] = bootstrap
         if state == "delivered" and brief:
             async with self.sessions._lifecycle_lock(host, name):
                 current = await self.store.fetch_session(host, name)
@@ -4550,6 +4594,11 @@ class SpawnCtl:
                         self.sessions.apply_durable(
                             f"{host}:{name}", bootstrap_state="starting",
                         )
+            if not brief:
+                # Delivery was never requested; uncertainty concerns bootstrap.
+                receipt.update({"state": "not_requested", "delivery_status": "not_requested",
+                                "failure_code": "boot_not_ready", "failure_reason": reason})
+                receipt.pop("delivery_failed_at", None)
             await self.store.set_spawn_outcome(
                 host, name, "indeterminate", request_id=request_id,
                 delivery_evidence=evidence, reason=reason,
@@ -4568,6 +4617,10 @@ class SpawnCtl:
                 "to_stream_id": f"{host}:{name}",
                 "delivery_ack_at": iso_now(),
             }
+        if not brief and isinstance(receipt, dict):
+            receipt.update({"state": "not_requested", "delivery_status": "not_requested"})
+            receipt.pop("delivery_ack_at", None)
+            receipt.pop("delivered_late_at", None)
         await self.store.set_spawn_outcome(
             host, name, state, request_id=request_id,
             delivery_evidence=evidence, reason=reason,
@@ -4730,6 +4783,35 @@ class SpawnCtl:
                 CODEX_RESET_BLOCKED,
                 CODEX_RESET_BLOCKED,
             )
+        if (not brief and session
+                and str(session.get("provider") or "") in READY_PREDICATES
+                and session.get("bootstrap_state") in {"starting", "unproven"}):
+            # No initial input is a delivery fact, not a provider-ready signal.
+            # Reuse the normal bounded observer without sending any input.
+            ready = await self._await_provider_ready(
+                name, str(session["provider"]), tmux,
+                absolute_deadline=time.monotonic() + ADOPTION_BOOT_DEADLINE_S,
+            )
+            if ready.ready:
+                if await self._session_state_for_wait(name, tmux) == "gone":
+                    return "failed", "pane_died_during_boot", "promptless adopted pane died after readiness observation"
+                request_id = str((resume or {}).get("request_id") or "")
+                nonce = str((resume or {}).get("nonce") or "")
+                readable, observed_nonce = await self._tmux_nonce(name, tmux)
+                if (not request_id or not nonce or not readable or observed_nonce != nonce
+                        or not await self.store.owns_spawn_intent(host, name, request_id, nonce)
+                        or not await self._current_spawn_pane_verified_alive(
+                            host, name, tmux, expected_generation=str(session.get("session_generation") or ""),
+                        )
+                        or str(await tmux.pane_pid(name)) != str(session.get("pane_pid") or "")):
+                    return ("indeterminate", "provider_identity_unproven",
+                            "adopted_after_restart: promptless readiness pane identity is unverified")
+            if not ready.ready:
+                if await self._session_state_for_wait(name, tmux) == "gone":
+                    return "failed", "pane_died_during_boot", "promptless adopted pane died before readiness"
+                return ("indeterminate", "provider_booting",
+                        "adopted_after_restart: promptless provider readiness unknown"
+                        + (f": {ready.reason}" if ready.reason else ""))
         if not brief:
             return "delivered", "not_requested", "adopted_after_restart: no brief to deliver"
         provider = str((session or {}).get("provider") or "")

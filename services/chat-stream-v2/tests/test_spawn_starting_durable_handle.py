@@ -368,3 +368,93 @@ def test_periodic_reconciler_adopts_a_reachable_remote_intent() -> None:
 
     row = asyncio.run(run())
     assert row is not None and row["status"] == "open"
+
+
+@pytest.mark.parametrize("aperture", ["before_generation", "promptless_starting"])
+def test_real_pane_checkpoint_survives_private_daemon_restart(tmp_path, aperture):
+    """Kill an owned daemon at the real create/admit or bootstrap boundary.
+
+    The fixture provider proves orchestration only; native provider readiness
+    remains covered by the integrated deployment canary.
+    """
+    import json
+    import shlex
+    import signal
+    from tests.soak import restart_matrix as rm
+
+    name = "aperture-checkpoint"
+    request = "checkpoint-request"
+    evidence = Path(os.environ.get("PENTACLE_GATE_EVIDENCE_DIR", str(tmp_path / "evidence"))) / f"adoption-crash-{aperture}"
+    with rm.cell_env(tmp_path / "checkpoint", evidence) as cell:
+        if aperture == "before_generation":
+            async def prior_row():
+                store = Store(cell.daemon.db)
+                store.start()
+                try:
+                    await store.open_session(rm.LOCAL_HOST, name, session_generation="prior")
+                    await store.update_session(rm.LOCAL_HOST, name, status="closed", pane_status="pane_dead")
+                finally:
+                    store.stop()
+            asyncio.run(prior_row())
+            # Hold only the successful new-session reply: the pane and nonce
+            # are real, and the production spawn has not reached row admission.
+            marker = cell.control / "after-create"
+            wrapper = cell.root / "tmux-after-create"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"base={shlex.quote(str(cell.daemon.tmux_bin))}\n"
+                'if [ "$1" = new-session ]; then\n'
+                '  "$base" "$@" || exit $?\n'
+                f"  touch {shlex.quote(str(marker))}\n"
+                "  while :; do sleep 1; done\n"
+                'fi\nexec "$base" "$@"\n')
+            wrapper.chmod(0o755)
+            cell.daemon.tmux_bin = wrapper
+        else:
+            cell.set_mode("hold_ready")
+            marker = cell.control / f"{name}.booting"
+        cell.daemon.start()
+        pending = rm.PendingRpc(cell.daemon.url, rm.spawn_payload(name, "", "checkpoint-key", request))
+        assert rm.wait_for(marker.exists, 15), f"spawn did not reach checkpoint: {pending.reply} {pending.error}"
+        if aperture == "promptless_starting":
+            assert rm.wait_for(lambda: any(r["status"] == "open" and r["bootstrap_state"] == "starting"
+                                          for r in cell.session_rows(name)), 5)
+        before = cell.snapshot("interrupted-checkpoint", name)
+        intent = json.loads(cell.reservations(name)[0]["payload"])
+        generation = intent["open_fields"]["session_generation"]
+        pane = tmux_transport.Tmux(str(cell.daemon.tmux_bin))
+        identity = asyncio.run(pane.pane_identity(name))
+        assert identity and identity["pane_pid"] and before["panes"] == [name]
+        stop = cell.daemon.stop(signal.SIGKILL)
+        pending.thread.join(timeout=5)
+        assert not pending.thread.is_alive()
+        cell.release()
+        cell.daemon.start()
+        settled = rm.wait_for(lambda: cell.outcomes(name), 30)
+        assert settled, "private daemon did not reconcile the persisted checkpoint"
+        after = cell.snapshot("recovered", name)
+        awaited = rm.rpc(cell.daemon.url, {"type": "await_spawn", "spawn_request_id": request})
+        status = rm.rpc(cell.daemon.url, {"type": "spawn_status", "idempotency_key": "checkpoint-key"})
+        cell.note("checkpoint-proof", aperture=aperture, identity=identity, stop=stop,
+                  generation=generation, awaited=awaited, status=status)
+        assert cell.inputs(name) == [], "promptless adoption must not fabricate provider input"
+        assert after["reservations"] == []
+        if aperture == "before_generation":
+            assert after["panes"] == [], "retired adoption intent left an actual live orphan"
+            assert after["sessions"][0]["status"] == "closed"
+            assert after["outcomes"][0]["state"] == "failed"
+            assert awaited["type"] == "await_spawn.error"
+        else:
+            assert after["panes"] == [name]
+            assert len(after["sessions"]) == 1
+            assert after["sessions"][0]["bootstrap_state"] == "ready"
+            assert awaited["state"] == "ready"
+            assert awaited["session"]["session_generation"] == generation
+            assert awaited["session"]["pane_pid"] == identity["pane_pid"]
+            receipt = json.loads(after["outcomes"][0]["delivery_receipt"])
+            assert receipt["state"] == "not_requested"
+    assert cell.daemon.proc is None and not cell.namespace.socket_path.exists()
+    (evidence / "cleanup.json").write_text(json.dumps({
+        "owned_daemon_pids": cell.daemon.pids, "daemon_stopped": True,
+        "owned_socket_gone": True, "owned_pane_count_after_cleanup": 0,
+    }, indent=2) + "\n")

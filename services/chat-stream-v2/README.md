@@ -591,6 +591,23 @@ is fenced to the parent generation. Late proof retains `failure_code` and
 `late_first_user_event`; `adopted_after_restart` requires evidence of a different
 daemon instance. Reuse the existing spawn handle for recovery.
 
+
+### Interrupted spawn adoption
+
+A restart reconciles each saved request against its pane nonce and session
+generation. An owned pane created before admission can be registered normally
+when no conflicting row exists. If a retained closed row has another generation
+and no intentional close marker, recovery preserves that row and cleans up only
+the interrupted request's nonce-bound pane. Confirmed cleanup produces a failed
+spawn outcome; uncertain cleanup keeps an indeterminate outcome and its durable
+reservation. Foreign panes, open successor generations and intentional closes
+retain their existing refusal behavior.
+
+For promptless provider spawns still starting, adoption runs the existing
+bounded readiness observer. A ready pane advances bootstrap to ready; an
+unproven live pane keeps the original handle and reports starting. Initial
+prompt delivery remains `not_requested`, and recovery sends no synthetic input.
+
 ## Screen leases
 
 Desktop automation cooperatively acquires the whole screen for a registered
