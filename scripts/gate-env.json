@@ -77,7 +77,7 @@
           "capabilities": "v2_host",
           "timeout_s": 900,
           "max_timeout_s": 7200,
-          "unit_workers": 4
+          "unit_workers": 2
         },
         "v2-smoke": {
           "kind": "run_gate",
@@ -104,7 +104,7 @@
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "timeout_s": 1800,
           "max_timeout_s": 14400,
-          "unit_workers": 4
+          "unit_workers": 2
         },
         "v2-merge-capacity": {
           "kind": "run_gate",
@@ -122,7 +122,7 @@
           },
           "timeout_s": 2700,
           "max_timeout_s": 2700,
-          "unit_workers": 4
+          "unit_workers": 2
         },
         "v2-pytest": {
           "kind": "pytest_files",
@@ -183,7 +183,7 @@
           },
           "timeout_s": 3000,
           "max_timeout_s": 3000,
-          "unit_workers": 4
+          "unit_workers": 2
         },
         "cli-pytest": {
           "kind": "pytest_files",
