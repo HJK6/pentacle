@@ -1129,7 +1129,8 @@ def _private_artifact_metadata(value: str) -> dict[str, object]:
 
 
 def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest: dict[str, object],
-                       private_artifacts: list[dict[str, object]]) -> dict[str, object]:
+                       private_artifacts: list[dict[str, object]],
+                       provider_snapshot: dict[str, str] | None = None) -> dict[str, object]:
     # Do not resolve the executable symlink: its venv path selects site-packages.
     executable = os.path.abspath(sys.executable)
     config = Path(args.host_config).expanduser().resolve() if args.host_config else None
@@ -1147,6 +1148,8 @@ def _preflight_binding(args: argparse.Namespace, targets: list[Target], manifest
         "python": {"executable": executable, "prefix": sys.prefix,
                    "version": sys.version, "sha256": _sha256(Path(executable))},
         "runtime_package": manifest.get("runtime_package"),
+        "provider_snapshot": provider_snapshot,
+        "provider_packages": manifest.get("provider_packages"),
         "private_artifacts": private_artifacts,
     }
 
@@ -1158,6 +1161,8 @@ def _apply_argv(args: argparse.Namespace, receipt: Path) -> list[str]:
             "--sftp-timeout", str(args.sftp_timeout), "--preflight-receipt", str(receipt)]
     if args.host_config:
         argv += ["--host-config", str(Path(args.host_config).expanduser().resolve())]
+    if args.provider_cli_pin_file:
+        argv += ["--provider-cli-pin-file", str(Path(args.provider_cli_pin_file).expanduser().resolve())]
     for override in args.ssh_target:
         argv += ["--ssh-target", override]
     for artifact in args.private_artifact:
@@ -1274,15 +1279,21 @@ def main() -> int:
             manifest = None
             binding = None
             if not args.rollback:
-                provider_pin=None
+                provider_pin = None
+                provider_snapshot = None
                 if args.provider_cli_pin_file:
-                    services_root=str(Path(__file__).resolve().parents[2])
-                    if services_root not in sys.path: sys.path.insert(0,services_root)
+                    services_root = str(Path(__file__).resolve().parents[2])
+                    if services_root not in sys.path: sys.path.insert(0, services_root)
                     from _shared.provider_cli_release import loads as load_provider_pin
-                    provider_pin=load_provider_pin(Path(args.provider_cli_pin_file).read_text())
+                    snapshot_path = Path(args.provider_cli_pin_file).expanduser().resolve()
+                    snapshot_bytes = snapshot_path.read_bytes()
+                    provider_pin = load_provider_pin(snapshot_bytes)
+                    # Bind exactly the bytes parsed, even if the file changes
+                    # while the archive is built. Replay must revalidate them.
+                    provider_snapshot = {"path": str(snapshot_path), "sha256": _sha256_bytes(snapshot_bytes)}
                 manifest = _archive(repo, args.commit, Path(temp), args.resume,provider_cli_pin=provider_pin)
                 records["manifest"] = manifest
-                binding = _preflight_binding(args, targets, manifest, private_artifacts)
+                binding = _preflight_binding(args, targets, manifest, private_artifacts, provider_snapshot)
                 if args.preflight_receipt:
                     _verify_preflight(args.preflight_receipt, binding)
             lock = nullcontext() if args.dry_run else RolloutLock(_rollout_lock_path(), lock_stamp)
