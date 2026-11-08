@@ -2,60 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 
 const { registerAssetIpcHandlers } = require('../main/asset_ipc_bridge');
-
-test('preload asset API forwards renderer calls to asset IPC channels', async () => {
-  const calls = [];
-  const ipcRenderer = {
-    invoke(channel, ...args) {
-      calls.push({ channel, args });
-      return Promise.resolve({ ok: true, channel, args });
-    },
-    send() {},
-    on() {},
-    removeAllListeners() {},
-  };
-  const context = {
-    require(name) {
-      if (name === 'electron') return { clipboard: { readText: () => '', writeText() {} }, ipcRenderer };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {},
-    process,
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'), context, {
-    filename: 'preload.js',
-  });
-
-  await context.window.cc.assetList({ stream_id: 'hostb:provider_c-1' });
-  await context.window.cc.assetGet({ stream_id: 'hostb:provider_c-1', asset_id: 'asset-1' });
-  await context.window.cc.assetCommentsList({ stream_id: 'hostb:provider_c-1', asset_id: 'asset-1' });
-  await context.window.cc.assetCommentAdd({ asset_id: 'asset-1', body: 'note' });
-  await context.window.cc.assetCommentEdit({ asset_id: 'asset-1', comment_id: 'c1', body: 'edit' });
-  await context.window.cc.assetCommentDelete({ asset_id: 'asset-1', comment_id: 'c1' });
-  await context.window.cc.assetCommentResolve({ asset_id: 'asset-1', comment_id: 'c1', resolved: true });
-  await context.window.cc.assetReviewSet({ asset_id: 'asset-1', review_status: 'approved' });
-  await context.window.cc.assetCommentsSendToChat({ asset_id: 'asset-1' });
-  await context.window.cc.assetPopOut({ asset_id: 'asset-1' });
-  await context.window.cc.assetDock({ asset_id: 'asset-1' });
-
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    { channel: 'chat-stream:asset-list', args: [{ stream_id: 'hostb:provider_c-1' }] },
-    { channel: 'chat-stream:asset-get', args: [{ stream_id: 'hostb:provider_c-1', asset_id: 'asset-1' }] },
-    { channel: 'chat-stream:asset-comments-list', args: [{ stream_id: 'hostb:provider_c-1', asset_id: 'asset-1' }] },
-    { channel: 'chat-stream:asset-comment-add', args: [{ asset_id: 'asset-1', body: 'note' }] },
-    { channel: 'chat-stream:asset-comment-edit', args: [{ asset_id: 'asset-1', comment_id: 'c1', body: 'edit' }] },
-    { channel: 'chat-stream:asset-comment-delete', args: [{ asset_id: 'asset-1', comment_id: 'c1' }] },
-    { channel: 'chat-stream:asset-comment-resolve', args: [{ asset_id: 'asset-1', comment_id: 'c1', resolved: true }] },
-    { channel: 'chat-stream:asset-review-set', args: [{ asset_id: 'asset-1', review_status: 'approved' }] },
-    { channel: 'chat-stream:asset-comments-send-to-chat', args: [{ asset_id: 'asset-1' }] },
-    { channel: 'chat-stream:asset-pop-out', args: [{ asset_id: 'asset-1' }] },
-    { channel: 'chat-stream:asset-dock', args: [{ asset_id: 'asset-1' }] },
-  ]);
-});
 
 test('main asset IPC handlers forward arguments to chatStreamClient', async () => {
   const handlers = new Map();

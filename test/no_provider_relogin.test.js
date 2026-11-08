@@ -36,7 +36,7 @@ test('the real handler table answers provider-relogin:hosts with unknown_method 
 test('the re-login sources and bridge wiring are gone', () => {
   assert.equal(fs.existsSync(path.join(root, 'renderer/provider_relogin_ui.js')), false);
   assert.equal(fs.existsSync(path.join(root, 'main/provider_relogin.js')), false);
-  for (const file of ['main/cc_handlers.js', 'preload.js', 'renderer/web_cc.js', 'server/ws_bridge.js']) {
+  for (const file of ['main/cc_handlers.js', 'renderer/web_cc.js', 'server/ws_bridge.js']) {
     assert.doesNotMatch(fs.readFileSync(path.join(root, file), 'utf8'), /provider-relogin/, file);
   }
 });

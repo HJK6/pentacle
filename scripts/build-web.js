@@ -7,9 +7,8 @@
 //   node scripts/build-web.js            → renderer/dist/web/
 //
 // The page is DERIVED from renderer/index.html rather than hand-copied, so the
-// desktop and web pages cannot drift: the same markup, with the <script src>
-// tags replaced by the single bundle and the stylesheets rewritten to local
-// copies. Electron's file:// load path is untouched.
+// source page and served page share the same markup, with the <script src>
+// tags replaced by the single bundle and the stylesheets rewritten to local copies.
 
 const fs = require('fs');
 const path = require('path');
@@ -30,7 +29,7 @@ const EXTERNAL_CSS = {
 // CommonJS wrapper is exactly what breaks them: a UMD sees `module.exports` and
 // assigns there instead of to `window`, so `window.TriforceDashboards` and
 // `window.PentacleChatCore` would silently never appear. Keeping them external
-// also keeps them byte-identical to what Electron loads.
+// preserves their browser-ready global exports.
 const EXTERNAL_SCRIPTS = {
   'confirm_dialog.js': 'confirm_dialog.js',
   'dashboards/registry.js': 'dashboards-registry.js',
@@ -46,8 +45,8 @@ const EXTERNAL_SCRIPTS = {
 // runs exactly where app.js ran.
 const BUNDLE_ANCHOR = 'app.js';
 
-// `../config-loader` reads the config off disk in the Electron preload; in a
-// browser the host injects the computed config, so it maps to the shim. esbuild
+// The host injects the computed config, so `../config-loader` maps to the
+// browser shim. esbuild
 // cannot infer that from the filesystem, hence the resolve hook.
 function rendererResolvePlugin() {
   return {

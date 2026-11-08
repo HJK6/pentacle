@@ -1,25 +1,16 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createRequire } = require('node:module');
+const { createCcHandlers, createCollector } = require('../main/cc_handlers');
 const root = path.resolve(__dirname, '..');
-const realRequire = createRequire(path.join(root, 'main.js'));
 function harness(client, config = {}) {
-  const handlers = new Map();
-  const app = { setName() {}, on() {}, whenReady: () => ({ then() {} }) };
-  const ipcMain = { handle: (name, handler) => { assert.ok(!handlers.has(name), name); handlers.set(name, handler); }, on() {} };
-  const electron = { app, ipcMain, BrowserWindow: class { static getAllWindows() { return []; } }, shell: {} };
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'main.js'), 'utf8'), {
-    require(name) { if (name === 'electron') return electron; if (name === './main/chat_stream_client') return { init() {}, ...client };
-      if (name === './config-loader') return { loadConfig: () => ({ config }) }; return realRequire(name); },
-    __dirname: root, process: { ...process, env: {} }, console, Buffer, URL,
-  });
-  return (name, ...args) => handlers.get(name)({ sender: { id: 1 } }, ...args);
+  const collector = createCollector();
+  createCcHandlers({ CONFIG: config, chatStreamClient: client, harness: true }).register(collector);
+  return (name, ...args) => collector.table[name].handler({ sender: { id: 1 } }, ...args);
 }
-test('real main IPC returns the renderer catalog and preserves spawn host and tuple', async () => {
+test('real shared handler returns the renderer catalog and preserves spawn host and tuple', async () => {
   const calls = [];
   const catalog = { profiles: { desktop_manual: {} }, catalog_version: 'public-v1' };
   const session = { stream_id: 'workstation:s1', host: 'workstation', session_name: 's1', requested_launch_tuple: { provider: 'claude' } };

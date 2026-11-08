@@ -26,14 +26,6 @@ function _isEnabled() {
 }
 
 function _resolveUserDataDir() {
-  // Try Electron's `app.getPath` if loaded inside a main process; fall back
-  // to a platform-appropriate dir so this module is usable from scripts.
-  try {
-    const { app } = require('electron');
-    if (app && typeof app.getPath === 'function') return app.getPath('userData');
-  } catch (_) {
-    // Not running inside Electron (e.g. a unit test). Fall through.
-  }
   if (process.platform === 'darwin') {
     return path.join(os.homedir(), 'Library', 'Application Support', 'Pentacle');
   }
@@ -61,7 +53,6 @@ function _ensureStream() {
         log_path: _logPath,
         platform: process.platform,
         node: process.versions.node,
-        electron: process.versions.electron || null,
         pid: process.pid,
       },
     });

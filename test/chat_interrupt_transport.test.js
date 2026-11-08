@@ -2,8 +2,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
 const esbuild = require('esbuild');
 
@@ -40,35 +38,6 @@ test('the bundled chat entry hands the captured generation to the browser bridge
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, [['peer', 'disposable-seat', 'selected-generation']]);
   store.dispose();
-});
-
-function desktopInterruptArgs(host, sessionName, expectedSessionGeneration) {
-  const calls = [];
-  const ipcRenderer = {
-    invoke(channel, ...args) { calls.push({ channel, args }); return Promise.resolve(); },
-    send() {}, on() {}, removeAllListeners() {},
-  };
-  const context = {
-    require(name) {
-      if (name === 'electron') return { clipboard: { writeText() {}, readText: () => '' }, ipcRenderer };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {}, process, console,
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'), context,
-    { filename: 'preload.js' });
-  context.window.cc.chatInterrupt(host, sessionName, expectedSessionGeneration);
-  return { channel: calls[0]?.channel, args: Array.from(calls[0]?.args || []) };
-}
-
-test('desktop preload carries the selected generation and preserves a local legacy call', () => {
-  assert.deepEqual(desktopInterruptArgs('peer', 'remote-seat', 'selected-generation'), {
-    channel: 'chat-stream:interrupt', args: ['peer', 'remote-seat', 'selected-generation'],
-  });
-  assert.deepEqual(desktopInterruptArgs(undefined, 'local-seat', undefined), {
-    channel: 'chat-stream:interrupt', args: ['local', 'local-seat', undefined],
-  });
 });
 
 test('IPC and wire carry generation; a missing remote generation returns a typed code', async (t) => {

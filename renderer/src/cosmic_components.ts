@@ -1,7 +1,7 @@
 // Public component layer (public cosmic component contract): cosmic component library port.
 //
 // Vanilla DOM / inline-SVG factory functions reimplementing the public
-// DOM cosmic component library so the Electron renderer can
+// DOM cosmic component library so the browser renderer can
 // render the same "cosmic / arcane" sigils, frames, atoms and tags WITHOUT
 // public DOM. Each factory returns a live DOM node (`SVGElement` /
 // `HTMLElement`); string consumers (e.g. the innerHTML path in

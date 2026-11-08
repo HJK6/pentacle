@@ -131,14 +131,13 @@ test('a composite popout bootstrap cannot allocate a terminal', async (t) => {
   assert.equal(vm.runInContext('!!state.terminals[0]', h.context), false);
 });
 
-// Exercise the shipped renderer bundle -> preload -> shared IPC -> socket payload.
+// Exercise the shipped renderer bundle -> browser bridge -> shared handler -> socket payload.
 async function wireRenderer(t, compositeMode = true, {
   streamId = STREAM,
   messageKind = 'ASSIST_TEXT',
   messageId = 'message-question',
   messageText = 'Choose the next step',
 } = {}) {
-  const fs = require('node:fs');
   const path = require('node:path');
   const esbuild = require('esbuild');
   const { createCcHandlers, createCollector } = require('../main/cc_handlers');
@@ -161,16 +160,10 @@ async function wireRenderer(t, compositeMode = true, {
   } };
   const collector = createCollector();
   createCcHandlers({ CONFIG: { chatStream: {} }, chatStreamClient: client, harness: true }).register(collector);
-  const preload = { window: {}, process, console, require(name) {
-    if (name === 'electron') return { clipboard: {}, ipcRenderer: {
-      invoke(channel, ...args) { return collector.table[channel].handler({}, ...args); },
-      on() {}, send() {}, removeAllListeners() {},
-    } };
-    if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-    return require(name);
-  } };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../preload.js'), 'utf8'), preload);
-  h.dom.window.cc.chatSendCorrelated = preload.window.cc.chatSendCorrelated;
+  h.dom.window.cc.chatSendCorrelated = require('../renderer/web_cc').buildCc({
+    call: (channel, ...args) => collector.table[channel].handler({}, ...args),
+    fire() {}, on() {},
+  }, {}).chatSendCorrelated;
   h.context.cc = h.dom.window.cc;
   h.context.crypto = h.dom.window.crypto;
   h.context.structuredClone = structuredClone;
@@ -188,7 +181,7 @@ async function wireRenderer(t, compositeMode = true, {
   return { ...h, store, wires };
 }
 
-test('desktop composite composer sends exact input and identity through real IPC; ordinary sends retain their wire', async t => {
+test('composite composer sends exact input and identity through the web handler; ordinary sends retain their wire', async t => {
   for (const compositeMode of [true, false]) {
     const h = await wireRenderer(t, compositeMode);
     const literal = '  Plan this\n\nwithout changing spacing  ';

@@ -1,7 +1,7 @@
 // CDP client for the desktop E2E walk harness.
 // spec_pentacle_desktop_chat_ui_e2e_walk_harness_2026_05_25
 //
-// Connects to a real Electron app over the Chrome DevTools Protocol (launched
+// Connects to a browser over the Chrome DevTools Protocol (launched
 // with --remote-debugging-port) and provides the primitives walks need:
 //   - connect to a page target (by url/title match) + raw send(method, params)
 //   - Runtime.evaluate (read state/DOM, dispatch real DOM clicks/typing)

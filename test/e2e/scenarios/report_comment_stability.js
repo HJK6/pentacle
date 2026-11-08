@@ -5,7 +5,7 @@
 // reset scroll to the top, because comment mutations were routed through the
 // teardown re-render (renderSlotAsset force path) instead of an in-place update.
 //
-// This walk drives the REAL renderer in real Electron (real layout, real
+// This walk drives the REAL renderer in a browser (real layout, real
 // scrollTop clamping — the parts JSDOM cannot exercise) over a fixture report
 // tall enough to scroll:
 //   1. add 3 comments mid-document through the real UI path (each followed by

@@ -1,8 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
 
 const {
   buildCc, buildHost, createTransport, browserClipboard, chatPopoutContextFromSearch,
@@ -44,25 +41,6 @@ function fakeTransportWithEmit() {
   return t;
 }
 
-function preloadCcKeys() {
-  const ipcRenderer = { invoke: () => Promise.resolve(), send() {}, on() {}, removeAllListeners() {} };
-  const context = {
-    require(name) {
-      if (name === 'electron') return { clipboard: { writeText() {}, readText: () => '' }, ipcRenderer };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {},
-    process,
-  };
-  vm.runInNewContext(
-    fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'),
-    context,
-    { filename: 'preload.js' },
-  );
-  return Object.keys(context.window.cc).sort();
-}
-
 function fakeTransport() {
   const calls = [];
   const fires = [];
@@ -77,12 +55,10 @@ function fakeTransport() {
   };
 }
 
-test('the web shim exposes exactly the window.cc surface preload does', () => {
+test('the web bridge exposes its connection lifecycle', () => {
   const cc = buildCc(fakeTransport(), { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
   assert.equal(typeof cc.onDisconnect, 'function');
   assert.equal(typeof cc.webConnectionState, 'function');
-  assert.deepEqual(Object.keys(cc).filter(k => !['onDisconnect', 'webConnectionState'].includes(k)).sort(), preloadCcKeys(),
-    'renderer/web_cc.js must stay method-for-method with preload.js');
 });
 
 test('send-mode methods return undefined and invoke-mode methods return promises', () => {
@@ -106,7 +82,7 @@ test('send-mode methods return undefined and invoke-mode methods return promises
   assert.deepEqual(transport.calls.map((c) => c.method), ['pty:create', 'pty:kill', 'pty:paste', 'get-config']);
 });
 
-test('hostId defaults match preload for every defaulted argument', () => {
+test('hostId defaults are preserved for every defaulted argument', () => {
   const transport = fakeTransport();
   const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
 
@@ -120,32 +96,18 @@ test('hostId defaults match preload for every defaulted argument', () => {
   assert.deepEqual(transport.calls[1].args, ['sess', 'local']);
   assert.deepEqual(transport.calls[2].args, ['codex', 'local']);
   assert.deepEqual(transport.calls[3].args, ['local', 'sess', 'hi']);
-  assert.deepEqual(transport.fires[0].args, [0, 'up', 1], 'scroll defaults to one line, as preload does');
+  assert.deepEqual(transport.fires[0].args, [0, 'up', 1], 'scroll defaults to one line');
 });
 
-test('web and preload newSession preserve omission arity and explicit accounts', async () => {
+test('web newSession preserves omission arity and explicit accounts', async () => {
   const transport = fakeTransport();
   const web = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
-  const calls = [];
-  const context = {
-    require(name) {
-      if (name === 'electron') return { ipcRenderer: { invoke: (method, ...args) => {
-        calls.push({ method, args }); return Promise.resolve();
-      } } };
-      if (name === './config-loader') return { loadConfig: () => ({ config: {} }) };
-      return require(name);
-    },
-    window: {}, process,
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'), context);
-  for (const cc of [web, context.window.cc]) {
-    await cc.newSession('codex');
-    await cc.newSession('codex', 'peer', undefined);
-    await cc.newSession('codex', 'peer', 'spare');
-    await cc.newSession('codex', 'peer', null);
-  }
+  await web.newSession('codex');
+  await web.newSession('codex', 'peer', undefined);
+  await web.newSession('codex', 'peer', 'spare');
+  await web.newSession('codex', 'peer', null);
   const expected = [['codex', 'local'], ['codex', 'peer'], ['codex', 'peer', 'spare'], ['codex', 'peer', null]];
-  for (const captured of [transport.calls, calls]) {
+  for (const captured of [transport.calls]) {
     assert.ok(captured.every(({ method }) => method === 'pty:new-session'));
     assert.deepEqual(captured.map(({ args }) => args), expected);
   }
@@ -155,7 +117,7 @@ test('chat send/spawn reach the bridge with the right method and host mapping', 
   // The web CDP gate does not exercise a live send-turn (no public spawn/ingest
   // fixture — see spec_pentacle__web_mode_e2e_gate_2026_09 § Findings), so the
   // browser send path is pinned here: spawn and send forward over the websocket
-  // as the same channels + argument shapes preload uses, defaulting host to
+  // with the expected channels and argument shapes, defaulting host to
   // 'local' and preserving an explicit host.
   const transport = fakeTransport();
   const cc = buildCc(transport, { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
@@ -197,7 +159,7 @@ test('openExternal opens a tab for http(s) and refuses anything else', async () 
   global.window = { open: (...args) => opened.push(args) };
   try {
     const cc = buildCc(fakeTransport(), { clipboard: { writeText() {}, readText: () => '' }, chatPopoutContext: null, reload() {} });
-    // Mirrors main.js openPublicUrl: the same shape for the same inputs.
+    // The browser opens the requested public URL.
     assert.deepEqual(await cc.openExternal('https://example.com/x'), { ok: true });
     assert.deepEqual(await cc.openExternal('file:///etc/passwd'), { ok: false, error: 'unsupported URL' });
     assert.deepEqual(await cc.openExternal('not a url'), { ok: false, error: 'unsupported URL' });
@@ -233,7 +195,7 @@ test('the browser clipboard falls back to an empty read rather than throwing', a
   }
 });
 
-test('window.HOST mirrors preload’s synchronous host metadata', () => {
+test('window.HOST supplies synchronous host metadata', () => {
   assert.deepEqual(
     buildHost({ hostname: 'amaterasu', platform: 'linux', isClient: false, dashboardHub: { url: 'http://h' } }),
     {
@@ -277,7 +239,7 @@ test('the chat popout context comes from the query string', () => {
   assert.equal(chatPopoutContextFromSearch(''), null);
   assert.equal(chatPopoutContextFromSearch('?pentacle-chat-popout=not-json'), null);
   assert.equal(chatPopoutContextFromSearch('?pentacle-chat-popout=%7B%22host%22%3A%22x%22%7D'), null,
-    'an incomplete context is rejected, matching preload');
+    'an incomplete context is rejected');
 });
 
 // ── transport behaviour, with a stand-in WebSocket ───────────────────────────

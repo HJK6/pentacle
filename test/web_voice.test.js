@@ -164,12 +164,11 @@ function ui(web, recorder, env = { isSecureContext: true, navigator: { mediaDevi
   bindComposerMic({ web, env, button: dom.window.document.querySelector('#mic'), panel: dom.window.document.querySelector('#panel'), roomToggle: () => dom.window.document.querySelector('#room').click(), getStreamId: () => 'local:seat', recorder, ...deps });
   return { dom, deps, button: dom.window.document.querySelector('#mic'), panel: dom.window.document.querySelector('#panel'), roomClicks: () => roomClicks };
 }
-test('web button records and stops; desktop keeps room-mic binding', async () => {
+test('web button records and stops', async () => {
   let starts = 0; let stops = 0;
   const u = ui(true, { start: async () => { starts++; }, stop: async () => { stops++; return { blob: new Blob(['x'], { type: 'audio/mp4' }), durationS: 2 }; }, discard: async () => {} });
   u.button.click(); await flush(); assert.match(u.panel.textContent, /Recording.*0:00/); assert.match(u.panel.textContent, /Cancel/);
   u.button.click(); await flush(); assert.equal(starts, 1); assert.equal(stops, 1); assert.equal(u.roomClicks(), 0); assert.equal(u.deps.calls.filter(c => c[0] === 'send').length, 1);
-  const desktop = ui(false); desktop.button.click(); assert.equal(desktop.roomClicks(), 1);
 });
 test('permission denied exposes Retry and unsupported browser disables button', async () => {
   let denied = true; const u = ui(true, { start: async () => { if (denied) throw Object.assign(new Error('denied'), { name: 'NotAllowedError' }); }, discard: async () => {} });

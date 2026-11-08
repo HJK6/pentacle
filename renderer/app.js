@@ -2,7 +2,7 @@ const { bindComposerMic, createBrowserRecorder, uploadVoiceBlob } = require('./w
 const { createQuestionVoiceBar } = require('./question_voice_bar');
 /* global Terminal, FitAddon */
 
-// Load xterm.js and fit addon via require (Electron renderer with nodeIntegration off — use dynamic import)
+// Bundle xterm.js and its addons for the browser.
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { Unicode11Addon } = require('@xterm/addon-unicode11'); // REQUIRED: without this, ❯ and other unicode renders as __
@@ -261,10 +261,8 @@ const themeVarMap = {
 
 function applyAppearanceSettings({ emit = false, changedKey } = {}) {
   state.appearance = normalizeAppearance(state.appearance || loadAppearanceSettings());
-  if (window.__PENTACLE_CONFIG__) {
-    const caps = { narrow: 600, default: 760, wide: 1000 };
-    document.documentElement.style.setProperty('--chat-content-max-width', `${caps[state.appearance.chatWidth]}px`);
-  }
+  const caps = { narrow: 600, default: 760, wide: 1000 };
+  document.documentElement.style.setProperty('--chat-content-max-width', `${caps[state.appearance.chatWidth]}px`);
   const palettes = chatFirstStyleEnabled() ? CHAT_FIRST_THEME_VARS : DESIGN_THEME_VARS;
   const palette = palettes[state.appearance.theme] || palettes.dark;
   document.documentElement.dataset.theme = state.appearance.theme;
@@ -1056,8 +1054,8 @@ if (typeof window !== 'undefined' && (window.PentacleHarness?.armed || CONFIG.fe
       await deleteSession(sessionName, hostId || 'local');
       return { ok: true };
     },
-    // Force a ws reconnect (reconnect_survival walk). No-ops if the preload/main
-    // harness channel is absent.
+    // Force a ws reconnect (reconnect_survival walk) when the host exposes
+    // the harness channel.
     forceReconnect: async () => {
       if (window.cc && typeof window.cc.forceReconnect === 'function') return await window.cc.forceReconnect();
       return { ok: false, error: 'no force-reconnect channel' };
@@ -3217,8 +3215,7 @@ function ensureSlotChatSurface(slot) {
       voicePanel.hidden = true;
       dockEl.insertBefore(voicePanel, composeEl);
       const voiceController = bindComposerMic({
-        web: window.HOST.isWeb === true, env: window, button: micEl, panel: voicePanel, composer: composeEl, takeMount: scrollEl,
-        roomToggle: () => document.getElementById('mic-btn-toggle')?.click(),
+        env: window, button: micEl, panel: voicePanel, composer: composeEl, takeMount: scrollEl,
         recorder: createBrowserRecorder(window, micSourceRecorderOptions()),
         getStreamId: () => {
           const target = chatControlTargetForSlot(slot);
@@ -6462,10 +6459,8 @@ window.cc.onChatStreamFrame((frame) => {
   }
 });
 
-// Web only: the /cc websocket reconnected to a (possibly fresh) web host
-// process — e.g. after `pentacle-web-start stop && pentacle-web-start`. The
-// desktop preload has no onReconnect (its ipcRenderer transport never drops),
-// so this is a no-op there. A fresh web host pushes no snapshot on connect and
+// The /cc websocket reconnected to a (possibly fresh) web host process.
+// A fresh web host pushes no snapshot on connect and
 // may already have completed its daemon handshake, so no connected:true frame
 // arrives on its own; without this the live app stays connected:false and the
 // composer send-gate keeps the input frozen until a manual reload. Re-pull the
@@ -6594,8 +6589,7 @@ async function checkForWebUpdate() {
 //   1. re-attach every slot's terminal PTY (frozen output + dead input), and
 //   2. clear the per-stream backfill trackers and re-fetch open chat slots so a
 //      wiped transcript reloads and the composer re-enables.
-// Mirrors the recovery the operator gets by closing/reopening the slot. Desktop
-// never enters this path (preload onReconnect is a no-op).
+// Mirrors the recovery the operator gets by closing/reopening the slot.
 function restoreSlotsAfterReconnect() {
   reattachTerminalSlotsAfterReconnect({
     slots: state.slots,
@@ -6654,7 +6648,7 @@ window.cc.onChatPopoutDock?.(async (payload) => {
 // Re-render the chat slots on every store state change so optimistic inserts,
 // send.result ack/fail, server-echo reconciliation, and turn-phase transitions
 // are reflected (transcript + send-button gating). No-op when the store global
-// is absent (defensive against an older preload).
+// is absent (for example, in an isolated renderer test).
 if (window.PentacleChatStore && typeof window.PentacleChatStore.subscribe === 'function') {
   window.PentacleChatStore.subscribe(() => {
     if (!chatUiEnabled()) return;
@@ -9112,8 +9106,8 @@ function setupSettingsPanel() {
 
   // Show this host's own build SHA and the connected daemon's runtime SHA as one
   // unobtrusive footer line — short in the label, full on hover. Both come from
-  // the chat-stream snapshot (window.cc bridge), so it works in both Electron and
-  // web mode; the build SHA is present even before the daemon connects.
+  // the chat-stream snapshot (window.cc bridge); the build SHA is present even
+  // before the daemon connects.
   // Both the label and the hover title gate on the SAME validity check, so a
   // malformed (non-empty but not 40-hex) SHA reads "unknown" in both places.
   const isSha = (sha) => /^[0-9a-f]{40}$/i.test(sha);
@@ -9198,13 +9192,11 @@ function setupSettingsPanel() {
     { value: 'compact', label: 'Compact' },
   ]);
 
-  if (window.__PENTACLE_CONFIG__) {
-    buildAppearanceRow('chatWidth', 'Chat width', '', [
-      { value: 'narrow', label: 'Narrow' },
-      { value: 'default', label: 'Default' },
-      { value: 'wide', label: 'Wide' },
-    ]);
-  }
+  buildAppearanceRow('chatWidth', 'Chat width', '', [
+    { value: 'narrow', label: 'Narrow' },
+    { value: 'default', label: 'Default' },
+    { value: 'wide', label: 'Wide' },
+  ]);
 
   // Default view chooser (replaces the removed "Chat UI" enable/disable toggle).
   // Chat view is always available; this only picks what a newly-opened session
@@ -9283,9 +9275,8 @@ function setupSettingsPanel() {
   btn.addEventListener('click', open);
   closeBtn?.addEventListener('click', close);
   reloadBtn?.addEventListener('click', () => {
-    // location.reload() is cancelled by the will-navigate guard in main.js;
-    // reload from the main process over IPC instead. Fall back to the direct
-    // call in non-Electron contexts (e.g. the test harness) where cc is absent.
+    // The browser bridge reloads this page. Keep the direct fallback for
+    // isolated renderer contexts without an installed bridge.
     if (window.cc?.reloadApp) window.cc.reloadApp();
     else location.reload();
   });
@@ -9310,7 +9301,7 @@ for (const row of slotGrid?.querySelectorAll('.grid-row') || []) {
     emit: (name, data) => window.PentacleHarness?.emit?.(`slot-layout:${name}`, { data: { ...data, row: rowName } }),
   }));
 }
-if (window.__PENTACLE_CONFIG__ && !new URLSearchParams(location.search).has('pentacle-chat-popout')) {
+if (!new window.URLSearchParams(window.location.search).has('pentacle-chat-popout')) {
   document.body.classList.add('web-sidebar-resizable');
   for (const button of document.querySelectorAll('[data-narrow-slot]')) {
     button.addEventListener('click', () => focusSlot(Number(button.dataset.narrowSlot)));
@@ -9481,7 +9472,7 @@ CFG_READY.then((cfg) => {
     });
     fetchMicStatus();
     setInterval(fetchMicStatus, 100);
-    if (window.HOST?.isWeb === true) initMicSource();
+    initMicSource();
   } else {
     const section = document.getElementById('mic-section');
     if (section) section.style.display = 'none';

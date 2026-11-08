@@ -383,27 +383,6 @@ the same millisecond. The no-profile gate still starts its own daemon on an
 ephemeral port. Its verdict records the owned daemon PID and confirmed exit;
 failure to stop that process fails the gate after a forced termination attempt.
 
-The standalone `test/e2e/grid_split_gate.js` entry is nonfunctional and is
-not a supported acceptance command. The historical invocations below are
-retained only to identify the path awaiting repair or retirement; do not use
-them as evidence of a passing gate:
-
-```bash
-npm run build:web
-node test/e2e/grid_split_gate.js web /tmp/pentacle-split-web
-node test/e2e/grid_split_gate.js desktop /tmp/pentacle-split-desktop
-```
-
-Its intended contract uses the same CDP client and scratch-daemon seeder. It launches the actual
-Electron entry point or served browser bundle with an isolated profile, creates
-four uniquely named local tmux fixtures, and checks their native PTY dimensions
-after drag, maximize/restore and view changes. It also checks narrow widths,
-header-control access and desktop process-restart persistence. It never restarts
-an existing desktop. The `finally` path removes its owned sessions and processes;
-cleanup failures fail the result. JSON, screenshots and logs go to the output
-directory. Set `PENTACLE_PYTHON` or `PENTACLE_CHROME` for a local interpreter or
-browser path; macOS uses the standard Google Chrome application path by default.
-
 ## Evidence contract
 
 Evidence is a small object containing the test name, candidate identifier, timestamps, and pass/fail assertions. Do not paste transcripts, environment dumps, absolute home paths, or tokens into evidence. Synthetic prompts and responses should be short and recognizable, for example `fixture-question` and `fixture-answer`.
@@ -487,7 +466,7 @@ node test/e2e/web_gate.js
 `npm test` invokes the existing collector exactly as follows:
 
 ```sh
-node scripts/run-tests.js "test/*.test.js" "test/*.test.ts" "test/e2e/terminal_interaction_runtime/*.test.js"
+node scripts/run-tests.js "test/*.test.js" "test/*.test.ts"
 ```
 
 The web gate needs Chrome/Chromium, `tmux`, the daemon's provisioned Python

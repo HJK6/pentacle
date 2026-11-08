@@ -2,22 +2,11 @@
 const { fetchBlobReply } = require('./blob_fetch_reply');
 
 // ── Shared `window.cc` handler registration ──────────────────────────────────
-// One definition, two transports. `main.js` registers these on Electron's
-// `ipcMain`; `server/ws_bridge.js` registers the same set into a table and
-// dispatches it from websocket frames. Keeping one definition is what stops the
-// desktop and the web host from drifting.
-//
-// Handlers keep their native `(event, ...args)` signature. The web host passes a
+// Handlers use an `(event, ...args)` signature. The web host passes a
 // per-connection stand-in for `event.sender`, which is what gives
 // `main/terminal_adapter.js` — whose slots are keyed by `event.sender.id` —
 // correct per-socket isolation and per-socket pty output for free.
 //
-// Electron-native handlers are NOT here: they stay in the Electron main-process
-// adapters — the clipboard pair in `main/clipboard_ipc_bridge.js`, and
-// `open-external`, `meeting:*` and `app:reload` directly in `main.js`. All of
-// them are listed below so the websocket dispatcher can refuse them with a
-// reason.
-
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -35,7 +24,7 @@ const { createMicRequest } = require('./mic_request');
 // clipboard, not the viewer's. The websocket dispatcher refuses these, so a
 // shim that forgets to implement one fails loudly instead of silently reading
 // the wrong machine.
-// Each entry carries the channel's preload mode, because a refusal must obey
+// Each entry carries the channel's mode, because a refusal must obey
 // the same contract as a real dispatch: answering a `send` channel would push
 // an unsolicited frame at a caller that never asked for one.
 const WEB_LOCAL = {
@@ -49,16 +38,14 @@ const WEB_LOCAL = {
 // (a safety net if anything reaches this transport), but the *web layer*
 // (renderer/web_cc.js) now answers each with a browser behavior — the reason
 // records what that is. `context-menu` renders an HTML menu that fires the same
-// assign-slot/action events; `meeting:open` toasts. They stay listed here so the
-// parity test keeps pinning main.js's native registrations.
+// assign-slot/action events; `meeting:open` toasts.
 const WEB_UNSUPPORTED = {
   'context-menu': { mode: 'send', reason: 'native Menu popup — web: HTML context menu (web_cc.js) firing assign-slot/action' },
   'meeting:open': { mode: 'send', reason: 'native window — web: "not available in web mode" toast' },
   'meeting:close': { mode: 'send', reason: 'native window — web: no-op' },
 };
 
-// Main → renderer push channels. Electron sends them through
-// `event.sender.send`; the web host sends `{event, args}` frames.
+// Host → renderer push channels sent as `{event, args}` frames.
 const PUSH_EVENTS = [
   'pty:data',
   'pty:exit',
@@ -70,18 +57,6 @@ const PUSH_EVENTS = [
   'chat:popout-dock',
 ];
 
-// Channels `preload.js` declares that NO main-process handler serves, on the
-// desktop as much as on the web. These are pre-existing gaps in the public
-// tree, not web-mode regressions — invoking one rejects with "No handler
-// registered" in Electron today. They are listed so the parity test pins the
-// set: a new dangling method fails the build, and implementing one here is what
-// removes it from this list.
-//
-// Lane 2 disposition (parity pass): the two chat-popout channels are deferred to
-// a web-mode popout follow-up spec (browser popout would be window.open of a
-// served route, matching the desktop BrowserWindow) — annotate, do not implement
-// here. The six dashboard channels have no provider in the public desktop, so
-// there is nothing to shim; they stay annotated until a provider exists.
 const UNIMPLEMENTED = {
   'chat-stream:chat-pop-out': 'no handler on either transport; web popout (window.open) deferred to the web-mode popout follow-up spec',
   'chat-stream:chat-dock': 'no handler on either transport; paired with chat-pop-out, deferred to the web-mode popout follow-up spec',
@@ -97,12 +72,6 @@ const UNIMPLEMENTED = {
 // channel the renderer does not consume yet.
 const UNCALLED = {
   'dashboard:list': 'registered for board discovery; no window.cc method calls it yet',
-};
-
-// `window.cc` methods with no IPC channel at all.
-const PRELOAD_LOCAL = {
-  chatPopoutContext: 'parsed from argv (Electron) / the query string (web)',
-  onReconnect: 'websocket reconnect hook — a no-op on the desktop (ipcRenderer never drops); in web mode it re-pulls chat-stream state after a /cc reconnect',
 };
 
 function safeString(value, fallback = '') { return String(value ?? '').trim() || fallback; }
@@ -147,8 +116,8 @@ async function command(action) {
 /**
  * Build the portable half of the `window.cc` surface.
  *
- * `register(target)` takes anything with `handle`/`on` — Electron's `ipcMain`,
- * or the websocket collector — and returns the terminal adapter's stop
+ * `register(target)` takes the websocket collector's `handle`/`on` interface
+ * and returns the terminal adapter's stop
  * function, which the caller wires to its own shutdown.
  */
 function createCcHandlers({
@@ -337,8 +306,7 @@ function createCcHandlers({
 }
 
 /**
- * A duck-typed `ipcMain` that records registrations into a table instead of
- * binding them. `mode` mirrors `preload.js`: 'invoke' answers, 'send' does not.
+ * Record handlers into a table: 'invoke' answers, 'send' does not.
  */
 function createCollector(table = {}) {
   return {
@@ -356,7 +324,6 @@ module.exports = {
   UNIMPLEMENTED,
   UNCALLED,
   PUSH_EVENTS,
-  PRELOAD_LOCAL,
   safeString,
   normalizeChatStreamError,
   resultError,

@@ -10,7 +10,7 @@ const root = path.join(__dirname, '..');
 const rendererRequire = createRequire(path.join(root, 'renderer/app.js'));
 const storageKey = 'pentacle.settings.v1';
 
-async function install(t, { record, web = true, storageThrows = false, popout = false } = {}) {
+async function install(t, { record, storageThrows = false, popout = false } = {}) {
   const dom = new JSDOM(fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8'), {
     url: `https://example.local/${popout ? '?pentacle-chat-popout=%7B%7D' : ''}`,
   });
@@ -22,7 +22,7 @@ async function install(t, { record, web = true, storageThrows = false, popout = 
     window.Storage.prototype.setItem = () => { throw new Error('full'); };
   }
   const config = { terminal: {}, chatStream: {}, hostNames: {}, hostColors: {}, features: {} };
-  if (web) window.__PENTACLE_CONFIG__ = config;
+  window.__PENTACLE_CONFIG__ = config;
   const events = [];
   window.PentacleHarness = { emit: (name, payload) => events.push({ name, ...payload }) };
   window.cc = {
@@ -47,7 +47,6 @@ async function install(t, { record, web = true, storageThrows = false, popout = 
       if (name === '@xterm/addon-fit') return { FitAddon: class { fit() {} } };
       if (name === '@xterm/addon-unicode11') return { Unicode11Addon: class {} };
       if (name === '@xterm/addon-webgl') return { WebglAddon: class {} };
-      if (name === 'electron') return { clipboard: { readText: () => '', writeText() {} } };
       if (name === '../config-loader') return { loadConfig: () => ({ config }) };
       return rendererRequire(name);
     },
@@ -100,13 +99,10 @@ test('three live segments share persistence, selection and existing appearance e
   assert.equal(restored.row.querySelector('[aria-pressed="true"]').dataset.value, 'wide');
 });
 
-test('web popout startup applies saved width; Electron keeps its fallback and no row', async t => {
+test('web popout startup applies saved width', async t => {
   const record = { appearance: { chatWidth: 'wide' } };
   const popout = await install(t, { record, popout: true });
   assert.equal(popout.cap(), '1000px');
-  const desktop = await install(t, { record, web: false });
-  assert.equal(desktop.row, null);
-  assert.equal(desktop.cap(), '');
 });
 
 test('storage exceptions keep live width changes usable', async t => {

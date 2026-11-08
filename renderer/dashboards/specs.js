@@ -3,9 +3,8 @@
 // ══════════════════════════════════════════════════════════════
 // Read-only triage view over every spec under the shared-memory
 // work/<status>/ tree. Talks to chat_streamd via the same WS that
-// powers the Chats tab (round-tripped through main process IPC; see
-// main/chat_stream_client.js specsList/Get/Drive/Capabilities and
-// main.js specs:* handlers).
+// powers the Chats tab (see main/chat_stream_client.js
+// specsList/Get/Drive/Capabilities and main/cc_handlers.js).
 //
 // Layout mirrors the Pi `specs` profile (control-dashboard-display
 // dashboards/specs/profile.js): minimal full-width kanban that fits

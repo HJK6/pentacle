@@ -189,6 +189,8 @@ test('only Terminal view hands the wheel to tmux', () => {
 test('the sidebar toggle collapses the sidebar and reports its state', () => {
   const h = installRenderer({ questionOverride: null });
   const { document } = h.dom.window;
+  Object.defineProperty(document.querySelector('.main'), 'clientWidth', { value: 1200 });
+  vm.runInContext('sidebarResizer.refresh()', h.context);
   const toggle = document.getElementById('sidebar-toggle');
   assert.equal(toggle.getAttribute('aria-expanded'), 'true');
   toggle.click();

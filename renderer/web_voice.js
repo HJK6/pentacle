@@ -268,8 +268,7 @@ function createBrowserRecorder(env = globalThis, { getDeviceId = () => null, onD
 }
 
 let captureOwner = null;
-function bindComposerMic({ web, env = globalThis, button, panel, composer = button.closest('.slot-chat-compose'), takeMount, roomToggle, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry, commit, outcome, cancel: cancelCommit, origin: originOf, clientBuild }) {
-  if (!web) { button.addEventListener('click', roomToggle); return; }
+function bindComposerMic({ env = globalThis, button, panel, composer = button.closest('.slot-chat-compose'), takeMount, getStreamId, recorder = createBrowserRecorder(env), upload, transcribe, send, telemetry, commit, outcome, cancel: cancelCommit, origin: originOf, clientBuild }) {
   button.setAttribute('aria-label', 'Record voice message'); button.title = 'Record voice message';
   button.innerHTML = '<svg class="voice-mic-glyph" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
   if (!env.isSecureContext || typeof env.navigator?.mediaDevices?.getUserMedia !== 'function') {

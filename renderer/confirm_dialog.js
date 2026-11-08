@@ -1,7 +1,7 @@
 // In-DOM, promise-based confirm dialog for the renderer.
 //
 // WHY this exists: the renderer used to gate destructive actions with the
-// browser-native window.confirm(). On Windows/Electron, dismissing a native JS
+// browser-native window.confirm(). On Windows, dismissing a native JS
 // dialog leaves Chromium swallowing the Space (and sometimes Enter) key until
 // the OS window blurs and refocuses -- the "spacebar stops working after a
 // popup" focus trap. A pure-DOM modal never invokes the native dialog manager.
@@ -9,9 +9,8 @@
 // close, so the terminal regains focus and Space keeps working.
 //
 // Loaded as a classic <script> (attaches root.confirmDialog) AND require()-able
-// (module.exports), mirroring the dashboards' UMD pattern. nodeIntegration is
-// on, but relative require() from a <script src> renderer is brittle across asar
-// packaging, so dashboards consume the global, not require(). No native dialog
+// (module.exports), mirroring the dashboards' UMD pattern. Dashboards consume
+// the browser global. No native dialog
 // API (alert/confirm/prompt) may be introduced here without reintroducing the
 // bug; the .focus() calls below are intentional (a DOM element, not a native
 // dialog) and are paired with focus restoration on close.

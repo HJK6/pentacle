@@ -69,8 +69,7 @@ function isHttpUrl(value) {
   }
 }
 
-// Route external links through the OS browser instead of a blank Electron window
-// (fixes public-link handling). Prefers the preload bridge; degrades to window.open, then no-op.
+// Open external links with the browser bridge, falling back to window.open.
 function openExternal(href) {
   if (!isHttpUrl(href)) return false;
   try {

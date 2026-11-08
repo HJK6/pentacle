@@ -1,9 +1,8 @@
 'use strict';
 
-// Browser stand-in for ../config-loader. The desktop reads the config file from
-// disk inside the preload; the web host injects the *computed* config (the same
-// object `get-config` returns) into window.__PENTACLE_CONFIG__ before the bundle
-// runs, so the renderer sees byte-identical values on both transports.
+// Browser stand-in for ../config-loader. The web host injects the computed
+// config (the object `get-config` returns) into window.__PENTACLE_CONFIG__
+// before the bundle runs.
 
 function loadConfig() {
   const config = (typeof window !== 'undefined' && window.__PENTACLE_CONFIG__) || null;

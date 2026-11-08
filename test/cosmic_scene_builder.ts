@@ -4,7 +4,6 @@
 // Both consumers read from here so the human-reviewable PNG artifact and the
 // deterministic structural gate render the EXACT same DOM:
 //   - test/generate_cosmic_chat_states.js  -> writes `.ui-review/desktop-chat/*.html`
-//     (captured to baseline PNGs by scripts/capture-cosmic-baselines.js)
 //   - test/cosmic_visual.test.ts            -> the hard structural assertions
 //
 // Fidelity bar: the transcript is built by the PRODUCTION renderer
@@ -245,7 +244,7 @@ const SINGLE_QUESTION = {
   prompt: 'Which screenshot vehicle should the gate use?',
   multiSelect: false,
   options: [
-    { index: 1, label: 'Headless Electron capturePage', description: 'Offscreen render, no daemon.' },
+    { index: 1, label: 'Headless browser screenshot', description: 'Offscreen render, no daemon.' },
     { index: 2, label: 'Full app over CDP', description: 'Highest fidelity; needs the local mock daemon.' },
     { index: 3, label: 'Type something.', meta: true },
   ],

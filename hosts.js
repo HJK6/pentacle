@@ -274,8 +274,8 @@ class Ssh2Host {
     // Persistent 'error' listener: ssh2 can emit multiple 'error' events for a
     // single failure (e.g. banner timeout → 'error' + socket 'error' + proto
     // errors on close). A `once` listener catches the first, and the rest hit
-    // Node's EventEmitter with no handler → uncaught exception → Electron
-    // main-process crash. Keep the listener permanent and swallow late errors.
+    // Node's EventEmitter with no handler → uncaught exception → host
+    // process crash. Keep the listener permanent and swallow late errors.
     const onError = (err) => {
       if (settled) {
         if (process.env.PENTACLE_DEBUG) {

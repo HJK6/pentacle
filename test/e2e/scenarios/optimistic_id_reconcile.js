@@ -1,7 +1,7 @@
 // Walk: optimistic_id_reconcile
 // Public regression scenario for optimistic-send reconciliation.
 //
-// Proves end-to-end, against the real Electron app + daemon, that a sent USER
+// Proves end-to-end, against the real browser app + daemon, that a sent USER
 // message reconciles with its server echo through the canonical chat-core
 // (3d93d9c) ID-first matcher + render-stability contract:
 //   - the renderer owns the optimistic_id and stamps it on the optimistic row;

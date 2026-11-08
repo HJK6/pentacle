@@ -45,14 +45,14 @@ function invoke(files, flags = [], extraEnv = {}) {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
-test('pinned144-file discovery and the legacy algorithm remain equivalent', () => {
+test('pinned141-file discovery and the legacy algorithm remain equivalent', () => {
   const expected = JSON.parse(fs.readFileSync(path.join(root, fixture('base-discovered.json')), 'utf8'));
-  const patterns = ['test/*.test.js', 'test/*.test.ts', 'test/e2e/terminal_interaction_runtime/*.test.js'];
+  const patterns = ['test/*.test.js', 'test/*.test.ts'];
   const synthetic = fs.mkdtempSync(path.join(os.tmpdir(), 'pentacle-discovery-proof-'));
   try {
     for (const name of expected) { const target = path.join(synthetic, name); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, '// synthetic discovery entry'); }
     fs.mkdirSync(path.join(synthetic, 'test/directory.test.js'));
-    assert.equal(expected.length, 144);
+    assert.equal(expected.length, 141);
     assert.deepEqual(runner.discover(synthetic, patterns), expected);
   } finally { fs.rmSync(synthetic, { recursive: true, force: true }); }
   // Compare on today's tree too, without freezing future additions out of it.

@@ -235,7 +235,6 @@ function installRenderer({ settingsRecord = null } = {}) {
       if (name === '@xterm/addon-fit') return { FitAddon: class { fit() {} } };
       if (name === '@xterm/addon-unicode11') return { Unicode11Addon: class {} };
       if (name === '@xterm/addon-webgl') return { WebglAddon: class {} };
-      if (name === 'electron') return { clipboard: { readText: () => '', writeText() {} } };
       if (name === '../config-loader') return { loadConfig: () => ({ config }) };
       return rendererRequire(name);
     },

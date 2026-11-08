@@ -152,7 +152,6 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 | `services/agent-orch/tests/` | 81 | `cli-pytest --select tests`; separate Public checks contracts partition. |
 | `services/_shared/tests/` | 8 | `shared-pytest --select tests`; separate from daemon tiers. |
 | Root `test/` | 205 | Root npm shallow globs select 203 JS/TS tests. `test/test_specs_parser.py` and `test/test_voice_reply.py` are outside those globs; their focused commands are documented in [public boundary](public_boundary.md) and [room microphone conversation](room_mic_conversation.md), respectively. These explicit entries do not establish required-CI inclusion. |
-| `test/e2e/terminal_interaction_runtime/` | 3 | Its `*.test.js` files join root npm tests; `npm run test:terminal-interactions` separately launches the owned Electron harness. |
 | `test/e2e/`; `test/e2e/lib/`; `test/e2e/scenarios/` | 7; 7; 31 | Outside root npm shallow globs. Explicit npm selections can run nested tests. Default browser invocation uses the registry below, not a recursive scenario-directory glob. |
 | `pentacle-chat-core/tests/` | 44 | Public checks frontend runs `npm --prefix pentacle-chat-core test`: TS tests plus `typecheck:test`. `typeContracts.ts` is typecheck support, not an executed `.test.ts` file. |
 | `mic-server/test/` | 24 | Public checks contracts explicitly runs `PYTHONPATH=mic-server python3 -m pytest mic-server/test`. |
@@ -179,7 +178,7 @@ unfiltered run with its owned profile, it additionally invokes
 three follow-ons. `test/e2e/scenarios/*.js` is a separate legacy population;
 matching names alone do not establish default execution.
 
-Other E2E entries such as `grid_split_gate.js`, `send_refusal_gate.cjs`,
+Other E2E entries such as `send_refusal_gate.cjs`,
 `web_host_recovery_gate.cjs`, `web_assistant_direct_entry_gate.cjs`,
 `web_chat_history_transport_gate.cjs`, `web_popouts_gate.cjs`,
 `web_sidebar_resize_gate.cjs`, `web_chat_width_gate.cjs`,
