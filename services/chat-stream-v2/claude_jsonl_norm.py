@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from message_envelopes import _PEER_DELIVERY as _PEER_TELL_RE  # Compatibility for existing registry consumers.
 from provider_wrappers import log_provider_classification, normalize_provider_user_text
 
 
