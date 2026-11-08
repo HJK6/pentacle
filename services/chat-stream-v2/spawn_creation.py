@@ -7,6 +7,11 @@ import json
 KEY = "remote_creation"
 
 
+def initial():
+    # Only a freshly persisted intent may initialize a provenance-complete set.
+    return {"version": 1, "attempts": []}
+
+
 def witness(payload):
     try:
         payload = json.loads(payload) if isinstance(payload, str) else payload

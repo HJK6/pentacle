@@ -43,6 +43,7 @@ def release_attestation(release_id: str = "active") -> dict:
 
 class FakeSessions:
     def __init__(self) -> None:
+        self.local_host = "hosta"
         self._graph_lock = asyncio.Lock()
         provenance = [{"kind": "explicit", "spec_id": SPEC}]
         self.rows = {

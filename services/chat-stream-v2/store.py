@@ -3907,20 +3907,56 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return _op(conn)
         return await self.submit(transaction)
 
-    async def owns_unwitnessed_spawn_intent(
-        self, host: str, name: str, request_id: str, nonce: str, *, owner_instance_id: str,
+    async def issue_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, attempt_id: str,
     ) -> bool:
-        """Reader-only prior may create only a current legacy intent."""
+        """Register one physical dispatch before it can reach the peer."""
         def operation(conn):
-            row = _spawn_reservation(conn, host, name, request_id, nonce)
-            if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
-                return False
-            try:
-                payload = json.loads(row.get("payload"))
-            except (ValueError, TypeError):
-                return False
-            return isinstance(payload, dict) and spawn_creation.KEY not in payload
-        return await self.submit(operation)
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _spawn_reservation(conn, host, session_name, request_id, nonce)
+                if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if value is None or not attempt_id or any(a["id"] == attempt_id for a in value["attempts"]):
+                    return False
+                value["attempts"].append({"id": attempt_id, "owner": owner_instance_id, "terminal": False})
+                payload = json.loads(row["payload"])
+                payload[spawn_creation.KEY] = value
+                conn.execute("UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
+                             (json.dumps(payload), host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
+
+    async def acknowledge_remote_creation(
+        self, host: str, session_name: str, *, request_id: str, nonce: str,
+        owner_instance_id: str, attempt_id: str,
+    ) -> bool:
+        """Persist exact command success even if cancellation already won."""
+        def operation(conn):
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = _row(conn.execute(
+                    "SELECT * FROM v2_stream_reservations WHERE host=? AND session_name=? "
+                    "AND request_id=? AND nonce=?",
+                    (host, session_name, request_id, nonce),
+                ).fetchone())
+                if not row or str(row.get("owner_instance_id") or "") != owner_instance_id:
+                    return False
+                value = spawn_creation.witness(row.get("payload"))
+                if value is None:
+                    return False
+                attempt = next((a for a in value["attempts"] if a["id"] == attempt_id), None)
+                if attempt is None or attempt["owner"] != owner_instance_id:
+                    return False
+                attempt["terminal"] = True
+                payload = json.loads(row["payload"])
+                payload[spawn_creation.KEY] = value
+                conn.execute("UPDATE v2_stream_reservations SET payload=? WHERE host=? AND session_name=?",
+                             (json.dumps(payload), host, session_name))
+                return True
+        return await self.submit(operation, settle_on_cancel=True)
 
     async def cancelled_creation_snapshot(
         self, host: str, session_name: str, *, request_id: str, nonce: str,

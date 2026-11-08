@@ -1300,7 +1300,7 @@ class Sessions:
                 self._pop_inventory_locked(f"{host}:{session_name}")
             if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
                 await emit_if_changed(immediate=True)
-            await self.store.upsert_session_reap(
+            await self._save_close_reap(
                 f"{host}:{session_name}",
                 reap_status=reap_status,
                 survivors=survivors or [],
@@ -1310,6 +1310,28 @@ class Sessions:
                 row, reason=reason or "confirmed_dead_close",
             )
         return row
+
+    async def _save_close_reap(
+        self, stream_id: str, *, reap_status: str,
+        survivors: list[dict[str, Any]], updated_at: str,
+    ) -> None:
+        # An unknown attempt cannot disprove or upgrade earlier ownership.
+        # Keep those exact records; only their existing fresh reaper checks
+        # may authorize them. New diagnostic PIDs receive no inherited proof.
+        retained: dict[str, Any] = {}
+        if reap_status == "unknown":
+            previous = await self.store.get_session_reap(stream_id)
+            stronger = [item for item in (previous or {}).get("survivors", [])
+                        if isinstance(item.get("ownership_proof_v2"), dict)]
+            if stronger:
+                previous_pids = {item["pid"] for item in stronger}
+                survivors = stronger + [item for item in survivors if item.get("pid") not in previous_pids]
+                retained = {key: previous[key] for key in (
+                    "attempts", "next_attempt_at", "exhausted_at") if key in previous}
+        await self.store.upsert_session_reap(
+            stream_id, reap_status=reap_status, survivors=survivors,
+            updated_at=updated_at, **retained,
+        )
 
     async def mark_reconciled_dead(
         self,
@@ -1594,23 +1616,21 @@ class Sessions:
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Bounded, idempotent, keyed on CONFIRMED process death (ledger req 5).
+        """Bounded, idempotent close with separate durable process cleanup.
 
         The order is always terminate -> confirm -> mark closed, never
         mark-then-kill, except explicit operator-confirmed offline intent
         (separate deferred-reap ledger, never recorded as verified death).
-        A closed row with a live tree is the wedge that killed
-        live work. A row is NEVER marked closed while a userspace-runnable
-        process still exists, so the v1 `row_closed_tree_alive` cascade stays
-        impossible. `_terminate_pane` runs the escalation ladder and returns one
-        of `ok` / `carcass` / `failed`:
+        Pane closure does not prove every descendant exited: surviving or
+        unverified cleanup remains in session_reap. `_terminate_pane` returns
+        one of `ok` / `carcass` / `failed`:
 
-          ok      the pane is gone (graceful kill, or a by-pid SIGKILL) -> mark closed
+          ok      the pane is gone (graceful kill, or captured-instance SIGKILL) -> mark closed
           carcass SIGKILL landed but the process is a kernel D-state husk that can
                   never execute userspace again -> mark closed as fact + alert
-          failed  no signal was deliverable (no pane pid, tmux unresponsive) ->
-                  the row stays OPEN, `close.failed`, alert; SessionReconciler
-                  re-checks
+          failed  authority or required exit remains unproved; eligible owned
+                  members may already have received SIGKILL. The row stays OPEN,
+                  `close.failed`, alert; SessionReconciler re-checks
 
         Local tmux is evidence about the LOCAL host only. Closing a remote row
         through it would read "no local pane" as confirmed death and false-close
@@ -1697,15 +1717,21 @@ class Sessions:
         if pane_live:
             state, pane_pid, reap = await self._terminate_pane(session_name)
             if state == "failed":
-                # No deliverable signal: the process may still run userspace, so
-                # the row must NOT be recorded closed. Honest `close.failed`.
+                failure_reason = str(reap.get("reason") or "no_deliverable_signal")
+                await self._save_close_reap(
+                    sid, reap_status=str(reap.get("reap_status") or "unknown"),
+                    survivors=reap.get("survivors") or [], updated_at=iso_now(),
+                )
                 await self._record_alert("close_failed", host=host, session_name=session_name,
                                         stream_id=sid, generation=(row or {}).get("session_generation"),
-                                         pane_pid=pane_pid, reason="no_deliverable_signal")
+                                        pane_pid=pane_pid, reason=failure_reason)
                 return {"failed": True, "already_closed": False,
-                        "reason": "pane_process_unkillable: no deliverable signal "
+                        "reason": failure_reason if failure_reason in {
+                            "instance_authority_unproven", "logical_ownership_unproven"} else
+                                  "pane_process_unkillable: no deliverable signal "
                                   "(no pane pid and tmux unresponsive)",
-                        "session": row}
+                        "reap_status": reap.get("reap_status", "unknown"),
+                        "survivors": reap.get("survivors", []), "session": row}
             if state == "carcass":
                 # SIGKILLed but still visible = uninterruptible sleep. It can
                 # never run userspace again, so closing the row is fact, not a
@@ -1797,13 +1823,9 @@ class Sessions:
         }
 
     async def _capture_tree_identity(
-        self, session_name: str, pane_pid: str
+        self, session_name: str, pane_pid: str, pane: dict[str, str] | None
     ) -> tuple[list[int], dict[int, dict[str, Any]], dict[int, dict[str, Any]], bool]:
-        """Capture the target tree and complete process-instance proofs."""
-        try:
-            pane = await self.tmux.pane_identity(session_name)
-        except (AttributeError, VerbError):
-            pane = None
+        """Capture provisional identities under the first live pane snapshot."""
         try:
             records = await prockill.process_records()
         except Exception:  # noqa: BLE001 - close remains bounded
@@ -1828,116 +1850,97 @@ class Sessions:
                 continue
             tree.append(pid)
             queue.extend(sorted(children.get(pid, [])))
-        if pane is None:
-            return tree, records, {}, True
         try:
             boot = await prockill.boot_id()
         except Exception:  # noqa: BLE001 - missing boot identity only loses proof
             boot = ""
+        if (not pane or pane.get("pane_pid") != str(root)
+                or records[root]["ppid"] != int(pane["server_pid"])):
+            return tree, records, {}, False
         proofs: dict[int, dict[str, Any]] = {}
         for pid in tree:
             proof = prockill.identity_proof(
                 host=self.local_host,
                 boot=boot,
                 record=records[pid],
-                tmux_session=str(pane.get("session_name") or session_name),
-                tmux_pane=str(pane.get("pane_id") or ""),
-                tty=str(pane.get("tty") or ""),
-                tmux_socket=str(pane.get("tmux_socket") or ""),
+                tmux_session=pane["session_name"], tmux_pane=pane["pane_id"],
+                tty=pane["tty"], tmux_socket=pane["tmux_socket"],
             )
             if proof is not None:
                 proofs[pid] = proof
         return tree, records, proofs, True
 
-    @staticmethod
-    def _reap_readback(
-        pids: list[int], records: dict[int, dict[str, Any]], proofs: dict[int, dict[str, Any]],
-        *, inventory_complete: bool = True,
-    ) -> dict[str, Any]:
-        if not inventory_complete:
-            root = pids[0] if pids else -1
-            if root <= 0 or not prockill.pid_alive(str(root)):
-                return {"reap_status": "unknown", "survivors": []}
-            return {
-                "reap_status": "unknown",
-                "survivors": [{
-                    "pid": root,
-                    "command": str(records.get(root, {}).get("command") or ""),
-                    "first_seen": iso_now(),
-                    "reap_reason": "process_observed_alive",
-                    "inventory_complete": False,
-                }],
-            }
-        survivors: list[dict[str, Any]] = []
-        for pid in pids:
-            if not prockill.pid_alive(str(pid)):
-                continue
-            item: dict[str, Any] = {
-                "pid": pid,
-                "command": str(records.get(pid, {}).get("command") or ""),
-                "first_seen": iso_now(),
-            }
-            if pid in proofs:
-                item["ownership_proof_v2"] = proofs[pid]
-            else:
-                item["reap_reason"] = "ownership_proof_missing"
-            survivors.append(item)
-        if not survivors:
-            return {"reap_status": "reaped", "survivors": []}
-        status = "survivors" if all("ownership_proof_v2" in item for item in survivors) else "unknown"
-        return {"reap_status": status, "survivors": survivors}
-
     async def _terminate_pane(self, session_name: str) -> tuple[str, str, dict[str, Any]]:
-        """Run the close escalation ladder against a pane confirmed live.
-
-        Returns `(state, pane_pid)` where state is `ok` / `carcass` / `failed`.
-        The pane pid is read up front, while the pane is still alive, so a
-        by-pid SIGKILL survives tmux going unresponsive under us.
-        """
-        pane_pid = await self.tmux.pane_pid(session_name)
+        """Close with one fixed cohort and witnesses retained across the grace wait."""
+        try:
+            pane_pid = await self.tmux.pane_pid(session_name)
+        except VerbError:
+            pane_pid = ""
+        try:
+            pane = await self.tmux.close_pane_identity(session_name)
+        except Exception:  # noqa: BLE001 - failed observation grants no ownership
+            pane = None
         tracked, records, proofs, inventory_complete = await self._capture_tree_identity(
-            session_name, pane_pid
+            session_name, pane_pid, pane
         )
+        cohort = prockill.CapturedTree(tracked, records, proofs, inventory_complete)
+        try:
+            await cohort.prepare()
+            changed = bool(pane and pane["pane_pid"] != pane_pid)
+            if pane:
+                try:
+                    after = await self.tmux.close_pane_identity(session_name)
+                except Exception:  # noqa: BLE001 - never retarget on lost readback
+                    after = None
+                changed = changed or after != pane
+                if not changed:
+                    await cohort.authorize(int(pane_pid), int(pane["server_pid"]))
+            if not cohort.anchored:
+                cohort.revoke()
+            if changed:
+                reap = await cohort.readback()
+                reap["reason"] = "logical_ownership_unproven"
+                return "failed", pane_pid, reap
+            try:
+                await self.tmux.kill_session(session_name)
+                graceful_gone = await self._confirm_pane_gone(session_name, CLOSE_GRACEFUL_CONFIRM_S)
+            except VerbError:
+                graceful_gone = False  # a wedged tmux cannot prevent witnessed escalation
+            if graceful_gone:
+                return "ok", pane_pid, await cohort.readback()
+            if not cohort.anchored:
+                reap = await cohort.readback()
+                reap["reason"] = "logical_ownership_unproven"
+                return "failed", pane_pid, reap
 
-        # (1) Graceful: ask tmux to kill the session, confirm it is gone.
-        await self.tmux.kill_session(session_name)
-        if await self._confirm_pane_gone(session_name, CLOSE_GRACEFUL_CONFIRM_S):
-            return "ok", pane_pid, self._reap_readback(
-                tracked, records, proofs, inventory_complete=inventory_complete
-            )
-
-        # (4) Graceful did not confirm death and there is no pid to signal: tmux
-        # is unresponsive and we have nothing to escalate to. Fail honestly.
-        if not pane_pid:
-            return "failed", pane_pid, {"reap_status": "unknown", "survivors": []}
-
-        # (2) SIGKILL the whole pane process tree DIRECTLY by pid — no tmux
-        # dependency, since tmux may be the wedged component — and confirm the
-        # root pid is gone by asking the kernel.
-        await prockill.signal_tree(pane_pid, signal.SIGKILL)
-        if await self._confirm_pid_gone(pane_pid, CLOSE_KILL_CONFIRM_S):
-            await self.tmux.kill_session(session_name)  # drop the now-defunct pane
-            return "ok", pane_pid, self._reap_readback(
-                tracked, records, proofs, inventory_complete=inventory_complete
-            )
-
-        # (3) SIGKILL delivered, process still visible = kernel D-state carcass.
-        await self.tmux.kill_session(session_name)  # remove the tmux artifacts
-        return "carcass", pane_pid, self._reap_readback(
-            tracked, records, proofs, inventory_complete=inventory_complete
-        )
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            if refused:
+                reap = await cohort.readback()
+                reap["reason"] = "instance_authority_unproven"
+                return "failed", pane_pid, reap
+            root = int(pane_pid)
+            if await cohort.confirm_exit(root, CLOSE_KILL_CONFIRM_S, CLOSE_POLL_INTERVAL_S):
+                try:
+                    await self.tmux.kill_session(session_name)
+                except VerbError:
+                    pass  # original process exit is proved independently of tmux
+                return "ok", pane_pid, await cohort.readback()
+            # A carcass classification requires actual delivery to this root.
+            if root not in sent:
+                reap = await cohort.readback()
+                reap["reason"] = "instance_authority_unproven"
+                return "failed", pane_pid, reap
+            try:
+                await self.tmux.kill_session(session_name)
+            except VerbError:
+                pass
+            return "carcass", pane_pid, await cohort.readback()
+        finally:
+            cohort.close()
 
     async def _confirm_pane_gone(self, session_name: str, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while await self.tmux.has_session(session_name):
-            if time.monotonic() >= deadline:
-                return False
-            await asyncio.sleep(CLOSE_POLL_INTERVAL_S)
-        return True
-
-    async def _confirm_pid_gone(self, pane_pid: str, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while prockill.pid_alive(pane_pid):
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(CLOSE_POLL_INTERVAL_S)

@@ -389,6 +389,40 @@ class Tmux:
             "tmux_socket": fields[3], "session_name": fields[4],
         }
 
+    async def close_pane_identity(self, name: str) -> dict[str, str] | None:
+        """Read one live, unambiguous pane for the close ownership bracket.
+
+        These server versions expose STATUSREADY through both exit fields,
+        independently of pane_dead's delayed fd teardown. Unknown formats
+        expand empty, so only a qualified responding-server version can make
+        those empty fields evidence. Keep this separate from persisted proofs.
+        """
+        keys = ("pane_pid", "pane_id", "tty", "tmux_socket", "session_name",
+                "session_id", "server_pid", "server_version", "pane_dead",
+                "pane_pipe", "pane_dead_status", "pane_dead_signal")
+        rc, out = await self.run(
+            "list-panes", "-s", "-t", _target(name), "-F",
+            "#{pane_pid}|#{pane_id}|#{pane_tty}|#{socket_path}|#{session_name}|"
+            "#{session_id}|#{pid}|#{version}|#{pane_dead}|#{pane_pipe}|"
+            "#{pane_dead_status}|#{pane_dead_signal}",
+        )
+        lines = out.splitlines()
+        if rc != 0 or len(lines) != 1:
+            return None
+        fields = lines[0].split("|")
+        if len(fields) != len(keys) or not all(fields[:-2]) or any(fields[-2:]):
+            return None
+        pane = dict(zip(keys, fields))
+        if (pane["session_name"] != name or pane["server_version"] not in {"3.4", "3.7c"}
+                or pane["pane_dead"] != "0" or pane["pane_pipe"] != "0"
+                or not re.fullmatch(r"%[0-9]+", pane["pane_id"])
+                or not re.fullmatch(r"\$[0-9]+", pane["session_id"])):
+            return None
+        for key in ("pane_pid", "server_pid"):
+            if not re.fullmatch(r"[0-9]+", pane[key]) or int(pane[key]) <= 0:
+                return None
+        return pane
+
     async def kill_session(self, name: str) -> None:
         await self.run("kill-session", "-t", _target(name))
 

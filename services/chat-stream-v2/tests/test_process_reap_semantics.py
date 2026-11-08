@@ -174,8 +174,22 @@ def test_saved_sessions_capture_reopens_and_reaps_with_recording_sink(tmp_path, 
             # alternate. Let the disposable process precede capture by >1s.
             await asyncio.sleep(1.05)
             sessions = Sessions(store, tmux=terminal, local_host="local")
-            tracked, records, proofs, complete = await sessions._capture_tree_identity("owned", str(root))
+            pane = await terminal.close_pane_identity("owned")
+            assert pane is not None
+            tracked, records, proofs, complete = await sessions._capture_tree_identity("owned", str(root), pane)
             assert complete and tracked == [root] and root in proofs
+            # Persist only readback from a fully anchored capture.
+            cohort = prockill.CapturedTree(tracked, records, proofs, complete)
+            try:
+                await cohort.prepare()
+                assert await terminal.close_pane_identity("owned") == pane
+                assert await cohort.authorize(root, int(pane["server_pid"]))
+                captured = await cohort.readback()
+                assert captured["reap_status"] == "survivors"
+                proofs = {item["pid"]: item["ownership_proof_v2"]
+                          for item in captured["survivors"]}
+            finally:
+                cohort.close()
             original_proof = copy.deepcopy(proofs[root])
             await store.open_session("local", "owned", pane_status="pane_dead")
             await store.update_session("local", "owned", status="closed", closed_at=__import__("v2_runtime").iso_now())
