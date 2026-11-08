@@ -148,7 +148,11 @@ class ConfigFailsClosed(Tmp):
         return path
 
     def test_checked_in_config_loads(self):
-        self.assertEqual(ge.load_config(HERE / "gate-env.json")["schema"], "pentacle.gate-env.v1")
+        config = ge.load_config(HERE / "gate-env.json")
+        self.assertEqual(config["schema"], "pentacle.gate-env.v1")
+        workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
+                   if "unit_workers" in target}
+        self.assertEqual(workers, {name: 2 for name in ("v2-unit", "v2-merge", "v2-merge-capacity", "v2-merge-ci")})
 
     def test_malformed_variants_are_refused(self):
         bad = {
@@ -695,6 +699,7 @@ class EntrypointReceipts(Tmp):
         self.assertEqual(observed, [(str(venv / 'bin/python'), str(venv / 'bin/python'))])
         prepared = next(e for e in events if e['state'] == 'prepared')
         self.assertEqual(prepared['toolchain']['python']['version'], '3.13.1')
+        self.assertEqual(prepared['host_cpu'], ge.host_cpu_identity())
         self.assertIn('PENTACLE_PYTHON', prepared['env_names'])
 
     def test_unknown_target_is_a_retained_setup_failure_and_missing_identity_is_unknown_history(self):

@@ -151,6 +151,16 @@ def find_exe(name: str, dirs: List[str], *, want_major: Optional[str] = None, ru
     return None, rejected
 
 
+def host_cpu_identity() -> Dict[str, Any]:
+    affinity = None
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = sorted(os.sched_getaffinity(0))
+        except OSError:
+            pass  # Unavailable observation, never an admission or worker-count decision.
+    return {"logical_count": os.cpu_count(), "affinity": affinity}
+
+
 def resolve_toolchain(config: Dict[str, Any], needs: List[str], *, ambient_path: Optional[str] = None,
                       system: Optional[str] = None, run=subprocess.run) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     system = "darwin" if (system or sys.platform) == "darwin" else "linux"
@@ -893,6 +903,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if failures:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
+                    host_cpu=host_cpu_identity(),
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
                     effective_selection=selection,
                     **({"passed_environment": {ENV_NAME: instruction_input}} if instruction_input else {}),

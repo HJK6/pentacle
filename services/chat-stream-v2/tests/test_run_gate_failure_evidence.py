@@ -122,6 +122,7 @@ def _check_pass_with_deadline(tmp_path: Path, workers: int) -> None:
     assert check["ok"] and check["tier_bounds_s"] == {"unit": 20.0} and check["reserve_s"] == run_gate.DEFAULT_RESERVE_S
     assert not (tmp_path / "base" / "unit").exists()
     assert ("-n" in unit["command"]) == (workers > 1)
+    assert ("--max-worker-restart=0" in unit["command"]) == (workers > 1)
     assert unit["progress"]["collected"] == unit["progress"]["started_nodes"] == unit["progress"]["completed_nodes"] == 1
 
 
@@ -143,6 +144,20 @@ def test_per_test_timeout_hard_exit_keeps_active_node(tmp_path: Path) -> None:
     assert "journal_incomplete" in unit["secondary_outcomes"]
     assert unit["progress"]["active_nodes"] == ["test_synthetic.py::test_hang"]
     assert unit["progress"]["last_completed"] == "test_synthetic.py::test_first"
+    parallel = tmp_path / "parallel"
+    parallel.mkdir()
+    code, data, output = _gate(parallel, source,
+        argv=["unit", "--unit-workers", "2", "--timeout-seconds", "20"])
+    unit = data["tiers"][0]
+    assert code == 1 and data["finished"] and not data["passed"], output
+    assert unit["reason"] == "test_failures" and not unit["timed_out"]
+    assert unit["counts"]["errors"] == 1 and unit["counts"]["failures"] == 0
+    assert "--max-worker-restart=0" in unit["command"]
+    assert "journal_incomplete" in unit["secondary_outcomes"]
+    assert unit["progress"]["active_nodes"] == ["test_synthetic.py::test_hang"]
+    assert {"node": "test_synthetic.py::test_hang", "phase": "???"} in unit["progress"]["failed"]
+    assert unit["progress"]["last_completed"] == "test_synthetic.py::test_first"
+    assert _subject_gone(unit)
 
 
 def test_outer_timeout_is_primary_with_missing_junit_secondary(tmp_path: Path) -> None:
