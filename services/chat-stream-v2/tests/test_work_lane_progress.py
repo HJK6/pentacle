@@ -1,4 +1,6 @@
 """File-derived work survives a paused lane without a running lead."""
+import pytest
+
 from test_work_lanes import run
 
 
@@ -99,6 +101,50 @@ def test_index_revision_history_and_re_read_membership(tmp_path, monkeypatch):
         shown = await env.store.get_work_lane(lid)
         assert [m["spec_id"] for m in shown["members"]] == ["spec_demo__other"]
         assert len([e for e in shown["events"] if e["operation"] == "item_change"]) == 3
+    run(body, str(tmp_path / "fixture.db"))
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("filename", ["spec.md", "summary.md"])
+def test_same_metadata_file_edits_commit_each_material_revision(tmp_path, monkeypatch, explicit, filename):
+    from _shared.specs_service import SpecsSubsystem
+    folder = tmp_path / "memory" / "work" / "in_progress" / "demo__span"
+    folder.mkdir(parents=True)
+    spec_text = "---\nid: spec_demo__span\ntitle: Span\n---\n## Acceptance Criteria\n- [ ] Assemble.\n"
+    (folder / "spec.md").write_text(spec_text)
+    (folder / "summary.md").write_text("**Next action** — Test the span.\n")
+    monkeypatch.setenv("PENTACLE_MEMORY_ROOT", str(tmp_path / "memory"))
+    subsystem = SpecsSubsystem(session_summaries=lambda: [], changed_callback=lambda ids: None,
+                               debounce_s=0, **({"memory_root": tmp_path / "memory"} if explicit else {}))
+    paths = [folder / name for name in ("spec.md", "summary.md")]
+    identity_fingerprint = subsystem._identity_fingerprint
+    fingerprints = {path: identity_fingerprint(path) for path in paths}
+    monkeypatch.setattr(subsystem, "_identity_fingerprint", lambda path, **kwargs:
+                        fingerprints[path] if path in fingerprints else identity_fingerprint(path, **kwargs))
+    now = max(path.stat().st_mtime for path in paths) + 1
+    path = folder / filename
+    original = path.read_text()
+    changed = original.replace("[ ]", "[x]") if filename == "spec.md" else original.replace("Test", "Ship")
+    assert changed != original and len(changed.encode()) == len(original.encode())
+
+    async def body(env):
+        lid = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]["lane_id"]
+        await env.store.reconcile_work_observations(subsystem.scan_work_observations(now=now), settle_s=0, sweep=True)
+        for revision, text in enumerate((changed, original, changed), 2):
+            path.write_text(text)
+            scan = subsystem.scan_work_observations(now=now + revision)
+            assert scan["candidates"]["spec_demo__span"][0]["quality"] == "fresh"
+            await env.store.reconcile_work_observations(scan, settle_s=0, sweep=True)
+            shown = await env.store.get_work_lane(lid)
+            assert shown["members"][0]["obs_rev"] == revision
+            assert shown["lane"]["version"] == 1
+        events = [event for event in shown["events"] if event["operation"] == "item_change"]
+        assert [event["event_id"] for event in events] == [f"item:{lid}:spec_demo__span:{n}" for n in (2, 3, 4)]
+        assert all(event["actor_stream_id"] == "daemon:index" and event["publication_event_id"] is None for event in events)
+        await env.store.reconcile_work_observations(subsystem.scan_work_observations(now=now + 10), settle_s=0, sweep=True)
+        repeated = await env.store.get_work_lane(lid)
+        assert repeated["members"][0]["obs_rev"] == 4 and repeated["lane"]["version"] == 1
+        assert len([event for event in repeated["events"] if event["operation"] == "item_change"]) == 3
     run(body, str(tmp_path / "fixture.db"))
 
 

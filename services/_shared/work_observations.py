@@ -32,7 +32,8 @@ def _signature(path: Path) -> tuple:
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
 
-def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float) -> dict:
+def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float,
+                        previous: dict | None = None) -> dict:
     """Read exactly the two source files, checking identities around the read."""
     paths = (folder / "spec.md", folder / "summary.md")
     before = [_signature(p) for p in paths]
@@ -41,6 +42,10 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     after = [_signature(p) for p in paths]
     unsettled = (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
                  or not all(text.strip() for text in texts))
+    digest = hashlib.sha256(json.dumps([status, *texts], ensure_ascii=False).encode()).hexdigest()
+    if (not unsettled and previous is not None and previous.get("quality") == "fresh"
+            and previous.get("path") == str(folder) and previous.get("source_hash") == digest):
+        return copy.deepcopy(previous)
     try:
         fm = load_frontmatter(texts[0])
     except (ValueError, yaml.YAMLError):
@@ -56,7 +61,6 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
         return {"spec_id": identity, "quality": "stale", "error": "work_files_unsettled", "path": str(folder)}
     facts = parse_work_facts(*texts, status)
     facts["title"] = facts["title"] if isinstance(facts["title"], str) else None
-    digest = hashlib.sha256(json.dumps([status, *texts], ensure_ascii=False).encode()).hexdigest()
     return {"spec_id": identity, "quality": "fresh", "facts": facts,
             "source_hash": digest, "path": str(folder), "error": None,
             "document_revisions": {name: hashlib.sha256(content).hexdigest()
