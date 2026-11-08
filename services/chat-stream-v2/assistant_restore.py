@@ -120,7 +120,19 @@ async def run_ps(pid: str, *, ps_bin: str = "ps", timeout_s: float = PS_TIMEOUT_
         except BaseException:
             await terminate_and_reap(proc)
             raise
-        results.append((int(proc.returncode or 0), out.decode(errors="replace"), err.decode(errors="replace")))
+        value = (int(proc.returncode or 0), out.decode(errors="replace"), err.decode(errors="replace"))
+        if value == (1, "", ""):
+            # A hidden/permission-limited ps row is not kernel absence. EPERM
+            # (or mere PID existence) still supplies no comparable birth.
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                pass
+            except (OSError, ValueError):
+                value = (2, "", "process_absence_unproven")
+            else:
+                value = (2, "", "process_absence_unproven")
+        results.append(value)
     return tuple(results)
 
 

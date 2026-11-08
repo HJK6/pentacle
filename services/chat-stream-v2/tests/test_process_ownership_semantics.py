@@ -111,3 +111,59 @@ def test_unknown_historical_zone_cannot_authorize_manual_restore_or_input_replay
     finally:
         child.terminate()
         child.wait(timeout=5)
+
+
+@pytest.mark.requires("ps birth readable")
+def test_definitively_absent_owned_child_still_restores_once(tmp_path, monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
+
+    async def run():
+        rig = Rig(tmp_path, monkeypatch)
+        try:
+            await rig.start()
+            environment(monkeypatch, "UTC0")
+            token = producer_start(child.pid)
+            await rig.store.update_session(LOCAL, "fd", observer_binding={
+                "executable": "claude", "pane_pid": str(child.pid),
+                "pane_started_at": token, "generation": G0})
+            child.terminate()
+            child.wait(timeout=5)
+            assert rig.store.stop()
+            environment(monkeypatch, "unset")
+            rig.store.start()
+            rig.restore = rig.owner()
+            rig.restore._ps = ar.run_ps
+            assert (await rig.restore.input_death_proof(SEAT, G0))[0] is True
+            assert (await rig.restore.advance())["state"] == "restored"
+            await rig.restore.advance()
+            assert len(rig.spawnctl.sent) == 1 and len(await rig.episodes()) == 1
+        finally:
+            await rig.composite.stop()
+            rig.store.stop()
+    try:
+        asyncio.run(run())
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("kernel", ["gone", "present", "permission", "unexpected"])
+def test_silent_ps_cannot_override_kernel_presence_or_permission(monkeypatch, kernel):
+    from tests.test_process_identity_table import Process
+    calls = []
+    async def spawn(*argv, **kwargs):
+        calls.append((argv, kwargs["env"]))
+        return Process(1, b"")
+    def existence(pid, sig):
+        assert (pid, sig) == (990001, 0)
+        if kernel == "gone": raise ProcessLookupError()
+        if kernel == "permission": raise PermissionError()
+        if kernel == "unexpected": raise OSError("unavailable")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(ar.os, "kill", existence)
+    values = asyncio.run(ar.run_ps("990001"))
+    expected = "gone" if kernel == "gone" else "unknown"
+    assert [ar.classify_ps(*value, "Wed Sep 9 11:00:00 2026") for value in values] == [expected, expected]
+    assert calls[0][1]["TZ"] == "UTC0" and "TZ" not in calls[1][1]
+    assert all(env["LC_ALL"] == "C" for _, env in calls)
