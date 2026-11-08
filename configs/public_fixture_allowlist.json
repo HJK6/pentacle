@@ -151,6 +151,7 @@
     "test/cosmic_components.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/cosmic_scene_builder.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/cosmic_theme.test.ts": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
+    "test/design_library_http.test.js": "Synthetic tailnet (CGNAT) address for the positive Tailscale identity-auth gallery test.",
     "test/desktop_config_coverage.test.js": "Regression detector explicitly names forbidden tokens as its test input.",
     "test/e2e/lib/chat_reliability_run_command.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",
     "test/e2e/lib/flows.send_turn.test.js": "Synthetic identities in routing, rendering, protocol or isolation test fixtures.",

@@ -29,13 +29,15 @@ function unmount(refs) {
 
 window.DASHBOARDS.push({
   id: 'ui-review',
-  name: 'UI Review',
-  description: 'Visual QA artifacts from repos on this machine',
+  name: 'Mockups',
+  description: 'Browse design views, recorded flows and offline prototypes',
   color: '#7ef0ba',
   mount,
   update,
   unmount,
-  pollFn: () => window.cc.listUiReviewArtifacts(),
+  pollFn: () => /^https?:$/.test(window.location.protocol)
+    ? window.fetch('/api/designs').then(response => { if (!response.ok) throw new Error('Design library unavailable'); return response.json(); })
+    : window.cc.listUiReviewArtifacts(),
   pollInterval: 5000,
   idlePollInterval: 15000,
   idleFn: () => true,
