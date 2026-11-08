@@ -13,6 +13,187 @@ from store import Store
 from sessions import VerbError
 from spawnctl import SpawnCtl
 
+pytestmark = pytest.mark.usefixtures("ruling_spec_root")
+
+
+def test_preflight_aggregates_before_any_advisor_or_provider_effect(tmp_path):
+    from front_desk_ingress_replay import harness, HOST, DESK
+    from _shared.specs_service import SpecsSubsystem
+
+    async def go():
+        async with harness(tmp_path) as h:
+            root = tmp_path / "memory"
+            path = root / "work/in_progress/fixture__ingress/spec.md"
+            path.write_text(path.read_text() + '\n## Tracking\n- Operator request: missing quotation marks\n')
+            h["server"].spawnctl = SpawnCtl(h["store"], h["sessions"], tmux=h["provider"],
+                specs=SpecsSubsystem(memory_root=root, session_summaries=lambda: [], changed_callback=lambda _: None))
+            result = await h["dispatch"]({"type": "spawn", "host": HOST, "session_name": "invalid-packet",
+                "request_id": "invalid-packet", "spec_id": "spec_fixture__ingress", "role": "lead",
+                "provider": "codex", "model": "unknown-model", "objective": "",
+                "objective_supported": True, "parent_stream_id": DESK}, "desk")
+            assert result["type"] == "spawn.error"
+            assert result["error_code"] == "spawn_preflight_failed", result
+            assert {e["field"] for e in result["errors"]} == {"objective", "model", "work_item.origin"}
+            assert all(set(e) == {"code", "field", "correction"} for e in result["errors"])
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_request'").fetchone()[0]) == 0
+            assert await h["store"].reservations(include_expired=True) == []
+            assert h["provider"].pastes == [] and h["spawned"].calls == []
+    asyncio.run(go())
+
+
+def test_preflight_unreadable_spec_never_creates_degraded_packet(tmp_path, monkeypatch):
+    from front_desk_ingress_replay import harness, HOST
+    from _shared.spec_reader import SpecReader
+
+    async def go():
+        async with harness(tmp_path) as h:
+            def unavailable(*args):
+                raise ValueError("spec_changed")
+            monkeypatch.setattr(SpecReader, "read", unavailable)
+            result = await h["dispatch"]({"type": "spawn", "host": HOST, "session_name": "degraded",
+                "request_id": "degraded", "spec_id": "spec_fixture__ingress", "role": "lead",
+                "objective": "Implement the accepted intent"}, "desk")
+            assert result["type"] == "spawn.error", result
+            assert result["error_code"] == "spawn_preflight_failed"
+            assert result["errors"][0]["code"] == "spec_unavailable"
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+            assert h["spawned"].calls == []
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("rule", ["composer_boundary", "last_top_level_heading", "first_1600"])
+def test_preflight_packet_has_concrete_frozen_redacted_intent(tmp_path, monkeypatch, rule):
+    import hashlib
+    from front_desk_ingress_replay import harness, HOST
+    from _shared.spec_reader import SpecReader
+
+    async def go():
+        async with harness(tmp_path) as h:
+            path = tmp_path / "memory/work/in_progress/fixture__ingress/spec.md"
+            text = path.read_text() + '\n## Tracking\n- Operator request (message 17): "Fix admission packets"\n'
+            path.write_text(text)
+            task = "# Actual commission\nImplement packet checks."
+            baseline = "# Lead baseline\n" + "baseline instructions " * 100 + "\n"
+            prompt = baseline + task if rule != "first_1600" else "Concrete plain task " * 150
+            msg = {"type": "spawn", "host": HOST, "session_name": "packet", "request_id": "packet",
+                   "idempotency_key": "packet", "spec_id": "spec_fixture__ingress", "role": "planner",
+                   "provider": "codex", "model": "gpt-6.1-sol", "effort": "high",
+                   "objective": "Implement preflight checks", "acceptance": "No malformed packet wakes the advisor",
+                   "initial_prompt": prompt, "risks": "Caller supplied risk", "exclusions": "No policy rewrite"}
+            if rule == "composer_boundary":
+                msg["initial_prompt_baseline_end"] = len(baseline)
+            first = await h["dispatch"](msg, "desk")
+            assert first["type"] == "spawn.pending_ruling", first
+            rid = first["ruling_request_id"]
+            row = await h["server"].lane_rulings._fetch(rid)
+            stored = json.loads(row["intent_json"])
+            packet = json.loads(stored["_ruling_packet"].split("\n", 1)[1])
+            assert list(packet)[:3] == ["objective", "acceptance", "work_item"]
+            assert packet["objective"] == msg["objective"]
+            assert packet["acceptance"] == msg["acceptance"]
+            assert packet["work_item"]["origin"] == "Fix admission packets"
+            assert packet["work_item"]["agent_authored_goal"] == "Exercise ingress."
+            assert packet["spec_content_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+            assert packet["brief"]["excerpt_rule"] == rule
+            assert len(packet["brief"]["brief_excerpt"]) <= 1600
+            assert packet["brief"]["brief_excerpt"].startswith("Concrete plain task" if rule == "first_1600" else "# Actual commission")
+            assert stored["initial_prompt"] == prompt
+            assert stored["risks"] == packet["brief"]["risks"]
+            assert h["spawned"].calls == []
+            before = await h["store"].submit(lambda c: c.execute(
+                "SELECT body FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_request'").fetchone()[0])
+            path.unlink()
+            def forbidden_read(*args):
+                raise AssertionError("same-key retry reread a mutable spec")
+            monkeypatch.setattr(SpecReader, "read", forbidden_read)
+            again = await h["dispatch"]({**msg, "request_id": "new-transport"}, "desk")
+            assert again["ruling_request_id"] == rid
+            assert (await h["server"].lane_rulings._fetch(rid))["intent_json"] == row["intent_json"]
+            assert await h["store"].submit(lambda c: c.execute(
+                "SELECT count(*) FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_request' AND body=?", (before,)).fetchone()[0]) == 1
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("condition,code", [("missing", "spec_unresolved"), ("unavailable", "spec_unavailable"), ("absent", "spec_unavailable")])
+def test_preflight_binding_prerequisite_is_reported_once(tmp_path, monkeypatch, condition, code):
+    from front_desk_ingress_replay import harness, HOST
+    from _shared.specs_service import SpecsSubsystem, SpecResolutionUnavailable
+
+    async def go():
+        async with harness(tmp_path) as h:
+            specs = SpecsSubsystem(memory_root=tmp_path / "memory", session_summaries=lambda: [], changed_callback=lambda _: None)
+            ctl = SpawnCtl(h["store"], h["sessions"], tmux=h["provider"], specs=None if condition == "absent" else specs)
+            h["server"].spawnctl = ctl
+            if condition == "unavailable":
+                async def unavailable(*args):
+                    raise SpecResolutionUnavailable("fixture unavailable")
+                monkeypatch.setattr("spawnctl.spec_resolution_view", unavailable)
+            result = await h["dispatch"]({"type": "spawn", "host": HOST, "session_name": "binding",
+                "request_id": "binding", "spec_id": "spec_fixture__missing", "role": "lead",
+                "objective": "Implement accepted work"}, "desk")
+            assert result["error_code"] == "spawn_preflight_failed", result
+            assert [e["code"] for e in result["errors"]] == [code]
+            assert await h["store"].reservations(include_expired=True) == []
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+    asyncio.run(go())
+
+
+def test_preflight_auth_failure_does_not_disclose_packet_fields(tmp_path):
+    from front_desk_ingress_replay import harness, HOST
+
+    async def go():
+        async with harness(tmp_path) as h:
+            result = await h["dispatch"]({"type": "spawn", "host": HOST, "session_name": "unauthorized",
+                "request_id": "unauthorized", "spec_id": "spec_private__unknown", "objective": "",
+                "_auth_context": {"token_verified": True}, "stream_token": "fake-credential"}, "stranger")
+            assert result["type"].endswith(".error"), result
+            assert "errors" not in result and "spec_private__unknown" not in json.dumps(result)
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
+    asyncio.run(go())
+
+
+def test_preflight_blob_packet_and_legacy_objective_retry_use_frozen_evidence(tmp_path):
+    import hashlib
+    from blobs import BlobStore
+    from front_desk_ingress_replay import harness, HOST
+    from _shared.specs_service import SpecsSubsystem
+
+    async def go():
+        async with harness(tmp_path) as h:
+            blobs = BlobStore(str(tmp_path / "blobs"))
+            await blobs.start()
+            baseline = "# Baseline\n" + "Keep the complete contract. " * 100 + "\n"
+            text = baseline + "# Task\nAcceptance: Exactly one advisory review\nSyntheticCredentialAbc123456789XYZ"
+            sha = hashlib.sha256(text.encode()).hexdigest()
+            path = blobs._path_for(sha)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            ctl = SpawnCtl(h["store"], h["sessions"], tmux=h["provider"], prompt_blobs=blobs,
+                specs=SpecsSubsystem(memory_root=tmp_path / "memory", session_summaries=lambda: [], changed_callback=lambda _: None))
+            h["server"].spawnctl = ctl
+            msg = {"type": "spawn", "host": HOST, "session_name": "blob", "request_id": "blob",
+                   "idempotency_key": "blob", "spec_id": "spec_fixture__ingress", "role": "planner",
+                   "initial_prompt_blob_sha": sha, "initial_prompt_baseline_end": len(baseline)}
+            result = await h["dispatch"](msg, "desk")
+            assert result["type"] == "spawn.pending_ruling", result
+            row = await h["server"].lane_rulings._fetch(result["ruling_request_id"])
+            intent = json.loads(row["intent_json"])
+            packet = json.loads(intent["_ruling_packet"].split("\n", 1)[1])
+            assert packet["brief"]["excerpt_rule"] == "composer_boundary"
+            assert packet["brief"]["brief_excerpt"].startswith("# Task")
+            assert "Exactly one advisory review" in packet["acceptance"]
+            assert "SyntheticCredentialAbc123456789XYZ" not in intent["_ruling_packet"]
+            assert "[redacted]" in intent["_ruling_packet"]
+            assert "initial_prompt" not in intent and intent["initial_prompt_blob_sha"] == sha
+            assert intent["objective_source"] == "derived"
+            path.unlink()
+            (tmp_path / "memory/work/in_progress/fixture__ingress/spec.md").unlink()
+            retry = await h["dispatch"]({**msg, "request_id": "new-transport"}, "desk")
+            assert retry["ruling_request_id"] == result["ruling_request_id"], retry
+            assert (await h["server"].lane_rulings._fetch(result["ruling_request_id"]))["intent_json"] == row["intent_json"]
+    asyncio.run(go())
+
 
 ROOT = "fixture-root:primary"
 ADVISOR = "fixture-advisor:astra"
@@ -1114,7 +1295,8 @@ def test_ruled_lead_spawn_checks_its_task_link_at_admission_not_release():
             root, _advisor, server, spawned = await _rulings_rig(store, spawnctl=LinkCheckingSpawn())
             with pytest.raises(VerbError) as exc:
                 await server._on_spawn({**_spawn_msg(root, "unlinked"), "spec_id": "spec_demo__other"})
-            assert exc.value.code == "work_lane_assignment_unlinked"
+            assert exc.value.code == "spawn_preflight_failed"
+            assert exc.value.extra["errors"][0]["code"] == "work_lane_assignment_unlinked"
             reply = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
             assert reply["type"] == "spawn.pending_ruling"
             # A retry of the admitted request is never re-gated.
@@ -1165,7 +1347,8 @@ def test_covered_fd_spawn_without_spec_is_refused_work_assignment_required():
             msg.pop("spec_id")
             with pytest.raises(VerbError) as exc:
                 await server._on_spawn(msg)
-            assert exc.value.code == "work_assignment_required"
+            assert exc.value.code == "spawn_preflight_failed"
+            assert exc.value.extra["errors"][0]["code"] == "work_assignment_required"
             assert spawned.calls == []
             count = await store.submit(lambda c: c.execute(
                 "SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0])

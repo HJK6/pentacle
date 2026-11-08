@@ -12,6 +12,26 @@ produces an unbound child. Explicit spec tags still resolve normally.
 Lead and QA commissions retain their work binding. Identity, lifecycle,
 objective, provider/account and QA integrity checks remain in force.
 
+New commissions covered by the assistant advisor use the existing admission
+checks before creating a ruling or waking the advisor. A mechanical failure
+returns `spawn.error`, `error_code: "spawn_preflight_failed"`, and `errors` with
+at most eight `{code, field, correction}` entries. The CLI prints the same
+array. Repair the values and submit a new intent. Authentication/account
+authorization still fail first; dependent fields report their unavailable
+prerequisite once. `spec_unavailable` means fresh source could not be read,
+whereas `spec_unresolved` means the supplied identity could not resolve.
+
+The advisor still reviews a valid packet substantively. Its display starts with
+the objective, acceptance and separately attributed work-item origin; missing
+origin stays `origin_missing: true`. An existing Tracking `- Operator request`
+line with malformed quote syntax returns `origin_malformed`, its location and
+the expected shape. This does not require inventing an operator request.
+The packet records `spec_content_sha256` from the exact resolved text and an
+`excerpt_rule`: `composer_boundary` when this CLI composed a role baseline,
+otherwise `last_top_level_heading`, then `first_1600`. The excerpt is bounded,
+redacted display data; full baseline and intent remain stored. A same-key retry
+keeps its original packet and digest. Release rechecks authoritative guards.
+
 ## Outbound credentials
 
 `agent_orch/send_boundary.py` owns credential loading and websocket serialization.
@@ -130,6 +150,23 @@ peer records retirement intent and a generation-fenced deferred reap, with proce
 death unverified. For a seat subject to external lane rulings, only the report
 prerequisite is waived: approval and the existing timeout/release behavior remain,
 and release rechecks the current principal. Manager reparent behavior is unchanged.
+
+For a lost close response, preserve the original complete invocation, including
+`--expected-generation`, reason, caller, flags, progeny and any waiver. The CLI
+prints `close request ID: <id>` to stderr before transport and keeps JSON on
+stdout. Repeat that invocation with `--request-id <original-id>`; an explicit
+ID requires an explicit `--expected-generation`. For example:
+
+```sh
+agent-orch close fixture:worker --expected-generation saved-generation --reason 'Accepted work finished'
+# If the response was lost, use the printed ID with the same complete invocation:
+agent-orch close fixture:worker --expected-generation saved-generation --reason 'Accepted work finished' --request-id close-original-id
+```
+
+An exact retry reconciles the existing decision. Changed immutable inputs or
+generation remain conflicts/refusals. The CLI never retries automatically or
+allocates another ID after timeout. Approval while a seat is working still
+defers closure under the existing safety checks.
 
 `agent-orch list` carries `requested_model`, `requested_effort`, `effective_model`,
 `effective_effort`, and `routing_integrity` on every row. `model` and `effort` are

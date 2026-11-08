@@ -138,21 +138,39 @@ def _work_item(spec_id: str) -> tuple[dict[str, Any], str | None]:
         from _shared.spec_reader import SpecReader
         status, _, _, text = SpecReader(None).read(spec_id)
         item["status"] = status
+        item["spec_content_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         match = re.search(r"(?m)^title:\s*['\"]?(.+?)['\"]?\s*$", text)
         if match:
-            item["title"] = match.group(1)
+            item["title"] = scrub(match.group(1), 600) or ""
         goal = re.search(r"(?ims)^## Goal\s*\n(.*?)(?=^## |\Z)", text)
         if goal:
-            item["agent_authored_goal"] = goal.group(1).strip()[:600]
+            item["agent_authored_goal"] = scrub(goal.group(1), 600) or ""
         tracking = re.search(r"(?ims)^## Tracking\s*\n(.*?)(?=^## |\Z)", text)
         if tracking:
-            origin = re.search(r'(?im)^- Operator request(?: \([^\n)]*\))?: ["“]([^"”\n]*)["”]', tracking.group(1))
+            pattern = r'(?im)^- Operator request(?: \([^\n)]*\))?: ["“]([^"”\n]*)["”]'
+            origin = re.search(pattern, tracking.group(1))
             if origin:
-                item.update(origin=origin.group(1)[:600], origin_missing=False,
-                            origin_line=origin.group(0)[:600])
+                item.update(origin=scrub(origin.group(1), 600) or "", origin_missing=False,
+                            origin_line=scrub(origin.group(0), 600) or "")
+            for line in re.finditer(r"(?m)^- Operator request[^\n]*", tracking.group(1)):
+                if not re.match(pattern, line.group(0)):
+                    item.update(origin_malformed=True,
+                                origin_location=f"## Tracking, line {text.count(chr(10), 0, tracking.start(1) + line.start()) + 1}")
+                    break
         return item, None
     except Exception as exc:
-        return item, type(exc).__name__
+        return item, "spec_unresolved" if isinstance(exc, ValueError) and str(exc) == "spec_unresolved" else "spec_unavailable"
+
+
+def _brief_excerpt(text: str, intent: dict[str, Any]) -> tuple[str, str]:
+    """Select display data only; a caller's heading never supplies authority."""
+    boundary = intent.get("initial_prompt_baseline_end")
+    if isinstance(boundary, int) and not isinstance(boundary, bool) and 0 <= boundary <= len(text):
+        chosen, rule = text[boundary:], "composer_boundary"
+    else:
+        headings = list(re.finditer(r"(?m)^# ", text))
+        chosen, rule = (text[headings[-1].start():], "last_top_level_heading") if headings else (text, "first_1600")
+    return scrub(chosen, 1600) or "", rule
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -505,6 +523,8 @@ class AssistantLaneRulings:
 
     async def request_spawn(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         from spawnctl import new_work_commission
+        from sessions import VerbError
+        from _shared.spawn_profiles import SpawnProfileError, resolve_spawn, validate_v2
         composite = self._composite()
         auth = msg.get("_auth_context") or {}
         key = str(msg.get("idempotency_key") or msg.get("request_id") or "")
@@ -519,18 +539,40 @@ class AssistantLaneRulings:
             return None
         binding = await self.binding()
         message = self._safe_intent(msg)
-        if not str(message.get("objective") or "").strip():
+        errors: list[dict[str, str]] = []
+
+        def correction(code: str, field: str, text: str) -> None:
+            if len(errors) < 8:
+                errors.append({"code": code, "field": field, "correction": scrub(text, 500) or ""})
+
+        brief = ""
+        if known and not str(message.get("objective") or "").strip():
+            # A legacy producer's derived objective belongs to the frozen
+            # intent too; replay must not depend on a mutable blob/spec read.
+            prior = await self.store.submit(lambda conn: conn.execute(
+                "SELECT intent_json FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)
+            ).fetchone())
+            frozen = json.loads(prior[0])
+            message["objective"] = frozen.get("objective")
+            if "objective_source" in frozen:
+                message["objective_source"] = frozen["objective_source"]
+        if not known:
             brief_reader = getattr(self.server.spawnctl, "_brief_from_message", None)
-            brief = await brief_reader(message) if callable(brief_reader) else str(message.get("initial_prompt") or "")
+            try:
+                brief = await brief_reader(message) if callable(brief_reader) else str(message.get("initial_prompt") or "")
+            except VerbError as exc:
+                correction(exc.code, "initial_prompt", "Supply one readable initial prompt or an available prompt blob, then resubmit.")
             objective, source, error = resolve_objective(
                 message.get("objective"), objective_supported=message.get("objective_supported"),
                 parent_stream_id=message.get("parent_stream_id"), brief=brief,
                 title=message.get("title"), objective_source=message.get("objective_source"),
             )
             if error:
-                raise ValueError(error)
-            message["objective"] = objective
-            message["objective_source"] = source
+                correction(error, "objective", "Supply the commission objective as one nonempty line of at most 120 characters.")
+            else:
+                if not str(message.get("objective") or "").strip():
+                    message["objective_source"] = source
+                message["objective"] = objective
         if not key:
             raise ValueError("assistant_ruling_spawn_key_required")
         # A CLI retry carries a fresh RPC request ID. Keep the daemon intent
@@ -544,29 +586,67 @@ class AssistantLaneRulings:
             return None
         spawnctl = self.server.spawnctl
         spec_id = str(message.get("spec_id") or "")
+        item = None
         if not known:
-            if hasattr(spawnctl, "_work_link_refusal"):
-                host, name = target.split(":", 1)
-                authenticated = {**message, "_auth_context": {**auth, "covered_admission": True}}
-                spec_binding = await spawnctl._resolve_spec_binding(authenticated, host, name)
-                spec_id = str(spec_binding.get("assigned_spec_id") or "")
-                if not spec_id:
-                    from sessions import VerbError
+            # These are the same pure tuple predicates used by _resolve_launch;
+            # account choice was authorized by Server before entering admission.
+            # A command-only launch has no provider tuple to validate here.
+            provider = str(message.get("provider") or "").strip()
+            if provider or message.get("schema") is not None:
+                try:
+                    if message.get("schema") is not None:
+                        validate_v2(schema=str(message["schema"]), provider=provider,
+                            model=str(message.get("model") or ""), effort=str(message.get("effort") or ""),
+                            host=target.split(":", 1)[0], spawn_profile=str(message.get("spawn_profile") or ""),
+                            catalog_version=str(message.get("catalog_version") or ""),
+                            resolution_source=str(message.get("resolution_source") or ""))
+                    else:
+                        resolve_spawn(provider=provider, model=message.get("model"), effort=message.get("effort"),
+                                      host=target.split(":", 1)[0], legacy=True)
+                except SpawnProfileError as exc:
+                    field = {"spawn_model_unsupported": "model", "spawn_provider_unavailable": "provider",
+                             "spawn_effort_unsupported": "effort", "spawn_pair_unsupported": "effort",
+                             "spawn_schema_unsupported": "schema", "spawn_profile_unknown": "spawn_profile",
+                             "spawn_catalog_version_conflict": "catalog_version"}.get(exc.code, "provider_tuple")
+                    correction(exc.code, field, "Resolve the provider/model/effort tuple using the current spawn catalog, then resubmit.")
+            try:
+                if hasattr(spawnctl, "_work_link_refusal"):
+                    host, name = target.split(":", 1)
+                    authenticated = {**message, "_auth_context": {**auth, "covered_admission": True}}
+                    spec_binding = await spawnctl._resolve_spec_binding(authenticated, host, name)
+                    spec_id = str(spec_binding.get("assigned_spec_id") or "")
+                    if not spec_id:
+                        raise VerbError("work_assignment_required", "Supply this commission's assigned spec with --spec-id.")
+                    refusal = await spawnctl._work_link_refusal(authenticated, spec_binding)
+                    if refusal is not None:
+                        # The resolved spec is still independently readable even
+                        # when its product-lane link needs repair.
+                        correction(refusal.code, "spec_id", str(refusal))
+                elif not spec_id:
                     raise VerbError("work_assignment_required", f"{auth['stream_id']} requires an assigned spec")
-                refusal = await spawnctl._work_link_refusal(authenticated, spec_binding)
-                if refusal is not None:
-                    raise refusal
-            elif not spec_id:
-                from sessions import VerbError
-                raise VerbError("work_assignment_required", f"{auth['stream_id']} requires an assigned spec")
-        item, item_error = _work_item(spec_id)
-        if spec_id and hasattr(self.store, "open_lanes_for_spec"):
-            item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
+            except VerbError as exc:
+                code = ("spec_unavailable" if exc.code == "spec_unresolved" and "spec_resolution" in exc.extra
+                        and exc.extra["spec_resolution"] is None else exc.code)
+                correction(code, "spec_id", "Restore fresh spec resolution before resubmitting." if code == "spec_unavailable"
+                           else "Supply a resolvable assigned --spec-id linked to this commission's open product lane.")
+                spec_id = ""  # Origin and link depend on this prerequisite.
+            if spec_id:
+                item, item_error = _work_item(spec_id)
+                if item_error:
+                    correction(item_error, "spec_id", "Restore readable canonical spec content before resubmitting."
+                               if item_error == "spec_unavailable" else "Supply a uniquely resolvable canonical --spec-id.")
+                elif item.get("origin_malformed"):
+                    correction("origin_malformed", "work_item.origin",
+                        f'{item["origin_location"]}: expected - Operator request (source): "exact operator text"; preserve the existing source and quote.')
+                if hasattr(self.store, "open_lanes_for_spec"):
+                    item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
+            if errors:
+                raise VerbError("spawn_preflight_failed", "Repair the admission packet and submit a new intent.", errors=errors)
         request = await self._create(
             action="spawn", key="spawn:" + key, intent=message,
             requester=str(auth["stream_id"]), requester_generation=str(auth["session_generation"]),
             binding=binding, target=target, target_generation="", covered=True,
-            work_item=item, work_item_error=item_error,
+            work_item=item, brief_text=brief,
         )
         if request["state"] == "bypassed":
             return None
@@ -811,6 +891,7 @@ class AssistantLaneRulings:
         target_generation: str, linked_from: str = "", covered: bool = False,
         work_item: dict[str, Any] | None = None, work_item_error: str | None = None,
         recent_cards: dict[str, int] | None = None,
+        brief_text: str | None = None,
     ) -> dict[str, Any]:
         if action not in _ACTION_KINDS:
             raise ValueError("assistant_ruling_action_invalid")
@@ -859,11 +940,25 @@ class AssistantLaneRulings:
                         packet["recent_cards"] = recent_cards
                     else:
                         packet["brief"] = {key: intent[key] for key in
-                            ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta") if key in intent}
-                        packet["brief"]["acceptance"] = _acceptance_brief(intent)
-                        if intent.get("initial_prompt"):
+                            ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta",
+                             "evidence", "evidence_refs", "risk", "risks", "exclusions") if key in intent}
+                        packet["brief"]["acceptance"] = _acceptance_brief(
+                            {**intent, "initial_prompt": brief_text} if action == "spawn" and brief_text is not None else intent)
+                        if action == "spawn":
+                            excerpt, rule = _brief_excerpt(brief_text or "", intent)
+                            packet["brief"].update(brief_excerpt=excerpt, excerpt_rule=rule)
+                            packet = {"objective": intent.get("objective"),
+                                      "acceptance": packet["brief"]["acceptance"], "work_item": work_item,
+                                      "spec_content_sha256": (work_item or {}).get("spec_content_sha256"),
+                                      **{key: value for key, value in packet.items() if key != "work_item"}}
+                        elif intent.get("initial_prompt"):
                             packet["brief"]["brief_excerpt"] = str(intent["initial_prompt"])[:1600]
-                    stored_intent["_ruling_packet"] = "[Assistant lane ruling request]\n" + _canonical(packet)
+                        packet["brief"] = {key: scrub(value, 2000) if isinstance(value, str)
+                                           else scrub(_canonical(value), 2000) for key, value in packet["brief"].items()}
+                        if action == "spawn":
+                            packet["objective"] = packet["brief"].get("objective")
+                            packet["acceptance"] = packet["brief"]["acceptance"]
+                    stored_intent["_ruling_packet"] = "[Assistant lane ruling request]\n" + json.dumps(packet, ensure_ascii=True)
                 conn.execute(
                     "INSERT INTO v2_assistant_lane_rulings (ruling_request_id,request_key,action,intent_digest,intent_json,"
                     "requester_stream_id,requester_generation,authority_stream_id,authority_generation,target_stream_id,"

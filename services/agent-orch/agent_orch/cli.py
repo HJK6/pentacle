@@ -372,45 +372,33 @@ def _initial_prompt_payload(
     *,
     baseline_content: str | None = None,
 ) -> tuple[dict[str, object], int]:
-    if getattr(args, "initial_prompt", None) is not None:
-        text = args.initial_prompt
-        if baseline_content is not None:
-            text = _compose_role_baseline_prompt(baseline_content, text)
-        data = text.encode("utf-8")
-        if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
-            return {"initial_prompt": text}, len(data)
-        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
-        if upload.get("type") != "upload_prompt_blob.ok":
-            raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
-        return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)
-    if getattr(args, "initial_prompt_file", None) is None:
-        if baseline_content is None:
-            return {}, 0
-        data = baseline_content.encode("utf-8")
-        if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
-            return {"initial_prompt": baseline_content}, len(data)
-        upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
-        if upload.get("type") != "upload_prompt_blob.ok":
-            raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
-        return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)
-    path = Path(args.initial_prompt_file).expanduser()
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise FileNotFoundError(f"initial_prompt_file_unreadable: {path}") from exc
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("prompt_blob_invalid_utf8") from exc
+    text = getattr(args, "initial_prompt", None)
+    if text is None and getattr(args, "initial_prompt_file", None) is not None:
+        path = Path(args.initial_prompt_file).expanduser()
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise FileNotFoundError(f"initial_prompt_file_unreadable: {path}") from exc
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("prompt_blob_invalid_utf8") from exc
+    if text is None and baseline_content is None:
+        return {}, 0
+    metadata: dict[str, object] = {}
     if baseline_content is not None:
+        supplied_length = len(text or "")
         text = _compose_role_baseline_prompt(baseline_content, text)
-        data = text.encode("utf-8")
+        # This composer knows exactly where the injected contract ends. The
+        # daemon uses this offset only to select display data for new packets.
+        metadata["initial_prompt_baseline_end"] = len(text) - supplied_length
+    data = text.encode("utf-8")
     if len(data) <= INITIAL_PROMPT_INLINE_CAP_BYTES:
-        return {"initial_prompt": text}, len(data)
+        return {"initial_prompt": text, **metadata}, len(data)
     upload = asyncio.run(upload_prompt_blob_once(config, data, timeout=float(getattr(args, "timeout", None) or 30.0)))
     if upload.get("type") != "upload_prompt_blob.ok":
         raise RuntimeError(str(upload.get("error_code") or upload.get("type") or "upload_prompt_blob_failed"))
-    return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha")}, len(data)
+    return {"initial_prompt_blob_sha": upload.get("prompt_blob_sha"), **metadata}, len(data)
 
 
 def _capture_initial_prompt(
@@ -3615,6 +3603,15 @@ def close(args: argparse.Namespace) -> int:
     """
     if not _require_stream_id("close", args.stream_id):
         return 2
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and not str(getattr(args, "expected_generation", None) or "").strip():
+        print("agent-orch close: --request-id requires --expected-generation", file=sys.stderr)
+        return 2
+    if request_id is not None and (not isinstance(request_id, str) or not request_id.strip()):
+        print("agent-orch close: --request-id must be nonempty", file=sys.stderr)
+        return 2
+    request_id = request_id if request_id is not None else f"close-{uuid.uuid4()}"
+    print(f"close request ID: {request_id}", file=sys.stderr, flush=True)
     config = load_config()
     caller_stream_id = (
         getattr(args, "caller_stream_id", None)
@@ -3642,6 +3639,7 @@ def close(args: argparse.Namespace) -> int:
                 progeny_stream_id=getattr(args, "progeny", None),
                 disposition_waived_reason=getattr(args, "disposition_waived_reason", None),
                 expected_generation=getattr(args, "expected_generation", None),
+                request_id=request_id,
             )
         )
     except ValueError as exc:
@@ -6257,6 +6255,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     close_parser = subparsers.add_parser("close")
     close_parser.add_argument("--reason", default="manual")
+    close_parser.add_argument("--request-id", help="Replay the original complete close invocation; requires --expected-generation.")
     close_parser.add_argument(
         "--expected-generation",
         help="Refuse if the target's current session generation differs from this value.",

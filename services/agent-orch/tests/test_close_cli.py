@@ -61,6 +61,7 @@ def patched_close(monkeypatch, tmp_path):
         progeny_stream_id=None,
         disposition_waived_reason=None,
         expected_generation=None,
+        request_id=None,
     ):
         calls.append(
             {
@@ -75,6 +76,7 @@ def patched_close(monkeypatch, tmp_path):
                 "progeny_stream_id": progeny_stream_id,
                 "disposition_waived_reason": disposition_waived_reason,
                 "expected_generation": expected_generation,
+                "request_id": request_id,
             }
         )
         if state["raises"] is not None:
@@ -140,6 +142,31 @@ def test_close_parser_forwards_expected_generation(patched_close):
     assert cli.close(args) == 0
     assert patched_close.calls[0]["expected_generation"] == "prepared-generation"
     assert patched_close.calls[0]["reason"] == "Retire prepared generation"
+
+
+def test_close_parser_forwards_exact_retry_id(patched_close, capsys):
+    args = cli.build_parser().parse_args([
+        "close", "hostb:codex-child", "--request-id", "close-original",
+        "--expected-generation", "prepared-generation",
+    ])
+    assert cli.close(args) == 0
+    assert patched_close.calls[0]["request_id"] == "close-original"
+    assert json.loads(capsys.readouterr().out)["type"] == "close.ok"
+
+
+def test_close_generated_id_survives_transport_loss(patched_close, capsys):
+    patched_close.set_raises(TimeoutError("lost reply"))
+    assert cli.close(_close_args(expected_generation="owned-generation")) == 67
+    output = capsys.readouterr()
+    request_id = patched_close.calls[0]["request_id"]
+    assert request_id and request_id.startswith("close-")
+    assert f"close request ID: {request_id}" in output.err
+    assert output.out == ""
+
+
+def test_close_explicit_id_requires_generation_before_transport(patched_close):
+    assert cli.close(_close_args(request_id="close-original")) == 2
+    assert patched_close.calls == []
 
 
 def test_close_already_closed_is_success(patched_close, capsys):

@@ -19,6 +19,8 @@ from test_assistant_prose_mirror import ASSISTANT, ROOT, _config, _normalized_tu
 from test_assistant_lane_rulings import BlockedSpawn, RecordingSpawn, _chat_lines, _rulings_rig, _spawn_msg
 from test_work_lanes import Env
 
+pytestmark = pytest.mark.usefixtures("ruling_spec_root")
+
 
 def _run(body):
     async def go():

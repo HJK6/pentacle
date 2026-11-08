@@ -7,6 +7,8 @@ import pytest
 from store import Store
 from test_assistant_lane_rulings import _rulings_rig, ROOT, ADVISOR
 
+pytestmark = pytest.mark.usefixtures("ruling_spec_root")
+
 
 def test_authority_set_records_brief_and_seat_shape(tmp_path):
     brief = tmp_path / 'brief.md'

@@ -2,6 +2,19 @@
 
 The daemon launches configured Claude/Codex CLI sessions in tmux, ingests their native JSONL transcripts, persists session and coordination state, and serves WebSocket clients. It includes the `agent-orch` coordination RPCs, assets, schedules, notifications and authenticated web/mobile transport.
 
+Covered assistant commissions run non-mutating admission preflight before
+creating a ruling, enqueueing its notice or launching/reserving a provider.
+`spawn_preflight_failed` carries at most eight redacted `{code, field,
+correction}` entries in `errors`; account authorization remains fail-fast.
+The existing spec resolver, work binding and model tuple predicates are reused;
+no routing policy or advisor authority changes. Missing operator origin remains
+honest substantive input; malformed existing Tracking origin syntax is a
+mechanical error. New decision packets retain the exact resolved
+`spec_content_sha256` and display-only `excerpt_rule`, with complete immutable
+intent in the existing ruling row. Existing pending requests retain their
+original evidence, and release still rechecks authority and safety.
+See [CLI admission and exact close retries](../agent-orch/README.md#supporting-spawn-admission).
+
 ## Accepted report evidence
 
 `work.report.get` reads an immutable ingested report by `report_id`. Existing
