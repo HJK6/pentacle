@@ -553,8 +553,8 @@ class AssistantLaneRulings:
                 "SELECT intent_json FROM v2_assistant_lane_rulings WHERE request_key=?", ("spawn:" + key,)
             ).fetchone())
             frozen = json.loads(prior[0])
-            message["objective"] = frozen.get("objective")
-            if "objective_source" in frozen:
+            if frozen.get("objective_source") == "derived":
+                message["objective"] = frozen.get("objective")
                 message["objective_source"] = frozen["objective_source"]
         if not known:
             brief_reader = getattr(self.server.spawnctl, "_brief_from_message", None)

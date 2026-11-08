@@ -195,6 +195,28 @@ def test_preflight_blob_packet_and_legacy_objective_retry_use_frozen_evidence(tm
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("objective", ["", None, "omitted"])
+def test_preflight_explicit_objective_cannot_be_erased_by_retry(tmp_path, objective):
+    from front_desk_ingress_replay import harness, HOST, DESK
+
+    async def go():
+        async with harness(tmp_path) as h:
+            msg = {"type": "spawn", "host": HOST, "session_name": "explicit", "request_id": "explicit",
+                   "idempotency_key": "explicit", "spec_id": "spec_fixture__ingress", "role": "lead",
+                   "parent_stream_id": DESK, "objective_supported": True, "objective": "Implement original task"}
+            first = await h["dispatch"](msg, "desk")
+            assert first["type"] == "spawn.pending_ruling", first
+            retry = {**msg, "request_id": "retry", "objective": objective}
+            if objective == "omitted":
+                retry.pop("objective")
+            result = await h["dispatch"](retry, "desk")
+            assert result["type"] == "spawn.error", result
+            assert result["error_code"] == "assistant_ruling_intent_changed"
+            assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 1
+            assert h["spawned"].calls == []
+    asyncio.run(go())
+
+
 ROOT = "fixture-root:primary"
 ADVISOR = "fixture-advisor:astra"
 
