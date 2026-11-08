@@ -143,18 +143,22 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
             live = await tmux.close_pane_identity("v2-owned")
             assert live is not None
             assert live["server_version"] in {"3.4", "3.7c"}
+            # This server is private. Latch the actual retained-pane exit before
+            # triggering it, so scheduler load cannot exhaust a polling guess.
+            rc, _ = await tmux.run("set-hook", "-g", "pane-died",
+                                   "wait-for -S owned-pane-exited")
+            assert rc == 0
             # Only the pane's own code exits or signals itself. No foreign PID reuse.
             marker.touch()
-            for _ in range(250):
-                rc, out = await tmux.run("list-panes", "-s", "-t", "=v2-owned:", "-F",
-                                         "#{pane_dead_status}|#{pane_dead_signal}")
-                terminal = out.rstrip("\n")
-                if rc == 0 and (terminal == "0|" if exit_kind == "status" else
-                                terminal.startswith("|") and len(terminal) > 1):
-                    break
-                await asyncio.sleep(0.02)
-            else:
-                pytest.fail(f"owned pane exit status not observed: {out!r}")
+            rc, _ = await tmux.run("wait-for", "owned-pane-exited")
+            assert rc == 0
+            rc, out = await tmux.run("list-panes", "-s", "-t", "=v2-owned:", "-F",
+                                     "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")
+            assert rc == 0
+            dead, terminal = out.rstrip("\n").split("|", 1)
+            assert dead == "1"
+            assert (terminal == "0|" if exit_kind == "status" else
+                    terminal.startswith("|") and len(terminal) > 1), out
             assert await tmux.has_session("v2-owned")  # retained dead pane, not missing session
             assert await tmux.close_pane_identity("v2-owned") is None
             assert sentinel.poll() is None

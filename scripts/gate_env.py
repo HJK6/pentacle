@@ -99,6 +99,9 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 limits = target.get("tier_timeouts")
                 if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
                     problems.append("tier_timeouts of " + tname)
+                if "unit_workers" in target and (target.get("kind") != "run_gate" or target.get("gate") not in ("unit", "merge")
+                                                 or type(target["unit_workers"]) is not int or target["unit_workers"] < 1):
+                    problems.append("unit_workers of " + tname)
 
     if problems:
         raise SetupFailure([fail("config", "malformed gate-env.json: " + ", ".join(problems), "restore the checked-in scripts/gate-env.json")])
@@ -146,6 +149,16 @@ def find_exe(name: str, dirs: List[str], *, want_major: Optional[str] = None, ru
             continue
         return {"path": str(path), "realpath": real, "version": version, "sha256": file_digest(Path(real))}, rejected
     return None, rejected
+
+
+def host_cpu_identity() -> Dict[str, Any]:
+    affinity = None
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = sorted(os.sched_getaffinity(0))
+        except OSError:
+            pass  # Unavailable observation, never an admission or worker-count decision.
+    return {"logical_count": os.cpu_count(), "affinity": affinity}
 
 
 def resolve_toolchain(config: Dict[str, Any], needs: List[str], *, ambient_path: Optional[str] = None,
@@ -890,6 +903,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if failures:
             raise SetupFailure(failures)
         writer.emit("prepared", toolchain={k: {"version": v["version"], "sha256": v["sha256"], "realpath": v["realpath"]} for k, v in toolchain.items()},
+                    host_cpu=host_cpu_identity(),
                     locale=locale_name, dependency=dep_info, npm=npm_info, prepared_key=prepared_dir.name,
                     effective_selection=selection,
                     **({"passed_environment": {ENV_NAME: instruction_input}} if instruction_input else {}),
@@ -1028,6 +1042,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         runner = service_dir / "tools" / "run_gate.py"
         command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
                    "--basetemp", str(basetemp)]
+        if "unit_workers" in target:
+            command += ["--unit-workers", str(target["unit_workers"])]
         if not limits:
             command += ["--timeout-seconds", str(tier_s)]
         wall_s = timeout_s + config["reserve_s"]

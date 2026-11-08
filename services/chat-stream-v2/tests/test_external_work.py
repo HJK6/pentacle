@@ -13,6 +13,8 @@ from server import Server
 from store import STREAM_TOKEN_HASH_VERSION, Store
 from test_nudges import HOST, Harness
 
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
 T0 = 1_900_000_000.0
 WATCH = "fixture-watch"
 CONFIG = ExternalWorkConfig("enabled", WATCH, "Fixture external worker", "fixture://queue")
