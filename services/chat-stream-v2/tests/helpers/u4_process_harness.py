@@ -82,8 +82,9 @@ def launch_daemon(source, root):
             if not measured:
                 event('queued_read_started',queue_wait_s=picked_up-enqueue,pickup_mono_s=picked_up)
             value=conn.execute('SELECT 42').fetchone()[0]
-            return value,picked_up,time.monotonic()
-        value,picked_up,finished=await owned['store'].submit(callback)
+            return value,picked_up
+        value,picked_up=await owned['store'].submit(callback)
+        finished=time.monotonic()  # include actual result delivery back to the daemon loop
         if measured:
             # Timestamp the real Store operation; synthetic publication is separate
             # and must neither occupy its callback nor block the daemon event loop.
