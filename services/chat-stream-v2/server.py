@@ -488,7 +488,7 @@ class _EncodedFrame:
 
 
 def _encode_frame(payload: Any) -> str:
-    if isinstance(payload, dict) and payload.get("type") in {"snapshot", "session.inventory"}:
+    if isinstance(payload, dict) and payload.get("type") in {"snapshot", "session.inventory", "work_lanes.inventory"}:
         return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return json.dumps(payload)
 
@@ -5089,6 +5089,7 @@ class Server:
             questions = await self.work_lanes.questions_by_spec() if self.work_lanes is not None else None
             projected = project_lane(row, open_sessions.get(str(row.get("bound_stream_id") or "")), _iso_now(),
                                      all_members=True, sessions_by_stream=open_sessions,
+                                     worked_by_spec=self.work_lanes.worked.values if self.work_lanes is not None else None,
                                      questions_by_spec=questions)
         return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
                 "events": shown["events"], "updates": shown["updates"],

@@ -620,7 +620,7 @@
         "stream_id": "home:assistant",
         "provider": "composite",
         "kind": "ASSIST_TEXT",
-        "text": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
+        "text": "Work lanes mobile slice — Header count, lanes list, lane_update card",
         "message_id": "publication:lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
         "reply_to_message_id": null,
         "reply_to_question_id": null,
@@ -641,7 +641,7 @@
             "update_id": "lane-update:wl-active-0002:adopt:stream:fixture-host:v2-lead0002",
             "lane_id": "wl-active-0002",
             "kind": "lane_started",
-            "summary": "Work lanes mobile slice \u2014 Header count, lanes list, lane_update card",
+            "summary": "Work lanes mobile slice — Header count, lanes list, lane_update card",
             "source": {
               "type": "adoption",
               "id": "adopt:stream:fixture-host:v2-lead0002"
@@ -958,7 +958,7 @@
       "transport_unknown"
     ]
   },
-  "fixture_version": 3,
+  "fixture_version": 4,
   "progress_v2": [
     {
       "name": "active_progress",
@@ -1053,6 +1053,7 @@
             "lane_id": "wl-000000000000000000000001",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "active",
             "state_reason": "fd",
             "blocker": null,
@@ -1117,10 +1118,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -1148,10 +1153,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 2,
@@ -1309,6 +1318,7 @@
             "lane_id": "wl-000000000000000000000002",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1352,10 +1362,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -1383,10 +1397,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_3",
@@ -1414,10 +1432,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 3,
@@ -1525,6 +1547,7 @@
             "lane_id": "wl-000000000000000000000003",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "blocked",
             "state_reason": "fd",
             "blocker": "Materials needed.",
@@ -1568,10 +1591,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 1,
@@ -1673,6 +1700,7 @@
             "lane_id": "wl-000000000000000000000004",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1710,10 +1738,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": null,
+                "next_line": null
               }
             ],
             "members_total": 1,
@@ -1811,6 +1843,7 @@
             "lane_id": "wl-000000000000000000000005",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1848,10 +1881,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": null,
+                "next_line": null
               }
             ],
             "members_total": 1,
@@ -1949,6 +1986,7 @@
             "lane_id": "wl-000000000000000000000006",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -1986,10 +2024,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 1,
@@ -2067,6 +2109,7 @@
             "lane_id": "wl-000000000000000000000007",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2185,6 +2228,7 @@
             "lane_id": "wl-000000000000000000000008",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2228,10 +2272,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 1,
@@ -2364,6 +2412,7 @@
             "lane_id": "wl-000000000000000000000009",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2407,10 +2456,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2438,10 +2491,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 2,
@@ -2570,6 +2627,7 @@
             "lane_id": "wl-000000000000000000000010",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -2613,10 +2671,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2644,10 +2706,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 2,
@@ -2779,6 +2845,7 @@
             "lane_id": "wl-000000000000000000000011",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "active",
             "state_reason": "fd",
             "blocker": null,
@@ -2843,10 +2910,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -2874,10 +2945,14 @@
                 "estimate_exempt": false,
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 2,
@@ -2964,7 +3039,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             },
             {
               "spec_id": "spec_demo__remaining_only_2",
@@ -2989,7 +3068,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             }
           ],
           "no_spec_reason": null,
@@ -3010,6 +3093,7 @@
             "lane_id": "wl-a1-remaining-only",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3051,12 +3135,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               },
               {
                 "spec_id": "spec_demo__remaining_only_2",
@@ -3082,12 +3170,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               }
             ],
             "members_total": 2,
@@ -3182,7 +3274,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             },
             {
               "spec_id": "spec_demo__elapsed_only_ignored_2",
@@ -3201,7 +3297,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             }
           ],
           "no_spec_reason": null,
@@ -3222,6 +3322,7 @@
             "lane_id": "wl-a1-elapsed-only-ignored",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3257,12 +3358,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               },
               {
                 "spec_id": "spec_demo__elapsed_only_ignored_2",
@@ -3282,12 +3387,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               }
             ],
             "members_total": 2,
@@ -3384,7 +3493,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_2",
@@ -3403,7 +3516,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_3",
@@ -3422,7 +3539,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             }
           ],
           "no_spec_reason": null,
@@ -3443,6 +3564,7 @@
             "lane_id": "wl-a1-umbrella-exempt",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3484,12 +3606,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               },
               {
                 "spec_id": "spec_demo__umbrella_exempt_2",
@@ -3509,12 +3635,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               },
               {
                 "spec_id": "spec_demo__umbrella_exempt_3",
@@ -3534,12 +3664,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               }
             ],
             "members_total": 3,
@@ -3646,7 +3780,11 @@
                 "observed_at": "2026-01-02T00:00:00.000Z",
                 "error": null
               },
-              "obs_rev": 1
+              "obs_rev": 1,
+              "criteria": [],
+              "transitions": [],
+              "status_line": null,
+              "next_line": "Inspect the deck."
             }
           ],
           "no_spec_reason": null,
@@ -3667,6 +3805,7 @@
             "lane_id": "wl-20f4013702cc1ee6335bac2a",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "paused",
             "state_reason": "fd",
             "blocker": null,
@@ -3708,12 +3847,16 @@
                   "error": null
                 },
                 "obs_rev": 1,
+                "status_line": null,
+                "next_line": "Inspect the deck.",
                 "seats": [],
                 "seats_total": 0,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null
               }
             ],
             "members_total": 1,
@@ -3942,6 +4085,7 @@
             "lane_id": "wl-000000000000000000000001",
             "title": "Build model bridges",
             "summary": "Assemble and inspect miniature spans.",
+            "icon": "hammer",
             "state": "active",
             "state_reason": "members_working",
             "blocker": null,
@@ -4025,10 +4169,21 @@
                   }
                 ],
                 "seats_total": 2,
+                "lead_seat": {
+                  "stream_id": "fixture-host:lead",
+                  "host": "fixture-host",
+                  "activity": "working",
+                  "provider": null,
+                  "eta_at": null,
+                  "active_step": null
+                },
                 "open_questions": {
                   "count": 2,
                   "first_question_id": "fixture-question-1"
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               },
               {
                 "spec_id": "spec_demo__item_2",
@@ -4066,10 +4221,14 @@
                   }
                 ],
                 "seats_total": 1,
+                "lead_seat": null,
                 "open_questions": {
                   "count": 0,
                   "first_question_id": null
-                }
+                },
+                "worked": null,
+                "status_line": "Model prepared.",
+                "next_line": "Inspect the paper span."
               }
             ],
             "members_total": 2,
@@ -4112,5 +4271,284 @@
         }
       }
     }
-  ]
+  ],
+  "spec_details_v1": {
+    "lane": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "version": 1,
+      "work_state": "paused",
+      "icon": "phone",
+      "_members": [
+        {
+          "spec_id": "spec_demo__detail",
+          "status": "in_progress",
+          "terminal": null,
+          "ac_total": 2,
+          "ac_checked": 1,
+          "status_text": "Tests pass. Review pending",
+          "next_action_text": "Review the result.",
+          "criteria": [
+            {
+              "title": "Check `code`",
+              "disposition": "open"
+            },
+            {
+              "title": "Ship",
+              "disposition": "done"
+            }
+          ],
+          "transitions": [
+            {
+              "status": "backlog",
+              "at": "2026-01-01"
+            },
+            {
+              "status": "in_progress",
+              "at": "2026-01-03"
+            }
+          ]
+        }
+      ]
+    },
+    "sessions": {
+      "host-a:lead": {
+        "assigned_spec_id": "spec_demo__detail",
+        "role": "lead",
+        "host": "host-a",
+        "status": "open",
+        "provider": "codex",
+        "online": true,
+        "working": true,
+        "status_card": {
+          "eta_at": "2026-01-04T00:00:00Z",
+          "plan": [
+            {
+              "status": "active",
+              "text": "Review the result."
+            }
+          ]
+        }
+      }
+    },
+    "worked_by_spec": {
+      "spec_demo__detail": {
+        "elapsed_h": 3.5,
+        "censored": true,
+        "active_h": 0.5,
+        "seats": 2,
+        "qa_rounds": 1,
+        "as_of": "2026-01-03T00:00:00Z"
+      }
+    },
+    "now_iso": "2026-01-03T00:00:00Z",
+    "inventory_frame": {
+      "type": "work_lanes.inventory",
+      "lanes": [
+        {
+          "lane_id": "wl-detail",
+          "title": "Mobile release",
+          "summary": "",
+          "icon": "phone",
+          "state": "active",
+          "state_reason": "members_working",
+          "blocker": null,
+          "owner_kind": null,
+          "version": 1,
+          "updated_at": null,
+          "first_admitted_at": null,
+          "done_at": null,
+          "lead": null,
+          "visible_chat": {
+            "stream_id": null,
+            "generation": null,
+            "kind": "session",
+            "available": "unavailable"
+          },
+          "last_update": null,
+          "members": [
+            {
+              "spec_id": "spec_demo__detail",
+              "status": "in_progress",
+              "terminal": null,
+              "ac_total": 2,
+              "ac_checked": 1,
+              "status_text": "Tests pass. Review pending",
+              "next_action_text": "Review the result.",
+              "seats": [
+                {
+                  "stream_id": "host-a:lead",
+                  "role": "lead",
+                  "host": "host-a",
+                  "visibility": null,
+                  "parent_stream_id": null,
+                  "activity": "working",
+                  "last_activity": null
+                }
+              ],
+              "seats_total": 1,
+              "lead_seat": {
+                "stream_id": "host-a:lead",
+                "host": "host-a",
+                "activity": "working",
+                "provider": "codex",
+                "eta_at": "2026-01-04T00:00:00Z",
+                "active_step": "Review the result."
+              },
+              "open_questions": {
+                "count": 0,
+                "first_question_id": null
+              },
+              "worked": {
+                "elapsed_h": 3.5,
+                "censored": true,
+                "active_h": 0.5,
+                "seats": 2,
+                "qa_rounds": 1,
+                "as_of": "2026-01-03T00:00:00Z"
+              },
+              "status_line": "Tests pass.",
+              "next_line": "Review the result."
+            }
+          ],
+          "members_total": 1,
+          "no_spec_reason": null,
+          "items_total": 1,
+          "items_completed": 0,
+          "items_dropped": 0,
+          "items_open": 1,
+          "items_unresolved": 0,
+          "ac_checked": 1,
+          "ac_total": 2,
+          "ac_members": 1,
+          "open_estimate_h": null,
+          "open_estimated": 0,
+          "estimate_complete": false,
+          "freshness_at": null,
+          "completion_pending": null,
+          "lead_reported_done": null,
+          "stale": false
+        }
+      ],
+      "counts": {
+        "open": 1,
+        "active": 1,
+        "paused": 0,
+        "blocked": 0
+      },
+      "truncated": false,
+      "generated_at": "2026-01-03T00:00:00Z",
+      "work_index": {
+        "available": false,
+        "root_configured": false,
+        "snapshot_at": null,
+        "last_sweep_at": null,
+        "error": "work_index_unavailable"
+      }
+    },
+    "show_projection": {
+      "lane_id": "wl-detail",
+      "title": "Mobile release",
+      "summary": "",
+      "icon": "phone",
+      "state": "active",
+      "state_reason": "members_working",
+      "blocker": null,
+      "owner_kind": null,
+      "version": 1,
+      "updated_at": null,
+      "first_admitted_at": null,
+      "done_at": null,
+      "lead": null,
+      "visible_chat": {
+        "stream_id": null,
+        "generation": null,
+        "kind": "session",
+        "available": "unavailable"
+      },
+      "last_update": null,
+      "members": [
+        {
+          "spec_id": "spec_demo__detail",
+          "status": "in_progress",
+          "terminal": null,
+          "ac_total": 2,
+          "ac_checked": 1,
+          "status_text": "Tests pass. Review pending",
+          "next_action_text": "Review the result.",
+          "criteria": [
+            {
+              "title": "Check `code`",
+              "disposition": "open"
+            },
+            {
+              "title": "Ship",
+              "disposition": "done"
+            }
+          ],
+          "transitions": [
+            {
+              "status": "backlog",
+              "at": "2026-01-01"
+            },
+            {
+              "status": "in_progress",
+              "at": "2026-01-03"
+            }
+          ],
+          "seats": [
+            {
+              "stream_id": "host-a:lead",
+              "role": "lead",
+              "host": "host-a",
+              "visibility": null,
+              "parent_stream_id": null,
+              "activity": "working",
+              "last_activity": null
+            }
+          ],
+          "seats_total": 1,
+          "lead_seat": {
+            "stream_id": "host-a:lead",
+            "host": "host-a",
+            "activity": "working",
+            "provider": "codex",
+            "eta_at": "2026-01-04T00:00:00Z",
+            "active_step": "Review the result."
+          },
+          "open_questions": {
+            "count": 0,
+            "first_question_id": null
+          },
+          "worked": {
+            "elapsed_h": 3.5,
+            "censored": true,
+            "active_h": 0.5,
+            "seats": 2,
+            "qa_rounds": 1,
+            "as_of": "2026-01-03T00:00:00Z"
+          },
+          "status_line": "Tests pass.",
+          "next_line": "Review the result."
+        }
+      ],
+      "members_total": 1,
+      "no_spec_reason": null,
+      "items_total": 1,
+      "items_completed": 0,
+      "items_dropped": 0,
+      "items_open": 1,
+      "items_unresolved": 0,
+      "ac_checked": 1,
+      "ac_total": 2,
+      "ac_members": 1,
+      "open_estimate_h": null,
+      "open_estimated": 0,
+      "estimate_complete": false,
+      "freshness_at": null,
+      "completion_pending": null,
+      "lead_reported_done": null,
+      "stale": false
+    }
+  }
 }

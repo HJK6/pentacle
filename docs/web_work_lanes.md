@@ -24,6 +24,60 @@ The sidebar lanes view (the header lane count and the **Lanes (N)** section) is 
 - **Ordering.** Lane pushes and the `work_lanes` field of a snapshot go through the same connection state-version gate as the rest of the daemon state, so a stale frame never rolls the panel back. The lane generation is passed only by the lane-history slot's own reads (initial, paging, retry, reconnect refetch); another slot reading the same stream id never sends it.
 - **Lane update cards.** The assistant's chat renders a typed card for every `publish_kind: "lane_update"` publication (`lane_started`, `lane_completed`, `lane_blocked`, `lane_unblocked`, `major_decision`, `milestone`) from `raw.lane_update`. A client that does not branch on the kind shows the summary as ordinary assistant text.
 
+## Structured spec facts
+
+Inventory lanes always carry `icon` (a key or null). Explicit icons are stored
+on the lane through the existing `set_text` operation's optional `icon` key;
+null clears the override. Invalid keys are refused. Without an override, the
+daemon matches the title against the ordered keyword table in
+`pentacle-chat-core/lane_icons.json`. Unknown legacy overrides project null
+and log one warning per unknown value. `LANE_ICON_KEYS` and `LaneIconKey` are
+exported by chat-core for consumers.
+
+The inventory's existing eight inline members carry optional display facts:
+
+- `worked`: elapsed hours, a censoring flag, active hours, seat and QA-round
+  counts, and the observation time. The daemon batches all lane-member specs
+  in one background usage-rollup pass per ten minutes. A missing ledger,
+  unattributed usage or a sixty-second timeout yields null. Active hours sum
+  the available Claude and Codex proxies; both missing yields null. These are
+  activity estimates, not billing or a live work timer.
+- `lead_seat`: the first open lead (then nexus) assigned to that member spec,
+  including provider, observed activity, ETA and active status-card step.
+  Steps longer than 120 characters are truncated with an ellipsis.
+  Workers, QA seats and planners never qualify. No qualifying seat yields null.
+- `status_line` and `next_line`: the first passing sentence from the original
+  Status/Next labels. The original `status_text` and `next_action_text` remain
+  available. Rules and examples live only in
+  `pentacle-chat-core/tests/fixtures/summary_prose_cases.json`; the daemon loads
+  those patterns and accepts the first sentence of a longer label.
+
+`work_lanes.show` returns all lane members and adds `criteria` and
+`transitions`; these arrays are absent from inventory and list frames.
+Criteria include only the spec's Custom acceptance criteria, in source order,
+with `open`, `done`, `waived`, `tracked` or `parked` dispositions. Titles keep
+code spans; at most forty titles of 120 characters are emitted. Consumers may
+sort open criteria first. Transitions translate the source lifecycle's leaving
+date into the next lifecycle's entry date, begin at `created_at`, and retain
+the newest eight entries in chronological order.
+
+Only criteria and transitions extend the observation's material fields.
+Worked time, lead presence and icons never increment `obs_rev` or write
+`item_change` events. The CLI's `agent-orch work-lane show` prints the icon and
+all member detail fields; `--json` preserves the wire shapes. Older daemons
+and consumers may omit the additive fields.
+
+Lane pushes use the same compact JSON encoding as snapshots and session
+inventory; whitespace changes, field shapes do not. The byte-budget fixture
+uses a real projection with one lead seat per member, existing title, seat and
+status-card lengths at measured p95, and all new fields populated at their
+caps. It guards an 800-byte per-member new-field delta, a 320 KiB frame for
+16 lanes × 8 members and a 1.25 MiB stress frame for 64 × 8. These are measured
+synthetic bounds, not a promise for arbitrary legacy strings or Unicode text.
+The transport's hard limit is 4 MiB; inventory is a transient broadcast, not a
+persisted exchange event. Detail arrays remain exclusive to `show` regardless
+of size; no size-dependent field dropping occurs.
+
 ## Where it lives
 
 | Concern | File |

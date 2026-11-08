@@ -11,6 +11,12 @@ export type WorkLaneUpdateKind =
   | 'major_decision' | 'lane_started' | 'lane_completed' | 'lane_blocked' | 'lane_unblocked' | 'milestone';
 
 export const WORK_LANE_OPEN_STATES: readonly WorkLaneState[] = ['active', 'paused', 'blocked'];
+/** Keys in lane_icons.json; its ordered keyword table is the resolver authority. */
+export const LANE_ICON_KEYS = [
+  'pentacle', 'flask', 'cube', 'phone', 'bot', 'bug', 'truck', 'wrench', 'columns', 'rocket',
+  'hammer', 'eye', 'camera', 'cursor', 'home', 'book', 'chart', 'shield', 'key', 'leaf',
+] as const;
+export type LaneIconKey = typeof LANE_ICON_KEYS[number];
 export const WORK_LANE_UPDATE_KINDS: readonly WorkLaneUpdateKind[] = [
   'major_decision', 'lane_started', 'lane_completed', 'lane_blocked', 'lane_unblocked', 'milestone',
 ];
@@ -60,6 +66,19 @@ export type WorkLaneMember = {
   estimate_exempt: boolean;
   status_text: string | null;
   next_action_text: string | null;
+  status_line?: string | null;
+  next_line?: string | null;
+  worked?: {
+    elapsed_h: number | null; censored: boolean; active_h: number | null;
+    seats: number; qa_rounds: number; as_of: string;
+  } | null;
+  lead_seat?: {
+    stream_id: string; host: string; provider: string | null;
+    activity: WorkLaneSeat['activity']; eta_at: string | null; active_step: string | null;
+  } | null;
+  /** Detail-only facts from work_lanes.show, in source order. */
+  criteria?: Array<{ title: string; disposition: 'open' | 'done' | 'waived' | 'tracked' | 'parked' }>;
+  transitions?: Array<{ status: string; at: string }>;
   source_changed_at: string | null;
   observation: { quality: string | null; observed_at: string | null; error: string | null } | null;
   /** Additive attribution; empty/zero from a daemon that predates it. */
@@ -98,6 +117,7 @@ export type WorkIndexStatus = {
 export type WorkLane = {
   lane_id: string;
   title: string;
+  icon?: LaneIconKey | null;
   summary: string;
   state: WorkLaneState;
   state_reason: string | null;
@@ -197,6 +217,25 @@ function normalizeRange(raw: unknown): { p25: number; p75: number; median: numbe
 }
 
 const SEAT_ACTIVITY = new Set(['working', 'idle', 'offline', 'unknown']);
+const CRITERION_DISPOSITIONS = new Set(['open', 'done', 'waived', 'tracked', 'parked']);
+
+function normalizeWorked(raw: unknown): WorkLaneMember['worked'] {
+  if (!isRec(raw) || !nonEmpty(raw.as_of)) return null;
+  return {
+    elapsed_h: finite(raw.elapsed_h), censored: raw.censored === true, active_h: finite(raw.active_h),
+    seats: finite(raw.seats) ?? 0, qa_rounds: finite(raw.qa_rounds) ?? 0, as_of: raw.as_of as string,
+  };
+}
+
+function normalizeLeadSeat(raw: unknown): WorkLaneMember['lead_seat'] {
+  if (!isRec(raw) || !nonEmpty(raw.stream_id) || !nonEmpty(raw.host)) return null;
+  return {
+    stream_id: raw.stream_id as string, host: raw.host as string, provider: str(raw.provider),
+    activity: typeof raw.activity === 'string' && SEAT_ACTIVITY.has(raw.activity)
+      ? raw.activity as WorkLaneSeat['activity'] : 'unknown',
+    eta_at: str(raw.eta_at), active_step: str(raw.active_step),
+  };
+}
 
 function normalizeSeat(raw: unknown): WorkLaneSeat | null {
   if (!isRec(raw)) return null;
@@ -230,6 +269,15 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
     estimate_exempt: raw.estimate_exempt === true,
     status_text: str(raw.status_text),
     next_action_text: str(raw.next_action_text),
+    status_line: str(raw.status_line), next_line: str(raw.next_line),
+    worked: normalizeWorked(raw.worked), lead_seat: normalizeLeadSeat(raw.lead_seat),
+    ...(Array.isArray(raw.criteria) ? { criteria: raw.criteria.flatMap((item) =>
+      isRec(item) && typeof item.title === 'string' && typeof item.disposition === 'string'
+        && CRITERION_DISPOSITIONS.has(item.disposition)
+        ? [{ title: item.title, disposition: item.disposition as 'open' | 'done' | 'waived' | 'tracked' | 'parked' }] : []) } : {}),
+    ...(Array.isArray(raw.transitions) ? { transitions: raw.transitions.flatMap((item) =>
+      isRec(item) && typeof item.status === 'string' && typeof item.at === 'string'
+        ? [{ status: item.status, at: item.at }] : []) } : {}),
     source_changed_at: str(raw.source_changed_at),
     observation: obs ? { quality: str(obs.quality), observed_at: str(obs.observed_at), error: str(obs.error) } : null,
     seats: seats,
@@ -282,6 +330,7 @@ function normalizeLane(raw: unknown): WorkLane | null {
   return {
     lane_id: laneId,
     title: str(raw.title) ?? '',
+    icon: typeof raw.icon === 'string' && LANE_ICON_KEYS.includes(raw.icon as LaneIconKey) ? raw.icon as LaneIconKey : null,
     summary: str(raw.summary) ?? '',
     state,
     state_reason: str(raw.state_reason),

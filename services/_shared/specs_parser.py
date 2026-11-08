@@ -8,6 +8,8 @@ from datetime import date
 import yaml
 from pathlib import Path
 
+from .summary_prose import summary_line
+
 DEFAULT_STATUSES = [
     {
         "name": "backlog",
@@ -159,6 +161,50 @@ def _section(text: str, heading: str) -> str | None:
     return match[1] if match else None
 
 
+def _criteria(ac: str | None, parked: str | None) -> list[dict]:
+    custom = re.search(r"^### Custom[ \t]*\n(.*?)(?=^### |\Z)", ac or "", re.M | re.S)
+    result = []
+    for mark, body in re.findall(r"^\s*[-*+] \[([ xX])\][ \t]*(.*)$", custom[1] if custom else "", re.M):
+        # Quoted/code examples carry no disposition. Mask them without moving
+        # offsets so the original title (including its code spans) is preserved.
+        declared = re.sub(r"(`+).*?\1|(?<!\w)([\"']).*?\2(?!\w)",
+                          lambda match: " " * len(match[0]) if "waived:" in match[0].lower()
+                          or "tracked:" in match[0] else match[0], body)
+        waiver = re.search(r"\(waived:\s*[^)\s][^)]*\)\.?\s*$", declared, re.I)
+        tracked = re.search(r"\btracked:\s*spec_[A-Za-z0-9_-]+\s*\((?:external_event|operator_action|new_scope)\)\.?\s*$", declared)
+        disposition = ("done" if mark.lower() == "x" else "waived" if waiver else
+                       "tracked" if tracked else "parked" if parked else "open")
+        suffix = waiver or tracked
+        text = body[:suffix.start()].rstrip() if suffix else body
+        bold = re.match(r"\*\*(.+?)\*\*", text)
+        title = " ".join((bold[1] if bold else text).split())
+        result.append({"title": title if len(title) <= 120 else title[:119] + "…", "disposition": disposition})
+        if len(result) == 40:
+            break
+    return result
+
+
+def _transitions(tracking: str, created_at: str | None, status: str) -> list[dict]:
+    moves = []
+    for at, source in re.findall(r"^- summary transition: ([0-9]{4}-[0-9]{2}-[0-9]{2}); source lifecycle: ([a-z_]+);", tracking, re.M):
+        try:
+            date.fromisoformat(at)
+        except ValueError:
+            continue
+        moves.append((at, source))
+    created = str(created_at or "")[:10]
+    try:
+        date.fromisoformat(created)
+    except ValueError:
+        return []
+    if not moves:
+        return [{"status": status, "at": created}]
+    entries = [{"status": moves[0][1], "at": created}]
+    entries.extend({"status": source, "at": moves[i - 1][0]} for i, (_, source) in enumerate(moves) if i)
+    entries.append({"status": status, "at": moves[-1][0]})
+    return entries[-8:]
+
+
 def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     """Parse file-owned lane facts without inferring completion or estimates."""
     fm = load_frontmatter(spec_text)
@@ -208,12 +254,15 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
                 pass
             else:
                 parked = f"{match[1]} {match[2]} — {' '.join(match[3].split())}"
+    status_text, next_text = label("Status"), label("Next action")
     return {"title": fm.get("title"), "status": status,
+            "criteria": _criteria(ac, parked), "transitions": _transitions(tracking, fm.get("created_at"), status),
+            "status_line": summary_line(status_text), "next_line": summary_line(next_text),
             **({"parked_declaration": parked} if parked else {}),
             "terminal": status if status in ("completed", "deprecated") else None,
             "ac_checked": checked if ac is not None else None,
             "ac_total": len(boxes) if ac is not None else None,
-            "estimate": estimate, "estimate_exempt": estimate_exempt, "status_text": label("Status"), "next_action_text": label("Next action")}
+            "estimate": estimate, "estimate_exempt": estimate_exempt, "status_text": status_text, "next_action_text": next_text}
 
 
 def _heading_text(path: Path, heading: str) -> str:

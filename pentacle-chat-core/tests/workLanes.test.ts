@@ -15,9 +15,34 @@ import {
   workLaneTapTarget,
   applyPentacleEvent,
   type PentacleEvent,
+  LANE_ICON_KEYS,
 } from '../src/index.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-lanes-inventory.json', import.meta.url), 'utf8'));
+
+test('lane icon keys match the frozen ordered keyword table', () => {
+  const table = JSON.parse(readFileSync(new URL('../lane_icons.json', import.meta.url), 'utf8'));
+  assert.deepEqual([...LANE_ICON_KEYS].sort(), table.icons.map((icon: { key: string }) => icon.key).sort());
+});
+
+test('structured spec fields survive normalization and older frames default safely', () => {
+  const cell = fixture.spec_details_v1;
+  const lane = normalizeWorkLanesInventory(cell.inventory_frame)!.lanes[0];
+  assert.equal(lane.icon, 'phone');
+  const member = lane.progress!.members[0];
+  for (const key of ['worked', 'lead_seat', 'status_line', 'next_line']) {
+    assert.deepEqual((member as Record<string, unknown>)[key], cell.inventory_frame.lanes[0].members[0][key]);
+  }
+  assert.equal(member.status_line, 'Tests pass.');
+  assert.equal(member.lead_seat?.active_step, 'Review the result.');
+  assert.equal(member.criteria, undefined);
+  assert.equal(member.transitions, undefined);
+  const detail = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [cell.show_projection] })!.lanes[0].progress!.members[0];
+  assert.deepEqual(detail.criteria, cell.show_projection.members[0].criteria);
+  assert.deepEqual(detail.transitions, cell.show_projection.members[0].transitions);
+  const old = normalizeWorkLanesInventory(fixture.inventory_frame)!.lanes[0];
+  assert.equal(old.icon, null);
+});
 
 test('inventory frame: server order, counts.open header, done never present', () => {
   const inv = applyWorkLanesFrame(emptyWorkLanesInventory(), fixture.inventory_frame);

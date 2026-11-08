@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Callable
 
 from work_lane_members import validate_members, validate_title
+from _shared.lane_icons import validate_icon
 from work_lane_progress import lane_lead_lost, members_working
 from store_work_index import ensure_work_index_schema, member_ids, members_conn, _state_conn
 from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
@@ -31,6 +32,7 @@ WORK_LANE_COLUMNS = (
     ("blocker", "TEXT"),
     ("owner_kind", "TEXT"),
     ("title", "TEXT"),
+    ("icon", "TEXT"),
     ("visible_chat_stream_id", "TEXT"),
     ("visible_chat_generation", "TEXT"),
     ("adoption_key", "TEXT"),
@@ -782,12 +784,14 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
             chat, chat_gen = _validate_chat_pointer_conn(conn, stream_id, payload["visible_chat"], env_binding)
             changes.update(visible_chat_stream_id=chat, visible_chat_generation=chat_gen)
         elif operation == "set_text":
-            if not payload or set(payload) - {"title", "summary"}:
+            if not payload or set(payload) - {"title", "summary", "icon"}:
                 raise ValueError("work_lane_payload_invalid")
             if "title" in payload:
                 changes["title"] = validate_title(_text(payload["title"], TITLE_MAX, "work_lane_title_invalid", required=True))
             if "summary" in payload:
                 changes["summary"] = _text(payload["summary"], SUMMARY_MAX, "work_lane_payload_invalid") or ""
+            if "icon" in payload:
+                changes["icon"] = validate_icon(payload["icon"])
         elif operation == "set_members":
             if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 raise ValueError("work_lane_payload_invalid")

@@ -66,6 +66,9 @@ def _print_members(members):
               f"[{(member.get('observation') or {}).get('quality', 'unknown')}]")
         if member.get("next_action_text"):
             print(f"      next: {member['next_action_text']}")
+        for key in ("worked", "lead_seat", "status_line", "next_line", "criteria", "transitions"):
+            if key in member:
+                print(f"      {key}: {json.dumps(member[key], ensure_ascii=False, default=str)}")
 
 
 def cmd_unattended(args: argparse.Namespace) -> int:
@@ -155,8 +158,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(_lane_line(lane) if lane else stored.get("lane_id"))
     print(f"    stored {stored.get('work_state')} ({stored.get('work_state_reason')})  "
           f"owner_kind={stored.get('owner_kind')}  version={stored.get('version')}")
-    if args.members:
-        _print_members(response.get("members", lane.get("members", [])))
+    print(f"    icon: {lane.get('icon') or '-'}")
+    _print_members(response.get("members", lane.get("members", [])))
     for event in response.get("events") or []:
         update = f"  -> {event.get('update_kind')} {event.get('update_id')}" if event.get("update_kind") else ""
         print(f"    {event.get('created_at')}  {event.get('operation')}  "

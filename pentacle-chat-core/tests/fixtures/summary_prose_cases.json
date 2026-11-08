@@ -1,0 +1,190 @@
+{
+  "limit": 160,
+  "abbreviations": [
+    "e.g.",
+    "i.e.",
+    "vs.",
+    "etc."
+  ],
+  "patterns": {
+    "label": "^\\*\\*(Status|Next action)\\*\\*\\s*[—–-]\\s*(.*)$",
+    "fence": "^\\s*(`{3,}|~{3,})",
+    "terminal": "[.!?](?=\\s|$)",
+    "semicolon": ";",
+    "hex": "(?i)(?=[0-9a-f]*[a-f])[0-9a-f]{8,}",
+    "seat": "\\w+:v2-[0-9a-fA-F]+",
+    "work_id": "(?:spec_|work_)\\w+",
+    "path": "(^|\\s)[\\w./-]*/[\\w.-]+\\.[a-z]{1,5}\\b",
+    "joined_token": "[A-Za-z]{3,}[0-9]{2,}[0-9A-Za-z]*"
+  },
+  "cases": [
+    {
+      "name": "template_status",
+      "label": "**Status** — Backlog, requirements not yet gathered.",
+      "lint_ok": true,
+      "daemon_line": "Backlog, requirements not yet gathered."
+    },
+    {
+      "name": "template_next_action",
+      "label": "**Status** — Gather requirements with the user and fill the spec.",
+      "lint_ok": true,
+      "daemon_line": "Gather requirements with the user and fill the spec."
+    },
+    {
+      "name": "old_template",
+      "label": "**Status** — backlog; requirements not yet gathered.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "multiple_sentences",
+      "label": "**Status** — Tests pass. Review the result.",
+      "lint_ok": false,
+      "daemon_line": "Tests pass."
+    },
+    {
+      "name": "abbreviation",
+      "label": "**Status** — Review examples, e.g. the short label.",
+      "lint_ok": true,
+      "daemon_line": "Review examples, e.g. the short label."
+    },
+    {
+      "name": "other_abbreviations",
+      "label": "**Status** — Compare checks, i.e. local vs. remote, etc. before release.",
+      "lint_ok": true,
+      "daemon_line": "Compare checks, i.e. local vs. remote, etc. before release."
+    },
+    {
+      "name": "decimal",
+      "label": "**Status** — Review takes 1.5 h.",
+      "lint_ok": true,
+      "daemon_line": "Review takes 1.5 h."
+    },
+    {
+      "name": "version",
+      "label": "**Status** — Review v2.1 before release.",
+      "lint_ok": true,
+      "daemon_line": "Review v2.1 before release."
+    },
+    {
+      "name": "bare_filename",
+      "label": "**Status** — Review README.md before release.",
+      "lint_ok": true,
+      "daemon_line": "Review README.md before release."
+    },
+    {
+      "name": "date",
+      "label": "**Status** — Review starts 20261108.",
+      "lint_ok": true,
+      "daemon_line": "Review starts 20261108."
+    },
+    {
+      "name": "sha",
+      "label": "**Status** — Review abcdef0123456789abcdef0123456789abcdef01.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "seat",
+      "label": "**Status** — Review host:v2-ab12.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "spec_id",
+      "label": "**Status** — Review spec_example.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "work_id",
+      "label": "**Status** — Review work_example.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "path",
+      "label": "**Status** — Review scripts/check.py now.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "joined_token",
+      "label": "**Status** — Review ticket12 now.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "length_160",
+      "label": "**Status** — ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
+      "lint_ok": true,
+      "daemon_line": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ."
+    },
+    {
+      "name": "length_161",
+      "label": "**Status** — ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "semicolon",
+      "label": "**Status** — Tests pass; review the result.",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "hyphen",
+      "label": "**Status** - Review the result.",
+      "lint_ok": true,
+      "daemon_line": "Review the result."
+    },
+    {
+      "name": "en_dash",
+      "label": "**Status** – Review the result.",
+      "lint_ok": true,
+      "daemon_line": "Review the result."
+    },
+    {
+      "name": "missing",
+      "label": null,
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "no_terminal",
+      "label": "**Status** — Review the result",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "empty",
+      "label": "**Status** — ",
+      "lint_ok": false,
+      "daemon_line": null
+    },
+    {
+      "name": "trailing_fragment",
+      "label": "**Status** — Tests pass. Review pending",
+      "lint_ok": false,
+      "daemon_line": "Tests pass."
+    },
+    {
+      "name": "question",
+      "label": "**Status** — Can review start?",
+      "lint_ok": true,
+      "daemon_line": "Can review start?"
+    },
+    {
+      "name": "exclamation",
+      "label": "**Status** — Review is ready!",
+      "lint_ok": true,
+      "daemon_line": "Review is ready!"
+    },
+    {
+      "name": "abbreviation_only",
+      "label": "**Status** — e.g.",
+      "lint_ok": false,
+      "daemon_line": null
+    }
+  ]
+}

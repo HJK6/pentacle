@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .specs_parser import WORK_SPEC_ID_RE, load_frontmatter, parse_work_facts
 
-MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt", "status_text", "next_action_text")
+MATERIAL_FIELDS = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt", "status_text", "next_action_text", "criteria", "transitions")
 
 
 class WorkFilesUnsettled(ValueError):
