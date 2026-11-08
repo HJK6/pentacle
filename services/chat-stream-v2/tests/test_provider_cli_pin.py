@@ -260,6 +260,7 @@ def test_inactive_retained_cells_stay_in_status_and_raw_command_fence(tmp_path):
 
 
 def test_real_remote_creation_after_pin_move_keeps_old_admission(tmp_path):
+    import spawn_creation
     from test_spawn_cancel_fence_holes import ReconTmux
     from provider_cli_pin import canonical
     from test_account_rotation import NOW
@@ -291,7 +292,8 @@ def test_real_remote_creation_after_pin_move_keeps_old_admission(tmp_path):
         try:
             await store.reserve_stream_id("host-b","remote-late",ttl_s=600,request_id="remote-request",nonce="native-nonce")
             await store.record_spawn_intent("host-b","remote-late",{"open_fields":fields,"brief":"",
-                "delivery_receipt":{"state":"not_requested"}},request_id="remote-request",nonce="native-nonce")
+                "delivery_receipt":{"state":"not_requested"},
+                spawn_creation.KEY:spawn_creation.initial()},request_id="remote-request",nonce="native-nonce")
             created=[False]
             result=await ctl._spawn_fenced("host-b","remote-late","remote-request","managed-native","","READY",
                 {"ready_marker":"READY"},created,[False],fields,{"resolved_launch_tuple":{"provider":"claude"}},

@@ -24,23 +24,25 @@ Account status labels retained admitted creation records
 `cancelled_cleanup_pending`; destructive CLI maintenance and host-transfer
 quiescence still wait for unresolved creation, including cancelled creation.
 
-This release supplies the compatible reader before enabling witness producers.
-New remote spawns use the existing unwitnessed flow. A retained intent containing
-any `remote_creation` member cannot dispatch another creation under this reader;
-it requires a writer-capable release. Unreadable current intents also refuse
-dispatch. Existing witness metadata is preserved through payload updates.
+This release enables witness producers after qualification of the compatible
+reader. Each physical remote creation registers a fresh pending attempt before
+dispatch, including retries and resumed launches. Cancellation seals issuance;
+only successful command return acknowledges its exact attempt. Unreadable or
+malformed witness history refuses issuance and dispatch. Existing metadata is
+preserved through payload updates. The prior reader's member-present dispatch
+refusal is replaced by this durable issuance fence.
 
 The reader understands per-attempt successful-command acknowledgements, which
 are distinct from binding or adoption. Cancelled cleanup releases after all
 attempts are terminal, a fresh absence observation, and an atomic
 identity/owner/witness comparison. Missing, historical or malformed metadata
-stays unknown. An ordinary unwitnessed remote cancellation can therefore retain
-its name indefinitely under this release. Non-cancelled bound release and local
+stays unknown. Historical unwitnessed remote cancellations can therefore retain
+their names indefinitely under this release. Non-cancelled bound release and local
 cancellation keep their existing behavior.
 
-Deploy and qualify this reader first. Enable witness initialization, issuance and
-acknowledgement only in a subsequent release whose sealed rollback prior is this
-qualified live reader. Both automatic recovery and explicit rollback must return
+Deploy only after the compatible reader is qualified live. Seal that exact
+reader SHA as this release's rollback prior. Both automatic recovery and explicit
+rollback must return
 to a compatible reader. Record the exact controller checkout/SHA, target/prior
 identities and reader journey; the smoke-runner hash does not identify the deploy
 controller. Future-record fixtures belong in isolated databases, never live rows.

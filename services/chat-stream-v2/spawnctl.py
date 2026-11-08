@@ -2317,6 +2317,8 @@ class SpawnCtl:
                         "open_fields": open_flds,
                         "brief": brief,
                         "delivery_receipt": delivery_receipt,
+                        **({spawn_creation.KEY: spawn_creation.initial()}
+                           if host != self.sessions.local_host else {}),
                         "operator_initiated_top_level": (
                             not open_flds.get("parent_stream_id")
                             and not open_flds.get("handoff_from_stream_id")
@@ -3047,10 +3049,15 @@ class SpawnCtl:
                 selected_home = (open_flds.get("account_binding") or {}).get("home")
                 await tmux.pretrust_codex_cwd(str(msg.get("cwd") or machine.codex_cwd),
                     **({"code_home": selected_home} if selected_home else {}))
-        if host != self.sessions.local_host and not await self.store.owns_unwitnessed_spawn_intent(
-            host, name, request_id, nonce, owner_instance_id=self.instance_id,
-        ):
-            raise VerbError("spawn_fence_lost", "remote creation requires its witness-capable writer")
+        creation_attempt = ""
+        if host != self.sessions.local_host:
+            creation_attempt = uuid.uuid4().hex
+            if not await self.store.issue_remote_creation(
+                host, name, request_id=request_id, nonce=nonce,
+                owner_instance_id=self.instance_id, attempt_id=creation_attempt,
+            ):
+                raise VerbError("spawn_fence_lost", "remote creation issuance lost request ownership")
+        creation_succeeded = False
         try:
             # Inject the creation nonce into the pane's environment (spec §D1) so
             # the pane is born carrying its identity — adoptable by a restart
@@ -3059,6 +3066,7 @@ class SpawnCtl:
                 name, command, cwd=msg.get("cwd") or None,
                 env={PANE_NONCE_ENV: nonce} if nonce else None,
             )
+            creation_succeeded = True
         except VerbError as exc:
             if exc.code != "tmux_timeout":
                 raise
@@ -3081,6 +3089,14 @@ class SpawnCtl:
             # positive liveness read as creation evidence and continue the same
             # boot+delivery obligation instead of returning a false negative.
         created[0] = True  # from here on, and only here on, cleanup may kill it
+        if creation_attempt and creation_succeeded:
+            try:
+                await self.store.acknowledge_remote_creation(
+                    host, name, request_id=request_id, nonce=nonce,
+                    owner_instance_id=self.instance_id, attempt_id=creation_attempt,
+                )
+            except Exception:  # failed persistence leaves the attempt unknown
+                log.exception("remote creation acknowledgement not persisted host=%s name=%s", host, name)
         release_deadline = (
             time.monotonic() + BOOT_READY_HARD_DEADLINE_S
             if provider == "codex" else None
