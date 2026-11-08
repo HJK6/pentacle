@@ -2102,6 +2102,8 @@ class SpawnCtl:
         source_id = str(msg.get("handoff_from_stream_id") or "")
         predecessor = (await self.store.fetch_session(*source_id.split(":", 1))
                        if ":" in source_id else None)
+        if predecessor is not None and not visibility_fields.get("role"):
+            visibility_fields["role"] = predecessor.get("role")
         if effective_visibility is None:
             prior = resume_prior_row if resume_prior_row is not None else predecessor
             effective_visibility = (prior.get("visibility") or "default") if prior is not None else visibility_fields["visibility"]

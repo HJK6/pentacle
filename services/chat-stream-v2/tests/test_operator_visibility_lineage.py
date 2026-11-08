@@ -137,7 +137,7 @@ def test_composed_visibility(monkeypatch, tmp_path, source_visibility, requested
                         authorized_spec_ids=frozenset({FD_SPEC}))
                 assert await store.get_assistant_binding(env_binding={}) == before
             # Changing the predecessor after admission cannot change replay's initial decision.
-            await store.submit(lambda c: c.execute("UPDATE sessions SET visibility='nested' WHERE session_name='old'"))
+            await store.submit(lambda c: (c.execute("UPDATE sessions SET visibility='nested' WHERE session_name='old'"), c.commit()))
             restarted = SpawnCtl(store, sessions, tmux=tmux, machine=ctl.machine, specs=_FdCatalog())
             replay = await restarted.spawn(dict(msg), "localhost")
             assert replay["stream_id"] == result["stream_id"]
@@ -145,6 +145,15 @@ def test_composed_visibility(monkeypatch, tmp_path, source_visibility, requested
                 *result["stream_id"].split(":", 1)))["delivery_receipt"]
             assert len(commands) == len(first_open) == 1
             assert (await store.fetch_session(*result["stream_id"].split(":", 1)))["visibility"] == expected
+            await store.submit(lambda c: (c.execute(
+                "UPDATE sessions SET visibility='nested' WHERE host=? AND session_name=?",
+                result["stream_id"].split(":", 1)), c.commit()))
+            await sessions.refresh()
+            current_replay = await restarted.spawn(dict(msg), "localhost")
+            assert current_replay["stream_id"] == result["stream_id"]
+            assert current_replay["initial_prompt_delivery"] == replay["initial_prompt_delivery"]
+            assert (await store.fetch_session(*result["stream_id"].split(":", 1)))["visibility"] == "nested"
+            assert len(commands) == 1
         finally:
             store.stop()
 
@@ -182,6 +191,16 @@ async def scheduled_fixture(monkeypatch, tmp_path):
     await link_specs(store, FD_SPEC, UI_SPEC)
     await sessions.refresh()
     ctl = SpawnCtl(store, sessions, tmux=tmux, machine=_machine(tmp_path), specs=LineageCatalog())
+    ctl.visibility_launches = _spy_operator_facing(monkeypatch)
+    ctl.visibility_opens = []
+    real_open = sessions.open
+    async def record_open(host, name, **fields):
+        retained = next(r for r in await store.reservations(include_expired=True) if r["session_name"] == name)
+        payload = retained["payload"]
+        payload = json.loads(payload) if isinstance(payload, str) else payload
+        ctl.visibility_opens.append({"first_open": dict(fields), "retained_intent": payload["open_fields"]})
+        return await real_open(host, name, **fields)
+    monkeypatch.setattr(sessions, "open", record_open)
     # The external provider is recorded. Admission, intent, generation fencing,
     # first open, native USER-event delivery proof and receipts all run normally.
     monkeypatch.setattr(ctl, "_await_provider_ready", AsyncMock(return_value=SimpleNamespace(ready=True)))
@@ -238,6 +257,9 @@ def test_scheduled_fresh_recovery_requires_original_receipt_selection(monkeypatc
             child = children[0]
             proved = explicit and corruption is None
             assert child["visibility"] == ("hidden" if proved else "default")
+            assert ctl.visibility_launches == [not proved]
+            assert ctl.visibility_opens[0]["first_open"]["visibility"] == child["visibility"]
+            assert ctl.visibility_opens[0]["retained_intent"]["visibility"] == child["visibility"]
             provenance = {e["spec_id"]: e["provenance"] for e in child["spec_binding_provenance"]}
             assert provenance[FD_SPEC] == ("spawn_explicit" if proved else "parent_inherited")
             assert provenance[UI_SPEC] == "spawn_explicit"
@@ -252,8 +274,12 @@ def test_scheduled_fresh_recovery_requires_original_receipt_selection(monkeypatc
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("explicit,update_selection", [(False, None), (True, None), (False, True), (True, False)])
-def test_recurring_update_preserves_only_proved_explicit_subset(monkeypatch, tmp_path, explicit, update_selection):
+@pytest.mark.parametrize("explicit,update_selection,damage", [
+    (False, None, None), (True, None, None), (False, True, None), (True, False, None),
+    (True, None, "missing"), (True, None, "expired"), (True, None, "owner-generation"),
+    (True, None, "occurrence"),
+])
+def test_recurring_update_preserves_only_proved_explicit_subset(monkeypatch, tmp_path, explicit, update_selection, damage):
     import uuid
 
     async def run():
@@ -268,21 +294,102 @@ def test_recurring_update_preserves_only_proved_explicit_subset(monkeypatch, tmp
                 request["spec_ids"] = [UI_SPEC, FD_SPEC]
             created = await surface.recurring_create(request)
             rid = created["recurring"]["recurring_id"]
+            if damage and damage != "occurrence":
+                receipt = await surface._get_receipt(request["request_id"], "row_committed")
+                measured = json.loads(receipt["measured_state_json"])
+                if damage == "missing":
+                    measured.pop("configured_recovery_explicit_spec_ids")
+                elif damage == "owner-generation":
+                    measured["owner_session_generation"] = "wrong-generation"
+                await store.submit(lambda conn: (conn.execute(
+                    "UPDATE v2_operation_receipts SET measured_state_json=?,retain_until=? WHERE receipt_id=?",
+                    (json.dumps(measured), "2000-01-01" if damage == "expired" else receipt["retain_until"],
+                     receipt["receipt_id"])), conn.commit()))
             edit = {**base, "recurring_id": rid, "initial_prompt": "Run the updated ordinary work."}
             if update_selection is not None:
                 edit["spec_ids"] = [UI_SPEC, FD_SPEC] if update_selection else [UI_SPEC]
             await surface.recurring_update(edit)
             occurrence = await surface.recurring_run({**base, "recurring_id": rid})
+            if damage == "occurrence":
+                def corrupt(conn):
+                    receipt = conn.execute("SELECT * FROM v2_operation_receipts WHERE target_id=? AND phase='row_committed'",
+                                           (occurrence["schedule_id"],)).fetchone()
+                    measured = json.loads(receipt["measured_state_json"])
+                    measured["recurring_id"] = str(uuid.uuid4())
+                    conn.execute("UPDATE v2_operation_receipts SET measured_state_json=? WHERE receipt_id=?",
+                                 (json.dumps(measured), receipt["receipt_id"]))
+                    conn.commit()
+                await store.submit(corrupt)
             await surface._fire_schedule(occurrence["schedule_id"])
             await asyncio.gather(*list(ctl._background_spawns))
             child = next(r for r in sessions.list_open() if r["stream_id"] != "localhost:owner")
-            proved = explicit if update_selection is None else update_selection
+            proved = (explicit if update_selection is None else update_selection) and damage is None
             assert child["visibility"] == ("hidden" if proved else "default")
+            assert ctl.visibility_launches == [not proved]
+            assert ctl.visibility_opens[0]["first_open"]["visibility"] == child["visibility"]
+            assert ctl.visibility_opens[0]["retained_intent"]["visibility"] == child["visibility"]
             provenance = {e["spec_id"]: e["provenance"] for e in child["spec_binding_provenance"]}
             if FD_SPEC in provenance:
                 assert provenance[FD_SPEC] == ("spawn_explicit" if proved else "parent_inherited")
             assert child["assigned_spec_id"] == UI_SPEC
             assert len(ctl.tmux.commands) == 1
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("visibility,requested,bound", [
+    ("default", None, False), ("hidden", None, False), ("hidden", "default", False),
+    ("default", "hidden", False), ("hidden", "nested", False), ("default", "default", False),
+    ("hidden", None, True),
+])
+def test_scheduled_handoff_uses_inherited_presentation_and_bound_identity(monkeypatch, tmp_path, visibility, requested, bound):
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    async def run():
+        store, sessions, ctl, surface, auth = await scheduled_fixture(monkeypatch, tmp_path)
+        try:
+            await store.submit(lambda conn: (conn.execute(
+                "UPDATE sessions SET visibility=? WHERE session_name='owner'", (visibility,)), conn.commit()))
+            await sessions.refresh()
+            if bound:
+                _front_desk_composite(store, sessions, bound=("localhost:owner", auth["session_generation"]))
+            request = {"request_id": str(uuid.uuid4()), "from_stream_id": "localhost:owner", "_auth_context": auth,
+                       "objective": "Continue the scheduled conversation", "handoff": True,
+                       "handoff_from_stream_id": "localhost:owner", "visibility": requested,
+                       "fires_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()}
+            created = await surface.schedule_insert(request)
+            await surface._fire_schedule(created["schedule"]["schedule_id"])
+            await asyncio.gather(*list(ctl._background_spawns))
+            child = next(r for r in sessions.list_open() if r["stream_id"] != "localhost:owner")
+            expected = "hidden" if bound else requested or visibility
+            assert child["visibility"] == expected
+            assert ctl.visibility_launches == [expected == "default"]
+            assert ctl.visibility_opens[0]["first_open"]["visibility"] == expected
+            assert ctl.visibility_opens[0]["retained_intent"]["visibility"] == expected
+            if bound:
+                proof = await store.submit(lambda conn: conn.execute(
+                    "SELECT 1 FROM v2_assistant_direct_handoff_proofs WHERE predecessor_stream_id=? AND predecessor_generation=? "
+                    "AND successor_stream_id=? AND successor_generation=?",
+                    ("localhost:owner", auth["session_generation"], child["stream_id"], child["session_generation"])).fetchone())
+                assert proof is not None
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_untrusted_recovery_projection_cannot_authorize_schedule_fallback(monkeypatch, tmp_path):
+    async def run():
+        store, sessions, ctl, surface, auth = await scheduled_fixture(monkeypatch, tmp_path)
+        try:
+            msg = {"spec_ids": [UI_SPEC, FD_SPEC], "configured_recovery_explicit_spec_ids": [FD_SPEC],
+                   "_configured_recovery_explicit_spec_ids": [FD_SPEC],
+                   "_auth_context": {"service_authenticated": True, "service_actor": "daemon:scheduler"}}
+            resolved = await ctl._resolve_spec_binding(msg, "localhost", "scheduled")
+            by_id = {e["spec_id"]: e["provenance"] for e in resolved["spec_binding_provenance"]}
+            assert by_id[FD_SPEC] == "parent_inherited"
+            assert by_id[UI_SPEC] == "spawn_explicit"
         finally:
             store.stop()
     asyncio.run(run())
@@ -304,8 +411,8 @@ def test_native_resume_uses_effective_visibility_at_launch_and_first_open(monkey
             machine = _machine(tmp_path)
             path = _write_transcript(machine)
             old = await _closed_prior(store, path)
-            await store.submit(lambda conn: conn.execute(
-                "UPDATE sessions SET visibility=? WHERE session_name=?", (prior_visibility, old["session_name"])))
+            await store.submit(lambda conn: (conn.execute(
+                "UPDATE sessions SET visibility=? WHERE session_name=?", (prior_visibility, old["session_name"])), conn.commit()))
             tmux = RecordingTmux()
             sessions = Sessions(store, tmux=tmux, local_host="localhost")
             await sessions.refresh()
@@ -333,7 +440,8 @@ def test_native_resume_uses_effective_visibility_at_launch_and_first_open(monkey
 
 
 @pytest.mark.parametrize("requested", ["default", "nested", None])
-def test_genuine_daff_hides_without_rewriting_request_identity(monkeypatch, tmp_path, requested):
+@pytest.mark.parametrize("handoff", [False, True])
+def test_genuine_daff_hides_without_rewriting_request_identity(monkeypatch, tmp_path, requested, handoff):
     monkeypatch.setenv("PENTACLE_ASSISTANT_DAFF_ROLE", "partner-assistant")
     launches = _spy_operator_facing(monkeypatch)
 
@@ -347,6 +455,12 @@ def test_genuine_daff_hides_without_rewriting_request_identity(monkeypatch, tmp_
             msg = {"provider": "claude", "model": "claude-opus-5-5", "effort": "medium",
                    "role": "partner-assistant", "objective": "Continue the protected assistant",
                    "ready_marker": "READY", "request_id": "hidden-daff-wire", "_auth_context": OPERATOR}
+            if handoff:
+                # Historical protected rows can still carry visible presentation.
+                await sessions.open("localhost", "prior-daff", role="partner-assistant", visibility="default",
+                                    provider="claude", effective_model="claude-opus-5-5", effective_effort="medium")
+                msg.pop("role")
+                msg.update(handoff=True, handoff_from_stream_id="localhost:prior-daff")
             if requested is not None:
                 msg["visibility"] = requested
             original_hash = ctl._spawn_payload_hash(msg)
