@@ -65,7 +65,8 @@ def test_exception_defaults_off_and_qualified_provenance_must_be_well_formed():
     row = {"parent_stream_id": None, "visibility": "default",
            "qualified_spec_ids": json.dumps([SPEC]),
            "spec_binding_provenance": json.dumps([{"spec_id": SPEC, "provenance": "spawn_explicit",
-                                                   "granting_principal": "operator"}])}
+                                                   "granting_principal": "operator",
+                                                   "granted_at": "2026-01-01T00:00:00Z"}])}
     assert not _configured_spec_authorized(row, frozenset())
     assert _configured_spec_authorized(row, cfg.rebind_authorized_spec_ids)
     for fields in [
@@ -76,11 +77,15 @@ def test_exception_defaults_off_and_qualified_provenance_must_be_well_formed():
         {"spec_binding_provenance": "{}"}, {"spec_binding_provenance": "[]"},
         {"spec_binding_provenance": "[null]"},
         {"spec_binding_provenance": json.dumps([{"spec_id": [], "provenance": "spawn_explicit",
-                                                 "granting_principal": "operator"}])},
+                                                 "granting_principal": "operator", "granted_at": "date"}])},
         {"spec_binding_provenance": json.dumps([{"spec_id": SPEC, "provenance": "parent_inherited",
-                                                 "granting_principal": "operator"}])},
+                                                 "granting_principal": "operator", "granted_at": "date"}])},
         {"spec_binding_provenance": json.dumps([{"spec_id": SPEC, "provenance": "spawn_explicit",
-                                                 "granting_principal": ""}])},
+                                                 "granting_principal": "", "granted_at": "date"}])},
+        {"spec_binding_provenance": json.dumps([{"spec_id": SPEC, "provenance": "spawn_explicit",
+                                                 "granting_principal": "operator"}])},
+        {"spec_binding_provenance": json.dumps([{"spec_id": SPEC, "provenance": ["spawn_explicit"],
+                                                 "granting_principal": "operator", "granted_at": "date"}])},
     ]:
         assert not _configured_spec_authorized({**row, **fields}, cfg.rebind_authorized_spec_ids)
     hidden = {**row, "visibility": "hidden"}

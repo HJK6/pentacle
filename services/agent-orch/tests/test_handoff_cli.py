@@ -83,7 +83,7 @@ def test_handoff_short_initial_prompt_is_inlined(monkeypatch, capsys, tmp_path):
     assert payload["handoff"] is True
     assert payload["handoff_from_stream_id"] == "hostb:codex-old"
     assert payload["role"] == "qa"
-    assert payload["visibility"] == "default"
+    assert payload["visibility"] is None
     assert "parent_stream_id" not in payload
     assert payload["initial_prompt"] == "short prompt"
     assert "initial_prompt_blob_sha" not in payload

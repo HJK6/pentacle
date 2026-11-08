@@ -231,7 +231,7 @@ def test_visibility_and_lifecycle_are_independent(role, handoff, visibility, sel
     msg = dict(parent_stream_id="hosta:parent", role=role, handoff=handoff,
                visibility=visibility, self_close_on_completion=self_close, objective="Check overrides")
     fields = open_fields(msg)
-    expected = visibility or ("default" if handoff or role == "nexus" else "hidden")
+    expected = visibility or ("default" if handoff else "hidden")
     assert fields["visibility"] == expected
     assert fields["self_close_on_completion"] is self_close
 

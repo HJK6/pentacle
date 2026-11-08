@@ -84,6 +84,7 @@ def test_spawn_resume_payload_includes_resume_session_id(monkeypatch, tmp_path, 
     assert payload["type"] == "spawn"
     assert payload["provider"] == "claude"
     assert payload["resume_session_id"] == RESUME_ID
+    assert payload["visibility"] is None
     # No lineage grafted, and no self_close (resume has no parent/handoff).
     assert "parent_stream_id" not in payload
     assert "from_stream_id" not in payload

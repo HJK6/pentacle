@@ -517,11 +517,11 @@ Agents self-title with `agent-orch title "<succinct durable goal>"` once they un
 
 ## Spawn visibility
 
-When `--visibility` is omitted, `agent-orch spawn` materializes `"default"` for handoffs, `--role nexus`, and parentless spawns (including `--top-level`). A non-Nexus spawn with a parent leaves visibility unset so the daemon resolves it to `"nested"`. Explicit `default`, `nested`, and `hidden` always override this inference.
+Use explicit `--visibility default` for a conversation the operator requested, including when parented to another agent; inspect the effective visibility before reporting it available. Omitted fresh parented work is hidden for every role, including Nexus and QA. Fresh parentless spawns (including `--top-level`) retain `default`. Omitted handoff and native Claude resume inherit the predecessor's stored visibility. Explicit `default`, `nested`, and `hidden` override ordinary inheritance; genuine configured FD and protected Daff seats remain hidden. Visibility changes no lifecycle or rebind authority.
 
 ## Handoff
 
-`agent-orch spawn --handoff` creates a new top-level session for another leader, not a nested child. The CLI sends `handoff:true`, discovers the caller's stream id as `handoff_from_stream_id`, omits `parent_stream_id`, and defaults `visibility` to `"default"` unless the caller explicitly passes `--visibility`. `--handoff` is incompatible with `--parent`.
+`agent-orch spawn --handoff` creates a new top-level successor. The CLI sends `handoff:true`, discovers the caller's stream id as `handoff_from_stream_id`, omits `parent_stream_id`, and preserves omitted visibility so the daemon inherits stored presentation. Immediate and delayed handoffs follow the same rule. Cached legacy requests with a stored explicit `default` retain it; same-key replay retains the admitted successor and receipt. `--handoff` is incompatible with `--parent`.
 
 For Claude spawns, `opus-5.5` and `opus-5` select `claude-opus-5-5`. The full ID `claude-opus-5` still selects Opus 5. The bare `opus` alias and omitted-Claude default remain Opus 4.8.
 
@@ -922,7 +922,7 @@ Constraints and safety:
 - **Not in role baselines.** Role baselines (`qa_baseline.md`, `documentation_baseline.md`, etc.) MUST NOT include this flag in their spawn boilerplate. Hidden seats with a real parent already default on; other visibility values default off. A lead who needs to keep a hidden worker open passes `--no-self-close-on-completion`. A test under `services/agent-orch/tests/test_role_baseline_safety.py` scans the live memory-repo baselines for any unconditional reference to the flag and fails if one appears.
 - **Visible via `inspect`.** `agent-orch inspect <stream>` includes `self_close_on_completion: true|false` in its session summary so operators can confirm authorization status without grep'ing the audit log.
 - **Re-upserts require explicit re-authorization.** `session_store.upsert()` defaults `self_close_on_completion=False`; callers re-upserting a session row (e.g. reconciliation, pane_pid_gone recovery) must pass the flag explicitly to preserve it. All current internal callers comply.
-- **Omitted flag follows visibility and lineage.** A hidden worker with a real parent gets `self_close_on_completion=True`; one with `--visibility default` or `--visibility nested` gets no self-close bit. Explicit `--no-self-close-on-completion` persists false for a parented worker or handoff. When a worker has no self-close permission and its leader is alive, `report --terminate` reaches `live_leader_refused` exit 6; the leader closes it after consuming the report.
+- **Omitted flag follows explicit visibility and lineage.** A worker created with explicit `--visibility hidden` and a real parent gets `self_close_on_completion=True`; daemon-inherited hidden visibility does not add that CLI convenience. A worker with `--visibility default` or `--visibility nested` gets no self-close bit. Explicit `--no-self-close-on-completion` persists false for a parented worker or handoff. When a worker has no self-close permission and its leader is alive, `report --terminate` reaches `live_leader_refused` exit 6; the leader closes it after consuming the report.
 
 ### Leader-owned close
 
