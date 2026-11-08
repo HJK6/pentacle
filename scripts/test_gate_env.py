@@ -159,6 +159,10 @@ class ConfigFailsClosed(Tmp):
             "invalid required selection": lambda c: c["profiles"]["pentacle"]["targets"]["v2-pytest"].update(required_select="tests/test_x.py"),
             "no targets": lambda c: c["profiles"]["pentacle"].update(targets={}),
             "deadline budget": lambda c: c["deadline"].update(slack_s=-1),
+            **{f"invalid workers {value!r}": lambda c, v=value: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(unit_workers=v)
+               for value in (True, False, 0, -1, 1.5, "2", None)},
+            **{f"workers on {target}": lambda c, t=target: c["profiles"]["pentacle"]["targets"][t].update(unit_workers=2)
+               for target in ("v2-smoke", "v2-pytest", "npm-test")},
         }
         for label, mutate in bad.items():
             with self.subTest(label), self.assertRaises(ge.SetupFailure):
@@ -561,6 +565,7 @@ class DeadlineEnvelope(Tmp):
         (service / "tools").mkdir(parents=True, exist_ok=True)
         (service / "tools" / "run_gate.py").write_text(runner_text)
         target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
+        target.pop("unit_workers", None)  # existing serial/deadline and legacy controls
         command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
         return command, results
 
@@ -571,10 +576,17 @@ class DeadlineEnvelope(Tmp):
         self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+        service = self.tmp / "svc"
+        for gate in ("unit", "merge"):
+            target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], unit_workers=2)
+            command, _ = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service,
+                                           self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], {})
+            self.assertEqual(command[command.index("--unit-workers") + 1], "2")
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
         self.assertNotIn("--deadline-seconds", command)
+        self.assertNotIn("--unit-workers", command)
         self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
@@ -1153,6 +1165,8 @@ class MigratedTargets(Tmp):
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
+        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
+        self.assertNotIn("PYTEST_ADDOPTS", env)
         self.assertIn("merge", cmd)
         self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2820)
         self.assertEqual(result["wall_s"], 2850)
