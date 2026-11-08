@@ -29,7 +29,6 @@ from typing import Any
 # Keep the ordinary Linux ps path; use this only after that query fails.
 SESSION_ID_PROBE = """\
 import os
-import select
 import subprocess
 
 table = subprocess.run(

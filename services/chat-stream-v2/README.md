@@ -60,6 +60,8 @@ later instance drift returns `instance_authority_unproven`. An unanchored attemp
 creates no ownership proofs and retains unknown cleanup even if its guessed PIDs
 disappear. Existing authorized graceful tmux teardown remains available without
 an initial anchor; its success is separate from that unresolved cleanup.
+An instance refusal may follow delivery to other proved members of the cohort;
+the session stays open with its cleanup obligation.
 After a valid initial binding, a changed or unavailable second binding defers
 the entire attempt without graceful teardown, so it cannot retarget a replacement.
 Late descendants are reported but never signalled by this escalation. A tmux

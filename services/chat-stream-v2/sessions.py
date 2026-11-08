@@ -1616,23 +1616,21 @@ class Sessions:
         defer_if_working: bool = False,
         attribution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Bounded, idempotent, keyed on CONFIRMED process death (ledger req 5).
+        """Bounded, idempotent close with separate durable process cleanup.
 
         The order is always terminate -> confirm -> mark closed, never
         mark-then-kill, except explicit operator-confirmed offline intent
         (separate deferred-reap ledger, never recorded as verified death).
-        A closed row with a live tree is the wedge that killed
-        live work. A row is NEVER marked closed while a userspace-runnable
-        process still exists, so the v1 `row_closed_tree_alive` cascade stays
-        impossible. `_terminate_pane` runs the escalation ladder and returns one
-        of `ok` / `carcass` / `failed`:
+        Pane closure does not prove every descendant exited: surviving or
+        unverified cleanup remains in session_reap. `_terminate_pane` returns
+        one of `ok` / `carcass` / `failed`:
 
           ok      the pane is gone (graceful kill, or captured-instance SIGKILL) -> mark closed
           carcass SIGKILL landed but the process is a kernel D-state husk that can
                   never execute userspace again -> mark closed as fact + alert
-          failed  no signal was deliverable (no pane pid, tmux unresponsive) ->
-                  the row stays OPEN, `close.failed`, alert; SessionReconciler
-                  re-checks
+          failed  authority or required exit remains unproved; eligible owned
+                  members may already have received SIGKILL. The row stays OPEN,
+                  `close.failed`, alert; SessionReconciler re-checks
 
         Local tmux is evidence about the LOCAL host only. Closing a remote row
         through it would read "no local pane" as confirmed death and false-close
