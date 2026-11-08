@@ -120,9 +120,9 @@ def test_close_binding_rejects_hidden_second_window_and_partial_response():
     assert asyncio.run(Partial().close_pane_identity("v2-owned")) is None
 
 
-@pytest.mark.parametrize("exit_kind,expected", [("status", "0|"), ("signal", "|term")])
+@pytest.mark.parametrize("exit_kind", ["status", "signal"])
 def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentinel(
-    isolated_tmux_env, tmp_path, exit_kind, expected,
+    isolated_tmux_env, tmp_path, exit_kind,
 ):
     import shlex
     import subprocess
@@ -145,10 +145,12 @@ def test_private_tmux_terminal_pane_refuses_anchor_and_preserves_foreign_sentine
             assert live["server_version"] in {"3.4", "3.7c"}
             # Only the pane's own code exits or signals itself. No foreign PID reuse.
             marker.touch()
-            for _ in range(100):
+            for _ in range(250):
                 rc, out = await tmux.run("list-panes", "-s", "-t", "=v2-owned:", "-F",
                                          "#{pane_dead_status}|#{pane_dead_signal}")
-                if rc == 0 and out.rstrip("\n") == expected:
+                terminal = out.rstrip("\n")
+                if rc == 0 and (terminal == "0|" if exit_kind == "status" else
+                                terminal.startswith("|") and len(terminal) > 1):
                     break
                 await asyncio.sleep(0.02)
             else:

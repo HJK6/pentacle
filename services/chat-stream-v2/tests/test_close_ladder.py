@@ -1444,3 +1444,77 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
         finally:
             store.stop()
     asyncio.run(go())
+
+
+def test_unanchored_graceful_close_stays_unknown_when_guessed_cohort_is_gone(monkeypatch):
+    root = 441234567
+    now = {root: {"pid": root, "ppid": 1, "uid": 501, "pgid": root, "sid": root,
+                  "start_id": "Mon Jan 1 00:00:00 2026", "command": "unowned-recording-root"}}
+    class Tmux(LadderTmux):
+        async def kill_session(self, name):
+            await super().kill_session(name)
+            now.clear()
+            now[441234599] = {"pid": 441234599, "ppid": 1, "uid": 501, "pgid": 441234599,
+                              "sid": 441234599, "start_id": "Mon Jan 1 00:00:00 2026",
+                              "command": "unrelated-inventory-row"}
+    class Witness(RecordingWitness):
+        def exited(self): return self.pid not in now
+    async def records(): return {pid: dict(rec) for pid, rec in now.items()}
+    async def boot(): return "boot-fixture"
+    monkeypatch.setattr(prockill, "process_records", records)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+    monkeypatch.setattr(prockill, "ExitWitness", Witness)
+    monkeypatch.setattr(prockill, "pid_alive", lambda _pid: False)
+    async def go():
+        result, store, _ = await _close(Tmux(pid=str(root), dies_on_graceful=True), "unknown-gone")
+        try:
+            assert not result["failed"] and result["reap_status"] == "unknown"
+            reap = await store.get_session_reap(f"{HOST}:unknown-gone")
+            assert reap["reap_status"] == "unknown" and reap["survivors"] == []
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_unanchored_close_preserves_existing_proof_without_upgrading_or_widening(monkeypatch):
+    from collections import defaultdict
+    root, child = 441234567, 441234568
+    current = {pid: {"pid": pid, "ppid": 1 if pid == root else root, "uid": 501,
+                     "pgid": root, "sid": root, "start_id": "Mon Jan 1 00:00:01 2026",
+                     "command": "foreign-now"} for pid in (root, child)}
+    old_record = {**current[root], "start_id": "Mon Jan 1 00:00:00 2026", "command": "old-owned"}
+    old_proof = prockill.identity_proof(host=HOST, boot="boot-fixture", record=old_record,
+        tmux_session="preserve-proof", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
+    old_item = {"pid": root, "command": "old-owned", "first_seen": "2026-01-01T00:00:00Z",
+                "ownership_proof_v2": old_proof}
+    async def records(): return current
+    async def boot(): return "boot-fixture"
+    monkeypatch.setattr(prockill, "process_records", records)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+    monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
+    monkeypatch.setattr(prockill, "pid_alive", lambda pid: int(pid) in current)
+    async def go():
+        store = Store(":memory:"); store.start()
+        tmux = LadderTmux(pid=str(root), dies_on_graceful=True)
+        sessions = Sessions(store, tmux=tmux, local_host=HOST)
+        try:
+            await _seed(store, "preserve-proof")
+            await store.upsert_session_reap(f"{HOST}:preserve-proof", reap_status="survivors",
+                                           survivors=[old_item], attempts=2)
+            result = await sessions.close(HOST, "preserve-proof")
+            assert not result["failed"] and result["reap_status"] == "unknown"
+            reap = await store.get_session_reap(f"{HOST}:preserve-proof")
+            by_pid = {item["pid"]: item for item in reap["survivors"]}
+            assert by_pid[root] == old_item
+            assert "ownership_proof_v2" not in by_pid[child]
+            reaper = SessionReconciler(sessions, None)
+            async def inventory(_host): return [], current, "boot-fixture"
+            signals = []
+            async def signal_pids(_host, pids, sig): signals.extend(pids); return True
+            monkeypatch.setattr(reaper, "_reap_inventory", inventory)
+            monkeypatch.setattr(reaper, "_signal_pids", signal_pids)
+            await reaper._reconcile_closed_survivors(defaultdict(int))
+            assert signals == []  # old proof drifts; new child has no authority
+        finally:
+            store.stop()
+    asyncio.run(go())
