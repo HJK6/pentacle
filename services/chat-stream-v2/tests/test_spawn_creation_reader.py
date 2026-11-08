@@ -1,4 +1,4 @@
-"""Compatible prior consumes future witnesses without creating new ones.
+"""Writer activation retains compatible consumers and registers each dispatch.
 
 All panes and destructive sinks are recording doubles; databases are owned.
 The separate cross-version proof uses actual writer-produced databases.
@@ -59,67 +59,6 @@ def witness(terminal=False):
     return {"version": 1, "attempts": [{"id": "attempt", "owner": "writer", "terminal": terminal}]}
 
 
-@pytest.mark.parametrize("value", [None, {}, {"version": 2, "attempts": []}, witness(), witness(True),
-                                   {"version": 1, "attempts": []}])
-def test_reader_refuses_physical_dispatch_for_any_witness_member(tmp_path, value):
-    async def run():
-        store = Store(str(tmp_path / "reader.db")); store.start()
-        class NoCreation(ReconTmux):
-            async def new_session(self, *args, **kwargs):
-                self.created += 1
-                raise AssertionError("reader dispatched a witnessed creation")
-        tmux = NoCreation()
-        ctl = controller(store, tmux)
-        try:
-            await intent(store, value)
-            before = (await store.reservations(include_expired=True))[0]["payload"]
-            # Every retry/resume creation converges on this exact boundary.
-            for attempt in (0, 1):
-                with pytest.raises(VerbError, match="witness-capable writer"):
-                    await ctl._spawn_fenced(PEER, "owned", "request", "fixture-command", "", "",
-                                             {}, [False], [False], {}, {}, tmux, {}, "nonce",
-                                             attempt=attempt, total_attempts=2)
-            assert tmux.created == 0
-            assert (await store.reservations(include_expired=True))[0]["payload"] == before
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("raw", [None, "broken-json", "[]", "null"])
-def test_reader_refuses_unreadable_or_missing_current_intent(tmp_path, raw):
-    async def run():
-        store = Store(str(tmp_path / "missing.db")); store.start()
-        try:
-            await intent(store)
-            await store.submit(lambda conn: conn.execute(
-                "UPDATE v2_stream_reservations SET payload=?", (raw,)))
-            assert not await store.owns_unwitnessed_spawn_intent(
-                PEER, "owned", "request", "nonce", owner_instance_id="owner")
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
-def test_reader_dispatch_check_binds_current_identity_owner_and_cancel(tmp_path):
-    async def run():
-        store = Store(str(tmp_path / "identity.db")); store.start()
-        async def allowed(name="owned", request="request", nonce="nonce", owner="owner"):
-            return await store.owns_unwitnessed_spawn_intent(PEER, name, request, nonce, owner_instance_id=owner)
-        try:
-            await intent(store)
-            assert await allowed()
-            assert not await allowed(name="other")
-            assert not await allowed(request="other")
-            assert not await allowed(nonce="other")
-            assert not await allowed(owner="other")
-            assert (await store.cancel_reservation_fenced(PEER, "owned", "request"))["status"] == "cancelled"
-            assert not await allowed()
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("value", [MISSING, None, {"version": 2, "attempts": []}, witness(), witness(True)])
 def test_cancelled_future_or_historical_record_survives_reader_restart(tmp_path, value):
     async def run():
@@ -167,7 +106,7 @@ def test_reader_payload_refresh_preserves_every_future_value(tmp_path):
     asyncio.run(run())
 
 
-def test_reader_normal_remote_spawn_produces_no_witness(tmp_path):
+def test_writer_normal_remote_spawn_initializes_witness(tmp_path):
     async def run():
         store = Store(str(tmp_path / "normal.db")); store.start()
         tmux = ReconTmux(); ctl = controller(store, tmux)
@@ -181,12 +120,12 @@ def test_reader_normal_remote_spawn_produces_no_witness(tmp_path):
         store.record_spawn_intent = observe
         try:
             reply = await ctl.spawn({"host": PEER, "session_name": "normal", "request_id": "normal-request",
-                                     "command": "fixture-command", "objective": "Qualify legacy reader normal remote spawn"}, LOCAL)
+                                     "command": "fixture-command", "objective": "Qualify writer normal remote spawn"}, LOCAL)
             await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
             assert reply["type"] == "spawn.ok" and tmux.created == 1
             assert (await store.fetch_session(PEER, "normal"))["status"] == "open"
             assert not await store.reservations(include_expired=True)
-            assert recorded and all(spawn_creation.KEY not in payload for payload in recorded)
+            assert recorded and all(spawn_creation.witness(payload) is not None for payload in recorded)
         finally:
             await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
             store.stop()
@@ -194,7 +133,7 @@ def test_reader_normal_remote_spawn_produces_no_witness(tmp_path):
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_reader_remote_retry_and_resume_produce_no_witness(tmp_path, monkeypatch, resume):
+def test_writer_remote_retry_and_resume_register_each_creation(tmp_path, monkeypatch, resume):
     import spawnctl as module
     from tests.test_spawn_auth_context import ClaudeBootTmux, _claude_resolve
     monkeypatch.setattr(module, "BOOT_READY_HARD_DEADLINE_S", 0.01)
@@ -202,6 +141,15 @@ def test_reader_remote_retry_and_resume_produce_no_witness(tmp_path, monkeypatch
         store = Store(str(tmp_path / "retry.db")); store.start()
         tmux = ClaudeBootTmux("Loading Claude…"); ctl = controller(store, tmux)
         ctl._resolve_launch = _claude_resolve
+        dispatches = []
+        physical_create = tmux.new_session
+        async def physical_dispatch(*args, **kwargs):
+            rows = await store.reservations(include_expired=True)
+            value = spawn_creation.witness(rows[0]["payload"])
+            assert value is not None
+            dispatches.append(value)
+            await physical_create(*args, **kwargs)
+        tmux.new_session = physical_dispatch
         if resume:
             async def transcript_discovery(*args):
                 return "resumed", "/fixture/transcript.jsonl", "", None
@@ -216,7 +164,7 @@ def test_reader_remote_retry_and_resume_produce_no_witness(tmp_path, monkeypatch
         store.record_spawn_intent = record
         try:
             message = {"host": PEER, "request_id": "retry-request", "provider": "claude",
-                       "initial_prompt": "never delivered", "objective": "Qualify reader remote retry without witness production"}
+                       "initial_prompt": "never delivered", "objective": "Qualify a registered creation attempt on every writer retry"}
             if resume:
                 message["resume_session_id"] = "12345678-1234-1234-1234-123456789abc"
             else:
@@ -226,7 +174,15 @@ def test_reader_remote_retry_and_resume_produce_no_witness(tmp_path, monkeypatch
             assert error.value.code == "boot_not_ready"
             assert tmux.new_sessions == module.PROMPT_SPAWN_RETRY_ATTEMPTS > 1
             assert tmux.pastes == 0
-            assert observed and all(spawn_creation.KEY not in payload for payload in observed)
+            assert observed and all(spawn_creation.witness(payload) is not None for payload in observed)
+            assert len(dispatches) == module.PROMPT_SPAWN_RETRY_ATTEMPTS
+            identifiers = []
+            for number, value in enumerate(dispatches, 1):
+                assert len(value["attempts"]) == number
+                assert all(a["terminal"] for a in value["attempts"][:-1])
+                assert value["attempts"][-1]["terminal"] is False
+                identifiers.append(value["attempts"][-1]["id"])
+            assert len(set(identifiers)) == len(identifiers)
         finally:
             await asyncio.gather(*tuple(ctl._background_spawns), return_exceptions=True)
             store.stop()
