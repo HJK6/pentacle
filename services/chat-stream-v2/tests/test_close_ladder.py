@@ -407,7 +407,7 @@ def test_dstate_carcass_marks_closed_and_alerts(monkeypatch: pytest.MonkeyPatch)
     async def records():
         return {999999: {"pid": 999999, "ppid": 1, "uid": 501, "pgid": 999999,
                          "sid": 999999, "start_id": "Mon Jan 1 00:00:00 2026", "command": "husk"}}
-    async def boot(): return "boot-1"
+    async def boot(): return "00000000-0000-0000-0000-000000000001"
     monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
     monkeypatch.setattr(prockill, "process_records", records)
     monkeypatch.setattr(prockill, "boot_id", boot)
@@ -979,7 +979,7 @@ def test_force_close_refuses_stale_captured_instance(monkeypatch: pytest.MonkeyP
     from types import SimpleNamespace
     captured = {"pid": 990001, "ppid": 1, "uid": 501, "pgid": 990001,
                 "sid": 990001, "start_id": "Mon Jan 1 00:00:00 2026", "command": "owned-A"}
-    proof = prockill.identity_proof(host=HOST, boot="boot-1", record=captured,
+    proof = prockill.identity_proof(host=HOST, boot="00000000-0000-0000-0000-000000000001", record=captured,
         tmux_session="s-stale", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
     async def capture(*_args):
         return [990001], {990001: captured}, {990001: proof}, True
@@ -987,7 +987,7 @@ def test_force_close_refuses_stale_captured_instance(monkeypatch: pytest.MonkeyP
         return {990001: {**captured, "start_id": "Mon Jan 1 00:00:01 2026", "command": "foreign-B"}}
     async def tree(_root):
         return ["990001", "990002"]  # late foreign descendant must never be signalled
-    async def boot(): return "boot-1"
+    async def boot(): return "00000000-0000-0000-0000-000000000001"
     async def not_gone(*_args): return False
     deliveries = []
     monkeypatch.setattr(prockill, "process_records", current)
@@ -1011,7 +1011,7 @@ def _cohort_rig(monkeypatch, *, complete=True):
                  "sid": 990001, "start_id": "Mon Jan 1 00:00:01 2026", "command": "owned-child"},
     }
     now = {pid: dict(rec) for pid, rec in original.items()}
-    state = {"boot": "boot-1", "records": now}
+    state = {"boot": "00000000-0000-0000-0000-000000000001", "records": now}
     handles = {}
     def witness(pid):
         handles[pid] = RecordingWitness(pid)
@@ -1021,7 +1021,7 @@ def _cohort_rig(monkeypatch, *, complete=True):
     monkeypatch.setattr(prockill, "ExitWitness", witness)
     monkeypatch.setattr(prockill, "process_records", records)
     monkeypatch.setattr(prockill, "boot_id", boot)
-    proofs = {pid: prockill.identity_proof(host=HOST, boot="boot-1", record=rec,
+    proofs = {pid: prockill.identity_proof(host=HOST, boot="00000000-0000-0000-0000-000000000001", record=rec,
               tmux_session="owned", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
               for pid, rec in original.items()}
     cohort = prockill.CapturedTree(list(original), original, proofs, complete)
@@ -1032,7 +1032,7 @@ def _cohort_rig(monkeypatch, *, complete=True):
 @pytest.mark.parametrize("field,value", [
     ("pid", 999998), ("uid", 502), ("pgid", 990003), ("sid", 990003),
     ("start_id", "Mon Jan 1 00:00:02 2026"), ("start_id", ""),
-    ("command", "foreign-B"), ("ppid", 990003), ("boot", "boot-2"),
+    ("command", "foreign-B"), ("ppid", 990003), ("boot", "00000000-0000-0000-0000-000000000002"),
 ])
 def test_close_cohort_refuses_changed_authority(monkeypatch, field, value):
     async def go():
@@ -1142,7 +1142,7 @@ def test_close_cohort_exit_before_delivery_sends_nothing(monkeypatch, phase):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("where", ["prepare", "grace"])
+@pytest.mark.parametrize("where", ["prepare", "postread", "authorize", "grace"])
 def test_close_cancellation_closes_every_registered_witness(monkeypatch, where):
     async def go():
         cohort, state, handles = _cohort_rig(monkeypatch)
@@ -1152,6 +1152,23 @@ def test_close_cancellation_closes_every_registered_witness(monkeypatch, where):
         from types import SimpleNamespace
         tmux = AnchoredLadderTmux(pid="990001")
         if where == "grace": tmux.kill_session = cancelled
+        if where == "postread":
+            probe = tmux.close_pane_identity
+            count = 0
+            async def cancel_postread(name):
+                nonlocal count
+                count += 1
+                if count == 2: raise asyncio.CancelledError
+                return await probe(name)
+            tmux.close_pane_identity = cancel_postread
+        if where == "authorize":
+            count = 0
+            async def cancel_authorize():
+                nonlocal count
+                count += 1
+                if count == 2: raise asyncio.CancelledError
+                return state["records"]
+            monkeypatch.setattr(prockill, "process_records", cancel_authorize)
         receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture)
         with pytest.raises(asyncio.CancelledError):
             await Sessions._terminate_pane(receiver, "owned")
@@ -1180,7 +1197,7 @@ def test_close_refusal_persists_open_obligation_and_retry_completes(monkeypatch)
             assert reap["reap_status"] == "unknown"
             assert reap["survivors"][0]["reap_reason"] == "logical_ownership_unproven"
             assert all(not h.sent and h.closed for h in handles.values())
-            state["boot"] = "boot-1"
+            state["boot"] = "00000000-0000-0000-0000-000000000001"
             def witness(pid):
                 handle = RecordingWitness(pid)
                 def send(sig):
@@ -1371,7 +1388,8 @@ def test_close_tmux_timeout_still_uses_independent_captured_authority(monkeypatc
     "missing", "dead", "status_zero", "signal", "pipe", "unknown_version", "partial",
     "same_server_reuse", "other_parent", "hidden_window", "wrong_root", "wrong_session",
     "drift_pane_id", "drift_pane_pid", "drift_session_id", "drift_tty", "drift_socket",
-    "drift_server", "drift_version", "post_missing", "exit_during_registration",
+    "drift_server", "drift_version", "drift_session_name", "post_missing",
+    "post_dead", "post_signal", "post_pipe", "exit_during_registration", "witness_error",
 ])
 @pytest.mark.parametrize("graceful", [False, True])
 def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, scenario, graceful):
@@ -1385,7 +1403,11 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
     state = {"records": {root: rec(root, server), child: rec(child, root)}}
     handles, deliveries = {}, []
     class Witness(RecordingWitness):
-        def exited(self): return self.pid not in state["records"]
+        def exited(self):
+            self.observations = getattr(self, "observations", 0) + 1
+            if scenario == "witness_error" and self.observations > 1:
+                raise OSError("synthetic failed witness observation")
+            return self.pid not in state["records"]
         def send(self, sig):
             deliveries.append((self.pid, int(sig)))
             state["records"].pop(self.pid, None)
@@ -1397,7 +1419,7 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             state["records"][child]["ppid"] = 1
         return handles[pid]
     async def records(): return {pid: dict(row) for pid, row in state["records"].items()}
-    async def boot(): return "boot-fixture"
+    async def boot(): return "00000000-0000-0000-0000-000000000003"
     monkeypatch.setattr(prockill, "ExitWitness", witness)
     monkeypatch.setattr(prockill, "process_records", records)
     monkeypatch.setattr(prockill, "boot_id", boot)
@@ -1432,6 +1454,10 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             if scenario == "exit_during_registration" and self.reads > 1:
                 fields["pane_dead_status"] = "0"
             if scenario == "pipe": fields["pane_pipe"] = "1"
+            if self.reads > 1:
+                if scenario == "post_dead": fields["pane_dead"] = "1"
+                if scenario == "post_signal": fields["pane_dead_signal"] = "term"
+                if scenario == "post_pipe": fields["pane_pipe"] = "1"
             if scenario == "unknown_version": fields["version"] = "unqualified"
             if scenario == "wrong_root": fields["pane_pid"] = str(root + 10)
             if scenario == "wrong_session": fields["session_name"] = "replacement"
@@ -1442,7 +1468,8 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             drift = {"drift_pane_id": ("pane_id", "%2"), "drift_pane_pid": ("pane_pid", str(root + 10)),
                      "drift_session_id": ("session_id", "$8"), "drift_tty": ("pane_tty", "/dev/other"),
                      "drift_socket": ("socket_path", "/tmp/replacement"),
-                     "drift_server": ("pid", str(server + 1)), "drift_version": ("version", "3.4")}
+                     "drift_server": ("pid", str(server + 1)), "drift_version": ("version", "3.4"),
+                     "drift_session_name": ("session_name", "replacement")}
             if close_read and self.reads > 1 and scenario in drift:
                 key, value = drift[scenario]; fields[key] = value
             for key, value in fields.items(): fmt = fmt.replace("#{" + key + "}", value)
@@ -1457,7 +1484,8 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             result = await sessions.close(HOST, "anchor-refusal")
             assert deliveries == [], (scenario, deliveries)
             changed = (scenario.startswith("drift_") or scenario in {
-                "post_missing", "exit_during_registration", "wrong_root"})
+                "post_missing", "post_dead", "post_signal", "post_pipe",
+                "exit_during_registration", "wrong_root"})
             succeeded = graceful and not changed
             assert result["failed"] is not succeeded
             if not succeeded: assert result["reason"] == "logical_ownership_unproven"
@@ -1471,7 +1499,7 @@ def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, s
             if succeeded:
                 # Continue from the actual persisted close, through the ordinary reaper.
                 reaper = SessionReconciler(sessions, None)
-                async def inventory(_host): return [], await records(), "boot-fixture"
+                async def inventory(_host): return [], await records(), "00000000-0000-0000-0000-000000000003"
                 async def signal_pids(_host, pids, sig):
                     deliveries.extend((pid, int(sig)) for pid in pids)
                     return True
@@ -1502,7 +1530,7 @@ def test_unanchored_graceful_close_stays_unknown_when_guessed_cohort_is_gone(mon
     class Witness(RecordingWitness):
         def exited(self): return self.pid not in now
     async def records(): return {pid: dict(rec) for pid, rec in now.items()}
-    async def boot(): return "boot-fixture"
+    async def boot(): return "00000000-0000-0000-0000-000000000003"
     monkeypatch.setattr(prockill, "process_records", records)
     monkeypatch.setattr(prockill, "boot_id", boot)
     monkeypatch.setattr(prockill, "ExitWitness", Witness)
@@ -1525,12 +1553,12 @@ def test_unanchored_close_preserves_existing_proof_without_upgrading_or_widening
                      "pgid": root, "sid": root, "start_id": "Mon Jan 1 00:00:01 2026",
                      "command": "foreign-now"} for pid in (root, child)}
     old_record = {**current[root], "start_id": "Mon Jan 1 00:00:00 2026", "command": "old-owned"}
-    old_proof = prockill.identity_proof(host=HOST, boot="boot-fixture", record=old_record,
+    old_proof = prockill.identity_proof(host=HOST, boot="00000000-0000-0000-0000-000000000003", record=old_record,
         tmux_session="preserve-proof", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
     old_item = {"pid": root, "command": "old-owned", "first_seen": "2026-01-01T00:00:00Z",
                 "ownership_proof_v2": old_proof}
     async def records(): return current
-    async def boot(): return "boot-fixture"
+    async def boot(): return "00000000-0000-0000-0000-000000000003"
     monkeypatch.setattr(prockill, "process_records", records)
     monkeypatch.setattr(prockill, "boot_id", boot)
     monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
@@ -1550,7 +1578,7 @@ def test_unanchored_close_preserves_existing_proof_without_upgrading_or_widening
             assert by_pid[root] == old_item
             assert "ownership_proof_v2" not in by_pid[child]
             reaper = SessionReconciler(sessions, None)
-            async def inventory(_host): return [], current, "boot-fixture"
+            async def inventory(_host): return [], current, "00000000-0000-0000-0000-000000000003"
             signals = []
             async def signal_pids(_host, pids, sig): signals.extend(pids); return True
             monkeypatch.setattr(reaper, "_reap_inventory", inventory)
@@ -1559,4 +1587,31 @@ def test_unanchored_close_preserves_existing_proof_without_upgrading_or_widening
             assert signals == []  # old proof drifts; new child has no authority
         finally:
             store.stop()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("stored,observed,accepted", [
+    ("{ sec = 123456, usec = 789 } Sun Nov 8 UTC", "{ sec = 123456, usec = 789 } Sat Nov 7 CST", True),
+    ("{ sec = 123456, usec = 789 } UTC", "{ sec = 123457, usec = 789 } CST", False),
+    ("{ sec = broken, usec = 789 }", "{ sec = broken, usec = 789 }", False),
+    ("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000001", True),
+    ("invalid-boot", "invalid-boot", False),
+])
+def test_close_anchor_consumes_shared_numeric_boot_comparison(monkeypatch, stored, observed, accepted):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        cohort.anchored = False
+        for proof in cohort.proofs.values(): proof["boot_id"] = stored
+        state["boot"] = stored
+        try:
+            await cohort.prepare()
+            state["boot"] = observed
+            assert await cohort.authorize(990001, 1) is accepted
+            sent, _ = await cohort.signal(signal.SIGKILL)
+            assert sent == ({990001, 990002} if accepted else set())
+            if not accepted:
+                assert all(not handle.sent for handle in handles.values())
+                assert all("ownership_proof_v2" not in item for item in (await cohort.readback())["survivors"])
+        finally:
+            cohort.close()
     asyncio.run(go())

@@ -1300,7 +1300,7 @@ class Sessions:
                 self._pop_inventory_locked(f"{host}:{session_name}")
             if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
                 await emit_if_changed(immediate=True)
-            await self.store.upsert_session_reap(
+            await self._save_close_reap(
                 f"{host}:{session_name}",
                 reap_status=reap_status,
                 survivors=survivors or [],
@@ -1310,6 +1310,28 @@ class Sessions:
                 row, reason=reason or "confirmed_dead_close",
             )
         return row
+
+    async def _save_close_reap(
+        self, stream_id: str, *, reap_status: str,
+        survivors: list[dict[str, Any]], updated_at: str,
+    ) -> None:
+        # An unknown attempt cannot disprove or upgrade earlier ownership.
+        # Keep those exact records; only their existing fresh reaper checks
+        # may authorize them. New diagnostic PIDs receive no inherited proof.
+        retained: dict[str, Any] = {}
+        if reap_status == "unknown":
+            previous = await self.store.get_session_reap(stream_id)
+            stronger = [item for item in (previous or {}).get("survivors", [])
+                        if isinstance(item.get("ownership_proof_v2"), dict)]
+            if stronger:
+                previous_pids = {item["pid"] for item in stronger}
+                survivors = stronger + [item for item in survivors if item.get("pid") not in previous_pids]
+                retained = {key: previous[key] for key in (
+                    "attempts", "next_attempt_at", "exhausted_at") if key in previous}
+        await self.store.upsert_session_reap(
+            stream_id, reap_status=reap_status, survivors=survivors,
+            updated_at=updated_at, **retained,
+        )
 
     async def mark_reconciled_dead(
         self,
@@ -1698,7 +1720,7 @@ class Sessions:
             state, pane_pid, reap = await self._terminate_pane(session_name)
             if state == "failed":
                 failure_reason = str(reap.get("reason") or "no_deliverable_signal")
-                await self.store.upsert_session_reap(
+                await self._save_close_reap(
                     sid, reap_status=str(reap.get("reap_status") or "unknown"),
                     survivors=reap.get("survivors") or [], updated_at=iso_now(),
                 )
@@ -1706,7 +1728,8 @@ class Sessions:
                                         stream_id=sid, generation=(row or {}).get("session_generation"),
                                         pane_pid=pane_pid, reason=failure_reason)
                 return {"failed": True, "already_closed": False,
-                        "reason": failure_reason if failure_reason == "instance_authority_unproven" else
+                        "reason": failure_reason if failure_reason in {
+                            "instance_authority_unproven", "logical_ownership_unproven"} else
                                   "pane_process_unkillable: no deliverable signal "
                                   "(no pane pid and tmux unresponsive)",
                         "reap_status": reap.get("reap_status", "unknown"),
@@ -1802,13 +1825,9 @@ class Sessions:
         }
 
     async def _capture_tree_identity(
-        self, session_name: str, pane_pid: str
+        self, session_name: str, pane_pid: str, pane: dict[str, str] | None
     ) -> tuple[list[int], dict[int, dict[str, Any]], dict[int, dict[str, Any]], bool]:
-        """Capture the target tree and complete process-instance proofs."""
-        try:
-            pane = await self.tmux.pane_identity(session_name)
-        except Exception:  # noqa: BLE001 - pane binding is optional, records are mandatory
-            pane = None
+        """Capture provisional identities under the first live pane snapshot."""
         try:
             records = await prockill.process_records()
         except Exception:  # noqa: BLE001 - close remains bounded
@@ -1837,8 +1856,8 @@ class Sessions:
             boot = await prockill.boot_id()
         except Exception:  # noqa: BLE001 - missing boot identity only loses proof
             boot = ""
-        pane = pane or {}
-        if pane.get("pane_pid") and str(pane["pane_pid"]) != str(root):
+        if (not pane or pane.get("pane_pid") != str(root)
+                or records[root]["ppid"] != int(pane["server_pid"])):
             return tree, records, {}, False
         proofs: dict[int, dict[str, Any]] = {}
         for pid in tree:
@@ -1846,10 +1865,8 @@ class Sessions:
                 host=self.local_host,
                 boot=boot,
                 record=records[pid],
-                tmux_session=str(pane.get("session_name") or session_name),
-                tmux_pane=str(pane.get("pane_id") or ""),
-                tty=str(pane.get("tty") or ""),
-                tmux_socket=str(pane.get("tmux_socket") or ""),
+                tmux_session=pane["session_name"], tmux_pane=pane["pane_id"],
+                tty=pane["tty"], tmux_socket=pane["tmux_socket"],
             )
             if proof is not None:
                 proofs[pid] = proof
@@ -1857,13 +1874,35 @@ class Sessions:
 
     async def _terminate_pane(self, session_name: str) -> tuple[str, str, dict[str, Any]]:
         """Close with one fixed cohort and witnesses retained across the grace wait."""
-        pane_pid = await self.tmux.pane_pid(session_name)
+        try:
+            pane_pid = await self.tmux.pane_pid(session_name)
+        except VerbError:
+            pane_pid = ""
+        try:
+            pane = await self.tmux.close_pane_identity(session_name)
+        except Exception:  # noqa: BLE001 - failed observation grants no ownership
+            pane = None
         tracked, records, proofs, inventory_complete = await self._capture_tree_identity(
-            session_name, pane_pid
+            session_name, pane_pid, pane
         )
         cohort = prockill.CapturedTree(tracked, records, proofs, inventory_complete)
         try:
             await cohort.prepare()
+            changed = bool(pane and pane["pane_pid"] != pane_pid)
+            if pane:
+                try:
+                    after = await self.tmux.close_pane_identity(session_name)
+                except Exception:  # noqa: BLE001 - never retarget on lost readback
+                    after = None
+                changed = changed or after != pane
+                if not changed:
+                    await cohort.authorize(int(pane_pid), int(pane["server_pid"]))
+            if not cohort.anchored:
+                cohort.revoke()
+            if changed:
+                reap = await cohort.readback()
+                reap["reason"] = "logical_ownership_unproven"
+                return "failed", pane_pid, reap
             try:
                 await self.tmux.kill_session(session_name)
                 graceful_gone = await self._confirm_pane_gone(session_name, CLOSE_GRACEFUL_CONFIRM_S)
@@ -1871,8 +1910,10 @@ class Sessions:
                 graceful_gone = False  # a wedged tmux cannot prevent witnessed escalation
             if graceful_gone:
                 return "ok", pane_pid, await cohort.readback()
-            if not pane_pid:
-                return "failed", pane_pid, {"reap_status": "unknown", "survivors": []}
+            if not cohort.anchored:
+                reap = await cohort.readback()
+                reap["reason"] = "logical_ownership_unproven"
+                return "failed", pane_pid, reap
 
             sent, refused = await cohort.signal(signal.SIGKILL)
             if refused:

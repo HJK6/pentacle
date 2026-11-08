@@ -374,6 +374,8 @@ class CapturedTree:
 
     No current-tree enumeration can expand destructive authority. Missing or
     changed records/witnesses refuse the target; they never trigger a PID fallback.
+    Registration is provisional until Sessions confirms the live tmux bracket;
+    neither signals nor readback proofs are granted before that anchor.
     """
 
     def __init__(self, pids: list[int], records: dict[int, dict[str, Any]],
@@ -382,12 +384,13 @@ class CapturedTree:
         self.records = {pid: dict(records[pid]) for pid in pids if pid in records}
         self.proofs = {pid: dict(proofs[pid]) for pid in pids if pid in proofs}
         self.complete = complete
+        self.anchored = False
         self.witnesses: dict[int, ExitWitness] = {}
         self.valid: set[int] = set()
 
     def _matches(self, pid: int, current: dict[str, Any] | None, boot: str) -> bool:
         captured, proof = self.records.get(pid), self.proofs.get(pid)
-        if not current or not captured or not proof or not boot or proof.get("boot_id") != boot:
+        if not current or not captured or not proof or not boot_matches(proof.get("boot_id"), boot):
             return False
         try:
             for key in ("pid", "uid", "pgid", "sid"):
@@ -437,7 +440,30 @@ class CapturedTree:
         except OSError:
             return False
 
+    async def authorize(self, root: int, server: int) -> bool:
+        """Finish the live tmux bracket after its matching second snapshot."""
+        current, boot = await process_records(), await boot_id()
+        try:
+            self.anchored = bool(
+                self.complete and self.pids and self.pids[0] == root
+                and self.records.get(root, {}).get("ppid") == server
+                and current.get(root, {}).get("ppid") == server
+                and all(pid in self.valid and not self.witnesses[pid].exited()
+                        and self._matches(pid, current.get(pid), boot) for pid in self.pids)
+            )
+        except OSError:
+            self.anchored = False
+        return self.anchored
+
+    def revoke(self) -> None:
+        self.anchored = False
+        self.valid.clear()
+        self.proofs.clear()
+        self.close()
+
     async def signal(self, sig: int) -> tuple[set[int], set[int]]:
+        if not self.anchored:
+            return set(), set(self.pids) or {-1}
         current, boot = await process_records(), await boot_id()
         sent: set[int] = set()
         refused: set[int] = set()
@@ -474,7 +500,7 @@ class CapturedTree:
                 break
             observed.update(extra)
         proved = set()
-        for pid in self.valid:
+        for pid in self.valid if self.anchored else ():
             try:
                 if not self.witnesses[pid].exited() and self._matches(pid, current.get(pid), boot):
                     proved.add(pid)
@@ -502,7 +528,7 @@ class CapturedTree:
             pending -= attached
         survivors = []
         for pid in sorted(observed):
-            if pid in self.pids and self.gone(pid):
+            if self.anchored and pid in self.pids and self.gone(pid):
                 continue
             # An unreadable inventory must still retain a possibly-live target.
             if pid not in current and not pid_alive(str(pid)):
@@ -513,16 +539,20 @@ class CapturedTree:
             if pid in proofs:
                 item["ownership_proof_v2"] = proofs[pid]
             else:
-                item["reap_reason"] = ("instance_authority_unproven" if self.complete
-                                       else "process_observed_alive")
+                item["reap_reason"] = ("instance_authority_unproven" if self.anchored
+                                       else "logical_ownership_unproven")
             survivors.append(item)
-        unknown = not self.complete or not current or any("ownership_proof_v2" not in x for x in survivors)
+        unknown = not self.anchored or not self.complete or not current or any(
+            "ownership_proof_v2" not in x for x in survivors)
         return {"reap_status": "unknown" if unknown else "survivors" if survivors else "reaped",
                 "survivors": survivors}
 
     def close(self) -> None:
         for witness in self.witnesses.values():
-            witness.close()
+            try:
+                witness.close()
+            except OSError:
+                pass
         self.witnesses.clear()
 
 
