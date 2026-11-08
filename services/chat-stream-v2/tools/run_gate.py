@@ -274,7 +274,7 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         # The subject looked green but its evidence is partial: never a green verdict.
         primary = "evidence_incomplete"
     return primary, reporting
-def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path) -> dict[str, Any]:
+def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1) -> dict[str, Any]:
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
     junit, log = evidence / f"{tier}.junit.xml", evidence / f"{tier}.log"
@@ -301,6 +301,8 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
         if preflight != 0:
             return _result(tier, code=preflight, passed=False, reason="preflight_failed", timed_out=preflight_timeout, preflight=preflight, command=[str(PRE_FLIGHT)], junit=junit, log=log, soak=soak)
     command = _tier_command(tier, junit, basetemp)
+    if tier == "unit" and unit_workers > 1:
+        command += ["-n", str(unit_workers), "--dist", "loadfile"]
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
     print(f"[v2-gate] {tier}: {' '.join(command)}")
     _LAST_PROCESS.clear()
@@ -409,6 +411,7 @@ def main() -> int:
     parser.add_argument("--evidence-out", type=Path)
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
+    parser.add_argument("--unit-workers", type=int, default=1, help="fixed unit-tier workers; 1 keeps serial execution")
     parser.add_argument("--deadline-seconds", type=_positive_finite,
                         help="total time this runner may use; refuse before launch or a tier that cannot fit")
     parser.add_argument("--deadline-reserve-seconds", type=_positive_finite, default=DEFAULT_RESERVE_S,
@@ -421,6 +424,8 @@ def main() -> int:
     parser.add_argument("--usage-deployment-contract", type=Path,
                         help="external expected owner and host inventory for the usage manifest")
     args = parser.parse_args()
+    if args.unit_workers < 1 or (args.unit_workers > 1 and args.gate not in {"unit", "merge"}):
+        parser.error("--unit-workers must be positive and parallel workers require unit or merge")
     if bool(args.usage_manifest) != bool(args.usage_deployment_contract):
         parser.error("--usage-manifest and --usage-deployment-contract must be supplied together")
     if args.usage_manifest and args.gate != "merge":
@@ -464,7 +469,7 @@ def main() -> int:
                     if index and (refusal := _deadline_check(deadline, clock_start, "deadline", limits[index:], usage_pending=False)):
                         results.append(refusal)
                         break
-                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest))
+                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers))
     except KeyboardInterrupt:
         _TERMINATION_REQUESTED = True
         results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))

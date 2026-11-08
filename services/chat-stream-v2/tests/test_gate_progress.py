@@ -64,11 +64,25 @@ def _run_suite(tmp_path: Path, source: str, *extra: str) -> tuple[subprocess.Com
 
 
 def test_journal_records_outcomes_and_completes(tmp_path: Path) -> None:
-    proc, journal = _run_suite(tmp_path, SUITE)
+    for workers in (1, 2):
+        case = tmp_path / str(workers)
+        case.mkdir()
+        _check_journal_outcomes(case, *([] if workers == 1 else ["-n", str(workers), "--dist", "loadfile"]))
+    mismatch = tmp_path / "mismatch"
+    mismatch.mkdir()
+    source = SUITE + '\nif os.environ.get("PYTEST_XDIST_WORKER") == "gw1":\n    def test_extra(): pass\n'
+    proc, journal = _run_suite(mismatch, source, "-n", "2", "--dist", "loadfile")
+    summary = gate_progress.summarize(journal)
+    assert proc.returncode != 0 and summary["collection_mismatch"] is True and summary["complete"] is False
+
+
+def _check_journal_outcomes(tmp_path: Path, *extra: str) -> None:
+    proc, journal = _run_suite(tmp_path, SUITE, *extra)
     assert proc.returncode == 1, proc.stdout
     summary = gate_progress.summarize(journal)
     assert summary["complete"] is True and summary["run_id"] == "run-1:unit"
     assert summary["collected"] == 5 and summary["completed_nodes"] == 5 and summary["active_nodes"] == []
+    assert summary["started_nodes"] == 5
     assert {"node": "test_synthetic.py::test_fail", "phase": "call"} in summary["failed"]
     assert {"node": "test_synthetic.py::test_setup_error", "phase": "setup"} in summary["failed"]
     assert summary["exitstatus"] == 1
@@ -84,6 +98,13 @@ def test_per_test_timeout_hard_exit_keeps_last_started_node(tmp_path: Path) -> N
     assert summary["last_completed"] == "test_synthetic.py::test_first"
     assert summary["active_nodes"] == ["test_synthetic.py::test_hangs"]
     assert summary["truncated_tail"] is False and summary["malformed_lines"] == 0
+    parallel = tmp_path / "parallel"
+    parallel.mkdir()
+    proc, journal = _run_suite(parallel, HANG, "-n", "2", "--dist", "loadfile", "--max-worker-restart=0")
+    summary = gate_progress.summarize(journal)
+    assert proc.returncode != 0 and summary["complete"] is False
+    assert summary["last_started"] == "test_synthetic.py::test_hangs"
+    assert summary["malformed_lines"] == 0 and summary["truncated_tail"] is False
 
 
 def test_journal_budget_exhaustion_is_explicit(tmp_path: Path) -> None:

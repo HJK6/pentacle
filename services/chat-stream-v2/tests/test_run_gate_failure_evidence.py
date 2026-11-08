@@ -105,7 +105,15 @@ def _subject_gone(tier: dict) -> bool:
 
 
 def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
-    code, data, out = _gate(tmp_path, PASSING, argv=["unit", "--timeout-seconds", "20", "--deadline-seconds", "120"])
+    for workers in (1, 2):
+        case = tmp_path / str(workers)
+        case.mkdir()
+        _check_pass_with_deadline(case, workers)
+
+
+def _check_pass_with_deadline(tmp_path: Path, workers: int) -> None:
+    code, data, out = _gate(tmp_path, PASSING, argv=["unit", "--timeout-seconds", "20", "--deadline-seconds", "120",
+                                                  *([] if workers == 1 else ["--unit-workers", str(workers)])])
     unit = data["tiers"][0]
     assert code == 0 and data["passed"] is True and data["finished"] is True, out
     assert unit["reason"] is None and unit["secondary_outcomes"] == [] and unit["progress"]["complete"] is True
@@ -113,6 +121,8 @@ def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
     check = data["deadline"]["checks"][0]
     assert check["ok"] and check["tier_bounds_s"] == {"unit": 20.0} and check["reserve_s"] == run_gate.DEFAULT_RESERVE_S
     assert not (tmp_path / "base" / "unit").exists()
+    assert ("-n" in unit["command"]) == (workers > 1)
+    assert unit["progress"]["collected"] == unit["progress"]["started_nodes"] == unit["progress"]["completed_nodes"] == 1
 
 
 def test_assertion_and_setup_errors_name_nodes(tmp_path: Path) -> None:
@@ -252,13 +262,21 @@ def test_invalid_deadline_rejected_before_launch(tmp_path: Path, value: str) -> 
     proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 2 and "--deadline-seconds" in proc.stderr
     assert not evidence.exists()
+    for gate, workers in (("unit", "0"), ("unit", "-1"), ("unit", "auto"), ("unit", "1.5"), ("smoke", "2"), ("soak", "2")):
+        config_path = Path(command[-1])
+        config = json.loads(config_path.read_text())
+        config["argv"] = [gate, "--unit-workers", workers]
+        config_path.write_text(json.dumps(config))
+        invalid = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        assert invalid.returncode == 2 and "--unit-workers" in invalid.stderr
+        assert not evidence.exists()
 
 
 def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     clock = [1000.0]
     seen: list[str] = []
 
-    def fake_tier(tier, evidence_dir, limit, *, basetemp, manifest):
+    def fake_tier(tier, evidence_dir, limit, *, basetemp, manifest, unit_workers=1):
         seen.append(tier)
         clock[0] += 50.0  # unit overran its 10s bound (terminate/drain), leaving too little for smoke
         return run_gate._result(tier, code=0, passed=True)

@@ -99,6 +99,9 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 limits = target.get("tier_timeouts")
                 if limits is not None and (target.get("gate") != "merge" or not isinstance(limits, dict) or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values()) or sum(limits.values()) != target["timeout_s"]):
                     problems.append("tier_timeouts of " + tname)
+                if "unit_workers" in target and (target.get("kind") != "run_gate" or target.get("gate") not in ("unit", "merge")
+                                                 or type(target["unit_workers"]) is not int or target["unit_workers"] < 1):
+                    problems.append("unit_workers of " + tname)
 
     if problems:
         raise SetupFailure([fail("config", "malformed gate-env.json: " + ", ".join(problems), "restore the checked-in scripts/gate-env.json")])
@@ -1028,6 +1031,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         runner = service_dir / "tools" / "run_gate.py"
         command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
                    "--basetemp", str(basetemp)]
+        if "unit_workers" in target:
+            command += ["--unit-workers", str(target["unit_workers"])]
         if not limits:
             command += ["--timeout-seconds", str(tier_s)]
         wall_s = timeout_s + config["reserve_s"]

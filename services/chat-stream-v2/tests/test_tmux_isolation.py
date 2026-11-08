@@ -63,3 +63,16 @@ def test_gate_runs_tiers_with_strict_capabilities_unless_opted_out(preset, expec
     monkeypatch.setattr(run_gate, '_run_process', capture)
     run_gate._run_tier('unit', tmp_path, 1, basetemp=tmp_path, manifest=tmp_path / 'owned.json')
     assert seen['PENTACLE_TEST_STRICT_CAPABILITIES'] == expected
+    commands = []
+    def capture_tier(command, *, env, log_path, timeout):
+        commands.append(command)
+        assert env['PENTACLE_TEST_STRICT_CAPABILITIES'] == expected
+        assert 'PYTEST_ADDOPTS' not in env
+        return 0, False
+    monkeypatch.setattr(run_gate, '_run_process', capture_tier)
+    monkeypatch.setattr(run_gate, '_preflight', lambda *args: (0, False))
+    monkeypatch.setattr(run_gate.shutil, 'which', lambda _: '/fixture/tmux')
+    for tier in ('unit', 'smoke', 'soak'):
+        run_gate._run_tier(tier, tmp_path, 1, basetemp=tmp_path, manifest=tmp_path / 'owned.json', unit_workers=2)
+        assert ('-n' in commands[-1]) == (tier == 'unit')
+        assert ('--dist' in commands[-1]) == (tier == 'unit')
