@@ -481,3 +481,12 @@ within that scope; ordinary adoption remains unproven. No activation is invented
 to fill an observation metric.
 
 Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.
+# Mockups gallery
+
+`/designs/` opens the shared Mockups gallery directly. Configure the private
+`dashboards.designLibraryRoot` profile setting or `PENTACLE_DESIGN_LIBRARY_ROOT`.
+The existing host authentication gates `/api/designs`, prepared-document JSON
+and allowlisted `/design-media/` routes. Media supports HEAD and byte ranges;
+original exports are not executable public files. See
+[design library](../docs/design-library.md) for the drop format, offline sandbox,
+agent edit/publish/rollback procedure, dependency pins and sync verification.

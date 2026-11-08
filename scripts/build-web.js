@@ -32,6 +32,7 @@ const EXTERNAL_CSS = {
 // preserves their browser-ready global exports.
 const EXTERNAL_SCRIPTS = {
   'confirm_dialog.js': 'confirm_dialog.js',
+  '../vendor/dashboard-library/dist/dashboard-library.js': 'dashboard-library.js',
   'dashboards/registry.js': 'dashboards-registry.js',
   'dashboards/demo.js': 'dashboards-demo.js',
   'dashboards/catalog_loader.js': 'dashboards-catalog-loader.js',
@@ -191,6 +192,12 @@ async function build({ minify = false } = {}) {
   });
 
   const html = readIndexHtml();
+  await esbuild.build({
+    entryPoints: [path.join(RENDERER, 'designs_entry.js')], bundle: true,
+    format: 'iife', target: 'es2020', platform: 'browser',
+    outfile: path.join(OUT, 'designs.bundle.js'), minify, logLevel: 'warning',
+  });
+  fs.copyFileSync(path.join(RENDERER, 'designs.html'), path.join(OUT, 'designs.html'));
   fs.writeFileSync(path.join(OUT, 'web.html'), buildHtml(html));
   fs.writeFileSync(path.join(OUT, 'asset-popout.html'), buildAssetPopoutHtml(
     fs.readFileSync(path.join(RENDERER, 'asset_popout.html'), 'utf8')));

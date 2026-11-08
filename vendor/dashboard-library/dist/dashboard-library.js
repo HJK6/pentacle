@@ -11,7 +11,7 @@
 // blocks `import` over file:// (origin null). See
 // Consumers inject this optional dependency explicitly.
 //
-// dddddd530f03 is replaced by build.js with the source git short-sha.
+// 3d3f655e66dc is replaced by build.js with the source git short-sha.
 
 (function (root, factory) {
   const api = factory();
@@ -21,7 +21,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  const VERSION = 'dddddd530f03';
+  const VERSION = '3d3f655e66dc';
 
   // ── Status set ────────────────────────────────────────────────
   // Canonical JS mirror of triforce-shared/specs_parser DEFAULT_STATUSES and
@@ -2756,6 +2756,127 @@
 
 
   // ── UI Review board ───────────────────────────────────────────
+  // The UI Review board and the direct /designs/ entry share this renderer.
+  const GALLERY_CSS = `
+    @font-face{font-family:'IBM Plex Sans';src:url('/assets/fonts/IBMPlexSans-400.woff2') format('woff2');font-weight:400;font-display:swap}
+    @font-face{font-family:'IBM Plex Sans';src:url('/assets/fonts/IBMPlexSans-600.woff2') format('woff2');font-weight:600;font-display:swap}
+    @font-face{font-family:'JetBrains Mono';src:url('/assets/fonts/JetBrainsMono_400Regular.ttf') format('truetype');font-display:swap}
+    .design-gallery{--dg-ink:#080f0c;--dg-panel:#0b1512;--dg-border:#1b2a22;--dg-dim:#8fa89d;--dg-text:#e7f1eb;--dg-green:#8bf0c0;box-sizing:border-box;min-width:0;min-height:100%;background:#0a1310;color:var(--dg-text);font:13px/1.5 'IBM Plex Sans',sans-serif;display:flex;flex-direction:column}
+    .design-gallery *{box-sizing:border-box}.design-gallery button,.design-gallery input,.design-gallery select{font:inherit;color:inherit;max-width:100%}
+    .design-gallery button,.design-gallery select{min-height:36px;border:1px solid var(--dg-border);background:transparent;border-radius:7px;padding:6px 10px;cursor:pointer}
+    .design-gallery button:hover{border-color:#4ea67e}.design-gallery button[aria-pressed=true]{background:#14291f;color:var(--dg-green);border-color:#315b45}
+    .design-gallery :focus-visible{outline:2px solid var(--dg-green);outline-offset:3px}.design-gallery a{color:var(--dg-green)}
+    .dg-header{padding:12px 20px;display:flex;align-items:center;flex-wrap:wrap;gap:12px;background:#0c1712;border-bottom:1px solid var(--dg-border)}
+    .dg-brand{font-weight:600;font-size:15px}.dg-projects,.dg-segment{display:flex;flex-wrap:wrap;gap:5px}.dg-search{flex:1 1 180px;min-width:100px;max-width:320px;margin-left:auto;background:var(--dg-ink);border:1px solid var(--dg-border);border-radius:8px;padding:8px 12px}
+    .dg-sync,.dg-mono{font:11px/1.5 'JetBrains Mono',monospace;color:var(--dg-dim)}.dg-sync{padding:4px 8px;border:1px solid var(--dg-border);border-radius:6px}
+    .dg-layout{display:grid;grid-template-columns:260px minmax(0,1fr) 280px;flex:1;min-height:0}.dg-nav{padding:16px 12px;background:var(--dg-panel);border-right:1px solid var(--dg-border);min-width:0}
+    .dg-group{margin-top:18px}.dg-group h2{font:11px 'JetBrains Mono',monospace;color:var(--dg-dim);letter-spacing:.8px;text-transform:uppercase;margin:0 8px 6px}.dg-item{display:block;width:100%;text-align:left;margin:3px 0}.dg-item span{display:block;overflow-wrap:anywhere}.dg-item small{color:var(--dg-dim)}
+    .dg-main{min-width:0;display:flex;flex-direction:column}.dg-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 24px;border-bottom:1px solid var(--dg-border)}.dg-heading>div:first-child{flex:1 1 200px;min-width:0}.dg-heading h1{font-size:22px;font-weight:600;line-height:1.25;margin:4px 0;overflow-wrap:anywhere}
+    .dg-stage{padding:24px;background:var(--dg-ink);flex:1;min-height:400px;min-width:0}.dg-screens{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:20px}.dg-screens figure{margin:0;min-width:0}.dg-screens img{display:block;width:100%;max-height:680px;object-fit:contain;object-position:top;border:1px solid #1e2f26;border-radius:12px;background:var(--dg-panel)}.dg-screens figcaption{margin-top:8px;color:var(--dg-dim);overflow-wrap:anywhere}
+    .dg-stage video{display:block;width:100%;max-height:700px;background:var(--dg-panel)}.dg-stage iframe{display:block;width:100%;height:700px;border:1px solid var(--dg-border);background:var(--dg-panel)}.dg-note{color:var(--dg-dim);margin:12px 0;overflow-wrap:anywhere}.dg-empty{padding:24px;border:1px dashed var(--dg-border);border-radius:8px;color:var(--dg-dim)}
+    .dg-details{padding:20px;background:var(--dg-panel);border-left:1px solid var(--dg-border);min-width:0}.dg-details h2{font:11px 'JetBrains Mono',monospace;letter-spacing:.8px;text-transform:uppercase;color:var(--dg-dim);margin:0 0 18px}.dg-details dl{display:grid;grid-template-columns:70px minmax(0,1fr);gap:10px 12px;margin:0}.dg-details dt{color:var(--dg-dim)}.dg-details dd{margin:0;overflow-wrap:anywhere}.dg-details select{width:100%;background:#0b1512;margin-top:8px}.dg-details label{display:block;margin-top:18px}.dg-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.dg-error{color:#f1b09c}.dg-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}
+    @media(max-width:1100px){.dg-layout{grid-template-columns:230px minmax(0,1fr)}.dg-details{grid-column:1/-1;border-top:1px solid var(--dg-border);border-left:0}.dg-details dl{grid-template-columns:90px minmax(0,1fr)}}
+    @media(max-width:600px){.dg-header{padding:12px;gap:8px}.dg-search{order:3;flex-basis:100%;max-width:none;margin:0}.dg-layout{grid-template-columns:minmax(0,1fr)}.dg-nav{border-right:0;border-bottom:1px solid var(--dg-border);max-height:245px;overflow:auto}.dg-heading{padding:14px 12px}.dg-stage{padding:12px;min-height:350px}.dg-stage iframe{height:650px}.dg-sync{font-size:10px}.dg-projects button{padding:6px 8px}.dg-details{padding:16px}.dg-segment{width:100%}.dg-segment button{flex:1}}
+  `;
+  function mountGallery(container, options = {}) {
+    const doc = container.ownerDocument;
+    const root = doc.createElement('section'); root.className = 'design-gallery'; root.setAttribute('aria-label', 'Mockups gallery');
+    root.innerHTML = `<style>${GALLERY_CSS}</style><header class="dg-header"><span class="dg-brand">✧ Mockups</span><nav class="dg-projects" aria-label="Projects"></nav><label class="dg-sr" for="dg-search">Search views and flows</label><input id="dg-search" class="dg-search" type="search" placeholder="Search views and flows"><span class="dg-sync" role="status">Loading library…</span></header><div class="dg-layout"><nav class="dg-nav" aria-label="Views and flows"><div class="dg-segment dg-kinds"></div><div class="dg-items"></div></nav><main class="dg-main"><div class="dg-heading"><div><div class="dg-mono dg-breadcrumb"></div><h1>Select a view</h1></div><div class="dg-segment dg-modes" role="group" aria-label="Show as"></div></div><div class="dg-stage" aria-live="polite"></div></main><aside class="dg-details" aria-label="Details"></aside></div>`;
+    container.replaceChildren(root);
+    const storage = options.storage === undefined ? (() => { try { return doc.defaultView.sessionStorage; } catch { return null; } })() : options.storage;
+    let saved; try { saved = JSON.parse(storage?.getItem('design-gallery.selection') || 'null'); } catch {}
+    const refs = { root, container, storage, fetch: options.fetch || doc.defaultView.fetch.bind(doc.defaultView), state: { project: '', revision: '', kind: 'views', item: '', mode: 'screens', query: '', ...saved }, catalog: { projects: [] }, disposed: false, generation: 0, displayKey: null, controller: null, historyManifest: null, lastCatalog: '' };
+    root.querySelector('.dg-search').value = refs.state.query;
+    root.querySelector('.dg-search').addEventListener('input', e => { refs.state.query = e.target.value; renderGallery(refs); });
+    return refs;
+  }
+  function galleryMedia(refs, file) { return '/design-media/' + [refs.state.project, refs.manifest.revision_id, ...file.split('/')].map(encodeURIComponent).join('/'); }
+  function galleryCleanup(refs) {
+    refs.generation++; refs.controller?.abort(); refs.controller = null;
+    refs.root.querySelectorAll('video').forEach(video => { video.pause(); video.removeAttribute('src'); video.load(); });
+    refs.root.querySelectorAll('iframe').forEach(frame => { frame.removeAttribute('srcdoc'); frame.remove(); });
+  }
+  function unmountGallery(refs) { if (!refs) return; refs.disposed = true; galleryCleanup(refs); refs.root.remove(); }
+  function galleryButton(refs, container, text, active, action) {
+    const button = refs.root.ownerDocument.createElement('button'); button.type = 'button'; button.textContent = text; button.setAttribute('aria-pressed', String(!!active)); button.addEventListener('click', action); container.appendChild(button); return button;
+  }
+  function updateGallery(refs, catalog) {
+    if (refs.disposed) return;
+    if (catalog.error) { refs.root.querySelector('.dg-sync').textContent = catalog.error; return; }
+    const snapshot = JSON.stringify(catalog);
+    if (snapshot === refs.lastCatalog) return;
+    refs.lastCatalog = snapshot; refs.catalog = catalog; renderGallery(refs);
+  }
+  function renderGallery(refs) {
+    if (refs.disposed) return;
+    const { root, state } = refs, projects = refs.catalog.projects || [];
+    if (!projects.some(p => p.id === state.project)) { state.project = projects[0]?.id || ''; state.revision = ''; refs.historyManifest = null; }
+    const project = projects.find(p => p.id === state.project);
+    refs.manifest = refs.historyManifest?.revision_id === state.revision ? refs.historyManifest : project?.manifest;
+    if (state.revision && !project?.revisions?.some(r => r.revision_id === state.revision)) { state.revision = ''; refs.historyManifest = null; refs.manifest = project?.manifest; }
+    const manifest = refs.manifest;
+    const projectNav = root.querySelector('.dg-projects'); projectNav.replaceChildren();
+    projects.forEach(p => { const b = galleryButton(refs, projectNav, p.title, state.project === p.id, () => { Object.assign(state, { project: p.id, item: '', revision: '' }); refs.historyManifest = null; renderGallery(refs); }); b.dataset.project = p.id; });
+    root.querySelector('.dg-sync').textContent = !projects.length ? 'Library empty' : `library · ${project?.sync === 'verified' ? 'verified locally' : project?.sync === 'conflict' ? 'sync conflict — retained revision' : 'sync pending — retained revision'}`;
+    const kinds = root.querySelector('.dg-kinds'); kinds.replaceChildren();
+    ['views', 'flows'].forEach(kind => galleryButton(refs, kinds, kind === 'views' ? 'Views' : 'Flows', state.kind === kind, () => { state.kind = kind; state.item = ''; renderGallery(refs); }));
+    const all = manifest?.[state.kind] || [], items = all.filter(item => [item.title, item.entry, item.group, item.surface].join(' ').toLowerCase().includes(state.query.toLowerCase()));
+    if (!all.some(i => i.id === state.item)) state.item = items[0]?.id || '';
+    const item = all.find(i => i.id === state.item);
+    const list = root.querySelector('.dg-items'); list.replaceChildren();
+    const groups = new Map();
+    for (const row of items) { const group = row.group || (state.kind === 'flows' ? 'Flows' : row.surface === 'mobile' ? 'Mobile' : 'Web'); if (!groups.has(group)) groups.set(group, []); groups.get(group).push(row); }
+    for (const [name, rows] of groups) {
+      const group = root.ownerDocument.createElement('div'); group.className = 'dg-group';
+      const heading = root.ownerDocument.createElement('h2'); heading.textContent = `${name} · ${rows.length}`; group.appendChild(heading); list.appendChild(group);
+      for (const row of rows) { const button = galleryButton(refs, group, '', row.id === state.item, () => { state.item = row.id; renderGallery(refs); }); button.className = 'dg-item'; button.dataset.item = row.id; const title = root.ownerDocument.createElement('span'); title.textContent = row.title; const status = root.ownerDocument.createElement('small'); status.textContent = row.approval_ref ? 'Approved source · ' + row.compatibility?.status : row.compatibility?.status || 'Pending generation'; button.append(title, status); }
+    }
+    if (!items.length) list.textContent = all.length ? 'No matching views or flows.' : 'No verified items yet.';
+    root.querySelector('h1').textContent = item?.title || (projects.length ? 'No verified selection' : 'Your design library is empty');
+    root.querySelector('.dg-breadcrumb').textContent = [project?.title, item?.group || state.kind].filter(Boolean).join(' / ');
+    const modes = root.querySelector('.dg-modes'); modes.replaceChildren();
+    [['screens', 'Screens'], ['video', 'Flow video'], ['prototype', 'Prototype']].forEach(([mode, title]) => galleryButton(refs, modes, title, state.mode === mode, () => { state.mode = mode; renderGallery(refs); }));
+    const detail = root.querySelector('.dg-details'); detail.replaceChildren();
+    const title = root.ownerDocument.createElement('h2'); title.textContent = 'Details'; detail.appendChild(title);
+    const dl = root.ownerDocument.createElement('dl'); detail.appendChild(dl);
+    for (const [label, value] of [['Surface', item?.surface || '—'], ['Status', item?.approval_ref ? 'Approved source (evidence linked)' : 'Mirror / candidate'], ['Frames', item?.screenshots?.length || 0], ['Revision', manifest?.source_revision || 'Unknown'], ['Generated', item?.generated ? 'Verified capture' : 'Imported reference / pending'], ['File', item?.entry || '—']]) { const dt = root.ownerDocument.createElement('dt'), dd = root.ownerDocument.createElement('dd'); dt.textContent = label; dd.textContent = value; dl.append(dt, dd); }
+    const authority = root.ownerDocument.createElement('p'); authority.className = 'dg-note'; authority.textContent = 'Claude Design is the design source of truth. This library contains mirrors and local candidates.'; detail.appendChild(authority);
+    if (manifest && !manifest.complete) { const missing = root.ownerDocument.createElement('p'); missing.className = 'dg-note dg-error'; missing.textContent = 'Incomplete draft: ' + manifest.missing_paths.join(', '); detail.appendChild(missing); }
+    if (item?.approval_ref) { const evidence = root.ownerDocument.createElement('p'); evidence.className = 'dg-note dg-mono'; evidence.textContent = 'Approval evidence: ' + item.approval_ref; detail.appendChild(evidence); }
+    const actions = root.ownerDocument.createElement('div'); actions.className = 'dg-actions'; detail.appendChild(actions);
+    if (item) galleryButton(refs, actions, 'Copy library path', false, async () => { const relative = `projects/${state.project}/revisions/${manifest.revision_id}/source/${item.entry}`; try { await root.ownerDocument.defaultView.navigator.clipboard.writeText(relative); root.querySelector('.dg-sync').textContent = 'Library path copied'; } catch { root.querySelector('.dg-sync').textContent = 'Copy path: ' + relative; } });
+    const historyLabel = root.ownerDocument.createElement('label'); historyLabel.textContent = 'History'; const history = root.ownerDocument.createElement('select'); history.setAttribute('aria-label', 'History'); historyLabel.appendChild(history); detail.appendChild(historyLabel);
+    const currentOption = root.ownerDocument.createElement('option'); currentOption.value = ''; currentOption.textContent = 'Current verified revision'; history.appendChild(currentOption);
+    for (const revision of project?.revisions || []) { const option = root.ownerDocument.createElement('option'); option.value = revision.revision_id; option.textContent = `${revision.source_revision} · ${revision.revision_id.slice(0, 8)}${revision.complete ? '' : ' · incomplete'}`; history.appendChild(option); }
+    history.value = state.revision || '';
+    history.addEventListener('change', async () => {
+      const revision = history.value; refs.controller?.abort(); const controller = new AbortController(); refs.controller = controller;
+      if (!revision) { state.revision = ''; refs.historyManifest = null; renderGallery(refs); return; }
+      try { const response = await refs.fetch(`/api/designs/${state.project}/${revision}`, { signal: controller.signal }); if (!response.ok) throw new Error('History revision unavailable or still syncing'); const value = await response.json(); if (refs.disposed || controller.signal.aborted) return; state.revision = revision; refs.historyManifest = value; renderGallery(refs); } catch (e) { if (e.name !== 'AbortError') root.querySelector('.dg-sync').textContent = e.message; }
+    });
+    try { refs.storage?.setItem('design-gallery.selection', JSON.stringify(state)); } catch {}
+    const key = [state.project, manifest?.revision_id, state.kind, state.item, state.mode].join(':');
+    if (key === refs.displayKey) return;
+    galleryCleanup(refs); refs.displayKey = key;
+    const stage = root.querySelector('.dg-stage'); stage.replaceChildren();
+    if (!item) { stage.innerHTML = '<p class="dg-empty">Import a verified design revision to browse its views and flows.</p>'; return; }
+    const note = root.ownerDocument.createElement('p'); note.className = 'dg-note'; note.textContent = item.compatibility?.reason || 'Generation pending';
+    if (state.mode === 'screens') {
+      const grid = root.ownerDocument.createElement('div'); grid.className = 'dg-screens'; stage.appendChild(grid);
+      for (const screenshot of item.screenshots || []) { const figure = root.ownerDocument.createElement('figure'), image = root.ownerDocument.createElement('img'), caption = root.ownerDocument.createElement('figcaption'); image.src = galleryMedia(refs, screenshot.path); image.alt = screenshot.name; image.loading = 'lazy'; image.addEventListener('error', () => { caption.textContent = 'Screenshot unavailable or still syncing'; }); caption.textContent = screenshot.name; figure.append(image, caption); grid.appendChild(figure); }
+      if (!item.screenshots?.length) grid.textContent = 'No screenshot available for this incomplete view.';
+    } else if (state.mode === 'video') {
+      if (item.video) { const video = root.ownerDocument.createElement('video'); video.controls = true; video.preload = 'metadata'; video.playsInline = true; video.src = galleryMedia(refs, item.video); video.setAttribute('aria-label', item.title + ' flow video'); video.addEventListener('error', () => { note.textContent = 'Video unavailable or still syncing. Try Screens or refresh.'; }); stage.appendChild(video); const steps = root.ownerDocument.createElement('p'); steps.className = 'dg-mono'; steps.textContent = (item.steps || []).map(s => s.name).join(' → '); stage.appendChild(steps); }
+      else stage.appendChild(root.ownerDocument.createTextNode('No flow video for this view. Select Flows to play a recorded journey.'));
+    } else if (item.prototype || item.kind === 'flow') {
+      note.textContent = 'Offline preview · transient storage · calls mocked when labelled. Imported canvas editing and persistence are unsupported. ' + (item.compatibility?.reason || '');
+      const controller = new AbortController(); refs.controller = controller; const generation = refs.generation;
+      stage.appendChild(root.ownerDocument.createTextNode('Loading offline prototype…'));
+      refs.fetch(`/api/designs/${state.project}/${manifest.revision_id}/${item.id}`, { signal: controller.signal }).then(async response => { if (!response.ok) throw new Error('Prototype unavailable or still syncing'); return response.json(); }).then(value => { if (refs.disposed || generation !== refs.generation || controller.signal.aborted) return; stage.replaceChildren(); if (!value.document) { stage.textContent = 'This view is screenshot/video-only.'; stage.appendChild(note); return; } const frame = root.ownerDocument.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts'); frame.setAttribute('referrerpolicy', 'no-referrer'); frame.setAttribute('allow', "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"); frame.title = item.title + ' offline prototype'; frame.srcdoc = value.document; stage.append(frame, note); }).catch(error => { if (error.name !== 'AbortError' && !refs.disposed && generation === refs.generation) { stage.textContent = error.message; stage.appendChild(note); } });
+    } else stage.appendChild(root.ownerDocument.createTextNode('This view is screenshot/video-only.'));
+    stage.appendChild(note);
+  }
+
   // Visual-QA artifact browser: stats, filter controls, artifact list, and an
   // iframe preview. Stateful (filters + selection). The filter controls are
   // interactiveOnly (a passive Pi wall doesn't get a search box / dropdowns);
@@ -2940,6 +3061,10 @@
 
     function update(refs, data, ctx) {
       if (!refs || !data) return;
+      if (data.schema === 'design-catalog.v1') {
+        if (!refs.gallery) refs.gallery = mountGallery(refs.root);
+        updateGallery(refs.gallery, data); return;
+      }
       const cx = refs.__ctx || ctx;
       refs.lastData = data;
       const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
@@ -2974,7 +3099,7 @@
       _selectArtifact(refs, visibleArtifacts.find((item) => _artifactKey(item) === refs.selectedId) || null);
     }
 
-    function unmount(_refs) {}
+    function unmount(refs) { if (refs?.gallery) unmountGallery(refs.gallery); }
 
     return {
       id: 'ui-review',
@@ -3863,6 +3988,7 @@
 
   return {
     VERSION,
+    mountGallery, updateGallery, unmountGallery,
     DEFAULT_STATUSES,
     TOKENS,
     MODES,

@@ -1,0 +1,30 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { JSDOM } = require('jsdom');
+const library = require('../vendor/dashboard-library/dist/dashboard-library.js');
+const item = { id: 'home', title: 'Home', kind: 'view', entry: 'mobile/Home.html', surface: 'mobile', approval_ref: null, compatibility: { status: 'offline-interactive', reason: 'Verified offline' }, screenshots: [{ name: 'Home', path: 'screenshots/home.png' }], prototype: true };
+const catalog = { schema: 'design-catalog.v1', authority: 'Claude Design', projects: ['example', 'sample', 'demo'].map(id => ({ id, title: id, sync: 'verified', revision_id: 'a'.repeat(64), revisions: [], manifest: { title: id, revision_id: 'a'.repeat(64), source_revision: 'source-v1', complete: true, views: [item], flows: [] } })) };
+test('shared gallery preserves selection on refresh and isolates prototype documents', async () => {
+  const dom = new JSDOM('<main></main>', { url: 'https://app.example.test/designs/' });
+  const refs = library.mountGallery(dom.window.document.querySelector('main'), { fetch: async () => ({ ok: true, json: async () => ({ document: '<h1>Prototype</h1>' }) }) });
+  library.updateGallery(refs, catalog);
+  assert.equal(refs.root.querySelectorAll('[data-project]').length, 3);
+  refs.root.querySelector('[data-project="sample"]').click();
+  assert.equal(refs.state.project, 'sample');
+  [...refs.root.querySelectorAll('.dg-modes button')].find(b => b.textContent === 'Prototype').click();
+  await new Promise(resolve => setImmediate(resolve));
+  const frame = refs.root.querySelector('iframe'); assert.ok(frame); assert.equal(frame.getAttribute('sandbox'), 'allow-scripts'); assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer'); assert.equal(frame.srcdoc, '<h1>Prototype</h1>');
+  library.updateGallery(refs, structuredClone(catalog)); assert.equal(refs.root.querySelector('iframe'), frame, 'poll refresh must not reload a running prototype');
+  assert.match(refs.root.querySelector('.dg-details').textContent, /Claude Design is the design source of truth/);
+  library.unmountGallery(refs); assert.equal(dom.window.document.querySelector('iframe'), null); dom.window.close();
+});
+test('gallery renders empty, search and unavailable mode states without inventing approval', () => {
+  const dom = new JSDOM('<main></main>', { url: 'https://app.example.test/designs/' });
+  const refs = library.mountGallery(dom.window.document.querySelector('main'), { fetch: async () => ({ ok: false }) });
+  library.updateGallery(refs, { schema: 'design-catalog.v1', projects: [] }); assert.match(refs.root.textContent, /library is empty/);
+  library.updateGallery(refs, catalog); assert.match(refs.root.querySelector('.dg-details').textContent, /Mirror \/ candidate/);
+  const input = refs.root.querySelector('input'); input.value = 'absent'; input.dispatchEvent(new dom.window.Event('input')); assert.match(refs.root.querySelector('.dg-items').textContent, /No matching/);
+  [...refs.root.querySelectorAll('.dg-modes button')].find(b => b.textContent === 'Flow video').click(); assert.match(refs.root.querySelector('.dg-stage').textContent, /No flow video/);
+  library.unmountGallery(refs); dom.window.close();
+});

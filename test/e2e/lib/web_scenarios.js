@@ -620,6 +620,7 @@ const SCENARIOS = [
   ['web-voice-answers', webVoiceAnswers],
   ['web-dashboards-revamp', webDashboardsRevamp],
   ['dashboard_catalog', dashboardCatalog],
+  ['design-gallery', require('./design_gallery_scenario.cjs').designGallery],
   // Reloads the page at both ends and injects only the frozen lane wire fixture; runs before closed-chat-slot.
   ['web-work-lanes', webWorkLanes],
   // Drives the sidebar Scheduled section against the seeded rule and one-shot; leaves them as found except the edited time.

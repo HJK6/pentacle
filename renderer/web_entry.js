@@ -10,4 +10,5 @@
 // the source page cannot silently go missing from the served page.
 
 require('./web_cc').installWebCc();
+require('./dashboards/ui-review.js');
 require('./app.js');
