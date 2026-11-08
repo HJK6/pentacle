@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from sessions import TITLE_SOURCE_PLACEHOLDER, VerbError
+from sessions import TITLE_SOURCE_PLACEHOLDER, VerbError, _finish_despite_cancel
 from store import (
     QAAttestationUnverified,
     ReportReplayConflict,
@@ -815,7 +815,7 @@ class Ledger:
             ),
             "ingested_at": iso_now(),
         }
-        try:
+        async def persist_and_project():
             put_kwargs: dict[str, Any] = {}
             if not announce:
                 put_kwargs["announce"] = False
@@ -826,6 +826,20 @@ class Ledger:
                 routing_snapshot=routing_snapshot,
                 **put_kwargs,
             )
+            inserted = bool(row.pop("_report_inserted", True))
+            if inserted:
+                if apply_state := getattr(self.sessions, "apply_report_state", None):
+                    try:
+                        await apply_state(row)
+                    except Exception:
+                        log.exception("report roster projection failed after durable ingest")
+            return row, inserted
+
+        try:
+            # Disconnect may cancel the report request after the Store commits.
+            # Finish its roster projection before propagating cancellation;
+            # notices, pane delivery and report-triggered close stay outside.
+            row, inserted = await _finish_despite_cancel(persist_and_project())
         except ReportProvenanceUnavailable as exc:
             raise self._routing_refusal(
                 "report_provenance_unavailable",
@@ -855,13 +869,7 @@ class Ledger:
             ) from exc
         # Durable first, announced second: everything below is best-effort and
         # may not fail the ingest the caller was already told to trust.
-        inserted = bool(row.pop("_report_inserted", True))
         if inserted:
-            if apply_state := getattr(self.sessions, "apply_report_state", None):
-                try:
-                    await apply_state(row)
-                except Exception:
-                    log.exception("report roster projection failed after durable ingest")
             await self._alert_claim_result(
                 row.get("claim_verified"), row.get("ac_claim_mismatch"),
                 report_id=str(row.get("report_id") or report_id),
