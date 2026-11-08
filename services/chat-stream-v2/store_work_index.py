@@ -34,17 +34,18 @@ def member_ids(lane: dict) -> list[str]:
     return json.loads(lane.get("members_json") or "[]")
 
 
-def effective_membership_conn(conn) -> dict:
-    """One indexed resolver for every lane reader and membership guard; no I/O."""
+def effective_membership_ids_conn(conn) -> dict:
+    """Canonical membership without decoding observation records on the writer.
+
+    SQLite extracts only the retained source epic identity. Full member facts
+    are decoded separately by readers that actually render/aggregate them.
+    """
     state = _state_conn(conn)
     lanes = [dict(row) for row in conn.execute(
         "SELECT lane_id,members_json FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")]
     known_lanes = {lane["lane_id"] for lane in lanes}
-    goals = state.get("goal_observations", {})
-    records = {row[0]: _observed_record(json.loads(row[1]), state) for row in conn.execute(
-        "SELECT spec_id,record_json FROM v2_work_item_observations")}
     scoped, wire_ids, assigned = {}, {}, {}
-    for identity, record in goals.items():
+    for identity, record in state.get("goal_observations", {}).items():
         facts = record.get("facts") or {}
         if facts.get("lane_id") not in known_lanes:
             continue
@@ -53,6 +54,29 @@ def effective_membership_conn(conn) -> dict:
             raise ValueError("work_goal_id_collision")
         wire_ids[wire_id] = identity
         scoped[identity] = record
+    if scoped:
+        for identity, epic in conn.execute(
+                "SELECT spec_id,json_extract(record_json,'$.last_good._epic') "
+                "FROM v2_work_item_observations "
+                "WHERE json_type(record_json,'$.last_good._epic')='text'"):
+            goal = scoped.get(epic)
+            if goal is not None:
+                assigned[identity] = goal["facts"]["lane_id"]
+    membership = {}
+    for lane in lanes:
+        identity = lane["lane_id"]
+        legacy_order = [spec for spec in member_ids(lane) if spec not in assigned or assigned[spec] == identity]
+        derived = sorted(spec for spec, target in assigned.items() if target == identity)
+        membership[identity] = list(dict.fromkeys([*legacy_order, *derived]))
+    return {"state": state, "goals": scoped, "assigned": assigned, "membership": membership}
+
+
+def effective_membership_conn(conn) -> dict:
+    """Enrich the canonical identity resolver for member/goal projection; no I/O."""
+    snapshot = effective_membership_ids_conn(conn)
+    state, scoped = snapshot["state"], snapshot["goals"]
+    records = {row[0]: _observed_record(json.loads(row[1]), state) for row in conn.execute(
+        "SELECT spec_id,record_json FROM v2_work_item_observations")}
     members = {}
     for identity, record in records.items():
         member = dict(record["member"])
@@ -64,7 +88,6 @@ def effective_membership_conn(conn) -> dict:
             member["_goal_status"] = last_good["status"]
         goal = scoped.get(epic)
         if goal is not None:
-            assigned[identity] = goal["facts"]["lane_id"]
             member["goal_id"] = goal_id(epic)
             if goal["quality"] != "fresh" and member["observation"]["quality"] == "fresh":
                 member["observation"] = {**member["observation"], "quality": "stale",
@@ -72,20 +95,13 @@ def effective_membership_conn(conn) -> dict:
         if record.get("progress_changed_at"):
             member["_progress_changed_at"] = record["progress_changed_at"]
         members[identity] = member
-    membership = {}
-    for lane in lanes:
-        identity = lane["lane_id"]
-        legacy_order = [spec for spec in member_ids(lane) if spec not in assigned or assigned[spec] == identity]
-        derived = sorted(spec for spec, target in assigned.items() if target == identity)
-        membership[identity] = list(dict.fromkeys([*legacy_order, *derived]))
-    return {"state": state, "records": records, "members": members, "goals": scoped,
-            "assigned": assigned, "membership": membership}
+    return {**snapshot, "records": records, "members": members}
 
 
 def effective_member_ids(conn, lane: dict, snapshot: dict | None = None) -> list[str]:
     if not lane.get("lane_id"):
         return member_ids(lane)  # Explicit report-context selection, not a lane.
-    snapshot = snapshot if snapshot is not None else effective_membership_conn(conn)
+    snapshot = snapshot if snapshot is not None else effective_membership_ids_conn(conn)
     return snapshot["membership"].get(lane["lane_id"], [])
 
 
@@ -275,7 +291,7 @@ class WorkIndexStoreMixin:
                     return {"changed": 0, "stale_scan": True}
                 lanes = [dict(row) for row in conn.execute(
                     "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")]
-                previous_membership = effective_membership_conn(conn)["membership"]
+                previous_membership = effective_membership_ids_conn(conn)["membership"]
                 holders: dict[str, list[dict]] = {}
                 for lane in lanes:
                     for spec_id in member_ids(lane):
@@ -323,7 +339,7 @@ class WorkIndexStoreMixin:
                 conn.execute("INSERT INTO v2_work_index_state(singleton,state_json) VALUES (1,?) "
                              "ON CONFLICT(singleton) DO UPDATE SET state_json=excluded.state_json",
                              (json.dumps(state, separators=(",", ":")),))
-                snapshot = effective_membership_conn(conn)
+                snapshot = effective_membership_ids_conn(conn)
                 # Source-derived replacement is the same completion boundary as
                 # explicit set_members, even if the replacement is all terminal.
                 for lane in lanes:

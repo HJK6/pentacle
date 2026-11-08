@@ -533,8 +533,13 @@ class _WorkLanesStoreMixin:
             prepare_hues_conn(conn, [lane_id])
             row = next(iter(work_lane_rows_conn(conn, include_done=True, lane_id=lane_id)), None)
             lane = lane_row_conn(conn, lane_id)
+            internal_members = row["_members"] if row is not None else members_conn(conn, lane)
+            # Public Store members retain the observation contract. Projection
+            # keeps its private last-good/freshness inputs in _projection_row.
+            public_members = [{key: value for key, value in member.items() if not key.startswith("_")}
+                              for member in internal_members]
             return {"lane": lane, "events": events, "updates": updates,
-                    "members": row["_members"] if row is not None else members_conn(conn, lane),
+                    "members": public_members,
                     "_projection_row": row, "_work_index": index_status_conn(conn)}
         def coherent(conn):
             with hue_transaction(conn):
