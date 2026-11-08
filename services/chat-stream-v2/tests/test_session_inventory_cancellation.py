@@ -95,7 +95,8 @@ async def client(server, actor=SOURCE):
         await socket.send(json.dumps({"type": "hello", "client": "cancel-fixture",
             "from_stream_id": actor, "stream_token": TOKEN if actor == SOURCE else TOKEN + actor,
             "subscribe": {"include_subagents": True}}))
-        await receive(socket, lambda f: f["type"] in {"snapshot", "hello.error"})
+        hello = await receive(socket, lambda f: f["type"] in {"snapshot", "hello.error"})
+        assert hello["type"] == "snapshot", hello
         yield socket
 
 
@@ -198,6 +199,112 @@ def test_disconnect_after_commit_converges_before_and_after_restart(tmp_path, mo
             durable = await reopened.fetch_session(target_host, "v2-target")
             assert durable["session_generation"] == generation
             assert_projection(await public_row(restarted, sid), durable, verb)
+        assert signals == []
+    asyncio.run(run())
+
+
+def mutation_lock(sessions, verb):
+    return (sessions._lifecycle_lock(HOST, "v2-target") if verb in {"rename", "status_card"}
+            else sessions._graph_lock)
+
+
+@pytest.mark.parametrize("verb", CASES)
+def test_disconnect_waiting_for_mutation_lock_has_no_effect(tmp_path, monkeypatch, verb):
+    from test_cancellation_continuation_controls import observe_request
+    async def run():
+        async with daemon(tmp_path / "sessions.db", seed_host=HOST) as (store, sessions, server, _):
+            before = await store.fetch_session(HOST, "v2-target")
+            lock = mutation_lock(sessions, verb)
+            requests, finished = observe_request(monkeypatch, server)
+            async with lock:
+                async with client(server) as socket:
+                    await socket.send(json.dumps({"type": verb, "request_id": "disconnect-control",
+                        "stream_id": HOST + ":v2-target", **CASES[verb][0]}))
+                    async with asyncio.timeout(5):
+                        while not any(not w.done() for w in (getattr(lock, "_waiters", None) or ())):
+                            await asyncio.sleep(0)
+                    await socket.close()
+                    await asyncio.wait_for(finished.wait(), 5)
+                    assert requests[0].cancelled()
+            assert await store.fetch_session(HOST, "v2-target") == before
+            _, field, _ = CASES[verb]
+            assert (await public_row(server, HOST + ":v2-target")).get(field) == before.get(field)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("verb", CASES)
+def test_cancelled_metadata_continuation_cannot_resurrect_concurrent_close(tmp_path, monkeypatch, verb):
+    from test_cancellation_continuation_controls import observe_request
+    async def run():
+        database = tmp_path / "sessions.db"
+        sid = HOST + ":v2-target"
+        reached, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        signals = []
+        def no_signal(*args, **kwargs):
+            signals.append(args)
+            raise AssertionError("metadata/absent-pane close must not signal a host process")
+        monkeypatch.setattr(os, "kill", no_signal)
+        async with daemon(database, seed_host=HOST) as (store, sessions, server, panes):
+            async def absent(name):
+                return False
+            monkeypatch.setattr(panes, "has_session", absent)
+            update, mark_closed = store.update_session, store.mark_closed
+            async def commit_then_pause(host, name, **fields):
+                row = await update(host, name, **fields)
+                if name == "v2-target":
+                    reached.set()
+                    await release.wait()
+                return row
+            async def observe_close(*args, **kwargs):
+                row = await mark_closed(*args, **kwargs)
+                closed.set()
+                return row
+            monkeypatch.setattr(store, "update_session", commit_then_pause)
+            monkeypatch.setattr(store, "mark_closed", observe_close)
+            requests, finished = observe_request(monkeypatch, server)
+            lock = mutation_lock(sessions, verb)
+            try:
+                async with client(server) as submitter:
+                    await submitter.send(json.dumps({"type": verb, "request_id": "disconnect-control",
+                        "stream_id": sid, **CASES[verb][0]}))
+                    await asyncio.wait_for(reached.wait(), 5)
+                    await submitter.close()
+                    async with asyncio.timeout(5):
+                        while not requests[0].cancelling():
+                            await asyncio.sleep(0)
+                    # The target closes itself through an independent actor;
+                    # reusing SOURCE would park on Server's per-actor effect
+                    # lock before reaching the mutation's lifecycle/graph fence.
+                    async with client(server, sid) as closer:
+                        close_task = asyncio.create_task(rpc(closer, "close", "concurrent-close",
+                                                           stream_id=sid, operator_confirm=True))
+                        try:
+                            # A correct continuation retains its fence. If a
+                            # mutation releases it early, allow the close to
+                            # commit first: the final public oracle must still
+                            # reject resurrection by the late cache update.
+                            async with asyncio.timeout(5):
+                                while (not closed.is_set() and not close_task.done()
+                                       and not any(not w.done() for w in (getattr(lock, "_waiters", None) or ()))):
+                                    await asyncio.sleep(0)
+                            release.set()
+                            await asyncio.wait_for(finished.wait(), 5)
+                            reply = await asyncio.wait_for(close_task, 5)
+                            assert reply["type"] == "close.ok", reply
+                        finally:
+                            release.set()
+                            await asyncio.gather(close_task, return_exceptions=True)
+                assert requests[0].cancelled()
+                durable = await store.fetch_session(HOST, "v2-target")
+                assert durable["status"] == "closed"
+                async with client(server) as reader:
+                    assert sid not in {r["stream_id"] for r in (await rpc(reader, "list_sessions", "after-close"))["active"]}, "closed generation resurrected by late metadata cache"
+            finally:
+                release.set()
+        async with daemon(database) as (store, _, restarted, _):
+            assert (await store.fetch_session(HOST, "v2-target"))["status"] == "closed"
+            async with client(restarted) as reader:
+                assert sid not in {r["stream_id"] for r in (await rpc(reader, "list_sessions", "restart-close"))["active"]}
         assert signals == []
     asyncio.run(run())
 

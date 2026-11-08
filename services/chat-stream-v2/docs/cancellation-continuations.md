@@ -14,13 +14,13 @@ remove an already queued operation (`store.py:1989`).
 | Producer → durable boundary | Consumer → action | Cancellation disposition |
 | --- | --- | --- |
 | `spawn` → `Sessions.open` → `Store.open_session` (`sessions.py:810`) | `_cache` → hello/list inventory | Request-disconnect immune: the ordinary spawn caller detaches its effect task. A real Store/socket/restart control pauses after this commit and proves one creation and no input. Startup/recurring adoption also calls `open`; cancellation of those daemon tasks is distinct from request disconnect. |
-| `rename` → `Store.update_session` (`844`) | `_cache` and immediate emitter → public title | **Defect:** authenticated socket teardown after commit leaves the old title in fresh RPC inventory. Repair queued behind the shared-file handoff. |
-| Ordinary `reparent` → `_reparent_locked` → `Store.update_session` (`1041`, including watch custody) | `_cache` and emitter → parentage/roster | **Defect:** ordinary parent-authorized caller lacks the manager caller's protection. Durable parent changes while public inventory retains the old parent. |
+| `rename` → `Store.update_session` (`844`) | `_cache` and immediate emitter → public title | **Defect repaired:** commit/cache/emitter finish under the existing lifecycle lock before cancellation propagates; a queued caller remains cancellable before lock acquisition. |
+| Ordinary `reparent` → `_reparent_locked` → `Store.update_session` (`1041`, including watch custody) | `_cache` and emitter → parentage/roster | **Defect repaired:** ordinary parent-authorized commit/cache/emitter now finish together while the existing graph lock stays held. |
 | Manager `reparent` → `_manager_reparent_locked` (`server.py:4141`) | Sessions cache plus outcome audit | Protected control: existing `_finish_despite_cancel` encloses the applied outcome while authority/lifecycle fences remain held. |
-| `role.set` → `_set_role_locked` → `Store.update_session` and `set_session_role_source` (`1152–1159`) | `_cache` and emitter → role/source projection | **Defect:** cancellation after the first commit loses role-source/cache continuation. Baseline text delivery in the Server is a separate best-effort network action. |
+| `role.set` → `_set_role_locked` → `Store.update_session` and `set_session_role_source` (`1152–1159`) | `_cache` and emitter → role/source projection | **Defect repaired:** role, role-source and cache/emitter continuation finish under the existing graph lock. Baseline text delivery in the Server remains a separate best-effort network action. |
 | Detached spawn handoff → `reparent_children` → `_reparent_children_locked` (`1182`) | Per-child `_cache`, count and emitter → successor's children | Request-disconnect immune through the same spawn-owned task as `open`; the helper is not a separately routed verb. A partial daemon shutdown is not claimed atomic across all children. |
-| `set_visibility` → `Store.update_session` (`1197`) | `_cache` and emitter → public visibility | **Defect:** Store commit survives teardown while cache retains the previous visibility. The existing graph lock must remain owned through completion. |
-| `status_card` → `Store.update_session` (`1209`) | `_cache` and emitter → persisted card in inventory | **Defect:** durable goal exists while fresh RPC returns the old card. Explicit retries are separate requests; setting a goal creates no duplicate update history. |
+| `set_visibility` → `Store.update_session` (`1197`) | `_cache` and emitter → public visibility | **Defect repaired:** Store/cache/emitter finish before cancellation propagates, retaining the existing graph lock through completion. |
+| `status_card` → `Store.update_session` (`1209`) | `_cache` and emitter → persisted card in inventory | **Defect repaired:** card computation, Store/cache/emitter finish under the existing lifecycle lock. Explicit retries remain separate requests; setting a goal creates no duplicate update history. |
 | `close` / `mark_closed` → `_mark_closed_locked` (`1251`) | Eviction, emitter and cleanup record → closed generation disappears | Protected control: existing finish-then-cancel boundary. This audit does not change process termination or spawn cancellation cleanup. |
 | Reconciler or detached resume → `mark_reconciled_dead`, protected-seat branch (`1322`) | `_cache(pane_dead, working=False)` → preserved assistant row with death evidence | No ordinary request owns/cancels this producer. Request-disconnect immunity is narrower than daemon-task cancellation during shutdown. |
 | Same producers → `mark_reconciled_dead`, ordinary branch (`1329`) | Eviction, emitter, awaiter resolution → dead row disappears | Same request-disconnect boundary. Its generation CAS and restart reconstruction remain authoritative; no claim of an atomic shutdown-wide projection is made. |
@@ -59,7 +59,9 @@ Use the supported `scripts/gate_env.py run --target v2-pytest` entry, selecting:
 - `tests/test_session_inventory_cancellation.py`: five ordinary handlers,
   independently varied local/peer target metadata, real commit barrier,
   authenticated teardown, fresh RPC and inventory push, disk restart,
-  pre-admission/post-continuation cancellation and explicit retry controls.
+  pre-admission/post-continuation cancellation and explicit retry controls;
+  lock-wait cancellation makes no write, and independently authenticated close
+  cannot be undone by the cancelled metadata continuation, including after restart.
 - `tests/test_report_inventory_cancellation.py`: report commit/projection,
   inserted-false replay, done/error/progress restart and cancellable notice work.
 - `tests/test_cancellation_continuation_controls.py`: DB-backed notification
