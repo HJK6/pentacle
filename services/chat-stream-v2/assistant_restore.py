@@ -94,43 +94,23 @@ def _normalize_start(value: object) -> str:
     return canonical_start(value)
 
 
-async def run_ps(pid: str, *, ps_bin: str = "ps", timeout_s: float = PS_TIMEOUT_S) -> tuple[int, str, str]:
-    """Run ``ps -o lstart= -p <pid>``; raise on a missing binary or a timeout."""
-    proc = await asyncio.create_subprocess_exec(
-        ps_bin, "-o", "lstart=", "-p", pid,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise
-    return int(proc.returncode or 0), out.decode(errors="replace"), err.decode(errors="replace")
+PSResult = tuple[int, str, str]
+
+
+async def run_ps(pid: str, *, ps_bin: str = "ps", timeout_s: float = PS_TIMEOUT_S) -> tuple[PSResult, ...]:
+    """Comparison observations; persisted producer rendering is unchanged."""
+    from prockill import start_observations
+    return await start_observations(pid, ps_bin=ps_bin, timeout_s=timeout_s)
 
 
 def classify_ps(rc: int, stdout: str, stderr: str, recorded_start: str) -> str:
-    """``gone`` / ``alive`` / ``unknown`` for one explicit ``ps`` observation.
-
-    Only two results prove the recorded process is gone: ``ps`` found no such
-    pid (exit 1, no output at all), or the pid now belongs to a process with a
-    different start time.  Everything else is unknown, never "no process".
-    """
-    if rc == 1:
-        # "No such pid" prints nothing at all; whitespace is still output.
-        return "gone" if stdout == "" and stderr == "" else "unknown"
-    if rc == 0 and stderr == "":
-        # Exactly one line; blank lines around it are not ignored.
-        lines = stdout.splitlines()
-        if len(lines) != 1:
-            return "unknown"
-        try:
-            datetime.strptime(_normalize_start(lines[0]), "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            return "unknown"
-        if not _normalize_start(recorded_start):
-            return "unknown"
-        return "alive" if _normalize_start(lines[0]) == _normalize_start(recorded_start) else "gone"
+    """Only definitive absence is gone; unmatched live birth remains unknown."""
+    from prockill import birth_matches, classify_start_observation
+    state, start = classify_start_observation(rc, stdout, stderr)
+    if state == "absent":
+        return "gone"
+    if state == "record" and birth_matches(recorded_start, start):
+        return "alive"
     return "unknown"
 
 
@@ -159,7 +139,7 @@ def test_hooks(environ: dict[str, str]) -> tuple[Any, Any]:
             while not os.path.exists(pause_file):
                 await asyncio.sleep(0.1)
 
-    async def ps_runner(pid: str) -> tuple[int, str, str]:
+    async def ps_runner(pid: str) -> tuple[PSResult, ...]:
         return await run_ps(pid, ps_bin=ps_bin)
 
     return (fault if (crash_at or pause_at) else None), (ps_runner if ps_bin else None)
@@ -181,7 +161,7 @@ class AssistantRestore:
         flush_composite_tells: Callable[[Any], Awaitable[int]],
         deliver_notice: Callable[[Any, str, str], Awaitable[None]],
         broadcast: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        ps_runner: Callable[[str], Awaitable[tuple[int, str, str]]] | None = None,
+        ps_runner: Callable[[str], Awaitable[PSResult | tuple[PSResult, ...]]] | None = None,
         clock: Callable[[], datetime] = _now,
         fault: Callable[[str], Awaitable[None]] | None = None,
         notify: Any | None = None,
@@ -373,6 +353,7 @@ class AssistantRestore:
                 "assistant restore name=%s state=%s reason=%s episode=%s attempt=%s",
                 self.name, status["state"], status["reason"], status["episode_id"],
                 status["attempt_seq"],
+                extra={"subsystem": "assistant_restore", "bug_ref": "process_ownership_semantic_cohort"},
             )
             if self._broadcast is not None:
                 try:
@@ -477,11 +458,22 @@ class AssistantRestore:
                 return "gone", None
             return "unknown", "pane_identity_unrecorded"
         try:
-            rc, out, err = await self._ps(pid)
+            observed = await self._ps(pid)
+            # Injected readers may supply one explicit observation, as before.
+            observations = (observed,) if len(observed) == 3 and isinstance(observed[0], int) else observed
+            results = [classify_ps(*value, started) for value in observations]
         except Exception:  # noqa: BLE001 - missing ps, timeout, permission: unknown
             return "unknown", "process_probe_unknown"
-        result = classify_ps(rc, out, err, started)
-        return result, (None if result != "unknown" else "process_probe_unknown")
+        if "alive" in results:
+            return "alive", None
+        if results and all(value == "gone" for value in results):
+            return "gone", None
+        # A well-formed record with an unmatched birth is distinct from a
+        # failed probe. Neither is death proof and neither permits replay.
+        from prockill import classify_start_observation
+        if any(classify_start_observation(*value)[0] == "record" for value in observations):
+            return "unknown", "process_identity_incomparable"
+        return "unknown", "process_probe_unknown"
 
     async def _attempt_recorded_failed(self, row: dict[str, Any], episode: dict[str, Any]) -> bool:
         outcomes, reservations = await self._spawn_records(str(episode.get("spawn_key") or ""))

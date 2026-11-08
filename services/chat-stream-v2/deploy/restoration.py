@@ -42,10 +42,19 @@ def qualified_prior(stamp, sha, bindings):
     if stamp.get('coordinated_receipt'):
         receipt = read_json(stamp['coordinated_receipt'])
         sealed = dict(receipt); seal = sealed.pop('receipt_sha256', None)
-        if (seal != digest(sealed) or seal != stamp.get('receipt_sha256')
-                or receipt.get('intent', {}).get('target_sha') != sha):
+        if seal != digest(sealed):
             raise Invalid('prior production receipt reference invalid')
-        reference.update(receipt=stamp['coordinated_receipt'], receipt_sha256=seal)
+        if receipt.get('intent', {}).get('target_sha') == sha:
+            if seal != stamp.get('receipt_sha256'):
+                raise Invalid('prior production receipt reference invalid')
+            reference.update(receipt=stamp['coordinated_receipt'], receipt_sha256=seal)
+        else:
+            prior = stamp.get('prior_qualification')
+            witness = prior.get('stamp') if isinstance(prior, dict) else None
+            if ('receipt_sha256' in stamp or not isinstance(witness, dict)
+                    or witness.get('coordinated_receipt') != stamp['coordinated_receipt']):
+                raise Invalid('prior production receipt reference invalid')
+            reference.update(ancestry_receipt=stamp['coordinated_receipt'], ancestry_receipt_sha256=seal)
     return reference
 
 

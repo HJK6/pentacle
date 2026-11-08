@@ -1607,3 +1607,204 @@ def test_archive_and_installed_helpers_bind_matching_private_test_settings(tmp_p
     installed.chmod(0o600); installed.write_bytes(overlay + b' ')
     with pytest.raises(subprocess.CalledProcessError):
         installer.verify_helper_source(target, commit, manifest)
+
+
+@pytest.fixture
+def provider_snapshot_replay(monkeypatch, tmp_path, capsys):
+    services = str(SCRIPT.parents[2])
+    monkeypatch.syspath_prepend(services)
+    from _shared.provider_cli_release import manifest as provider_manifest
+
+    fixture = tmp_path / "private replay fixtures"
+    fixture.mkdir(mode=0o700)
+    pin = {"schema": 1, "revision": 7, "providers": {
+        provider: {"version": version, "artifacts": {"darwin-arm64": {
+            "provenance": "https://releases.example.test/" + provider,
+            "native_sha256": "a" * 64, "resource_sha256": "b" * 64}}}
+        for provider, version in (("claude", "2.1.312"), ("codex", "0.160.0"))}}
+    snapshot = fixture / "provider pin.json"
+    snapshot.write_text(json.dumps(pin))
+    private = fixture / "private packet.json"
+    private.write_text('{"synthetic": true}')
+    private.chmod(0o600)
+    config = fixture / "hosts.json"
+    root = fixture / "home/.local/share/pentacle/releases"
+    config.write_text(json.dumps({"here": {"ssh": "localhost", "release_root": str(root)},
+                                  "peer": {"ssh": "peer.invalid", "release_root": "/tmp/replay/.local/share/pentacle/releases"}}))
+    receipt, lock = fixture / "preflight.json", fixture / "rollout.lock"
+    monkeypatch.setenv("PENTACLE_RELEASE_ROLLOUT_LOCK", str(lock))
+    repo = SCRIPT.parents[3]
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    argv = [str(SCRIPT), "--commit", commit, "--repo", str(repo), "--hosts", "here,peer",
+            "--host-config", str(config), "--run-host", "here", "--private-artifact", str(private),
+            "--resume", "rollout-snapshot"]
+    calls = []
+
+    def transport(target, command, *, dry_run, **kwargs):
+        calls.append((target.name, dry_run, command))
+        assert dry_run, "replay must never mutate a target"
+        return ""
+
+    monkeypatch.setattr(installer, "_remote", transport)
+
+    def invoke(arguments):
+        monkeypatch.setattr(installer.sys, "argv", list(arguments))
+        result = installer.main()
+        return result, json.loads(capsys.readouterr().out)
+
+    return {"invoke": invoke, "argv": argv, "snapshot": snapshot, "pin": pin,
+            "packages": provider_manifest(pin), "receipt": receipt, "lock": lock,
+            "config": config, "root": root, "calls": calls}
+
+
+def test_recorded_apply_replays_provider_snapshot_through_full_main(provider_snapshot_replay, monkeypatch):
+    f = provider_snapshot_replay
+    # Relative input and spaces must round-trip as one resolved argv element.
+    monkeypatch.chdir(f["snapshot"].parent)
+    code, preflight = f["invoke"](f["argv"] + ["--provider-cli-pin-file", f["snapshot"].name,
+                                                "--preflight", str(f["receipt"])])
+    assert code == 0
+    receipt = json.loads(f["receipt"].read_text())
+    recorded = receipt["apply_argv"]
+    assert recorded[recorded.index("--provider-cli-pin-file") + 1] == str(f["snapshot"].resolve())
+    # Independently varied caller environment/cwd cannot replace the accepted input.
+    monkeypatch.chdir(f["snapshot"].parent.parent)
+    monkeypatch.setenv("LANG", "C")
+    monkeypatch.setenv("TZ", "UTC")
+    code, replay = f["invoke"](recorded[1:] + ["--dry-run"])
+    assert code == 0
+    assert replay["manifest"]["provider_packages"] == preflight["manifest"]["provider_packages"] == f["packages"]
+    assert replay["manifest"]["runtime_package"] == preflight["manifest"]["runtime_package"]
+    assert receipt["binding"]["provider_packages"] == f["packages"]
+    assert receipt["binding"]["provider_snapshot"] == {
+        "path": str(f["snapshot"].resolve()), "sha256": hashlib.sha256(f["snapshot"].read_bytes()).hexdigest()}
+    assert {host for host, _, _ in f["calls"]} == {"here", "peer"}
+    assert all(dry_run for _, dry_run, _ in f["calls"])
+    assert not f["lock"].exists() and not f["root"].exists()
+
+
+@pytest.mark.parametrize("change", ["bytes", "version", "revision", "artifact", "missing", "invalid",
+                                    "other_path", "other_content", "omitted", "packages", "host_config"])
+def test_recorded_apply_refuses_snapshot_drift_before_lock_or_transport(provider_snapshot_replay, monkeypatch, change):
+    f = provider_snapshot_replay
+    code, _ = f["invoke"](f["argv"] + ["--provider-cli-pin-file", str(f["snapshot"]),
+                                       "--preflight", str(f["receipt"])])
+    assert code == 0
+    recorded = json.loads(f["receipt"].read_text())["apply_argv"][1:]
+    f["calls"].clear()
+    pin = f["pin"]
+    if change == "bytes":
+        f["snapshot"].write_text(f["snapshot"].read_text() + "\n")
+    elif change in {"version", "revision", "artifact", "other_content"}:
+        if change in {"version", "other_content"}: pin["providers"]["codex"]["version"] = "0.161.0"
+        elif change == "revision": pin["revision"] += 1
+        else: pin["providers"]["claude"]["artifacts"]["darwin-arm64"]["native_sha256"] = "d" * 64
+        target = f["snapshot"] if change != "other_content" else f["snapshot"].with_name("other pin.json")
+        target.write_text(json.dumps(pin))
+        recorded[recorded.index("--provider-cli-pin-file") + 1] = str(target)
+    elif change == "missing": f["snapshot"].unlink()
+    elif change == "invalid": f["snapshot"].write_text("not JSON")
+    elif change == "other_path":
+        target = f["snapshot"].with_name("identical pin.json")
+        target.write_bytes(f["snapshot"].read_bytes())
+        recorded[recorded.index("--provider-cli-pin-file") + 1] = str(target)
+    elif change == "omitted":
+        index = recorded.index("--provider-cli-pin-file")
+        del recorded[index:index + 2]
+    elif change == "packages":
+        archive = installer._archive
+        def mismatching_archive(*args, **kwargs):
+            manifest = archive(*args, **kwargs)
+            manifest["provider_packages"]["codex"]["required_version"] = "0.161.0"
+            return manifest
+        monkeypatch.setattr(installer, "_archive", mismatching_archive)
+    elif change == "host_config": f["config"].write_text(f["config"].read_text() + "\n")
+    # Omit --dry-run deliberately: a bad decision would reach a live mutation sink.
+    code, replay = f["invoke"](recorded)
+    assert code == 1 and replay["ok"] is False
+    if change not in {"missing", "invalid"}:
+        assert "preflight_binding_mismatch" in replay["error"]
+    assert not f["calls"] and not f["lock"].exists() and not f["root"].exists()
+
+
+def test_recorded_apply_preserves_explicit_unpinned_policy(provider_snapshot_replay):
+    f = provider_snapshot_replay
+    code, preflight = f["invoke"](f["argv"] + ["--preflight", str(f["receipt"])])
+    assert code == 0
+    receipt = json.loads(f["receipt"].read_text())
+    assert "--provider-cli-pin-file" not in receipt["apply_argv"]
+    code, replay = f["invoke"](receipt["apply_argv"][1:] + ["--dry-run"])
+    assert code == 0
+    assert preflight["manifest"]["provider_packages"] == replay["manifest"]["provider_packages"] == {
+        name: {"managed_admission": "pin_snapshot_required"} for name in ("claude", "codex")}
+    assert receipt["binding"]["provider_snapshot"] is None
+    # Adding a pin after unpinned preflight requires a fresh receipt too.
+    f["calls"].clear()
+    code, replay = f["invoke"](receipt["apply_argv"][1:] + ["--provider-cli-pin-file", str(f["snapshot"])])
+    assert code == 1 and "preflight_binding_mismatch" in replay["error"]
+    assert not f["calls"] and not f["lock"].exists()
+
+
+def test_preflight_binds_loaded_bytes_and_interrupted_replay_can_resume(provider_snapshot_replay, monkeypatch):
+    f = provider_snapshot_replay
+    original = f["snapshot"].read_bytes()
+    archive = installer._archive
+
+    def replace_after_load(*args, **kwargs):
+        f["snapshot"].write_bytes(original + b"\n")
+        return archive(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(installer, "_archive", replace_after_load)
+        code, preflight = f["invoke"](f["argv"] + ["--provider-cli-pin-file", str(f["snapshot"]),
+                                                   "--preflight", str(f["receipt"])])
+    assert code == 0
+    receipt = json.loads(f["receipt"].read_text())
+    assert receipt["binding"]["provider_snapshot"]["sha256"] == hashlib.sha256(original).hexdigest()
+    f["calls"].clear()
+    code, replay = f["invoke"](receipt["apply_argv"][1:])
+    assert code == 1 and not f["calls"] and not f["lock"].exists()
+    f["snapshot"].write_bytes(original)
+
+    def interrupted_archive(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(installer, "_archive", interrupted_archive)
+        with pytest.raises(KeyboardInterrupt):
+            f["invoke"](receipt["apply_argv"][1:])
+    assert not f["calls"] and not f["lock"].exists()
+    assert json.loads(f["receipt"].read_text()) == receipt
+    code, replay = f["invoke"](receipt["apply_argv"][1:] + ["--dry-run"])
+    assert code == 0
+    assert replay["manifest"]["provider_packages"] == preflight["manifest"]["provider_packages"]
+
+
+def test_full_cli_recorded_snapshot_survives_process_restart(tmp_path):
+    pin = {"schema": 1, "revision": 1, "providers": {
+        provider: {"version": version, "artifacts": {"darwin-arm64": {
+            "provenance": "https://releases.example.test/" + provider,
+            "native_sha256": "a" * 64, "resource_sha256": "b" * 64}}}
+        for provider, version in (("claude", "2.1.312"), ("codex", "0.160.0"))}}
+    snapshot = tmp_path / "provider pin.json"
+    snapshot.write_text(json.dumps(pin))
+    repo = SCRIPT.parents[3]
+    commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    receipt, lock = tmp_path / "preflight.json", tmp_path / "rollout.lock"
+    config, root = tmp_path / "hosts.json", tmp_path / "home/.local/share/pentacle/releases"
+    config.write_text(json.dumps({"local": {"ssh": "localhost", "release_root": str(root)}}))
+    env = dict(os.environ, PENTACLE_RELEASE_ROLLOUT_LOCK=str(lock))
+    preflight = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(repo), "--commit", commit,
+                               "--host-config", str(config), "--provider-cli-pin-file", str(snapshot),
+                               "--preflight", str(receipt)], env=env, capture_output=True, text=True)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    recorded = json.loads(receipt.read_text())["apply_argv"]
+    replay = subprocess.run(recorded + ["--dry-run"], cwd=tmp_path,
+                            env=dict(env, LANG="C", TZ="UTC"), capture_output=True, text=True)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert json.loads(preflight.stdout)["manifest"]["provider_packages"] == json.loads(replay.stdout)["manifest"]["provider_packages"]
+    # A subsequent process cannot reuse the persisted receipt after byte drift.
+    snapshot.write_text(snapshot.read_text() + "\n")
+    refused = subprocess.run(recorded, env=env, capture_output=True, text=True)
+    assert refused.returncode == 1 and "preflight_binding_mismatch" in refused.stdout
+    assert not lock.exists() and not root.exists()

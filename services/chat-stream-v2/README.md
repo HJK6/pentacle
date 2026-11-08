@@ -532,15 +532,11 @@ not idle-timeout claims. This detector belongs to local `Ingest`; satellite
 `event.push` ownership must be inspected separately when investigating a remote
 session.
 
-The start-field consumer audit covers process-record/table capture and reap
-proof capture (`prockill`), remote spawn capture and cancelled-spawn cleanup
-(`spawnctl`), strict/recovery ingest checks, reconciler remote table capture and
-reap proof comparison, Store rebind no-op detection, and assistant-restore ps
-classification. Exact JSON binding CAS snapshots and unrelated timestamps are
-unchanged. Gate ownership uses Linux start ticks or its existing platform
-fallback; orphan-reaper date parsing is an elapsed-age input, not observer
-presentation equality. Private cache/delivery validators are maintained by
-their owner outside this public source tree.
+The [process ownership contract and consumer dispositions](../../docs/PROCESS_OWNERSHIP.md)
+cover restore/replay, capture, reap, ingest, occupancy and input/capacity probes,
+including each retained availability refusal and the alternate-rendering clock
+fences. Persisted producer renderings and exact binding CAS snapshots remain
+unchanged.
 
 ### Native Codex cwd trust and late delivery
 

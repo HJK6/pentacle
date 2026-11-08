@@ -302,3 +302,150 @@ def pid_alive(pid: str) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def comparison_environment(*, host_local: bool = False) -> dict[str, str]:
+    env = {**os.environ, "LC_ALL": "C"}
+    if host_local:
+        env.pop("TZ", None)
+    else:
+        env["TZ"] = "UTC0"
+    return env
+
+
+def classify_start_observation(rc: int, stdout: str, stderr: str) -> tuple[str, str]:
+    """record / absent / unknown; a failed observation never proves absence."""
+    from datetime import datetime
+    if not isinstance(stdout, str) or not isinstance(stderr, str):
+        return "unknown", ""
+    if rc == 1 and stdout == "" and stderr == "":
+        return "absent", ""
+    if rc != 0 or stderr or len(stdout.splitlines()) != 1:
+        return "unknown", ""
+    started = canonical_start(stdout)
+    try:
+        datetime.strptime(started, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return "unknown", ""
+    return "record", started
+
+
+def birth_matches(recorded: object, *observed: object) -> bool:
+    """Positive comparable rendering only; false never establishes death."""
+    stored = canonical_start(recorded)
+    return (classify_start_observation(0, stored, "")[0] == "record"
+            and any(stored == canonical_start(value) for value in observed))
+
+
+def darwin_boot(value: object) -> tuple[int, int] | None:
+    import re
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\s*\{\s*sec\s*=\s*([0-9]+),\s*usec\s*=\s*([0-9]+)\s*\}(?:\s+[^\n]*)?\s*", value)
+    if match is None:
+        return None
+    sec, usec = map(int, match.groups())
+    return (sec, usec) if usec < 1_000_000 else None
+
+
+def boot_matches(recorded: object, observed: object) -> bool:
+    if not isinstance(recorded, str) or not isinstance(observed, str) or not recorded or not observed:
+        return False
+    # Darwin's trailing ctime presentation changes with TZ. Malformed Darwin
+    # observations do not acquire equality authority, even if the bytes match.
+    if recorded.lstrip().startswith("{") or observed.lstrip().startswith("{"):
+        key = darwin_boot(recorded)
+        return key is not None and key == darwin_boot(observed)
+    # Linux UUID equality supplies no clock bound. Invalid tokens stay unknown.
+    import re
+    return bool(re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", recorded)
+                and recorded == observed)
+
+
+def _comparison_inventory(sid_probe):
+    """Standalone producing-host comparison; no imports from an installed daemon."""
+    import os
+    import subprocess
+    import sys
+
+    def run(argv, env):
+        return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3, check=False)
+
+    def environment(local=False):
+        env = {**os.environ, "LC_ALL": "C"}
+        if local:
+            env.pop("TZ", None)
+        else:
+            env["TZ"] = "UTC0"
+        return env
+
+    def boot():
+        for argv in (("sysctl", "-n", "kern.boottime"), ("cat", "/proc/sys/kernel/random/boot_id")):
+            try:
+                result = run(argv, environment())
+            except OSError:
+                continue
+            if result.returncode == 0 and not result.stderr and result.stdout.strip():
+                return result.stdout.strip()
+        raise RuntimeError("boot observation unavailable")
+
+    def inventory(local=False):
+        env = environment(local)
+        result = run(("ps", "-eo", "pid=,ppid=,uid=,pgid=,sid=,lstart=,command="), env)
+        if result.returncode != 0:
+            result = run((sys.executable, "-c", sid_probe), env)
+        if result.returncode != 0 or result.stderr or not result.stdout.strip():
+            raise RuntimeError("process observation unavailable")
+        return result.stdout
+
+    before = boot()
+    utc = inventory()
+    local = inventory(True)
+    utc_after = inventory()
+    after = boot()
+    return {"utc": utc, "local": local, "utc_after": utc_after,
+            "boot_before": before, "boot_after": after}
+
+
+def comparison_inventory_probe() -> str:
+    import inspect
+    return ("import json\n" + inspect.getsource(_comparison_inventory)
+            + "\nprint(json.dumps(_comparison_inventory(" + repr(SESSION_ID_PROBE) + ")))\n")
+
+
+PSResult = tuple[int, str, str]
+
+
+async def start_observations(pid: str, *, ps_bin: str = "ps", timeout_s: float = 5.0) -> tuple[PSResult, ...]:
+    """Observe the two supported birth renderings on the process's host.
+
+    Empty TZ is not host-local on Darwin. Explicitly remove it for that read;
+    keep the persisted producer and the daemon's own environment untouched.
+    """
+    results = []
+    for zone in ("UTC0", None):
+        env = comparison_environment(host_local=zone is None)
+        proc = await asyncio.create_subprocess_exec(
+            ps_bin, "-o", "lstart=", "-p", pid, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
+        except BaseException:
+            await terminate_and_reap(proc)
+            raise
+        value = (int(proc.returncode or 0), out.decode(errors="replace"), err.decode(errors="replace"))
+        if value == (1, "", ""):
+            # A hidden/permission-limited ps row is not kernel absence. EPERM
+            # (or mere PID existence) still supplies no comparable birth.
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                pass
+            except (OSError, ValueError):
+                value = (2, "", "process_absence_unproven")
+            else:
+                value = (2, "", "process_absence_unproven")
+        results.append(value)
+    return tuple(results)

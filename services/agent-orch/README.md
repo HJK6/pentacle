@@ -575,8 +575,12 @@ A successful preflight runs archive/dependency construction and the complete
 stage/activation plan without target commands, target copies, pointer writes or
 the production rollout lock. It writes a receipt binding the installer hash,
 source SHA, repository, host configuration, resolved target names/aliases/roots,
-timeout/resume options, interpreter path/prefix/version/binary hash and runtime
-dependency hashes. The interpreter path preserves the venv symlink: substituting
+timeout/resume options, interpreter path/prefix/version/binary hash, runtime
+dependency hashes and provider packages. When a provider snapshot is supplied,
+the receipt also binds its resolved path and the SHA256 of the exact bytes parsed,
+and `apply_argv` preserves that path as one argument. Changed bytes or a different
+snapshot path require a fresh preflight, even if the provider versions match.
+The interpreter path preserves the venv symlink: substituting
 its resolved base Python changes the environment. Preflight performs **no target
 verification** and grants no deployment authority.
 

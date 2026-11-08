@@ -60,7 +60,7 @@ async def ready_fixture(tmp_path, monkeypatch, *, serving_seat=True,provider="co
             if argv[0]=="tmux":
                 return SimpleNamespace(returncode=0,stdout="42|%42|/dev/ttys042|/fixture/tmux.sock|current-ready\n")
             if argv[0] in {"cat","sysctl"}:
-                return SimpleNamespace(returncode=0,stdout="fixture-boot\n")
+                return SimpleNamespace(returncode=0,stdout="12345678-1234-1234-1234-123456789abc\n")
             return actual_run(argv,**kwargs)
         host.run=current
         await runtime.admit_launch(row)

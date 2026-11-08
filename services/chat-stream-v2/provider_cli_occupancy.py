@@ -12,7 +12,7 @@ import sys
 
 from provider_accounts import AccountError, Binding, _component
 from provider_cli_pin import digest
-from prockill import SESSION_ID_PROBE, canonical_start, identity_proof, parse_process_records
+from prockill import SESSION_ID_PROBE, canonical_start, identity_proof, parse_process_records, boot_matches
 
 
 async def descriptors(runtime, host, provider):
@@ -321,7 +321,7 @@ def status(host, binding, launchers, *, mutation_state=True,pin=None):
             try:
                 code,output=_run(host,["tmux","list-panes","-t","="+name,"-F",
                     "#{pane_pid}|#{pane_id}|#{pane_tty}|#{socket_path}|#{session_name}"])
-                if (code or output.strip().split("|")!=fields or fresh_boot!=boot
+                if (code or output.strip().split("|")!=fields or not boot_matches(fresh_boot,boot)
                         or not fresh_native<=fresh_records.keys()
                         or any(fresh_records.get(p)!=records[p] for p in chain)
                         or fresh_records.get(root)!=records[root]
