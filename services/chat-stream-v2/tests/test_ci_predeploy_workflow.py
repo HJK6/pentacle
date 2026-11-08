@@ -128,6 +128,14 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
             if other != job_id:
                 assert not any(fnmatch.fnmatch(str(root / other / 'attempt-manifest.json'), pattern) for pattern in selected)
     included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in patterns)
+    success_uploads = [s for s in job['steps']
+                       if s.get('uses') == 'actions/upload-artifact@v4' and s.get('if') == '${{ always() }}']
+    assert len(success_uploads) == 1 and success_uploads[0]['with']['retention-days'] == 7
+    success_patterns = success_uploads[0]['with']['path'].replace('${{ runner.temp }}', str(runner_temp)).replace('${{ github.job }}', 'daemon').splitlines()
+    assert all(p.startswith(str(root / 'daemon') + '/') and '..' not in Path(p).parts for p in success_patterns)
+    success_included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in success_patterns)
+    for required in ('v2-merge-evidence.json', 'unit.junit.xml', 'smoke.junit.xml', 'unit.progress.jsonl', 'smoke.progress.jsonl'):
+        assert success_included(root / 'daemon/daemon/gate' / required), required
     for required in ['daemon/daemon/gate/v2-merge-evidence.json','daemon/daemon/gate/unit.log','daemon/daemon/gate/unit.junit.xml',
                      'daemon/daemon/attempts/a/0001-started.json','daemon/attempt-manifest.json','web/web/gate/web/verdict.json',
                      'frontend/npm/attempts/a/0001-started.json','contracts/cli/gate/pytest.junit.xml',
@@ -142,6 +150,7 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
         for excluded in [base/'unit/owned-case/sessions.db',tmp/'scratch',home/'.aws/credentials',home/'.env',
                          home/'Library/Keychains/login.keychain-db',workspace/'prepared/venv']:
             assert not included(excluded), str(excluded)
+            assert not success_included(excluded), str(excluded)
 
 
 def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(tmp_path, monkeypatch):

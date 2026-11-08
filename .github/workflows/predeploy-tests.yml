@@ -231,6 +231,11 @@ jobs:
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/attempt-manifest.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/test-attempts.v1.json
           ${{ runner.temp }}/gate-evidence/${{ github.job }}/**/attempts/**/*.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/v2-merge-evidence.json
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/unit.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/smoke.junit.xml
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/unit.progress.jsonl
+          ${{ runner.temp }}/gate-evidence/${{ github.job }}/daemon/gate/smoke.progress.jsonl
     - name: Retain failed gate evidence
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
