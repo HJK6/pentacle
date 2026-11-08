@@ -267,8 +267,13 @@ def normalize_codex_rollout_record(
             for group in groups:
                 joined = "\n".join(part for _, part in group)
                 child = {**record, "payload": {**payload, "content": joined}}
-                event = normalize_codex_rollout_record(child, host=host, session_name=session_name,
-                            session_id=session_id, _preserve_blocks=True)[0]
+                normalized = normalize_codex_rollout_record(child, host=host, session_name=session_name,
+                            session_id=session_id, _preserve_blocks=True)
+                if not normalized:
+                    # Whitespace-only groups emit no event. The full original
+                    # record remains attached to each retained neighboring input.
+                    continue
+                event = normalized[0]
                 event["raw"].update(native_input_version=1, source_record=record,
                     native_block_ordinals=[ordinal for ordinal, _ in group],
                     native_block_spans=[[ordinal, 0, len(part)] for ordinal, part in group],

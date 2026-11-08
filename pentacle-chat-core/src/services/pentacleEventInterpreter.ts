@@ -922,6 +922,11 @@ export function interpretPentacleEvent(
       return interpreted(event, 'user-message', 'bubble:user', 'user', '', text, false,
         'Daemon-correlated operator input; envelope-like text remains literal.');
     }
+    if (origin.kind === 'service' && origin.verified === true
+        && (kind === 'TELL' || parsePeerAgentMessage(userText))) {
+      return interpreted(event, 'system', 'bubble:agent', 'system', 'Service', text, false,
+        'Daemon-correlated service input; an inner peer header remains literal.', text);
+    }
     if (origin.kind === 'unknown' || origin.verified !== true) {
       return interpreted(event, 'unknown', 'bubble:agent', 'system', 'Unknown source', text, false,
         'Input has no unique authenticated dispatch or delivery occurrence.', text);

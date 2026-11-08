@@ -91,6 +91,63 @@ def test_ordinary_send_captures_daemon_proof_before_native_input(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('outcome', ['not-started', 'pasted-unconfirmed'])
+def test_send_no_input_refusal_disqualifies_only_the_refused_attempt(tmp_path, outcome):
+    from ingest import append_ingested_event
+    from sessions import VerbError
+    async def run():
+        h = _Harness(tmp_path)
+        try:
+            await h.start()
+            wires = []
+            paste = h.tmux.paste
+            async def deliver(name, wire):
+                wires.append(wire)
+                if outcome == 'not-started':
+                    raise VerbError('synthetic_native_refusal', 'No input happened', phase='not_started')
+                await paste(name, wire)
+            h.tmux.paste = deliver
+            if outcome == 'pasted-unconfirmed':
+                async def pasted_unconfirmed(plan):
+                    await h.tmux.paste('seat-a', plan.wire_text)
+                    return False, 1, True, 'claude', None
+                h.comms._attempt_send_delivery_bound = pasted_unconfirmed
+            result = await h.send(to_stream_id=SEAT_A, request_id='refused-send')
+            assert result['delivery'] == 'not_landed'
+            if outcome == 'not-started':
+                assert h.tmux.inputs == []
+            else:
+                assert len(h.tmux.inputs) == 1
+            casts = []
+            async def broadcast(frame):
+                casts.append(frame)
+            for event in normalize('claude', native_record('claude', wires, 'after-send')):
+                await append_ingested_event(h.store, broadcast, event, recent_limit=500)
+            origin = casts[-1]['event']['raw']['input_provenance']
+            assert origin['kind'] == ('unknown' if outcome == 'not-started' else 'peer')
+            history = await h.store.submit(lambda c: [json.loads(r[0]) for r in c.execute(
+                'SELECT meta_json FROM v2_send_receipts ORDER BY rowid')])
+            assert any('_input_proof' in row for row in history)
+            assert any(row.get('pool_input_not_started') is True for row in history) == (outcome == 'not-started')
+        finally:
+            h.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('texts', [
+    ['   ', '[from fixture:peer] [tell:whitespace]\nbody'],
+    ['[from fixture:peer] [tell:whitespace]\nbody', '   '],
+])
+def test_codex_whitespace_block_keeps_peer_and_original_record(texts):
+    record = native_record('codex', texts, 'whitespace-boundary')
+    events = normalize('codex', record)
+    assert len(events) == 1
+    assert events[0]['kind'] == 'TELL'
+    assert events[0]['text'] == 'body'
+    assert events[0]['raw']['source_record'] == record
+    assert events[0]['raw']['native_block_ordinals'] == [texts.index('[from fixture:peer] [tell:whitespace]\nbody')]
+
+
 def test_operator_dispatch_keeps_answer_when_peer_arrives_last():
     from test_assistant_mirror_trigger_scope import setup, append, sql
     from test_assistant_prose_mirror import ROOT, _route_for, _answer_rows

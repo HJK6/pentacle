@@ -109,6 +109,7 @@ def retained_proof(conn, payload):
 def send_proofs(conn, target, text):
     """Read only daemon pre-input receipt JSON; public meta is voice-only."""
     attempts = {}
+    no_input = set()
     rows = history_query(conn,
         "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
         "AND json_type(meta_json,'$._input_proof')='object' "
@@ -118,17 +119,25 @@ def send_proofs(conn, target, text):
         return  # Unbounded/ambiguous history is never an origin grant.
     for row in rows:
         try:
-            proof = json.loads(row["meta_json"]).get("_input_proof")
+            meta = json.loads(row["meta_json"])
+            proof = meta.get("_input_proof")
         except (TypeError, ValueError):
+            continue
+        key = row["receipt_id"]
+        # A durable not_started outcome disqualifies the earlier pre-input
+        # anchor. Other not_landed outcomes can still have physically pasted.
+        if meta.get("pool_input_not_started") is True:
+            no_input.add(key)
             continue
         if not isinstance(proof, dict):
             continue
-        key = row["receipt_id"]
         previous = attempts.get(key)
         # Later completion may not overwrite an already-consumed occurrence.
         if previous is None or proof.get("proof_event_id") is not None:
             attempts[key] = (row, proof)
     for row, proof in attempts.values():
+        if row["receipt_id"] in no_input:
+            continue
         length = proof.get("wire_length")
         if type(length) is not int or length <= 0 or not isinstance(text, str):
             continue

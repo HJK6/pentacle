@@ -355,3 +355,20 @@ test('daemon occurrence classification preserves operator quotations and unknown
       input_provenance: { kind: 'peer', verified: true, generation: 'captured' } } }));
   assert.equal(row.caseId, 'peer-agent-message');
 });
+
+test('verified service quotations retain their literal body without borrowing a peer label', () => {
+  const wire = '[from claimed:peer] [tell:quoted]\nliteral';
+  const row = interpretPentacleEvent(event({ text: wire,
+    raw: { input_provenance: { kind: 'service', verified: true } } }));
+  assert.equal(row.caseId, 'system');
+  assert.equal(row.label, 'Service');
+  assert.equal(row.text, wire);
+  assert.equal(row.hidden, false);
+  for (const item of wrappers.notice_cases) {
+    const input = event({ text: item.wire_text,
+      message_envelope: { kind: item.kind, id: item.expected_tag.id, schema_version: 1 } });
+    const actual = interpretPentacleEvent({ ...input,
+      raw: { input_provenance: { kind: 'service', verified: true } } });
+    assert.deepEqual(actual, { ...interpretPentacleEvent(input), event: actual.event });
+  }
+});
