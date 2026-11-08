@@ -493,7 +493,8 @@ def test_cold_recovery_rejects_unproved_identity(monkeypatch, provenance, princi
             _front_desk_composite(store, sessions)
             fields = {"visibility": "default", "qualified_spec_ids": qualified,
                       "spec_binding_provenance": [{"spec_id": FD_SPEC, "provenance": provenance,
-                                                   "granting_principal": principal}]}
+                                                   "granting_principal": principal,
+                                                   "granted_at": "2026-11-08T00:00:00Z"}]}
             if handoff:
                 fields["handoff_from_stream_id"] = "localhost:unrelated"
             assert not sessions.assistant.is_front_desk_seat("localhost:candidate", fields)
@@ -526,7 +527,8 @@ def test_transactional_recovery_boundary(provenance, handoff, same_seat, retarge
                 effective_model="claude-opus-5-5", effective_effort="high",
                 handoff_from_stream_id="localhost:previous" if handoff else None)
             await _persist_recovery_claim(store, actor_id, [FD_SPEC], [{
-                "spec_id": FD_SPEC, "provenance": provenance, "granting_principal": "operator"}])
+                "spec_id": FD_SPEC, "provenance": provenance, "granting_principal": "operator",
+                "granted_at": "2026-11-08T00:00:00Z"}])
             kwargs = dict(env_binding={"stream_id": "localhost:old", "generation": old["session_generation"]},
                           actor_stream_id=actor_id, actor_generation=actor["session_generation"],
                           target_stream_id="localhost:target" if retarget else actor_id,

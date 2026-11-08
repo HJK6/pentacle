@@ -364,6 +364,7 @@ def _configured_spec_authorized(
             if same_seat_restore else {"spawn_explicit", "drive_explicit"}
         )
         and isinstance(item.get("granting_principal"), str) and item["granting_principal"].strip()
+        and isinstance(item.get("granted_at"), str) and item["granted_at"].strip()
         for item in provenance
     )
 
