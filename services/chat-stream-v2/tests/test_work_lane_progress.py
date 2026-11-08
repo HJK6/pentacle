@@ -54,6 +54,7 @@ def test_membership_replay_cas_auth_bounds_and_unknown_ids():
 
 
 def test_index_revision_history_and_re_read_membership(tmp_path, monkeypatch):
+    import asyncio
     import time
     from _shared.specs_service import SpecsSubsystem
     folder = tmp_path / "memory" / "work" / "in_progress" / "demo__span"
@@ -75,9 +76,14 @@ def test_index_revision_history_and_re_read_membership(tmp_path, monkeypatch):
         assert not [e for e in shown["events"] if e["operation"] == "item_change"]
         for revision, mark in ((2, "x"), (3, " "), (4, "x")):
             spec.write_text(template.format(mark))
-            await scan()
-            await scan()
-            shown = await env.store.get_work_lane(lid)
+            # File observations may retain stale facts until a fresh scan.
+            deadline = time.monotonic() + 2
+            while True:
+                await scan()
+                shown = await env.store.get_work_lane(lid)
+                if shown["members"][0]["obs_rev"] == revision or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.01)
             assert shown["members"][0]["obs_rev"] == revision
             assert shown["lane"]["version"] == 1
         events = [e for e in shown["events"] if e["operation"] == "item_change"]
