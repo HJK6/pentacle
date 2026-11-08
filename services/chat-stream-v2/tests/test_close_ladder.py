@@ -1329,3 +1329,118 @@ def test_close_tmux_timeout_still_uses_independent_captured_authority(monkeypatc
         assert state == "ok" and reap["reap_status"] == "reaped"
         assert all(h.sent == [signal.SIGKILL] and h.closed for h in handles.values())
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("scenario", [
+    "missing", "dead", "status_zero", "signal", "pipe", "unknown_version", "partial",
+    "same_server_reuse", "other_parent", "hidden_window", "wrong_root", "wrong_session",
+    "drift_pane_id", "drift_pane_pid", "drift_session_id", "drift_tty", "drift_socket",
+    "drift_server", "drift_version", "post_missing", "exit_during_registration",
+])
+@pytest.mark.parametrize("graceful", [False, True])
+def test_unanchored_close_never_signals_or_persists_new_authority(monkeypatch, scenario, graceful):
+    """Actual close/capture/readback; synthetic inventory and recording-only handles."""
+    from collections import defaultdict
+    from tmux_transport import Tmux
+    root, child, server = 441234567, 441234568, 441234569
+    def rec(pid, ppid):
+        return {"pid": pid, "ppid": ppid, "uid": 501, "pgid": root, "sid": root,
+                "start_id": "Mon Jan 1 00:00:00 2026", "command": "recording-fixture"}
+    state = {"records": {root: rec(root, server), child: rec(child, root)}}
+    handles, deliveries = {}, []
+    class Witness(RecordingWitness):
+        def exited(self): return self.pid not in state["records"]
+        def send(self, sig):
+            deliveries.append((self.pid, int(sig)))
+            state["records"].pop(self.pid, None)
+            return True
+    def witness(pid):
+        handles[pid] = Witness(pid)
+        if scenario == "exit_during_registration" and pid == child:
+            state["records"].pop(root, None)
+            state["records"][child]["ppid"] = 1
+        return handles[pid]
+    async def records(): return {pid: dict(row) for pid, row in state["records"].items()}
+    async def boot(): return "boot-fixture"
+    monkeypatch.setattr(prockill, "ExitWitness", witness)
+    monkeypatch.setattr(prockill, "process_records", records)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+    monkeypatch.setattr(prockill, "pid_alive", lambda pid: int(pid) in state["records"])
+    monkeypatch.setattr(sessions_mod, "CLOSE_GRACEFUL_CONFIRM_S", 0)
+    monkeypatch.setattr(sessions_mod, "CLOSE_KILL_CONFIRM_S", 0)
+    class BindingTmux(Tmux):
+        def __init__(self):
+            super().__init__()
+            self.alive, self.reads, self.kills = True, 0, 0
+        async def has_session(self, name): return self.alive
+        async def pane_pid(self, name): return str(root)
+        async def kill_session(self, name):
+            self.kills += 1
+            if scenario == "same_server_reuse":
+                # The unrelated root exits during grace; its child reparents.
+                state["records"].pop(root, None)
+                state["records"][child]["ppid"] = 1
+            if graceful: self.alive = False
+        async def run(self, *args, **kwargs):
+            fmt = args[-1]
+            close_read = "#{session_id}" in fmt
+            if close_read: self.reads += 1
+            fields = {"pane_pid": str(root), "pane_id": "%1", "pane_tty": "/dev/test",
+                      "socket_path": "/tmp/owned-fixture", "session_name": "anchor-refusal",
+                      "session_id": "$7", "pid": str(server), "version": "3.7c",
+                      "pane_dead": "0", "pane_pipe": "0", "pane_dead_status": "",
+                      "pane_dead_signal": ""}
+            if scenario in {"dead", "same_server_reuse"}: fields["pane_dead"] = "1"
+            if scenario in {"status_zero", "same_server_reuse"}: fields["pane_dead_status"] = "0"
+            if scenario == "signal": fields["pane_dead_signal"] = "term"
+            if scenario == "pipe": fields["pane_pipe"] = "1"
+            if scenario == "unknown_version": fields["version"] = "unqualified"
+            if scenario == "wrong_root": fields["pane_pid"] = str(root + 10)
+            if scenario == "wrong_session": fields["session_name"] = "replacement"
+            if scenario == "other_parent": state["records"][root]["ppid"] = server + 1
+            if close_read and (scenario == "missing" or scenario == "post_missing" and self.reads > 1):
+                return 1, "unavailable"
+            if close_read and scenario == "partial": return 0, "incomplete|fields\n"
+            drift = {"drift_pane_id": ("pane_id", "%2"), "drift_pane_pid": ("pane_pid", str(root + 10)),
+                     "drift_session_id": ("session_id", "$8"), "drift_tty": ("pane_tty", "/dev/other"),
+                     "drift_socket": ("socket_path", "/tmp/replacement"),
+                     "drift_server": ("pid", str(server + 1)), "drift_version": ("version", "3.4")}
+            if close_read and self.reads > 1 and scenario in drift:
+                key, value = drift[scenario]; fields[key] = value
+            for key, value in fields.items(): fmt = fmt.replace("#{" + key + "}", value)
+            if close_read and scenario == "hidden_window": fmt += "\n" + fmt.replace("%1", "%2")
+            return 0, fmt + "\n"
+    async def go():
+        store = Store(":memory:"); store.start()
+        tmux = BindingTmux()
+        sessions = Sessions(store, tmux=tmux, local_host=HOST)
+        try:
+            await _seed(store, "anchor-refusal")
+            result = await sessions.close(HOST, "anchor-refusal")
+            assert deliveries == [], (scenario, deliveries)
+            assert result["failed"] is not graceful
+            if not graceful: assert result["reason"] == "logical_ownership_unproven"
+            assert result["reap_status"] == "unknown"
+            reap = await store.get_session_reap(f"{HOST}:anchor-refusal")
+            assert reap is not None and reap["reap_status"] == "unknown"
+            for item in reap["survivors"]:
+                assert "ownership_proof_v2" not in item
+                assert item["reap_reason"] == "logical_ownership_unproven"
+            if graceful:
+                # Continue from the actual persisted close, through the ordinary reaper.
+                reaper = SessionReconciler(sessions, None)
+                async def inventory(_host): return [], await records(), "boot-fixture"
+                async def signal_pids(_host, pids, sig):
+                    deliveries.extend((pid, int(sig)) for pid in pids)
+                    return True
+                monkeypatch.setattr(reaper, "_reap_inventory", inventory)
+                monkeypatch.setattr(reaper, "_signal_pids", signal_pids)
+                await reaper._reconcile_closed_survivors(defaultdict(int))
+                after = await store.get_session_reap(f"{HOST}:anchor-refusal")
+                assert deliveries == []
+                assert all("ownership_proof_v2" not in item and item["reap_reason"] ==
+                           "ownership_proof_missing" for item in after["survivors"])
+            assert all(handle.closed for handle in handles.values())
+        finally:
+            store.stop()
+    asyncio.run(go())
