@@ -960,3 +960,181 @@ def test_registration_failure_does_not_leave_a_live_unregistered_claude_pane(
     assert outcome is not None
     assert outcome["state"] == "failed"
     assert "session registration failed" in outcome["reason"]
+
+
+class AperturePane(RegistrationFailureTmux):
+    """Owned pane with observable nonce, readiness, and teardown uncertainty."""
+
+    def __init__(self, *, screen="provider loading", nonce="APERTURE", cleanup_unknown=False):
+        super().__init__()
+        self.screen = screen
+        self.nonce = nonce
+        self.cleanup_unknown = cleanup_unknown
+        self.captures = 0
+
+    async def capture(self, name):
+        self.captures += 1
+        return self.screen
+
+    async def run(self, *args, **kwargs):
+        if args and args[0] == "show-environment":
+            return 0, f"{spawnctl_mod.PANE_NONCE_ENV}={self.nonce}\n"
+        return await super().run(*args, **kwargs)
+
+    async def kill_session(self, name):
+        if self.cleanup_unknown:
+            raise RuntimeError("cleanup transport unavailable")
+        await super().kill_session(name)
+
+
+async def _aperture_reconcile(pane, *, prior=None, admitted=False, provider="codex",
+                              receipt=None, unreadable=False, after_first=None, bootstrap="starting", tombstone=False):
+    store = Store(":memory:")
+    store.start()
+    name = "adoption-aperture"
+    try:
+        sessions = Sessions(store, tmux=pane, local_host=HOST)
+        ctl = SpawnCtl(store, sessions, tmux=pane)
+        if prior:
+            await sessions.open(HOST, name, session_generation="prior", pane_pid="1111")
+            await store.update_session(HOST, name, status="closed", pane_status="pane_dead",
+                                       close_kind=prior if prior != "retained" else None)
+            await sessions.refresh()
+        assert await store.reserve_stream_id(HOST, name, ttl_s=60, request_id="aperture-request",
+                                             nonce="APERTURE")
+        fields = {"objective": "Exercise interrupted adoption apertures", "provider": provider,
+                  "session_generation": "intended", "bootstrap_state": bootstrap}
+        intent = {"open_fields": fields, "brief": "",
+                  "delivery_receipt": receipt or {"state": "not_requested"}}
+        assert await store.record_spawn_intent(HOST, name, intent)
+        if admitted:
+            await sessions.open(HOST, name, **fields, pane_pid=await pane.pane_pid(name),
+                                pane_status="pane_alive", fence="aperture-request")
+        if prior == "newer":
+            await store.open_session(HOST, name, session_generation="newer", pane_pid="9999")
+            await sessions.refresh()
+        if unreadable:
+            await store.submit(lambda c: (c.execute("UPDATE v2_stream_reservations SET payload='unreadable'"), c.commit()))
+        if tombstone:
+            def closed_tombstone(conn):
+                conn.execute("INSERT INTO v2_deferred_reap (stream_id,host,session_name,generation,requested_at,done_at) "
+                             "VALUES (?,?,?,?,?,?)", (f"{HOST}:{name}", HOST, name, "intended", "closed", "done"))
+                conn.commit()
+            await store.submit(closed_tombstone)
+        result = await ctl.reconcile_spawn_intents()
+        first = {"outcome": await store.get_spawn_outcome(HOST, name),
+                 "row": await store.fetch_session(HOST, name)}
+        if after_first:
+            await after_first(ctl, store, sessions, pane, name)
+            result = await ctl.reconcile_spawn_intents()
+        return {"first": first, "reconcile": result, "row": await store.fetch_session(HOST, name),
+                "outcome": await store.get_spawn_outcome(HOST, name),
+                "reservations": await store.reservations(include_expired=True),
+                "inventory": sessions.list_open(),
+                "await": await ctl.await_spawn({"stream_id": f"{HOST}:{name}"}),
+                "status": await ctl.spawn_status({"host": HOST, "session_name": name}, HOST)}
+    finally:
+        store.stop()
+
+
+def test_pane_before_generation_admission_cleans_exact_owned_pane():
+    pane = AperturePane()
+    result = asyncio.run(_aperture_reconcile(pane, prior="retained"))
+    assert not pane.alive, "owned pane must not outlive a retired pre-admission intent"
+    assert result["reconcile"] == {"adopted": 0, "released": 1}
+    assert result["row"]["session_generation"] == "prior"
+    assert result["row"]["status"] == "closed"
+    assert result["inventory"] == []
+    assert result["reservations"] == []
+    assert result["outcome"]["state"] == "failed"
+    assert result["outcome"]["delivery_evidence"] == "pane_cleanup_confirmed"
+    assert result["await"]["type"] == "await_spawn.error"
+    assert not pane.pasted
+
+
+def test_pane_before_admission_unknown_cleanup_keeps_durable_handle():
+    pane = AperturePane(cleanup_unknown=True)
+    result = asyncio.run(_aperture_reconcile(pane, prior="retained"))
+    assert pane.alive
+    assert result["reconcile"] == {"adopted": 0, "released": 0}
+    assert len(result["reservations"]) == 1
+    assert result["outcome"]["state"] == "indeterminate"
+    assert result["outcome"]["delivery_evidence"] == "pane_cleanup_unknown"
+    assert result["row"]["session_generation"] == "prior"
+    assert not pane.pasted
+
+
+@pytest.mark.parametrize("prior,nonce", [("retained", "FOREIGN"), ("newer", "APERTURE"),
+                                        ("operator", "APERTURE")])
+def test_pane_before_admission_preserves_foreign_newer_and_closed(prior, nonce):
+    pane = AperturePane(nonce=nonce)
+    result = asyncio.run(_aperture_reconcile(pane, prior=prior))
+    assert pane.alive and not pane.killed and not pane.pasted
+    assert result["row"]["session_generation"] == ("newer" if prior == "newer" else "prior")
+    assert result["outcome"]["state"] == "failed"
+
+
+@pytest.mark.parametrize("screen,expected", [
+    ("OpenAI Codex\n─────────\n› explain this codebase\n  gpt-5-codex high", "ready"),
+    ("provider loading", "starting"),
+])
+def test_promptless_adoption_observes_bootstrap_separately(monkeypatch, screen, expected):
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.01)
+    pane = AperturePane(screen=screen)
+    result = asyncio.run(_aperture_reconcile(pane, admitted=True))
+    assert pane.captures > 0, "no brief does not prove provider readiness"
+    assert result["row"]["bootstrap_state"] == expected
+    assert result["await"]["state"] == expected
+    assert result["inventory"][0]["bootstrap_state"] == expected
+    assert not pane.pasted and not pane.killed
+    assert result["outcome"]["delivery_receipt"]["state"] == "not_requested"
+    assert len(result["inventory"]) == 1
+    assert result["row"]["session_generation"] == "intended"
+    if expected == "starting":
+        assert result["outcome"]["state"] == "indeterminate"
+        assert len(result["reservations"]) == 1
+    else:
+        assert result["outcome"]["state"] == "delivered"
+        assert not result["reservations"]
+
+
+@pytest.mark.parametrize("provider,screen", [
+    ("codex", "OpenAI Codex\n─────────\n› explain this codebase\n  gpt-5-codex high"),
+    ("claude", "──────────────────────────\n❯\n──────────────────────────\n  ⏵⏵ bypass permissions on"),
+])
+def test_promptless_pending_readiness_converges_once_without_input(monkeypatch, provider, screen):
+    monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.01)
+    pane = AperturePane()
+
+    async def become_ready(ctl, store, sessions, pane, name):
+        pane.screen = screen
+
+    result = asyncio.run(_aperture_reconcile(pane, admitted=True, provider=provider, after_first=become_ready))
+    assert result["first"]["outcome"]["state"] == "indeterminate"
+    assert result["first"]["row"]["bootstrap_state"] == "starting"
+    assert result["row"]["bootstrap_state"] == "ready"
+    assert result["outcome"]["state"] == "delivered"
+    assert result["outcome"]["delivery_receipt"]["state"] == "not_requested"
+    assert not pane.pasted and not pane.killed
+    assert len(result["inventory"]) == 1 and not result["reservations"]
+
+
+@pytest.mark.parametrize("guard", ["reset", "tombstone"])
+def test_promptless_adoption_preserves_durable_readiness_blocks(guard):
+    pane = AperturePane()
+    result = asyncio.run(_aperture_reconcile(pane, admitted=True,
+                        bootstrap="reset_blocked" if guard == "reset" else "starting",
+                        tombstone=guard == "tombstone"))
+    assert result["reconcile"] == {"adopted": 0, "released": 0}
+    assert pane.captures == 0 and pane.alive
+    assert not pane.pasted and not pane.killed
+    assert len(result["reservations"]) == 1
+
+
+def test_unreadable_pre_admission_intent_fails_closed_without_default_registration():
+    pane = AperturePane()
+    result = asyncio.run(_aperture_reconcile(pane, unreadable=True))
+    assert not pane.alive and pane.killed
+    assert result["row"] is None and result["inventory"] == []
+    assert result["outcome"]["state"] == "failed"
+    assert not result["reservations"] and not pane.pasted
