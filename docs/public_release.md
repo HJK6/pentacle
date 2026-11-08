@@ -77,6 +77,12 @@ The legacy configuration may supply `PENTACLE_SMOKE_ACCOUNTS` through the daemon
 Repeat the declarations when the next deployment should retain explicit selection.
 Rollback uses the map recorded in its stamp.
 
+Coordinated prepare qualifies a prior through its own sealed receipt, or through
+its own forward fleet smoke when a plain deployment inherited an ancestor receipt
+pointer backed by a genuine seal and a matching nested `prior_qualification`
+pointer. A stripped seal on the prior's own receipt and a coordinated-rollback
+stamp still refuse qualification.
+
 FD is the release owner for the deploy gate-evidence choice. When a fresh,
 accepted local v2-merge receipt names the exact public candidate SHA, clean
 source before and after, and passing unit and smoke tiers, FD may pass
