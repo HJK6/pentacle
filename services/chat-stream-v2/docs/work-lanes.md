@@ -110,6 +110,10 @@ after `WORK_INDEX_SETTLE_S` (default 300 seconds) and at least two periodic
 sweeps; callbacks cannot accelerate the sweep count. Coherent reads restore
 fresh facts. Root loss retains the durable snapshot with index availability false.
 
+Each scan reads both current source files. Parsed facts are reused only when
+their captured contents and status match; equal file timestamps alone do not
+hide completed edits. Quiet-window and coherent-read checks still apply.
+
 Lane additions are `members` (first 8, in membership order), `members_total`,
 `no_spec_reason`, `items_total`, `items_completed`, `items_dropped`, `items_open`,
 `items_unresolved`, `ac_checked`, `ac_total`, `ac_members`, `open_estimate_h`,

@@ -829,6 +829,12 @@ class Sessions:
         return host, name
 
     async def rename(self, host: str, session_name: str, display_name: str, source: str = "agent") -> dict[str, Any]:
+        # Retain lifecycle ownership until the durable title and inventory agree,
+        # including when the requesting connection disappears after commit.
+        async with self._lifecycle_lock(host, session_name):
+            return await _finish_despite_cancel(self._rename_locked(host, session_name, display_name, source))
+
+    async def _rename_locked(self, host: str, session_name: str, display_name: str, source: str) -> dict[str, Any]:
         display_name = display_name.strip()
         if not display_name:
             raise VerbError("bad_request", "display_name is required")
@@ -935,10 +941,10 @@ class Sessions:
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         async with self._graph_lock:
-            return await self._reparent_locked(
+            return await _finish_despite_cancel(self._reparent_locked(
                 host, session_name, new_parent_stream_id,
                 auth_context=auth_context, manager_authorized=manager_authorized,
-                expected_generation=expected_generation)
+                expected_generation=expected_generation))
 
     async def _reparent_locked(
         self,
@@ -1067,7 +1073,8 @@ class Sessions:
         auth_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async with self._graph_lock:
-            return await self._set_role_locked(host, session_name, role, auth_context=auth_context)
+            return await _finish_despite_cancel(
+                self._set_role_locked(host, session_name, role, auth_context=auth_context))
 
     async def _set_role_locked(
         self,
@@ -1194,13 +1201,20 @@ class Sessions:
         if visibility not in VISIBILITIES:
             raise VerbError("bad_request", f"visibility must be one of {', '.join(VISIBILITIES)}")
         async with self._graph_lock:
-            row = await self.store.update_session(host, session_name, visibility=visibility)
+            return await _finish_despite_cancel(self._set_visibility_locked(host, session_name, visibility))
+
+    async def _set_visibility_locked(self, host: str, session_name: str, visibility: str) -> dict[str, Any]:
+        row = await self.store.update_session(host, session_name, visibility=visibility)
         updated = self._cache(row)
         if emit_if_changed := getattr(self._inventory_emitter, "emit_if_changed", None):
             await emit_if_changed(immediate=True)
         return updated
 
     async def set_status_card(self, host: str, session_name: str, fields: dict[str, Any]) -> dict[str, Any]:
+        async with self._lifecycle_lock(host, session_name):
+            return await _finish_despite_cancel(self._set_status_card_locked(host, session_name, fields))
+
+    async def _set_status_card_locked(self, host: str, session_name: str, fields: dict[str, Any]) -> dict[str, Any]:
         from ledger import apply_status_card_update
 
         sid = f"{host}:{session_name}"

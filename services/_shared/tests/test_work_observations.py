@@ -224,23 +224,148 @@ def test_explicit_scanner_never_resolves_environment_root(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_work_scan_reuses_unchanged_and_invalidates_one_folder(tmp_path, monkeypatch, explicit):
+@pytest.mark.parametrize("filename", ["spec.md", "summary.md"])
+def test_work_scan_rechecks_bytes_when_all_metadata_matches(tmp_path, monkeypatch, explicit, filename):
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    paths = [folder / name for name in ("spec.md", "summary.md")]
+    identity_fingerprint = service._identity_fingerprint
+    fingerprints = {path: identity_fingerprint(path) for path in paths}
+    # Model a filesystem timestamp tick; the actual files and parser remain real.
+    monkeypatch.setattr(service, "_identity_fingerprint", lambda path, **kwargs:
+                        fingerprints[path] if path in fingerprints else identity_fingerprint(path, **kwargs))
+    now = max(path.stat().st_mtime for path in paths) + 1
+    baseline = service.scan_work_observations(now=now)["candidates"][ID][0]
+    assert baseline["quality"] == "fresh"
+    path = folder / filename
+    original = path.read_text()
+    changed = original.replace("[ ]", "[x]") if filename == "spec.md" else original.replace("Test", "Ship")
+    assert changed != original and len(changed.encode()) == len(original.encode())
+    field = "ac_checked" if filename == "spec.md" else "next_action_text"
+    values = [1, 0, 1] if filename == "spec.md" else ["Ship the span.", "Test the span.", "Ship the span."]
+    for revision, (text, value) in enumerate(zip((changed, original, changed), values), 1):
+        path.write_text(text)
+        candidate = service.scan_work_observations(now=now + revision)["candidates"][ID][0]
+        assert candidate["quality"] == "fresh"
+        assert candidate["facts"][field] == value
+    assert baseline["facts"][field] != values[-1]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("failure", ["read_error", "decode_error", "yaml_error", "symlink"])
+def test_cached_work_facts_cannot_hide_failed_current_capture(tmp_path, monkeypatch, explicit, failure):
     from _shared import specs_service
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    now = max((folder / name).stat().st_mtime for name in ("spec.md", "summary.md")) + 1
+    assert service.scan_work_observations(now=now)["candidates"][ID][0]["quality"] == "fresh"
+    if failure == "read_error":
+        source_type = specs_service._BoundedSource if explicit else Path
+        original_read = source_type.read_bytes
+        def deny_summary(source, *args, **kwargs):
+            if source.name == "summary.md":
+                raise PermissionError("synthetic current capture failure")
+            return original_read(source, *args, **kwargs)
+        monkeypatch.setattr(source_type, "read_bytes", deny_summary)
+    elif failure == "decode_error":
+        (folder / "summary.md").write_bytes(b"\xff")
+    elif failure == "symlink":
+        outside = tmp_path / "outside.md"
+        outside.write_text("untrusted fixture")
+        (folder / "summary.md").unlink()
+        (folder / "summary.md").symlink_to(outside)
+    else:
+        (folder / "spec.md").write_text("---\nid: [broken\n---\n")
+    result = service.scan_work_observations(now=now + 1)
+    assert ID not in result["candidates"]
+    assert result["errors"][str(folder)]["quality"] == "error"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_cached_work_facts_reject_a_source_change_during_capture(tmp_path, monkeypatch, explicit):
+    from _shared import specs_service
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    path = folder / "summary.md"
+    now = max((folder / name).stat().st_mtime for name in ("spec.md", "summary.md")) + 30
+    assert service.scan_work_observations(now=now)["candidates"][ID][0]["quality"] == "fresh"
+    original_stat = path.stat()
+    source_type = specs_service._BoundedSource if explicit else Path
+    original_read = source_type.read_bytes
+    def changed_after_read(source, *args, **kwargs):
+        content = original_read(source, *args, **kwargs)
+        if source.name == "summary.md":
+            path.write_text("**Next action** — Ship the span.\n")
+            os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 10_000_000_000))
+        return content
+    with monkeypatch.context() as patch:
+        patch.setattr(source_type, "read_bytes", changed_after_read)
+        candidate = service.scan_work_observations(now=now + 1)["candidates"][ID][0]
+        assert candidate["quality"] == "stale" and candidate["error"] == "work_files_unsettled"
+    restored = service.scan_work_observations(now=now + 2)["candidates"][ID][0]
+    assert restored["quality"] == "fresh" and restored["facts"]["next_action_text"] == "Ship the span."
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_cached_work_facts_still_require_quiet_current_files(tmp_path, monkeypatch, explicit):
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    now = max((folder / name).stat().st_mtime for name in ("spec.md", "summary.md"))
+    assert service.scan_work_observations(now=now + 1)["candidates"][ID][0]["quality"] == "fresh"
+    future = service.scan_work_observations(now=now - 1)["candidates"][ID][0]
+    assert future["quality"] == "stale" and future["error"] == "work_files_unsettled"
+    assert service.scan_work_observations(now=now + 2)["candidates"][ID][0]["quality"] == "fresh"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_cached_work_facts_follow_atomic_file_replacement(tmp_path, monkeypatch, explicit):
+    folder = write_item(tmp_path)
+    service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
+        memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
+    path = folder / "spec.md"
+    now = max((folder / name).stat().st_mtime for name in ("spec.md", "summary.md")) + 1
+    baseline = service.scan_work_observations(now=now)["candidates"][ID][0]
+    replacement = folder / ".replacement"
+    replacement.write_text(path.read_text().replace("[ ]", "[x]"))
+    replacement.replace(path)
+    changed = service.scan_work_observations(now=now + 1)["candidates"][ID][0]
+    assert baseline["facts"]["ac_checked"] == 0 and changed["facts"]["ac_checked"] == 1
+    assert changed["quality"] == "fresh"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_work_scan_reuses_unchanged_and_invalidates_one_folder(tmp_path, monkeypatch, explicit):
+    from _shared import specs_service, work_observations
     first = write_item(tmp_path)
     second = write_item(tmp_path, slug="demo__other")
     service = subsystem(tmp_path, monkeypatch) if not explicit else SpecsSubsystem(
         memory_root=tmp_path, session_summaries=lambda: [], changed_callback=lambda ids: None, debounce_s=0)
-    reads = []
-    original = specs_service.read_work_candidate
-    def counted(folder, *args, **kwargs):
-        reads.append(str(folder))
-        return original(folder, *args, **kwargs)
-    monkeypatch.setattr(specs_service, "read_work_candidate", counted)
+    reads, parses, yaml_reads = [], [], []
+    source_type = specs_service._BoundedSource if explicit else Path
+    original_read = source_type.read_bytes
+    original_parse = work_observations.parse_work_facts
+    original_yaml = work_observations.load_frontmatter
+    def counted_read(source, *args, **kwargs):
+        reads.append(source.name)
+        return original_read(source, *args, **kwargs)
+    def counted_parse(*args, **kwargs):
+        parses.append(args)
+        return original_parse(*args, **kwargs)
+    def counted_yaml(*args, **kwargs):
+        yaml_reads.append(args)
+        return original_yaml(*args, **kwargs)
+    monkeypatch.setattr(source_type, "read_bytes", counted_read)
+    monkeypatch.setattr(work_observations, "parse_work_facts", counted_parse)
+    monkeypatch.setattr(work_observations, "load_frontmatter", counted_yaml)
     before = service.scan_work_observations()["candidates"]
-    assert len(reads) == 2
-    reads.clear()
+    assert len(reads) == 4 and len(parses) == len(yaml_reads) == 2
+    reads.clear(); parses.clear(); yaml_reads.clear()
     assert service.scan_work_observations()["candidates"] == before
-    assert reads == []
+    assert len(reads) == 4 and parses == yaml_reads == []
     # Change content with the same size and restored mtime: ctime must invalidate.
     path = first / "spec.md"
     old = path.stat()
@@ -249,14 +374,15 @@ def test_work_scan_reuses_unchanged_and_invalidates_one_folder(tmp_path, monkeyp
     path.write_text(path.read_text().replace("[ ]", "[x]"))
     os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
     assert path.stat().st_ctime_ns != old.st_ctime_ns
+    reads.clear(); parses.clear(); yaml_reads.clear()
     changed = service.scan_work_observations()["candidates"]
-    assert reads == [str(first)]
+    assert len(reads) == 4 and len(parses) == len(yaml_reads) == 1
     assert sorted(c["facts"]["ac_checked"] for c in changed[ID]) == [0, 1]
     # Returned facts cannot mutate the cached value.
     changed[ID][0]["facts"]["ac_checked"] = 99
-    reads.clear()
+    reads.clear(); parses.clear(); yaml_reads.clear()
     assert sorted(c["facts"]["ac_checked"] for c in service.scan_work_observations()["candidates"][ID]) == [0, 1]
-    assert reads == []
+    assert len(reads) == 4 and parses == yaml_reads == []
     second.rename(tmp_path / "removed")
     assert len(service.scan_work_observations()["candidates"][ID]) == 1
     assert second not in service._work_observation_cache

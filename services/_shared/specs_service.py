@@ -464,11 +464,11 @@ class SpecsSubsystem:
         paths = (folder / "spec.md", folder / "summary.md")
         fingerprint = tuple(self._identity_fingerprint(path, directory_fd=directory_fd) for path in paths)
         cached = prior_cache.get(folder)
-        if (cached is not None and cached[0] == fingerprint
-                and all(value is not None and now - value[-2] / 1e9 >= self.debounce_s for value in fingerprint)):
-            return fingerprint, copy.deepcopy(cached[1])
         source = folder if directory_fd is None else _BoundedFolder(folder, directory_fd)
-        candidate = read_work_candidate(source, status, now=now, quiet_s=self.debounce_s)
+        # Timestamps can alias for completed same-size edits. Reuse parsing only
+        # after the coherent reader has captured and qualified both current files.
+        candidate = read_work_candidate(source, status, now=now, quiet_s=self.debounce_s,
+                                        previous=cached[1] if cached is not None else None)
         if fingerprint != tuple(self._identity_fingerprint(path, directory_fd=directory_fd) for path in paths):
             candidate.update(quality="stale", error="work_files_unsettled")
         return fingerprint, candidate
