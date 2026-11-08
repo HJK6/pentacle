@@ -98,6 +98,13 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
         rev = record["member"]["obs_rev"] + int(material)
         source_changed = (timestamp(now) if record.get("source_hash") != candidate["source_hash"]
                           else record["member"]["source_changed_at"])
+        organization = {"_epic", "_epic_error"}
+        organization_only = (old is not None
+            and any(old.get(key) != facts.get(key) for key in organization)
+            and all(old.get(key) == facts.get(key) for key in (old.keys() | facts.keys()) - organization))
+        progress_changed = (record.get("progress_changed_at", record["member"].get("source_changed_at"))
+                            if organization_only or record.get("source_hash") == candidate["source_hash"]
+                            else source_changed)
         member = {"spec_id": spec_id, **facts, "source_changed_at": source_changed,
                   "observation": {"quality": "fresh", "observed_at": timestamp(now), "error": None}, "obs_rev": rev}
         if material:
@@ -106,7 +113,7 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
                       "prior": {k: old.get(k) for k in fields}, "next": {k: facts.get(k) for k in fields},
                       "source_changed_at": source_changed}
         record.update(member=member, last_good=copy.deepcopy(facts), path=candidate["path"],
-                      source_hash=candidate["source_hash"],
+                      source_hash=candidate["source_hash"], progress_changed_at=progress_changed,
                       document_revisions=candidate.get("document_revisions") or {},
                       incident=None, bad_since=None, bad_sweeps=0)
     else:

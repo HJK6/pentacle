@@ -593,6 +593,19 @@ class SpawnCtl:
                 for spec_id in explicit
             ]
 
+        auth = msg.get("_auth_context") or {}
+        if auth.get("service_authenticated") and auth.get("service_actor") == "daemon:scheduler":
+            # Only the scheduler's authenticated, receipt-checked projection can
+            # distinguish original explicit recovery selection from owner fallback.
+            # No public request field or retained schedule provenance is proof.
+            composite = getattr(getattr(self.sessions, "assistant", None), "front_desk", None)
+            configured = composite.env_config.rebind_authorized_spec_ids if composite else frozenset()
+            proved = auth.get("configured_recovery_explicit_spec_ids")
+            proved = set(proved) if isinstance(proved, list) and all(isinstance(s, str) for s in proved) else set()
+            for entry in provenance:
+                if entry["spec_id"] in configured and entry["spec_id"] not in proved:
+                    entry["provenance"] = "handoff_inherited" if msg.get("handoff_from_stream_id") else "parent_inherited"
+
         # The work assignment is the first explicit spec; an inherited binding carries the
         # source seat's assignment, never an arbitrary tag from its portfolio.
         if inherited and msg.get("handoff_from_stream_id") and carried_assignment(source_row) == UNASSIGNED:
@@ -1828,6 +1841,9 @@ class SpawnCtl:
         # Capability/provenance metadata must not break a pre-hotfix explicit retry.
         volatile = {"request_id", "idempotency_key", "objective_supported", "objective_source"}
         canonical = {k: msg[k] for k in sorted(msg) if k not in volatile}
+        if isinstance(canonical.get("_auth_context"), dict):
+            canonical["_auth_context"] = {key: value for key, value in canonical["_auth_context"].items()
+                                          if key != "configured_recovery_explicit_spec_ids"}
         return hashlib.sha256(
             json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode()
         ).hexdigest()
@@ -2075,10 +2091,29 @@ class SpawnCtl:
         # never produce a pane, intent, or misleading spawn.ok.
         spec_binding = await self._resolve_spec_binding(msg, host, name)
         policy = getattr(self.sessions, "assistant", None)
+        # Resolve presentation only after the original wire hash is frozen. The
+        # same decision feeds launch, retained intent and first open; replay uses
+        # the already admitted artifact below rather than updating its row.
+        visibility_fields = {**tmux_transport.open_fields(msg), **spec_binding}
+        if resume_prior_row is not None:
+            visibility_fields.update({key: resume_prior_row[key] for key in RESUME_PRESERVED_FIELDS
+                                      if key in resume_prior_row and key != "visibility"})
+        effective_visibility = msg.get("visibility")
+        source_id = str(msg.get("handoff_from_stream_id") or "")
+        predecessor = (await self.store.fetch_session(*source_id.split(":", 1))
+                       if ":" in source_id else None)
+        if predecessor is not None and not visibility_fields.get("role"):
+            visibility_fields["role"] = predecessor.get("role")
+        if effective_visibility is None:
+            prior = resume_prior_row if resume_prior_row is not None else predecessor
+            effective_visibility = (prior.get("visibility") or "default") if prior is not None else visibility_fields["visibility"]
+        visibility_fields["visibility"] = effective_visibility
         if policy is not None and policy.is_front_desk_seat(
-            f"{host}:{name}", {**tmux_transport.open_fields(msg), **spec_binding},
+            f"{host}:{name}", visibility_fields,
         ):
-            msg["visibility"] = "hidden"
+            effective_visibility = "hidden"
+        if policy is not None and policy.is_daff_backend({"host": host, **visibility_fields}):
+            effective_visibility = "hidden"
 
         # Resolve provider tuples before reservation; explicit commands still win.
         # The deterministic staged path is safe to put in a launcher command
@@ -2091,6 +2126,7 @@ class SpawnCtl:
         )
         launch_msg = {
             **msg,
+            "visibility": effective_visibility,
             **({"_native_initial_prompt_path": native_prompt_path} if native_prompt_path else {}),
             **({"_resume_jsonl_path": resume_jsonl_path} if resume_jsonl_path else {}),
             **({"_resume_cwd": resume_cwd} if resume_cwd else {}),
@@ -2111,8 +2147,6 @@ class SpawnCtl:
                     admitted=await self.store.submit(lambda c:c.execute('SELECT 1 FROM kv WHERE k=?',
                         (f"provider_cli.admission:{host}:{prior['session_name']}:{generation}",)).fetchone() is not None)
                 if admitted: launch_msg['_account_admitted_replay']=True
-        if policy is not None and policy.is_daff_backend(resume_prior_row):
-            launch_msg["visibility"] = "hidden"
         launch_context = tmux_transport._ACTIVE_LAUNCH_TMUX.set(tmux)
         try:
             command, resolution, open_overrides = await self._resolve_launch(launch_msg, host, name)
@@ -2226,11 +2260,7 @@ class SpawnCtl:
             for field in RESUME_PRESERVED_FIELDS:
                 if field in resume_prior_row:
                     open_flds[field] = resume_prior_row[field]
-        if policy is not None and policy.is_daff_backend({"host": host, **open_flds}):
-            open_flds["visibility"] = "hidden"
-            log.info("subsystem=assistant_inventory bug_ref=daff_backend_inventory_scope action=hidden_spawn")
-        if policy is not None and policy.is_front_desk_seat(f"{host}:{name}", open_flds):
-            open_flds["visibility"] = "hidden"
+        open_flds["visibility"] = effective_visibility
         # Fence this spawn's lifecycle to a generation IT owns. Both boot-failure
         # cleanup closes below pass it as `expected_generation`, so a cleanup can
         # only ever close the row THIS spawn created — never a newer same-name
@@ -3532,10 +3562,7 @@ class SpawnCtl:
                 build_plan = functools.partial(launch.build_launch,
                     machine, provider=provider, tmux_session=name,
                     launch_model=launch_model, launch_effort=launch_effort,
-                    operator_facing=(
-                        not str(msg.get("parent_stream_id") or "").strip()
-                        and str(msg.get("visibility") or "default") != "hidden"
-                    ),
+                    operator_facing=tmux_transport.open_fields(msg)["visibility"] == "default",
                     initial_prompt_file=(
                         str(msg.get("_native_initial_prompt_path") or "")
                         if provider == "codex" and not explicit else None

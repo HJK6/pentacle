@@ -4970,7 +4970,8 @@ class Server:
                         and isinstance(msg.get("payload"), dict)):
                     from work_lane_members import validate_members
                     payload = msg["payload"]
-                    members, _ = validate_members(payload.get("members"), payload.get("no_spec_reason"))
+                    members, _ = validate_members(payload.get("members"), payload.get("no_spec_reason"),
+                                                  derived=any(member.get("goal_id") for member in shown["members"]))
                     existing = set(shown["lane"]["members"])
                     specs = self.work_lanes.specs if self.work_lanes is not None else None
                     for identity in members:
@@ -5079,23 +5080,21 @@ class Server:
         shown = await self.store.get_work_lane(lane_id) if lane_id else None
         if shown is None:
             raise VerbError("work_lane_not_found", "no first-class lane with that id")
-        from work_lanes_projection import project_lane, presence_index, _iso_now
-        rows = await self.store.work_lane_rows(include_done=True)
-        row = next((row for row in rows if row["lane_id"] == lane_id), None)
-        projected = None
-        if row is not None:
-            row.update(shown["lane"], _members=shown["members"])
-            open_sessions = presence_index(self.sessions.list_open())
-            questions = await self.work_lanes.questions_by_spec() if self.work_lanes is not None else None
-            projected = project_lane(row, open_sessions.get(str(row.get("bound_stream_id") or "")), _iso_now(),
-                                     all_members=True, sessions_by_stream=open_sessions,
-                                     worked_by_spec=self.work_lanes.worked.values if self.work_lanes is not None else None,
-                                     questions_by_spec=questions)
-        return {"type": "work_lanes.show.ok", "lane": shown["lane"], "projection": projected,
-                "events": shown["events"], "updates": shown["updates"],
-                # Same shape as projected members, so the seat/question attribution shows here too.
-                "members": projected["members"] if projected is not None else shown["members"],
-                "work_index": await self.store.work_index_status()}
+        from work_lanes_projection import project_lane, presence_index, _iso_now, page_lane_detail
+        row = shown["_projection_row"]
+        if row is None:
+            raise VerbError("work_lane_not_found", "no first-class lane with that id")
+        open_sessions = presence_index(self.sessions.list_open())
+        questions = await self.work_lanes.questions_by_spec() if self.work_lanes is not None else None
+        projected = project_lane(row, open_sessions.get(str(row.get("bound_stream_id") or "")), _iso_now(),
+                                 all_members=True, sessions_by_stream=open_sessions,
+                                 worked_by_spec=self.work_lanes.worked.values if self.work_lanes is not None else None,
+                                 questions_by_spec=questions)
+        try:
+            return page_lane_detail(shown, projected, members_limit=msg.get("members_limit", 32),
+                                    members_after=msg.get("members_after"), goal_filter=msg.get("goal_id"))
+        except ValueError as exc:
+            raise VerbError(str(exc), "invalid lane detail request or oversized source projection") from None
 
     async def _on_work_lanes_adopt_preview(self, msg: dict[str, Any]) -> dict[str, Any]:
         self._work_lanes_reader(msg)

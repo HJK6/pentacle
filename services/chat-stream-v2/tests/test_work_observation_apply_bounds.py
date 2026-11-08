@@ -117,7 +117,10 @@ def test_public_members_match_monolithic_transition_oracle(tmp_path, file_backed
             events = [e["payload"] for e in shown["events"] if e["operation"] == "item_change"]
             assert events == transitions
             rows = await env.store.work_lane_rows()
-            assert rows[0]["_members"] == shown["members"]
+            # Projection rows retain private goal/freshness inputs; their
+            # complete public observation facts must still match the oracle.
+            assert [{key: value for key, value in member.items() if not key.startswith("_")}
+                    for member in rows[0]["_members"]] == shown["members"]
     run(body, str(tmp_path / "fixture.db") if file_backed else ":memory:")
 
 
@@ -348,3 +351,61 @@ def test_readers_see_complete_snapshot_while_delta_commit_is_held(tmp_path):
         assert [m["ac_checked"] for m in shown["members"]] == [1, 1]
         assert {m["observation"]["observed_at"] for m in shown["members"]} == {timestamp(200)}
     run(body, path)
+
+
+@pytest.mark.parametrize('scoped', [False, True])
+def test_store_members_never_expose_private_keys(tmp_path, scoped):
+    from test_work_lane_goals import write_goal, write_item, scanner, reconcile, projected
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = (await env.adopt(state='paused', owner='operator', members=['spec_demo__boundary']))['lane']
+        if scoped:
+            write_goal(root, lane['lane_id'])
+        write_item(root, 'boundary', status='completed', epic='epic_fixture' if scoped else None)
+        await reconcile(env.store, scanner(root))
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        assert shown['members'][0]['spec_id'] == 'spec_demo__boundary'
+        assert shown['members'][0]['status'] == 'completed'
+        assert all(not key.startswith('_') for member in shown['members'] for key in member)
+        progress = projected(shown)
+        bucket = progress['goals'][0] if scoped else progress['default_goal']
+        assert (bucket['state'], bucket['done'], bucket['total']) == ('done', 1, 1)
+    run(body)
+
+
+def test_file_store_goal_and_legacy_membership_noop_and_fixed_delta_decode_zero_records(tmp_path, monkeypatch):
+    from test_work_lane_goals import write_goal, write_item, scanner, reconcile, projected
+    root, database = tmp_path / 'memory', str(tmp_path / 'state.db')
+    async def body(env):
+        lane = (await env.adopt(state='paused', owner='operator', members=['spec_demo__legacy']))['lane']
+        write_goal(root, lane['lane_id'])
+        write_item(root, 'legacy', epic=None)
+        for i in range(65):
+            write_item(root, f'bounded{i:02}')
+        source = scanner(root)
+        await reconcile(env.store, source)
+        writer_id = await env.store.submit(lambda conn: threading.get_ident())
+        loads, decoded, writes = json.loads, [], []
+        def counted(value, *args, **kwargs):
+            result = loads(value, *args, **kwargs)
+            if threading.get_ident() == writer_id and isinstance(result, dict) and 'member' in result:
+                decoded.append(1)
+            return result
+        def trace(sql):
+            if sql.upper().startswith(('INSERT INTO V2_WORK_ITEM_OBSERVATIONS', 'UPDATE V2_WORK_ITEM_OBSERVATIONS')):
+                writes.append(sql)
+        await env.store.submit(lambda conn: conn.set_trace_callback(trace))
+        with monkeypatch.context() as patch:
+            patch.setattr(json, 'loads', counted)
+            assert await reconcile(env.store, source) == {'changed': 0, 'stale_scan': False}
+            assert len(decoded) == 0 and len(writes) == 0
+            path = root / 'work/backlog/demo__bounded00/spec.md'
+            path.write_text(path.read_text().replace('- [ ] Inspect.', '- [x] Inspect.'))
+            assert await reconcile(env.store, source) == {'changed': 1, 'stale_scan': False}
+            assert len(decoded) == 0 and len(writes) == 1
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        assert len(shown['members']) == 66
+        progress = projected(shown)
+        assert progress['goals'][0]['total'] == 65 and progress['default_goal']['total'] == 1
+        assert len([event for event in shown['events'] if event['operation'] == 'item_change']) == 1
+    run(body, database)

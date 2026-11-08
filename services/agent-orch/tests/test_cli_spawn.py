@@ -604,7 +604,7 @@ def test_spawn_direct_defaults_parent_to_caller_without_wrapper_workspace(monkey
     ("parent", "role", "top_level", "requested_visibility", "expected_visibility"),
     [
         (None, "nexus", True, None, "default"),
-        ("hostc:codex-parent", "nexus", False, None, "default"),
+        ("hostc:codex-parent", "nexus", False, None, None),
         (None, "lead", True, None, "default"),
         ("hostc:codex-parent", "lead", False, None, None),
         (None, "lead", True, "nested", "nested"),

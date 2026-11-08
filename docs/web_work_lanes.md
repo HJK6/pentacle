@@ -54,8 +54,10 @@ The inventory's existing eight inline members carry optional display facts:
   `pentacle-chat-core/tests/fixtures/summary_prose_cases.json`; the daemon loads
   those patterns and accepts the first sentence of a longer label.
 
-`work_lanes.show` returns all lane members and adds `criteria` and
-`transitions`; these arrays are absent from inventory and list frames.
+`work_lanes.show` returns a cursor page of up to 32 lane members and adds
+`criteria` and `transitions`; complete readers accumulate one source revision
+as defined in the [wire contract](../services/chat-stream-v2/docs/work-lanes.md#live-detail-pages).
+These detail arrays are absent from inventory and list frames.
 Criteria include only the spec's Custom acceptance criteria, in source order,
 with `open`, `done`, `waived`, `tracked` or `parked` dispositions. Titles keep
 code spans; at most forty titles of 120 characters are emitted. Consumers may
@@ -65,8 +67,8 @@ the newest eight entries in chronological order.
 
 Only criteria and transitions extend the observation's material fields.
 Worked time, lead presence and icons never increment `obs_rev` or write
-`item_change` events. The CLI's `agent-orch work-lane show` prints the icon and
-all member detail fields; `--json` preserves the wire shapes. Older daemons
+`item_change` events. The CLI's `agent-orch work-lane show --members` traverses the complete
+member population and prints the icon and all member detail fields; `--json` preserves the wire shapes. Older daemons
 and consumers may omit the additive fields.
 
 Lane pushes use the same compact JSON encoding as snapshots and session

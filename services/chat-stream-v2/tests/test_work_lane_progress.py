@@ -164,7 +164,7 @@ def test_all_members_show_and_inline_inventory_keep_membership_order():
         assert [m["spec_id"] for m in frame["lanes"][0]["members"]] == ids[:8]
         shown = await server._on_work_lanes_show({"lane_id": lane["lane_id"], "members": True,
                                                  "_auth_context": {"operator_authenticated": True}})
-        assert [m["spec_id"] for m in shown["members"]] == ids
+        assert [m["spec_id"] for m in shown["members"]] == sorted(ids)
         assert shown["projection"]["members"] == shown["members"]
     run(body)
 
@@ -446,10 +446,16 @@ def test_additive_estimate_metadata_persists_projection_restart_last_good(tmp_pa
         frame = await server.work_lanes.current()
         listed = await server._on_work_lanes_list({"_auth_context": {"operator_authenticated": True}})
         shown = await server._on_work_lanes_show({"lane_id": lid, "_auth_context": {"operator_authenticated": True}})
+        assert [member["spec_id"] for member in frame["lanes"][0]["members"]] == [A, B]
+        assert [member["spec_id"] for member in listed["lanes"][0]["members"]] == [A, B]
+        assert [member["spec_id"] for member in shown["members"]] == sorted([A, B])
+        assert shown["projection"]["members"] == shown["members"]
         for lane in (frame["lanes"][0], listed["lanes"][0], shown["projection"]):
-            assert lane["members"][0]["estimate_exempt"] is True
-            assert lane["members"][1]["estimate"]["as_of"] == "2026-10-10"
-            assert lane["members"][1]["obs_rev"] == 2
+            by_id = {member["spec_id"]: member for member in lane["members"]}
+            assert set(by_id) == {A, B}
+            assert by_id[A]["estimate_exempt"] is True
+            assert by_id[B]["estimate"]["as_of"] == "2026-10-10"
+            assert by_id[B]["obs_rev"] == 2
             assert lane["estimate_complete"] and lane["open_estimated"] == 1
             assert lane["version"] == 1
         # A malformed summary preserves both independent last-good facts.

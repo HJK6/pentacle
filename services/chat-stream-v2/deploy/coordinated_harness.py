@@ -176,7 +176,8 @@ class Rehearsal:
             for path in (self.controller / relative).glob("*.py"):
                 shutil.copy2(path, destination / path.name)
         shutil.copytree(source / "tools", self.repo / "services/chat-stream-v2/tools", ignore=shutil.ignore_patterns("__pycache__"))
-        for relative in ("pentacle-chat-core/lane_icons.json", "pentacle-chat-core/tests/fixtures/summary_prose_cases.json",
+        for relative in ("pentacle-chat-core/lane_icons.json", "pentacle-chat-core/lane_hues.json",
+                         "pentacle-chat-core/tests/fixtures/summary_prose_cases.json",
                          "services/_shared/spawn_defaults.json", "services/chat-stream-v2/requirements.txt", "services/agent-orch/pyproject.toml",
                          "services/agent-orch/deploy/runtime_python.py",
                          "services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist",
