@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import importlib.util
 import json
 import sqlite3
@@ -23,7 +24,7 @@ def _seed(state: Path, *, populated=False):
     state.mkdir(mode=0o700)
     AssetStore(state / "assets.db").close()
     NotificationStore(state / "notifications.db").close()
-    with sqlite3.connect(state / "schedules.db") as conn:
+    with closing(sqlite3.connect(state / "schedules.db")) as conn, conn:
         conn.execute("CREATE TABLE schedules (id TEXT PRIMARY KEY)")
     async def run():
         store = Store(str(state / "sessions.db"))
@@ -116,7 +117,7 @@ def test_missing_component_is_never_mislabeled_pass_and_copy_cleaned(tmp_path, c
 
 def test_missing_attachment_pointer_fails_despite_readable_database(tmp_path):
     state = _seed(tmp_path / "state")
-    with sqlite3.connect(state / "sessions.db") as conn:
+    with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
         conn.execute("INSERT INTO v2_attachment_refs VALUES ('publication','fixture','fixture:a','missing',?)", ('a' * 64,))
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     with pytest.raises(recovery_drill.DrillFailed, match="reference:attachment_receipts"):
@@ -135,7 +136,7 @@ def test_wrong_public_projection_fails_with_underlying_rows_still_readable(tmp_p
     with pytest.raises(recovery_drill.DrillFailed, match="rpc:lane_inventory"):
         asyncio.run(recovery_drill.run_drill(state, composite_stream=CHAT, binding_name="fixture-binding", env={},
             remove_state_dir=False))
-    with sqlite3.connect(state / "sessions.db") as conn:
+    with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
         assert conn.execute("SELECT COUNT(*) FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL").fetchone()[0] == 1
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
@@ -202,7 +203,7 @@ def test_ready_managed_attachment_requires_actual_blob_bytes(tmp_path, damage):
     target = state / "blobs" / digest[:2] / digest
     target.parent.mkdir(parents=True)
     target.write_bytes(content)
-    with sqlite3.connect(state / "sessions.db") as conn:
+    with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
         conn.execute("INSERT INTO v2_attachment_uploads "
             "(upload_id,request_id,auth_fingerprint,blob_sha,size_bytes,media_type,filename,purpose,auth_kind,"
             "principal_id,seat_stream_id,seat_generation,uploaded_at,updated_at,state) "
@@ -301,7 +302,7 @@ def test_archive_refuses_before_startup_or_original_access(tmp_path, monkeypatch
     if damage == "missing":
         archive.unlink()
     elif damage == "pair":
-        with sqlite3.connect(archive) as conn:
+        with closing(sqlite3.connect(archive)) as conn, conn:
             conn.execute("UPDATE v2_receipt_route_archive SET pair_id='other'")
     elif damage == "corrupt":
         archive.write_bytes(b"not sqlite")
@@ -313,13 +314,13 @@ def test_archive_refuses_before_startup_or_original_access(tmp_path, monkeypatch
         archive.unlink()
         os.link(original / "sessions_archive.db", archive)
     elif damage == "escape":
-        with sqlite3.connect(state / "sessions.db") as conn:
+        with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
             conn.execute("UPDATE v2_send_receipt_sequence SET archive_path='/fixture/../escape.db'")
     elif damage == "high_water":
-        with sqlite3.connect(state / "sessions.db") as conn:
+        with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
             conn.execute("UPDATE v2_send_receipt_sequence SET high_water=0")
     elif damage == "conflicting_duplicate":
-        with sqlite3.connect(state / "sessions.db") as conn:
+        with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
             conn.execute("ATTACH DATABASE ? AS copied", (str(archive),))
             columns = [r[1] for r in conn.execute("PRAGMA main.table_info(v2_send_receipts)")]
             names = ','.join(columns)
@@ -336,7 +337,14 @@ def test_archive_refuses_before_startup_or_original_access(tmp_path, monkeypatch
     with pytest.raises((recovery_drill.DrillFailed, sqlite3.DatabaseError)):
         asyncio.run(recovery_drill.run_drill(state, composite_stream=CHAT, binding_name="fixture-binding", env={},
             source_archive_path=approved))
-    assert starts == attempts == [] and not state.exists()
+    assert starts == attempts == []
+    if damage == "unapproved":
+        # Admission cannot prove ownership from an overlapping unapproved root.
+        # Its caller owns this known fixture copy and performs outer cleanup.
+        import shutil
+        assert state.exists()
+        shutil.rmtree(state)
+    assert not state.exists()
 
 
 def test_fresh_no_file_archive_is_rewrite_only_and_bootstraps_inside_copy(tmp_path):
@@ -350,7 +358,7 @@ def test_fresh_no_file_archive_is_rewrite_only_and_bootstraps_inside_copy(tmp_pa
 def test_same_pair_equal_duplicates_keep_existing_union_semantics(tmp_path):
     original, state = _paired_fixture(tmp_path)
     archive = state / "sessions_archive.db"
-    with sqlite3.connect(state / "sessions.db") as conn:
+    with closing(sqlite3.connect(state / "sessions.db")) as conn, conn:
         conn.execute("ATTACH DATABASE ? AS copied", (str(archive),))
         columns = [r[1] for r in conn.execute("PRAGMA main.table_info(v2_send_receipts)")]
         names = ','.join(columns)
@@ -401,3 +409,81 @@ def test_ready_zero_absence_needs_capture_qualification_for_external_source(tmp_
         with pytest.raises(recovery_drill.DrillFailed, match="archive:absence_not_qualified"):
             run()
     assert attempts == [] and not state.exists()
+
+
+def test_live_like_root_is_refused_before_mutation_or_destructive_cleanup(tmp_path):
+    import hashlib
+    state = _seed(tmp_path / "live-like")
+    before = hashlib.sha256((state / "sessions.db").read_bytes()).hexdigest()
+    with pytest.raises(recovery_drill.DrillFailed, match="copy:source_and_working_roots_overlap"):
+        asyncio.run(recovery_drill.run_drill(state, composite_stream=CHAT, binding_name="fixture-binding", env={},
+            source_archive_path=state / "sessions_archive.db"))
+    assert state.exists() and hashlib.sha256((state / "sessions.db").read_bytes()).hexdigest() == before
+
+
+def test_cli_requires_approved_source_before_touching_input(tmp_path, monkeypatch, capsys):
+    import sys
+    state = _seed(tmp_path / "state")
+    monkeypatch.setattr(sys, "argv", ["recovery_drill", str(state), "--composite-stream", CHAT,
+        "--binding-name", "fixture-binding"])
+    with pytest.raises(SystemExit) as caught:
+        recovery_drill.main()
+    assert caught.value.code == 2 and state.exists()
+    assert "--source-archive-path" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("alias", ["sessions.db-wal", "sessions.db-shm", "sessions.db-journal", "blobs"])
+def test_alias_refused_before_any_sqlite_open(tmp_path, monkeypatch, alias):
+    state = _seed(tmp_path / "state")
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"original")
+    (state / alias).symlink_to(victim)
+    def prohibited(*args, **kwargs):
+        pytest.fail("SQLite opened before copy alias refusal")
+    monkeypatch.setattr(sqlite3, "connect", prohibited)
+    with pytest.raises(recovery_drill.DrillFailed, match="copy:"):
+        asyncio.run(recovery_drill.run_drill(state, composite_stream=CHAT, binding_name="fixture-binding", env={}))
+    assert victim.read_bytes() == b"original" and state.exists()
+
+
+def test_store_stop_failure_does_not_skip_copy_removal_or_port_probe(tmp_path, monkeypatch):
+    from server import Server
+    state = _seed(tmp_path / "state")
+    real_stop, real_bind = Store.stop, Server.bind
+    ports = []
+    def false_stop(self):
+        assert real_stop(self)
+        return False
+    async def bind(self):
+        port = await real_bind(self)
+        ports.append(port)
+        return port
+    async def primary(*args, **kwargs):
+        raise recovery_drill.DrillFailed("fixture_primary")
+    monkeypatch.setattr(Store, "stop", false_stop)
+    monkeypatch.setattr(Server, "bind", bind)
+    monkeypatch.setattr(recovery_drill, "_projections", primary)
+    async def run():
+        with pytest.raises(BaseExceptionGroup) as caught:
+            await recovery_drill.run_drill(state, composite_stream=CHAT, binding_name="fixture-binding", env={})
+        assert [str(e) for e in caught.value.exceptions] == ["fixture_primary", "cleanup:store_worker"]
+        for port in ports:
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", port)
+    asyncio.run(run())
+    assert not state.exists()
+
+
+def test_cli_error_group_uses_only_sanitized_types_and_predicates(monkeypatch, capsys):
+    import sys
+    async def fail(*args, **kwargs):
+        raise ExceptionGroup("private_payload_must_not_be_emitted", [sqlite3.DatabaseError("private_sql"),
+            recovery_drill.DrillFailed("fixture_predicate")])
+    monkeypatch.setattr(recovery_drill, "run_drill", fail)
+    monkeypatch.setattr(sys, "argv", ["recovery_drill", "/fixture/work", "--composite-stream", CHAT,
+        "--binding-name", "fixture-binding", "--source-archive-path", "/fixture/source/sessions_archive.db"])
+    assert recovery_drill.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == "" and "private_" not in captured.out
+    assert json.loads(captured.out)["errors"] == [{"type": "DatabaseError"},
+        {"type": "DrillFailed", "predicate": "fixture_predicate"}]

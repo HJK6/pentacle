@@ -15,6 +15,7 @@ PID / binding parity and matching source/destination hashes. Sequential backups 
 not establish a cross-database atomic snapshot.
 
 Use Python3.13 with the daemon dependencies and a private temporary HOME/TMPDIR.
+Pass the resolved absolute path (on macOS, `/private/tmp/...`, not `/tmp/...`).
 Run with an empty environment, adding only the required PATH and PYTHONPATH:
 
 ```sh
@@ -51,8 +52,13 @@ binding mutation. One input uses a disposable auth-v2 operator credential throug
 public `send`; an identical publish retry must produce exactly one final reply.
 A real Store/server restart and new authenticated connection repeat the reads.
 
-The script removes the working copy, fixture credentials and listeners in finally,
-including cancellation. Sanitized receipts contain counts, identities, hashes and
+The CLI requires the approved source literal and proves source/working root
+separation before arming cleanup. An input rejected during admission stays
+untouched; its caller must clean any known owned scratch. Pre-existing SQLite
+sidecars and aliased data roots are refused before SQLite opens.
+
+For an admitted copy, the script removes the working copy, fixture credentials and listeners in finally,
+including cancellation and a reported Store shutdown failure. Sanitized receipts contain counts, identities, hashes and
 named predicates; they contain no message bodies, bearer secrets or full config.
 The caller must independently remove retained source/transfer backup scratch on
 success or failure. A successful script run alone is not capture or cleanup proof

@@ -64,6 +64,33 @@ def _direct(db, sql, args=()):
     return tuple(rows[0].values()) if rows else None
 
 
+def admit_working_copy(state_dir: Path, source_archive_path: Path | None, *, fixture: bool):
+    """Prove copy ownership before arming destructive finally cleanup."""
+    root = state_dir.absolute()
+    require(root == root.resolve() and root.is_dir() and root.stat().st_mode & 0o077 == 0,
+            "copy:private_scratch_path")
+    require(root != (Path.home() / ".local/share/pentacle-stream").resolve(), "copy:live_state_refused")
+    for name in ("sessions", "notifications", "assets", "schedules", "sessions_archive"):
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = root / (name + ".db" + suffix)
+            require(not sidecar.exists() and not sidecar.is_symlink(), "copy:preexisting_sqlite_sidecar")
+    for name in ("blobs", "attachments"):
+        path = root / name
+        require(not path.is_symlink(), "copy:data_root_alias")
+
+    if source_archive_path is None:
+        require(fixture, "copy:approved_source_required")
+    else:
+        source_root = Path(source_archive_path).absolute().parent
+        require(not root.is_relative_to(source_root) and not source_root.is_relative_to(root),
+                "copy:source_and_working_roots_overlap")
+        require(not (root / "sessions.db").is_symlink() and (root / "sessions.db").stat().st_nlink == 1,
+                "copy:sessions_alias")
+        sequence = _rows(root / "sessions.db", "SELECT archive_path FROM v2_send_receipt_sequence WHERE singleton=1")
+        require(not sequence or sequence[0]["archive_path"] != str(root / "sessions_archive.db"),
+                "copy:unseparated_source_state")
+
+
 def validate_copy(state_dir: Path) -> dict:
     """Full checks before Store startup/migration or any fixture credential write.
 
@@ -285,6 +312,7 @@ def _expectations(db, composite_stream):
 async def run_drill(state_dir: Path, *, composite_stream: str, binding_name: str, env=None, roster=(),
                     remove_state_dir: bool = True, source_archive_path: Path | None = None, archive_source_absent: bool = False) -> dict:
     preflight(os.environ if env is None else env, roster)
+    admit_working_copy(state_dir, source_archive_path, fixture=env is not None)
     from assistant_composite import AssistantComposite, AssistantCompositeConfig
     from _shared import operator_auth
     from server import Server
@@ -300,29 +328,42 @@ async def run_drill(state_dir: Path, *, composite_stream: str, binding_name: str
     ports = []
     primary_error = None
     async def cleanup():
-        try:
-            if composite is not None:
-                await composite.stop()
-        finally:
+        errors = []
+        for target in (composite, server):
+            if target is not None:
+                try:
+                    await (target.stop() if target is composite else target.close())
+                except BaseException as exc:
+                    errors.append(exc)
+        if store is not None:
             try:
-                if server is not None:
-                    await server.close()
-            finally:
-                if store is not None:
-                    require(store.stop(), "cleanup:store_worker")
-                result["port_closed"] = True
-                for port in ports:
-                    try:
-                        _, writer = await asyncio.open_connection("127.0.0.1", port)
-                    except OSError:
-                        continue
-                    writer.close()
-                    await writer.wait_closed()
-                    result["port_closed"] = False
-                if remove_state_dir:
-                    shutil.rmtree(state_dir)
-                    result["state_dir_removed"] = not state_dir.exists()
-                require(result["port_closed"], "cleanup:listener")
+                require(store.stop(), "cleanup:store_worker")
+            except BaseException as exc:
+                errors.append(exc)
+        result["port_closed"] = True
+        for port in ports:
+            try:
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+            except OSError:
+                continue
+            except BaseException as exc:
+                errors.append(exc)
+                continue
+            writer.close()
+            await writer.wait_closed()
+            result["port_closed"] = False
+        if remove_state_dir:
+            try:
+                shutil.rmtree(state_dir)
+                result["state_dir_removed"] = not state_dir.exists()
+            except BaseException as exc:
+                errors.append(exc)
+        if not result["port_closed"]:
+            errors.append(DrillFailed("cleanup:listener"))
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("drill cleanup failed", errors)
     try:
         result["integrity"] = validate_copy(state_dir)
         captured_expected = _expectations(db, composite_stream)
@@ -482,16 +523,23 @@ def main() -> int:
     parser.add_argument("state_dir", type=Path)
     parser.add_argument("--composite-stream", required=True)
     parser.add_argument("--binding-name", required=True)
-    parser.add_argument("--source-archive-path", type=Path, help="FD-approved source literal; equality check only, never opened")
+    parser.add_argument("--source-archive-path", required=True, type=Path, help="FD-approved source literal; equality check only, never opened")
     parser.add_argument("--archive-source-absent", action="store_true",
         help="capture manifest proves no source archive file; ready=0 copy bootstrap only")
     args = parser.parse_args()
     try:
         result = asyncio.run(run_drill(args.state_dir, composite_stream=args.composite_stream, binding_name=args.binding_name,
             source_archive_path=args.source_archive_path, archive_source_absent=args.archive_source_absent))
-    except (DrillFailed, DrillRefused) as exc:
-        print(json.dumps({"passed": False, "predicate": str(exc)}))
-        return 1
+    except BaseException as exc:
+        def sanitized(error):
+            if isinstance(error, BaseExceptionGroup):
+                return [item for child in error.exceptions for item in sanitized(child)]
+            item = {"type": type(error).__name__}
+            if isinstance(error, (DrillFailed, DrillRefused)):
+                item["predicate"] = str(error)
+            return [item]
+        print(json.dumps({"passed": False, "errors": sanitized(exc)}))
+        return 130 if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)) else 1
     print(json.dumps(result, indent=2))
     return 0
 
