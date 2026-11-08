@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 import os
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from presence import PresenceObservation, RemotePresence
@@ -763,7 +765,56 @@ class SessionReconciler:
         # treating that as an empty tree would falsely prove foreign exclusion.
         if any(int(pane["pane_pid"]) not in processes for pane in panes):
             return None
+        # Comparison-only observations run on the owning host. They never
+        # change persisted capture/producer tokens. A failed extra read leaves
+        # the established exact-match path available, but grants no alternate.
+        comparison = await self._host_command(host, "python3", "-c", prockill.comparison_inventory_probe())
+        if comparison is not None and comparison[0] == 0:
+            try:
+                observed = json.loads(comparison[1])
+                utc = prockill.parse_process_records(observed["utc"])
+                local = prockill.parse_process_records(observed["local"])
+                utc_after = prockill.parse_process_records(observed["utc_after"])
+                # Bind snapshots by non-birth fields and supported renderings.
+                # Retain boot witnesses so clock drift has a distinct refusal.
+                fields = ("pid", "ppid", "uid", "pgid", "sid", "command")
+                for pid, current in processes.items():
+                    if (pid in utc and pid in local and utc[pid] == utc_after.get(pid)
+                            and all(current[k] == utc[pid][k] == local[pid][k] for k in fields)
+                            and prockill.birth_matches(current["start_id"], utc[pid]["start_id"], local[pid]["start_id"])):
+                        current["birth_observation"] = {
+                            "host": host, "utc": utc[pid]["start_id"],
+                            "local": local[pid]["start_id"],
+                            "boot_before": observed["boot_before"], "boot_after": observed["boot_after"],
+                        }
+            except (KeyError, TypeError, ValueError):
+                pass  # Unsupported/failed observation is no new signal authority.
         return panes, processes, boot
+
+    def _birth_refusal(self, host: str, proof: dict, current: dict, boot: str) -> str | None:
+        if prockill.birth_matches(proof.get("start_id"), current.get("start_id")):
+            return None  # Existing exact-rendering authority/residual is unchanged.
+        observation = current.get("birth_observation")
+        if (not isinstance(observation, dict) or observation.get("host") != host
+                or not prockill.birth_matches(proof.get("start_id"), observation.get("utc"), observation.get("local"))):
+            return "identity_drift"
+        # Sessions._capture_tree_identity is the only production proof producer
+        # entering the local session_reap ledger. Remote close readbacks do not
+        # establish that local capture/clock provenance; retain exact-only there.
+        if (host != self.sessions.local_host or host != self.hosts.local_host
+                or proof.get("host") != host
+                or prockill.darwin_boot(boot) is None
+                or not prockill.boot_matches(boot, observation.get("boot_before"))
+                or not prockill.boot_matches(boot, observation.get("boot_after"))):
+            return "clock_provenance_unknown"
+        try:
+            birth = datetime.strptime(observation["utc"], "%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+            captured = datetime.strptime(proof["captured_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            return "capture_clock_incomparable"
+        if birth >= captured:
+            return "capture_clock_incomparable"
+        return None
 
     @staticmethod
     def _survivor_records(survivors: object) -> list[dict[str, Any]]:
@@ -827,13 +878,18 @@ class SessionReconciler:
                 or proof_ppid != current_ppid
                 or proof_pgid != current_pgid
                 or proof_sid != current_sid
-                or proof.get("boot_id") != boot
-                or not prockill.canonical_start(proof.get("start_id"))
-                or prockill.canonical_start(proof.get("start_id")) != prockill.canonical_start(current.get("start_id"))
                 or proof.get("command_fingerprint") != prockill.command_fingerprint(str(current.get("command") or ""))
                 or not all(str(proof.get(field) or "") for field in ("tmux_socket", "tmux_session", "tmux_pane", "tty"))
             ):
                 deferred.append({**item, "reap_reason": "identity_drift"})
+                continue
+            if not prockill.boot_matches(proof.get("boot_id"), boot):
+                reason = "boot_clock_changed" if prockill.darwin_boot(proof.get("boot_id")) is not None else "identity_drift"
+                deferred.append({**item, "reap_reason": reason})
+                continue
+            refusal = self._birth_refusal(host, proof, current, boot)
+            if refusal is not None:
+                deferred.append({**item, "reap_reason": refusal})
                 continue
             target_panes = [
                 pane for pane in panes
