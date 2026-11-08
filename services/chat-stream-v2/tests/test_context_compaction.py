@@ -13,6 +13,8 @@ from routing_integrity import RoutingIntegrity
 from test_context_nudges import _context_harness
 from test_nudges import HOST, _iso, _new_store
 
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
 # --------------------------------------------------------------------------- #
 # Captured-layout fixtures for the Claude CLI self-update footer.
 #

@@ -189,6 +189,7 @@ def test_send_cancels_copy_mode_once_then_confirms_submission(tmp_path) -> None:
         store.stop()
 
 
+@pytest.mark.usefixtures("short_pane_evidence_wait")
 def test_send_reports_pane_mode_after_attempting_submission(tmp_path) -> None:
     tmux = CopyModeClaudeTmux(cancel_succeeds=False)
     store = Store(":memory:")

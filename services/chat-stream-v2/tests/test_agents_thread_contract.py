@@ -116,6 +116,7 @@ def test_progress_transition_since_survives_cold_start_and_later_working_change(
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("short_pane_evidence_wait")
 def test_retained_sources_restart_repair_and_report_state(tmp_path, monkeypatch):
     from comms import Comms
     from ledger import Ledger
