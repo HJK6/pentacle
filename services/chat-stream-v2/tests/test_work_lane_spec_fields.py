@@ -174,6 +174,37 @@ def test_lead_step_has_a_120_character_cap():
     assert attribute_members([member()], sessions, None)[0]["lead_seat"]["active_step"] == "Z" * 119 + "…"
 
 
+def test_background_batch_covers_members_of_done_lanes(tmp_path):
+    from types import SimpleNamespace
+    from test_work_lane_progress import a1_close
+    from work_lanes_projection import WorkLanesInventory
+    seen = []
+    worked = {"elapsed_h": 2, "censored": False, "active_h": 0.5,
+              "seats": 1, "qa_rounds": 1, "as_of": "2026-01-04T00:00:00Z"}
+    def reader(specs, *_):
+        seen.append(specs)
+        return {spec: worked for spec in specs}
+    async def body(env):
+        stored = (await env.adopt(state="paused", owner="operator", members=[SPEC]))["lane"]
+        await a1_close(env, stored)
+        async def broadcast(_):
+            pass
+        inventory = WorkLanesInventory(env.store, SimpleNamespace(list_open=lambda: []), broadcast, refresh_min_s=0)
+        inventory.worked = WorkedCache(tmp_path, tmp_path, changed=lambda: None, reader=reader)
+        try:
+            inventory.refresh()
+            await inventory._task
+            if inventory.worked._task is not None:
+                await inventory.worked._task
+            assert seen == [{SPEC}]
+            assert (await inventory.current())["lanes"] == []
+            history = await inventory.list(include_done=True)
+            assert history["lanes"][0]["members"][0]["worked"] == worked
+        finally:
+            await inventory.stop()
+    run(body)
+
+
 BUDGET = json.loads((Path(__file__).parent / "fixtures/work_lane_byte_budget.json").read_text())
 
 

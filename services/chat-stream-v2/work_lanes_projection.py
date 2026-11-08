@@ -300,8 +300,9 @@ class WorkLanesInventory:
             try:
                 await self.reconcile_index()
                 await self.store.reconcile_work_lane_episodes(self.episode_sink)
-                rows = await self.store.work_lane_rows()
-                self.worked.refresh({member["spec_id"] for row in rows for member in row.get("_members", [])})
+                if self.worked.needs_refresh():
+                    rows = await self.store.work_lane_rows(include_done=True)
+                    self.worked.refresh({member["spec_id"] for row in rows for member in row.get("_members", [])})
                 await self.emit_if_changed()
             except Exception:  # noqa: BLE001 - a lane refresh must not break session paths
                 log.exception("work lanes refresh failed")

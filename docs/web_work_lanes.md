@@ -38,7 +38,9 @@ The inventory's existing eight inline members carry optional display facts:
 
 - `worked`: elapsed hours, a censoring flag, active hours, seat and QA-round
   counts, and the observation time. The daemon batches all lane-member specs
-  in one background usage-rollup pass per ten minutes. A missing ledger,
+  in one background usage-rollup pass per ten minutes. The batch includes done
+  lanes returned by `show`; its full lane census also runs only when the cache
+  is due. A missing ledger,
   unattributed usage or a sixty-second timeout yields null. Active hours sum
   the available Claude and Codex proxies; both missing yields null. These are
   activity estimates, not billing or a live work timer.

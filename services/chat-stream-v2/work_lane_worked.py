@@ -42,13 +42,20 @@ class WorkedCache:
         self._task: asyncio.Task | None = None
         self._worker: asyncio.Task | None = None
 
+    def needs_refresh(self) -> bool:
+        """Keep the complete lane census on the same TTL as the ledger read."""
+        return (self.data_dir is not None and self.work_root is not None and self.clock() >= self._due
+                and (self._task is None or self._task.done())
+                and (self._worker is None or self._worker.done()))
+
     def refresh(self, spec_ids: set[str]) -> None:
         """Schedule from the inventory drain; reads only ever see the cached pass."""
-        if (self.data_dir is None or self.work_root is None or not spec_ids or self.clock() < self._due
-                or (self._task is not None and not self._task.done())
-                or (self._worker is not None and not self._worker.done())):
+        if not self.needs_refresh():
             return
         self._due = self.clock() + self.ttl_s
+        if not spec_ids:
+            self.values = {}
+            return
         self._task = asyncio.create_task(self._refresh(spec_ids))
 
     async def _refresh(self, spec_ids: set[str]) -> None:
