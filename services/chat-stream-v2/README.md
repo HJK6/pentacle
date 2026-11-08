@@ -43,6 +43,33 @@ Close/reap process identity uses numeric kernel session IDs. On hosts whose
 with `os.getsid`; peer reaping requires `python3` on the peer's command path.
 An unavailable probe leaves cleanup unverified. Birth, boot, user, process group,
 session and tmux ownership checks still apply before survivor signals.
+Forced local close first brackets capture with the same live, single-pane tmux
+binding across the whole session. The pane root must be a direct child of the
+responding server. Both snapshots require server version `3.4` or `3.7c`,
+`pane_dead=0`, `pane_pipe=0`, and exactly empty `pane_dead_status` and
+`pane_dead_signal`; even exit status `0` refuses authority. Other server versions
+defer until their format/reap/respawn contract is independently qualified.
+Capture retains a fixed process cohort and a kernel witness per process before
+the second binding check and graceful teardown. Fresh process records and boot
+identity fence each target; Linux sends through the retained pidfd. Darwin uses
+NOTE_EXIT and a synchronous final event check immediately before kill. Darwin's
+check and kill are not atomic: exit plus PID reuse in that final interval, and
+initial ambiguity in one-second printed birth values, remain platform limits.
+Unproved initial binding returns `logical_ownership_unproven` for forced close;
+later instance drift returns `instance_authority_unproven`. An unanchored attempt
+creates no ownership proofs and retains unknown cleanup even if its guessed PIDs
+disappear. Existing authorized graceful tmux teardown remains available without
+an initial anchor; its success is separate from that unresolved cleanup.
+An instance refusal may follow delivery to other proved members of the cohort;
+the session stays open with its cleanup obligation.
+After a valid initial binding, a changed or unavailable second binding defers
+the entire attempt without graceful teardown, so it cannot retarget a replacement.
+Late descendants are reported but never signalled by this escalation. A tmux
+server that wedges after a successful anchor still permits witnessed escalation;
+a server already wedged before anchoring does not.
+Legacy cancelled-spawn rows without a nonce also require a nonempty matching
+birth value; otherwise their retained cleanup remains deferred.
+
 `close` requests carrying `progeny_stream_id` are refused before teardown with
 `close_progeny_unsupported`; use `spawn --handoff` for succession.
 
