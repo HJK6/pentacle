@@ -353,6 +353,7 @@ class AssistantRestore:
                 "assistant restore name=%s state=%s reason=%s episode=%s attempt=%s",
                 self.name, status["state"], status["reason"], status["episode_id"],
                 status["attempt_seq"],
+                extra={"subsystem": "assistant_restore", "bug_ref": "process_ownership_semantic_cohort"},
             )
             if self._broadcast is not None:
                 try:
