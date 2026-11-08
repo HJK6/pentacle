@@ -75,14 +75,26 @@ def launch_daemon(source, root):
             return 1
         await owned['store'].submit(callback)
         event('store_hold_await_completed')
-    async def queue_read():
-        enqueue=event('queued_read_enqueued')['mono_s']
+    async def queue_read(*, measured=False):
+        enqueue=time.monotonic() if measured else event('queued_read_enqueued')['mono_s']
         def callback(conn):
-            picked_up=time.monotonic()  # store-thread pickup, before this event's own rewrite
-            event('queued_read_started',queue_wait_s=picked_up-enqueue,pickup_mono_s=picked_up)
-            return conn.execute('SELECT 42').fetchone()[0]
-        value=await owned['store'].submit(callback)
-        event('queued_read_completed',value=value)
+            picked_up=time.monotonic()
+            if not measured:
+                event('queued_read_started',queue_wait_s=picked_up-enqueue,pickup_mono_s=picked_up)
+            value=conn.execute('SELECT 42').fetchone()[0]
+            return value,picked_up,time.monotonic()
+        value,picked_up,finished=await owned['store'].submit(callback)
+        if measured:
+            # Timestamp the real Store operation; synthetic publication is separate
+            # and must neither occupy its callback nor block the daemon event loop.
+            await asyncio.to_thread(event,'queued_read_enqueued',submitted_mono_s=enqueue)
+            await asyncio.to_thread(event,'queued_read_started',queue_wait_s=picked_up-enqueue,
+                                    pickup_mono_s=picked_up)
+            await asyncio.to_thread(event,'queued_read_completed',value=value,
+                                    submitted_mono_s=enqueue,finished_mono_s=finished,
+                                    read_latency_s=finished-enqueue)
+        else:
+            event('queued_read_completed',value=value)
     # Test-only fault injection into the real publisher, after its last publish.
     try:
         from loop_watchdog import LoopWatchdog
@@ -113,7 +125,8 @@ def launch_daemon(source, root):
                 elif cmd.startswith('release_'):
                     gate=barriers.get(cmd.removeprefix('release_'))
                     if gate is not None: gate.set()
-                elif cmd=='queue_read': asyncio.run_coroutine_threadsafe(queue_read(),owned['loop'])
+                elif cmd in ('queue_read','queue_read_measured'):
+                    asyncio.run_coroutine_threadsafe(queue_read(measured=cmd=='queue_read_measured'),owned['loop'])
                 elif cmd!='status': raise ValueError('bad_control')
                 dump(root/'control-response.json',{'id':seen,'mono_s':time.monotonic(),'pending':owned.get('store').pending() if owned.get('store') else None})
             except FileNotFoundError: pass
@@ -334,9 +347,14 @@ async def run(source, output):
                     if SCENARIO=='publisher':
                         while time.monotonic()<held['mono_s']+6.5:
                             pings.append(await request(ws,'publisher-'+str(len(pings)),.2))
-                            enqueue=time.monotonic();control(root,'queue_read')
-                            completed=await wait_event(root,'queued_read_completed',timeout=.2,after=enqueue)
-                            reads.append({'enqueued_mono_s':enqueue,'completed':completed,'elapsed_s':completed['mono_s']-enqueue})
+                            enqueue=time.monotonic();control(root,'queue_read_measured')
+                            observer_started=time.monotonic()
+                            completed=await wait_event(root,'queued_read_completed',after=enqueue)
+                            observed=time.monotonic()
+                            reads.append({'requested_mono_s':enqueue,
+                                          'enqueued_mono_s':completed['submitted_mono_s'],
+                                          'completed':completed,'elapsed_s':completed['read_latency_s'],
+                                          'observed_mono_s':observed,'observer_wait_s':observed-observer_started})
                             await asyncio.sleep(.2)
                     else:
                         await ws.send(json.dumps({'type':'ping','request_id':'process-held'}))
