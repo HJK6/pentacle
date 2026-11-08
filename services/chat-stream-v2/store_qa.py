@@ -40,8 +40,9 @@ class SpecInputsUnavailable(ValueError):
 
 class _SpecCommitConnection:
     """Operation-local abandonment guard, including nested context commits."""
-    def __init__(self, conn, check):
+    def __init__(self, conn, check, after_commit=None):
         self._conn, self._check = conn, check
+        self._after_commit = after_commit
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -56,7 +57,11 @@ class _SpecCommitConnection:
 
     def commit(self):
         self._check()
-        return self._conn.commit()
+        had_transaction = self._conn.in_transaction
+        result = self._conn.commit()
+        if had_transaction and self._after_commit is not None:
+            self._after_commit()
+        return result
 
     def __enter__(self):
         self._conn.__enter__()
@@ -69,7 +74,11 @@ class _SpecCommitConnection:
             except BaseException:
                 self._conn.rollback()
                 raise
-        return self._conn.__exit__(kind, value, traceback)
+        had_transaction = self._conn.in_transaction
+        result = self._conn.__exit__(kind, value, traceback)
+        if kind is None and had_transaction and self._after_commit is not None:
+            self._after_commit()
+        return result
 
 
 class _SpecLookup:
@@ -414,17 +423,29 @@ class QaStoreMixin:
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         return await asyncio.shield(task)
 
-    async def _submit_spec_commit(self, callback):
+    async def _submit_spec_commit(self, callback, *, cancel_owner=None):
         """Do not execute an abandoned queued binding/report/QA write."""
-        caller = asyncio.current_task()
+        caller = cancel_owner if cancel_owner is not None else asyncio.current_task()
         abandoned = threading.Event()
+        committed = False
+        def after_commit():
+            nonlocal committed
+            committed = True
         def check():
+            if committed:
+                return
             if abandoned.is_set() or (caller is not None and caller.cancelling()):
                 raise asyncio.CancelledError()
         def checked(conn):
             check()
             try:
-                return callback(_SpecCommitConnection(conn, check))
+                # Only the shielded report caller supplies its original owner.
+                # Once its first commit succeeds, later cancellation must not
+                # interrupt the return path to roster projection. Other callers
+                # retain the existing abandonment checks.
+                return callback(_SpecCommitConnection(
+                    conn, check, after_commit if cancel_owner is not None else None,
+                ))
             except BaseException:
                 conn.rollback()
                 raise

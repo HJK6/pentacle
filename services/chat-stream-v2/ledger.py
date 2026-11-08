@@ -815,6 +815,8 @@ class Ledger:
             ),
             "ingested_at": iso_now(),
         }
+        request_owner = asyncio.current_task()
+
         async def persist_and_project():
             put_kwargs: dict[str, Any] = {}
             if not announce:
@@ -824,6 +826,7 @@ class Ledger:
             row = await self.store.put_report(
                 report_fields,
                 routing_snapshot=routing_snapshot,
+                _cancel_owner=request_owner,
                 **put_kwargs,
             )
             inserted = bool(row.pop("_report_inserted", True))

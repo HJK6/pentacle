@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -25,11 +26,14 @@ def agent(parent, sid):
 
 
 @pytest.mark.parametrize("status,expected", [("done", "done"), ("error", "blocked"), ("progress", "idle")])
-def test_report_disconnect_after_commit_projects_once_and_survives_replay_restart(tmp_path, monkeypatch, status, expected):
+@pytest.mark.parametrize("boundary", ["returned", "first_commit"])
+def test_report_disconnect_after_commit_projects_once_and_survives_replay_restart(tmp_path, monkeypatch, status, expected, boundary):
     async def run():
         database = tmp_path / "sessions.db"
         sid = HOST + ":v2-target"
         reached, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        commit_release = threading.Event()
+        committed = []
         requests, writes, projections = [], [], []
         async with daemon(database, seed_host=HOST) as (store, sessions, server, _):
             # A progress report must clear an earlier terminal projection.
@@ -40,13 +44,50 @@ def test_report_disconnect_after_commit_projects_once_and_survives_replay_restar
             old_agent = agent(await public_row(server, SOURCE), sid)
             assert old_agent["state"] != expected
             original_put, original_apply, original_serve = store.put_report, sessions.apply_report_state, server._serve
+            original_submit = store.submit
+            loop = asyncio.get_running_loop()
+
+            class CommitBarrier:
+                """Pause only after the real SQLite transaction has committed."""
+                def __init__(self, conn):
+                    self.conn = conn
+
+                def __getattr__(self, name):
+                    return getattr(self.conn, name)
+
+                def pause(self, had_transaction):
+                    if had_transaction and not self.conn.in_transaction and not committed:
+                        committed.append(True)
+                        loop.call_soon_threadsafe(reached.set)
+                        assert commit_release.wait(5)
+
+                def commit(self):
+                    had_transaction = self.conn.in_transaction
+                    result = self.conn.commit()
+                    self.pause(had_transaction)
+                    return result
+
+                def __enter__(self):
+                    self.conn.__enter__()
+                    return self
+
+                def __exit__(self, kind, value, traceback):
+                    had_transaction = self.conn.in_transaction
+                    result = self.conn.__exit__(kind, value, traceback)
+                    if kind is None:
+                        self.pause(had_transaction)
+                    return result
+
+            async def submit_with_commit_barrier(callback, **kwargs):
+                return await original_submit(lambda conn: callback(CommitBarrier(conn)), **kwargs)
 
             async def commit_then_pause(fields, **kwargs):
                 row = await original_put(fields, **kwargs)
                 if fields["report_id"] == "cancelled-report" and row.get("_report_inserted"):
                     writes.append(row)
-                    reached.set()
-                    await release.wait()
+                    if boundary == "returned":
+                        reached.set()
+                        await release.wait()
                 return row
 
             async def project(row):
@@ -65,23 +106,27 @@ def test_report_disconnect_after_commit_projects_once_and_survives_replay_restar
             monkeypatch.setattr(store, "put_report", commit_then_pause)
             monkeypatch.setattr(sessions, "apply_report_state", project)
             monkeypatch.setattr(server, "_serve", serve)
+            if boundary == "first_commit":
+                monkeypatch.setattr(store, "submit", submit_with_commit_barrier)
             payload = report(sid, "cancelled-report", status)
             try:
                 async with client(server, sid) as submitter:
                     await submitter.send(json.dumps({"type": "report", "request_id": "cancel-report", **payload}))
                     await asyncio.wait_for(reached.wait(), 5)
-                    saved = await store.get_report("cancelled-report")
-                    assert saved["status"] == status
-                    state = await store.child_report_state(sid)
-                    assert state["generation"] == saved["session_generation"]
-                    assert state["status"] == status
                     await submitter.close()
                     async with asyncio.timeout(5):
                         while not requests[0].cancelling():
                             await asyncio.sleep(0)
                     release.set()
+                    commit_release.set()
                     await asyncio.wait_for(finished.wait(), 5)
                     assert requests[0].cancelled(), "a disconnected report caller must retain uncertainty"
+                saved = await store.get_report("cancelled-report")
+                assert saved["status"] == status
+                state = await store.child_report_state(sid)
+                assert state["generation"] == saved["session_generation"]
+                assert state["status"] == status
+                assert bool(committed) == (boundary == "first_commit")
                 # Replaying inserted=False cannot hide a missing first projection.
                 async with client(server, sid) as retry:
                     reply = await rpc(retry, "report", "retry-report", **payload)
@@ -93,6 +138,7 @@ def test_report_disconnect_after_commit_projects_once_and_survives_replay_restar
                 assert len(writes) == 1 and projections == ["cancelled-report"]
             finally:
                 release.set()
+                commit_release.set()
         async with daemon(database) as (store, _, restarted, _):
             state = await store.child_report_state(sid)
             restored = agent(await public_row(restarted, SOURCE), sid)

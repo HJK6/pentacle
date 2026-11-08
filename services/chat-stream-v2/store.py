@@ -4955,6 +4955,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         routing_snapshot: dict[str, Any] | None = None,
         qa_attestation_mode: str = "warn",
         announce: bool = True,
+        _cancel_owner: asyncio.Task | None = None,
     ) -> dict[str, Any]:
         """Persist one validated report and return the stored row.
 
@@ -5120,7 +5121,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     ids.extend(normalize_spec_ids(row.get("qualified_spec_ids") or row.get("spec_ids"), row.get("spec_id")))
             try:
                 lookup = await self._resolve_spec_inputs(ids, warn_single=qa_attestation_mode == "warn")
-                return await self._submit_spec_commit(_op)
+                return await self._submit_spec_commit(_op, cancel_owner=_cancel_owner)
             except SpecInputsUnavailable:
                 if attempt:
                     raise ReportProvenanceUnavailable(routing_snapshot) from None

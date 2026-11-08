@@ -345,22 +345,59 @@ async def test_two_binding_mutations_refuse_without_commission():
         store.stop()
 
 
+@pytest.mark.parametrize('boundary', ['begin', 'insert'])
 @pytest.mark.asyncio
-async def test_cancel_after_callback_entry_before_sql_begin_rolls_back_report():
+async def test_cancel_after_callback_entry_before_sql_begin_rolls_back_report(boundary):
     store,sessions,server,ledger,frames=await _state()
     entered,release=threading.Event(),threading.Event()
     blocked=[]
     def trace(sql):
-        if sql=='BEGIN IMMEDIATE' and not blocked:
+        at_boundary = sql == 'BEGIN IMMEDIATE' if boundary == 'begin' else sql.startswith('INSERT INTO v2_reports ')
+        if at_boundary and not blocked:
             blocked.append(True); entered.set(); assert release.wait(5)
     try:
         await store.submit(lambda conn:conn.set_trace_callback(trace))
         task=asyncio.create_task(ledger.report(_report('cancelled-inside-callback',READY)))
         assert await asyncio.to_thread(entered.wait,3)
         task.cancel()
-        with pytest.raises(asyncio.CancelledError): await task
         release.set()
+        with pytest.raises(asyncio.CancelledError): await task
         assert await store.submit(lambda conn:conn.execute("SELECT count(*) FROM v2_reports WHERE report_id='cancelled-inside-callback'").fetchone()[0])==0
         assert not any(frame.get('report_id')=='cancelled-inside-callback' for frame in frames)
     finally:
         release.set(); await store.submit(lambda conn:conn.set_trace_callback(None));store.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_report_queued_before_commit_has_no_effects(monkeypatch):
+    store,sessions,server,ledger,frames=await _state()
+    worker_entered,worker_release=threading.Event(),threading.Event()
+    queued=asyncio.Event()
+    original=store._submit_spec_commit
+
+    async def queue_behind_blocker(callback, **kwargs):
+        blocker=asyncio.create_task(store.submit(lambda conn:(worker_entered.set(),worker_release.wait(5))))
+        assert await asyncio.to_thread(worker_entered.wait,3)
+        pending=asyncio.create_task(original(callback, **kwargs))
+        # The new task runs to its first await: its checked Store callback is
+        # queued behind the still-blocked real worker, before cancellation.
+        await asyncio.sleep(0)
+        assert store._queue.qsize() >= 1
+        queued.set()
+        try:
+            return await pending
+        finally:
+            worker_release.set()
+            await blocker
+
+    monkeypatch.setattr(store, '_submit_spec_commit', queue_behind_blocker)
+    try:
+        task=asyncio.create_task(ledger.report(_report('cancelled-queued-report',READY)))
+        await asyncio.wait_for(queued.wait(),3)
+        task.cancel()
+        worker_release.set()
+        with pytest.raises(asyncio.CancelledError): await task
+        assert await store.submit(lambda conn:conn.execute("SELECT count(*) FROM v2_reports WHERE report_id='cancelled-queued-report'").fetchone()[0])==0
+        assert not any(frame.get('report_id')=='cancelled-queued-report' for frame in frames)
+    finally:
+        worker_release.set();store.stop()
