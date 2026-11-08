@@ -43,6 +43,19 @@ Close/reap process identity uses numeric kernel session IDs. On hosts whose
 with `os.getsid`; peer reaping requires `python3` on the peer's command path.
 An unavailable probe leaves cleanup unverified. Birth, boot, user, process group,
 session and tmux ownership checks still apply before survivor signals.
+Forced local close captures a fixed process cohort and a kernel witness per
+process before waiting for graceful teardown. Fresh process records and boot
+identity fence each target; Linux sends through the retained pidfd. Darwin uses
+NOTE_EXIT and a synchronous final event check immediately before kill. Darwin's
+check and kill are not atomic: exit plus PID reuse in that final interval, and
+initial ambiguity in one-second printed birth values, remain platform limits.
+Missing, changed or unavailable authority returns `instance_authority_unproven`,
+leaves the session open and retains uncertain cleanup. Late descendants are
+reported but never signalled by this escalation. A missing tmux pane binding does
+not prevent force close when the independent records and witnesses prove ownership.
+Legacy cancelled-spawn rows without a nonce also require a nonempty matching
+birth value; otherwise their retained cleanup remains deferred.
+
 `close` requests carrying `progeny_stream_id` are refused before teardown with
 `close_progeny_unsupported`; use `spawn --handoff` for succession.
 

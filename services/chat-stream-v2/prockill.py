@@ -1,9 +1,9 @@
 """prockill.py - direct process-tree termination for the close ladder.
 
 The close escalation (spec close ruling, steps 2-3) must be able to end a pane's
-processes WITHOUT tmux: tmux itself may be the wedged component. Given a pane
-pid this enumerates the process tree, SIGKILLs it, and reports liveness by
-asking the kernel directly (`kill(pid, 0)`) rather than asking tmux.
+processes WITHOUT tmux: tmux itself may be the wedged component. Forced close
+retains a fixed cohort and capture-time kernel witnesses;
+fresh records fence each delivery independently of tmux.
 
 Everything here is either one `ps` exec off the event loop or a non-blocking
 syscall. No `/proc` dependency, so it stays portable to the macOS peers. This
@@ -14,8 +14,10 @@ transcript probe imports `process_tree` from here rather than keeping its own.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import os
+import select
 import signal
 import sys
 import time
@@ -27,6 +29,7 @@ from typing import Any
 # Keep the ordinary Linux ps path; use this only after that query fails.
 SESSION_ID_PROBE = """\
 import os
+import select
 import subprocess
 
 table = subprocess.run(
@@ -169,30 +172,36 @@ async def process_records() -> dict[int, dict[str, Any]]:
     except (asyncio.TimeoutError, OSError):
         await terminate_and_reap(proc)
         return {}
-    return parse_process_records((out or b"").decode("utf-8", "replace"))
+    return parse_process_records((out or b"").decode("utf-8", "replace"), strict=True)
 
 
-def parse_process_records(output: str) -> dict[int, dict[str, Any]]:
+def parse_process_records(output: str, *, strict: bool = False) -> dict[int, dict[str, Any]]:
     """Shared identity parser for async lifecycle and synchronous host helpers."""
     records: dict[int, dict[str, Any]] = {}
     for line in output.splitlines():
         parts = line.strip().split(None, 10)
         if len(parts) < 10:
+            if strict and parts:
+                return {}
             continue
         try:
             pid, ppid, uid, pgid, sid = (int(parts[index]) for index in range(5))
         except (TypeError, ValueError):
+            if strict:
+                return {}
             continue
         # lstart is five whitespace-separated fields after sid.  Some ps
         # implementations omit command for a kernel process; retain an empty
         # command but never invent identity fields.
         start_id = canonical_start(" ".join(parts[5:10]))
         command = parts[10] if len(parts) > 10 else ""
-        if pid > 0 and ppid >= 0 and uid >= 0 and pgid >= 0 and sid >= 0 and start_id:
+        if pid > 0 and ppid >= 0 and pgid >= 0 and sid >= 0 and start_id:
             records[pid] = {
                 "pid": pid, "ppid": ppid, "uid": uid, "pgid": pgid, "sid": sid,
                 "start_id": start_id, "command": command,
             }
+        elif strict:
+            return {}
     return records
 
 
@@ -203,13 +212,18 @@ async def boot_id() -> str:
         ("sysctl", "-n", "kern.boottime"),
     )
     for argv in commands:
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except asyncio.CancelledError:
+            await terminate_and_reap(proc)
+            raise
         except (asyncio.TimeoutError, OSError):
+            await terminate_and_reap(proc)
             continue
         if proc.returncode == 0 and (value := (out or b"").decode("utf-8", "replace").strip()):
             return value
@@ -277,17 +291,239 @@ async def process_tree(root_pid: str) -> list[str]:
     return seen
 
 
-async def signal_tree(root_pid: str, sig: int = signal.SIGKILL) -> list[str]:
-    """Send `sig` to `root_pid` and every descendant. Returns the pids signalled.
-    A pid that vanished between enumeration and delivery is fine — it is already
-    gone, which is the goal."""
-    pids = await process_tree(root_pid)
-    for pid in pids:
+class ExitWitness:
+    """Capture-time kernel witness. Delivery never retargets a Linux numeric PID.
+
+    Darwin NOTE_EXIT closes the grace-period hazard, but check+kill is not
+    atomic. Exit/reuse between the final check and kill remains the explicitly
+    accepted platform residual; printed lstart is also not a unique birth token.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.fd: int | None = None
+        self.kq: Any = None
+        self.terminal = False
         try:
-            os.kill(int(pid), sig)
-        except (ProcessLookupError, ValueError, PermissionError):
-            pass
-    return pids
+            if sys.platform.startswith("linux"):
+                self.fd = os.pidfd_open(pid, 0)
+            elif sys.platform == "darwin":
+                self.kq = select.kqueue()
+                self.terminal = self._events(self.kq.control([select.kevent(
+                    pid, filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                    fflags=select.KQ_NOTE_EXIT)], 1, 0))
+            else:
+                raise OSError("kernel process witnesses unavailable")
+            self.exited()
+        except ProcessLookupError:
+            self.terminal = True
+        except BaseException:
+            self.close()
+            raise
+
+    def _events(self, events: list[Any]) -> bool:
+        for event in events:
+            matching = event.ident == self.pid and event.filter == select.KQ_FILTER_PROC
+            if event.flags & select.KQ_EV_ERROR:
+                if matching and event.data == errno.ESRCH:
+                    return True
+                raise OSError(event.data, "process exit event failed")
+            if matching and event.fflags & select.KQ_NOTE_EXIT:
+                return True
+        return False
+
+    def exited(self) -> bool:
+        if not self.terminal:
+            if self.fd is not None:
+                self.terminal = bool(select.select([self.fd], [], [], 0)[0])
+            elif self.kq is not None:
+                self.terminal = self._events(self.kq.control(None, 1, 0))
+            else:
+                raise OSError("process witness closed")
+        return self.terminal
+
+    def send(self, sig: int) -> bool:
+        # Keep the final event check and delivery synchronous, with no await or
+        # callback between them. pidfd delivery additionally binds the instance.
+        if self.exited():
+            return False
+        try:
+            if self.fd is not None:
+                signal.pidfd_send_signal(self.fd, sig)
+            elif self.kq is not None:
+                os.kill(self.pid, sig)
+            else:
+                raise OSError("process witness unavailable")
+        except ProcessLookupError:
+            self.terminal = True
+            return False
+        return True
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.kq is not None:
+            self.kq.close()
+            self.kq = None
+
+
+class CapturedTree:
+    """Finite close cohort, retained from before grace through final readback.
+
+    No current-tree enumeration can expand destructive authority. Missing or
+    changed records/witnesses refuse the target; they never trigger a PID fallback.
+    """
+
+    def __init__(self, pids: list[int], records: dict[int, dict[str, Any]],
+                 proofs: dict[int, dict[str, Any]], complete: bool) -> None:
+        self.pids = tuple(pids)
+        self.records = {pid: dict(records[pid]) for pid in pids if pid in records}
+        self.proofs = {pid: dict(proofs[pid]) for pid in pids if pid in proofs}
+        self.complete = complete
+        self.witnesses: dict[int, ExitWitness] = {}
+        self.valid: set[int] = set()
+
+    def _matches(self, pid: int, current: dict[str, Any] | None, boot: str) -> bool:
+        captured, proof = self.records.get(pid), self.proofs.get(pid)
+        if not current or not captured or not proof or not boot or proof.get("boot_id") != boot:
+            return False
+        try:
+            for key in ("pid", "uid", "pgid", "sid"):
+                if int(current[key]) != int(captured[key]) or int(proof[key]) != int(captured[key]):
+                    return False
+            started = canonical_start(captured["start_id"])
+            if (not started or started != canonical_start(current["start_id"])
+                    or started != canonical_start(proof["start_id"])
+                    or not captured["command"] or captured["command"] != current["command"]
+                    or proof["command_fingerprint"] != command_fingerprint(captured["command"])):
+                return False
+            parent = int(captured["ppid"])
+            if int(proof["ppid"]) != parent:
+                return False
+            if int(current["ppid"]) != parent:
+                # Only an OS reparent to init/launchd with the captured parent's
+                # definitive exit is accepted. A missing ps row is not death.
+                witness = self.witnesses.get(parent)
+                if int(current["ppid"]) != 1 or witness is None or not witness.exited():
+                    return False
+        except (KeyError, TypeError, ValueError, OSError):
+            return False
+        return True
+
+    async def prepare(self) -> None:
+        if not self.complete:
+            return
+        for pid in self.pids:
+            try:
+                self.witnesses[pid] = ExitWitness(pid)
+            except (OSError, AttributeError):
+                pass
+        # Register first, then compare again: registration itself can race exit
+        # and reuse. These handles remain open even for refused registrations.
+        current, boot = await process_records(), await boot_id()
+        for pid, witness in self.witnesses.items():
+            try:
+                if not witness.exited() and self._matches(pid, current.get(pid), boot):
+                    self.valid.add(pid)
+            except OSError:
+                pass
+
+    def gone(self, pid: int) -> bool:
+        witness = self.witnesses.get(pid)
+        try:
+            return witness is not None and witness.exited()
+        except OSError:
+            return False
+
+    async def signal(self, sig: int) -> tuple[set[int], set[int]]:
+        current, boot = await process_records(), await boot_id()
+        sent: set[int] = set()
+        refused: set[int] = set()
+        for pid in reversed(self.pids):
+            if self.gone(pid):
+                continue
+            if pid not in self.valid or not self._matches(pid, current.get(pid), boot):
+                refused.add(pid)
+                continue
+            try:
+                if self.witnesses[pid].send(sig):
+                    sent.add(pid)
+            except (OSError, AttributeError):
+                refused.add(pid)
+        if not self.complete or not self.pids:
+            refused.add(self.pids[0] if self.pids else -1)
+        return sent, refused
+
+    async def confirm_exit(self, pid: int, timeout: float, interval: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while not self.gone(pid):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(interval)
+        return True
+
+    async def readback(self) -> dict[str, Any]:
+        current, boot = await process_records(), await boot_id()
+        # Include late descendants as unresolved cleanup, never as signal targets.
+        observed = set(self.pids)
+        while True:
+            extra = {pid for pid, rec in current.items() if rec.get("ppid") in observed} - observed
+            if not extra:
+                break
+            observed.update(extra)
+        proved = set()
+        for pid in self.valid:
+            try:
+                if not self.witnesses[pid].exited() and self._matches(pid, current.get(pid), boot):
+                    proved.add(pid)
+            except OSError:
+                pass
+        proofs: dict[int, dict[str, Any]] = {}
+        for pid in proved:
+            # Refresh a proved reparent's ppid for the existing durable reaper.
+            proofs[pid] = {**self.proofs[pid], "ppid": current[pid]["ppid"]}
+        pending = observed - set(self.pids)
+        while pending:
+            attached = set()
+            for pid in pending:
+                parent = current[pid].get("ppid")
+                if parent in proofs:
+                    binding = proofs[parent]
+                    proof = identity_proof(host=binding["host"], boot=boot, record=current[pid],
+                        tmux_session=binding["tmux_session"], tmux_pane=binding["tmux_pane"],
+                        tty=binding["tty"], tmux_socket=binding["tmux_socket"])
+                    if proof:
+                        proofs[pid] = proof
+                        attached.add(pid)
+            if not attached:
+                break
+            pending -= attached
+        survivors = []
+        for pid in sorted(observed):
+            if pid in self.pids and self.gone(pid):
+                continue
+            # An unreadable inventory must still retain a possibly-live target.
+            if pid not in current and not pid_alive(str(pid)):
+                continue
+            item: dict[str, Any] = {"pid": pid, "command": str(
+                current.get(pid, self.records.get(pid, {})).get("command") or ""),
+                "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            if pid in proofs:
+                item["ownership_proof_v2"] = proofs[pid]
+            else:
+                item["reap_reason"] = ("instance_authority_unproven" if self.complete
+                                       else "process_observed_alive")
+            survivors.append(item)
+        unknown = not self.complete or not current or any("ownership_proof_v2" not in x for x in survivors)
+        return {"reap_status": "unknown" if unknown else "survivors" if survivors else "reaped",
+                "survivors": survivors}
+
+    def close(self) -> None:
+        for witness in self.witnesses.values():
+            witness.close()
+        self.witnesses.clear()
 
 
 def pid_alive(pid: str) -> bool:

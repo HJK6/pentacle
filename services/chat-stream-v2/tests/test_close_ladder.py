@@ -60,6 +60,27 @@ class LadderTmux:
             self.alive = False
 
 
+class RecordingWitness:
+    """Synthetic kernel handle for synthetic process tables; never calls kill."""
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.terminal = False
+        self.closed = False
+        self.sent: list[int] = []
+
+    def exited(self) -> bool:
+        return self.terminal
+
+    def send(self, sig: int) -> bool:
+        if self.exited():
+            return False
+        self.sent.append(sig)
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class DecisionCaptureTmux(LadderTmux):
     def __init__(self, captures: list[str]) -> None:
         super().__init__(dies_on_graceful=True)
@@ -230,21 +251,31 @@ def test_graceful_kill_confirms_close_ok() -> None:
 
 def _spawn_orphan() -> str:
     r, w = os.pipe()
+    ready_r, ready_w = os.pipe()
+    os.set_inheritable(ready_w, True)
     child = os.fork()
     if child == 0:  # pragma: no cover - child process
         os.close(r)
+        os.close(ready_r)
         os.setsid()
         grandchild = os.fork()
         if grandchild == 0:  # pragma: no cover - grandchild
             os.close(w)
-            os.execv(sys.executable, [sys.executable, "-c", "import time; time.sleep(300)"])
+            os.execv(sys.executable, [sys.executable, "-c",
+                f"import os,time; os.write({ready_w}, b'r'); os.close({ready_w}); time.sleep(300)"])
+        os.close(ready_w)
         os.write(w, str(grandchild).encode())
         os.close(w)
         os._exit(0)
     os.close(w)
+    os.close(ready_w)
     os.waitpid(child, 0)
     pid = os.read(r, 32).decode()
     os.close(r)
+    try:
+        assert os.read(ready_r, 1) == b"r"  # capture after exec, not the pre-exec shell
+    finally:
+        os.close(ready_r)
     return pid
 
 
@@ -359,6 +390,14 @@ def test_dstate_carcass_marks_closed_and_alerts(monkeypatch: pytest.MonkeyPatch)
     # SIGKILL is delivered but the pid never clears — a kernel D-state husk.
     monkeypatch.setattr(prockill, "pid_alive", lambda pid: True)
 
+    async def records():
+        return {999999: {"pid": 999999, "ppid": 1, "uid": 501, "pgid": 999999,
+                         "sid": 999999, "start_id": "Mon Jan 1 00:00:00 2026", "command": "husk"}}
+    async def boot(): return "boot-1"
+    monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
+    monkeypatch.setattr(prockill, "process_records", records)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+
     async def go() -> None:
         tmux = LadderTmux(pid="999999", dies_on_graceful=False)
         result, store, alerts = await _close(tmux, "s-carcass")
@@ -416,6 +455,12 @@ def test_close_persists_descendant_survivor_proof(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(sessions_mod.prockill, "process_records", records)
     monkeypatch.setattr(sessions_mod.prockill, "boot_id", boot)
     monkeypatch.setattr(sessions_mod.prockill, "pid_alive", lambda pid: str(pid) == "101")
+
+    class SurvivorWitness(RecordingWitness):
+        def __init__(self, pid):
+            super().__init__(pid)
+            self.terminal = pid == 100
+    monkeypatch.setattr(prockill, "ExitWitness", SurvivorWitness)
 
     async def go() -> None:
         tmux = LadderTmux(pid="100", dies_on_graceful=True)
@@ -497,9 +542,9 @@ def test_reap_reason_separates_inventory_incomplete_from_process_observed_alive(
         return True
 
     monkeypatch.setattr(sessions_mod.prockill, "pid_alive", live_pid)
-    observed = Sessions._reap_readback(
-        [101], {}, {}, inventory_complete=False
-    )
+    async def no_records(): return {}
+    monkeypatch.setattr(prockill, "process_records", no_records)
+    observed = asyncio.run(prockill.CapturedTree([101], {}, {}, False).readback())
     assert observed["survivors"][0]["reap_reason"] == "process_observed_alive"
     assert observed["survivors"][0]["reap_reason"] != "inventory_incomplete"
     assert probes == ["101"]
@@ -899,4 +944,388 @@ def test_reap_reprobes_stale_idle_before_kill() -> None:
         finally:
             store.stop()
 
+    asyncio.run(go())
+
+
+def test_force_close_refuses_stale_captured_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real Sessions→prockill boundary must refuse A replaced by B."""
+    from types import SimpleNamespace
+    captured = {"pid": 990001, "ppid": 1, "uid": 501, "pgid": 990001,
+                "sid": 990001, "start_id": "Mon Jan 1 00:00:00 2026", "command": "owned-A"}
+    proof = prockill.identity_proof(host=HOST, boot="boot-1", record=captured,
+        tmux_session="s-stale", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
+    async def capture(*_args):
+        return [990001], {990001: captured}, {990001: proof}, True
+    async def current():
+        return {990001: {**captured, "start_id": "Mon Jan 1 00:00:01 2026", "command": "foreign-B"}}
+    async def tree(_root):
+        return ["990001", "990002"]  # late foreign descendant must never be signalled
+    async def boot(): return "boot-1"
+    async def not_gone(*_args): return False
+    deliveries = []
+    monkeypatch.setattr(prockill, "process_records", current)
+    monkeypatch.setattr(prockill, "process_tree", tree)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+    monkeypatch.setattr(prockill.os, "kill", lambda pid, sig: deliveries.append((pid, sig)) if sig else None)
+    monkeypatch.setattr(prockill, "ExitWitness", RecordingWitness)
+    tmux = LadderTmux(pid="990001")
+    receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture,
+        _confirm_pane_gone=not_gone)
+    state, _, _ = asyncio.run(Sessions._terminate_pane(receiver, "s-stale"))
+    assert deliveries == [], f"stale instance reached destructive sink: {deliveries}"
+    assert state == "failed"
+
+
+def _cohort_rig(monkeypatch, *, complete=True):
+    original = {
+        990001: {"pid": 990001, "ppid": 1, "uid": 501, "pgid": 990001,
+                 "sid": 990001, "start_id": "Mon Jan 1 00:00:00 2026", "command": "owned-A"},
+        990002: {"pid": 990002, "ppid": 990001, "uid": 501, "pgid": 990001,
+                 "sid": 990001, "start_id": "Mon Jan 1 00:00:01 2026", "command": "owned-child"},
+    }
+    now = {pid: dict(rec) for pid, rec in original.items()}
+    state = {"boot": "boot-1", "records": now}
+    handles = {}
+    def witness(pid):
+        handles[pid] = RecordingWitness(pid)
+        return handles[pid]
+    async def records(): return state["records"]
+    async def boot(): return state["boot"]
+    monkeypatch.setattr(prockill, "ExitWitness", witness)
+    monkeypatch.setattr(prockill, "process_records", records)
+    monkeypatch.setattr(prockill, "boot_id", boot)
+    proofs = {pid: prockill.identity_proof(host=HOST, boot="boot-1", record=rec,
+              tmux_session="owned", tmux_pane="%1", tty="/dev/test", tmux_socket="/tmp/test")
+              for pid, rec in original.items()}
+    return prockill.CapturedTree(list(original), original, proofs, complete), state, handles
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pid", 999998), ("uid", 502), ("pgid", 990003), ("sid", 990003),
+    ("start_id", "Mon Jan 1 00:00:02 2026"), ("start_id", ""),
+    ("command", "foreign-B"), ("ppid", 990003), ("boot", "boot-2"),
+])
+def test_close_cohort_refuses_changed_authority(monkeypatch, field, value):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        try:
+            await cohort.prepare()
+            if field == "boot": state["boot"] = value
+            else: state["records"][990001][field] = value
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert 990001 not in sent and 990001 in refused
+            assert handles[990001].sent == []
+        finally:
+            cohort.close()
+        assert all(h.closed for h in handles.values())
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("fault", ["missing_birth", "missing_proof", "partial", "unreadable", "registration", "registration_drift"])
+def test_close_cohort_missing_capture_authority_never_falls_back(monkeypatch, fault):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch, complete=fault != "partial")
+        if fault == "missing_birth": cohort.records[990001]["start_id"] = ""
+        if fault == "missing_proof": cohort.proofs.clear()
+        if fault == "unreadable": state["records"] = {}
+        if fault == "registration":
+            def denied(_pid): raise PermissionError("synthetic registration denied")
+            monkeypatch.setattr(prockill, "ExitWitness", denied)
+        if fault == "registration_drift": state["records"][990001]["command"] = "foreign"
+        try:
+            await cohort.prepare()
+            if fault == "registration_drift": state["records"][990001]["command"] = "owned-A"
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert 990001 not in sent and 990001 in refused
+            assert all(not h.sent for pid, h in handles.items() if pid == 990001)
+        finally:
+            cohort.close()
+    asyncio.run(go())
+
+
+def test_close_cohort_reparents_only_after_captured_parent_exit(monkeypatch):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        try:
+            await cohort.prepare()
+            state["records"][990002]["ppid"] = 1
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert 990002 in refused and not handles[990002].sent
+            handles[990001].terminal = True
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert sent == {990002} and refused == set()
+            reap = await cohort.readback()
+            assert [x["pid"] for x in reap["survivors"]] == [990002]
+            assert reap["survivors"][0]["ownership_proof_v2"]["ppid"] == 1
+        finally:
+            cohort.close()
+    asyncio.run(go())
+
+
+def test_close_cohort_never_signals_late_or_foreign_process(monkeypatch):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        try:
+            await cohort.prepare()
+            state["records"][990003] = {**state["records"][990002], "pid": 990003, "ppid": 990002}
+            state["records"][990004] = {**state["records"][990002], "pid": 990004, "ppid": 1}
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert sent == {990001, 990002} and refused == set()
+            assert set(handles) == {990001, 990002}
+            reap = await cohort.readback()
+            by_pid = {x["pid"]: x for x in reap["survivors"]}
+            assert 990004 not in by_pid
+            assert "ownership_proof_v2" in by_pid[990003]
+            # A late descendant observed below a drifted instance stays unknown.
+            state["records"][990002]["command"] = "foreign-child"
+            reap = await cohort.readback()
+            by_pid = {x["pid"]: x for x in reap["survivors"]}
+            assert reap["reap_status"] == "unknown"
+            assert "ownership_proof_v2" not in by_pid[990003]
+        finally:
+            cohort.close()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("phase", ["grace", "fresh_read", "final_check"])
+def test_close_cohort_exit_before_delivery_sends_nothing(monkeypatch, phase):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        try:
+            await cohort.prepare()
+            root = handles[990001]
+            if phase == "grace": root.terminal = True
+            elif phase == "fresh_read":
+                async def records():
+                    root.terminal = True
+                    return state["records"]
+                monkeypatch.setattr(prockill, "process_records", records)
+            else:
+                def final_exit(_sig):
+                    root.terminal = True
+                    return False
+                root.send = final_exit
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert 990001 not in sent and 990001 not in refused
+            assert root.sent == []
+        finally:
+            cohort.close()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("where", ["prepare", "grace"])
+def test_close_cancellation_closes_every_registered_witness(monkeypatch, where):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        async def capture(*_args): return list(cohort.pids), cohort.records, cohort.proofs, True
+        async def cancelled(*_args): raise asyncio.CancelledError
+        if where == "prepare": monkeypatch.setattr(prockill, "process_records", cancelled)
+        from types import SimpleNamespace
+        tmux = LadderTmux(pid="990001")
+        if where == "grace": tmux.kill_session = cancelled
+        receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture)
+        with pytest.raises(asyncio.CancelledError):
+            await Sessions._terminate_pane(receiver, "owned")
+        assert set(handles) == {990001, 990002}
+        assert all(h.closed and not h.sent for h in handles.values())
+    asyncio.run(go())
+
+
+def test_close_refusal_persists_open_obligation_and_retry_completes(monkeypatch):
+    monkeypatch.setattr(sessions_mod, "CLOSE_GRACEFUL_CONFIRM_S", 0)
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        # Only root participates here. The child's record is foreign to this test's cohort.
+        state["records"].pop(990002)
+        state["boot"] = ""
+        tmux = LadderTmux(pid="990001")
+        store = Store(":memory:"); store.start()
+        alerts = RecordingAlerts()
+        sessions = Sessions(store=store, tmux=tmux, local_host=HOST, alerts=alerts)
+        try:
+            await _seed(store, "retry")
+            result = await sessions.close(HOST, "retry")
+            assert result["failed"] and result["reason"] == "instance_authority_unproven"
+            assert (await store.fetch_session(HOST, "retry"))["status"] == "open"
+            reap = await store.get_session_reap(f"{HOST}:retry")
+            assert reap["reap_status"] == "unknown"
+            assert reap["survivors"][0]["reap_reason"] == "instance_authority_unproven"
+            assert all(not h.sent and h.closed for h in handles.values())
+            state["boot"] = "boot-1"
+            def witness(pid):
+                handle = RecordingWitness(pid)
+                def send(sig):
+                    handle.sent.append(sig); handle.terminal = True
+                    return True
+                handle.send = send
+                handles[pid] = handle
+                return handle
+            monkeypatch.setattr(prockill, "ExitWitness", witness)
+            result = await sessions.close(HOST, "retry")
+            assert not result["failed"] and result["session"]["status"] == "closed"
+            assert handles[990001].sent == [signal.SIGKILL]
+            repeated = await sessions.close(HOST, "retry")
+            assert repeated["already_closed"] and handles[990001].sent == [signal.SIGKILL]
+        finally:
+            store.stop()
+    asyncio.run(go())
+
+
+def test_linux_witness_delivers_only_through_retained_pidfd(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(prockill, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(prockill.os, "pidfd_open", lambda pid, flags: calls.append(("open", pid)) or 42, raising=False)
+    monkeypatch.setattr(prockill.select, "select", lambda *_args: ([], [], []))
+    monkeypatch.setattr(prockill.signal, "pidfd_send_signal", lambda fd, sig: calls.append(("pidfd", fd, sig)), raising=False)
+    monkeypatch.setattr(prockill.os, "kill", lambda *_args: pytest.fail("numeric PID delivery on Linux"))
+    monkeypatch.setattr(prockill.os, "close", lambda fd: calls.append(("close", fd)))
+    witness = prockill.ExitWitness(990001)
+    assert witness.send(signal.SIGKILL)
+    witness.close()
+    assert calls == [("open", 990001), ("pidfd", 42, signal.SIGKILL), ("close", 42)]
+
+
+@pytest.mark.parametrize("exit_at_final_check", [False, True])
+def test_darwin_witness_final_check_and_explicit_nonatomic_residual(monkeypatch, exit_at_final_check):
+    from types import SimpleNamespace
+    calls = []
+    state = {"armed": False, "reused_after_check": False}
+    class Queue:
+        def control(self, changes, count, timeout):
+            calls.append("register" if changes else "check")
+            if state["armed"] and exit_at_final_check:
+                return [SimpleNamespace(ident=990001, filter=1, flags=0, fflags=2)]
+            if state["armed"]:
+                # Documents the accepted Darwin residual: an exit/reuse after
+                # this check cannot be made atomic with the following kill.
+                state["reused_after_check"] = True
+            return []
+        def close(self): calls.append("close")
+    monkeypatch.setattr(prockill, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(prockill, "select", SimpleNamespace(kqueue=Queue,
+        kevent=lambda *args, **kwargs: object(), KQ_FILTER_PROC=1, KQ_NOTE_EXIT=2,
+        KQ_EV_ADD=4, KQ_EV_ENABLE=8, KQ_EV_ERROR=16))
+    monkeypatch.setattr(prockill.os, "kill", lambda pid, sig: calls.append(("kill", pid, sig)))
+    witness = prockill.ExitWitness(990001)
+    calls.clear(); state["armed"] = True
+    try:
+        assert witness.send(signal.SIGKILL) is (not exit_at_final_check)
+        if exit_at_final_check:
+            assert calls == ["check"] and witness.exited()
+        else:
+            assert calls == ["check", ("kill", 990001, signal.SIGKILL)]
+            assert state["reused_after_check"]  # no atomicity claim
+    finally:
+        witness.close()
+
+
+def test_close_witness_observation_error_cannot_create_readback_proof(monkeypatch):
+    async def go():
+        cohort, state, handles = _cohort_rig(monkeypatch)
+        try:
+            await cohort.prepare()
+            def denied(): raise PermissionError("synthetic observation denied")
+            handles[990001].exited = denied
+            sent, refused = await cohort.signal(signal.SIGKILL)
+            assert 990001 not in sent and 990001 in refused
+            reap = await cohort.readback()
+            root = next(x for x in reap["survivors"] if x["pid"] == 990001)
+            assert "ownership_proof_v2" not in root
+            assert reap["reap_status"] == "unknown"
+        finally:
+            cohort.close()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("missing_pane_identity", [False, True])
+def test_disposable_private_tmux_force_close_preserves_foreign_sentinel(
+    monkeypatch, isolated_tmux_env, missing_pane_identity,
+):
+    """Real pane/process tree, with only graceful teardown made unresponsive."""
+    from tmux_transport import Tmux
+    import subprocess
+    monkeypatch.setattr(sessions_mod, "CLOSE_GRACEFUL_CONFIRM_S", 0.05)
+    monkeypatch.setattr(sessions_mod, "CLOSE_KILL_CONFIRM_S", 3)
+    async def go():
+        tmux = Tmux(isolated_tmux_env)
+        store = Store(":memory:"); store.start()
+        sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        pane_pid = ""
+        captured = []
+        deliveries = []
+        original_send = prockill.ExitWitness.send
+        def record_send(witness, sig):
+            assert witness.pid in captured
+            assert witness.pid != sentinel.pid
+            result = original_send(witness, sig)
+            if result: deliveries.append(witness.pid)
+            return result
+        monkeypatch.setattr(prockill.ExitWitness, "send", record_send)
+        try:
+            # exec pins the pane's command before capture; its child is owned.
+            await tmux.new_session("fence-owned", "exec " + sys.executable +
+                " -c 'import subprocess,time; subprocess.Popen([\"sleep\",\"60\"]); time.sleep(60)'")
+            pane_pid = await tmux.pane_pid("fence-owned")
+            # Wait for the owned child to appear, using actual records.
+            for _ in range(50):
+                table = await prockill.process_records()
+                if any(x["ppid"] == int(pane_pid) for x in table.values()): break
+                await asyncio.sleep(0.02)
+            else: pytest.fail("disposable pane did not create its child")
+            original_kill = tmux.kill_session
+            calls = 0
+            async def wedged_grace(name):
+                nonlocal calls
+                calls += 1
+                if calls > 1: await original_kill(name)
+            monkeypatch.setattr(tmux, "kill_session", wedged_grace)
+            if missing_pane_identity:
+                async def no_identity(_name): return None
+                monkeypatch.setattr(tmux, "pane_identity", no_identity)
+            sessions = Sessions(store=store, tmux=tmux, local_host=HOST)
+            capture = sessions._capture_tree_identity
+            async def record_capture(*args):
+                result = await capture(*args)
+                captured.extend(result[0])
+                return result
+            monkeypatch.setattr(sessions, "_capture_tree_identity", record_capture)
+            await _seed(store, "fence-owned")
+            result = await sessions.close(HOST, "fence-owned")
+            assert not result["failed"], result
+            assert result["session"]["status"] == "closed"
+            assert len(captured) >= 2 and set(deliveries) == set(captured)
+            assert sentinel.poll() is None
+            assert not prockill.pid_alive(pane_pid)
+            assert not await tmux.has_session("fence-owned")
+            # A terminal child's exit witness is enough even before wait/reap.
+            assert result["reap_status"] == "reaped" and not result["survivors"]
+        finally:
+            await tmux.run("kill-server")
+            sentinel.terminate(); sentinel.wait(timeout=5)
+            store.stop()
+    asyncio.run(go())
+
+
+def test_close_tmux_timeout_still_uses_independent_captured_authority(monkeypatch):
+    async def go():
+        cohort, _state, handles = _cohort_rig(monkeypatch)
+        async def capture(*_args): return list(cohort.pids), cohort.records, cohort.proofs, True
+        async def timeout(*_args): raise VerbError("tmux_timeout", "synthetic wedged tmux")
+        from types import SimpleNamespace
+        def witness(pid):
+            handle = RecordingWitness(pid)
+            def send(sig):
+                handle.sent.append(sig); handle.terminal = True
+                return True
+            handle.send = send
+            handles[pid] = handle
+            return handle
+        monkeypatch.setattr(prockill, "ExitWitness", witness)
+        tmux = LadderTmux(pid="990001")
+        tmux.kill_session = timeout
+        receiver = SimpleNamespace(tmux=tmux, _capture_tree_identity=capture)
+        state, _, reap = await Sessions._terminate_pane(receiver, "owned")
+        assert state == "ok" and reap["reap_status"] == "reaped"
+        assert all(h.sent == [signal.SIGKILL] and h.closed for h in handles.values())
     asyncio.run(go())

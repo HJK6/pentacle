@@ -107,3 +107,15 @@ def test_portable_probe_cannot_report_permission_gap_as_death(monkeypatch, capsy
     with pytest.raises(PermissionError):
         exec(prockill.SESSION_ID_PROBE, {})
     assert capsys.readouterr().out == ""
+
+
+def test_complete_inventory_retains_signed_darwin_nobody_uid():
+    # Darwin ps prints the nobody UID as -2. Its complete row must not turn an
+    # otherwise valid inventory into an observation failure.
+    table = ROW.decode() + "43 1 -2 43 1 Mon Jan 1 00:00:00 2026 system actor\n"
+    records = prockill.parse_process_records(table, strict=True)
+    assert set(records) == {42, 43} and records[43]["uid"] == -2
+
+
+def test_truncated_inventory_cannot_authorize_root_only_fallback():
+    assert prockill.parse_process_records(ROW.decode() + "43 42 501\n", strict=True) == {}
