@@ -27,12 +27,15 @@ def inventory(s):
     tree = ast.parse((Path(__file__).resolve().parents[1] / "main.py").read_text())
     creation = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
                     and any(isinstance(t, ast.Name) and t.id == "work_lanes" for t in n.targets))
-    return eval(compile(ast.Expression(creation), "main.py", "eval"), {
-        "WorkLanesInventory": WorkLanesInventory,
-        "WorkLaneAlertSink": work_lane_alerts.WorkLaneAlertSink,
-        "store": s.store, "sessions": s.server.sessions, "server": s.server,
-        "specs": None, "alerts": s.alerts,
-    })
+    # These journeys drive each drain explicitly; refresh-interval tests cover scheduling.
+    with pytest.MonkeyPatch.context() as timing:
+        timing.setenv("WORK_LANES_REFRESH_MIN_S", "0")
+        return eval(compile(ast.Expression(creation), "main.py", "eval"), {
+            "WorkLanesInventory": WorkLanesInventory,
+            "WorkLaneAlertSink": work_lane_alerts.WorkLaneAlertSink,
+            "store": s.store, "sessions": s.server.sessions, "server": s.server,
+            "specs": None, "alerts": s.alerts,
+        })
 
 
 @asynccontextmanager

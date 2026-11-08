@@ -19,6 +19,8 @@ from server import ASSISTANT_ALIAS, Server
 from sessions import Sessions, VerbError
 from test_send_semantics import FakeTmux, HOST, _new_comms
 
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
 ALIAS = ASSISTANT_ALIAS
 COMPOSITE_CHAT = f"{ALIAS}:assistant"
 SEAT_A = f"{HOST}:seat-a"

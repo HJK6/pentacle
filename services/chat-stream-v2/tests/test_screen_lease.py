@@ -7,6 +7,8 @@ from screen_lease import ScreenLease
 from test_external_work import Rig
 from test_nudges import HOST
 
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
 DESK = f"{HOST}:desk"
 OTHER = f"{HOST}:other"
 
