@@ -17,8 +17,7 @@ from spawnctl import SpawnCtl  # noqa: E402
 from store import Store, normalize_spec_ids  # noqa: E402
 from uiverbs import UIVerbs  # noqa: E402
 from ledger import Ledger  # noqa: E402
-pytest.importorskip("specs_parser", reason="requires the shared specs parser")
-from specs_parser import DEFAULT_STATUSES  # noqa: E402
+from _shared.specs_parser import DEFAULT_STATUSES  # noqa: E402
 from _shared.specs_service import SpecsSubsystem  # noqa: E402
 
 

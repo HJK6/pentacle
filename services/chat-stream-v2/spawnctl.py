@@ -2107,6 +2107,9 @@ class SpawnCtl:
         # launch resolution and reservation so an explicit but unknown item can
         # never produce a pane, intent, or misleading spawn.ok.
         spec_binding = await self._resolve_spec_binding(msg, host, name)
+        # Native resume preserves its retained assignment below. Guard that
+        # same source, rather than the fresh request's often-empty spec tags.
+        execution_binding = resume_prior_row if resume_prior_row is not None else spec_binding
         policy = getattr(self.sessions, "assistant", None)
         # Resolve presentation only after the original wire hash is frozen. The
         # same decision feeds launch, retained intent and first open; replay uses
@@ -2227,7 +2230,7 @@ class SpawnCtl:
                     return replay
                 raise refusal
 
-        await self._lane_admission(msg, spec_binding, work_role)
+        await self._lane_admission(msg, execution_binding, work_role)
 
         # Reserve the stream and its creation identity before any pane exists.
         # The existing atomic claim still decides concurrent NEW same-key fires.
@@ -2346,7 +2349,7 @@ class SpawnCtl:
             # Graph admission ends before boot. A winning parent close makes
             # this request refuse before a pane; a winning intent blocks close.
             async with self.sessions._graph_lock:
-                lane_provisioning = await self._lane_admission(msg, spec_binding, work_role)
+                lane_provisioning = await self._lane_admission(msg, execution_binding, work_role)
                 parent_normalization = None
                 parent_id = str(open_flds.get("parent_stream_id") or "")
                 if parent_id:
@@ -2382,7 +2385,7 @@ class SpawnCtl:
                         *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
                     ),
                     prepared_qa=prepared_qa,
-                    lane_admission={"spec_id": effective_assignment(spec_binding), "lane_id": msg.get("lane_id"),
+                    lane_admission={"spec_id": effective_assignment(execution_binding), "lane_id": msg.get("lane_id"),
                                     "provisioning": bool(lane_provisioning), "linked_only": not msg.get("provision_only"),
                                     "provisioning_auth": msg.get("_auth_context") or {}},
                 )

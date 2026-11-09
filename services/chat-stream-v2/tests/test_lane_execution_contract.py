@@ -95,6 +95,42 @@ async def test_real_spawn_admission_requires_active_owned_lane(env, state):
     assert tmux.created == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["active", "paused", "blocked", "done", "orphan"])
+async def test_native_resume_rechecks_retained_lane_assignment(env, tmp_path, state):
+    from test_spawn_resume import (_machine, _write_transcript, _closed_prior,
+                                   ResumeTmux, _install_successful_spawn, RESUME_ID)
+    from spawnctl import SpawnCtl
+    from _shared.specs_service import SpecsSubsystem
+    target = item(env.root, "demo__resume")
+    machine = _machine(tmp_path)
+    prior = await _closed_prior(env.store, _write_transcript(machine))
+    await env.store.update_session("localhost", "v2-original-fable", spec_ids=[target],
+        spec_id=target, assigned_spec_id=target,
+        spec_binding_provenance=[{"spec_id": target, "provenance": "spawn_explicit",
+                                 "granting_principal": "operator", "granted_at": "2026-11-09T00:00:00Z"}])
+    await lane(env.store, "wl-resume", target, state="active" if state == "orphan" else state)
+    if state == "orphan":
+        await env.store.submit(lambda conn: conn.execute(
+            "UPDATE v2_assistant_composite_lanes SET bound_generation='lost'"))
+    tmux = ResumeTmux()
+    sessions = Sessions(env.store, tmux=tmux, local_host="localhost")
+    specs = SpecsSubsystem(memory_root=env.root, session_summaries=lambda: [], changed_callback=lambda _: None)
+    ctl = SpawnCtl(env.store, sessions, tmux=tmux, machine=machine, specs=specs)
+    commands = _install_successful_spawn(ctl, sessions, tmux)
+    msg = {"provider": "claude", "model": "claude-fable-5-1", "effort": "high",
+           "resume_session_id": RESUME_ID, "request_id": "lane-resume"}
+    if state == "active":
+        assert (await ctl.spawn(msg, "localhost"))["type"] == "spawn.ok"
+        assert len(commands) == 1
+    else:
+        with pytest.raises(VerbError) as exc:
+            await ctl.spawn(msg, "localhost")
+        assert exc.value.code in {"work_lane_not_active", "work_lane_assignment_unlinked", "work_lane_visible_lead_required"}
+        assert commands == []
+        assert (await env.store.fetch_session("localhost", "v2-original-fable"))["session_generation"] == prior["session_generation"]
+
+
 @pytest.mark.parametrize("to", ["paused", "blocked", "done"])
 def test_busy_assigned_worker_blocks_deliberate_transition(to):
     async def body(env):
