@@ -40,13 +40,14 @@ import shlex
 import stat as stat_module
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import Any, Awaitable, Callable
 
 from claude_jsonl_norm import normalize_claude_jsonl_records
 from codex_rollout_norm import codex_is_guardian_review, codex_session_identity, normalize_codex_rollout_record
 from context_adapters import parse_codex_context_reading
 from message_envelopes import annotate_message_envelope
-from prockill import canonical_start, process_tree, process_record
+from prockill import canonical_start, process_tree, process_record, pid_alive
 from error_adapters import ErrorFact
 from store import ENTRY_DROPPED
 from tmux_transport import TRANSCRIPT_DIRS, _exec
@@ -107,6 +108,13 @@ class IngestConfig:
 
 
 @dataclass
+class _IdentityGrace:
+    key: tuple[str, str, str, str]
+    since: float
+    attempts: int = 0
+
+
+@dataclass
 class _StreamIngest:
     """Per-stream supervised tail state — the unit B13 isolates so one sick
     stream never kills the pump. Never persisted (rebuilt on daemon restart; the
@@ -132,6 +140,9 @@ class _StreamIngest:
     cursor_norm_state: dict = field(default_factory=dict)
     cursor_line: int = 0
     identity_incident_id: str | None = None
+    identity_grace: _IdentityGrace | None = None
+    # Coalesce entry/late refusals; eligibility advances only at attempt completion.
+    identity_refusal: tuple[dict, dict] | None = None
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -444,6 +455,7 @@ class Ingest:
     # -- per-stream ingest -------------------------------------------------
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
+        st.identity_refusal = None
         appended = await self._ingest_stream_events(row, st, budget)
         # A strict discovery/pre-append check can fail after entry was proven.
         # Surface that refusal at this pass's end, without consuming any bytes
@@ -464,6 +476,17 @@ class Ingest:
                     if await self._provider_root(current, name, observation=observation) is None:
                         _close_stream(st)
                         await self._record_identity_blocked(current, st, observation)
+                    else:
+                        st.identity_refusal = None  # proven late recovery
+                else:
+                    st.identity_refusal = None
+        refusal = st.identity_refusal
+        st.identity_refusal = None
+        if refusal is not None:
+            failed_row, observation = refusal
+            await self._record_identity_blocked(failed_row, st, observation, completed_attempt=True)
+        else:
+            st.identity_grace = None
         return appended
 
     async def _ingest_stream_events(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
@@ -1078,11 +1101,15 @@ class Ingest:
                  })
         return {**row, "observer_binding": rebound}
 
-    async def _record_identity_blocked(self, row: dict, st: _StreamIngest, observation: dict) -> None:
+    async def _record_identity_blocked(
+        self, row: dict, st: _StreamIngest, observation: dict, *, completed_attempt: bool = False,
+    ) -> None:
         """Historical refusal at normal ingest cadence; never an activity claim."""
         binding = row.get("observer_binding")
         generation = row.get("session_generation")
         if not generation or not isinstance(binding, dict) or binding.get("generation") != generation:
+            st.identity_grace = None
+            st.identity_refusal = None
             return
         try:
             current = await self.store.fetch_session(row["host"], row["session_name"])
@@ -1090,14 +1117,42 @@ class Ingest:
                     or current.get("session_generation") != generation
                     or current.get("observer_binding") != binding
                     or current.get("pane_pid") != row.get("pane_pid")):
+                st.identity_grace = None
+                st.identity_refusal = None
                 return  # stale diagnostic; next normal pass observes the new tuple
             digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             started = canonical_start(observation.get("start")) or "unavailable"
+            reason = observation.get("reason", "proof_unavailable")
+            unavailable = (reason == "proof_unavailable" and started == "unavailable"
+                           and binding.get("pane_pid") == row.get("pane_pid"))
+            if unavailable:
+                # Liveness is only an alert filter. It grants no transcript or
+                # rebind authority; strict root proof has already refused both.
+                if not await asyncio.to_thread(pid_alive, str(binding.get("pane_pid") or "")):
+                    st.identity_grace = None
+                    st.identity_refusal = None
+                    log.debug("ingest identity deferred stream=%s action=process_gone", row["stream_id"])
+                    return
+                if not completed_attempt:
+                    st.identity_refusal = (row, dict(observation))
+                    return
+                key = (row["stream_id"], generation, digest, str(row.get("pane_pid") or ""))
+                now = monotonic()
+                if st.identity_grace is None or st.identity_grace.key != key:
+                    st.identity_grace = _IdentityGrace(key, now)
+                st.identity_grace.attempts += 1
+                if st.identity_grace.attempts < 3 or now - st.identity_grace.since < 10:
+                    log.debug("ingest identity deferred stream=%s attempts=%s elapsed_s=%.3f",
+                              row["stream_id"], st.identity_grace.attempts, now - st.identity_grace.since)
+                    return
+            else:
+                st.identity_grace = None
+                st.identity_refusal = None
             episode = "ingest_identity_blocked:" + hashlib.sha256(json.dumps(
                 [row["stream_id"], generation, digest, started], separators=(",", ":"),
             ).encode()).hexdigest()
-            reason = observation.get("reason", "proof_unavailable")
-            st.identity_incident_id = episode
+            if not unavailable:
+                st.identity_incident_id = episode  # preserve immediate-refusal semantics
             log.warning("ingest identity blocked incident=%s stream=%s generation=%s binding_digest=%s stored_pid=%s current_pid=%s stored_start=%s current_start=%s reason=%s",
                         episode, row["stream_id"], generation, digest, binding.get("pane_pid"),
                         row.get("pane_pid"), canonical_start(binding.get("pane_started_at")), started, reason,
@@ -1108,7 +1163,9 @@ class Ingest:
                                "observed_start": started, "reason": reason})
             fact = ErrorFact("integrity", "ingest_identity_blocked", episode, stage=reason)
             ref = await self.alerts.error(fact) if self.alerts is not None else None
-            if not ref:
+            if ref:
+                st.identity_incident_id = episode
+            else:
                 log.warning("ingest identity incident=%s action=sink_unavailable", episode,
                             extra={"subsystem": "ingest", "bug_ref": "issue_201"})
         except Exception:  # noqa: BLE001 - retry at normal cadence, never fail the pump

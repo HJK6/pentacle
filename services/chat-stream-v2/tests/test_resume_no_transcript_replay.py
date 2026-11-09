@@ -12,6 +12,7 @@ import asyncio
 from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from ingest import append_ingested_event
 from store import Store
+from test_assistant_prose_mirror import _operator_trigger
 
 ASSISTANT = "fixture-chat:assistant"
 ROOT = "fixture-root:visible"
@@ -32,13 +33,21 @@ def _event(text: str, message_id: str) -> dict:
             "raw": {"source_session_identity": "fixture-session", "message_id": message_id}}
 
 
-async def _open(store: Store, pane_pid: str) -> dict:
+async def _open(store: Store, pane_pid: str) -> tuple[dict, str]:
     row = await store.open_session("fixture-root", "visible", provider="claude", pane_pid=pane_pid,
                                    claude_session_id="11111111-2222-4333-8444-555555555555")
     composite = AssistantComposite(store, config=_config(row["session_generation"]))
     await composite.ensure_projection()
-    await composite.stop()
-    return await store.fetch_open_session_lifecycle(ROOT, pane_pid=pane_pid)
+    try:
+        # Each lifecycle needs an admitted operator input so replay suppression,
+        # rather than unknown-trigger suppression, controls its mirror oracle.
+        seq = await _operator_trigger(store, composite,
+            identity="resume-operator-" + pane_pid, pane_pid=pane_pid)
+        operator_wire = next(event["text"] for event in await store.fetch_session_event_tail(ROOT, limit=50)
+                             if event["daemon_seq"] == seq)
+    finally:
+        await composite.stop()
+    return await store.fetch_open_session_lifecycle(ROOT, pane_pid=pane_pid), operator_wire
 
 
 async def _mirrored(store: Store) -> list[str]:
@@ -56,7 +65,7 @@ def test_resumed_seat_rereads_history_silently_and_new_records_are_live():
             async def broadcast(frame):
                 frames.append(frame)
 
-            first = await _open(store, "4242")
+            first, _ = await _open(store, "4242")
             old = _event("Earlier front-desk answer", "m-1")
             assert await append_ingested_event(store, broadcast, old, recent_limit=50, lifecycle=first)
             assert await _mirrored(store) == ["Earlier front-desk answer"]
@@ -65,7 +74,7 @@ def test_resumed_seat_rereads_history_silently_and_new_records_are_live():
 
             # Resume: the same stream and transcript, a new lifecycle.
             await asyncio.sleep(1.1)  # the row's created_at has one-second resolution here
-            second = await _open(store, "4343")
+            second, operator_wire = await _open(store, "4343")
             assert second["session_created_at"] != first["session_created_at"]
             assert second["generation"] != first["generation"]
 
@@ -75,14 +84,14 @@ def test_resumed_seat_rereads_history_silently_and_new_records_are_live():
             assert await _mirrored(store) == ["Earlier front-desk answer"], "no second mirror publication"
             # The new lifecycle still has its history.
             history = [e["text"] for e in await store.fetch_session_event_tail(ROOT, limit=50)]
-            assert history == ["Earlier front-desk answer"]
+            assert history == [operator_wire, "Earlier front-desk answer"]
 
             fresh = _event("First answer after the resume", "m-2")
             assert await append_ingested_event(store, broadcast, fresh, recent_limit=50, lifecycle=second)
             assert len(frames) > live_before
             assert await _mirrored(store) == ["Earlier front-desk answer", "First answer after the resume"]
             assert [e["text"] for e in await store.fetch_session_event_tail(ROOT, limit=50)] == [
-                "Earlier front-desk answer", "First answer after the resume"]
+                operator_wire, "Earlier front-desk answer", "First answer after the resume"]
             # Re-reading within the same lifecycle stays a plain duplicate.
             assert await append_ingested_event(store, broadcast, fresh, recent_limit=50, lifecycle=second) is None
         finally:
@@ -100,10 +109,10 @@ def test_same_stream_name_with_other_records_is_not_treated_as_replay():
             async def broadcast(frame):
                 return None
 
-            first = await _open(store, "4242")
+            first, _ = await _open(store, "4242")
             assert await append_ingested_event(store, broadcast, _event("old", "m-1"), recent_limit=50, lifecycle=first)
             await asyncio.sleep(1.1)
-            second = await _open(store, "4343")
+            second, _ = await _open(store, "4343")
             assert second["session_created_at"] != first["session_created_at"]
             assert await append_ingested_event(store, broadcast, _event("old", "m-other"), recent_limit=50,
                                                lifecycle=second)
