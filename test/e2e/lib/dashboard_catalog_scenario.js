@@ -139,9 +139,8 @@ async function dashboardCatalog(ctx) {
     await session.click('#view-chats');
     await session.eval("window.__catalogPreviousList = document.getElementById('dashboard-list').firstChild");
     await session.click('#view-dashboards');
-    // View entry empties the list at once and keeps the previous version
-    // attribute until the load settles; wait for the re-rendered list, since
-    // board clicks are ignored while the catalog is loading.
+    // Re-entry can render provisional membership immediately. Wait for the
+    // requested version and a newly rendered list before version assertions.
     await session.waitFor(`document.getElementById('dashboard-content').dataset.catalogVersion === ${JSON.stringify(version)}
       && document.getElementById('dashboard-list').firstChild !== window.__catalogPreviousList
       && !!document.querySelector('#dashboard-list [data-dashboard-id]')`);
@@ -183,8 +182,11 @@ async function dashboardCatalog(ctx) {
       ['catalogRoot never reaches the renderer', config && !('catalogRoot' in config), { config }],
     ]);
     await prepareCatalogChat(ctx);
+    const coldStart = Date.now();
     await enter(first.version);
+    const coldMs = Date.now() - coldStart;
     const loaded = await observe();
+    reportChecks(report, [['healthy fixture cold catalog is selectable within 2 seconds', coldMs <= 2000, {coldMs}]]);
     reportChecks(report, [[`catalog ${first.version} renders in catalog array order`, loaded.version === first.version
       && JSON.stringify(loaded.ids) === JSON.stringify(first.catalog.boards.filter(board => board.visible !== false).map(board => board.id)), loaded]]);
 
@@ -234,6 +236,43 @@ async function dashboardCatalog(ctx) {
         ['example-board renders version N', adapter.state === 'ready' && adapter.adapterVersion === first.version && adapter.text.includes(`lib ${first.version}`), adapter],
         ['adapter loads version-pinned lib, css, script in order with SRI', expectedTags.every((entry, index) => tags[index]?.url === `/dashboards/private/${first.version}/${entry.path}` && tags[index].integrity === pinnedIntegrity(entry.sha256) && tags[index].crossorigin === 'anonymous'), { tags }],
       ]);
+
+      // Delay a real catalog bridge response for twenty seconds. Catalog and
+      // adapter bytes still come from the fixture daemon/web host unchanged.
+      await session.eval(`(() => {
+        const original = window.cc.assetList;
+        window.__catalogDelay = {calls:0,done:false};
+        window.cc.assetList = async function(args) {
+          if (args?.spec_id !== ${JSON.stringify(fixture.specId)}) return original.call(this,args);
+          window.__catalogDelay.calls++;
+          const reply = await original.call(this,args);
+          await new Promise(resolve => setTimeout(resolve,20000));
+          window.__catalogDelay.done = true;
+          return reply;
+        };
+        window.__restoreCatalogList = () => { window.cc.assetList = original; };
+      })()`);
+      try {
+        const warm = [];
+        for (let i=0;i<5;i++) {
+          await session.click('#view-chats');
+          await session.eval("window.__catalogWarmStart = performance.now()");
+          await session.click('#view-dashboards');
+          await session.waitFor(`!!document.querySelector('[data-testid="dashboard-catalog-cached"]')
+            && !!document.querySelector('#dashboard-list [data-dashboard-id]')
+            && document.querySelector('[data-example-board-version]')?.dataset.exampleBoardVersion === ${JSON.stringify(first.version)}`);
+          warm.push(await session.eval(`({ms:performance.now()-window.__catalogWarmStart,
+            refreshing:document.querySelector('[data-testid="dashboard-catalog-cached"]').textContent.includes('refreshing'),
+            usable:document.getElementById('dashboard-content').textContent.includes(${JSON.stringify(`lib ${first.version}`)}),
+            calls:window.__catalogDelay.calls,done:window.__catalogDelay.done})`));
+        }
+        await session.eval("window.__catalogUnchangedNode = document.querySelector('[data-example-board-version]'); true");
+        reportChecks(report, [['five warm catalog returns stay usable within 500ms during 20s revalidation',
+          warm.every(row=>row.ms<=500 && row.refreshing && row.usable && row.calls===1 && !row.done), {warm}]]);
+        await session.waitFor("window.__catalogDelay.done && !document.querySelector('[data-testid=dashboard-catalog-cached]')", {timeoutMs:25000});
+        const unchanged = await session.eval("document.querySelector('[data-example-board-version]') === window.__catalogUnchangedNode");
+        reportChecks(report, [['unchanged refresh preserves selected board DOM', unchanged, {unchanged}]]);
+      } finally { await session.eval('window.__restoreCatalogList?.()'); }
 
       await session.click('[data-dashboard-id="example-broken"]');
       await session.waitFor("!!document.querySelector('#dashboard-content [data-testid=\"dashboard-board-error\"]')");

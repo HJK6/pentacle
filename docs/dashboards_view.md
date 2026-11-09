@@ -34,6 +34,27 @@ is a normal hosted catalog record, with no separate built-in registration.
 Without a configured catalog or usable cache, there is no independently ordered
 built-in fallback; an empty list reads “No dashboards configured”.
 
+## Catalog refresh
+
+Returning to Dashboards immediately displays the last validated catalog from
+this connected browser and catalog scope, with a cached-age/refreshing label.
+Repeated navigation shares one background list/get request. An unchanged
+response preserves the selected board; changed catalog content reconciles it
+through normal unmount/mount cleanup. Leaving the view disposes board resources
+while a still-current catalog request can finish for the next entry.
+
+Disconnects, binding/scope changes and catalog update/removal pushes invalidate
+immediate reuse. Authoritative removal, denial, malformed or unsupported
+responses clear provisional membership. A transport outage may display validated
+cached data with an unavailable warning; restored session storage is only this
+stale fallback, never immediate authenticated authority. Hosted opening always
+checks the current daemon policy and identity mode.
+
+Automatic chat asset/question refreshes coalesce by viewer while pending.
+Inventories and pushes continue to update chat state while Dashboards is open;
+automatic chat reads wait until Chats returns, then catch up once per dirty
+viewer. Initial attachment and explicit user reads retain their normal behavior.
+
 ## Hosted URL and web admission
 
 The daemon service owns these runtime inputs:

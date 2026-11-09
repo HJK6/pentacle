@@ -508,7 +508,6 @@ const state = {
   questionDrafts: {}, // streamId -> { sig, answers: { [questionIndex]: { optionIndex?, text? } } }
   questionPageIndexByStream: {},
   durableQuestionNotificationsById: {}, // notification_id -> open agent_question.v1 notification
-  durableQuestionHydrationByStream: {}, // streamId -> in-flight/done scoped prompt.list hydration
   // Bug1 (chat_ui_hardening_batch3) new-chat flash guard: the desktop session
   // key + the stream id LAST PAINTED for each slot. On a session change these
   // hold the PREVIOUS binding (intentionally NOT reset by attachSession) so
@@ -687,6 +686,8 @@ function indexDurableQuestionNotification(notification) {
   // A stale open inventory cannot resurrect an already resolved identity.
   if (previous && !isOpenDurableQuestionNotification(previous) && isOpenDurableQuestionNotification(merged)) return false;
   state.durableQuestionNotificationsById[id] = merged;
+  state.questionMutationGen = (state.questionMutationGen || 0) + 1;
+  (state.questionMutations ||= new Map()).set(id, state.questionMutationGen);
   if (!isOpenDurableQuestionNotification(merged)) {
     for (const uncertain of Object.values(state.questionUncertainIdsByStream || {})) uncertain.delete(id);
   }
@@ -770,7 +771,7 @@ function notificationFromAgentQuestion(question, surfacedToStreamId = '') {
   };
 }
 
-function applyPromptListQuestions(reply, streamId) {
+function applyPromptListQuestions(reply, streamId, mutationGen = Infinity) {
   if (!reply || !Array.isArray(reply.questions)) return;
   const scopedStreamIds = new Set(
     (Array.isArray(reply.producer_stream_ids) ? reply.producer_stream_ids : [])
@@ -783,14 +784,14 @@ function applyPromptListQuestions(reply, streamId) {
     const notification = notificationFromAgentQuestion(question, surfacedToStreamId);
     if (!notification) continue;
     returnedIds.add(durableQuestionNotificationId(notification));
-    indexDurableQuestionNotification(notification);
+    if ((state.questionMutations?.get(durableQuestionNotificationId(notification)) || 0) <= mutationGen) indexDurableQuestionNotification(notification);
   }
   for (const uncertain of Object.values(state.questionUncertainIdsByStream || {})) {
     for (const id of returnedIds) uncertain.delete(id);
   }
   if (scopedStreamIds.size > 0) {
     for (const [notificationId, notification] of Object.entries(state.durableQuestionNotificationsById || {})) {
-      if (returnedIds.has(notificationId)) continue;
+      if (returnedIds.has(notificationId) || (state.questionMutations?.get(notificationId) || 0) > mutationGen) continue;
       const producerStreamId = durableQuestionStreamId(notification);
       if (producerStreamId && scopedStreamIds.has(producerStreamId)) {
         delete state.durableQuestionNotificationsById[notificationId];
@@ -799,20 +800,84 @@ function applyPromptListQuestions(reply, streamId) {
   }
 }
 
-function ensureDurableQuestionsHydrated(streamId) {
+// Automatic chat reads share a viewer/connection/scope lifetime. Inventories
+// dirty an existing read; only its settlement may start one trailing read.
+const automaticChatReads = new Map();
+const chatViewerScopes = new Map();
+const chatViewerEpochs = new Map();
+let chatRefreshEpoch = 0;
+function activeChatViewerSlots(streamId) {
+  return [0, 1, 2, 3].filter(slot => assetContextForSlot(slot)?.streamId === streamId);
+}
+function chatViewerScope(streamId) {
+  const rows = state.chatStream.sessions || [], ids = new Set([streamId]);
+  for (let n = 0; n < 64; n++) {
+    const before = ids.size;
+    for (const row of rows) {
+      const id = sessionSummaryStreamId(row);
+      if (ids.has(id) && row.handoff_from_stream_id) ids.add(row.handoff_from_stream_id);
+      if (ids.has(row.parent_stream_id) || ids.has(row.handoff_from_stream_id)) ids.add(id);
+    }
+    if (ids.size === before) break;
+  }
+  return JSON.stringify(rows.filter(row => ids.has(sessionSummaryStreamId(row))).map(row =>
+    [sessionSummaryStreamId(row), row.parent_stream_id, row.visibility, row.spec_ids, row.qualified_spec_ids, row.status, row.closed_at, row.handoff_from_stream_id, row.session_generation]
+  ).sort((a,b) => a[0].localeCompare(b[0])));
+}
+function clearChatViewerScope(streamId) {
+  chatViewerEpochs.set(streamId, (chatViewerEpochs.get(streamId) || 0) + 1);
+  const bucket = assetBucketForStream(streamId);
+  bucket.snapshotRequestGen = (bucket.snapshotRequestGen || 0) + 1;
+  bucket.scopeStreamIds = [streamId]; bucket.snapshotAssetKeys = new Set();
+  for (const slot of activeChatViewerSlots(streamId)) {
+    if (state.slotActiveAsset[slot]) { state.slotActiveAsset[slot] = null; updateSlotViewMode(slot, 'chat'); }
+    ensureSlotAssetTabs(slot);
+  }
+  for (const [id, question] of Object.entries(state.durableQuestionNotificationsById)) {
+    if (question.surfaced_to_stream_id === streamId && durableQuestionStreamId(question) !== streamId) delete state.durableQuestionNotificationsById[id];
+  }
+}
+function reconcileChatReadScopes(reset = false) {
+  if (reset) { chatRefreshEpoch++; automaticChatReads.clear(); }
+  for (const streamId of new Set([0,1,2,3].map(slot => assetContextForSlot(slot)?.streamId).filter(Boolean))) {
+    const signature = chatViewerScope(streamId);
+    if (reset || (chatViewerScopes.has(streamId) && chatViewerScopes.get(streamId) !== signature)) {
+      for (const kind of ['assets','questions']) automaticChatReads.delete(`${kind}:${streamId}`);
+      clearChatViewerScope(streamId);
+    }
+    chatViewerScopes.set(streamId, signature);
+  }
+}
+function automaticChatRead(kind, streamId, read, dirty = false) {
+  const key = `${kind}:${streamId}`;
+  let entry = automaticChatReads.get(key);
+  if (!entry) { entry = { dirty: true, pending: null }; automaticChatReads.set(key, entry); }
+  if (dirty) entry.dirty = true;
+  entry.read = read;
+  if (entry.pending || !entry.dirty || state.currentView === 'dashboards' || !state.chatStream.connected || !activeChatViewerSlots(streamId).length) return entry.pending;
+  entry.dirty = false;
+  // Start synchronously so a second slot immediately joins the same request.
+  entry.pending = Promise.resolve(read()).catch(() => {}).finally(() => {
+    entry.pending = null;
+    if (automaticChatReads.get(key) !== entry) return;
+    if (entry.dirty) automaticChatRead(kind, streamId, entry.read);
+  });
+  return entry.pending;
+}
+function ensureDurableQuestionsHydrated(streamId, dirty = false) {
   const wanted = String(streamId || '').trim();
-  if (!wanted || !window.cc || typeof window.cc.promptList !== 'function') return;
-  if (state.durableQuestionHydrationByStream[wanted]) return;
-  state.durableQuestionHydrationByStream[wanted] = 'loading';
-  window.cc.promptList({ producer_stream_id: wanted, open: false })
-    .then((reply) => {
-      applyPromptListQuestions(reply, wanted);
-      state.durableQuestionHydrationByStream[wanted] = 'done';
-      scheduleDurableQuestionSlotRenders();
-    })
-    .catch(() => {
-      delete state.durableQuestionHydrationByStream[wanted];
-    });
+  if (!wanted || typeof window.cc?.promptList !== 'function') return;
+  return automaticChatRead('questions', wanted, async () => {
+    const epoch = chatRefreshEpoch, scopeEpoch = chatViewerEpochs.get(wanted), scope = chatViewerScope(wanted);
+    const owners = activeChatViewerSlots(wanted).map(slot => [slot, state.slotGen[slot], state.slots[slot]]);
+    const mutationGen = state.questionMutationGen || 0;
+    const reply = await window.cc.promptList({ producer_stream_id: wanted, open: false });
+    if (epoch !== chatRefreshEpoch || scopeEpoch !== chatViewerEpochs.get(wanted) || scope !== chatViewerScope(wanted)
+      || !owners.some(([slot, gen, session]) => state.slotGen[slot] === gen && state.slots[slot] === session)) return;
+    if (reply?.ok === false) return;
+    applyPromptListQuestions(reply, wanted, mutationGen);
+    scheduleDurableQuestionSlotRenders();
+  }, dirty);
 }
 
 // The host forwards the daemon's connect snapshot only to renderers attached at
@@ -821,8 +886,9 @@ function ensureDurableQuestionsHydrated(streamId) {
 // before any chat is opened.
 function hydrateOpenDurableQuestions() {
   if (typeof window.cc?.notificationList !== 'function') return Promise.resolve();
+  const epoch = chatRefreshEpoch;
   return Promise.resolve(window.cc.notificationList({ states: ['open'] })).then((reply) => {
-    if (!reply || !Array.isArray(reply.notifications)) return;
+    if (epoch !== chatRefreshEpoch || !reply || !Array.isArray(reply.notifications)) return;
     let changed = false;
     for (const notification of reply.notifications) {
       changed = indexDurableQuestionNotification(notification) || changed;
@@ -1435,15 +1501,18 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
   if (!args) return null;
   const fallbackSessionKey = fallbackAssetSessionKeyForSession(session);
   const viewerBucket = assetBucketForStream(fallbackSessionKey.stream_id);
+  const epoch = chatRefreshEpoch, scopeEpoch = chatViewerEpochs.get(fallbackSessionKey.stream_id), scope = chatViewerScope(fallbackSessionKey.stream_id);
   const requestGen = viewerBucket.snapshotRequestGen = (viewerBucket.snapshotRequestGen || 0) + 1;
   const mutationGen = state.chatStream.assetMutationGen || 0;
   try {
     const reply = await window.cc.assetList(args);
-    if (state.slotGen[slot] !== gen || state.slots[slot] !== session
+    if (epoch !== chatRefreshEpoch || scopeEpoch !== chatViewerEpochs.get(fallbackSessionKey.stream_id) || scope !== chatViewerScope(fallbackSessionKey.stream_id)
+      || state.slotGen[slot] !== gen || state.slots[slot] !== session
       || viewerBucket.snapshotRequestGen !== requestGen) return null;
     if (reply?.ok === false) return null;
     viewerBucket.scopeStreamIds = Array.isArray(reply?.scope_stream_ids)
       ? reply.scope_stream_ids : [fallbackSessionKey.stream_id];
+    chatViewerScopes.set(fallbackSessionKey.stream_id, chatViewerScope(fallbackSessionKey.stream_id));
     const rows = normalizeAssetListResponse(reply, fallbackSessionKey);
     const recordsByOwner = new Map(rows.map(row => [JSON.stringify([row.session_key.stream_id, row.asset_id]), row]));
     // Preserve pushes committed while this snapshot was in flight, including
@@ -1482,9 +1551,14 @@ async function fetchSlotAssetSnapshot(slot, gen = state.slotGen[slot]) {
   }
 }
 
-function refetchAssetSnapshotsForActiveSlots() {
-  for (let slot = 0; slot < 4; slot++) {
-    if (state.slots[slot] && !state.botSlots[slot]) fetchSlotAssetSnapshot(slot, state.slotGen[slot]);
+function refetchAssetSnapshotsForActiveSlots(dirty = true) {
+  const viewers = new Set([0,1,2,3].map(slot => assetContextForSlot(slot)?.streamId).filter(Boolean));
+  for (const streamId of viewers) {
+    automaticChatRead('assets', streamId, () => {
+      const slot = activeChatViewerSlots(streamId)[0];
+      return slot === undefined ? null : fetchSlotAssetSnapshot(slot, state.slotGen[slot]);
+    }, dirty);
+    ensureDurableQuestionsHydrated(streamId, dirty);
   }
 }
 
@@ -1994,6 +2068,7 @@ function applyChatStreamState(data) {
   // there's a stale-UI window where the sidebar still shows live state
   // but the daemon is unreachable.
   if (!applyVersionedConnectionState(state.chatStream, data, setDegradedMode)) return;
+  if (wasConnected !== state.chatStream.connected) invalidateDashboardCatalog();
   const nextPolicy = data.connected === false ? null : data.hostedDashboardPolicy;
   if (data.connected === false || Object.prototype.hasOwnProperty.call(data, 'hostedDashboardPolicy')) {
     window.hostedDashboardPolicy = nextPolicy || null;
@@ -2025,7 +2100,7 @@ function applyChatStreamState(data) {
   closedChatSlots.update(data);
   reconcileComposerDraftInventory(data);
   reconcileLocallyClosedStreamIds();
-  state.durableQuestionHydrationByStream = {};
+  reconcileChatReadScopes(wasConnected !== state.chatStream.connected);
   if (Array.isArray(data.schedules)) {
     // Retain the schedule protocol inventory for future consumers; the desktop
     // schedule window plane was retired so there is nothing to re-render here.
@@ -2111,29 +2186,20 @@ function applyChatStreamPayload(payload) {
     return;
   }
   if (payload.type === 'asset.update') {
+    invalidateDashboardCatalogForAsset(payload);
     applyAssetUpdate(payload);
     return;
   }
   if (payload.type === 'asset.removed') {
+    invalidateDashboardCatalogForAsset(payload);
     applyAssetRemoved(payload);
     return;
   }
   if (payload.type === 'assistant.binding.changed') {
     wakeDelivery?.invalidateBinding();
-    // A binding change does not emit session.inventory. Hide the old scope
-    // immediately; the newer request generation refuses any late old list.
-    for (let slot = 0; slot < 4; slot++) {
-      const context = assetContextForSlot(slot);
-      if (!context) continue;
-      const bucket = assetBucketForStream(context.streamId);
-      bucket.scopeStreamIds = [context.streamId];
-      bucket.snapshotAssetKeys = new Set();
-      if (state.slotActiveAsset[slot]) {
-        state.slotActiveAsset[slot] = null;
-        updateSlotViewMode(slot, 'chat');
-      }
-      ensureSlotAssetTabs(slot);
-    }
+    // A binding change creates a new scope lifetime even while chats are hidden.
+    reconcileChatReadScopes(true);
+    invalidateDashboardCatalog();
     refetchAssetSnapshotsForActiveSlots();
     return;
   }
@@ -2193,7 +2259,7 @@ function applyChatStreamPayload(payload) {
     closedChatSlots.update(payload);
     reconcileComposerDraftInventory(payload);
     reconcileLocallyClosedStreamIds();
-    state.durableQuestionHydrationByStream = {};
+    reconcileChatReadScopes();
     if (state.chatStream.connected) {
       syncSlotDisplayNames();
     }
@@ -5939,6 +6005,7 @@ async function attachSession(slot, sessionName, displayName, hostId, options = {
 
 function detachSlot(slot, { force = false, preserveWorkspace = false } = {}) {
   if (!force && state.slotChatRefs[slot]?.questionVoiceController?.requestLeave(() => detachSlot(slot))) return;
+  const detachedViewer = assetContextForSlot(slot)?.streamId;
   saveComposerDraft(slot);
   state.slotComposerKeys[slot] = null;
   state.slotAttachments[slot] = [];
@@ -6005,6 +6072,11 @@ function detachSlot(slot, { force = false, preserveWorkspace = false } = {}) {
     delete state.chatStream.historyPaging?.[detachedStreamId];
   }
   state.slots[slot] = null;
+  if (detachedViewer && !activeChatViewerSlots(detachedViewer).length) {
+    for (const kind of ['assets','questions']) automaticChatReads.delete(`${kind}:${detachedViewer}`);
+    chatViewerEpochs.set(detachedViewer, (chatViewerEpochs.get(detachedViewer) || 0) + 1);
+    chatViewerScopes.delete(detachedViewer);
+  }
   state.slotSendPending[slot] = false;
   state.slotSendErrors[slot] = '';
   state.slotReplies[slot] = null;
@@ -7481,43 +7553,72 @@ window.addEventListener('pentacle:hosted-dashboard-mode', () => {
   if (state.currentView === 'dashboards' && !state.catalogLoading) renderDashboardList();
 });
 
-async function enterDashboardView() {
-  const generation = ++catalogViewGeneration;
-  state.catalogLoading = true;
-  document.getElementById('dashboard-list').replaceChildren();
+function invalidateDashboardCatalog() {
+  catalogClient?.reset();
+  catalogViewGeneration++;
+  if (state.currentView === 'dashboards') void enterDashboardView();
+}
+function invalidateDashboardCatalogForAsset(payload) {
+  const asset = payload.asset || payload;
+  if (asset.asset_id !== 'dashboard-catalog' || asset.spec_id !== CONFIG.dashboards?.catalogSpecId) return;
+  catalogClient ||= dashboardCatalog.createLoader({ root: window });
+  catalogClient.invalidate(asset.spec_id);
+  catalogViewGeneration++;
+  if (state.currentView === 'dashboards') void enterDashboardView();
+}
+function presentDashboardCatalog(result) {
   const container = document.getElementById('dashboard-content');
-  container.replaceChildren();
-  container.dataset.boardState = 'loading';
-  try {
-    await CFG_READY;
-    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
-    catalogClient ||= dashboardCatalog.createLoader();
-    const result = await catalogClient.refresh(CONFIG.dashboards?.catalogSpecId);
-    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards' || result.status === 'superseded') return;
-    stopDashboardPolling();
-    unmountCurrentDashboard();
-    const builtins = builtinDashboardImplementations;
-    const merged = catalogClient.merge(result, builtins, { reportBoard: dashboardReports,
+  const previous = catalogResult.catalog;
+  const unchanged = previous && result.catalog && JSON.stringify(previous) === JSON.stringify(result.catalog);
+  const mounted = !!state.dashboardRefs;
+  if (!unchanged || !mounted) {
+    stopDashboardPolling(); unmountCurrentDashboard();
+    const merged = catalogClient.merge(result, builtinDashboardImplementations, { reportBoard: dashboardReports,
       renderAsset: assetRender.renderAsset, hostedBoard: hostedDashboardRenderer });
     window.DASHBOARDS.splice(0, window.DASHBOARDS.length, ...merged.boards);
-    catalogResult = result; catalogBoardErrors = merged.errors;
-  } catch (error) {
-    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
-    stopDashboardPolling(); unmountCurrentDashboard();
-    catalogResult = { status: 'unavailable', catalog: null, message: `Dashboard catalog unavailable: ${error.message || error}` };
-    window.DASHBOARDS.splice(0, window.DASHBOARDS.length);
+    catalogBoardErrors = merged.errors;
   }
-  state.catalogLoading = false;
-  if (catalogResult.catalog) container.dataset.catalogVersion = catalogResult.catalog.catalog_version;
+  catalogResult = result; state.catalogLoading = false;
+  if (result.catalog) container.dataset.catalogVersion = result.catalog.catalog_version;
   else delete container.dataset.catalogVersion;
   const visible = window.visibleDashboards(CONFIG);
   if (!visible.some(board => board.id === state.selectedDashboard)) state.selectedDashboard = visible[0]?.id || null;
   renderDashboardList();
-  if (state.selectedDashboard) mountAndPoll(state.selectedDashboard);
+  if (state.selectedDashboard) { if (!unchanged || !mounted) mountAndPoll(state.selectedDashboard); }
   else {
     container.replaceChildren();
     const empty = document.createElement('p'); empty.className = 'dashboards-empty'; empty.textContent = 'No dashboards configured'; container.appendChild(empty);
     container.dataset.boardState = 'empty';
+  }
+}
+async function enterDashboardView() {
+  const generation = ++catalogViewGeneration;
+  const container = document.getElementById('dashboard-content');
+  // DOM ownership ends on navigation. A current-scope read survives it and may
+  // populate the next entry; only a scope/connection invalidation cancels it.
+  state.catalogLoading = true;
+  try {
+    await CFG_READY;
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
+    catalogClient ||= dashboardCatalog.createLoader({ root: window });
+    const spec = CONFIG.dashboards?.catalogSpecId;
+    const cached = catalogClient.peek(spec);
+    if (cached) presentDashboardCatalog(cached);
+    else {
+      stopDashboardPolling(); unmountCurrentDashboard();
+      window.DASHBOARDS.splice(0, window.DASHBOARDS.length);
+      document.getElementById('dashboard-list').replaceChildren();
+      container.replaceChildren(); container.dataset.boardState = 'loading';
+      delete container.dataset.catalogVersion;
+      const loading = document.createElement('p'); loading.textContent = 'Loading dashboards…';
+      loading.setAttribute('role', 'status'); container.appendChild(loading);
+    }
+    const result = await catalogClient.refresh(spec);
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards' || result.status === 'superseded') return;
+    presentDashboardCatalog(result);
+  } catch (error) {
+    if (generation !== catalogViewGeneration || state.currentView !== 'dashboards') return;
+    presentDashboardCatalog({ status: 'unavailable', catalog: null, message: `Dashboard catalog unavailable: ${error.message || error}` });
   }
 }
 
@@ -7529,7 +7630,6 @@ function switchView(view) {
   if (state.currentView === 'dashboards') {
     catalogViewGeneration++;
     state.catalogLoading = false;
-    catalogClient?.cancel();
     stopDashboardPolling();
     unmountCurrentDashboard();
   }
@@ -7551,6 +7651,7 @@ function switchView(view) {
     // Restore sessions panel.
     document.getElementById('panel-sessions').style.display = 'flex';
     scheduleVisibleSlotFits();
+    refetchAssetSnapshotsForActiveSlots(false);
   } else {
     // Hide chat panels
     document.getElementById('panel-sessions').style.display = 'none';
@@ -7694,7 +7795,7 @@ function renderDashboardList() {
   }
   if (catalogResult.cached) {
     const badge = document.createElement('p'); badge.dataset.testid = 'dashboard-catalog-cached';
-    badge.textContent = `catalog cached ${Math.floor(catalogResult.age / 1000)}s`; list.appendChild(badge);
+    badge.textContent = `catalog cached ${Math.floor(catalogResult.age / 1000)}s${catalogResult.status === 'refreshing' ? ' · refreshing' : ''}`; list.appendChild(badge);
   }
   for (const message of catalogBoardErrors) {
     const card = document.createElement('p'); card.dataset.testid = 'dashboard-board-error'; card.textContent = message; list.appendChild(card);
