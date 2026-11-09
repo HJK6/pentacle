@@ -107,4 +107,7 @@ def test_actual_populated_detail_serializer_stays_bounded():
     shown = {"lane": lane, "events": [], "updates": [], "_projection_row": lane, "_work_index": {"available": True}}
     response = page_lane_detail(shown, detail)
     assert len(json.dumps(response).encode()) <= 4194304
+    assert json.dumps(response).count('"progress_text"') == 32
+    assert json.dumps(response).count('"checkpoint_revision"') == 32
+    assert json.dumps(response).count('"goal_text"') == 32
     assert all("checkpoint" not in member for member in response["members"])

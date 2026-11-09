@@ -164,7 +164,8 @@ def test_pages_traverse_65_once_with_full_aggregates_and_goal_filter(tmp_path):
         seen, cursor = [], None
         while True:
             page = page_lane_detail(shown, projection, members_after=cursor)
-            assert page['members'] == page['projection']['members']
+            from work_lanes_projection import detail_member_keys
+            assert page['projection']['members'] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in page['members']]
             assert len(page['lane']['members']) <= 32 and 'members_json' not in page['lane']
             assert page['members_total'] == 66 and page['projection']['items_total'] == 66
             assert page['detail_revision'] == projection['detail_revision']

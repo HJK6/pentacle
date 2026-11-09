@@ -165,7 +165,8 @@ def test_all_members_show_and_inline_inventory_keep_membership_order():
         shown = await server._on_work_lanes_show({"lane_id": lane["lane_id"], "members": True,
                                                  "_auth_context": {"operator_authenticated": True}})
         assert [m["spec_id"] for m in shown["members"]] == sorted(ids)
-        assert shown["projection"]["members"] == shown["members"]
+        from work_lanes_projection import detail_member_keys
+        assert shown["projection"]["members"] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in shown["members"]]
     run(body)
 
 
@@ -449,7 +450,8 @@ def test_additive_estimate_metadata_persists_projection_restart_last_good(tmp_pa
         assert [member["spec_id"] for member in frame["lanes"][0]["members"]] == [A, B]
         assert [member["spec_id"] for member in listed["lanes"][0]["members"]] == [A, B]
         assert [member["spec_id"] for member in shown["members"]] == sorted([A, B])
-        assert shown["projection"]["members"] == shown["members"]
+        from work_lanes_projection import detail_member_keys
+        assert shown["projection"]["members"] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in shown["members"]]
         for lane in (frame["lanes"][0], listed["lanes"][0], shown["projection"]):
             by_id = {member["spec_id"]: member for member in lane["members"]}
             assert set(by_id) == {A, B}

@@ -26,6 +26,12 @@ from work_lane_worked import WorkedCache
 from _shared.work_goals import project_goals
 from _shared.checkpoint_policy import detail_field_keys, policy_revision
 
+
+def detail_member_keys():
+    return detail_field_keys() | {"checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
+        "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
+        "goal_text", "goal_text_truncated", "goal_source"}
+
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
 _STATE_ORDER = {"blocked": 0, "active": 1, "paused": 2, "done": 3}
@@ -148,9 +154,7 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     lane["_members_working"] = members_working(lane, list((sessions_by_stream or {}).values()))
     state, reason = lane_state(lane)
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
-    detail_keys = detail_field_keys() | {"checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
-        "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
-        "goal_text", "goal_text_truncated", "goal_source"}
+    detail_keys = detail_member_keys()
     if sessions_by_stream is not None:
         # Preserve the installed client's needs-you gate even when every
         # question-bearing member falls beyond its eight-row inventory preview.
@@ -232,7 +236,10 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     remaining = [member for member in selected if members_after is None or member["spec_id"] > members_after]
     page = remaining[:members_limit]
     cursor = page[-1]["spec_id"] if page and len(remaining) > len(page) else None
-    projection = {**{key: value for key, value in projected.items() if not key.startswith("_")}, "members": page, "members_total": total,
+    # Keep the legacy projection page, but serialize new source prose/metadata
+    # only in the canonical top-level detail members, never twice per response.
+    legacy_page = [{key: value for key, value in member.items() if key not in detail_member_keys()} for member in page]
+    projection = {**{key: value for key, value in projected.items() if not key.startswith("_")}, "members": legacy_page, "members_total": total,
                   "members_next": cursor}
     if goal_filter is not None:
         # Reuse the full membership census, not this cursor page. Goal prose is
