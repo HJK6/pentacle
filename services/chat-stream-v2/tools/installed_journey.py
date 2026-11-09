@@ -30,6 +30,7 @@ import uuid
 SERVICE = Path(__file__).resolve().parents[1]
 ROOT = SERVICE.parents[1]
 CLI_SOURCE = 'services/agent-orch/agent_orch'
+CLI_SOURCES = (CLI_SOURCE, 'services/_shared/spawn_profiles.py', 'services/_shared/asset_schema.py')
 WEB_SOURCES = ('assets', 'configs', 'config-loader.js', 'hosts.js', 'lib', 'main',
                'package.json', 'package-lock.json', 'pentacle-chat-core', 'renderer',
                'scripts/build-web.js', 'server', 'vendor')
@@ -340,7 +341,7 @@ class Journey:
             return hashlib.sha256(source).hexdigest()
 
         cli = self.m['cli']
-        cli_source = compatible(cli['version'], (CLI_SOURCE,), 'CLI')
+        cli_source = compatible(cli['version'], CLI_SOURCES, 'CLI')
         package = release.get('runtime_package') or {}
         require(package.get('path') == CLI_SOURCE, 'CLI package source missing')
         # Use the installer's existing source/archive and installed-tree oracles.

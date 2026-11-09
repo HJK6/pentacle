@@ -264,7 +264,7 @@ def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
     assert run.cleanup['errors'] == []
 
 
-@pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'web-source', 'manifest-package',
+@pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'shared-contract', 'web-source', 'manifest-package',
                                  'installed-package', 'import-binding', 'web-stamp', 'web-build',
                                  'served-build', 'served-bytes', 'artifact-bytes'])
 def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, monkeypatch, fault):
@@ -282,6 +282,10 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     contents = {'cli.py': b'CLI release fixture\n', 'wsclient.py': b'CLI transport fixture\n'}
     for name, data in contents.items():
         (package / name).write_bytes(data)
+    shared = checkout / 'services/_shared'
+    shared.mkdir()
+    (shared / 'spawn_profiles.py').write_text('shared admission contract')
+    (shared / 'asset_schema.py').write_text('shared asset contract')
     (checkout / 'renderer').mkdir()
     (checkout / 'renderer/app.js').write_text('web source fixture')
     git('add', '.')
@@ -289,6 +293,8 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     released = git('rev-parse', 'HEAD')
     if fault == 'cli-source':
         (package / 'cli.py').write_text('incompatible daemon-side CLI')
+    elif fault == 'shared-contract':
+        (shared / 'spawn_profiles.py').write_text('incompatible daemon-side contract')
     elif fault == 'web-source':
         (checkout / 'renderer/app.js').write_text('incompatible daemon-side web')
     (checkout / 'daemon-only').write_text('independent daemon release')
@@ -320,7 +326,7 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     value['web'] = {'source_sha': released, 'artifact': str(artifact), 'build_id': frozen}
     value['expected_build_id'] = frozen
     release = {'runtime_package': {'path': subject.CLI_SOURCE, 'sha256': tree_hash}}
-    expected = {'cli-source': 'CLI source incompatible', 'web-source': 'web source incompatible',
+    expected = {'cli-source': 'CLI source incompatible', 'shared-contract': 'CLI source incompatible', 'web-source': 'web source incompatible',
                 'manifest-package': 'CLI manifest package differs', 'installed-package': 'installed CLI package differs',
                 'import-binding': 'imported CLI module differs', 'web-stamp': 'web artifact source stamp drift',
                 'web-build': 'web artifact/served build identity mismatch', 'served-build': 'web artifact/served build identity mismatch',

@@ -59,8 +59,8 @@ separate identities.
 
 Releases are component-scoped: `source_sha` binds the daemon; CLI `version`
 binds its own release manifest and installed/imported package bytes. The runner
-checks the CLI source tree is identical between that release and the daemon
-source. `web` supplies its own full `source_sha`, installed `artifact` directory
+checks the CLI source tree and shared spawn/asset contracts are identical between
+that release and the daemon source. `web` supplies its own full `source_sha`, installed `artifact` directory
 and `build_id`. The runner verifies the artifact's `build-sha.txt`, uses the
 existing web build-ID oracle and checks served JS/CSS bytes against the artifact.
 Tracked web inputs (renderer, client core, server, assets, configs, libraries,
