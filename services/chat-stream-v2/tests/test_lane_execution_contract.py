@@ -17,6 +17,87 @@ from sessions import Sessions, VerbError
 NOW = "2026-11-09T10:00:00.000Z"
 
 
+@pytest.mark.parametrize("to", ["paused", "blocked", "done"])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("case", ["pending", "proved", "late_pending", "enriched",
+                                 "wire_conflict", "receipt_conflict", "meta_conflict",
+                                 "unproved", "new_generation", "invalid_birth", "held"])
+def test_receipt_precedence_agrees_with_real_lane_drain(tmp_path, to, archived, case):
+    """Canonical delivery proof settles debt; conflicts and new births retain it."""
+    import sqlite3
+
+    async def body(env):
+        owner = await env.seat("receipt-lead", role="lead", parent_stream_id=FD)
+        lane_row = (await env.adopt(key="stream:receipt-drain", lead=owner,
+                                   members=["spec_demo__receipt_drain"]))["lane"]
+        worker, _ = await env.seat("receipt-worker", role="worker",
+                                   assigned_spec_id="spec_demo__receipt_drain")
+
+        async def append(state="accepted", **changes):
+            values = dict(to_stream_id=worker, request_id="receipt-drain-send",
+                          receipt_id="same-attempt", state=state, wire_text="Synthetic body",
+                          display_text="Synthetic body", attachments=[], attempts=1,
+                          delivery="landed" if state == "landed" else "committed_pending_proof",
+                          submission_confirmed=state == "landed", created_at="2030-01-01T00:00:00Z",
+                          meta_json="{}")
+            values.update(changes)
+            await env.store.append_send_receipt(**values)
+
+        await append()
+        if case not in {"pending", "held"}:
+            await append("landed", submission_confirmed=case != "unproved")
+        if archived:
+            def archive(conn):
+                rows = conn.execute("SELECT rowid AS receipt_rowid,* FROM v2_send_receipts").fetchall()
+                names = rows[0].keys()
+                with sqlite3.connect(conn.history_archive_path) as retained:
+                    retained.executemany("INSERT INTO v2_send_receipts (" + ",".join(names) +
+                                         ") VALUES (" + ",".join("?" for _ in names) + ")",
+                                         [tuple(row) for row in rows])
+                conn.execute("DELETE FROM main.v2_send_receipts")
+                conn.commit()
+            await env.store.submit(archive)
+        if case not in {"pending", "proved"}:
+            changes = {
+                "enriched": {"meta_json": json.dumps({"pool_input": {"wire_text": "Synthetic body"},
+                                                       "_input_proof": {"wire_text": "Synthetic body"}})},
+                "wire_conflict": {"wire_text": "Different body"},
+                "receipt_conflict": {"receipt_id": "different-attempt"},
+                "meta_conflict": {"meta_json": '{"client_changed":true}'},
+                "held": {"reason": "front_desk_held"},
+            }.get(case, {})
+            await append(**changes)
+        if case in {"new_generation", "invalid_birth"}:
+            birth = "2031-01-01T00:00:00Z" if case == "new_generation" else "invalid"
+            def replace_birth(conn):
+                conn.execute("UPDATE sessions SET created_at=? WHERE host='host-a' AND session_name='receipt-worker'",
+                             (birth,))
+                conn.commit()
+            await env.store.submit(replace_birth)
+        settled = case in {"proved", "late_pending", "enriched", "held"}
+        receipt = await env.store.get_send_receipt(worker, "receipt-drain-send",
+                                                  include_submission_identity=True)
+        assert receipt["state"] == ("landed" if settled and case != "held" else "accepted")
+        if settled and case != "held":
+            assert receipt["submission_confirmed"] is True
+            assert receipt["first_created_at"] == "2030-01-01T00:00:00Z"
+        payload = {"to": to, "reason": "Checkpoint settled work", "next_action": "Resume later",
+                   "blocker": "keys", "outcome": "Done"}
+        if settled:
+            result = await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
+            assert result["lane"]["work_state"] == to
+        else:
+            with pytest.raises(VerbError) as exc:
+                await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
+            assert exc.value.code == "work_lane_drain_required"
+            assert exc.value.extra["seat_ids"] == []
+            assert exc.value.extra["delivery_ids"] == ["send:receipt-drain-send"]
+            after = (await env.store.get_work_lane(lane_row["lane_id"]))["lane"]
+            assert after["work_state"] == "active" and after["version"] == 1
+
+    run(body, path=str(tmp_path / "sessions.db"))
+
+
 def motion_lane():
     return {"lane_id": "motion", "version": 1, "work_state": "active", "owner_kind": "fd",
             "bound_stream_id": "fixture:old", "bound_generation": "old-gen", "_qualifies": False,

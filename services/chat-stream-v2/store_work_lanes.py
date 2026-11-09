@@ -386,8 +386,13 @@ def require_lane_drained_conn(conn, lane, live_sessions=()):
     for raw in history_query(conn, "SELECT r.* FROM v2_send_receipts r WHERE r.rowid=(SELECT MAX(n.rowid) "
                             "FROM v2_send_receipts n WHERE n.to_stream_id=r.to_stream_id AND n.request_id=r.request_id) "
                             "AND r.state='accepted'"):
-        if raw["to_stream_id"] in relevant and raw["reason"] != "front_desk_held":
-            pending.append("send:" + raw["request_id"])
+        if raw["to_stream_id"] in relevant:
+            # A later pending/enrichment row may follow confirmed same-attempt
+            # delivery. Use the reader's proof/conflict/birth-fenced selection.
+            from store import _effective_send_receipt_row
+            receipt = _effective_send_receipt_row(conn, raw["to_stream_id"], raw["request_id"])
+            if receipt["state"] == "accepted" and receipt["reason"] != "front_desk_held":
+                pending.append("send:" + receipt["request_id"])
     for raw in conn.execute("SELECT schedule_id,owner_spec_ids_json,owner_stream_id,handoff_from_stream_id FROM v2_schedules "
                             "WHERE state IN ('pending','retry_pending','firing','indeterminate')"):
         selected = json.loads(raw["owner_spec_ids_json"])

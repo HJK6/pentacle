@@ -538,6 +538,30 @@ def _upsert_spawn_outcome(
     return True
 
 
+def _effective_send_receipt_row(conn: sqlite3.Connection, target: str, request: str) -> sqlite3.Row | None:
+    """Canonical retained receipt row, shared by readers and transactional drain."""
+    from receipt_proof import epoch, proved_pending_precedence
+    rows = history_query(conn,
+        """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
+           WHERE to_stream_id=? AND request_id=?
+           ORDER BY rowid""",
+        (target, request),
+    ).fetchall()
+    if not rows:
+        return None
+    prior, _conflict = proved_pending_precedence(rows)
+    if prior is not None and ":" in target:
+        current = conn.execute(
+            "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
+            tuple(target.split(":", 1))).fetchone()
+        if current is not None:
+            birth, claim = epoch(current["created_at"]), epoch(rows[0]["created_at"])
+            if birth is None or claim is None or birth >= claim:
+                prior = None
+    row = prior if prior is not None else rows[-1]
+    return row
+
+
 def _send_receipt_row(
     row: sqlite3.Row, *, include_attachments: bool = False, include_display_text: bool = False,
     include_rowid: bool = False,
@@ -5910,31 +5934,15 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     async def get_send_receipt(self, to_stream_id: str, request_id: str, *, include_display_text: bool = False, include_submission_identity: bool = False) -> dict[str, Any] | None:
         """Project latest outcome, preserving same-attempt confirmed delivery."""
-        from receipt_proof import epoch, proved_pending_precedence
         target = str(to_stream_id or "").strip()
         request = str(request_id or "").strip()
         if not target or not request:
             return None
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
-            rows = history_query(conn,
-                """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
-                   WHERE to_stream_id=? AND request_id=?
-                   ORDER BY rowid""",
-                (target, request),
-            ).fetchall()
-            if not rows:
+            row = _effective_send_receipt_row(conn, target, request)
+            if row is None:
                 return None
-            prior, _conflict = proved_pending_precedence(rows)
-            if prior is not None and ":" in target:
-                current = conn.execute(
-                    "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
-                    tuple(target.split(":", 1))).fetchone()
-                if current is not None:
-                    birth, claim = epoch(current["created_at"]), epoch(rows[0]["created_at"])
-                    if birth is None or claim is None or birth >= claim:
-                        prior = None
-            row = prior if prior is not None else rows[-1]
             result = _project_send_receipt_row(conn, row, include_display_text=include_display_text)
             if include_submission_identity:
                 first = history_query(conn, "SELECT created_at FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid LIMIT 1", (target, request)).fetchone()
