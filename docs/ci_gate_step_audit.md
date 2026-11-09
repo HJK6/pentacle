@@ -23,7 +23,7 @@ expected-head merge and separate merged-SHA/main readbacks.
 | npm ci / npm run prestart / npm test | `Supported npm tests`: `gate_env.py run --target npm-test`; same lockfile, prestart build and three default runner globs. |
 | Python service requirements + editable CLI install | Per-target owned Python 3.13 venv from the same requirements and editable declaration; no ambient pip install. |
 | Web mode E2E gate | `--target web-gate`: existing prestart/build:web, real `web_gate.js` (including ancillary browser journeys), then `node --test test/e2e/web_gate_interrupt.test.js`. |
-| Daemon merge | `--target v2-merge-ci`: same unit then smoke; CI unit 2100s and smoke 900s are explicit profile constants. Ordinary local targets keep their existing bounds. Hosted-runner unit headroom was increased after the same 9521-case suite took 1056.5s and 1196.4s; the latter completed its journal but reached the old 1200s process deadline before exit. |
+| Daemon merge | `--target v2-merge-ci`: same unit then smoke; CI unit 4320s and smoke 900s are explicit profile constants. Ordinary local targets keep their existing bounds. See the [measured hosted CI budget](TEST_COVERAGE.md#hosted-daemon-ci-budget) for calibration and headroom. |
 | CLI tests | `--target cli-pytest --select tests`: complete existing `services/agent-orch/tests`, prepared interpreter, existing PYTHONPATH. |
 | Shared service tests | `--target shared-pytest --select tests`: complete existing `services/_shared/tests`, prepared interpreter, existing PYTHONPATH. |
 | Failed evidence | Each job owns `${runner.temp}/gate-evidence/${github.job}/**`: started/setup-failure events, manifests, preflight identities, runner logs/JUnit and browser reports. Scratch, credential HOME and prepared environments remain outside uploads. |
@@ -46,9 +46,10 @@ process/socket capabilities and installed UTF-8 locale. Preparation/build failur
 stops before the subject and retains its receipt. No ambient credentials or
 pytest flags enter the child environment.
 
-For v2 CI the finite envelope is 2400s for unit plus smoke, with the existing
-120s preflight/cleanup/startup reserves (2520s total). The reviewed workflow job
-bound is 50 minutes. This is hosted CI headroom; local tier bounds stay unchanged. Browser and npm subjects retain their existing
+For v2 CI the finite envelope is 5220s for unit plus smoke, with the existing
+120s preflight/cleanup/startup allowances (5340s deadline) and 30s outer slack
+(5370s outer limit). The reviewed daemon workflow job bound is 110 minutes.
+This is hosted CI headroom; local tier bounds stay unchanged. Browser and npm subjects retain their existing
 runner behavior and own teardown; direct pytest subjects use the existing owner
 manifest. CLI/shared service pytest has no daemon-specific capability plugin.
 

@@ -426,3 +426,19 @@ Validation for this section is citation and diff review at the stated base.
 No runtime tests, full suites, daemon processes or closing gate were run for
 this docs-only change. Existing full acceptance requirements are unchanged;
 this section neither certifies runtime deployment nor commissions extra work.
+
+### Hosted daemon CI budget
+
+The serial hosted unit tier uses 4320s, with the existing 900s smoke tier,
+for a 5220s merge target and maximum. Successful hosted unit logs measured
+2059.04s and 2071.48s. Another run exhausted its former 2100s unit limit
+after 13010 of 13285 nodes; average-throughput extrapolation gives about
+2144s, an estimate rather than a completed measurement. Twice the larger
+observed or projected cost, rounded up to a minute, gives the new unit
+envelope. Individual test timers and assertions remain unchanged.
+
+The existing runner allowances produce a 5340s deadline and 5370s outer
+gate limit. The daemon job allows 110 minutes, leaving 630s after that
+outer limit and the existing 600s package step for other setup and artifact
+retention. This changes the suite and job envelopes; it does not enable
+parallel hosted workers or alter local gate budgets.
