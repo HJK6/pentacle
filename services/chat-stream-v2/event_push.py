@@ -291,7 +291,7 @@ class EventPush:
 
     async def _usage_fences(self, host: str) -> list[dict[str, str]]:
         """Return current coordinator-issued usage fences to a satellite."""
-        rows = await self.store.list_open_sessions_with_event_summary()
+        rows = await self.store.list_open_usage_fence_rows(host)
         fences: list[dict[str, str]] = []
         for row in rows:
             if row.get("host") != host or row.get("provider") not in {"codex", "claude"}:
