@@ -117,10 +117,10 @@
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
-            "unit": 1800,
+            "unit": 1320,
             "smoke": 900
           },
-          "timeout_s": 2700,
+          "timeout_s": 2220,
           "max_timeout_s": 2700,
           "unit_workers": 2
         },
