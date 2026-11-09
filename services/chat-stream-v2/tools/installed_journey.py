@@ -65,7 +65,8 @@ def component_compatibility(checkout, version, daemon, owned_paths, name):
     require(bool(shared) and shared == git('ls-tree', '-r', '-z', daemon, '--', *SHARED_SOURCES),
             name + ' shared contracts incompatible with daemon')
     common = git('merge-base', version, daemon).decode().strip()
-    forward = git('diff', '--name-only', '-z', common, version).decode().split('\0')
+    # Check both endpoints of renames; a foreign deletion cannot become owned.
+    forward = git('diff', '--no-renames', '--name-only', '-z', common, version).decode().split('\0')
     forward = [path for path in forward if path]
     records = [path for path in forward if any(path == root or path.startswith(root + '/') for root in COMPONENT_RECORD_PATHS)]
     runtime = [path for path in forward if path not in records]

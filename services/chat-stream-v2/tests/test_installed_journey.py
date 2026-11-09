@@ -376,3 +376,37 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
         with pytest.raises(AssertionError, match=expected[fault]):
             run.component_identity(release, modules)
         assert run.fixtures == []
+
+
+@pytest.mark.parametrize('component', ['CLI', 'web'])
+@pytest.mark.parametrize('destination', ['owned', 'docs', 'test'])
+def test_component_compatibility_rejects_foreign_source_renames(tmp_path, component, destination):
+    import subprocess
+    checkout = tmp_path / 'source'
+    checkout.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'diff.renames', 'true')
+    owned = subject.CLI_OWNED if component == 'CLI' else subject.WEB_SOURCES
+    own_root = owned[0] if component == 'CLI' else 'renderer'
+    for name, contents in ((own_root + '/existing.py', 'owned source'),
+                           ('services/_shared/contract.py', 'shared source'),
+                           ('foreign/runtime.py', 'foreign runtime, unique content for exact rename')):
+        target = checkout / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    git('add', '.')
+    git('commit', '-qm', 'base')
+    daemon = git('rev-parse', 'HEAD')
+    renamed = (own_root if destination == 'owned' else destination) + '/renamed.py'
+    (checkout / renamed).parent.mkdir(parents=True, exist_ok=True)
+    git('mv', 'foreign/runtime.py', renamed)
+    git('commit', '-qm', 'foreign source moved into allowed destination')
+    version = git('rev-parse', 'HEAD')
+    # Prove this is a detected rename, rather than a vacuous path-control test.
+    assert git('diff', '--find-renames', '--name-status', daemon, version) == 'R100\tforeign/runtime.py\t' + renamed
+    with pytest.raises(AssertionError, match=component + ' release changes outside its owned paths'):
+        subject.component_compatibility(checkout, version, daemon, owned, component)
