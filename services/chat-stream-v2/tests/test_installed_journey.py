@@ -74,6 +74,31 @@ def test_pending_spawn_cannot_pass_without_owned_cleanup(monkeypatch, tmp_path):
     assert rows[0]['primary_error'] == 'spawn reply unavailable'
 
 
+def test_readiness_failure_retains_admitted_credential_binding(tmp_path):
+    from types import SimpleNamespace
+    from tools.live_window import OwnedSession
+    run = subject.Journey(manifest(), tmp_path)
+    run.registry = SimpleNamespace(_owned={})
+    class Register:
+        def prepare_owned_spawn(self, payload):
+            pass
+        def __call__(self, payload, reply):
+            run.registry._owned[reply['stream_id']] = OwnedSession(
+                payload['request_id'], payload['idempotency_key'], reply['stream_id'],
+                payload['host'], payload['session_name'], 'owned-generation')
+    run.call = lambda payload: {'stream_id': 'fixture:owned', 'state': 'starting'}
+    run.inspect = lambda stream: {'session': {'session_generation': 'owned-generation', 'token_hash': 'f' * 64}}
+    def not_ready(stream):
+        raise RuntimeError('owned readiness fault')
+    with pytest.raises(RuntimeError, match='owned readiness fault'):
+        run.spawn('fixture', Register(), not_ready, 'fixture-catalog')
+    saved = json.loads((tmp_path / 'run-manifest.json').read_text())
+    assert saved['pending_spawns'] == []
+    assert saved['fixtures'][0]['stream_token_sha256'] == 'f' * 64
+    assert saved['fixtures'][0]['spawn_reply']['stream_id'] == 'fixture:owned'
+    assert saved['cleanup']['expected'] == 1
+
+
 def test_dirty_evidence_is_retired_without_overwriting_original(tmp_path):
     out = tmp_path / 'evidence'
     out.mkdir()

@@ -208,9 +208,16 @@ class Journey:
         fixture['spawn_ordinal'] = len(self.fixtures)
         self.fixtures.append(fixture)
         self.cleanup['expected'] = len(self.fixtures)
+        fixture['spawn_payload'] = payload
+        fixture['spawn_reply'] = {k: response.get(k) for k in ('stream_id', 'state', 'initial_prompt_delivery')}
+        self.record_manifest()
+        inspected = self.inspect(owned.stream_id)
+        require(inspected['session']['session_generation'] == owned.session_generation, 'owned admission generation drift')
+        fixture['stream_token_sha256'] = inspected['session'].get('token_hash')
         self.record_manifest()
         wait_ready(owned.stream_id)
         inspected = self.inspect(owned.stream_id)
+        require(inspected['session']['session_generation'] == owned.session_generation, 'owned ready generation drift')
         binding = inspected['session'].get('account_binding') or {}
         expected = provider if host == self.m['local_host'] else self.m['remote']['provider']
         require(all(binding.get(key) == expected.get(key) for key in
@@ -218,8 +225,6 @@ class Journey:
         require(binding.get('alias') == provider['alias'] and binding.get('provider') == 'codex', 'wrong provider/account')
         fixture['account_binding'] = binding
         fixture['stream_token_sha256'] = inspected['session'].get('token_hash')
-        fixture['spawn_payload'] = payload
-        fixture['spawn_reply'] = {k: response.get(k) for k in ('stream_id', 'state', 'initial_prompt_delivery')}
         self.record_manifest()
         return fixture
 
@@ -648,6 +653,12 @@ class Journey:
                                 require(inspected['session']['status'] == 'closed', 'owned durable closed row missing')
                                 require(inspected['session']['session_generation'] == fixture['session_generation'],
                                         'owned cleanup generation changed')
+                                # Admission can fail before its first inspect.
+                                # The freshly read, same-generation closed row
+                                # remains authoritative for its token hash.
+                                token_hash = fixture.get('stream_token_sha256') or inspected['session'].get('token_hash')
+                                require(isinstance(token_hash, str) and re.fullmatch('[0-9a-f]{64}', token_hash),
+                                        'owned cleanup credential binding missing')
                                 remote = fixture['host'] != self.m['local_host']
                                 tmux = self.m['remote'].get('tmux_bin', 'tmux') if remote else self.m.get('tmux_bin', 'tmux')
                                 command = [tmux, 'has-session', '-t', '=' + fixture['session_name']]
@@ -663,7 +674,7 @@ class Journey:
                                     if token.exists():
                                         require(not token.is_symlink() and stat.S_ISREG(token.lstat().st_mode),
                                                 'owned token file was replaced; refusing removal')
-                                        require(hashlib.sha256(token.read_bytes().strip()).hexdigest() == fixture['stream_token_sha256'],
+                                        require(hashlib.sha256(token.read_bytes().strip()).hexdigest() == token_hash,
                                                 'owned token file was replaced; refusing removal')
                                         token.unlink()
                                 else:
@@ -676,7 +687,7 @@ class Journey:
                                                'assert s is None or hashlib.sha256(p.read_bytes().strip()).hexdigest()==sys.argv[2]; '
                                                'p.unlink(missing_ok=True)')
                                     removed = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', fixture['host'],
-                                        shlex.join(['python3', '-c', program, token, fixture['stream_token_sha256']])],
+                                        shlex.join(['python3', '-c', program, token, token_hash])],
                                         capture_output=True, text=True, timeout=15)
                                     require(removed.returncode == 0, 'owned remote credential-file cleanup unproved')
                                 self.cleanup['closed'] += 1
