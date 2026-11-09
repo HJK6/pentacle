@@ -73,6 +73,36 @@ async def test_new_readiness_requires_current_checkpoint_and_verified_qa_then_re
             await ledger.report(ready)
         assert exc.value.code == "work_checkpoint_invalid" and await store.get_report("ready-checkpoint") is None
         summary.write_text(LABELLED)
+        # Change only the shared policy: the real report gate and actual detail
+        # projection must follow the same definition, including a future field.
+        from dataclasses import replace
+        import json
+        from _shared import checkpoint_policy as policy
+        from _shared.work_checkpoint import work_checkpoint
+        from work_lanes_projection import project_lane
+        original_policy = policy.FIELDS
+        def optional(status):
+            return False
+        added = policy.Field("review", "Review note", "review_text", "Review evidence.", optional)
+        monkeypatch.setattr(policy, "FIELDS", (*original_policy, added))
+        assert work_checkpoint(SPEC_ID)["state"] == "valid"
+        monkeypatch.setattr(policy, "FIELDS", (*original_policy, replace(added, required_when=policy.always)))
+        with pytest.raises(VerbError) as exc:
+            await ledger.report(ready)
+        assert exc.value.code == "work_checkpoint_invalid"
+        assert exc.value.extra["work_checkpoint"]["deficiencies"][0]["code"] == "review_missing"
+        future_text = "\U0001f9ed" * 240
+        summary.write_text(LABELLED + "**Review note** — " + future_text + "\n")
+        checkpoint = work_checkpoint(SPEC_ID)
+        assert checkpoint["state"] == "valid"
+        member = {"spec_id": SPEC_ID, **checkpoint["facts"], "observation": {"quality": "fresh"}}
+        lane = {"lane_id": "wl-policy", "version": 1, "work_state": "paused", "_members": [member], "_work_index_available": True}
+        detail = project_lane(lane, None, "2026-11-09T10:00:00Z", all_members=True)["members"][0]
+        assert detail["review_text"] == future_text
+        assert "review_text" not in project_lane(lane, None, "2026-11-09T10:00:00Z")["members"][0]
+        additions = {k: v for k, v in detail.items() if k in policy.detail_field_keys() or k.startswith("checkpoint_")}
+        assert len(json.dumps(additions).encode()) <= 49152
+        monkeypatch.setattr(policy, "FIELDS", original_policy)
         with pytest.raises(VerbError) as exc:
             await ledger.report({**ready, "qa_attestation": {"stream_id": QA, "report_id": "forged"}})
         assert exc.value.code == "qa_attestation_unverified"
