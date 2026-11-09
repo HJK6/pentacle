@@ -2,7 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { installRenderer, mountRaceSlot, STREAM } = require('./helpers/renderer_chat');
+const { installRenderer } = require('./helpers/renderer_chat');
+const STREAM = 'host-a:fixture-session';
 const catalogApi = require('../renderer/dashboards/catalog_loader');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -11,7 +12,13 @@ async function boot(t) {
   t.after(() => h.dom.window.close());
   await flush(); await flush();
   const run = code => vm.runInContext(code, h.context);
-  mountRaceSlot(h.context);
+  run(`CONFIG.chatStream.hostMap.local = 'host-a'; CONFIG.hostNames.local = 'host-a';
+    ensureSlotChatSurface(0);
+    state.slots[0] = {name:'fixture-session',displayName:'Fixture',hostId:'local'};
+    state.slotViewModes[0] = 'chat'; state.chatStream.connected = true;
+    state.chatStream.sessions = [{stream_id:'${STREAM}',host:'host-a',provider:'claude',
+      session_id:'fixture-session',session_name:'fixture-session',name:'fixture-session',title:'Fixture',working:false}];
+    renderSlotChat(0);`);
   await flush();
   return { ...h, run };
 }
@@ -40,7 +47,7 @@ test('hidden chat ingests pushes, defers automatic reads and catches up once on 
   dom.window.cc.promptList = async () => { questions++; return { questions: [] }; };
   run(`state.currentView = 'dashboards';
     for (let i=0;i<10;i++) applyChatStreamPayload({type:'session.inventory',sessions:state.chatStream.sessions});
-    applyChatStreamPayload({type:'asset.update',asset_id:'pushed',content_type:'report',title:'Push',session_key:{host:'hostc',session_name:'claude-hostc-race',stream_id:'${STREAM}'}});
+    applyChatStreamPayload({type:'asset.update',asset_id:'pushed',content_type:'report',title:'Push',session_key:{host:'host-a',session_name:'fixture-session',stream_id:'${STREAM}'}});
     applyChatStreamPayload({type:'notification',notification:{notification_id:'hidden-question',producer:'agent_question.v1',state:'open',question:{question_id:'hidden-question',producer_stream_id:'${STREAM}',state:'open'}}});`);
   assert.equal(assets, 0); assert.equal(questions, 0);
   assert.equal(run(`visibleAssetsForSlot(0).some(x=>x.asset_id==='pushed')`), true);
@@ -58,10 +65,10 @@ test('slot reassignment rejects old owner data and a different viewer can fetch 
   run(`refetchAssetSnapshotsForActiveSlots();
     state.slotGen[0]++;
     state.slots[0] = {hostId:'local',name:'other'};
-    state.chatStream.sessions.push({stream_id:'hostc:other',host:'hostc',session_name:'other'});
+    state.chatStream.sessions.push({stream_id:'host-a:other',host:'host-a',session_name:'other'});
     refetchAssetSnapshotsForActiveSlots();`);
   assert.equal(assets.length, 2); assert.equal(questions.length, 2);
-  assert.equal(assets[1].args.stream_id, 'hostc:other');
+  assert.equal(assets[1].args.stream_id, 'host-a:other');
   assets[0].resolve({assets:[{asset_id:'late',stream_id:STREAM,content_type:'report'}]});
   questions[0].resolve({questions:[{notification_id:'late',question_id:'late',producer_stream_id:STREAM,state:'open'}]});
   await flush();
@@ -194,12 +201,12 @@ test('reparenting while hidden clears old membership and rejects an old pending 
   const { dom, run } = await boot(t);
   let release;
   dom.window.cc.assetList = () => new Promise(resolve => { release = resolve; });
-  run(`state.chatStream.sessions.push({stream_id:'hostc:child',parent_stream_id:'${STREAM}',visibility:'hidden'});
+  run(`state.chatStream.sessions.push({stream_id:'host-a:child',parent_stream_id:'${STREAM}',visibility:'hidden'});
     reconcileChatReadScopes();
     refetchAssetSnapshotsForActiveSlots();
     state.currentView='dashboards';
-    applyChatStreamPayload({type:'session.inventory',sessions:state.chatStream.sessions.map(s=>s.stream_id==='hostc:child'?{...s,parent_stream_id:'hostc:other'}:s)});`);
-  release({scope_stream_ids:[STREAM,'hostc:child'],assets:[{asset_id:'old-child',stream_id:'hostc:child',content_type:'report'}]});
+    applyChatStreamPayload({type:'session.inventory',sessions:state.chatStream.sessions.map(s=>s.stream_id==='host-a:child'?{...s,parent_stream_id:'host-a:other'}:s)});`);
+  release({scope_stream_ids:[STREAM,'host-a:child'],assets:[{asset_id:'old-child',stream_id:'host-a:child',content_type:'report'}]});
   await flush();
   assert.equal(run(`visibleAssetsForSlot(0).length`), 0);
   assert.deepEqual([...run(`state.chatStream.assets['${STREAM}'].scopeStreamIds`)], [STREAM]);
