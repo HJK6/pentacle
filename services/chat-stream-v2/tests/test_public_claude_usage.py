@@ -452,8 +452,8 @@ def test_replacement_during_dead_endpoint_probe_is_not_unlinked(owned_probe_sock
 
 
 @pytest.mark.parametrize("kill_failure", ["nonzero", "timeout", "oserror"])
-@pytest.mark.parametrize("primary_failure", [False, True])
-def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport, kill_failure, primary_failure):
+@pytest.mark.parametrize("primary_failure", [None, "trust", "auth", "timeout", "parse", "subprocess"])
+def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport, capsys, kill_failure, primary_failure):
     import subprocess
     commands = []
     captures = 0
@@ -468,16 +468,36 @@ def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport
             return SimpleNamespace(returncode=1, stdout="DO_NOT_LEAK")
         if command[3] == "capture-pane":
             captures += 1
-            screen = "Do you trust this folder?" if primary_failure else (
-                "❯" if captures == 1 else "Current week (all models)\n42% used")
+            if primary_failure == "subprocess":
+                raise subprocess.TimeoutExpired(command, 5)
+            screen = {"trust": "Do you trust this folder?", "auth": "Please sign in to continue",
+                      "timeout": "loading", "parse": "Current week (all models)\n101% used"}.get(
+                          primary_failure, "❯" if captures == 1 else "Current week (all models)\n42% used")
             return SimpleNamespace(returncode=0, stdout=screen)
         return SimpleNamespace(returncode=0, stdout="")
-    with pytest.raises(RuntimeError, match="trust" if primary_failure else "socket kill failed") as error:
-        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=socket_transport(run), sleep=lambda _: None)
-    assert "DO_NOT_LEAK" not in str(error.value)
+    ticks = iter([0, 0, 0, 3])
+    def collect():
+        return probe.collect(claude="fake", tmux="fake", cwd="/owned", timeout=2,
+                             run=socket_transport(run), sleep=lambda _: None,
+                             monotonic=lambda: next(ticks))
+    if primary_failure:
+        error_type = subprocess.TimeoutExpired if primary_failure == "subprocess" else RuntimeError
+        message = {"trust": "not a trusted Claude workspace", "auth": "logged in",
+                   "timeout": "within the timeout", "parse": "within the timeout", "subprocess": "timed out"}[primary_failure]
+        with pytest.raises(error_type, match=message) as error:
+            collect()
+        assert error.value.__notes__ == ["usage socket kill failed"]
+        assert "DO_NOT_LEAK" not in str(error.value)
+        assert capsys.readouterr().err == ""
+    else:
+        assert collect() == {"week_all_pct": 42, "week_all_resets": None,
+                             "week_fable_pct": None, "week_fable_resets": None}
+        assert capsys.readouterr().err == (
+            "Claude usage cleanup warning [subsystem=usage_probe bug_ref=cleanup_discards_reading]: usage socket kill failed\n")
     name = commands[0][2]
     path = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.geteuid()}" / name
     assert not path.exists()
+    assert commands[-1][3] == "kill-server"
 
 
 @pytest.mark.parametrize("timeout_kind", ["overall", "subprocess"])
@@ -516,15 +536,29 @@ def test_missing_ownership_capture_kills_but_never_guesses_an_unlink(owned_probe
     assert any("no unlink attempted" in note for note in error.value.__notes__)
 
 
-def test_successful_usage_with_live_endpoint_reports_cleanup_failure(owned_probe_socket, monkeypatch):
+@pytest.mark.parametrize("pct", [0, 42])
+@pytest.mark.parametrize("handling_error", [False, True])
+def test_successful_usage_with_live_endpoint_reports_cleanup_failure(owned_probe_socket, monkeypatch, capsys, pct, handling_error):
     path, _ = owned_probe_socket(live=True)
     monkeypatch.setattr(probe.uuid, "uuid4", lambda: SimpleNamespace(hex=path.name.removeprefix("pentacle-usage-")))
-    screens = iter(["❯", "Current week (all models)\n42% used"])
+    screens = iter(["❯", f"Current week (all models)\n{pct}% used"])
     def run(command, **kwargs):
         text = str(path) if command[3] == "display-message" else next(screens) if command[3] == "capture-pane" else ""
         return SimpleNamespace(returncode=0, stdout=text)
-    with pytest.raises(RuntimeError, match="cleanup unconfirmed"):
-        probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run, sleep=lambda _: None)
+    def collect():
+        return probe.collect(claude="fake", tmux="fake", cwd="/owned", run=run, sleep=lambda _: None)
+    if handling_error:
+        try:
+            raise ValueError("unrelated caller error")
+        except ValueError as caller_error:
+            reading = collect()
+            assert not hasattr(caller_error, "__notes__")
+    else:
+        reading = collect()
+    assert reading == {"week_all_pct": pct, "week_all_resets": None,
+                       "week_fable_pct": None, "week_fable_resets": None}
+    assert capsys.readouterr().err == (
+        "Claude usage cleanup warning [subsystem=usage_probe bug_ref=cleanup_discards_reading]: usage socket cleanup unconfirmed\n")
     assert path.exists()
 
 
@@ -543,3 +577,109 @@ def test_named_probe_keeps_exact_home_and_rejects_inherited_auth_overrides(monke
     assert 'CLAUDE_CONFIG_DIR=/absolute/named-home' in argv
     assert '--setting-sources' in argv and '--settings' in argv
     assert 'fake-only' not in command[-1] and 'ANTHROPIC_API_KEY' not in kwargs['env']
+
+
+@pytest.mark.parametrize("screen", ["zero", "nonzero", "trust", "auth"])
+def test_cleanup_failure_cli_updates_real_collector(tmp_path, monkeypatch, screen):
+    """Real entrypoint and collector; only provider/tmux are controlled counterparts."""
+    import json
+    import subprocess
+    import sys
+    from usage_collector import UsageStateCollector
+    from usage_state import UsageStateStore
+
+    # The test owns the live listener. The fake tmux moves its pathname to the
+    # probe-generated name, but cannot close it or make safe-unlink accept it.
+    with tempfile.TemporaryDirectory(prefix="usage-", dir="/tmp") as root:
+        root = Path(root)
+        directory = root / f"tmux-{os.geteuid()}"
+        directory.mkdir(mode=0o700)
+        monkeypatch.setenv("TMUX_TMPDIR", str(root))
+        monkeypatch.setenv("PENTACLE_USAGE_CLAUDE_OAUTH", "0")
+        monkeypatch.delenv("PENTACLE_USAGE_NAMED_ACCOUNT", raising=False)
+        terminal = {
+            "zero": "Current week (all models)\n0% used\nResets tomorrow\nCurrent week (Fable)\n12% used",
+            "nonzero": "Current week (all models)\n63% used\nResets tomorrow\nCurrent week (Fable)\n12% used",
+            "trust": "Do you trust this folder? DO_NOT_LEAK",
+            "auth": "Please sign in to continue DO_NOT_LEAK",
+        }[screen]
+        provider = root / "provider"
+        provider.write_text(f"#!{sys.executable}\nprint({terminal!r})\n")
+        provider.chmod(0o700)
+        tmux = root / "tmux"
+        tmux.write_text(f'''#!{sys.executable}
+import json, os, pathlib, shlex, subprocess, sys
+root = pathlib.Path({str(root)!r})
+name, operation = sys.argv[2:4]
+endpoint = root / f"tmux-{{os.geteuid()}}" / name
+with (root / "commands").open("a") as log:
+    log.write(json.dumps({{"name": name, "operation": operation}}) + "\\n")
+if operation == "new-session":
+    (root / "endpoint").rename(endpoint)
+    (root / "screen").write_text(subprocess.check_output(shlex.split(sys.argv[-1]), text=True))
+    (root / "sent").unlink(missing_ok=True)
+elif operation == "display-message":
+    print(endpoint)
+elif operation == "send-keys":
+    (root / "sent").touch()
+elif operation == "capture-pane":
+    print((root / "screen").read_text() if (root / "sent").exists() or {screen!r} in {{"trust", "auth"}} else "❯")
+elif operation == "kill-server":
+    # Deliberately leave the owned live endpoint; never signal any process.
+    print("DO_NOT_LEAK", file=sys.stderr)
+''')
+        tmux.chmod(0o700)
+        command = (sys.executable, str(Path(__file__).parents[3] / "scripts/check_claude_usage.py"),
+                   "--json", "--claude", str(provider), "--tmux", str(tmux), "--cwd", str(root))
+        endpoints = []
+        def invoke(action):
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(root / "endpoint"))
+                endpoint.listen(16)
+                before = (root / "endpoint").lstat()
+                result = action()
+                name = json.loads((root / "commands").read_text().splitlines()[-1])["name"]
+                path = directory / name
+                after = path.lstat()
+                assert (after.st_dev, after.st_ino, after.st_uid) == (before.st_dev, before.st_ino, os.geteuid())
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(1)
+                    connection.connect(str(path))
+                endpoints.append({"same_owned_inode": True, "still_live": True})
+                return result
+
+        direct = invoke(lambda: subprocess.run(command, capture_output=True, text=True, timeout=15))
+        state_path = tmp_path / "usage.json"
+        collector = UsageStateCollector(state_path=state_path, claude_command=(sys.executable, "-c", 'print(\'{"week_all_pct":17,"week_all_resets":null,"week_fable_pct":4,"week_fable_resets":null}\')'),
+                                        codex_command=(sys.executable, "-c", 'print(\'{"status":"no_update"}\')'))
+        collector.run_once()
+        before = UsageStateStore(state_path).load()
+        assert [row["pct"] for row in before.lkg] == [17, 4]
+        collector = UsageStateCollector(state_path=state_path, claude_command=command,
+                                        codex_command=(sys.executable, "-c", 'print(\'{"status":"no_update"}\')'))
+        invoke(collector.run_once)
+        after = UsageStateStore(state_path).load()
+        receipt = {"case": screen, "exit": direct.returncode, "stdout": direct.stdout, "stderr": direct.stderr,
+                   "prior_pcts": [row["pct"] for row in before.lkg], "pcts": [row["pct"] for row in after.lkg],
+                   "health": after.health["outcome"], "endpoints": endpoints}
+        (tmp_path / "cleanup-journey.json").write_text(json.dumps(receipt))
+        print("usage cleanup journey: " + json.dumps(receipt))
+        operations = [json.loads(line)["operation"] for line in (root / "commands").read_text().splitlines()]
+        assert operations.count("new-session") == operations.count("kill-server") == 2
+        assert "DO_NOT_LEAK" not in direct.stdout + direct.stderr
+        if screen in {"trust", "auth"}:
+            assert direct.returncode == 1 and direct.stdout == ""
+            expected = "trusted Claude workspace" if screen == "trust" else "logged in"
+            assert expected in direct.stderr
+            assert [row["pct"] for row in after.lkg] == [17, 4]
+            assert after.health["outcome"] == "provider_error"
+        else:
+            assert direct.returncode == 0, receipt
+            assert json.loads(direct.stdout) == {"week_all_pct": 0 if screen == "zero" else 63,
+                                               "week_all_resets": "tomorrow", "week_fable_pct": 12,
+                                               "week_fable_resets": None}
+            assert len(direct.stdout.splitlines()) == 1
+            assert direct.stderr == (
+                "Claude usage cleanup warning [subsystem=usage_probe bug_ref=cleanup_discards_reading]: usage socket cleanup unconfirmed\n")
+            assert [row["pct"] for row in after.lkg] == [0 if screen == "zero" else 63, 12]
+            assert after.health["outcome"] == "ok"

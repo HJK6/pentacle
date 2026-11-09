@@ -21,6 +21,13 @@ probe performs no Keychain lookup and no network call. This is account quota,
 not session cost or requests per minute. It does not change the quota. The Fable
 row is optional and the client hides it when no Fable quota is reported.
 
+A parsed reading returns exit 0 and one JSON object on stdout, including 0% usage,
+even if dedicated-socket cleanup fails. A sanitized stderr warning carries
+`subsystem=usage_probe` and `bug_ref=cleanup_discards_reading` with the cleanup
+condition. The collector accepts that reading. Collection failures retain their
+original error and nonzero exit; cleanup context never replaces the primary
+failure. Cleanup still refuses live, changed or unowned sockets.
+
 1. As the same OS user that will run the collector, verify Claude login and
    complete the trust prompt **in the exact directory you will pass as
    `PENTACLE_USAGE_CWD`** (the probe launches the CLI there and never
