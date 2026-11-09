@@ -18,10 +18,20 @@ and the existing event insertion watermark. Concurrent event activity can defer
 promotion conservatively. A later ordinary read can try again through the existing
 desk recovery path; this feature adds no poller or timer.
 
-A proved landing appends one receipt and preserves prior history. Verified
-reconciliation can reuse that landing only across identical pending rows;
-terminal outcomes and changed identities remain authoritative. Ordinary receipt
-reads retain their highest-row behavior. No replay or pane submission occurs.
+A proved landing appends one receipt and preserves prior history. Both ordinary
+reads and reconciliation preserve the most recent confirmed landed receipt
+across later pending rows of the same immutable physical attempt. All retained
+rows must agree on receipt ID, payload, attachments, sender/actor and client
+metadata; contradictory terminal outcomes prevent precedence. This includes
+ordinary delivery confirmations and hot/archive history. No replay or pane
+submission occurs. A known session reincarnation still blocks reuse across
+pending rows; late-proof inference retains its generation and birth fences.
+
+Identity comparisons exclude only daemon-owned `_input_proof` and `pool_input`
+metadata enrichment. Unknown client fields still participate. Provenance
+validators retain the internal fields, while public receipts keep normalized
+first-admission voice metadata and never expose those internal records. The
+same late-proof checks also accept the existing `voice-v1` original request.
 
 The private logical identifier is used only to verify the request commitment.
 It is not returned, logged, or passed to receipt storage. Public examples and

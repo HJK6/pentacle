@@ -67,7 +67,18 @@ def epoch(value):
 
 
 def immutable_identity(row):
-    return tuple(row[k] for k in IDENTITY_FIELDS)
+    # Admission owns client metadata. Delivery may later add these two private
+    # provenance records; keep every other field, including unknown client keys.
+    meta = row["meta_json"]
+    try:
+        decoded = json.loads(meta)
+        if isinstance(decoded, dict):
+            meta = json.dumps({k: v for k, v in decoded.items()
+                               if k not in {"_input_proof", "pool_input"}},
+                              sort_keys=True, separators=(",", ":"))
+    except (ValueError, TypeError):
+        pass
+    return tuple(meta if k == "meta_json" else row[k] for k in IDENTITY_FIELDS)
 
 
 def pending(row):
@@ -81,16 +92,20 @@ def pending(row):
 
 
 def proved_pending_precedence(rows):
-    """Return prior proved row only across identical pending-only history."""
+    """Reuse confirmed delivery only within one immutable pending-only attempt."""
     proofs = [i for i, row in enumerate(rows) if row["state"] == "landed"
-              and row["reason"] == "late_user_proof" and row["submission_confirmed"]]
+              and row["delivery"] == "landed" and row["submission_confirmed"]]
     if not proofs:
         return None, False
     i = proofs[-1]
     proof = rows[i]
     followers = rows[i + 1:]
-    if followers and all(pending(r) and immutable_identity(r) == immutable_identity(proof)
-                         for r in followers):
+    if followers and all(
+            immutable_identity(r) == immutable_identity(proof) and
+            (n in proofs or (r["state"] == "accepted" and
+                             r["delivery"] in PENDING_DELIVERIES and
+                             r["reason"] != "front_desk_held"))
+            for n, r in enumerate(rows)):
         return proof, False
     return None, bool(followers)
 
