@@ -187,7 +187,7 @@ def test_precedence_only_for_identical_pending_history(tmp_path, later):
             row = await read_receipt(store, key, proof)
             assert (row["state"] == "landed") == (later == "pending")
             ordinary = await store.get_send_receipt(TARGET, key)
-            assert ordinary["state"] != "landed"
+            assert (ordinary["state"] == "landed") == (later == "pending")
         finally:
             store.stop()
     asyncio.run(run())

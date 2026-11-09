@@ -33,6 +33,22 @@ canonical observed start (or `unavailable`). Its stage is one finite reason:
 The notice contains the hashed episode and reason; local structured ingest logs
 map it to the compared metadata without transcript text, arguments, nonce or paths.
 
+For `proof_unavailable` with an empty canonical observed start and equal stored
+binding/current row PIDs, the producer first refetches the open generation and
+complete binding. A dead kernel PID emits no fact and clears pending eligibility;
+permission denial remains alive/unknown. A live seat requires both three consecutive
+distinct completed ingest attempts and ten monotonic seconds since the first
+eligible failure. Entry and late refusals count together once per attempt. Strict
+ingestion and recovery checks remain fail-closed throughout this grace.
+
+The pending key includes stream, generation, complete expected binding and current
+row PID. Healthy completion, proven recovery, tuple change, process death or row
+retirement resets it. Healthy entry alone does not reset repeated late refusals.
+A producer restart starts fresh grace; an eligible sink failure retries at normal
+cadence without restarting grace. Other reasons, nonempty observed starts and
+changed stored/current PIDs retain immediate alert behavior. No timer or new
+durable state is involved; deferred/gone observations remain local diagnostics.
+
 This code is a historical incident. The first durable fact wins: identical
 retries, reason changes and recurrence after a healthy pass retain the same
 notification, revision and acknowledgement. Different binding, generation or

@@ -440,17 +440,18 @@ to that seat. A closed seat's questions expire as usual. A failed binding read
 omits the stamp and the wider scope; it never fails hello or a list. Lane
 `question.open` is not used in this mode.
 
-The mirror classifies each primary assistant event by the nearest preceding
-non-sidechain USER or TELL in the same session lifecycle and source transcript.
-A USER matching this binding's resolved direct-primary wire envelope is an
-operator trigger (including queued-command USER rows). Peer tell/send envelopes
-(on a normalized TELL, the envelope ID is `raw.tell_id`) and daemon notice
-markers suppress mirroring only when their ID resolves to a
-durable tell delivery or outbound notice addressed to the source seat. This
-covers notices, child reports, digests, wakes and Dot messages. Envelope-shaped
-text without that provenance and other unknown triggers still mirror and emit
-`assistant_mirror_unknown_trigger` telemetry. SYSTEM, thinking, tool and
-assistant events do not replace the trigger. Lone glyph finals are dropped.
+Automatic mirroring requires a proven operator trigger in the same session
+lifecycle and source transcript. A USER matching this binding's resolved
+direct-primary wire envelope is an operator trigger, including queued-command
+USER rows. Later verified peer or service inputs do not take ownership from
+that operator. A turn containing only peer or service inputs does not mirror.
+Unknown inputs also stop automatic mirroring, including unverified tell or
+notice envelopes, direct provider-TUI text and prompts asking for visible
+output. They remain unverified in their source transcript and emit
+`assistant_mirror_unknown_trigger` telemetry with `mirror_action=suppressed`.
+SYSTEM, thinking, tool and assistant events do not replace the trigger. Lone
+glyph finals are dropped. Explicit authenticated dispatch publications and
+dispatch-correlated turn-final projection retain their existing behavior.
 
 The current direct-primary binding can explicitly publish a user-directed
 milestone after an excluded trigger:
