@@ -120,6 +120,51 @@ test('binding and reconnect epochs reject late questions and assets without clea
   await flush();
 });
 
+test('native reconnect without a disconnected edge starts a new read epoch and rejects late old replies', async t => {
+  const { dom, run } = await boot(t);
+  const assets = [], questions = [];
+  dom.window.cc.assetList = args => new Promise(resolve => assets.push({args,resolve}));
+  dom.window.cc.promptList = args => new Promise(resolve => questions.push({args,resolve}));
+  run(`refetchAssetSnapshotsForActiveSlots();
+    applyChatStreamPayload({type:'__reconnect',generation:1,next_generation:2});`);
+  const dispatch = {assets:assets.length,questions:questions.length};
+  assets[0].resolve({assets:[{asset_id:'old-epoch',stream_id:STREAM,content_type:'report'}]});
+  questions[0].resolve({questions:[{notification_id:'old-epoch',question_id:'old-epoch',producer_stream_id:STREAM,state:'open'}]});
+  await flush();
+  const observed = {connected:run('state.chatStream.connected'),dispatch,
+    oldAsset:run(`visibleAssetsForSlot(0).some(a=>a.asset_id==='old-epoch')`),
+    oldQuestion:run(`getOpenQuestionsForStream('${STREAM}').some(q=>q.notification_id==='old-epoch')`)};
+  for (const pending of assets.slice(1)) pending.resolve({assets:[]});
+  for (const pending of questions.slice(1)) pending.resolve({questions:[]});
+  await flush();
+  assert.deepEqual(observed,{connected:true,dispatch:{assets:2,questions:2},oldAsset:false,oldQuestion:false});
+});
+
+test('native reconnect invalidates catalog eligibility and preserves hidden chat deferral', async t => {
+  const { dom, context, run } = await boot(t);
+  const catalog = {schema_version:1,catalog_version:'v1',package:{repo:'example',commit:'a'.repeat(40)},requires:{host_api:2},boards:[]};
+  const loader = catalogApi.createLoader({root:dom.window,storage:null,cc:{
+    assetList:async()=>({assets:[{asset_id:'dashboard-catalog',content_type:'dashboard-catalog',stream_id:STREAM}]}),
+    assetGet:async()=>({asset:{body:catalog}}),
+  }});
+  await loader.refresh('example__catalog'); context.testLoader = loader;
+  let assets=0,questions=0;
+  dom.window.cc.assetList = async()=>{assets++;return {assets:[]};};
+  dom.window.cc.promptList = async()=>{questions++;return {questions:[]};};
+  run(`catalogClient=testLoader; CONFIG.dashboards={catalogSpecId:'example__catalog'};
+    state.currentView='dashboards';
+    applyChatStreamPayload({type:'__reconnect',generation:1,next_generation:2});`);
+  const cachedStillEligible = !!loader.peek('example__catalog');
+  const hidden = {assets,questions};
+  // Leave before the asynchronous dashboard entry can write DOM. The request
+  // eligibility assertion above is independent of view/render readiness.
+  run(`switchView('chats')`); await flush();
+  assert.equal(cachedStillEligible,false);
+  assert.deepEqual(hidden,{assets:0,questions:0});
+  assert.equal(assets,1,'only the visible chat catch-up starts a read');
+  assert.equal(questions,1);
+});
+
 test('automatic read errors release ownership and retry only on a later invalidation', async t => {
   const { dom, run } = await boot(t);
   let assets = 0, questions = 0;

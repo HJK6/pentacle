@@ -2144,6 +2144,8 @@ function applyChatStreamPayload(payload) {
     // Normal daemon recovery may keep the current view connected throughout.
     // Its summary snapshot cannot replay a FINAL persisted while the socket
     // was down, so backfill loaded chats independently of the visible edge.
+    reconcileChatReadScopes(true);
+    invalidateDashboardCatalog();
     invalidateChatHistoryLoads();
     refetchEventsForActiveChatSlots();
     refetchAssetSnapshotsForActiveSlots();
