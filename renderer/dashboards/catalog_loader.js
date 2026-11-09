@@ -150,32 +150,67 @@
       return null;
     }
     function save(spec, catalog) { const record = { catalog, savedAt: now() }; memory.set(spec, record); try { storage?.setItem(`dashboard-catalog:${spec}`, JSON.stringify(record)); } catch {} return record; }
-    async function refresh(spec) {
-      const token = ++generation;
-      if (!spec) return { status: 'unset', catalog: null, cached: false };
-      let body;
-      try {
-        const reply = await cc.assetList({ spec_id: spec });
-        if (reply?.ok === false) throw new Error(reply.error || 'asset.list failed');
-        const rows = reply?.assets || reply?.result?.assets;
-        if (!Array.isArray(rows)) throw new Error('asset.list returned no assets');
-        const record = rows.find(r => r?.content_type === 'dashboard-catalog' && r.asset_id === 'dashboard-catalog');
-        if (!record || typeof record.stream_id !== 'string' || !record.stream_id) throw new Error('dashboard-catalog asset not found');
-        const got = await cc.assetGet({ stream_id: record.stream_id, asset_id: record.asset_id, spec_id: spec });
-        if (got?.ok === false) throw new Error(got.error || 'asset.get failed');
-        const asset = got?.asset || got?.result?.asset;
-        if (!asset || !own(asset, 'body')) throw new Error('asset.get returned no catalog body');
-        body = asset.body;
-      } catch (error) {
+    let currentSpec = null, inFlight = null, allowStoredFallback = true;
+    const eligible = new Set(), invalidated = new Set();
+    function forget(spec) { memory.delete(spec); eligible.delete(spec); invalidated.add(spec); }
+    function reset() {
+      generation++; inFlight = null; currentSpec = null;
+      memory.clear(); eligible.clear(); allowStoredFallback = false;
+    }
+    function peek(spec) {
+      const record = spec === currentSpec && eligible.has(spec) && memory.get(spec);
+      return record ? { status: 'refreshing', catalog: record.catalog, cached: true,
+        age: Math.max(0, now() - record.savedAt), message: record.message } : null;
+    }
+    function refresh(spec) {
+      spec ||= null;
+      if (spec !== currentSpec) { generation++; currentSpec = spec; inFlight = null; eligible.clear(); }
+      if (inFlight) return inFlight;
+      const token = generation;
+      const task = (async () => {
+        if (!spec) return { status: 'unset', catalog: null, cached: false };
+        let body, authoritative = false;
+        const failure = reply => {
+          const code = String(reply?.error?.code || reply?.error || 'request failed');
+          authoritative = !/disconnected|offline|unavailable|timeout|busy|connection|overload/i.test(code);
+          throw new Error(code);
+        };
+        try {
+          const reply = await cc.assetList({ spec_id: spec });
+          if (reply?.ok === false) failure(reply);
+          const rows = reply?.assets || reply?.result?.assets;
+          authoritative = true;
+          if (!Array.isArray(rows)) throw new Error('asset.list returned no assets');
+          const record = rows.find(r => r?.content_type === 'dashboard-catalog' && r.asset_id === 'dashboard-catalog');
+          if (!record || typeof record.stream_id !== 'string' || !record.stream_id) throw new Error('dashboard-catalog asset not found');
+          authoritative = false;
+          const got = await cc.assetGet({ stream_id: record.stream_id, asset_id: record.asset_id, spec_id: spec });
+          if (got?.ok === false) failure(got);
+          authoritative = true;
+          const asset = got?.asset || got?.result?.asset;
+          if (!asset || !own(asset, 'body')) throw new Error('asset.get returned no catalog body');
+          body = asset.body;
+        } catch (error) {
+          if (token !== generation) return { status: 'superseded' };
+          if (authoritative) forget(spec);
+          const record = !invalidated.has(spec) && (memory.get(spec) || (allowStoredFallback && cached(spec)));
+          const message = `Dashboard catalog unavailable: ${error.message || error}`;
+          if (record) record.message = message;
+          return { status: 'unavailable', message, catalog: record?.catalog || null, cached: !!record, age: record ? Math.max(0, now() - record.savedAt) : null };
+        }
         if (token !== generation) return { status: 'superseded' };
-        const record = cached(spec);
-        return { status: 'unavailable', message: `Dashboard catalog unavailable: ${error.message || error}`, catalog: record?.catalog || null, cached: !!record, age: record ? Math.max(0, now() - record.savedAt) : null };
-      }
-      if (token !== generation) return { status: 'superseded' };
-      let catalog;
-      try { catalog = typeof body === 'string' ? JSON.parse(body) : body; validateCatalog(catalog); }
-      catch (error) { return { status: error.unsupported ? 'unsupported' : 'malformed', catalog: null, cached: false, message: `Dashboard catalog unsupported/malformed: ${error.message || error} (catalog ${typeof catalog?.catalog_version === 'string' ? catalog.catalog_version : 'unknown'})` }; }
-      save(spec, catalog); return { status: 'ready', catalog, cached: false };
+        let catalog;
+        try { catalog = typeof body === 'string' ? JSON.parse(body) : body; validateCatalog(catalog); }
+        catch (error) {
+          forget(spec);
+          return { status: error.unsupported ? 'unsupported' : 'malformed', catalog: null, cached: false, message: `Dashboard catalog unsupported/malformed: ${error.message || error} (catalog ${typeof catalog?.catalog_version === 'string' ? catalog.catalog_version : 'unknown'})` };
+        }
+        save(spec, catalog); eligible.add(spec); invalidated.delete(spec);
+        return { status: 'ready', catalog, cached: false };
+      })();
+      inFlight = task;
+      task.finally(() => { if (inFlight === task) inFlight = null; });
+      return task;
     }
     function loadTag(catalog, path, hash) {
       const url = fileUrl(catalog.catalog_version, path), key = `${url}:${hash}`;
@@ -281,7 +316,9 @@
       }
       return { boards, errors };
     }
-    return { refresh, merge, loadTag, loadAdapter, cancel: () => { generation++; } };
+    return { refresh, peek, reset, merge, loadTag, loadAdapter,
+      invalidate: (spec = currentSpec) => { generation++; inFlight = null; if (spec) forget(spec); },
+      cancel: () => { generation++; inFlight = null; } };
   }
   const api = { HOST_API, validateCatalog, keyFormatWidth, plainHttpUrl, admitHostedUrl, integrity, fileUrl, actions, errorCard, createLoader };
   root.DashboardCatalogLoader = api;

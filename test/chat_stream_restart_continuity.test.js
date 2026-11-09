@@ -165,6 +165,7 @@ function rendererPolicyHarness() {
  const context = { state: { chatStream: { connected: true, stateVersion: -1 }, currentView: 'chats' },
   window: { hostedDashboardPolicy: hostedPolicy, Event: class {}, dispatchEvent() {} },
   withSharedWorkingProjection: p => p, setDegradedMode() {},
+  reconcileChatReadScopes() {}, invalidateDashboardCatalog() {},
   applyVersionedConnectionState: require('../renderer/chat_stream_connection_state').applyVersionedConnectionState };
  vm.createContext(context);
  // Run the actual policy/state prefix and full dispatcher, without unrelated UI rendering.
@@ -203,6 +204,7 @@ function rendererDraftHarness() {
   window: { Event: class {}, dispatchEvent() {}, cc: { chatClose: async () => ({ ok: true }) } },
   CHAT_STREAM_LIMIT: 100, SCHEDULE_EVENT_TYPES: [], IS_CLIENT: false,
   withSharedWorkingProjection: p => p, setDegradedMode() {},
+  reconcileChatReadScopes() {}, invalidateDashboardCatalog() {},
   applyVersionedConnectionState: require('../renderer/chat_stream_connection_state').applyVersionedConnectionState,
   nextChatStreamSessions: (current, data) => Array.isArray(data.sessions) ? data.sessions : current,
   closedChatSlots: { update() {} }, reconcileComposerDraftInventory() {}, reconcileLocallyClosedStreamIds() {},
