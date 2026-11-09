@@ -580,7 +580,7 @@ def test_named_probe_keeps_exact_home_and_rejects_inherited_auth_overrides(monke
 
 
 @pytest.mark.parametrize("screen", ["zero", "nonzero", "trust", "auth"])
-def test_cleanup_failure_cli_updates_real_collector(tmp_path, monkeypatch, screen):
+def test_cleanup_failure_cli_updates_real_collector(tmp_path, monkeypatch, request, screen):
     """Real entrypoint and collector; only provider/tmux are controlled counterparts."""
     import json
     import subprocess
@@ -645,7 +645,8 @@ elif operation == "kill-server":
                 with socket.socket(socket.AF_UNIX) as connection:
                     connection.settimeout(1)
                     connection.connect(str(path))
-                endpoints.append({"same_owned_inode": True, "still_live": True})
+                endpoints.append({"device": before.st_dev, "inode": before.st_ino, "uid": before.st_uid,
+                                  "same_owned_inode": True, "still_live": True})
                 return result
 
         direct = invoke(lambda: subprocess.run(command, capture_output=True, text=True, timeout=15))
@@ -662,7 +663,7 @@ elif operation == "kill-server":
         receipt = {"case": screen, "exit": direct.returncode, "stdout": direct.stdout, "stderr": direct.stderr,
                    "prior_pcts": [row["pct"] for row in before.lkg], "pcts": [row["pct"] for row in after.lkg],
                    "health": after.health["outcome"], "endpoints": endpoints}
-        (tmp_path / "cleanup-journey.json").write_text(json.dumps(receipt))
+        request.node.user_properties.append(("usage_cleanup_journey", json.dumps(receipt)))
         print("usage cleanup journey: " + json.dumps(receipt))
         operations = [json.loads(line)["operation"] for line in (root / "commands").read_text().splitlines()]
         assert operations.count("new-session") == operations.count("kill-server") == 2
