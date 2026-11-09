@@ -582,8 +582,10 @@ def test_spawn_materializes_resolver_canonical_binding_after_store_restart(
 
 def test_attach_updates_inspect_and_ledger_agreement() -> None:
     async def go() -> None:
+        from work_lane_link import link_specs
         store = Store(":memory:")
         store.start()
+        await link_specs(store, CANONICAL_SPEC_ID)
         sessions = Sessions(store, local_host="alpha")
         await sessions.open("alpha", "attach", visibility="hidden")
         catalog = Catalog()
