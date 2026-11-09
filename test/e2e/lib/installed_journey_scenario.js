@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { pasteFixture } = require('./render_proofs');
+const { reloadDashboardPage } = require('./dashboard_scenario');
 
 async function installedJourney(ctx, descriptor) {
   const { session, report } = ctx;
@@ -119,7 +120,7 @@ async function installedJourney(ctx, descriptor) {
         const fixture = descriptor.fixtures[i];
         await open(fixture);
         const before = descriptor.before[String(i)];
-        await session.send('Page.reload');
+        await reloadDashboardPage(ctx, { keepWorkspace: true });
         const replyText = before.find(e => e.kind !== 'USER').text.trim();
         await wait(`!!window.cc && !!window.PentacleChatStore && document.querySelector('${list}')?.textContent.includes(${JSON.stringify(replyText)})`);
         const pages = [];
@@ -159,7 +160,7 @@ async function installedJourney(ctx, descriptor) {
       await session.click(portal + ' .slot-chat-question-submit');
       const query = `window.cc.promptList({producer_stream_id:${JSON.stringify(descriptor.fixtures[0].stream_id)},open:false})`;
       await wait(`(async () => { const r=await ${query}; return r.questions?.some(q => q.question_id === ${JSON.stringify(descriptor.question_id)} && q.state !== 'open'); })()`);
-      await session.send('Page.reload');
+      await reloadDashboardPage(ctx, { keepWorkspace: true });
       await wait('!!window.cc && !!window.PentacleChatStore');
       observation.questions = await session.eval(query, { awaitPromise:true });
       observation.answered_notification_id = descriptor.notification_id;
