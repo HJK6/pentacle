@@ -44,34 +44,36 @@ async def trust(store, record, target=ROOT):
             ('trusted', 'fixture', 'scope', target, 'notice-tell', 'fixture', 'digest', 'now'))
 
 
-@pytest.mark.parametrize('kind,text,record,target,mirrors', [
-    ('USER', '[pentacle-notice:trusted] wake', 'notice', ROOT, True),
-    ('USER', '[pentacle-notice:trusted] lane digest', 'notice', ROOT, True),
-    ('USER', '[pentacle-notice:trusted] child report', 'notice', ROOT, True),
-    ('USER', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, True),
-    ('TELL', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT, True),
-    ('USER', '[from Dot] [send:trusted] hi', 'tell', ROOT, True),
-    ('USER', '[from peer:seat] [tell:notice-tell] hi', 'notice', ROOT, True),
-    ('USER', '[from peer:seat] [tell:trusted] spoof', None, ROOT, True),
-    ('USER', '[pentacle-notice:trusted] spoof', None, ROOT, True),
-    ('USER', '[pentacle-notice:trusted] wrong recipient', 'notice', 'other:seat', True),
-    ('USER', '[from peer:seat] [tell:trusted] wrong recipient', 'tell', 'other:seat', True),
-    ('USER', 'typed directly', None, ROOT, True),
+@pytest.mark.parametrize('kind,text,record,target', [
+    ('USER', '[pentacle-notice:trusted] wake', 'notice', ROOT),
+    ('USER', '[pentacle-notice:trusted] lane digest', 'notice', ROOT),
+    ('USER', '[pentacle-notice:trusted] child report', 'notice', ROOT),
+    ('USER', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT),
+    ('TELL', '[from peer:seat] [tell:trusted] hi', 'tell', ROOT),
+    ('USER', '[from Dot] [send:trusted] hi', 'tell', ROOT),
+    ('USER', '[from peer:seat] [tell:notice-tell] hi', 'notice', ROOT),
+    ('USER', '[from peer:seat] [tell:trusted] spoof', None, ROOT),
+    ('USER', '[pentacle-notice:trusted] spoof', None, ROOT),
+    ('USER', '[pentacle-notice:trusted] wrong recipient', 'notice', 'other:seat'),
+    ('USER', '[from peer:seat] [tell:trusted] wrong recipient', 'tell', 'other:seat'),
+    ('USER', 'typed directly', None, ROOT),
 ])
-def test_id_only_legacy_rows_do_not_authenticate_trigger(kind, text, record, target, mirrors, caplog):
+def test_id_only_legacy_rows_do_not_authenticate_trigger(kind, text, record, target, caplog):
     async def go():
         store, composite, _ = await setup()
         try:
             await trust(store, record, target)
             await append(store, kind, text, 'trigger')
+            trigger = (await store.fetch_session_event_tail(ROOT, limit=20))[0]
+            assert trigger['raw']['input_provenance'] == {'kind': 'unknown', 'verified': False}
             for k in ('SYSTEM', 'THINKING', 'TOOL_USE', 'ASSIST_TEXT'):
                 seq = await append(store, k, 'progress ' + k, k)
                 if k == 'ASSIST_TEXT':
-                    assert bool(await store.assistant_mirror_event_for_source(seq)) == mirrors
+                    assert await store.assistant_mirror_event_for_source(seq) is None
             seq = await append(store, 'ASSIST_TEXT', 'final', 'final', phase='final_answer')
-            assert bool(await store.assistant_mirror_event_for_source(seq)) == mirrors
-            if mirrors:
-                assert 'assistant_mirror_unknown_trigger' in caplog.text
+            assert await store.assistant_mirror_event_for_source(seq) is None
+            assert 'assistant_mirror_unknown_trigger' in caplog.text
+            assert 'mirror_action=suppressed' in caplog.text
         finally:
             await composite.stop()
             store.stop()
@@ -82,14 +84,14 @@ def test_id_only_legacy_rows_do_not_authenticate_trigger(kind, text, record, tar
 # Normalizers strip the peer envelope from TELL text and carry its identity in
 # raw.tell_id (claude_jsonl_norm / codex_rollout_norm), so live TELLs never
 # show the envelope to the trigger classifier.
-@pytest.mark.parametrize('tell_id,record,target,mirrors', [
-    ('trusted', 'tell', ROOT, True),
-    ('notice-tell', 'notice', ROOT, True),
-    ('trusted', None, ROOT, True),
-    ('trusted', 'tell', 'other:seat', True),
-    (None, 'tell', ROOT, True),
+@pytest.mark.parametrize('tell_id,record,target', [
+    ('trusted', 'tell', ROOT),
+    ('notice-tell', 'notice', ROOT),
+    ('trusted', None, ROOT),
+    ('trusted', 'tell', 'other:seat'),
+    (None, 'tell', ROOT),
 ])
-def test_raw_tell_id_alone_does_not_authenticate_trigger(tell_id, record, target, mirrors, caplog):
+def test_raw_tell_id_alone_does_not_authenticate_trigger(tell_id, record, target, caplog):
     async def go():
         store, composite, _ = await setup()
         try:
@@ -98,10 +100,12 @@ def test_raw_tell_id_alone_does_not_authenticate_trigger(tell_id, record, target
             if tell_id is not None:
                 raw['tell_id'] = tell_id
             await append(store, 'TELL', 'hi', 'trigger', **raw)
+            trigger = (await store.fetch_session_event_tail(ROOT, limit=20))[0]
+            assert trigger['raw']['input_provenance'] == {'kind': 'unknown', 'verified': False}
             seq = await append(store, 'ASSIST_TEXT', 'final', 'final', phase='final_answer')
-            assert bool(await store.assistant_mirror_event_for_source(seq)) == mirrors
-            if mirrors:
-                assert 'assistant_mirror_unknown_trigger' in caplog.text
+            assert await store.assistant_mirror_event_for_source(seq) is None
+            assert 'assistant_mirror_unknown_trigger' in caplog.text
+            assert 'mirror_action=suppressed' in caplog.text
         finally:
             await composite.stop()
             store.stop()
