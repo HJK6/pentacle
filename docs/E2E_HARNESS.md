@@ -59,14 +59,17 @@ separate identities.
 
 Releases are component-scoped: `source_sha` binds the daemon; CLI `version`
 binds its own release manifest and installed/imported package bytes. The runner
-checks the CLI source tree and shared spawn/asset contracts are identical between
-that release and the daemon source. `web` supplies its own full `source_sha`, installed `artifact` directory
+checks compatibility independently of release order. `web` supplies its own full `source_sha`, installed `artifact` directory
 and `build_id`. The runner verifies the artifact's `build-sha.txt`, uses the
 existing web build-ID oracle and checks served JS/CSS bytes against the artifact.
-Tracked web inputs (renderer, client core, server, assets, configs, libraries,
+Web-owned paths (renderer, client core, server, assets, configs, libraries,
 main, vendor, package locks, web build script and root config/host loaders)
-must be identical between the web release and daemon source. A content mismatch
-refuses admission; a different component commit alone does not.
+may change independently. Changes introduced by a component since its merge-base
+with the daemon must stay within that component's own paths (the CLI package
+for CLI releases). Older component releases remain valid across daemon-only
+changes. Shared contracts under `services/_shared` must be identical between
+component and daemon source. These source compatibility checks do not waive
+verification of each component's actual installed bytes and build identity.
 
 Exit status is 0 PASS, 1 FAIL, or 2 BLOCKED. `rows.json` retains each check's
 `row`, `result`, `primary_error`, `harness_error`, `fixture_ids` and `cleanup`;

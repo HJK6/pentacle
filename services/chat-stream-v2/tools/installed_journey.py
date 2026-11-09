@@ -30,7 +30,7 @@ import uuid
 SERVICE = Path(__file__).resolve().parents[1]
 ROOT = SERVICE.parents[1]
 CLI_SOURCE = 'services/agent-orch/agent_orch'
-CLI_SOURCES = (CLI_SOURCE, 'services/_shared/spawn_profiles.py', 'services/_shared/asset_schema.py')
+SHARED_SOURCES = ('services/_shared',)
 WEB_SOURCES = ('assets', 'configs', 'config-loader.js', 'hosts.js', 'lib', 'main',
                'package.json', 'package-lock.json', 'pentacle-chat-core', 'renderer',
                'scripts/build-web.js', 'server', 'vendor')
@@ -50,6 +50,26 @@ def require(condition, message):
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def component_compatibility(checkout, version, daemon, owned_paths, name):
+    """Allow independently released component changes, preserving shared contracts."""
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args], timeout=30)
+    require(isinstance(version, str) and re.fullmatch('[0-9a-f]{40}', version), name + ' source SHA missing')
+    source = git('ls-tree', '-r', '-z', version, '--', *owned_paths)
+    require(bool(source), name + ' source paths missing')
+    shared = git('ls-tree', '-r', '-z', version, '--', *SHARED_SOURCES)
+    require(bool(shared) and shared == git('ls-tree', '-r', '-z', daemon, '--', *SHARED_SOURCES),
+            name + ' shared contracts incompatible with daemon')
+    common = git('merge-base', version, daemon).decode().strip()
+    forward = git('diff', '--name-only', '-z', common, version).decode().split('\0')
+    forward = [path for path in forward if path]
+    require(all(any(path == owned or path.startswith(owned + '/') for owned in owned_paths) for path in forward),
+            name + ' release changes outside its owned paths')
+    return {'source_index_sha256': hashlib.sha256(source).hexdigest(),
+            'shared_index_sha256': hashlib.sha256(shared).hexdigest(),
+            'merge_base': common, 'component_forward_paths': forward}
 
 
 def save(path, value):
@@ -333,15 +353,8 @@ class Journey:
         def git(*args):
             return subprocess.check_output(['git', '-C', checkout, *args], timeout=30)
 
-        def compatible(version, paths, name):
-            require(isinstance(version, str) and re.fullmatch('[0-9a-f]{40}', version), name + ' source SHA missing')
-            source = git('ls-tree', '-r', '-z', version, '--', *paths)
-            daemon = git('ls-tree', '-r', '-z', self.m['source_sha'], '--', *paths)
-            require(bool(source) and source == daemon, name + ' source incompatible with daemon')
-            return hashlib.sha256(source).hexdigest()
-
         cli = self.m['cli']
-        cli_source = compatible(cli['version'], CLI_SOURCES, 'CLI')
+        cli_source = component_compatibility(checkout, cli['version'], self.m['source_sha'], (CLI_SOURCE,), 'CLI')
         package = release.get('runtime_package') or {}
         require(package.get('path') == CLI_SOURCE, 'CLI package source missing')
         # Use the installer's existing source/archive and installed-tree oracles.
@@ -364,7 +377,7 @@ class Journey:
                     'imported CLI module differs from release source: ' + name)
 
         web = self.m['web']
-        web_source = compatible(web['source_sha'], WEB_SOURCES, 'web')
+        web_source = component_compatibility(checkout, web['source_sha'], self.m['source_sha'], WEB_SOURCES, 'web')
         artifact = Path(web['artifact'])
         require((artifact / 'build-sha.txt').read_text().strip() == web['source_sha'], 'web artifact source stamp drift')
         program = ('const s=require(process.argv[1]).freezeWebDist(process.argv[2]); '
@@ -381,9 +394,10 @@ class Journey:
                 for chunk in iter(lambda: response.read(1024 * 1024), b''):
                     hashed.update(chunk)
             require(hashed.hexdigest() == asset['sha256'], 'served web asset differs from installed artifact: ' + asset['path'])
-        return {'cli_version': cli['version'], 'cli_source_index_sha256': cli_source,
+        return {'cli_version': cli['version'], 'cli_source_index_sha256': cli_source['source_index_sha256'],
+                'cli_compatibility': cli_source, 'web_compatibility': web_source,
                 'cli_package_sha256': package['sha256'], 'web_source_sha': web['source_sha'],
-                'web_source_index_sha256': web_source, 'web_build_id': frozen['buildId']}
+                'web_source_index_sha256': web_source['source_index_sha256'], 'web_build_id': frozen['buildId']}
 
     def actor_cli(self, fixture, *args):
         from launch import stream_token_file_for

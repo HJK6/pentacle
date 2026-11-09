@@ -266,7 +266,8 @@ def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
 
 @pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'shared-contract', 'web-source', 'manifest-package',
                                  'installed-package', 'import-binding', 'web-stamp', 'web-build',
-                                 'served-build', 'served-bytes', 'artifact-bytes'])
+                                 'served-build', 'served-bytes', 'artifact-bytes', 'cli-ahead', 'web-ahead', 'foreign-ahead',
+                                 'cli-foreign-ahead', 'web-shared-ahead'])
 def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, monkeypatch, fault):
     import io
     import subprocess
@@ -292,16 +293,27 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     git('commit', '-qm', 'component release')
     released = git('rev-parse', 'HEAD')
     if fault == 'cli-source':
-        (package / 'cli.py').write_text('incompatible daemon-side CLI')
-    elif fault == 'shared-contract':
+        (package / 'cli.py').write_text('independent daemon-side CLI')
+    elif fault == 'cli-ahead':
+        contents['cli.py'] = b'independently released CLI\n'
+        (package / 'cli.py').write_bytes(contents['cli.py'])
+    elif fault in ('shared-contract', 'web-shared-ahead'):
         (shared / 'spawn_profiles.py').write_text('incompatible daemon-side contract')
-    elif fault == 'web-source':
-        (checkout / 'renderer/app.js').write_text('incompatible daemon-side web')
-    (checkout / 'daemon-only').write_text('independent daemon release')
+    elif fault in ('web-source', 'web-ahead'):
+        (checkout / 'renderer/app.js').write_text('independent daemon-side web')
+    if fault not in ('cli-ahead', 'web-ahead', 'web-shared-ahead'):
+        (checkout / 'daemon-only').write_text('independent daemon release')
     git('add', '.')
     git('commit', '-qm', 'daemon release')
     daemon = git('rev-parse', 'HEAD')
     version = daemon if fault == 'equal' else released
+    web_version = released
+    if fault in ('cli-ahead', 'web-ahead', 'foreign-ahead', 'cli-foreign-ahead', 'web-shared-ahead'):
+        if fault in ('cli-ahead', 'cli-foreign-ahead'):
+            version = daemon
+        else:
+            web_version = daemon
+        daemon = released
     release_root = tmp_path / 'release'
     installed = release_root / 'runtime/site-packages/agent_orch'
     installed.mkdir(parents=True)
@@ -313,7 +325,7 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     artifact = tmp_path / 'web'
     dist = artifact / 'renderer/dist/web'
     dist.mkdir(parents=True)
-    (artifact / 'build-sha.txt').write_text(released)
+    (artifact / 'build-sha.txt').write_text(web_version)
     (dist / 'web.html').write_text('<script src="bundle.js"></script>')
     (dist / 'bundle.js').write_text('installed web bundle')
     frozen = json.loads(subprocess.check_output(['node', '-e',
@@ -323,10 +335,11 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     value['source_sha'] = daemon
     value['daemon']['checkout'] = str(checkout)
     value['cli'].update(version=version, manifest_path=str(release_root / 'manifest.json'))
-    value['web'] = {'source_sha': released, 'artifact': str(artifact), 'build_id': frozen}
+    value['web'] = {'source_sha': web_version, 'artifact': str(artifact), 'build_id': frozen}
     value['expected_build_id'] = frozen
     release = {'runtime_package': {'path': subject.CLI_SOURCE, 'sha256': tree_hash}}
-    expected = {'cli-source': 'CLI source incompatible', 'shared-contract': 'CLI source incompatible', 'web-source': 'web source incompatible',
+    expected = {'shared-contract': 'CLI shared contracts incompatible', 'foreign-ahead': 'web release changes outside its owned paths',
+                'cli-foreign-ahead': 'CLI release changes outside its owned paths', 'web-shared-ahead': 'web shared contracts incompatible',
                 'manifest-package': 'CLI manifest package differs', 'installed-package': 'installed CLI package differs',
                 'import-binding': 'imported CLI module differs', 'web-stamp': 'web artifact source stamp drift',
                 'web-build': 'web artifact/served build identity mismatch', 'served-build': 'web artifact/served build identity mismatch',
@@ -347,9 +360,9 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     monkeypatch.setattr(subject, 'urlopen', lambda url, timeout: io.BytesIO(
         b'wrong served bytes' if fault == 'served-bytes' else (dist / 'bundle.js').read_bytes()))
     run = subject.Journey(value, tmp_path)
-    if fault in ('mixed', 'equal'):
+    if fault in ('mixed', 'equal', 'cli-source', 'web-source', 'cli-ahead', 'web-ahead'):
         proof = run.component_identity(release, modules)
-        assert proof['cli_version'] == version and proof['web_source_sha'] == released
+        assert proof['cli_version'] == version and proof['web_source_sha'] == web_version
         assert proof['web_build_id'] == frozen and run.fixtures == []
     else:
         with pytest.raises(AssertionError, match=expected[fault]):
