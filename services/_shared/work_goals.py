@@ -58,7 +58,12 @@ def parse_goal_facts(text: str) -> dict:
     rank = metadata.get('rank', 1000)
     if type(rank) is not int or not 0 <= rank <= MAX_COUNT:
         raise ValueError('work_goal_rank_invalid')
-    result = {'epic_id': identity, 'title': title, 'lane_id': lane, 'rank': rank}
+    from .checkpoint_policy import bounded_prose
+    goal = bounded_prose(_section(_without_fences(text), 'Goal'))
+    summary_prose = bounded_prose(summary)
+    result = {'epic_id': identity, 'title': title, 'lane_id': lane, 'rank': rank,
+              '_detail': {'summary_text': summary_prose['text'], 'summary_text_truncated': summary_prose['truncated'],
+                          'goal_text': goal['text'], 'goal_text_truncated': goal['truncated']}}
     if 'target_date' in metadata:
         target = metadata['target_date']
         if not isinstance(target, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', target):

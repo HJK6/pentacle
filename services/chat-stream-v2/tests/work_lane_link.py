@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from typing import Any
 
 FIXTURE_LANE_ID = "wl-fixture-link"
@@ -29,6 +30,16 @@ def link_specs_conn(conn: sqlite3.Connection, *spec_ids: str, lane_id: str = FIX
         members += [spec for spec in spec_ids if spec not in members]
         conn.execute("UPDATE v2_assistant_composite_lanes SET members_json=? WHERE lane_id=?",
                      (json.dumps(members), lane_id))
+    # A product lane fixture now includes its actual dedicated owner. Merely
+    # inserting membership no longer qualifies an executable commission.
+    name = "owner-" + lane_id
+    generation = uuid.uuid5(uuid.NAMESPACE_URL, name).hex
+    conn.execute("INSERT OR IGNORE INTO sessions(host,session_name,role,provider,visibility,created_at,status) "
+                 "VALUES ('lane-fixture',?,'lead','codex','hidden','2026-11-09T00:00:00Z','open')", (name,))
+    conn.execute("INSERT OR IGNORE INTO v2_session_generations(host,session_name,generation) VALUES ('lane-fixture',?,?)",
+                 (name, generation))
+    conn.execute("UPDATE v2_assistant_composite_lanes SET bound_stream_id=?,bound_generation=?,bound_backend_kind='lead' "
+                 "WHERE lane_id=? AND bound_stream_id IS NULL", ("lane-fixture:" + name, generation, lane_id))
     conn.commit()
 
 

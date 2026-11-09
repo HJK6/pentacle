@@ -4047,7 +4047,7 @@ class Server:
         # table (QA #18). Only spawn waits; the gate is open outside the boot
         # window, so this is a no-op for every steady-state spawn.
         await self.spawn_ready.wait()
-        if self.lane_rulings is not None:
+        if self.lane_rulings is not None and not msg.get("provision_only"):
             try:
                 pending = await self.lane_rulings.request_spawn(msg)
             except ValueError as exc:
@@ -5101,7 +5101,8 @@ class Server:
                                  questions_by_spec=questions)
         try:
             return page_lane_detail(shown, projected, members_limit=msg.get("members_limit", 32),
-                                    members_after=msg.get("members_after"), goal_filter=msg.get("goal_id"))
+                                    members_after=msg.get("members_after"), goal_filter=msg.get("goal_id"),
+                                    sessions_by_stream=open_sessions, questions_by_spec=questions)
         except ValueError as exc:
             raise VerbError(str(exc), "invalid lane detail request or oversized source projection") from None
 

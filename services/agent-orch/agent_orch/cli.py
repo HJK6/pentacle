@@ -1077,6 +1077,8 @@ def _derive_default_idempotency_key(
         "spec_ids": sorted(str(s) for s in spec_ids),
         "brief": initial_prompt_payload or {},
         "objective": payload.get("objective"),
+        "lane_id": payload.get("lane_id"),
+        "provision_only": payload.get("provision_only", False),
     }
     digest = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -1101,6 +1103,9 @@ def spawn(args: argparse.Namespace) -> int:
     if getattr(args, "at", None) and getattr(args, "delay", None):
         print("agent-orch spawn: validation failed: --at and --delay are mutually exclusive", file=sys.stderr)
         return 2
+    if scheduled and (getattr(args, "provision_only", False) or getattr(args, "lane_id", None)):
+        return _fresh_schedule_validation_error("lane_provisioning_not_schedulable",
+                                                "--provision-only and --lane-id require an immediate spawn")
     cwd = getattr(args, "cwd", None)
     if cwd is not None:
         if not isinstance(cwd, str) or not cwd:
@@ -1271,6 +1276,12 @@ def spawn(args: argparse.Namespace) -> int:
         role_source = "handoff" if handoff and not requested_role else "spawn"
         loaded_baseline = role_baseline.load_role_baseline(config, str(resolved_role))
     baseline_content = loaded_baseline.get("content") if loaded_baseline else None
+    if getattr(args, "provision_only", False):
+        if (resolved_role not in {"lead", "nexus"} or getattr(args, "initial_prompt", None) is not None
+                or getattr(args, "initial_prompt_file", None) is not None):
+            print("agent-orch spawn: --provision-only requires lead/nexus and no task prompt or command", file=sys.stderr)
+            return 2
+        baseline_content = None
     visibility = args.visibility
     if visibility is None:
         visibility = "default" if (not handoff and not getattr(args, "resume", None) and parent is None) else None
@@ -1374,6 +1385,10 @@ def spawn(args: argparse.Namespace) -> int:
         "visibility": visibility,
         **resolved_spawn,
     }
+    if getattr(args, "lane_id", None):
+        payload["lane_id"] = args.lane_id
+    if getattr(args, "provision_only", False):
+        payload["provision_only"] = True
     if getattr(args, "account", None) is not None:
         payload["account"] = args.account
     for field in ("pool_override_reason","pool_authority_ref"):
@@ -5371,6 +5386,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start the seat in this absolute project directory (immediate spawns only).",
     )
     spawn_parser.add_argument("--role")
+    spawn_parser.add_argument("--lane-id", help="Select the lane for an ambiguous spec membership.")
+    spawn_parser.add_argument("--provision-only", action="store_true", help="FD: provision a promptless lead; bind and explicitly activate its lane before sending work.")
     spawn_parser.add_argument("--phase")
     spawn_parser.add_argument(
         "--spec-id",

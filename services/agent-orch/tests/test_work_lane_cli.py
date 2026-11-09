@@ -48,6 +48,8 @@ def test_list_and_show_are_read_verbs(monkeypatch, capsys):
 
 def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys):
     member = {"spec_id": "spec_demo__detail", "status": "in_progress", "status_line": "Tests pass.",
+              "status_text": "Tests pass. Awaiting F12 review.", "progress_text": "Fixed v2.3; 12 checks pass.",
+              "next_action_text": "Review the result.",
               "next_line": "Review the result.", "worked": {"active_h": 0.5},
               "lead_seat": {"stream_id": "host-a:lead"},
               "criteria": [{"title": "Check `code`", "disposition": "open"}],
@@ -57,9 +59,19 @@ def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys
     assert _run(["work-lane", "show", "wl-1"]) == 0
     output = capsys.readouterr().out
     assert "icon: phone" in output
-    for key in ("worked", "lead_seat", "status_line", "next_line", "criteria", "transitions"):
+    for key in ("worked", "lead_seat", "criteria", "transitions", "Progress", "Status", "Next action"):
         assert f"{key}:" in output
     assert "Check `code`" in output and "Tests pass." in output
+    assert "F12 review" in output and "Fixed v2.3; 12 checks pass." in output
+
+
+def test_detail_rendering_follows_released_policy_declarations(monkeypatch, capsys):
+    from _shared import checkpoint_policy as policy
+    from agent_orch.work_lane_cli import _print_members
+    field = policy.Field("review", "Review note", "review_text", "Review evidence.")
+    monkeypatch.setattr(policy, "FIELDS", (*policy.FIELDS, field))
+    _print_members([{"spec_id": "spec_demo__visible", "review_text": "F12 reproduced."}])
+    assert "Review note: F12 reproduced." in capsys.readouterr().out
 
 
 def test_mutators_wrap_assistant_operation(monkeypatch):

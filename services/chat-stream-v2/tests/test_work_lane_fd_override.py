@@ -85,6 +85,8 @@ def test_override_audit_and_replay(operation, payload):
         lead = await env.seat("override-lead", role="lead", parent_stream_id=FD)
         lane = (await env.adopt(owner="operator", state="paused", lead=lead))["lane"]
         payload_with_reason = dict(payload, reason="FD manages this work")
+        if operation == "set_state" and payload["to"] == "blocked":
+            payload_with_reason["next_action"] = "Resume after dependency clears"
         result = await env.op(operation, payload_with_reason, lane=lane["lane_id"], version=1, request_id="override")
         audit = result["event"]["payload"]["override"]
         assert audit == {"schema": "WorkLaneOverrideV1", "action": operation + ":" + payload["to"],

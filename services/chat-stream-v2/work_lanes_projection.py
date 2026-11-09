@@ -17,13 +17,20 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_state, members_working, lane_progress
+from work_lane_progress import lane_state, members_working, lane_progress, seat_live, seat_working
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
 from _shared.summary_prose import summary_line
 from work_lane_worked import WorkedCache
 from _shared.work_goals import project_goals
+from _shared.checkpoint_policy import detail_field_keys, policy_revision
+
+
+def detail_member_keys():
+    return detail_field_keys() | {"checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
+        "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
+        "goal_text", "goal_text_truncated", "goal_source"}
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -61,6 +68,8 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
         return None
     row = lane.get("_lead_row") or {}
     live = presence or {}
+    if live.get("session_generation") and live["session_generation"] != lane.get("bound_generation"):
+        live = {}
     qualifies = bool(lane.get("_qualifies"))
     card = _status_card(live.get("status_card") if presence is not None else row.get("status_card"))
     eta = card.get("eta_at")
@@ -69,10 +78,9 @@ def _lead(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso: str) -
         "stream_id": lane["bound_stream_id"], "generation": lane.get("bound_generation"),
         "qualifies": qualifies, "status": row.get("status") or "unknown",
         "visibility": row.get("visibility") or "default",
-        # Lane presence is display-only: the lead reads working while it or its
-        # descendants are busy (generating or provider-reported background).
+        # Existing client team-busy field; identity/online/card remain the lead's.
         "presence": {"online": online,
-                     "working": bool(live.get("busy") if "busy" in live else live.get("working")),
+                     "working": bool(lane.get("_members_working") or seat_working(live)),
                      "capture_liveness": live.get("capture_liveness") or ("idle" if online else "transport_unknown"),
                      "last_activity": live.get("last_activity")},
         "status_card": card,
@@ -86,9 +94,9 @@ _ROLE_ORDER = {"lead": 0, "nexus": 1, "planner": 2, "worker": 3, "qa": 4}
 
 def _activity(row: dict[str, Any]) -> str:
     """An observation of the seat, never progress, intent or a pause."""
-    if row.get("online") is False or row.get("pane_status") == "pane_dead":
+    if not seat_live(row):
         return "offline"
-    if row.get("busy") or row.get("working"):
+    if seat_working(row):
         return "working"
     return "idle" if row.get("online") else "unknown"
 
@@ -138,16 +146,27 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
     lane = dict(lane)
     if index_available is not None:
         lane["_work_index_available"] = index_available
-    # Store rows carry authoritative uncapped attendance. Pure callers may supply
-    # their session census explicitly; presence never overrides stored ownership.
-    if "_members_working" not in lane:
-        lane["_members_working"] = members_working(lane, list((sessions_by_stream or {}).values()))
+    if presence is not None:
+        lane["_qualifies"] = bool(lane.get("_qualifies") and seat_live(presence)
+                                   and (not presence.get("session_generation")
+                                        or presence["session_generation"] == lane.get("bound_generation")))
+    # Presence supplies activity only; it never grants ownership or activation.
+    lane["_members_working"] = members_working(lane, list((sessions_by_stream or {}).values()))
     state, reason = lane_state(lane)
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
+    detail_keys = detail_member_keys()
     if sessions_by_stream is not None:
+        # Preserve the installed client's needs-you gate even when every
+        # question-bearing member falls beyond its eight-row inventory preview.
+        if not all_members and not any((questions_by_spec or {}).get(m["spec_id"], {}).get("count")
+                                       for m in progress["members"]):
+            question_member = next((m for m in lane.get("_members") or []
+                                    if (questions_by_spec or {}).get(m["spec_id"], {}).get("count")), None)
+            if question_member is not None and progress["members"]:
+                progress["members"] = [*progress["members"][:-1], question_member]
         progress["members"] = attribute_members(progress["members"], sessions_by_stream, questions_by_spec)
     progress["members"] = [{**{k: v for k, v in member.items()
-                               if not k.startswith("_") and (all_members or k not in {"criteria", "transitions"})},
+                               if not k.startswith("_") and (all_members or k not in detail_keys | {"criteria", "transitions"})},
                              "worked": (worked_by_spec or {}).get(member["spec_id"]),
                              "lead_seat": member.get("lead_seat"),
                              "status_line": summary_line(member.get("status_text")),
@@ -155,6 +174,13 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                              **({"criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]
+    if all_members:
+        for member in progress["members"]:
+            for key in detail_keys:
+                member.setdefault(key, [] if key == "checkpoint_deficiencies" else None)
+            if not lane.get("_work_index_available") or member.get("observation", {}).get("quality") != "fresh":
+                member["checkpoint_state"] = "unverifiable"
+            member["checkpoint_policy_revision"] = member.get("checkpoint_policy_revision") or policy_revision()
     return {
         "lane_id": lane["lane_id"], "title": lane.get("title"), "summary": lane.get("summary") or "",
         "icon": resolve_icon(lane.get("icon"), lane.get("title")),
@@ -170,11 +196,29 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
         **progress, **project_goals(lane, all_goals=all_members),
+        **({"visibility_counts": visibility_counts(lane.get("_members") or [], sessions_by_stream, questions_by_spec,
+                                                  source_available=lane.get("_work_index_available", False))}
+           if all_members else {}),
     }
 
 
+def visibility_counts(members, sessions, questions, *, source_available):
+    """Distinct item counts over the complete snapshot; unknowns are explicit."""
+    from store_specs import effective_assignment
+    ids = {member["spec_id"] for member in members}
+    complete = bool(source_available and all(member.get("observation", {}).get("quality") == "fresh"
+                                            for member in members))
+    working = {effective_assignment(row) for row in (sessions or {}).values() if seat_working(row, descendants=False)} & ids
+    return {"unfinished": sum(m.get("terminal") not in {"completed", "deprecated"} for m in members) if complete else None,
+            "working": len(working) if sessions is not None else None,
+            "blocked": sum(m.get("status") == "blocked" for m in members) if complete else None,
+            "needs_answer": sum(bool((questions or {}).get(identity, {}).get("count")) for identity in ids) if questions is not None else None,
+            "checkpoint_deficient": sum(m.get("checkpoint_state", "unverifiable") != "valid" for m in members) if complete else None,
+            "complete": {"source": complete, "presence": sessions is not None, "questions": questions is not None}}
+
+
 def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
-                     members_after=None, goal_filter=None) -> dict:
+                     members_after=None, goal_filter=None, sessions_by_stream=None, questions_by_spec=None) -> dict:
     """A live cursor page; aggregate/goals/revision inputs were computed uncapped."""
     from _shared.specs_parser import WORK_SPEC_ID_RE
     if type(members_limit) is not int or not 1 <= members_limit <= 32:
@@ -192,8 +236,26 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     remaining = [member for member in selected if members_after is None or member["spec_id"] > members_after]
     page = remaining[:members_limit]
     cursor = page[-1]["spec_id"] if page and len(remaining) > len(page) else None
-    projection = {**projected, "members": page, "members_total": total,
+    # Keep the legacy projection page, but serialize new source prose/metadata
+    # only in the canonical top-level detail members, never twice per response.
+    legacy_page = [{key: value for key, value in member.items() if key not in detail_member_keys()} for member in page]
+    projection = {**{key: value for key, value in projected.items() if not key.startswith("_")}, "members": legacy_page, "members_total": total,
                   "members_next": cursor}
+    if goal_filter is not None:
+        # Reuse the full membership census, not this cursor page. Goal prose is
+        # included once for the selected goal, never in goal previews.
+        members = [member for member in projected["members"] if member.get("goal_id") == goal_filter]
+        # Full activity is captured before seat caps in project_lane.
+        goal_counts = visibility_counts(members, sessions_by_stream, questions_by_spec,
+                                       source_available=shown.get("_work_index", {}).get("available", False))
+        selected = next(goal for goal in projected["goals"] if goal["goal_id"] == goal_filter)
+        from _shared.work_goals import goal_id
+        record = next((r for identity, r in (shown.get("_projection_row", {}).get("_goals") or {}).items()
+                       if goal_id(identity) == goal_filter), {})
+        projection["selected_goal"] = {**selected, "visibility_counts": goal_counts,
+                                       **(record.get("facts", {}).get("_detail") or {}),
+                                       "source": {"epic_id": record.get("facts", {}).get("epic_id"),
+                                                  "revision": record.get("source_hash")}}
     lane = {key: value for key, value in shown["lane"].items()
             if not key.startswith("_") and key not in {"members", "members_json", "hue_open_order"}}
     lane["members"] = [member["spec_id"] for member in page]

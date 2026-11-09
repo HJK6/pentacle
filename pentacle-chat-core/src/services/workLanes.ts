@@ -64,6 +64,8 @@ export type WorkLaneGoal = WorkLaneGoalProgress & {
 };
 
 export type WorkLaneMember = {
+  /** Optional released policy fields survive normalization, including retired fields. */
+  [key: string]: unknown;
   spec_id: string;
   goal_id?: string | null;
   title: string | null;
@@ -75,6 +77,16 @@ export type WorkLaneMember = {
   estimate_exempt: boolean;
   status_text: string | null;
   next_action_text: string | null;
+  progress_text?: string | null;
+  blockers_text?: string | null;
+  checkpoint_state?: 'valid' | 'invalid' | 'unverifiable' | null;
+  checkpoint_deficiencies?: Array<{ field: string; code: string; fix: string }>;
+  checkpoint_revision?: string | null;
+  checkpoint_policy_revision?: string | null;
+  checkpoint_changed_at?: string | null;
+  checkpoint_first_observed_at?: string | null;
+  goal_text?: string | null;
+  goal_text_truncated?: boolean;
   status_line?: string | null;
   next_line?: string | null;
   worked?: {
@@ -125,6 +137,8 @@ export type WorkIndexStatus = {
 };
 
 export type WorkLane = {
+  visibility_counts?: Record<string, unknown>;
+  selected_goal?: WorkLaneGoal & Record<string, unknown>;
   lane_id: string;
   goals?: WorkLaneGoal[];
   goals_total?: number;
@@ -299,6 +313,9 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
   const seats = (Array.isArray(raw.seats) ? raw.seats : []).map(normalizeSeat).filter((s): s is WorkLaneSeat => s !== null);
   const questions = isRec(raw.open_questions) ? raw.open_questions : {};
   return {
+    // Policy fields are additive and optional; orchestration does not maintain
+    // a second executable field list. Known base fields keep their normalizers.
+    ...raw,
     spec_id: specId,
     goal_id: goalId(raw.goal_id),
     title: str(raw.title),
@@ -371,6 +388,9 @@ function normalizeLane(raw: unknown): WorkLane | null {
   const last = raw.last_update;
   return {
     lane_id: laneId,
+    ...(isRec(raw.visibility_counts) ? { visibility_counts: raw.visibility_counts } : {}),
+    ...(isRec(raw.selected_goal) && normalizeGoal(raw.selected_goal)
+      ? { selected_goal: { ...raw.selected_goal, ...normalizeGoal(raw.selected_goal)! } } : {}),
     goals: (Array.isArray(raw.goals) ? raw.goals : []).map(normalizeGoal).filter((goal): goal is WorkLaneGoal => goal !== null),
     goals_total: count(raw.goals_total) ?? 0,
     default_goal: normalizeGoalProgress(raw.default_goal),

@@ -15,6 +15,7 @@ from typing import Any
 
 import prockill
 from assistant_policy import AssistantPolicy
+from store_qa import SpecInputsUnavailable, spec_binding_source
 from mirror import _extract_live_state, _provider_from_session_name
 from v2_runtime import iso_now
 from session_summary import (MESSAGE_SUMMARY_FIELDS, apply_message_summary,
@@ -295,6 +296,8 @@ class Sessions:
         # Inventory-only registries and structural test stores have no durable
         # graph. Real Store instances share their fence with ownership writes.
         self._graph_lock = getattr(store, "session_graph_lock", None) or asyncio.Lock()
+        if store is not None:
+            store.lane_presence_reader = self.list_open
         #: Ledger callback for confirmed-dead close resolution. The callback is
         #: optional so the registry remains usable in focused lifecycle tests.
         self._awaiter_resolver: Any = None
@@ -1107,7 +1110,7 @@ class Sessions:
             raise VerbError("bad_request", "role must be a short slug ([a-z0-9_-])")
 
         stream_id = f"{host}:{session_name}"
-        target = self._inv.get(stream_id) or await self.store.fetch_session(host, session_name)
+        target = await self.store.fetch_session(host, session_name)
         if target is None or str(target.get("status") or "open") != "open":
             raise VerbError("unknown_session", f"{stream_id} is not an open session")
 
@@ -1156,7 +1159,15 @@ class Sessions:
                     "setting role=nexus requires the operator-facing seat or the session's parent",
                 )
 
-        updated = await self.store.update_session(host, session_name, role=role)
+        if role not in {"lead", "nexus"}:
+            await self.store.guard_lane_departure(stream_id, target.get("session_generation"))
+        try:
+            updated = await self.store.update_session(
+                host, session_name, role=role,
+                expected_spec_source=spec_binding_source(target),
+            )
+        except SpecInputsUnavailable:
+            raise VerbError("spec_unavailable", "session binding changed during role update") from None
         if updated is None or str(updated.get("status") or "open") != "open":
             raise VerbError("unknown_session", f"{stream_id} is no longer open")
         await self.store.set_session_role_source(
@@ -1569,6 +1580,8 @@ class Sessions:
                 if row and row.get("status") == "open":
                     if expected_generation is not None and self._row_generation(row) != expected_generation:
                         return await self._stale_close_result(sid, row)
+                    if not recovery:
+                        await self.store.guard_lane_departure(sid, self._row_generation(row))
                     if not recovery:
                         await self._check_lead_disposition(sid, self._row_generation(row),
                             observation_available=observation_available)

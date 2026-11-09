@@ -58,7 +58,7 @@ import boto3
 from sessions import VerbError
 from enrollment import EnrollmentError, EnrollmentRegistry
 from seat_token_telemetry import SeatTokenTelemetry
-from store import UNASSIGNED, normalize_spec_binding_provenance, normalize_spec_ids
+from store import UNASSIGNED, normalize_spec_binding_provenance, normalize_spec_ids, effective_assignment
 from v2_runtime import iso_now
 
 SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
@@ -409,7 +409,13 @@ class UIVerbs:
             if await self.store.fetch_session(host, name) is None:
                 raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
             async with self.sessions._graph_lock:
-                updated = await self.store.update_session(host, name, assigned_spec_id=UNASSIGNED)
+                source = await self.store.fetch_session(host, name)
+                if source:
+                    await self.store.guard_lane_departure(f"{host}:{name}", source.get("session_generation"), assignment_change=True)
+                updated = await self.store.update_session(
+                    host, name, expected_spec_source=spec_binding_source(source),
+                    assigned_spec_id=UNASSIGNED,
+                )
             self.sessions.apply_durable(f"{host}:{name}", assigned_spec_id=UNASSIGNED)
             return {"type": "session.spec_update.ok", "request_id": rid, "action": action, "session": updated}
         if not SPEC_ID_RE.fullmatch(spec_id):
@@ -492,7 +498,12 @@ class UIVerbs:
                 assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
+        proposed_assignment = effective_assignment({**source, "spec_id": first_spec_id,
+                                                    "spec_ids": spec_ids, "assigned_spec_id": assigned})
         async with self.sessions._graph_lock:
+            if effective_assignment(source) != proposed_assignment:
+                await self.store.guard_lane_departure(stream_id, source.get("session_generation"), assignment_change=True)
+                await self.store.require_lane_execution(proposed_assignment, target_stream_id=stream_id)
             updated = await self.store.update_session(
                 host,
                 name,

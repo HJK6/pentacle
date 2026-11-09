@@ -164,7 +164,8 @@ def test_pages_traverse_65_once_with_full_aggregates_and_goal_filter(tmp_path):
         seen, cursor = [], None
         while True:
             page = page_lane_detail(shown, projection, members_after=cursor)
-            assert page['members'] == page['projection']['members']
+            from work_lanes_projection import detail_member_keys
+            assert page['projection']['members'] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in page['members']]
             assert len(page['lane']['members']) <= 32 and 'members_json' not in page['lane']
             assert page['members_total'] == 66 and page['projection']['items_total'] == 66
             assert page['detail_revision'] == projection['detail_revision']
@@ -315,8 +316,8 @@ def test_owner_beyond_preview_drives_attendance_through_derived_membership(tmp_p
         await reconcile(env.store, scanner(root))
         stream, _ = await env.seat('tail-owner', role='lead', assigned_spec_id='spec_demo__n64', spec_ids=['spec_demo__n64'])
         shown = await env.store.get_work_lane(lane['lane_id'])
-        assert shown['_projection_row']['_members_working'] is True
-        assert project_lane(shown['_projection_row'], None, '2026-11-08T12:00:00Z')['state_reason'] == 'members_working'
+        assert '_members_working' not in shown['_projection_row']
+        assert project_lane(shown['_projection_row'], None, '2026-11-08T12:00:00Z')['state'] == 'paused'
         assert shown['lane']['work_state'] == 'paused' and shown['lane']['version'] == 1
         carried = await env.store.open_lanes_for_spec('spec_demo__n64')
         assert [row['lane_id'] for row in carried] == [lane['lane_id']]

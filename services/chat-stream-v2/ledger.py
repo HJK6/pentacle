@@ -622,11 +622,14 @@ class Ledger:
         if ":" not in from_stream_id or await self.store.get_report(report_id) is not None:
             return None
         row = await self.store.fetch_session(*from_stream_id.split(":", 1))
-        spec_id = (row or {}).get("assigned_spec_id")
-        if not spec_id or row.get("status") != "open" or str(row.get("role") or "").lower() != "lead":
+        from store_specs import effective_assignment
+        spec_id = effective_assignment(row)
+        if (not spec_id or row.get("status") != "open" or str(row.get("role") or "").lower() != "lead"
+                or row.get("phase") in {"qa", "spec", "planning", "planner"}):
             return None
         from _shared.work_checkpoint import work_checkpoint
         result = await asyncio.to_thread(work_checkpoint, spec_id)
+        result["session_generation"] = row.get("session_generation")
         return result
 
     async def _authenticated_caller(self, msg: dict[str, Any]) -> str | None:
@@ -754,6 +757,11 @@ class Ledger:
 
         claim_verified, claim_mismatch = await self.verify_ac_claim(validated.ac_claim)
         checkpoint = await self._owner_checkpoint(msg, report_id, from_stream_id, str(validated.status))
+        if validated.completion_kind == "implementation_ready" and checkpoint and checkpoint["state"] != "valid":
+            code = "work_checkpoint_" + checkpoint["state"]
+            raise self._error(code, "Repair the assigned spec checkpoint before asserting implementation readiness",
+                              report_id, spec_id=checkpoint["spec_id"],
+                              deficiencies=checkpoint["deficiencies"], work_checkpoint=checkpoint)
 
         routing_snapshot = await self._report_routing_snapshot(from_stream_id)
         durable_parent = await self._parent_of(from_stream_id)

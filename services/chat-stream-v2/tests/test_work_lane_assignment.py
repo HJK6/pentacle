@@ -13,7 +13,7 @@ from store import UNASSIGNED, Store, effective_assignment
 from store_work_lanes import _assigned_seats_conn
 from test_spawn_wip_cap import HOST, setup
 
-SUMMARY = "---\nid: work_{stem}\n---\n**Status** — Underway.\n\n**Next action** — Continue.\n"
+SUMMARY = "---\nid: work_{stem}\n---\n**Progress** — Created the acceptance fixture.\n\n**Status** — Underway.\n\n**Next action** — Continue.\n"
 SPEC = ("---\nid: spec_{stem}\ntitle: Fixture {stem}\n---\n## Acceptance Criteria\n- [ ] Done.\n\n"
         "## Estimate\n- remaining_work_h: 1–2 (median 1.5) as_of 2026-10-09\n")
 
@@ -28,11 +28,10 @@ def item(root, stem, *, summary=SUMMARY):
 
 async def lane(store, lane_id, *members, state="active"):
     def op(conn):
+        from work_lane_link import link_specs_conn
+        link_specs_conn(conn, *members, lane_id=lane_id)
         conn.execute(
-            "INSERT INTO v2_assistant_composite_lanes (lane_id,stream_id,phase,summary,version,created_at,updated_at,"
-            "work_state,work_state_reason,owner_kind,title,members_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (lane_id, "fixture:assistant", "execution", "", 4, "2026-10-09T00:00:00Z", "2026-10-09T00:00:00Z",
-             state, "fd", "fd", "Lane " + lane_id, json.dumps(list(members))))
+            "UPDATE v2_assistant_composite_lanes SET work_state=?,version=4 WHERE lane_id=?", (state,lane_id))
         conn.commit()
     await store.submit(op)
 
@@ -104,7 +103,7 @@ async def test_linked_commission_persists_assignment_and_warns_on_checkpoint(env
     assert row["assigned_spec_id"] == target
     # A malformed display record is a warning, never an extra refusal (FD GO).
     assert reply["work_checkpoint"]["state"] == "invalid"
-    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["status_missing", "next_action_missing"]
+    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["progress_missing", "status_missing", "next_action_missing"]
 
 
 @pytest.mark.asyncio
@@ -168,7 +167,7 @@ async def test_exempt_callers_are_never_refused(env, auth):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role, exempt", [("assistant", True), ("lead", False)])
+@pytest.mark.parametrize("role, exempt", [("assistant", False), ("lead", False)])
 async def test_protected_assistant_caller_is_exempt_and_other_roles_are_not(env, role, exempt):
     # A2/R5: a protected assistant seat is exempt; a seat's ordinary role never is.
     env.monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
@@ -277,11 +276,62 @@ async def test_operator_assign_is_recorded_without_refusal_and_detach_clears(env
     target = item(env.root, "demo__target")
     ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     chat = await seat(env.store, "chat", role=None)
+    await lane(env.store, "wl-operator", target)
     operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
     reply = await spec_update(env, ctl, sessions, "assign", chat[0], target, operator)
     assert reply["session"]["assigned_spec_id"] == target and reply["session"]["spec_ids"] == [target]
     reply = await spec_update(env, ctl, sessions, "detach", chat[0], target, operator)
     assert reply["session"]["assigned_spec_id"] == UNASSIGNED and effective_assignment(reply["session"]) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["attach", "detach"])
+@pytest.mark.parametrize("state", ["paused", "orphan", "fd", "active"])
+async def test_legacy_spec_tag_change_guards_proposed_effective_assignment(env, action, state):
+    target, other = item(env.root, "demo__target"), item(env.root, "demo__other")
+    ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
+    await lane(env.store, "wl-tags", target, state="paused" if state == "paused" else "active")
+    chat = await seat(env.store, "tag-chat", *([target, other] if action == "detach" else []), role="worker")
+    if state == "orphan":
+        await env.store.submit(lambda conn: (
+            conn.execute("UPDATE v2_assistant_composite_lanes SET bound_generation='lost' WHERE lane_id='wl-tags'"),
+            conn.commit()))
+    if state == "fd":
+        # The actual authenticated binding, not a role, title or caller flag.
+        await env.store.submit(lambda conn: (
+            conn.execute("INSERT INTO v2_assistant_direct_binding(name,stream_id,generation,revision,updated_at) "
+                         "VALUES ('assistant',?,?,1,'2026-11-09T00:00:00Z')", chat), conn.commit()))
+    before = await env.store.fetch_session(HOST, "tag-chat")
+    assert before["assigned_spec_id"] is None and effective_assignment(before) is None
+    operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+    changed_spec = other if action == "detach" else target
+    if state == "active":
+        reply = await spec_update(env, ctl, sessions, action, chat[0], changed_spec, operator)
+        assert reply["session"]["assigned_spec_id"] is None
+        assert effective_assignment(reply["session"]) == target
+    else:
+        with pytest.raises(VerbError) as exc:
+            await spec_update(env, ctl, sessions, action, chat[0], changed_spec, operator)
+        assert exc.value.code == {"paused": "work_lane_not_active", "orphan": "work_lane_visible_lead_required",
+                                  "fd": "work_lane_fd_execution_forbidden"}[state]
+        after = await env.store.fetch_session(HOST, "tag-chat")
+        assert after["spec_ids"] == before["spec_ids"] and effective_assignment(after) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["attach", "detach"])
+async def test_coordination_tags_stay_usable_after_explicit_unassignment(env, action):
+    target, other = item(env.root, "demo__target"), item(env.root, "demo__other")
+    ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
+    await lane(env.store, "wl-tags", target, state="paused")
+    chat = await seat(env.store, "coord-chat", *([target, other] if action == "detach" else []), role="worker")
+    operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
+    unassigned = await spec_update(env, ctl, sessions, "unassign", chat[0], auth=operator)
+    assert effective_assignment(unassigned["session"]) is None
+    reply = await spec_update(env, ctl, sessions, action, chat[0], other if action == "detach" else target, operator)
+    assert reply["session"]["spec_ids"] == [target]
+    assert reply["session"]["assigned_spec_id"] == UNASSIGNED
+    assert effective_assignment(reply["session"]) is None
 
 
 @pytest.mark.asyncio

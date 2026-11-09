@@ -20,6 +20,21 @@ import {
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-lanes-inventory.json', import.meta.url), 'utf8'));
 
+test('optional and retired checkpoint policy fields survive the existing normalizer', () => {
+  const cell = fixture.spec_details_v1;
+  const raw = structuredClone(cell.show_projection);
+  raw.members[0].review_text = 'F12 reproduced; review current evidence.';
+  raw.members[0].retired_policy_text = 'Prior released field.';
+  raw.members[0].progress_text = 'Fixed v2.3; 12 checks pass.';
+  raw.visibility_counts = { working: 1, blocked: null, complete: { source: false } };
+  const lane = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [raw] })!.lanes[0];
+  const member = lane.progress!.members[0];
+  assert.equal(member.review_text, raw.members[0].review_text);
+  assert.equal(member.retired_policy_text, 'Prior released field.');
+  assert.equal(member.progress_text, 'Fixed v2.3; 12 checks pass.');
+  assert.deepEqual(lane.visibility_counts, raw.visibility_counts);
+});
+
 test('lane icon keys match the frozen ordered keyword table', () => {
   const table = JSON.parse(readFileSync(new URL('../lane_icons.json', import.meta.url), 'utf8'));
   assert.deepEqual([...LANE_ICON_KEYS].sort(), table.icons.map((icon: { key: string }) => icon.key).sort());

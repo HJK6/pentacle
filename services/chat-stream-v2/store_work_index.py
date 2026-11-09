@@ -123,7 +123,8 @@ def enrich_goals_conn(conn, lane: dict, snapshot: dict | None = None) -> None:
         member = snapshot["members"].get(identity) or unresolved_member(identity)
         observation = member.get("observation") or {}
         members.append((identity, (record.get("last_good") or {}).get("_epic"), member.get("goal_id"),
-                        record.get("source_hash"), observation.get("quality"), observation.get("error")))
+                        record.get("source_hash"), observation.get("quality"), observation.get("error"),
+                        member.get("checkpoint_revision"), member.get("checkpoint_policy_revision")))
     goal_inputs = [(identity, record.get("source_hash"), record["quality"], record.get("error"))
                    for identity, record in goals.items()]
     lane["_goals"] = goals

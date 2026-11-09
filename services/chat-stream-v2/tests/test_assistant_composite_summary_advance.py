@@ -87,7 +87,7 @@ def test_work_lane_publication_advances_preview():
         lane = (await env.adopt(state="paused", lead=False, owner="operator"))["lane"]
         before = _row(sessions)
         await asyncio.sleep(0.01)
-        await env.op("set_state", {"to": "blocked", "blocker": "Need keys", "reason": "Test override"}, lane=lane["lane_id"], version=lane["version"])
+        await env.op("set_state", {"to": "blocked", "blocker": "Need keys", "reason": "Test override", "next_action": "Resume after the keys arrive"}, lane=lane["lane_id"], version=lane["version"])
         _assert_advanced(sessions, before, text="Need keys", kind="ASSIST_TEXT")
     _run(body)
 

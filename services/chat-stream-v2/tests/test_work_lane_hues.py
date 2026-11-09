@@ -120,10 +120,10 @@ def test_actual_reopen_moves_the_recent_entrant_only_and_fault_rolls_back():
             raise RuntimeError('synthetic post-update fault')
         env.store._work_lane_fault = fail
         with pytest.raises(RuntimeError, match='post-update fault'):
-            await env.op('set_state', {'to': 'paused', 'reason': 'Fixture reopen'}, lane=first['lane_id'], version=2)
+            await env.op('set_state', {'to': 'paused', 'reason': 'Fixture reopen', "next_action": "Resume after the fixture dependency clears"}, lane=first['lane_id'], version=2)
         env.store._work_lane_fault = None
         assert (await env.store.get_work_lane(first['lane_id']))['lane']['work_state'] == 'done'
-        reopened = await env.op('set_state', {'to': 'paused', 'reason': 'Fixture reopen'}, lane=first['lane_id'], version=2)
+        reopened = await env.op('set_state', {'to': 'paused', 'reason': 'Fixture reopen', "next_action": "Resume after the fixture dependency clears"}, lane=first['lane_id'], version=2)
         assert reopened['lane']['hue'] == 'yellow'
         assert (await env.store.get_work_lane(second['lane_id']))['lane']['hue'] == 'cyan'
         assert (await env.store.get_work_lane(third['lane_id']))['lane']['hue'] == 'violet'

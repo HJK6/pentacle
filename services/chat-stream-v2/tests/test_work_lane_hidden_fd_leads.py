@@ -138,40 +138,16 @@ def test_explicit_paused_blocked_done_fd_lanes_unchanged_t4():
     run(body)
 
 
-def test_operator_lanes_keep_visible_lead_rule_t5():
+def test_operator_lanes_also_accept_dedicated_hidden_leads_t5():
     async def body(env):
-        # Hiding an operator lane's lead still loses it (former V4 visibility_hidden case).
-        lead = await env.seat("t5-lead", role="lead", parent_stream_id=FD)
-        lid = (await env.adopt(key="stream:t5", owner="operator", lead=lead))["lane"]["lane_id"]
-        sessions, inv = await inventory(env)
-        await sessions.set_visibility("host-a", "t5-lead", "hidden")
-        assert ((await refresh(inv))[lid]["state_reason"]) == "lead_lost"
-        assert len(await lead_lost_episodes(env.store, lid)) == 1
-        # A hidden seat cannot be bound to an operator lane.
         hidden = await env.seat("t5-hidden", role="lead", parent_stream_id=FD, visibility="hidden")
-        row, _ = await stored(env, lid)
-        with pytest.raises(ValueError) as e:
-            await env.op("set_lead", lead_of(hidden), lane=lid, version=row["version"])
-        assert code(e) == "work_lane_lead_ineligible"
-        with pytest.raises(ValueError) as e:
-            await env.adopt(key="stream:t5-adopt", owner="operator", lead=hidden)
-        assert code(e) == "work_lane_lead_ineligible"
-        # Re-owning an FD lane to the operator re-applies the visible rule.
-        fd_lane = (await env.adopt(key="stream:t5-fd", lead=hidden))["lane"]
-        fd_lane = (await env.op("set_owner", {"to": "operator"}, lane=fd_lane["lane_id"],
-                                version=fd_lane["version"]))["lane"]
-        rows = {r["lane_id"]: r for r in await env.store.work_lane_rows()}
-        assert rows[fd_lane["lane_id"]]["_qualifies"] is False
-        frame = {lane["lane_id"]: lane for lane in (await inv.current())["lanes"]}
-        assert frame[fd_lane["lane_id"]]["state_reason"] == "lead_lost"
-        assert (await refresh(inv))[fd_lane["lane_id"]]["state_reason"] == "lead_lost"
-        assert len(await lead_lost_episodes(env.store, fd_lane["lane_id"])) == 1
-        # Handing it back to the FD re-qualifies its hidden lead: the fault is repaired, never a pause.
-        fd_lane, _ = await stored(env, fd_lane["lane_id"])
-        back = (await env.op("set_owner", {"to": "fd", "reason": "FD resumes management"},
-                             lane=fd_lane["lane_id"], version=fd_lane["version"]))["lane"]
-        assert back["work_state"] == "active"
-        assert (await lead_lost_episodes(env.store, fd_lane["lane_id"]))[0]["cleared_at"] is not None
+        lane = (await env.adopt(key="stream:t5", owner="operator", lead=hidden))["lane"]
+        _, inv = await inventory(env)
+        assert (await refresh(inv))[lane["lane_id"]]["lead"]["qualifies"] is True
+        changed = (await env.op("set_owner", {"to": "fd", "reason": "FD manages delivery"},
+                                lane=lane["lane_id"], version=1))["lane"]
+        assert changed["bound_stream_id"] == hidden[0] and changed["work_state"] == "active"
+        assert await lead_lost_episodes(env.store, lane["lane_id"]) == []
     run(body)
 
 

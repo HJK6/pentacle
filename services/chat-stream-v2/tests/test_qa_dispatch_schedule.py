@@ -41,6 +41,8 @@ def message(verb, **extra):
         "restart",
         "planner",
         "planner_unassigned_at_fire",
+        "lane_paused_at_fire",
+        "lane_orphaned_at_fire",
     ],
 )
 def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case):
@@ -194,8 +196,18 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                 assert row["generation"] == 2
             if case == "planner_unassigned_at_fire":
                 await store.update_session("localhost", "lead", assigned_spec_id="")
+            if case.startswith("lane_"):
+                # Inject a stale queued-work condition after real admission.
+                # Normal pause refuses this pending schedule until cancelled.
+                def lose_lane(conn):
+                    if case == "lane_paused_at_fire":
+                        conn.execute("UPDATE v2_assistant_composite_lanes SET work_state='paused'")
+                    else:
+                        conn.execute("UPDATE v2_assistant_composite_lanes SET bound_generation='lost'")
+                    conn.commit()
+                await store.submit(lose_lane)
             run_msg = message("schedule.run", schedule_id=sid)
-            if case in ("rejects", "stale", "rearm", "owner_generation", "scheduled_fire_refuses_pending", "planner_unassigned_at_fire"):
+            if case in ("rejects", "stale", "rearm", "owner_generation", "scheduled_fire_refuses_pending", "planner_unassigned_at_fire") or case.startswith("lane_"):
                 with pytest.raises(VerbError) as exc:
                     await schedule._fire_schedule(sid)
                 result = exc.value.extra.get("spawn", {})
@@ -220,6 +232,8 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                     assert persisted["state"] == "indeterminate"
                     assert persisted["last_error_code"] == expected
                     assert len((await issue(server, "show"))["commissions"]) == 2
+                if case.startswith("lane_"):
+                    expected = "work_lane_not_active" if case == "lane_paused_at_fire" else "work_lane_visible_lead_required"
                 assert result.get("error_code") == expected, (
                     exc.value.code,
                     exc.value.extra,

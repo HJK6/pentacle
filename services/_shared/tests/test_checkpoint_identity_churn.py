@@ -18,7 +18,7 @@ id: spec_fixture__target
 ## Estimate
 - remaining_work_h: unknown — fixture
 """
-SUMMARY = "**Status** — Ready.\n**Next action** — Finish.\n"
+SUMMARY = "**Progress** — Prepared the fixture.\n**Status** — Ready for review.\n**Next action** — Finish.\n"
 OTHER = "---\nid: spec_fixture__other\n---\nOther body.\n"
 
 
