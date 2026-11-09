@@ -30,7 +30,9 @@ import uuid
 SERVICE = Path(__file__).resolve().parents[1]
 ROOT = SERVICE.parents[1]
 CLI_SOURCE = 'services/agent-orch/agent_orch'
+CLI_OWNED = ('services/agent-orch',)
 SHARED_SOURCES = ('services/_shared',)
+COMPONENT_RECORD_PATHS = ('docs', 'test')
 WEB_SOURCES = ('assets', 'configs', 'config-loader.js', 'hosts.js', 'lib', 'main',
                'package.json', 'package-lock.json', 'pentacle-chat-core', 'renderer',
                'scripts/build-web.js', 'server', 'vendor')
@@ -65,11 +67,13 @@ def component_compatibility(checkout, version, daemon, owned_paths, name):
     common = git('merge-base', version, daemon).decode().strip()
     forward = git('diff', '--name-only', '-z', common, version).decode().split('\0')
     forward = [path for path in forward if path]
-    require(all(any(path == owned or path.startswith(owned + '/') for owned in owned_paths) for path in forward),
+    records = [path for path in forward if any(path == root or path.startswith(root + '/') for root in COMPONENT_RECORD_PATHS)]
+    runtime = [path for path in forward if path not in records]
+    require(all(any(path == owned or path.startswith(owned + '/') for owned in owned_paths) for path in runtime),
             name + ' release changes outside its owned paths')
     return {'source_index_sha256': hashlib.sha256(source).hexdigest(),
             'shared_index_sha256': hashlib.sha256(shared).hexdigest(),
-            'merge_base': common, 'component_forward_paths': forward}
+            'merge_base': common, 'component_forward_paths': runtime, 'record_forward_paths': records}
 
 
 def save(path, value):
@@ -354,7 +358,7 @@ class Journey:
             return subprocess.check_output(['git', '-C', checkout, *args], timeout=30)
 
         cli = self.m['cli']
-        cli_source = component_compatibility(checkout, cli['version'], self.m['source_sha'], (CLI_SOURCE,), 'CLI')
+        cli_source = component_compatibility(checkout, cli['version'], self.m['source_sha'], CLI_OWNED, 'CLI')
         package = release.get('runtime_package') or {}
         require(package.get('path') == CLI_SOURCE, 'CLI package source missing')
         # Use the installer's existing source/archive and installed-tree oracles.

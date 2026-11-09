@@ -267,7 +267,7 @@ def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
 @pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'shared-contract', 'web-source', 'manifest-package',
                                  'installed-package', 'import-binding', 'web-stamp', 'web-build',
                                  'served-build', 'served-bytes', 'artifact-bytes', 'cli-ahead', 'web-ahead', 'foreign-ahead',
-                                 'cli-foreign-ahead', 'web-shared-ahead'])
+                                 'cli-foreign-ahead', 'web-shared-ahead', 'web-ahead-records'])
 def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, monkeypatch, fault):
     import io
     import subprocess
@@ -299,16 +299,21 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
         (package / 'cli.py').write_bytes(contents['cli.py'])
     elif fault in ('shared-contract', 'web-shared-ahead'):
         (shared / 'spawn_profiles.py').write_text('incompatible daemon-side contract')
-    elif fault in ('web-source', 'web-ahead'):
+    elif fault in ('web-source', 'web-ahead', 'web-ahead-records'):
         (checkout / 'renderer/app.js').write_text('independent daemon-side web')
-    if fault not in ('cli-ahead', 'web-ahead', 'web-shared-ahead'):
+    if fault == 'web-ahead-records':
+        for name in ('docs/web.md', 'test/web.test.js'):
+            target = checkout / name
+            target.parent.mkdir(exist_ok=True)
+            target.write_text('component evidence')
+    if fault not in ('cli-ahead', 'web-ahead', 'web-shared-ahead', 'web-ahead-records'):
         (checkout / 'daemon-only').write_text('independent daemon release')
     git('add', '.')
     git('commit', '-qm', 'daemon release')
     daemon = git('rev-parse', 'HEAD')
     version = daemon if fault == 'equal' else released
     web_version = released
-    if fault in ('cli-ahead', 'web-ahead', 'foreign-ahead', 'cli-foreign-ahead', 'web-shared-ahead'):
+    if fault in ('cli-ahead', 'web-ahead', 'foreign-ahead', 'cli-foreign-ahead', 'web-shared-ahead', 'web-ahead-records'):
         if fault in ('cli-ahead', 'cli-foreign-ahead'):
             version = daemon
         else:
@@ -360,10 +365,13 @@ def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, 
     monkeypatch.setattr(subject, 'urlopen', lambda url, timeout: io.BytesIO(
         b'wrong served bytes' if fault == 'served-bytes' else (dist / 'bundle.js').read_bytes()))
     run = subject.Journey(value, tmp_path)
-    if fault in ('mixed', 'equal', 'cli-source', 'web-source', 'cli-ahead', 'web-ahead'):
+    if fault in ('mixed', 'equal', 'cli-source', 'web-source', 'cli-ahead', 'web-ahead', 'web-ahead-records'):
         proof = run.component_identity(release, modules)
         assert proof['cli_version'] == version and proof['web_source_sha'] == web_version
         assert proof['web_build_id'] == frozen and run.fixtures == []
+        if fault == 'web-ahead-records':
+            assert proof['web_compatibility']['component_forward_paths'] == ['renderer/app.js']
+            assert proof['web_compatibility']['record_forward_paths'] == ['docs/web.md', 'test/web.test.js']
     else:
         with pytest.raises(AssertionError, match=expected[fault]):
             run.component_identity(release, modules)
