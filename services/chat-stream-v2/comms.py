@@ -1818,16 +1818,28 @@ class Comms:
         return reply
 
     @asynccontextmanager
-    async def _account_input_guard(self,target,*,phase="not_started",claim=False):
+    async def _account_input_guard(self,target,*,phase="not_started",claim=False,execution=False):
         runtime=getattr(self,"account_runtime",None)
-        if runtime is None:
+        if runtime is None and not execution:
             yield
             return
         from provider_accounts import AccountError
         host,name=self.sessions.split(target)
         try:
-            async with runtime.input_guard(await self.store.fetch_session(host,name) or {},
-                    message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim):
+            account_guard = (runtime.input_guard(await self.store.fetch_session(host,name) or {},
+                message=_POOL_INPUT_MESSAGE.get(),phase=phase,claim=claim) if runtime is not None else nullcontext())
+            # Provider preparation precedes this fence. Hold the graph only for
+            # one physical action, never submission evidence or an Enter wait.
+            async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
+                if execution:
+                    from store_specs import effective_assignment
+                    current = await self.store.fetch_session(host,name) or {}
+                    try:
+                        await self.store.require_lane_execution(effective_assignment(current),
+                            target_stream_id=target, linked_only=True)
+                    except VerbError as exc:
+                        exc.extra.setdefault("phase", phase)
+                        raise
                 yield
         except AccountError as exc:
             if str(exc)=="provider_cli_input_maintenance" and phase!="not_started":
@@ -1852,7 +1864,7 @@ class Comms:
             before = await tmux.capture(name)
             await self._assert_codex_pane_input_safe(target, before)
         if plan.message.get("urgent"):
-            async with self._account_input_guard(target):
+            async with self._account_input_guard(target,execution=True):
                 await tmux.run("send-keys", "-t", f"={name}:", "Escape")
             before = None
             if provider == "codex":
@@ -1861,14 +1873,14 @@ class Comms:
 
         if provider not in SUBMIT_PREDICATES:
             before = before if before is not None else await tmux.capture(name)
-            async with self._account_input_guard(target,claim=True):
+            async with self._account_input_guard(target,claim=True,execution=True):
                 pane_mode_reason = await tmux.paste(name, plan.wire_text)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
             )
             if confirmed:
                 return True, 1, False, provider, None
-            async with self._account_input_guard(target,phase="enter_failed"):
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self.spawnctl._await_marker(
                 name, receipt_needle(plan.wire_text), RECEIPT_TIMEOUT_S, since=before, tmux=tmux,
@@ -1877,7 +1889,7 @@ class Comms:
 
         before = before if before is not None else await tmux.capture(name)
         watermark = await self._submission_watermark(target) if provider in ("codex", "claude") else 0
-        async with self._account_input_guard(target,claim=True):
+        async with self._account_input_guard(target,claim=True,execution=True):
             pane_mode_reason = await tmux.paste(name, plan.wire_text)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -1889,7 +1901,7 @@ class Comms:
             pane = await tmux.capture(name)
             if not claude_prompt_in_active_draft(pane, plan.wire_text):
                 return False, 1, False, provider, self._claude_commit_mode(pane, pane_mode_reason)
-            async with self._account_input_guard(target,phase="enter_failed"):
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
@@ -1904,7 +1916,7 @@ class Comms:
                 mode = self._claude_commit_mode(pane, mode)
             return False, 2, in_draft, provider, mode
         if provider != "codex":
-            async with self._account_input_guard(target,phase="enter_failed"):
+            async with self._account_input_guard(target,phase="enter_failed",execution=True):
                 enter_mode_reason = await self._send_enter(tmux, name)
             confirmed = await self._submission_evidence(
                 tmux, name, plan.wire_text, provider, baseline=before,
@@ -1918,7 +1930,7 @@ class Comms:
         pane = await tmux.capture(name)
         if not codex_prompt_in_active_draft(pane, plan.wire_text, exact=True):
             return False, 1, False, provider, pane_mode_reason
-        async with self._account_input_guard(target,phase="enter_failed"):
+        async with self._account_input_guard(target,phase="enter_failed",execution=True):
             enter_mode_reason = await self._send_enter(tmux, name)
         confirmed = await self._submission_evidence(
             tmux, name, plan.wire_text, provider, baseline=before,
@@ -2066,10 +2078,7 @@ class Comms:
             binding_gate = (self.store.front_desk_fence()
                             if isinstance(plan.message.get("_assistant_alias_binding"), dict) else nullcontext())
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
-            async with binding_gate, lifecycle, self._pane_input_lock(target), self.sessions._graph_lock:
-                from store_specs import effective_assignment
-                current = await self.store.fetch_session(host, name) or {}
-                await self.store.require_lane_execution(effective_assignment(current), target_stream_id=target, linked_only=True)
+            async with binding_gate, lifecycle, self._pane_input_lock(target):
                 if queued_operation is not None:
                     policy = getattr(self, "queued_send_now", None)
                     current = await self.store.fetch_session(host, name) or {}

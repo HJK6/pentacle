@@ -129,6 +129,7 @@ async def _journey(tmp_path, *, delivered, comment, refusal=None, transport="pro
                 assert rc != 0 and reused["error"] == "work_lane_operator_confirmation_mismatch", reused
                 rc, reopened = await cli("set-state", lane["lane_id"], "--to", "paused", "--expected-version",
                                          str(result["lane"]["version"]), "--request-id", "reopen", "--reason", "Reopen for confirmation reuse check",
+                                         "--next-action", "Repeat the same-action confirmation control",
                                          "--composite-stream-id", ASSISTANT)
                 assert rc == 0, reopened
                 args[args.index("--expected-version") + 1] = str(reopened["lane"]["version"])

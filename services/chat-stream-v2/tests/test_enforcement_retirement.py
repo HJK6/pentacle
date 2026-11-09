@@ -38,7 +38,7 @@ def test_completion_never_reads_spec_source(tmp_path, monkeypatch, route, source
 
     async def body(env):
         lead = await env.seat('retirement-lead', role='lead', parent_stream_id=FD)
-        lane = (await env.adopt(lead=lead, members=[SPEC]))['lane']
+        lane = (await env.adopt(lead=lead, members=[SPEC], state='active' if route == 'lane' else 'paused'))['lane']
         def forbidden(*args, **kwargs):
             raise AssertionError('Completion must not resolve or read spec files')
         monkeypatch.setattr(SpecsSubsystem, '_scan_folders_by_id', forbidden)
@@ -150,7 +150,7 @@ def test_legacy_budget_notice_is_terminal_without_delivery_and_history_survives(
 def test_close_cancellation_at_store_lock_preserves_enqueue_boundary(monkeypatch, route):
     async def body(env):
         lead = await env.seat('cancel-lock', role='lead', parent_stream_id=FD)
-        await env.adopt(lead=lead, members=[SPEC])
+        await env.adopt(lead=lead, members=[SPEC], state='paused')
         local = route in {'local', 'confirmed_local'}
         sessions = Sessions(env.store, tmux=QuietTmux(),
                             local_host='host-a' if local else 'local-fixture',

@@ -259,7 +259,8 @@ def new_work_commission(msg: dict[str, Any], *, resume: bool) -> bool:
     """A2/R5: a token-verified agent commissioning new work, by operation only.
 
     Handoffs, resumes, host transfers, daemon fires and recovery keep continuity
-    and are never refused. Operator chats without a seat token and anonymous
+    and are not new commissions; lane-linked execution still checks ownership.
+    Operator chats without a seat token and anonymous
     loopback spawns (a known local bypass) are independent work. Seat operator
     elevation does not exempt a token-verified caller. Text is never inspected."""
     auth = msg.get("_auth_context") or {}

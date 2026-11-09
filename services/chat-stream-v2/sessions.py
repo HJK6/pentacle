@@ -296,7 +296,8 @@ class Sessions:
         # Inventory-only registries and structural test stores have no durable
         # graph. Real Store instances share their fence with ownership writes.
         self._graph_lock = getattr(store, "session_graph_lock", None) or asyncio.Lock()
-        store.lane_presence_reader = self.list_open
+        if store is not None:
+            store.lane_presence_reader = self.list_open
         #: Ledger callback for confirmed-dead close resolution. The callback is
         #: optional so the registry remains usable in focused lifecycle tests.
         self._awaiter_resolver: Any = None

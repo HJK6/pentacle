@@ -207,6 +207,28 @@ async def test_ordinary_send_never_executes_after_hold_or_owner_loss(tmp_path, s
 
 
 @pytest.mark.asyncio
+async def test_send_rechecks_owner_after_acceptance_before_physical_paste(tmp_path):
+    from test_send_semantics import FakeTmux, _new_comms, _open, HOST as SEND_HOST, NAME
+    tmux = FakeTmux()
+    comms, store, sessions = _new_comms(tmux, tmp_path)
+    try:
+        await _open(comms, sessions)
+        await lane(store, "wl-physical", "spec_demo__send")
+        await store.update_session(SEND_HOST, NAME, assigned_spec_id="spec_demo__send")
+        watermark = comms._submission_watermark
+        async def lose_owner(target):
+            await store.submit(lambda conn: conn.execute(
+                "UPDATE v2_assistant_composite_lanes SET bound_generation='lost' WHERE lane_id='wl-physical'"))
+            return await watermark(target)
+        comms._submission_watermark = lose_owner
+        reply = await comms.send({"stream_id": f"{SEND_HOST}:{NAME}", "text": "Scoped work", "request_id": "physical-owner-loss"})
+        assert reply["delivery"] == "not_landed" and reply["reason"] == "work_lane_visible_lead_required"
+        assert tmux.pastes == []
+    finally:
+        store.stop()
+
+
+@pytest.mark.asyncio
 async def test_public_cli_provision_bind_activate_then_send(env, tmp_path):
     from assistant_composite import AssistantComposite
     from test_assistant_prose_mirror import _config, ASSISTANT

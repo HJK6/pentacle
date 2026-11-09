@@ -47,7 +47,8 @@ async def _harness(tmp_path):
         fixture_work = tmp_path / "memory" / "work" / "in_progress" / "fixture__ingress"
         fixture_work.mkdir(parents=True)
         (fixture_work / "spec.md").write_text("---\nid: spec_fixture__ingress\ntitle: Ingress fixture\nstatus: in_progress\n---\n## Goal\nExercise ingress.\n")
-        await store.update_session(HOST, "v2-test", assigned_spec_id="spec_fixture__ingress")
+        # FD carries coordination authority, never this lane's execution.
+        await store.update_session(HOST, "v2-test", spec_ids=["spec_fixture__ingress"], assigned_spec_id="")
         await store.submit(lambda c: c.execute(
             "INSERT INTO v2_assistant_composite_lanes "
             "(lane_id,stream_id,phase,created_at,updated_at,work_state,title,members_json) "
