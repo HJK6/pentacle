@@ -62,11 +62,11 @@ test('transport unavailable without cache, malformed and unsupported cards are e
   r = await h.loader.refresh('example__catalog'); assert.equal(r.status, 'malformed'); assert.match(r.message, /^Dashboard catalog unsupported\/malformed: .* \(catalog unknown\)$/);
   const c = full(); c.requires.host_api = 3; h.setGet(ok(c)); r = await h.loader.refresh('example__catalog'); assert.equal(r.status, 'unsupported'); assert.match(r.message, /catalog 0\.1\.0\+aaaaaaa/);
 });
-test('validated cache survives malformed/unsupported fetches and is shown only on unavailability', async () => {
+test('authoritative malformed/unsupported responses invalidate cache, including offline fallback', async () => {
   const h = harness(); const good = await h.loader.refresh('example__catalog');
   h.setGet({ asset: { body: '{broken' } }); let r = await h.loader.refresh('example__catalog'); assert.equal(r.catalog, null); assert.equal(r.cached, false);
   const unsupported = full(); unsupported.requires.host_api = 3; h.setGet(ok(unsupported)); r = await h.loader.refresh('example__catalog'); assert.equal(r.catalog, null);
-  h.setGet(new Error('offline')); r = await h.loader.refresh('example__catalog'); assert.equal(r.cached, true); assert.deepEqual(r.catalog, good.catalog); assert.equal(r.age, 0);
+  h.setGet(new Error('offline')); r = await h.loader.refresh('example__catalog'); assert.equal(r.cached, false); assert.equal(r.catalog, null);
   r = await h.loader.refresh('example__other'); assert.equal(r.cached, false);
 });
 test('session cache is validated; denied storage still preserves memory cache', async () => {
@@ -88,6 +88,46 @@ test('missing metadata, daemon failures and malformed response are unavailable',
   for (const list of [{ assets: [] }, { ok: false, error: 'asset_denied' }, {}, { assets: [{ ...meta, stream_id: '' }] }]) {
     const h = harness(); h.setList(list); assert.equal((await h.loader.refresh('example__catalog')).status, 'unavailable');
   }
+});
+test('only current-epoch validated memory is eligible for immediate presentation', async () => {
+  const h = harness();
+  await h.loader.refresh('example__catalog');
+  assert.equal(h.loader.peek('example__catalog').status, 'refreshing');
+  let release;
+  h.cc.assetList = () => new Promise(r => { release = r; });
+  const first = h.loader.refresh('example__catalog'), joined = h.loader.refresh('example__catalog');
+  assert.equal(first, joined);
+  h.loader.invalidate();
+  assert.equal(h.loader.peek('example__catalog'), null);
+  release({assets:[meta]}); assert.equal((await first).status, 'superseded');
+  h.cc.assetList = async () => { throw new Error('offline'); };
+  assert.equal((await h.loader.refresh('example__catalog')).catalog, null);
+  h.loader.reset();
+  assert.equal(h.loader.peek('example__catalog'), null);
+  assert.equal((await h.loader.refresh('example__catalog')).catalog, null, 'old session storage cannot cross a reset epoch');
+});
+test('scope switches reject old completions and session storage is never a fast path', async () => {
+  const h = harness(); await h.loader.refresh('example__catalog');
+  const restored = api.createLoader({root:h.root,cc:h.cc,storage:h.storage});
+  assert.equal(restored.peek('example__catalog'), null);
+  let release; h.cc.assetGet = () => new Promise(r => { release = r; });
+  const old = h.loader.refresh('example__catalog'); await Promise.resolve();
+  h.cc.assetList = async () => { throw new Error('offline'); };
+  const other = await h.loader.refresh('example__other');
+  assert.equal(other.catalog, null); assert.equal(h.loader.peek('example__catalog'), null);
+  release(ok(full())); assert.equal((await old).status, 'superseded');
+});
+test('authoritative removal and denied reads cannot reuse or resurrect cached catalogs', async () => {
+  for (const response of [{assets:[]}, {ok:false,error:'asset_denied'}, {ok:false,error:{code:'unauthorized'}}]) {
+    const h = harness(); await h.loader.refresh('example__catalog'); h.setList(response);
+    assert.equal((await h.loader.refresh('example__catalog')).catalog, null);
+    assert.equal(h.loader.peek('example__catalog'), null);
+    h.setList(new Error('offline'));
+    assert.equal((await h.loader.refresh('example__catalog')).catalog, null);
+  }
+  const h = harness(); await h.loader.refresh('example__catalog');
+  const empty = full(); empty.boards = []; h.setGet(ok(empty));
+  assert.deepEqual((await h.loader.refresh('example__catalog')).catalog.boards, []);
 });
 function autoTags(h, register = () => {}) {
   const seen = [], append = h.root.document.head.appendChild.bind(h.root.document.head);
@@ -241,7 +281,7 @@ test('N to N+1 to N reruns actual fixture library and adapter source without sta
     assert.equal(observations[2], observations[0]);
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
-test('pending catalog refresh disables stale selection and disposes old refs before registry replacement', async () => {
+test('pending catalog refresh preserves provisional selection and disposes old refs before changed registry replacement', async () => {
   const vm = require('node:vm'), app = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
   const dom = new JSDOM('<head></head><body><button class="view-btn" data-view="chats"></button><button class="view-btn" data-view="dashboards"></button><div class="grid"></div><div id="panel-sessions"></div><div id="panel-dashboards"><div id="dashboard-list"></div></div><div id="dashboard-content"></div></body>', { url: 'https://example.test' });
   const window = dom.window, document = window.document, state = { currentView: 'chats', selectedDashboard: null, dashboardPollToken: 0 };
@@ -250,16 +290,15 @@ test('pending catalog refresh disables stale selection and disposes old refs bef
   next.catalog_version = '0.2.1+bbbbbbb'; next.boards[0].web.sha256 = 'b'.repeat(64); delete first.boards[0].poll_interval_ms; delete next.boards[0].poll_interval_ms;
   let hold = false, resolve; const cc = { assetList: async () => ({ assets: [meta] }), assetGet: () => hold ? new Promise(r => { resolve = r; }) : Promise.resolve(ok(first)) };
   const loader = api.createLoader({ root: window, cc, storage: null, loadTimeoutMs: 1000 });
-  const context = vm.createContext({ window, document, state, CONFIG: { dashboards: { catalogSpecId: 'example__catalog' } }, CFG_READY: Promise.resolve(), dashboardCatalog: { createLoader: () => loader }, dashboardReports: {}, assetRender: {}, require() {}, gridColResizers: [], sidebarResizer: null, scheduleVisibleSlotFits() {}, setInterval, clearInterval, console });
+  const context = vm.createContext({ window, document, state, CONFIG: { dashboards: { catalogSpecId: 'example__catalog' } }, CFG_READY: Promise.resolve(), dashboardCatalog: { createLoader: () => loader }, dashboardReports: {}, assetRender: {}, require() {}, gridColResizers: [], sidebarResizer: null, scheduleVisibleSlotFits() {}, refetchAssetSnapshotsForActiveSlots() {}, setInterval, clearInterval, console });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/dashboards/registry.js'), 'utf8'), context);
   window.DASHBOARDS.push({ id: 'example-static', name: 'Example', mount(c) { c.textContent = 'static'; return {}; }, unmount() {} });
   vm.runInContext(app.slice(app.indexOf('// ── View Switcher (Chats / Dashboards)'), app.indexOf('// ── Toolbar Buttons')), context);
   const run = source => vm.runInContext(source, context), tick = () => new Promise(r => setImmediate(r));
   run("switchView('dashboards')"); await tick(); run("switchView('chats')"); hold = true; run("switchView('dashboards')"); await tick();
-  assert.equal(document.querySelectorAll('[data-dashboard-id]').length, 0);
-  run("selectDashboard('example-board')"); assert.equal(state.dashboardRefs, null);
-  // Independently protect the commit boundary even if a caller already started a mount.
-  run("state.selectedDashboard = 'example-board'; mountAndPoll('example-board')"); await tick();
+  assert.equal(document.querySelectorAll('[data-dashboard-id]').length, 1);
+  run("selectDashboard('example-board')"); assert.ok(state.dashboardRefs);
+  assert.ok(document.querySelector('[data-testid=dashboard-catalog-cached]'));
   const oldRefs = state.dashboardRefs, oldTag = document.querySelector('script'); let oldMounts = 0;
   resolve(ok(next)); await tick(); const newRefs = state.dashboardRefs; assert.equal(oldRefs.disposed, true);
   window.DASHBOARDS.push({ id: 'example-board', mount() { oldMounts++; } }); oldTag.onload(); await tick();

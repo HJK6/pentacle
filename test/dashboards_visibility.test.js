@@ -13,7 +13,7 @@ function setup(config = {}, descriptors) {
  const loader = catalog.createLoader({ root: window, storage: null, cc: {} });
  const context = vm.createContext({ window, document: window.document, CONFIG: config, CFG_READY: Promise.resolve(), state,
   dashboardCatalog: { createLoader: () => ({ ...loader, refresh: async () => ({ status: 'ready', catalog: { catalog_version: 'test', boards } }) }) }, dashboardReports: {}, assetRender: {},
-  gridColResizers: [], sidebarResizer: null, scheduleVisibleSlotFits() {}, require() { return {}; },
+  gridColResizers: [], sidebarResizer: null, scheduleVisibleSlotFits() {}, refetchAssetSnapshotsForActiveSlots() {}, require() { return {}; },
   setInterval() { throw Error('fixtures must never poll'); }, clearInterval() {}, console });
  vm.runInContext(fs.readFileSync(require.resolve('../renderer/dashboards/registry'), 'utf8'), context);
  window.DASHBOARDS.push(...['retired','active-a','active-b','outside'].map(id => ({ id, name: id, retired: id === 'retired',
