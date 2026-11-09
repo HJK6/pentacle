@@ -471,7 +471,8 @@ def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport
             if primary_failure == "subprocess":
                 raise subprocess.TimeoutExpired(command, 5)
             screen = {"trust": "Do you trust this folder?", "auth": "Please sign in to continue",
-                      "timeout": "loading", "parse": "Current week (all models)\n101% used"}.get(
+                      "timeout": "loading",
+                      "parse": "❯" if captures == 1 else "Current week (all models)\n101% used"}.get(
                           primary_failure, "❯" if captures == 1 else "Current week (all models)\n42% used")
             return SimpleNamespace(returncode=0, stdout=screen)
         return SimpleNamespace(returncode=0, stdout="")
@@ -489,6 +490,12 @@ def test_collect_removes_dead_entry_and_preserves_primary_error(socket_transport
         assert error.value.__notes__ == ["usage socket kill failed"]
         assert "DO_NOT_LEAK" not in str(error.value)
         assert capsys.readouterr().err == ""
+        if primary_failure == "parse":
+            assert captures == 2
+            assert [c[3:] for c in commands if c[3] == "send-keys"] == [
+                ["send-keys", "-t", "probe", "-l", "/usage"],
+                ["send-keys", "-t", "probe", "Enter"],
+            ]
     else:
         assert collect() == {"week_all_pct": 42, "week_all_resets": None,
                              "week_fable_pct": None, "week_fable_resets": None}
