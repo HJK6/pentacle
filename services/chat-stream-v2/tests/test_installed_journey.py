@@ -164,3 +164,100 @@ def test_invalid_manifest_is_blocked_before_any_network(tmp_path, monkeypatch, v
     monkeypatch.setattr(subject, 'served_build', lambda url: pytest.fail('network reached'))
     code, rows = invoke(tmp_path,value)
     assert code == 2 and rows[0]['result'] == 'BLOCKED'
+
+
+@pytest.mark.parametrize('binding', ['match', 'generation', 'captured_token', 'current_token'])
+def test_fixture_cli_requires_captured_generation_and_token(tmp_path, monkeypatch, binding):
+    import launch
+    token = tmp_path / 'stand-in-token'
+    token.write_text('stand-in-never-valid')
+    token.chmod(0o600)
+    token_hash = hashlib.sha256(token.read_bytes()).hexdigest()
+    fixture = {'stream_id': 'fixture:owned', 'host': 'fixture', 'session_name': 'owned',
+               'session_generation': 'owned-generation',
+               'stream_token_sha256': 'a' * 64 if binding == 'captured_token' else token_hash}
+    run = subject.Journey(manifest(), tmp_path)
+    run.inspect = lambda stream: {'session': {
+        'session_generation': 'replacement-generation' if binding == 'generation' else 'owned-generation',
+        'token_hash': 'b' * 64 if binding == 'current_token' else token_hash}}
+    invoked = []
+    def child(argv, **kwargs):
+        invoked.append(argv)
+        kwargs['stdout'].write(json.dumps({'type': 'prompt.ask.ok'}))
+        return 0
+    run.child = child
+    monkeypatch.setattr(launch, 'stream_token_file_for', lambda machine, name: str(token))
+    try:
+        if binding == 'match':
+            assert run.actor_cli(fixture, 'prompt', 'ask')['type'] == 'prompt.ask.ok'
+            assert len(invoked) == 1
+        else:
+            with pytest.raises(AssertionError, match='fixture'):
+                run.actor_cli(fixture, 'prompt', 'ask')
+            assert invoked == []
+    finally:
+        token.unlink()
+
+
+@pytest.mark.parametrize('cleanup_receipt', ['failed', 'missing', 'malformed'])
+@pytest.mark.parametrize('allow_failure', [False, True])
+def test_browser_method_preserves_primary_and_reports_cleanup(tmp_path, monkeypatch, cleanup_receipt, allow_failure):
+    def browser_run(run):
+        run.active_row = 'P3/P4.browser'
+        def child(argv, **kwargs):
+            receipt = run.out / 'browser-chat' / 'synthetic' / 'web_gate'
+            receipt.mkdir(parents=True)
+            subject.save(receipt / 'installed-observation.json',
+                         {'status': 'FAIL', 'primary_error': 'actual-native-reply-missing'})
+            if cleanup_receipt == 'failed':
+                subject.save(receipt / 'verdict.json', {'status': 'FAIL', 'chrome_cleanup': {'exited': False}})
+            elif cleanup_receipt == 'malformed':
+                (receipt / 'verdict.json').write_text('{')
+            return 1
+        run.child = child
+        run.browser('chat', allow_failure=allow_failure)
+    monkeypatch.setattr(subject.Journey, 'run', browser_run)
+    code, rows = invoke(tmp_path, manifest())
+    assert code == 1
+    assert rows[0]['primary_error'] == 'actual-native-reply-missing'
+    assert rows[0]['harness_error'] == 'owned browser cleanup unproved: chat'
+    assert rows[0]['cleanup']['errors'] == ['owned browser cleanup unproved: chat']
+
+
+def test_browser_method_accepts_attested_success(tmp_path):
+    run = subject.Journey(manifest(), tmp_path)
+    def child(argv, **kwargs):
+        receipt = run.out / 'browser-chat' / 'synthetic' / 'web_gate'
+        receipt.mkdir(parents=True)
+        subject.save(receipt / 'installed-observation.json', {'status': 'PASS'})
+        subject.save(receipt / 'verdict.json', {'status': 'PASS', 'chrome_cleanup': {'exited': True}})
+        return 0
+    run.child = child
+    assert run.browser('chat')['status'] == 'PASS'
+    assert run.cleanup['errors'] == []
+
+
+def test_browser_child_exception_survives_malformed_cleanup(tmp_path):
+    run = subject.Journey(manifest(), tmp_path)
+    def child(argv, **kwargs):
+        receipt = run.out / 'browser-chat' / 'synthetic' / 'web_gate'
+        receipt.mkdir(parents=True)
+        (receipt / 'verdict.json').write_text('{')
+        raise TimeoutError('owned browser child timed out')
+    run.child = child
+    with pytest.raises(TimeoutError, match='owned browser child timed out'):
+        run.browser('chat')
+    assert run.cleanup['errors'] == ['owned browser cleanup unproved: chat']
+
+
+def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
+    run = subject.Journey(manifest(), tmp_path)
+    def child(argv, **kwargs):
+        receipt = run.out / 'browser-history' / 'synthetic' / 'web_gate'
+        receipt.mkdir(parents=True)
+        subject.save(receipt / 'installed-observation.json', {'status': 'FAIL', 'primary_error': 'known-history-defect'})
+        subject.save(receipt / 'verdict.json', {'status': 'FAIL', 'chrome_cleanup': {'exited': True}})
+        return 1
+    run.child = child
+    assert run.browser('history', allow_failure=True)['primary_error'] == 'known-history-defect'
+    assert run.cleanup['errors'] == []

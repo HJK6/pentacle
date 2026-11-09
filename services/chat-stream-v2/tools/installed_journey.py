@@ -237,25 +237,44 @@ class Journey:
         directory = self.out / ('browser-' + phase)
         env = dict(os.environ, PENTACLE_WEB_GATE_REPORT_ROOT=str(directory))
         log = self.out / ('browser-' + phase + '.log')
+
+        def receipt(name):
+            paths = list(directory.glob('*/web_gate/' + name + '.json'))
+            if len(paths) != 1:
+                return {}
+            try:
+                value = json.loads(paths[0].read_text())
+                return value if isinstance(value, dict) else {}
+            except (OSError, ValueError):
+                return {}
+
+        def cleanup_proved(verdict):
+            cleanup = verdict.get('chrome_cleanup')
+            proved = isinstance(cleanup, dict) and cleanup.get('exited') is True
+            if not proved:
+                self.cleanup['errors'].append('owned browser cleanup unproved: ' + phase)
+            return proved
+
         try:
             with log.open('w') as handle:
                 returncode = self.child(['node', str(ROOT / 'test/e2e/lib/installed_journey_scenario.js'), str(path)],
                                         env=env, stdout=handle, stderr=subprocess.STDOUT, timeout=480)
         except Exception:
-            receipts = list(directory.glob('*/web_gate/verdict.json'))
-            if not (len(receipts) == 1 and json.loads(receipts[0].read_text()).get('chrome_cleanup', {}).get('exited') is True):
-                self.cleanup['errors'].append('owned browser cleanup unproved: ' + phase)
+            cleanup_proved(receipt('verdict'))
             raise
         # The web gate's logs contain only our selected scenario; keep its
         # actual primary failure and owned-browser cleanup verdict intact.
-        observations = list(directory.glob('*/web_gate/installed-observation.json'))
-        verdicts = list(directory.glob('*/web_gate/verdict.json'))
-        require(len(observations) == len(verdicts) == 1, 'browser proof/cleanup receipt missing')
-        observation = json.loads(observations[0].read_text())
-        verdict = json.loads(verdicts[0].read_text())
-        require(verdict.get('chrome_cleanup', {}).get('exited') is True, 'owned browser cleanup unproved')
-        if not (allow_failure and returncode == 1 and observation.get('status') == 'FAIL'):
-            require(returncode == 0 and verdict.get('status') == 'PASS',
+        observation = receipt('installed-observation')
+        verdict = receipt('verdict')
+        cleaned = cleanup_proved(verdict)
+        expected_failure = (allow_failure and returncode == 1 and observation.get('status') == 'FAIL'
+                            and verdict.get('status') == 'FAIL' and cleaned)
+        if observation.get('status') == 'FAIL' and not expected_failure:
+            raise AssertionError(observation.get('primary_error') or 'installed browser journey failed: ' + phase)
+        require(bool(observation), 'browser proof receipt missing or malformed')
+        require(cleaned, 'owned browser cleanup unproved: ' + phase)
+        if not expected_failure:
+            require(returncode == 0 and verdict.get('status') == observation.get('status') == 'PASS',
                     'installed browser journey failed; retain browser-' + phase + ' evidence')
         return observation
 
@@ -305,8 +324,11 @@ class Journey:
         info = path.stat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
                 'fixture seat credential is not private')
-        require(hashlib.sha256(path.read_bytes().strip()).hexdigest() ==
-                self.inspect(fixture['stream_id'])['session']['token_hash'], 'fixture credential generation mismatch')
+        session = self.inspect(fixture['stream_id'])['session']
+        require(session['session_generation'] == fixture['session_generation'], 'fixture generation mismatch')
+        token_hash = hashlib.sha256(path.read_bytes().strip()).hexdigest()
+        require(token_hash == fixture['stream_token_sha256'] == session['token_hash'],
+                'fixture credential generation mismatch')
         env = {k: v for k, v in os.environ.items() if not k.startswith(('AGENT_ORCH_', 'PENTACLE_STREAM_'))}
         env.update(AGENT_ORCH_STREAM_ID=fixture['stream_id'], AGENT_ORCH_STREAM_TOKEN_FILE=str(path),
                    AGENT_ORCH_HOST_ID=self.m['local_host'], AGENT_ORCH_WS_URL=self.m['ws_url'])
