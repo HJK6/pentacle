@@ -111,9 +111,10 @@ PROSE = "I don't have the filament total for all five levels yet. I'll answer as
 
 
 def test_fixture_final_is_structured_and_mirrors_without_open_route():
-    """Control: the same fixture final is mirror-eligible when no dispatch is open."""
+    """Control: proven operator prose is eligible when no dispatch is open."""
     async def body(h):
-        await h.ingest("USER", "typed directly", "plain-user")
+        route = await h.route("plain-operator", delivery="failed")
+        await h.dispatch_user(route, "plain-user")
         seq = await h.ingest("ASSIST_TEXT", PROSE, "plain-final", final=True)
         assert await h.store.assistant_mirror_event_for_source(seq) is not None
         assert [e["text"] for e in await h.answers()] == [PROSE]

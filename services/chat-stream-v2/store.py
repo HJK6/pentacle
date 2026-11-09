@@ -2384,13 +2384,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             source_generation=source_generation, session_created_at=source["created_at"],
             source_event_id=source_event_id, transcript=raw.get("source_session_identity"),
         )
-        if trigger == "excluded":
-            return
         if trigger == "unknown":
-            log.info("assistant_mirror_unknown_trigger source_stream_id=%s source_event_id=%s",
+            log.info("assistant_mirror_unknown_trigger source_stream_id=%s source_event_id=%s mirror_action=suppressed",
                      source_stream_id, source_event_id,
                      extra={"subsystem": "assistant_mirror",
-                            "bug_ref": "spec_pentacle__front_desk_mirror_trigger_scope_2026_10"})
+                            "bug_ref": "spec_pentacle__fd_peer_turn_mirror_leak_2026_11"})
+        if trigger != "operator":
+            return
         composite_host, _, composite_name = binding[0].partition(":")
         composite = conn.execute(
             "SELECT created_at FROM sessions WHERE host=? AND session_name=? "
@@ -5845,8 +5845,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         """Append one immutable send receipt and return its safe wire shape.
 
         This intentionally has no upsert, uniqueness constraint, or payload
-        comparison. A same-key retry is another physical attempt; the one-row
-        reader below gives clients its highest-rowid projection.
+        comparison. A same-key retry is another physical attempt; confirmed
+        delivery takes precedence only within the same immutable attempt.
         """
         if state not in {"accepted", "landed", "not_landed"}:
             raise ValueError("invalid_send_receipt_state")
@@ -5887,21 +5887,32 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         return receipt
 
     async def get_send_receipt(self, to_stream_id: str, request_id: str, *, include_display_text: bool = False, include_submission_identity: bool = False) -> dict[str, Any] | None:
-        """Return only the highest-rowid receipt for one lookup key."""
+        """Project latest outcome, preserving same-attempt confirmed delivery."""
+        from receipt_proof import epoch, proved_pending_precedence
         target = str(to_stream_id or "").strip()
         request = str(request_id or "").strip()
         if not target or not request:
             return None
 
         def _op(conn: sqlite3.Connection) -> dict[str, Any] | None:
-            row = history_query(conn,
+            rows = history_query(conn,
                 """SELECT rowid AS receipt_rowid, * FROM v2_send_receipts
                    WHERE to_stream_id=? AND request_id=?
-                   ORDER BY rowid DESC LIMIT 1""",
+                   ORDER BY rowid""",
                 (target, request),
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            if not rows:
                 return None
+            prior, _conflict = proved_pending_precedence(rows)
+            if prior is not None and ":" in target:
+                current = conn.execute(
+                    "SELECT created_at FROM sessions WHERE host=? AND session_name=?",
+                    tuple(target.split(":", 1))).fetchone()
+                if current is not None:
+                    birth, claim = epoch(current["created_at"]), epoch(rows[0]["created_at"])
+                    if birth is None or claim is None or birth >= claim:
+                        prior = None
+            row = prior if prior is not None else rows[-1]
             result = _project_send_receipt_row(conn, row, include_display_text=include_display_text)
             if include_submission_identity:
                 first = history_query(conn, "SELECT created_at FROM v2_send_receipts WHERE to_stream_id=? AND request_id=? ORDER BY rowid LIMIT 1", (target, request)).fetchone()

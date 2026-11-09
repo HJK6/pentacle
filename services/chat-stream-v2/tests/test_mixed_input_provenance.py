@@ -214,6 +214,100 @@ def normalize(provider, record):
 
 
 @pytest.mark.parametrize('provider', ['claude', 'codex'])
+def test_verified_peer_then_unknown_visibility_prompt_stays_internal(tmp_path, provider):
+    """A visibility retry cannot turn a proven peer conversation into operator prose."""
+    from ingest import append_ingested_event
+
+    async def run():
+        h = _Harness(tmp_path)
+        try:
+            await h.start()
+            await h.tell(to_stream_id=SEAT_A, tell_id='visibility-peer', text='Internal peer update')
+            wire = h.tmux.inputs[-1][1]
+            await h.store.update_session(HOST, 'seat-a', pane_pid='4242')
+            frames = []
+
+            async def broadcast(frame):
+                frames.append(frame)
+
+            async def ingest(record):
+                for event in normalize(provider, record):
+                    await append_ingested_event(h.store, broadcast, event, recent_limit=500,
+                        lifecycle=await h.store.fetch_open_session_lifecycle(SEAT_A, pane_pid='4242'))
+
+            peer = native_record(provider, [wire], 'visibility-peer-input')
+            await ingest(peer)
+            source = await h.store.fetch_session_event_tail(SEAT_A, limit=100)
+            assert source[-1]['kind'] == 'TELL'
+            assert source[-1]['raw']['input_provenance'] == {
+                'kind': 'peer', 'verified': True, 'sender': SENDER, 'generation': h.gen[SENDER]}
+            prompt_text = '[Your previous response had no visible output. Please continue and produce a user-visible response.]'
+            prompt = native_record(provider, [prompt_text], 'visibility-retry')
+            await ingest(prompt)
+            source = await h.store.fetch_session_event_tail(SEAT_A, limit=100)
+            assert source[-1]['kind'] == 'USER' and source[-1]['text'] == prompt_text
+            assert source[-1]['raw']['input_provenance'] == {'kind': 'unknown', 'verified': False}
+            if provider == 'claude':
+                answer = {'type': 'assistant', 'uuid': 'visibility-answer', 'sessionId': 'source-session',
+                    'message': {'role': 'assistant', 'stop_reason': 'end_turn',
+                                'content': [{'type': 'text', 'text': 'Internal response'}]}}
+            else:
+                answer = {'type': 'response_item', 'payload': {'type': 'message', 'id': 'visibility-answer',
+                    'role': 'assistant', 'phase': 'final_answer',
+                    'content': [{'type': 'output_text', 'text': 'Internal response'}]}}
+            await ingest(answer)
+            source = await h.store.fetch_session_event_tail(SEAT_A, limit=100)
+            assert [r['text'] for r in source if r['kind'] == 'ASSIST_TEXT'] == ['Internal response']
+            assert not [r for r in await h.store.fetch_session_event_tail(COMPOSITE_CHAT, limit=100)
+                        if r['kind'] == 'ASSIST_TEXT']
+            before = len(frames)
+            for record in (peer, prompt, answer):
+                await ingest(record)
+            assert len(frames) == before, 'source replay must not publish or rebroadcast the internal response'
+
+            # Pair the negative with the existing real authenticated server
+            # publication path, so broken capture cannot look like suppression.
+            await h.composite.accept_input({'message': 'Operator request', 'msg_id': 'visibility-operator',
+                'request_id': 'visibility-operator'}, operator_principal='operator:fixture')
+            for _ in range(100):
+                route = await h.store.get_assistant_composite_route(
+                    stream_id=COMPOSITE_CHAT, input_identity='visibility-operator')
+                if route and route['routing_state'] == 'resolved' and route['dispatch_id']:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError('operator route did not resolve')
+            token = 'synthetic-visibility-publish-token'
+            await h.store.grant_stream_token(HOST, 'seat-a', hashlib.sha256(token.encode()).hexdigest(),
+                                            version='sha256:v1')
+            class Socket:
+                remote_address = ('127.0.0.1', 54321)
+                async def send(self, payload):
+                    pass
+            socket = Socket()
+            h.server._register_client(socket)
+            hello = await h.server._dispatch(json.dumps({'type': 'hello', 'client': 'visibility-publish-control',
+                'stream_token': token, 'from_stream_id': SEAT_A}), websocket=socket)
+            assert not any(r['type'].endswith('.error') for r in hello), hello
+            payload = {'type': 'assistant.publish', 'request_id': 'publish:' + route['dispatch_id'],
+                'composite_stream_id': COMPOSITE_CHAT,
+                'dispatch_id': route['dispatch_id'], 'reply_to_message_id': 'visibility-operator',
+                'publish_kind': 'prose', 'response_state': 'final', 'message': 'Operator answer'}
+            for _ in range(2):
+                reply = (await h.server._dispatch(json.dumps(payload), websocket=socket))[0]
+                assert reply['type'] == 'assistant.publish.ok', reply
+            answers = [r for r in await h.store.fetch_session_event_tail(COMPOSITE_CHAT, limit=100)
+                       if r['kind'] == 'ASSIST_TEXT']
+            assert [r['text'] for r in answers] == ['Operator answer']
+            assert answers[0]['raw']['dispatch_id'] == route['dispatch_id']
+            assert answers[0]['reply_to_message_id'] == 'visibility-operator'
+        finally:
+            await h.composite.stop()
+            h.store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('provider', ['claude', 'codex'])
 @pytest.mark.parametrize('shape', ['operator-peer', 'peer-operator', 'two-peers', 'native-blocks', 'ambiguous'])
 def test_actual_tell_transcript_ingest_proof_and_later_quote(tmp_path, provider, shape):
     from ingest import append_ingested_event

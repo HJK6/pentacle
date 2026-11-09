@@ -5419,15 +5419,16 @@ class Server:
         sent_chunks = False
         try:
             while remaining > 0 and page_size > 0:
-                query_limit = page_size + (1 if remaining > page_size else 0)
+                quota = min(page_size, remaining)
+                query_limit = quota + (1 if remaining > quota else 0)
                 rows = await self.store.fetch_session_event_page(
                     stream_id,
                     before_daemon_seq=cursor,
                     limit=query_limit,
                     **({"generation": generation} if generation is not None else {}),
                 )
-                has_more = remaining > page_size and len(rows) > page_size
-                page = rows[-page_size:] if has_more else rows[:page_size]
+                has_more = remaining > quota and len(rows) > quota
+                page = rows[-quota:] if has_more else rows[:quota]
                 if not page:
                     break
 

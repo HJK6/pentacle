@@ -276,6 +276,7 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
 
     deadline = monotonic() + timeout
     captured = None
+    result = None
     try:
         command = shlex.join(command_args)
         call("new-session", "-d", "-s", "probe", "-x", "140", "-y", "60", "-c", cwd, command)
@@ -306,7 +307,8 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
             sleep(1)
         raise RuntimeError("Claude /usage did not provide labeled weekly account limits within the timeout")
     finally:
-        primary = sys.exception()
+        # A pending parsed return takes precedence, even inside a caller's except.
+        primary = None if result is not None else sys.exception()
         cleanup_error = None
         if captured is None and primary is not None:
             primary.add_note("usage socket ownership not captured; no unlink attempted")
@@ -324,7 +326,8 @@ def collect(*, claude: str, tmux: str, cwd: str, timeout: float = 60,
             if primary is not None:
                 primary.add_note(str(cleanup_error))
             else:
-                raise cleanup_error from None
+                print("Claude usage cleanup warning [subsystem=usage_probe "
+                      f"bug_ref=cleanup_discards_reading]: {cleanup_error}", file=sys.stderr)
 
 
 def default_cwd() -> str:
