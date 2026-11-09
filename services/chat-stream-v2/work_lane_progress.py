@@ -63,21 +63,35 @@ def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None 
 
 
 def members_working(lane: dict[str, Any], sessions: list[dict[str, Any]] | None = None) -> bool:
-    """Use full observations and effective owners before presentation caps."""
-    from store_specs import effective_assignment, task_owner
+    """Actual activity over all effective assignments, before presentation caps."""
+    from store_specs import effective_assignment
     if sessions is None:
         return bool(lane.get("_members_working"))
-    available = lane.get("_work_index_available", False)
-    members = {member["spec_id"] for member in lane.get("_members") or []
-               if not (available and member.get("observation", {}).get("quality") == "fresh"
-                       and member.get("status") in {"completed", "deprecated"})}
-    return any(task_owner(row) and effective_assignment(row) in members for row in sessions)
+    # Residual execution on terminal/unresolved work stays observable. It grants
+    # no ownership or admission, both of which have independent policy checks.
+    members = {member["spec_id"] for member in lane.get("_members") or []}
+    return any(seat_working(row, descendants=False) and effective_assignment(row) in members for row in sessions)
+
+
+def seat_live(row: dict[str, Any] | None) -> bool:
+    if not row or row.get("status", "open") != "open" or row.get("presumed_dead_at"):
+        return False
+    if row.get("online") is False or row.get("offline_since_ts") is not None or row.get("pane_status") == "pane_dead":
+        return False
+    generation, capture = row.get("session_generation"), row.get("capture_generation")
+    return not (generation and capture and generation != capture)
+
+
+def seat_working(row: dict[str, Any] | None, *, descendants=True) -> bool:
+    if not seat_live(row):
+        return False
+    busy = row.get("busy") and (descendants or not row.get("busy_reasons")
+                               or bool({"generating", "background"} & set(row["busy_reasons"])))
+    return bool(busy or row.get("working") or row.get("background_busy"))
 
 
 def lane_state(lane: dict[str, Any]) -> tuple[str, str | None]:
     state, reason = lane.get("work_state"), lane.get("work_state_reason")
-    if state in {"active", "paused"} and members_working(lane):
-        return "active", "members_working"
     if lane_lead_lost(lane):
         return "active", "lead_lost"
     return state, reason
@@ -90,7 +104,7 @@ def lane_lead_lost(lane: dict[str, Any]) -> bool:
     while their lead does not qualify; a qualifying lead clears it either way."""
     state = lane.get("work_state")
     legacy = state == "paused" and lane.get("work_state_reason") == "lead_lost"
-    return (state == "active" or legacy) and not lane.get("_qualifies") and not members_working(lane)
+    return (state == "active" or legacy) and not lane.get("_qualifies")
 
 
 def lane_progress(lane: dict[str, Any], *, all_members: bool = False,
@@ -107,7 +121,7 @@ def lane_progress(lane: dict[str, Any], *, all_members: bool = False,
                           and all(m.get("observation", {}).get("quality") == "fresh"
                                   and m.get("terminal") in ("completed", "deprecated") for m in members))
     threshold = stale_interval_h() * 3600
-    active = lane_state(lane)[0] == "active" and bool(lane.get("_qualifies") or members_working(lane))
+    active = lane_state(lane)[0] == "active" and bool(lane.get("_qualifies"))
     now = _epoch(now_iso) if now_iso else datetime.now(timezone.utc).timestamp()
     stale = bool(active and facts["freshness_at"] and now - _epoch(facts["freshness_at"]) > threshold)
     return {"members": members if all_members else members[:INLINE_MEMBERS], "members_total": len(members),

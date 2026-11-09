@@ -12,7 +12,7 @@ SPEC = ("---\nid: spec_demo__bridge\ntitle: Bridge\n---\n## Acceptance Criteria\
         "## Estimate\n- remaining_work_h: 2–5 (median 3) as_of 2026-10-15, provisional\n")
 PROSE = "---\nid: work_demo__bridge\n---\nCut and waiting on glue; join next.\n"
 FIXED_SPEC = SPEC.replace("as_of 2026-10-15, provisional", "as_of 2026-10-15 provisional")
-LABELLED = "---\nid: work_demo__bridge\n---\n**Status** — Cut.\n\n**Next action** — Join the deck.\n"
+LABELLED = "---\nid: work_demo__bridge\n---\n**Progress** — Cut the supports.\n**Status** — Cut.\n\n**Next action** — Join the deck.\n"
 
 
 @pytest.fixture
@@ -53,6 +53,47 @@ async def test_owner_report_with_malformed_source_is_durable_with_warning(memory
 
 
 @pytest.mark.asyncio
+async def test_new_readiness_requires_current_checkpoint_and_verified_qa_then_replays(memory, monkeypatch):
+    from test_qa_attestation_validation import _state, _report, SPEC_ID, READY, QA
+    monkeypatch.setenv("PENTACLE_QA_ATTESTATION_MODE", "enforce")
+    other = memory.parent / "pentacle__daemon_v2_qa_attestation_validation_control_plane_2026_08"
+    other.mkdir()
+    spec = FIXED_SPEC.replace("spec_demo__bridge", SPEC_ID)
+    other.joinpath("spec.md").write_text(spec)
+    summary = other / "summary.md"
+    summary.write_text(PROSE)
+    store, sessions, _, ledger, _ = await _state()
+    try:
+        row = await store.update_session("alpha", "ready", role="lead", assigned_spec_id=SPEC_ID)
+        sessions.apply_durable(READY, role="lead", assigned_spec_id=SPEC_ID)
+        await ledger.report(_report("qa-accepted-checkpoint", QA, qa_verdict="accept"))
+        ready = _report("ready-checkpoint", READY, completion_kind="implementation_ready",
+                        attestation={"stream_id": QA, "report_id": "qa-accepted-checkpoint"})
+        with pytest.raises(VerbError) as exc:
+            await ledger.report(ready)
+        assert exc.value.code == "work_checkpoint_invalid" and await store.get_report("ready-checkpoint") is None
+        summary.write_text(LABELLED)
+        with pytest.raises(VerbError) as exc:
+            await ledger.report({**ready, "qa_attestation": {"stream_id": QA, "report_id": "forged"}})
+        assert exc.value.code == "qa_attestation_unverified"
+        reply = await ledger.report(ready)
+        assert reply["work_checkpoint"]["state"] == "valid"
+        assert reply["qa_attestation_validation"]["state"] == "verified"
+        snapshot = reply["work_checkpoint"]
+        assert snapshot["source_revisions"]["summary.md"] and snapshot["policy_revision"]
+        summary.unlink()  # owned fixture only; accepted replay never rereads it
+        replay = await ledger.report(ready)
+        assert replay["work_checkpoint"] == snapshot
+        with pytest.raises(VerbError):
+            await ledger.report({**ready, "summary": "changed payload"})
+        error = _report("progress-still-allowed", READY, status="error")
+        error.update(reason="Source unavailable", findings=[], next_action="Repair the source")
+        assert (await ledger.report(error))["work_checkpoint"]["state"] == "unverifiable"
+    finally:
+        store.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["error", "aborted"])
 async def test_failure_reports_are_never_refused_and_carry_the_deficiencies(memory, status):
     store, ledger = await ledger_with({"role": "lead", "assigned_spec_id": "spec_demo__bridge"})
@@ -67,8 +108,7 @@ async def test_failure_reports_are_never_refused_and_carry_the_deficiencies(memo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fields", [{"role": "worker", "assigned_spec_id": "spec_demo__bridge"},
-                                    {"role": "nexus", "assigned_spec_id": "spec_demo__bridge"},
-                                    {"role": "lead"}])  # single-spec fallback only, nothing persisted
+                                    {"role": "nexus", "assigned_spec_id": "spec_demo__bridge"}])  # single-spec fallback only, nothing persisted
 async def test_non_owner_reports_are_unchanged(memory, fields):
     store, ledger = await ledger_with(fields)
     try:

@@ -43,9 +43,11 @@ def read_work_candidate(folder: Path, status: str, *, now: float, quiet_s: float
     unsettled = (before != after or any(now - p.stat().st_mtime < quiet_s for p in paths)
                  or not all(text.strip() for text in texts))
     digest = hashlib.sha256(json.dumps([status, *texts], ensure_ascii=False).encode()).hexdigest()
+    from .checkpoint_policy import policy_revision
     if (not unsettled and previous is not None and previous.get("quality") == "fresh"
             and previous.get("path") == str(folder) and previous.get("source_hash") == digest):
-        return copy.deepcopy(previous)
+        if previous.get("facts", {}).get("checkpoint_policy_revision") == policy_revision():
+            return copy.deepcopy(previous)
     try:
         fm = load_frontmatter(texts[0])
     except (ValueError, yaml.YAMLError):
@@ -107,6 +109,13 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
                             else source_changed)
         member = {"spec_id": spec_id, **facts, "source_changed_at": source_changed,
                   "observation": {"quality": "fresh", "observed_at": timestamp(now), "error": None}, "obs_rev": rev}
+        checkpoint_changed = (old is not None and old.get("checkpoint_revision") is not None
+                              and old.get("checkpoint_revision") != facts.get("checkpoint_revision")
+                              and old.get("checkpoint_policy_revision") == facts.get("checkpoint_policy_revision")
+                              and record.get("source_hash") != candidate["source_hash"])
+        member["checkpoint_changed_at"] = timestamp(now) if checkpoint_changed else record["member"].get("checkpoint_changed_at")
+        member["checkpoint_first_observed_at"] = (record["member"].get("checkpoint_first_observed_at") or timestamp(now))
+        member["goal_source"] = {"spec_id": spec_id, "revision": (candidate.get("document_revisions") or {}).get("spec.md")}
         if material:
             fields = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt")
             change = {"spec_id": spec_id, "obs_rev": rev,
@@ -129,9 +138,12 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
         member = record["member"]
         if quality in ("missing", "ambiguous"):
             member = {**unresolved_member(spec_id, quality), "obs_rev": member["obs_rev"],
-                      "source_changed_at": member["source_changed_at"], "observation": dict(member["observation"])}
+                      "source_changed_at": member["source_changed_at"], "observation": dict(member["observation"]),
+                      "checkpoint_changed_at": member.get("checkpoint_changed_at"),
+                      "checkpoint_first_observed_at": member.get("checkpoint_first_observed_at")}
         elif old is not None:
             member = {**member, **old}
         member["observation"] = {**member["observation"], "quality": quality, "error": error}
+        member["checkpoint_state"] = "unverifiable"
         record["member"] = member
     return record, change

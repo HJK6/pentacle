@@ -844,6 +844,23 @@ def test_spawn_role_baseline_is_initial_prompt_when_no_prompt_is_given(monkeypat
     assert captured["payload"]["initial_prompt_baseline_end"] == len("BASELINE\n")
 
 
+def test_provision_only_public_cli_sends_no_task_or_baseline(monkeypatch, tmp_path, capsys):
+    agents = tmp_path / "memory" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "lead_baseline.md").write_text("BASELINE\n")
+    monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path, agents.parent))
+    captured = []
+    async def call(config, payload, timeout):
+        captured.append(payload)
+        return {"type": "spawn.ok", "stream_id": "hostc:lead"}
+    monkeypatch.setattr(cli, "spawn_once", call)
+    args = _spawn_args(tmp_path, role="lead")
+    args.provision_only, args.lane_id, args.spec_id = True, "wl-paused", ["spec_demo__owned"]
+    assert cli.spawn(args) == 0
+    assert captured[0]["provision_only"] is True and captured[0]["lane_id"] == "wl-paused"
+    assert not any(key in captured[0] for key in ("initial_prompt", "initial_prompt_blob_sha", "initial_prompt_baseline_end"))
+
+
 def test_spawn_indeterminate_role_baseline_ack_is_explicit(monkeypatch, tmp_path: Path, capsys) -> None:
     memory_repo = tmp_path / "memory"
     (memory_repo / "agents").mkdir(parents=True)

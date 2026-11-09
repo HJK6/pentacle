@@ -13,6 +13,9 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- Require a dedicated live non-FD lane lead for active work, safe drained holds and succession, and show actual work by any assigned agent beyond preview caps.
+- Add source-backed checkpoint detail, full-membership visibility counts, goal prose and current-checkpoint validation for new implementation readiness reports.
+
 - 2026-11-07: Electron desktop app removed.
 
 ### Added

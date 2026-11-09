@@ -209,7 +209,7 @@ def _working_lane(count=1, owner="fd", state="paused", reason="fd"):
 
 def _working_seat(spec="spec_demo__item0", **overrides):
     return {"stream_id": "host:seat", "status": "open", "role": "lead", "visibility": "hidden",
-            "parent_stream_id": "host:parent", "assigned_spec_id": spec, **overrides}
+            "parent_stream_id": "host:parent", "assigned_spec_id": spec, "online": True, "working": True, **overrides}
 
 
 def _frame(lane, seats):
@@ -217,14 +217,14 @@ def _frame(lane, seats):
 
 
 def _assert_working(lane):
-    assert (lane["state"], lane["state_reason"]) == ("active", "members_working")
+    assert lane["lead"]["presence"]["working"] is True
 
 
 @pytest.mark.parametrize("role", ["lead", "nexus", "planner"])
 def test_members_working_red_hidden(role):
     frame = _frame(_working_lane(), [_working_seat(role=role)])
     _assert_working(frame["lanes"][0])
-    assert frame["counts"]["active"] == 1
+    assert frame["counts"]["paused"] == 1
 
 
 def test_members_working_red_operator_parentless():
@@ -247,6 +247,7 @@ def test_members_working_red_caps_and_surfaces(beyond):
                        assigned_spec_id=specs[-1])
         sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
+        sessions.apply_live("host-a:z-eligible", online=True, working=True)
         server = Server(store=env.store, sessions=sessions, comms=None, local_host="host-a")
         server.assistant_composite = env.composite
         server.work_lanes = WorkLanesInventory(env.store, sessions, server.broadcast)
@@ -334,9 +335,6 @@ def test_member_owner_precedes_history_but_fresh_terminal_does_not_activate(stor
                               source_changed_at="2026-10-01T00:00:00Z")
     lane["_work_index_available"] = True
     result = _frame(lane, [_working_seat(role="planner")])["lanes"][0]
-    if working:
-        _assert_working(result)
-        assert result["stale"] is True
-    else:
-        assert result["state_reason"] != "members_working"
-        assert result["stale"] is False
+    _assert_working(result)  # residual terminal/unresolved activity remains observable
+    assert result["state"] == stored
+    assert result["stale"] is False

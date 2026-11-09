@@ -315,8 +315,8 @@ def test_owner_beyond_preview_drives_attendance_through_derived_membership(tmp_p
         await reconcile(env.store, scanner(root))
         stream, _ = await env.seat('tail-owner', role='lead', assigned_spec_id='spec_demo__n64', spec_ids=['spec_demo__n64'])
         shown = await env.store.get_work_lane(lane['lane_id'])
-        assert shown['_projection_row']['_members_working'] is True
-        assert project_lane(shown['_projection_row'], None, '2026-11-08T12:00:00Z')['state_reason'] == 'members_working'
+        assert '_members_working' not in shown['_projection_row']
+        assert project_lane(shown['_projection_row'], None, '2026-11-08T12:00:00Z')['state'] == 'paused'
         assert shown['lane']['work_state'] == 'paused' and shown['lane']['version'] == 1
         carried = await env.store.open_lanes_for_spec('spec_demo__n64')
         assert [row['lane_id'] for row in carried] == [lane['lane_id']]

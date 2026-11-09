@@ -168,7 +168,7 @@ def test_stale_clear_on_leave_active_and_immediate_recur():
         stamp = "2030-01-01T00:00:00.000Z"
         await env.store.reconcile_work_lane_episodes(sink, now_iso=stamp)
         assert [r["kind"] for r in await episodes(env.store)] == ["stale"]
-        await env.op("set_state", {"to": "paused"}, lane=lane["lane_id"], version=1)
+        await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=1)
         await env.store.reconcile_work_lane_episodes(sink, now_iso=stamp)
         assert len(sink.calls) == 1
         await env.op("set_state", {"to": "active"}, lane=lane["lane_id"], version=2)

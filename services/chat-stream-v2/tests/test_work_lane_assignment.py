@@ -13,7 +13,7 @@ from store import UNASSIGNED, Store, effective_assignment
 from store_work_lanes import _assigned_seats_conn
 from test_spawn_wip_cap import HOST, setup
 
-SUMMARY = "---\nid: work_{stem}\n---\n**Status** — Underway.\n\n**Next action** — Continue.\n"
+SUMMARY = "---\nid: work_{stem}\n---\n**Progress** — Created the acceptance fixture.\n\n**Status** — Underway.\n\n**Next action** — Continue.\n"
 SPEC = ("---\nid: spec_{stem}\ntitle: Fixture {stem}\n---\n## Acceptance Criteria\n- [ ] Done.\n\n"
         "## Estimate\n- remaining_work_h: 1–2 (median 1.5) as_of 2026-10-09\n")
 
@@ -28,11 +28,10 @@ def item(root, stem, *, summary=SUMMARY):
 
 async def lane(store, lane_id, *members, state="active"):
     def op(conn):
+        from work_lane_link import link_specs_conn
+        link_specs_conn(conn, *members, lane_id=lane_id)
         conn.execute(
-            "INSERT INTO v2_assistant_composite_lanes (lane_id,stream_id,phase,summary,version,created_at,updated_at,"
-            "work_state,work_state_reason,owner_kind,title,members_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (lane_id, "fixture:assistant", "execution", "", 4, "2026-10-09T00:00:00Z", "2026-10-09T00:00:00Z",
-             state, "fd", "fd", "Lane " + lane_id, json.dumps(list(members))))
+            "UPDATE v2_assistant_composite_lanes SET work_state=?,version=4 WHERE lane_id=?", (state,lane_id))
         conn.commit()
     await store.submit(op)
 
@@ -104,7 +103,7 @@ async def test_linked_commission_persists_assignment_and_warns_on_checkpoint(env
     assert row["assigned_spec_id"] == target
     # A malformed display record is a warning, never an extra refusal (FD GO).
     assert reply["work_checkpoint"]["state"] == "invalid"
-    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["status_missing", "next_action_missing"]
+    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["progress_missing", "status_missing", "next_action_missing"]
 
 
 @pytest.mark.asyncio
@@ -168,7 +167,7 @@ async def test_exempt_callers_are_never_refused(env, auth):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role, exempt", [("assistant", True), ("lead", False)])
+@pytest.mark.parametrize("role, exempt", [("assistant", False), ("lead", False)])
 async def test_protected_assistant_caller_is_exempt_and_other_roles_are_not(env, role, exempt):
     # A2/R5: a protected assistant seat is exempt; a seat's ordinary role never is.
     env.monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
@@ -277,6 +276,7 @@ async def test_operator_assign_is_recorded_without_refusal_and_detach_clears(env
     target = item(env.root, "demo__target")
     ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     chat = await seat(env.store, "chat", role=None)
+    await lane(env.store, "wl-operator", target)
     operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
     reply = await spec_update(env, ctl, sessions, "assign", chat[0], target, operator)
     assert reply["session"]["assigned_spec_id"] == target and reply["session"]["spec_ids"] == [target]

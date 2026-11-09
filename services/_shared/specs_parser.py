@@ -255,6 +255,9 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
             else:
                 parked = f"{match[1]} {match[2]} — {' '.join(match[3].split())}"
     status_text, next_text = label("Status"), label("Next action")
+    from .checkpoint_policy import parse_checkpoint, bounded_prose
+    checkpoint = parse_checkpoint(summary, status)
+    goal = bounded_prose(_section(spec, "Goal"))
     organization = {}
     if "epic" in fm or "epic" in summary_fm:
         epic = fm.get("epic")
@@ -262,7 +265,8 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
         if (not isinstance(epic, str) or not re.fullmatch(r"epic_[a-z0-9_]+", epic)
                 or summary_fm.get("epic") != epic):
             organization["_epic_error"] = "work_goal_pair_invalid"
-    return {"title": fm.get("title"), "status": status, **organization,
+    return {"title": fm.get("title"), "status": status, **organization, **checkpoint,
+            "goal_text": goal["text"], "goal_text_truncated": goal["truncated"],
             "criteria": _criteria(ac, parked), "transitions": _transitions(tracking, fm.get("created_at"), status),
             "status_line": summary_line(status_text), "next_line": summary_line(next_text),
             **({"parked_declaration": parked} if parked else {}),

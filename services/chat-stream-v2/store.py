@@ -3844,11 +3844,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def record_spawn_intent(
         self, host: str, session_name: str, payload: dict[str, Any], *,
         request_id: str | None = None, nonce: str | None = None,
-        expected_spec_sources=(), prepared_qa=None,
+        expected_spec_sources=(), prepared_qa=None, lane_admission=None,
     ) -> bool:
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
 
+        reader = getattr(self, "lane_presence_reader", None)
+        lane_live = reader() if reader else ()
         def _op(conn: sqlite3.Connection) -> bool:
             host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             for stream_id, expected in expected_spec_sources:
@@ -3870,6 +3872,19 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # and record_spawn_intent runs before payload exists.
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
+            if lane_admission:
+                from store_work_lanes import require_lane_execution_conn, fd_backend_conn, _session_conn
+                from work_lane_progress import seat_live
+                context = dict(lane_admission)
+                auth = context.pop("provisioning_auth", None)
+                if context.get("provisioning"):
+                    actor = _session_conn(conn, auth["stream_id"]) if auth else None
+                    if (not actor or not auth.get("token_verified") or not seat_live(actor)
+                            or actor.get("session_generation") != auth.get("session_generation")
+                            or not fd_backend_conn(conn, auth["stream_id"])):
+                        from sessions import VerbError
+                        raise VerbError("work_lane_provisioning_forbidden", "The current FD binding changed before provisioning")
+                require_lane_execution_conn(conn, live_sessions=lane_live, **context)
             existing = json.loads(res.get("payload") or "{}")
             prior_intent = dict(payload)
             for key in ("exchange_binding", spawn_creation.KEY):
@@ -5093,6 +5108,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if changed:
                 raise ReportProvenanceChanged(routing_snapshot, current)
             stored_fields = dict(fields)
+            checkpoint = (stored_fields.get("extras") or {}).get("work_checkpoint")
+            if stored_fields.get("completion_kind") == "implementation_ready" and checkpoint:
+                # The coherent file snapshot must still belong to this exact
+                # assignment/generation at the report commit. Replay returned above.
+                if (checkpoint.get("spec_id") != effective_assignment(source[0])
+                        or checkpoint.get("session_generation") != (current or {}).get("session_generation")):
+                    raise SpecInputsUnavailable("checkpoint_assignment_changed")
             usage_row = _session_row(conn, conn.execute(
                 "SELECT * FROM sessions WHERE host=? AND session_name=?", (host, session_name)
             ).fetchone())
@@ -6098,6 +6120,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         )
         timestamp = created_at or iso_now()
 
+        reader = getattr(self, "lane_presence_reader", None)
+        lane_live = reader() if reader else ()
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             # Select the NEWEST receipt for this send's identity regardless of
             # state, so the latest outcome is authoritative: a later not_landed
@@ -6134,6 +6158,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 and str(latest["delivery"]) != "not_landed"
             ):
                 return {"coalesced": True, "winner": _send_receipt_row(latest, include_rowid=True)}
+            from store_work_lanes import require_lane_execution_conn
+            destination = _session_for_stream_conn(conn, target)
+            require_lane_execution_conn(conn, effective_assignment(destination), target_stream_id=target,
+                                        linked_only=True, live_sessions=lane_live)
             row = _insert_send_receipt_row(
                 conn, to_stream_id=target, request_id=request, receipt_id=receipt,
                 state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,

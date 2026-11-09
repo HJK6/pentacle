@@ -2066,7 +2066,10 @@ class Comms:
             binding_gate = (self.store.front_desk_fence()
                             if isinstance(plan.message.get("_assistant_alias_binding"), dict) else nullcontext())
             # Match bootstrap publishers: lifecycle before pane input, never the reverse.
-            async with binding_gate, lifecycle, self._pane_input_lock(target):
+            async with binding_gate, lifecycle, self._pane_input_lock(target), self.sessions._graph_lock:
+                from store_specs import effective_assignment
+                current = await self.store.fetch_session(host, name) or {}
+                await self.store.require_lane_execution(effective_assignment(current), target_stream_id=target, linked_only=True)
                 if queued_operation is not None:
                     policy = getattr(self, "queued_send_now", None)
                     current = await self.store.fetch_session(host, name) or {}
@@ -2312,9 +2315,6 @@ class Comms:
             msg = {**msg, "request_id": request_id}
         try:
             plan = await self._prepare_send_plan(msg)
-            if self.capacity_retry is not None:
-                async with self._pane_input_lock(str(plan.route["final_target"])):
-                    await self.capacity_retry.cancel_input(str(plan.route["final_target"]))
         except VerbError as exc:
             if exc.code in {CODEX_RESET_BLOCKED, CODEX_INITIAL_PROMPT_PENDING, "bootstrap_not_ready"}:
                 await self._record_blocked_input(msg, request_id, exc)
@@ -2359,6 +2359,9 @@ class Comms:
             return await self._coalesced_send_result(
                 plan, request_id=request_id, receipt_id=receipt_id, winner=claim["winner"],
             )
+        if self.capacity_retry is not None:
+            async with self._pane_input_lock(target):
+                await self.capacity_retry.cancel_input(target)
         try: await self._pool_ingress(target,msg)
         except VerbError as exc:
             from account_pool_control import POOL_ERRORS

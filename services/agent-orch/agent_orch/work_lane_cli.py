@@ -64,9 +64,12 @@ def _print_members(members):
         hours = f"{estimate['p25']}–{estimate['p75']}h (median {estimate['median']})" if estimate else "unknown"
         print(f"    {member['spec_id']}  {member.get('status')}  AC {ac}  estimate {hours}  "
               f"[{(member.get('observation') or {}).get('quality', 'unknown')}]")
-        if member.get("next_action_text"):
-            print(f"      next: {member['next_action_text']}")
-        for key in ("worked", "lead_seat", "status_line", "next_line", "criteria", "transitions"):
+        from _shared.checkpoint_policy import FIELDS
+        for field in FIELDS:
+            if member.get(field.wire_key):
+                print(f"      {field.label}: {member[field.wire_key]}")
+        for key in ("worked", "lead_seat", "criteria", "transitions", "checkpoint_state", "checkpoint_deficiencies",
+                    "checkpoint_changed_at", "checkpoint_first_observed_at", "goal_text"):
             if key in member:
                 print(f"      {key}: {json.dumps(member[key], ensure_ascii=False, default=str)}")
 
@@ -210,6 +213,9 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"    stored {stored.get('work_state')} ({stored.get('work_state_reason')})  "
           f"owner_kind={stored.get('owner_kind')}  version={stored.get('version')}")
     print(f"    icon: {lane.get('icon') or '-'}")
+    for key in ("visibility_counts", "selected_goal"):
+        if key in lane:
+            print(f"    {key}: {json.dumps(lane[key], ensure_ascii=False, default=str)}")
     _print_members(response.get("members", lane.get("members", [])))
     for event in response.get("events") or []:
         update = f"  -> {event.get('update_kind')} {event.get('update_id')}" if event.get("update_kind") else ""
@@ -245,8 +251,8 @@ def _confirmation(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str
 
 def cmd_set_state(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"to": args.to}
-    for key in ("blocker", "outcome", "resolution", "reason"):
-        if getattr(args, key):
+    for key in ("blocker", "outcome", "resolution", "reason", "next_action"):
+        if getattr(args, key, None):
             payload[key] = getattr(args, key)
     return _operation(args, "set_state", _confirmation(args, payload))
 
@@ -523,6 +529,7 @@ def add_parser(subparsers: Any) -> None:
     p.add_argument("--outcome")
     p.add_argument("--resolution")
     p.add_argument("--reason", help="required for a bound-FD override of an operator-owned lane")
+    p.add_argument("--next-action", help="required resume condition when pausing or blocking a lane")
     p.add_argument("--confirmation-question-id")
     p.set_defaults(func=cmd_set_state)
 

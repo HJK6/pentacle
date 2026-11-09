@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import hashlib
 from typing import Any
 
 from .specs_parser import _section, _without_fences, parse_work_facts
@@ -36,13 +37,8 @@ def checkpoint_deficiencies(spec_text: str, summary_text: str,
     if facts["terminal"] is None and not facts["ac_total"]:
         found.append({"field": "acceptance", "code": "acceptance_missing",
                       "fix": "spec.md: add `## Acceptance Criteria` with `- [ ] <criterion>` lines"})
-    if facts["status_text"] is None:
-        found.append({"field": "status_text", "code": "status_missing",
-                      "fix": "summary.md: add a line `**Status** — <one sentence>`"})
+    found.extend(facts["checkpoint_deficiencies"])
     if facts["terminal"] is None:
-        if facts["next_action_text"] is None:
-            found.append({"field": "next_action_text", "code": "next_action_missing",
-                          "fix": "summary.md: add a line `**Next action** — <one sentence>`"})
         declared = _last_remaining_declaration(spec_text)
         if facts["estimate"] is None and not facts["estimate_exempt"] and not (
                 declared and _UNKNOWN.fullmatch(declared)):
@@ -51,9 +47,7 @@ def checkpoint_deficiencies(spec_text: str, summary_text: str,
                               "fix": "spec.md `## Estimate`: append " + ESTIMATE_FORMS})
             else:
                 found.append({"field": "estimate", "code": "estimate_invalid",
-                              "fix": f"spec.md `## Estimate`: the last declaration `remaining_work_h: {declared}` "
-                                     "does not parse; append a new line in one of these forms "
-                                     "(explanations go on a separate line): " + ESTIMATE_FORMS})
+                              "fix": "spec.md: repair the last remaining_work_h declaration. Use a range with median/as_of, n/a for umbrella/coordination, or unknown with a reason."})
     return facts, found
 
 
@@ -80,4 +74,6 @@ def work_checkpoint(spec_id: str, *, root: str | Path | None = None) -> dict[str
     facts, found = checkpoint_deficiencies(spec_text, summary_text, status)
     facts["source_changed_at"] = datetime.fromtimestamp(changed, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"state": "invalid" if found else "valid", "spec_id": spec_id, "facts": facts,
-            "deficiencies": found, "error": None}
+            "deficiencies": found, "error": None, "policy_revision": facts["checkpoint_policy_revision"],
+            "source_revisions": {"spec.md": hashlib.sha256(reader.consumed[Path(folder) / "spec.md"].content).hexdigest(),
+                                 "summary.md": hashlib.sha256(summary[1]).hexdigest()}}
