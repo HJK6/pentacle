@@ -116,7 +116,7 @@ async def _route_for(composite: AssistantComposite, store: Store, input_id: str)
 
 async def _operator_trigger(store, composite, *, identity="operator-fixture",
                             stream_id=ROOT, pane_pid="4242", session="fixture-session",
-                            claude_binding=None):
+                            claude_binding=None, timestamp=None):
     """Keep mirror guard fixtures eligible through a real admitted operator route.
 
     A failed delivery releases open-route suppression, as in the existing
@@ -144,6 +144,8 @@ async def _operator_trigger(store, composite, *, identity="operator-fixture",
     event = {**_source_event(json.loads(route["route_json"])["direct_envelope"]["wire_body"]),
              "stream_id": stream_id, "provider": seat["provider"], "kind": "USER",
              "raw": {"source_session_identity": session, "message_id": identity}}
+    if timestamp is not None:
+        event["timestamp"] = timestamp
     entry = {"stream_id": stream_id, "event": event, "identity": identity}
     if claude_binding is not None:
         event["provider"] = "claude"
