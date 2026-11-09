@@ -1173,8 +1173,8 @@ class MigratedTargets(Tmp):
         self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
         self.assertNotIn("PYTEST_ADDOPTS", env)
         self.assertIn("merge", cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2340)
-        self.assertEqual(result["wall_s"], 2370)
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2280)
+        self.assertEqual(result["wall_s"], 2310)
 
     def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
         cfg = ge.load_config()
