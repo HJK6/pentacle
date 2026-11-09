@@ -46,8 +46,12 @@ The optional subscription controls visibility and event detail. Invalid event mo
 
 `request_stream_events` returns existing `request_stream_events.chunk` frames
 followed by a terminal `request_stream_events.ok`, or one terminal reply for a
-small page. Events retain their durable `daemon_seq`; `before_daemon_seq` resumes
-older history. Each UTF-8 JSON frame stays within 900 KiB, including its envelope.
+small page. The effective `limit` caps the total events across all pages;
+`chunk_limit` can reduce the per-page count. The newest eligible events are
+returned in newer pages before older pages, ascending by durable `daemon_seq`
+within each page. Resume older history with `before_daemon_seq` set to the
+smallest sequence received; the cursor is exclusive. Each UTF-8 JSON frame stays
+within 900 KiB, including its envelope.
 
 An event too large to fit alone becomes a wire-only text preview ending with
 `[Event truncated for backfill; original retained by daemon.]`. Optional payload
