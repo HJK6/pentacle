@@ -498,11 +498,12 @@ class UIVerbs:
                 assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
+        proposed_assignment = effective_assignment({**source, "spec_id": first_spec_id,
+                                                    "spec_ids": spec_ids, "assigned_spec_id": assigned})
         async with self.sessions._graph_lock:
-            if effective_assignment(source) != effective_assignment({**source, "spec_id": first_spec_id,
-                                                                    "spec_ids": spec_ids, "assigned_spec_id": assigned}):
+            if effective_assignment(source) != proposed_assignment:
                 await self.store.guard_lane_departure(stream_id, source.get("session_generation"), assignment_change=True)
-                await self.store.require_lane_execution(assigned, target_stream_id=stream_id)
+                await self.store.require_lane_execution(proposed_assignment, target_stream_id=stream_id)
             updated = await self.store.update_session(
                 host,
                 name,
