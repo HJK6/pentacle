@@ -16,7 +16,7 @@ import json
 
 from assistant_composite import AssistantComposite, direct_dispatch_envelope
 from store import Store
-from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config, _normalized_turn_event
+from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config, _normalized_turn_event, _operator_trigger
 
 
 def _proactive(generation: str, key: str, text: str) -> dict:
@@ -60,20 +60,20 @@ def test_proactive_publication_turn_final_is_not_mirrored():
             # Turn 1: publication first, then the delayed transcript rows (trigger, tool row, final).
             first = await composite.publish(_proactive(generation, "publish:fd-card-reissue-1", "Card reissued."), actor_stream_id=ROOT)
             assert first["duplicate"] is False
-            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly", identity="u1")
+            await _operator_trigger(store, composite, identity="u1", session="turn-session")
             await _tool_use_event(store, command="agent-orch assistant publish --request-id publish:fd-card-reissue-1 --proactive --message 'Card reissued.'", identity="t1")
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Card reissued.", identity="f1", final=True)
             rows = await _answer_rows(store)
             assert [r["text"] for r in rows] == ["Card reissued."], [r["message_id"] for r in rows]
             # Turn 2: dynamic key (not literal in the tool row); the final differs only in Markdown.
-            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly again", identity="u2")
+            await _operator_trigger(store, composite, identity="u2", session="turn-session")
             await _tool_use_event(store, command="K=publish:fd-domain-$(date +%s); agent-orch assistant publish --request-id $K --proactive --message \"$(cat reply.md)\"", identity="t2")
             await composite.publish(_proactive(generation, "publish:fd-domain-1791990000", "Domain **bought**."), actor_stream_id=ROOT)
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Domain bought.", identity="f2", final=True)
             rows = await _answer_rows(store)
             assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**.", "Domain bought."], [r["message_id"] for r in rows]
             # Turn 3 (control): no proactive publication; the final mirrors even with equal text.
-            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed directly once more", identity="u3")
+            await _operator_trigger(store, composite, identity="u3", session="turn-session")
             await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Card reissued.", identity="f3", final=True)
             rows = await _answer_rows(store)
             assert [r["text"] for r in rows] == ["Card reissued.", "Domain **bought**.", "Domain bought.", "Card reissued."]
@@ -281,7 +281,7 @@ def test_literal_key_markdown_variant_is_suppressed_and_logged(caplog):
         try:
             publication = await composite.publish(
                 _proactive(generation, "publish:markdown-variant", "Domain **bought**."), actor_stream_id=ROOT)
-            await _normalized_turn_event(store, provider="claude", kind="USER", text="typed", identity="md-u")
+            await _operator_trigger(store, composite, identity="md-u", session="turn-session")
             await _tool_use_event(store, command="agent-orch assistant publish --request-id publish:markdown-variant --proactive",
                                   identity="md-t")
             final_event_id = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
@@ -569,13 +569,13 @@ def test_proactive_correlation_controls_previous_turn_missing_generation_and_cod
             await composite.ensure_projection()
             turn = lambda **kw: _turn_row(store, ROOT, "4242", **kw)
             # Previous turn: turn 1's own tool row names its key, so turn 1's final is suppressed.
-            await turn(provider="claude", kind="USER", identity="p-u1", text="typed")
+            await _operator_trigger(store, composite, identity="p-u1", session="turn-session")
             await turn(provider="claude", kind="TOOL_USE", identity="p-t1", command="agent-orch assistant publish --request-id publish:dyn-1 --proactive")
             published = await composite.publish(_proactive(generation, "publish:dyn-1", "Lane moved."), actor_stream_id=ROOT)
             assert published["event_id"]
             await turn(provider="claude", kind="ASSIST_TEXT", identity="p-f1", text="Lane moved.", final=True)
             # Turn 2 has no publication: it mirrors even though turn 1's publication is recent.
-            await turn(provider="claude", kind="USER", identity="p-u2", text="typed again")
+            await _operator_trigger(store, composite, identity="p-u2", session="turn-session")
             await turn(provider="claude", kind="ASSIST_TEXT", identity="p-f2", text="Nothing new.", final=True)
             assert [r["text"] for r in await _answer_rows(store)] == ["Lane moved.", "Nothing new."]
             # Missing raw.actor_generation (a pre-upgrade row): never matches, even by literal key.
@@ -586,19 +586,19 @@ def test_proactive_correlation_controls_previous_turn_missing_generation_and_cod
                              "WHERE event_id=(SELECT event_id FROM v2_assistant_composite_publications WHERE publication_key='publish:legacy-1')")
                 conn.commit()
             await store.submit(_strip)
-            await turn(provider="claude", kind="USER", identity="p-u3", text="typed once more")
+            await _operator_trigger(store, composite, identity="p-u3", session="turn-session")
             await turn(provider="claude", kind="TOOL_USE", identity="p-t3", command="agent-orch assistant publish --request-id publish:legacy-1")
             await turn(provider="claude", kind="ASSIST_TEXT", identity="p-f3", text="Legacy update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)][-2:] == ["Legacy update.", "Legacy update."]
             # Codex: function_call carries the literal key; publication stored before the turn rows.
             await composite.publish(_proactive(generation, "publish:codex-1", "Codex update."), actor_stream_id=ROOT)
-            await turn(provider="codex", kind="USER", identity="c-u1", text="typed", session="codex-session")
+            await _operator_trigger(store, composite, identity="c-u1", session="codex-session")
             await turn(provider="codex", kind="TOOL_USE", identity="c-t1", session="codex-session",
                        command="agent-orch assistant publish --request-id publish:codex-1 --proactive")
             await turn(provider="codex", kind="ASSIST_TEXT", identity="c-f1", text="Codex update.", final=True, session="codex-session")
             rows = [r["text"] for r in await _answer_rows(store)]
             assert rows[-1] == "Codex update." and rows.count("Codex update.") == 1
-            await turn(provider="codex", kind="USER", identity="c-u2", text="typed again", session="codex-session")
+            await _operator_trigger(store, composite, identity="c-u2", session="codex-session")
             await turn(provider="codex", kind="ASSIST_TEXT", identity="c-f2", text="Codex update.", final=True, session="codex-session")
             assert [r["text"] for r in await _answer_rows(store)].count("Codex update.") == 2
             # Proactive events persist the publishing generation.
@@ -631,7 +631,7 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
             replacement = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             rebound = AssistantComposite(store, config=_config(replacement["session_generation"]))
             await rebound.ensure_projection()
-            await _turn_row(store, ROOT, "4242", provider="claude", kind="USER", identity="g-u1", text="typed")
+            await _operator_trigger(store, rebound, identity="g-u1", session="turn-session")
             await _turn_row(store, ROOT, "4242", provider="claude", kind="TOOL_USE", identity="g-t1",
                             command="agent-orch assistant publish --request-id publish:old-gen")
             await _turn_row(store, ROOT, "4242", provider="claude", kind="ASSIST_TEXT", identity="g-f1",
@@ -642,7 +642,7 @@ def test_previous_generation_and_other_seat_publications_never_suppress(tmp_path
             other = await store.open_session("fixture-newdesk", "visible", provider="codex", pane_pid="5252")
             await _set_durable_binding(store, "fixture-newdesk:visible", other["session_generation"])
             seat_b = "fixture-newdesk:visible"
-            await _turn_row(store, seat_b, "5252", provider="claude", kind="USER", identity="b-u1", text="typed")
+            await _operator_trigger(store, rebound, identity="b-u1", session="turn-session", stream_id=seat_b, pane_pid="5252")
             await _turn_row(store, seat_b, "5252", provider="claude", kind="TOOL_USE", identity="b-t1",
                             command="agent-orch assistant publish --request-id publish:seat-a")
 
@@ -677,7 +677,7 @@ def test_dynamic_key_fails_open_and_the_final_mirrors(caplog):
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
             turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
-            await turn(kind="USER", identity="m-u1", text="typed")
+            await _operator_trigger(store, composite, identity="m-u1", session="turn-session")
             await turn(kind="TOOL_USE", identity="m-t1", command="K=publish:fd-$(date +%s); agent-orch assistant publish --request-id $K --proactive")
             await composite.publish(_proactive(generation, "publish:fd-1791990001", "Late update."), actor_stream_id=ROOT)
             with caplog.at_level(logging.INFO, logger="chat_streamd_v2.store"):
@@ -706,14 +706,14 @@ def test_ordinary_final_ingested_after_a_later_proactive_publication_stays_visib
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
             turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
-            await turn(kind="USER", identity="d-u0", text="Initial input")
+            await _operator_trigger(store, composite, identity="d-u0", session="turn-session")
             await turn(kind="ASSIST_TEXT", identity="d-f0", text="Initial answer", final=True)
             prior_final_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             await asyncio.sleep(0.01)
             await composite.publish(_proactive(generation, "publish:future-turn", "Novel proactive update"), actor_stream_id=ROOT)
-            await turn(kind="USER", identity="d-u1", text="Independent question", timestamp=prior_final_ts)
+            await _operator_trigger(store, composite, identity="d-u1", session="turn-session", timestamp=prior_final_ts)
             await turn(kind="ASSIST_TEXT", identity="d-f1", text="Independent answer must be visible", final=True, timestamp=prior_final_ts)
-            await turn(kind="USER", identity="d-u2", text="Proactive trigger")
+            await _operator_trigger(store, composite, identity="d-u2", session="turn-session")
             await turn(kind="TOOL_USE", identity="d-t2", command="agent-orch assistant publish --request-id publish:future-turn --proactive")
             await turn(kind="ASSIST_TEXT", identity="d-f2", text="Novel proactive update", final=True)
             assert [r["text"] for r in await _answer_rows(store)] == [
@@ -740,22 +740,22 @@ def test_older_key_that_is_a_prefix_of_this_turns_key_never_suppresses():
             await composite.ensure_projection()
             turn = lambda **kw: _turn_row(store, ROOT, "4242", provider="claude", **kw)
             await composite.publish(_proactive(generation, "publish:x-1", "First update."), actor_stream_id=ROOT)
-            await turn(kind="USER", identity="s-u1", text="typed")
+            await _operator_trigger(store, composite, identity="s-u1", session="turn-session")
             await turn(kind="TOOL_USE", identity="s-t1", command="agent-orch assistant publish --request-id publish:x-1 --proactive --message 'First update.'")
             await turn(kind="ASSIST_TEXT", identity="s-f1", text="First update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)] == ["First update."]
             # Turn 2: its own publish (publish:x-10) never committed; the older key is only a substring.
-            await turn(kind="USER", identity="s-u2", text="typed again")
+            await _operator_trigger(store, composite, identity="s-u2", session="turn-session")
             await turn(kind="TOOL_USE", identity="s-t2", command="agent-orch assistant publish --request-id publish:x-10 --proactive --message 'Second update.'")
             await turn(kind="ASSIST_TEXT", identity="s-f2", text="Second update.", final=True)
             assert [r["text"] for r in await _answer_rows(store)] == ["First update.", "Second update."]
             # Whole-key matches still correlate, quoted or at the end of a JSON-encoded Codex argument.
             await composite.publish(_proactive(generation, "publish:x-2", "Third update."), actor_stream_id=ROOT)
-            await turn(kind="USER", identity="s-u3", text="typed once more")
+            await _operator_trigger(store, composite, identity="s-u3", session="turn-session")
             await turn(kind="TOOL_USE", identity="s-t3", command='agent-orch assistant publish --request-id "publish:x-2" --proactive')
             await turn(kind="ASSIST_TEXT", identity="s-f3", text="Third update.", final=True)
             await composite.publish(_proactive(generation, "publish:x-3", "Fourth update."), actor_stream_id=ROOT)
-            await _turn_row(store, ROOT, "4242", provider="codex", kind="USER", identity="s-u4", text="typed", session="codex-s")
+            await _operator_trigger(store, composite, identity="s-u4", session="codex-s")
             await _turn_row(store, ROOT, "4242", provider="codex", kind="TOOL_USE", identity="s-t4", session="codex-s",
                             command="agent-orch assistant publish --proactive --request-id publish:x-3")
             await _turn_row(store, ROOT, "4242", provider="codex", kind="ASSIST_TEXT", identity="s-f4", session="codex-s",

@@ -15,7 +15,7 @@ from assistant_composite import AssistantComposite
 from ingest import broadcast_assistant_mirror
 from sessions import Sessions, VerbError
 from store import Store
-from test_assistant_prose_mirror import ASSISTANT, ROOT, _config, _normalized_turn_event
+from test_assistant_prose_mirror import ASSISTANT, ROOT, _config, _normalized_turn_event, _operator_trigger
 from test_assistant_lane_rulings import BlockedSpawn, RecordingSpawn, _chat_lines, _rulings_rig, _spawn_msg
 from test_work_lanes import Env
 
@@ -111,6 +111,7 @@ def test_operator_input_admission_advances_preview():
 
 def test_mirror_projection_advances_preview():
     async def body(store, composite, sessions, generation):
+        await _operator_trigger(store, composite, session="turn-session")
         before = _row(sessions)
         await asyncio.sleep(0.01)
         seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Mirrored final.",

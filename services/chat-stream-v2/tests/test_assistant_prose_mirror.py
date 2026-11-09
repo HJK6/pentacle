@@ -1,6 +1,7 @@
-"""Dispatch-free direct-primary prose must reach the canonical chat."""
+"""Proven operator prose and explicit publications reach the canonical chat."""
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 import time
 
@@ -43,7 +44,7 @@ def _source_event(text: str = "A proactive milestone") -> dict:
     }
 
 
-def test_bound_dispatch_free_prose_is_projected_into_canonical_chat():
+def test_bound_operator_prose_is_projected_into_canonical_chat():
     async def _go():
         store = Store(":memory:")
         store.start()
@@ -51,6 +52,7 @@ def test_bound_dispatch_free_prose_is_projected_into_canonical_chat():
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             source = _source_event()
             inserted = await store.append_session_events_lifecycle_cas(
                 [{"stream_id": ROOT, "event": source, "identity": "fixture-message",
@@ -112,6 +114,50 @@ async def _route_for(composite: AssistantComposite, store: Store, input_id: str)
     raise AssertionError("direct route never became resolved")
 
 
+async def _operator_trigger(store, composite, *, identity="operator-fixture",
+                            stream_id=ROOT, pane_pid="4242", session="fixture-session",
+                            claude_binding=None, timestamp=None):
+    """Keep mirror guard fixtures eligible through a real admitted operator route.
+
+    A failed delivery releases open-route suppression, as in the existing
+    interleaving fixture. Its exact daemon-authored wire still proves operator
+    ownership; no input_provenance field is manufactured by this helper.
+    """
+    dispatch = composite.dispatch
+    async def no_submission(_route):
+        return {"delivery": "not_landed"}
+    composite.dispatch = no_submission
+    try:
+        route = await _route_for(composite, store, identity)
+        for _ in range(100):
+            route = await store.get_assistant_composite_route(
+                stream_id=ASSISTANT, input_identity=identity)
+            if route["delivery_state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("operator fixture dispatch did not fail without submission")
+    finally:
+        composite.dispatch = dispatch
+    assert route["route_target"] == stream_id
+    seat = await store.fetch_session(*stream_id.split(":", 1))
+    event = {**_source_event(json.loads(route["route_json"])["direct_envelope"]["wire_body"]),
+             "stream_id": stream_id, "provider": seat["provider"], "kind": "USER",
+             "raw": {"source_session_identity": session, "message_id": identity}}
+    if timestamp is not None:
+        event["timestamp"] = timestamp
+    entry = {"stream_id": stream_id, "event": event, "identity": identity}
+    if claude_binding is not None:
+        event["provider"] = "claude"
+        entry["claude_binding"] = claude_binding
+    else:
+        entry["lifecycle"] = await store.fetch_open_session_lifecycle(stream_id, pane_pid=pane_pid)
+    seq = (await store.append_session_events_lifecycle_cas([entry], limit=100))[0]
+    source = await store.fetch_session_event_tail(stream_id, limit=100)
+    assert next(r for r in source if r["daemon_seq"] == seq)["raw"]["input_provenance"]["kind"] == "operator"
+    return seq
+
+
 def test_held_dispatch_receipt_suppresses_reply_before_final_publish():
     async def _go():
         store = Store(":memory:")
@@ -124,6 +170,7 @@ def test_held_dispatch_receipt_suppresses_reply_before_final_publish():
             composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                            dispatch=dispatch)
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             route = await _route_for(composite, store, "question-1")
             assert route["delivery_state"] == "intent"
             assert await _append(store, "The direct answer")
@@ -159,6 +206,7 @@ def test_ambiguous_route_states_suppress_and_failed_releases():
                 composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                                dispatch=dispatch)
                 await composite.ensure_projection()
+                await _operator_trigger(store, composite)
                 route = await _route_for(composite, store, "question-" + state)
                 if state != "intent":
                     await store.update_assistant_composite_route(
@@ -187,6 +235,7 @@ def test_publication_first_reply_is_not_mirrored_and_public_guard_remains():
             composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                            dispatch=lambda _route: asyncio.sleep(100))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             try:
                 await composite.publish({
                     "request_id": "unauthorized", "composite_stream_id": ASSISTANT,
@@ -223,6 +272,7 @@ def test_kv_disable_invalid_value_and_nonprose_are_excluded():
             await composite.ensure_projection()
             for kind in ("USER", "TOOL_RESULT", "THINKING", "SYSTEM", "TELL"):
                 await _append(store, "never show " + kind, kind=kind)
+            await _operator_trigger(store, composite)
             await _append(store, "   ")
             await _append(store, "❯")
             assert await _answer_rows(store) == []
@@ -255,6 +305,10 @@ def test_unbound_generation_and_other_seat_never_project():
         store.start()
         try:
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
+            valid = AssistantComposite(store, config=_config(root["session_generation"]))
+            await valid.ensure_projection()
+            await _operator_trigger(store, valid)
+            await valid.stop()
             composite = AssistantComposite(store, config=_config("retired-generation"))
             await composite.ensure_projection()
             await _append(store, "from wrong generation")
@@ -280,6 +334,7 @@ def test_unfenced_source_append_never_projects():
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             assert await store.append_session_event(
                 ROOT, _source_event("unfenced single"), identity="unfenced-single", limit=20,
             )
@@ -297,7 +352,7 @@ def test_unfenced_source_append_never_projects():
 def test_remote_claude_binding_fenced_prose_is_projected():
     """A remote (satellite event.push) claude bound seat carries a
     ``claude_binding``, not a ``lifecycle`` snapshot — the lifecycle CAS is
-    codex-only. Its dispatch-free turn text must still mirror to the canonical
+    codex-only. Its proven operator turn text must still mirror to canonical
     chat, exactly as a daemon-local seat's does through local ingest.
 
     Regression: a bound front desk seat stopped reaching the chat after
@@ -312,6 +367,7 @@ def test_remote_claude_binding_fenced_prose_is_projected():
             )
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite, claude_binding="fixture-session")
             event = {
                 "stream_id": ROOT,
                 "provider": "claude",
@@ -362,6 +418,7 @@ def test_restart_replay_and_generation_rebind(tmp_path):
             old_generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(old_generation))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             assert await _append(store, "before restart", identity="persisted-source")
             first_id = (await _answer_rows(store))[0]["daemon_seq"]
             await composite.stop()
@@ -387,12 +444,21 @@ def test_restart_replay_and_generation_rebind(tmp_path):
                 "fixture-root", "visible", provider="codex", pane_pid="4242",
             )
             assert replacement["session_generation"] != old_generation
+            # Admit a current-lifecycle operator input without changing the
+            # stale mirror binding, so generation admission is the only blocker.
+            current = AssistantComposite(store, config=_config(replacement["session_generation"]))
+            try:
+                await _operator_trigger(store, current, identity="unbound-generation-operator")
+            finally:
+                await current.stop()
+            assert (await store.assistant_mirror_state(ASSISTANT))["binding"]["source_generation"] == old_generation
             await _append(store, "before rebind", identity="new-generation-unbound")
             assert [row["daemon_seq"] for row in await _answer_rows(store)] == [first_id]
             await composite.stop()
 
             rebound = AssistantComposite(store, config=_config(replacement["session_generation"]))
             await rebound.ensure_projection()
+            await _operator_trigger(store, rebound, identity="rebound-operator")
             assert await _append(store, "after rebind", identity="new-generation-bound")
             rows = await _answer_rows(store)
             assert [row["text"] for row in rows] == ["before restart", "after rebind"]
@@ -412,6 +478,7 @@ def test_concurrent_source_and_publication_have_one_published_row():
             composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                            dispatch=lambda _route: asyncio.sleep(100))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             route = await _route_for(composite, store, "question-race")
             await asyncio.gather(
                 _append(store, "serialized reply", identity="race-source"),
@@ -442,6 +509,7 @@ def test_live_projection_reuses_history_sequence_and_replay_does_not_broadcast()
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             event = _source_event("live milestone")
             first = await append_ingested_event(
                 store, broadcast, event, recent_limit=20,
@@ -474,6 +542,7 @@ def test_publication_text_dedupe_expires_at_120_seconds():
             composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                            dispatch=lambda _route: asyncio.sleep(100))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             route = await _route_for(composite, store, "question-time")
             key = "publish:" + route["dispatch_id"]
             await composite.publish({
@@ -511,6 +580,7 @@ def test_wrong_dispatch_generation_does_not_suppress_current_source():
             composite = AssistantComposite(store, config=_config(root["session_generation"]),
                                            dispatch=lambda _route: asyncio.sleep(100))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             route = await _route_for(composite, store, "question-other-generation")
             await store.update_assistant_composite_route(
                 route["route_id"], routing_state="resolved", delivery_state="intent",
@@ -533,6 +603,8 @@ def test_projection_unavailable_rolls_source_insert_back():
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
+            before = await store.fetch_session_event_tail(ROOT, limit=20)
             await store.submit(lambda conn: (conn.execute(
                 "DELETE FROM sessions WHERE host='fixture-chat' AND session_name='assistant'"),
                 conn.commit()))
@@ -542,7 +614,7 @@ def test_projection_unavailable_rolls_source_insert_back():
                 assert str(exc) == "assistant_mirror_projection_unavailable"
             else:
                 raise AssertionError("source insert committed without canonical projection")
-            assert await store.fetch_session_event_tail(ROOT, limit=20) == []
+            assert await store.fetch_session_event_tail(ROOT, limit=20) == before
             await composite.stop()
         finally:
             store.stop()
@@ -620,13 +692,16 @@ def test_durable_hot_rebind_moves_mirror_source_without_restart():
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
 
             # A new front-desk seat B is opened and the daemon is hot-rebound to
             # it via the durable binding table -- no restart, no reconfigure.
             newseat = await store.open_session("fixture-newdesk", "visible", provider="codex", pane_pid="5252")
             await _set_durable_binding(store, "fixture-newdesk:visible", newseat["session_generation"])
+            await _operator_trigger(store, composite, identity="rebound-operator",
+                                    stream_id="fixture-newdesk:visible", pane_pid="5252")
 
-            # B's dispatch-free prose now mirrors, with B's effective provenance.
+            # B's proven operator prose mirrors, with B's effective provenance.
             b_id = await _append_from(store, "fixture-newdesk:visible", "5252",
                                       "update from the rebound desk", "b-line")
             rows = await _answer_rows(store)
@@ -673,6 +748,7 @@ def test_dispatched_reply_under_durable_binding_suppresses_and_publishes_once():
                 dispatch=dispatch)
             await composite.ensure_projection()
             assert (await store.assistant_mirror_state(ASSISTANT))["binding"]["source_binding"] == "durable"
+            await _operator_trigger(store, composite, stream_id="fixture-newdesk:visible", pane_pid="5252")
 
             route = await _route_for(composite, store, "question-1")
             assert route["route_target"] == "fixture-newdesk:visible"
@@ -710,6 +786,7 @@ def test_corrupt_durable_binding_fails_closed_without_breaking_ingest():
             root = await store.open_session("fixture-root", "visible", provider="codex", pane_pid="4242")
             composite = AssistantComposite(store, config=_config(root["session_generation"]))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
 
             # A partial durable row (stream present, generation blank) is corrupt.
             def _corrupt(conn):
@@ -837,6 +914,7 @@ def test_sidechain_final_does_not_fence_primary_published_turn():
             assert await store.assistant_mirror_event_for_source(seq) is None
             assert len(await _answer_rows(store)) == 1
             assert side is not None and seq is not None  # source transcript preserved
+            await _operator_trigger(store, composite, identity="next-operator", session="turn-session")
             next_seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT",
                 text="**Published answer**", identity="ordinary-final", final=True)
             assert await store.assistant_mirror_event_for_source(next_seq) is not None
@@ -861,6 +939,7 @@ def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():
                     return {"delivery": "landed"}
                 composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
                 await composite.ensure_projection()
+                await _operator_trigger(store, composite, identity="earlier-operator", session="turn-session")
                 # A prior final must delimit this turn even if its ingestion lagged publication.
                 await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Earlier proactive reply",
                                              identity="previous-final", final=True)
@@ -877,7 +956,27 @@ def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():
                 await composite.publish(payload, actor_stream_id=ROOT)
                 assert (await composite.publish(payload, actor_stream_id=ROOT))["duplicate"] is True
                 # Other input in this same provider turn must not hide the dispatch identity.
-                await _normalized_turn_event(store, provider=provider, kind="USER", text="Peer context", identity="peer-input")
+                # Persist the existing daemon-owned pre-input delivery proof;
+                # an unverified USER here would stop at the unknown guard.
+                from comms import payload_digest
+                peer_wire = "[from fixture:peer] [tell:turn-peer]\nPeer context"
+                digest = payload_digest(ROOT, peer_wire)
+                seat = await store.fetch_session(*ROOT.split(":", 1))
+                await store.put_tell_delivery("turn-peer", {"payload_digest": digest,
+                    "reply": {"to_stream_id": ROOT, "tell_id": "turn-peer",
+                              "delivery_status": "committed_pending_proof"},
+                    "delivery": {"tell_id": "turn-peer", "to_stream_id": ROOT, "text": peer_wire,
+                        "sender_verified": True, "sender_kind": "peer", "sender_generation": "peer-generation",
+                        "from_stream_id": "fixture:peer", "proof_generation": root["session_generation"],
+                        "proof_session_created_at": seat["created_at"], "proof_watermark": 0,
+                        "proof_watermark_state": "reachable", "request_payload_hash": digest,
+                        "delivery_status": "committed_pending_proof"}})
+                peer_seq = await _normalized_turn_event(store, provider=provider, kind="USER",
+                    text=peer_wire, identity="peer-input")
+                peer_row = next(row for row in await store.fetch_session_event_tail(ROOT, limit=100)
+                                if row["daemon_seq"] == peer_seq)
+                assert peer_row["raw"]["input_provenance"] == {
+                    "kind": "peer", "verified": True, "sender": "fixture:peer", "generation": "peer-generation"}
                 def age_publication(conn):
                     conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE dispatch_id=?",
                                  ((datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat(), route["dispatch_id"]))
@@ -908,15 +1007,22 @@ def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():
                                  (datetime.now(timezone.utc).isoformat(), route["dispatch_id"]))
                     conn.commit()
                 await store.submit(fresh_publication)
-                # No new USER is needed: a new final boundary alone ends the published turn.
+                # A final boundary without a new operator input is now unknown
+                # and must stay internal, even when it repeats published prose.
                 seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="**The answer**",
                                                   identity="non-dispatch-final", final=True)
+                assert await store.assistant_mirror_event_for_source(seq) is None
+                assert len(await _answer_rows(store)) == 2
+                await _operator_trigger(store, composite, identity="next-operator", session="turn-session")
+                seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="**The answer**",
+                                                  identity="next-operator-final", final=True)
                 assert await store.assistant_mirror_event_for_source(seq) is not None
                 assert len(await _answer_rows(store)) == 3
                 # Replay does not broadcast or insert another answer.
                 assert await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="**The answer**",
-                                                    identity="non-dispatch-final", final=True) is None
+                                                    identity="next-operator-final", final=True) is None
                 # The old envelope in another transcript cannot suppress this transcript's final.
+                await _operator_trigger(store, composite, identity="foreign-operator", session="other-transcript")
                 seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="New transcript final",
                                                   identity="foreign-final", session="other-transcript", final=True)
                 assert await store.assistant_mirror_event_for_source(seq) is not None
@@ -989,6 +1095,7 @@ def test_isolated_socket_publishes_one_markdown_reply_and_keeps_next_mirror(tmp_
                 assert len([e for e in canonical_pushes if e["kind"] == "ASSIST_TEXT"]) == 1
                 assert len(await _answer_rows(store)) == 1
                 assert (await _answer_rows(store))[0]["text"] == payload["message"]
+                await _operator_trigger(store, composite, identity="socket-next-operator", session="turn-session")
                 seq = await _normalized_turn_event(store, provider="claude", kind="ASSIST_TEXT", text="Next proactive reply",
                                                   identity="socket-proactive", final=True)
                 await broadcast_assistant_mirror(store, server.broadcast, seq)
@@ -1050,6 +1157,7 @@ def test_publication_precedes_delayed_source_transcript_rows():
                     return {"delivery": "landed"}
                 composite = AssistantComposite(store, config=_config(root["session_generation"]), dispatch=dispatch)
                 await composite.ensure_projection()
+                await _operator_trigger(store, composite, identity="earlier-operator", session="turn-session")
                 route = await _route_for(composite, store, "late-question")
                 user_stamp = datetime.now(timezone.utc).isoformat()
                 prior_stamp = (datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat()
@@ -1072,6 +1180,7 @@ def test_publication_precedes_delayed_source_transcript_rows():
                 assert [r["text"] for r in rows if r["publish_kind"] == "prose"] == ["**Late answer**"]
                 source_rows = await store.fetch_session_event_tail(ROOT, limit=100)
                 assert any(r["daemon_seq"] == seq and r["text"] == "Late answer with different formatting" for r in source_rows)
+                await _operator_trigger(store, composite, identity="late-next-operator", session="turn-session")
                 seq = await _normalized_turn_event(store, provider=provider, kind="ASSIST_TEXT", text="Later ordinary reply",
                                                   identity="late-next-final", final=True)
                 assert await store.assistant_mirror_event_for_source(seq) is not None
@@ -1120,7 +1229,7 @@ def test_other_dispatch_publication_does_not_suppress_released_turn():
     asyncio.run(_go())
 
 
-def test_unknown_turn_metadata_preserves_dispatch_free_ingest():
+def test_unknown_turn_metadata_preserves_source_without_mirroring():
     async def _go():
         store = Store(":memory:")
         store.start()
@@ -1140,8 +1249,9 @@ def test_unknown_turn_metadata_preserves_dispatch_free_ingest():
                     {"stream_id": ROOT, "event": event, "identity": f"unknown:{i}",
                      "lifecycle": await store.fetch_open_session_lifecycle(ROOT, pane_pid="4242")}
                 ], limit=20)
-                assert seqs[0] and await store.assistant_mirror_event_for_source(seqs[0]) is not None
-            assert len(await _answer_rows(store)) == 5
+                assert seqs[0] and await store.assistant_mirror_event_for_source(seqs[0]) is None
+            assert len(await store.fetch_session_event_tail(ROOT, limit=20)) == 5
+            assert await _answer_rows(store) == []
             await composite.stop()
         finally:
             store.stop()
@@ -1179,6 +1289,7 @@ def test_restart_reingest_does_not_remirror_stale_turns(tmp_path):
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
             assert [r["text"] for r in await _answer_rows(store)] == ["turn one", "turn two"]
@@ -1232,6 +1343,7 @@ def test_restart_reingest_guard_survives_retention_and_keeps_live_out_of_order_t
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2026-09-30T16:14:00.000Z")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2026-09-30T16:20:00.000Z")
             # Retention pruned the composite tail; the publications remain.
@@ -1275,6 +1387,7 @@ def test_restart_reingest_watermark_compares_instants_not_text(tmp_path):
             generation = root["session_generation"]
             composite = AssistantComposite(store, config=_config(generation))
             await composite.ensure_projection()
+            await _operator_trigger(store, composite)
             # 06:55Z, then the newer 07:05Z written with a later offset and no fraction.
             await _append_ts(store, "turn one", identity="seq-one", timestamp="2025-11-02T01:55:00.000-05:00")
             await _append_ts(store, "turn two", identity="seq-two", timestamp="2025-11-02T01:05:00-06:00")
