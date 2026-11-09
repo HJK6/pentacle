@@ -98,7 +98,7 @@ def test_continuity_membership_lead_presence_unknown_correct_and_recur(tmp_path,
         await env.store.reconcile_work_lane_episodes(None)
         opening = (await episodes(env.store))[0]
         await env.op("set_members", {"members": ["spec_demo__other"]}, lane=lid, version=1)
-        await env.op("set_state", {"to": "paused"}, lane=lid, version=2)
+        await env.op("set_state", {"to": "paused", "reason": "Replace the fixture lead", "next_action": "Bind the replacement and resume"}, lane=lid, version=2)
         replacement = await env.seat("replacement", provider="codex", role="lead")
         await env.op("set_lead", {"lead": {"stream_id": replacement[0], "generation": replacement[1]}}, lane=lid, version=3)
         await env.op("set_state", {"to": "active"}, lane=lid, version=4)

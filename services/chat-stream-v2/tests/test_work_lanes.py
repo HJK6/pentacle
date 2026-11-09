@@ -119,11 +119,11 @@ def test_adopt_set_state_cas_and_replay_v9():
         out = await env.adopt()
         lane = out["lane"]
         assert lane["work_state"] == "active" and lane["version"] == 1 and out["update"] is None  # D-4
-        await env.op("set_state", {"to": "paused"}, lane=lane["lane_id"], version=1, request_id="p1")
+        await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=1, request_id="p1")
         with pytest.raises(ValueError) as e:
-            await env.op("set_state", {"to": "blocked", "blocker": "x"}, lane=lane["lane_id"], version=1)
+            await env.op("set_state", {"to": "blocked", "blocker": "x", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=1)
         assert code(e) == "assistant_lane_version_conflict"
-        again = await env.op("set_state", {"to": "paused"}, lane=lane["lane_id"], version=1, request_id="p1")
+        again = await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=1, request_id="p1")
         assert again["duplicate"] is True
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done", "outcome": "x"}, lane=lane["lane_id"], version=1,
@@ -138,17 +138,17 @@ def test_lifecycle_invariants_v3_v6_v7():
     async def body(env):
         lane = (await env.adopt())["lane"]
         lid = lane["lane_id"]
-        r = await env.op("set_state", {"to": "paused"}, lane=lid, version=1)
+        r = await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=1)
         assert r["update"] is None  # pause emits nothing
         with pytest.raises(ValueError) as e:
-            await env.op("set_state", {"to": "paused"}, lane=lid, version=2)
+            await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         assert code(e) == "work_lane_state_unchanged"
         with pytest.raises(ValueError) as e:
-            await env.op("set_state", {"to": "blocked"}, lane=lid, version=2)
+            await env.op("set_state", {"to": "blocked", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         assert code(e) == "work_lane_blocker_required"
-        r = await env.op("set_state", {"to": "blocked", "blocker": "Need keys"}, lane=lid, version=2)
+        r = await env.op("set_state", {"to": "blocked", "blocker": "Need keys", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         assert r["lane"]["blocker"] == "Need keys" and r["update"]["update_id"].startswith("lane-update:" + lid)
-        r = await env.op("set_state", {"to": "active"}, lane=lid, version=3)
+        r = await env.op("set_state", {"to": "active", "resolution": "Keys arrived"}, lane=lid, version=3)
         assert r["lane"]["blocker"] is None and r["event"]["payload"]["cleared_blocker"] == "Need keys"
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done"}, lane=lid, version=4)
@@ -157,12 +157,12 @@ def test_lifecycle_invariants_v3_v6_v7():
         assert r["lane"]["done_at"]
         assert [l["lane_id"] for l in await env.store.work_lane_rows()] == []
         assert [l["lane_id"] for l in await env.store.work_lane_rows(include_done=True)] == [lid]
-        r = await env.op("set_state", {"to": "paused"}, lane=lid, version=5)
+        r = await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=5)
         assert r["lane"]["work_state_reason"] == "reopened" and r["update"] is None
         kinds = [u["raw"]["lane_update"]["kind"] for u in await lane_updates(env.store)]
         assert kinds == ["lane_blocked", "lane_unblocked", "lane_completed"]
         texts = [u["text"] for u in await lane_updates(env.store)]
-        assert texts == ["Need keys", "Blocker cleared: Need keys", "Shipped"]
+        assert texts == ["Need keys", "Keys arrived", "Shipped"]
     run(body)
 
 
@@ -274,7 +274,7 @@ def test_each_update_kind_atomic_retry_restart_v12(kind):
             return None
         lid = (await env.adopt(key="stream:k"))["lane"]["lane_id"]
         if kind == "lane_unblocked":
-            await env.op("set_state", {"to": "blocked", "blocker": "dep"}, lane=lid, version=1)
+            await env.op("set_state", {"to": "blocked", "blocker": "dep", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=1)
             return lid, 2
         return lid, 1
 
@@ -286,7 +286,7 @@ def test_each_update_kind_atomic_retry_restart_v12(kind):
                               "no_spec_reason": "Synthetic publication fixture.",
                               "visible_chat": {"stream_id": ASSISTANT}}, None, None, "adopt:stream:started")
         lid, version = ctx
-        payload = {"lane_blocked": {"to": "blocked", "blocker": "Waiting on keys"},
+        payload = {"lane_blocked": {"to": "blocked", "blocker": "Waiting on keys", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"},
                    "lane_unblocked": {"to": "active", "resolution": "Keys arrived"},
                    "lane_completed": {"to": "done", "outcome": "Shipped it"},
                    "major_decision": {"kind": "major_decision", "source_id": "dec-1", "summary": "Go web first"},
@@ -371,7 +371,7 @@ def test_emit_started_once_and_owner_kind_v13():
         r = await env.op("set_state", {"to": "done", "outcome": "x", "operator_confirmation": good},
                          lane=lid, version=1)
         assert r["lane"]["work_state"] == "done" and r["event"]["consumed_question_id"] == "q-good"
-        r = await env.op("set_state", {"to": "paused", "reason": "Reopen managed work"}, lane=lid, version=2)
+        r = await env.op("set_state", {"to": "paused", "reason": "Reopen managed work", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         with pytest.raises(ValueError) as e:
             await env.op("set_state", {"to": "done", "outcome": "y", "operator_confirmation": good},
                          lane=lid, version=3)
@@ -420,11 +420,11 @@ def test_fd_lane_unaffected_and_adoption_owner_rules_v15():
     run(body)
 
 
-@pytest.mark.parametrize("path", ["visibility_hidden", "role_qa", "new_generation", "reconciled_dead"])
+@pytest.mark.parametrize("path", ["visibility_subagent", "role_qa", "new_generation", "reconciled_dead"])
 def test_each_lead_loss_path_reconciles_once_v4(path):
     # A hidden lead still leads an FD-owned lane (test_work_lane_hidden_fd_leads.py);
     # hiding is a lead loss only on an operator-owned lane.
-    owner = "operator" if path == "visibility_hidden" else "fd"
+    owner = "operator" if path == "visibility_subagent" else "fd"
 
     async def body(env):
         lead = await env.seat("loss-lead", role="lead", parent_stream_id=FD)
@@ -433,8 +433,8 @@ def test_each_lead_loss_path_reconciles_once_v4(path):
         blk = (await env.adopt(key="stream:loss-blk", state="blocked", lead=blk_lead, blocker="b",
                                owner=owner))["lane"]
         for name in ("loss-lead", "loss-blk"):
-            if path == "visibility_hidden":
-                await env.store.update_session("host-a", name, visibility="hidden")
+            if path == "visibility_subagent":
+                await env.store.update_session("host-a", name, visibility="subagent")
             elif path == "role_qa":
                 await env.store.update_session("host-a", name, role="qa")
             elif path == "new_generation":
@@ -576,7 +576,7 @@ def test_supplied_confirmation_must_match_operation_qa_f2():
         lid = (await env.adopt(key="stream:f2", owner="operator", lead=lead))["lane"]["lane_id"]
         done_q = env.confirm("q-f2-done", lid, "set_state:done")
         with pytest.raises(ValueError) as e:  # a done confirmation cannot ride on blocked
-            await env.op("set_state", {"to": "blocked", "blocker": "b", "operator_confirmation": done_q},
+            await env.op("set_state", {"to": "blocked", "blocker": "b", "operator_confirmation": done_q, "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"},
                          lane=lid, version=1)
         assert code(e) == "work_lane_operator_confirmation_mismatch"
         fd_lead = await env.seat("f2-fd", role="lead", parent_stream_id=FD)
@@ -601,7 +601,7 @@ def test_reopen_emits_no_update_even_to_blocked_qa_f4():
     async def body(env):
         lid = (await env.adopt(key="stream:f4"))["lane"]["lane_id"]
         await env.op("set_state", {"to": "done", "outcome": "ok"}, lane=lid, version=1)
-        r = await env.op("set_state", {"to": "blocked", "blocker": "again"}, lane=lid, version=2)
+        r = await env.op("set_state", {"to": "blocked", "blocker": "again", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=2)
         assert r["update"] is None and r["lane"]["work_state_reason"] == "reopened"
         assert r["lane"]["blocker"] == "again"
     run(body)

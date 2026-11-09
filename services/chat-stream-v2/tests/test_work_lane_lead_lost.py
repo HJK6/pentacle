@@ -94,7 +94,7 @@ def test_deliberate_pause_requires_reason_and_clears():
         with pytest.raises(ValueError) as exc:
             await env.op("set_state", {"to": "paused"}, lane=lid, version=version)
         assert "work_lane_reason_required" in code(exc)
-        await env.op("set_state", {"to": "paused", "reason": "Waiting for the owner window."},
+        await env.op("set_state", {"to": "paused", "reason": "Waiting for the owner window.", "next_action": "Resume after the fixture dependency clears"},
                      lane=lid, version=version)
         await drain(env.store)
         assert (await episodes(env.store, lid))[0]["cleared_at"] is not None
@@ -120,7 +120,7 @@ def test_legacy_stored_pause_is_a_fault_restated_with_reason():
         with pytest.raises(ValueError) as exc:
             await env.op("set_state", {"to": "paused"}, lane=lid, version=version)
         assert "work_lane_reason_required" in code(exc)
-        await env.op("set_state", {"to": "paused", "reason": "Deliberate hold."}, lane=lid, version=version)
+        await env.op("set_state", {"to": "paused", "reason": "Deliberate hold.", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=version)
         await drain(env.store)
         assert (await episodes(env.store, lid))[0]["cleared_at"] is not None
         lane = (await env.store.get_work_lane(lid))["lane"]
@@ -158,9 +158,9 @@ def test_same_state_is_still_unchanged_without_fault():
     async def body(env):
         lid = await lose_lead(env)
         version = (await env.store.get_work_lane(lid))["lane"]["version"]
-        await env.op("set_state", {"to": "paused", "reason": "Hold."}, lane=lid, version=version)
+        await env.op("set_state", {"to": "paused", "reason": "Hold.", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=version)
         with pytest.raises(ValueError) as exc:
-            await env.op("set_state", {"to": "paused", "reason": "Again."}, lane=lid, version=version + 1)
+            await env.op("set_state", {"to": "paused", "reason": "Again.", "next_action": "Resume after the fixture dependency clears"}, lane=lid, version=version + 1)
         assert "work_lane_state_unchanged" in code(exc)
     run(body)
 
@@ -266,24 +266,25 @@ def test_parallel_member_owners_share_projection_fault_and_stale_predicate(store
         for name, role, spec in zip(("parallel-lead", "parallel-planner"), ("lead", "planner"), specs):
             await env.seat(name, role=role, visibility="hidden", assigned_spec_id=spec, parent_stream_id=FD)
         await drain(env.store)
-        assert all(item["cleared_at"] for item in await episodes(env.store, lid))
+        assert all(item["cleared_at"] is None for item in await episodes(env.store, lid))
         rows = await env.store.work_lane_rows()
         row = next(row for row in rows if row["lane_id"] == lid)
         shown = presented(row)
-        assert (shown["state"], shown["state_reason"]) == ("active", "members_working")
-        assert shown["stale"] is True
+        assert shown["state"] == ("paused" if stored == "paused" else "active")
+        assert shown["state_reason"] == ("fd" if stored == "paused" else "lead_lost")
+        assert shown["stale"] is False
         census = {f"{seat['host']}:{seat['session_name']}": seat for seat in await env.store.list_sessions("open")}
         detail = project_lane(row, None, "2026-10-08T00:00:00Z", all_members=True, sessions_by_stream=census)
         assert [{seat["stream_id"] for seat in member["seats"]} for member in detail["members"]] == [
             {"host-a:parallel-lead"}, {"host-a:parallel-planner"}]
         stale = await episodes(env.store, lid, "stale")
-        assert len(stale) == 1 and stale[0]["cleared_at"] is None
+        assert stale == []
         # A completed member cannot activate, but the parallel planner remains.
         await observe(env.store, "completed", "completed-a", 101, identity=specs[0])
         await env.store.mark_closed("host-a", "parallel-lead", closed_at="2026-01-02T00:00:00Z", pane_status="pane_dead")
         await drain(env.store)
         row = next(row for row in await env.store.work_lane_rows() if row["lane_id"] == lid)
-        assert presented(row)["state_reason"] == "members_working"
+        assert presented(row)["state_reason"] == ("fd" if stored == "paused" else "lead_lost")
         census = {f"{seat['host']}:{seat['session_name']}": seat for seat in await env.store.list_sessions("open")}
         detail = project_lane(row, None, "2026-10-08T00:00:00Z", all_members=True, sessions_by_stream=census)
         assert detail["members"][0]["seats_total"] == 0

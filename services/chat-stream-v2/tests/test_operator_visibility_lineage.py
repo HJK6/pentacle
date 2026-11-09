@@ -215,6 +215,17 @@ async def scheduled_fixture(monkeypatch, tmp_path, *, recovery_spec=FD_SPEC, spe
     return store, sessions, ctl, surface, auth
 
 
+async def scheduled_child(surface, ctl, sessions, schedule_id):
+    result = await surface._fire_schedule(schedule_id)
+    await asyncio.gather(*list(ctl._background_spawns))
+    # Resolve the actual spawned artifact, not the independent lane owner that
+    # now also belongs to the full live-session census.
+    child = sessions.get(result["spawn"]["stream_id"])
+    assert child is not None and child["host"] == "localhost"
+    assert len(ctl.visibility_opens) == 1
+    return child
+
+
 @pytest.mark.parametrize("mode", ["once", "recurring-create", "recurring-update"])
 @pytest.mark.parametrize("folder_repo,declared_repo", [
     ("example-recovery", "example_recovery"),
@@ -265,9 +276,7 @@ def test_scheduled_recovery_alias_retains_original_selection(
                                                     "spec_ids": [UI_SPEC, alias]})
                 occurrence = await surface.recurring_run({**base, "recurring_id": recurring_id})
                 schedule_id = occurrence["schedule_id"]
-            await surface._fire_schedule(schedule_id)
-            await asyncio.gather(*list(ctl._background_spawns))
-            child = next(row for row in sessions.list_open() if row["stream_id"] != "localhost:owner")
+            child = await scheduled_child(surface, ctl, sessions, schedule_id)
             assert child["qualified_spec_ids"] == [UI_SPEC, recovery]
             assert child["visibility"] == "hidden"
             assert ctl.visibility_launches == [False]
@@ -328,11 +337,7 @@ def test_scheduled_fresh_recovery_requires_original_receipt_selection(monkeypatc
                         conn.execute("UPDATE v2_operation_receipts SET target_id='foreign' WHERE receipt_id=?", (receipt["receipt_id"],))
                     conn.commit()
                 await store.submit(corrupt)
-            await surface._fire_schedule(sid)
-            await asyncio.gather(*list(ctl._background_spawns))
-            children = [r for r in sessions.list_open() if r["stream_id"] != "localhost:owner"]
-            assert len(children) == 1
-            child = children[0]
+            child = await scheduled_child(surface, ctl, sessions, sid)
             proved = explicit and corruption is None
             assert child["visibility"] == ("hidden" if proved else "default")
             assert ctl.visibility_launches == [not proved]
@@ -398,9 +403,7 @@ def test_recurring_update_preserves_only_proved_explicit_subset(monkeypatch, tmp
                                  (json.dumps(measured), receipt["receipt_id"]))
                     conn.commit()
                 await store.submit(corrupt)
-            await surface._fire_schedule(occurrence["schedule_id"])
-            await asyncio.gather(*list(ctl._background_spawns))
-            child = next(r for r in sessions.list_open() if r["stream_id"] != "localhost:owner")
+            child = await scheduled_child(surface, ctl, sessions, occurrence["schedule_id"])
             proved = (explicit if update_selection is None else update_selection) and damage is None
             assert child["visibility"] == ("hidden" if proved else "default")
             assert ctl.visibility_launches == [not proved]
@@ -432,15 +435,14 @@ def test_scheduled_handoff_uses_inherited_presentation_and_bound_identity(monkey
                 "UPDATE sessions SET visibility=? WHERE session_name='owner'", (visibility,)), conn.commit()))
             await sessions.refresh()
             if bound:
+                await store.update_session("localhost", "owner", assigned_spec_id="")
                 _front_desk_composite(store, sessions, bound=("localhost:owner", auth["session_generation"]))
             request = {"request_id": str(uuid.uuid4()), "from_stream_id": "localhost:owner", "_auth_context": auth,
                        "objective": "Continue the scheduled conversation", "handoff": True,
                        "handoff_from_stream_id": "localhost:owner", "visibility": requested,
                        "fires_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()}
             created = await surface.schedule_insert(request)
-            await surface._fire_schedule(created["schedule"]["schedule_id"])
-            await asyncio.gather(*list(ctl._background_spawns))
-            child = next(r for r in sessions.list_open() if r["stream_id"] != "localhost:owner")
+            child = await scheduled_child(surface, ctl, sessions, created["schedule"]["schedule_id"])
             expected = "hidden" if bound else requested or visibility
             assert child["visibility"] == expected
             assert ctl.visibility_launches == [expected == "default"]

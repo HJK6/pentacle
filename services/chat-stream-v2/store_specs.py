@@ -163,6 +163,9 @@ def task_owner(row: dict[str, Any] | None) -> bool:
     return bool(row and row.get("status") == "open"
                 and row.get("role") in {"lead", "nexus", "planner"}
                 and not row.get("presumed_dead_at")
+                and row.get("offline_since_ts") is None
+                and row.get("pane_status") != "pane_dead"
+                and not row.get("_fd_backend")
                 and row.get("provider") != "composite"
                 and not str(row.get("stream_id") or "").endswith(":assistant")
                 and not AssistantPolicy(None, "").protects(row)

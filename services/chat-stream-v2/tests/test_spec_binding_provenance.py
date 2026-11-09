@@ -17,8 +17,7 @@ from spawnctl import SpawnCtl  # noqa: E402
 from store import Store, normalize_spec_ids  # noqa: E402
 from uiverbs import UIVerbs  # noqa: E402
 from ledger import Ledger  # noqa: E402
-pytest.importorskip("specs_parser", reason="requires the shared specs parser")
-from specs_parser import DEFAULT_STATUSES  # noqa: E402
+from _shared.specs_parser import DEFAULT_STATUSES  # noqa: E402
 from _shared.specs_service import SpecsSubsystem  # noqa: E402
 
 
@@ -583,8 +582,10 @@ def test_spawn_materializes_resolver_canonical_binding_after_store_restart(
 
 def test_attach_updates_inspect_and_ledger_agreement() -> None:
     async def go() -> None:
+        from work_lane_link import link_specs
         store = Store(":memory:")
         store.start()
+        await link_specs(store, CANONICAL_SPEC_ID)
         sessions = Sessions(store, local_host="alpha")
         await sessions.open("alpha", "attach", visibility="hidden")
         catalog = Catalog()

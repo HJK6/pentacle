@@ -259,7 +259,8 @@ def new_work_commission(msg: dict[str, Any], *, resume: bool) -> bool:
     """A2/R5: a token-verified agent commissioning new work, by operation only.
 
     Handoffs, resumes, host transfers, daemon fires and recovery keep continuity
-    and are never refused. Operator chats without a seat token and anonymous
+    and are not new commissions; lane-linked execution still checks ownership.
+    Operator chats without a seat token and anonymous
     loopback spawns (a known local bypass) are independent work. Seat operator
     elevation does not exempt a token-verified caller. Text is never inspected."""
     auth = msg.get("_auth_context") or {}
@@ -639,8 +640,6 @@ class SpawnCtl:
         if ":" in caller_id:
             caller = await self.store.fetch_session(*caller_id.split(":", 1))
         policy = getattr(self.sessions, "assistant", None)
-        if not auth.get("covered_admission") and (caller_id.endswith(":assistant") or (policy is not None and policy.protects(caller))):
-            return None  # A2/R5: protected assistant and composite seats are exempt
         spec_id = binding.get("assigned_spec_id")
         if not spec_id:
             source_id = str(msg.get("parent_stream_id") or "")
@@ -662,6 +661,24 @@ class SpawnCtl:
         return VerbError("work_lane_assignment_unlinked",
                          f"{spec_id} is not a member of any open product lane; the FD adds it first: {repair}",
                          spec_id=spec_id)
+
+    async def _lane_admission(self, msg, binding, role):
+        """The same guard covers new work, supporting work, resume and scheduled fire."""
+        spec = effective_assignment(binding)
+        if not spec:
+            if msg.get("provision_only"):
+                raise VerbError("work_assignment_required", "Provision a lane lead with its --spec-id")
+            return
+        # Provision only: a verified current FD may create an ordinary lead
+        # without any task input. Binding and activation remain explicit ops.
+        provision = (role in {"lead", "nexus"} and not self._prompt_requested(msg)
+                     and not str(msg.get("command") or "").strip()
+                     and await self.store.lane_provisioning_allowed(msg.get("_auth_context") or {}))
+        if msg.get("provision_only") and not provision:
+            raise VerbError("work_lane_provisioning_forbidden", "Only the authenticated current FD may provision a promptless dedicated lead")
+        await self.store.require_lane_execution(spec, lane_id=msg.get("lane_id"), provisioning=provision,
+                                                linked_only=not msg.get("provision_only"))
+        return provision
 
     async def work_checkpoint_warning(self, msg: dict[str, Any], stream_id: str) -> dict[str, Any] | None:
         """A5: report the assignment's display deficiencies; never a refusal."""
@@ -1776,6 +1793,7 @@ class SpawnCtl:
         if brief:
             tmux_transport.assert_injectable(brief, "brief")
         binding = await self._resolve_spec_binding(msg, host, admission_name)
+        await self._lane_admission(msg, binding, msg.get("role"))
         provider = str(msg.get("provider") or "").strip()
         requested_model = msg.get("model")
         requested_effort = msg.get("effort")
@@ -2090,6 +2108,9 @@ class SpawnCtl:
         # launch resolution and reservation so an explicit but unknown item can
         # never produce a pane, intent, or misleading spawn.ok.
         spec_binding = await self._resolve_spec_binding(msg, host, name)
+        # Native resume preserves its retained assignment below. Guard that
+        # same source, rather than the fresh request's often-empty spec tags.
+        execution_binding = resume_prior_row if resume_prior_row is not None else spec_binding
         policy = getattr(self.sessions, "assistant", None)
         # Resolve presentation only after the original wire hash is frozen. The
         # same decision feeds launch, retained intent and first open; replay uses
@@ -2210,6 +2231,8 @@ class SpawnCtl:
                     return replay
                 raise refusal
 
+        await self._lane_admission(msg, execution_binding, work_role)
+
         # Reserve the stream and its creation identity before any pane exists.
         # The existing atomic claim still decides concurrent NEW same-key fires.
         nonce = uuid.uuid4().hex
@@ -2327,6 +2350,7 @@ class SpawnCtl:
             # Graph admission ends before boot. A winning parent close makes
             # this request refuse before a pane; a winning intent blocks close.
             async with self.sessions._graph_lock:
+                lane_provisioning = await self._lane_admission(msg, execution_binding, work_role)
                 parent_normalization = None
                 parent_id = str(open_flds.get("parent_stream_id") or "")
                 if parent_id:
@@ -2346,6 +2370,7 @@ class SpawnCtl:
                     {
                         "open_fields": open_flds,
                         "brief": brief,
+                        "lane_provisioning": bool(lane_provisioning),
                         "delivery_receipt": delivery_receipt,
                         **({spawn_creation.KEY: spawn_creation.initial()}
                            if host != self.sessions.local_host else {}),
@@ -2361,6 +2386,9 @@ class SpawnCtl:
                         *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
                     ),
                     prepared_qa=prepared_qa,
+                    lane_admission={"spec_id": effective_assignment(execution_binding), "lane_id": msg.get("lane_id"),
+                                    "provisioning": bool(lane_provisioning), "linked_only": not msg.get("provision_only"),
+                                    "provisioning_auth": msg.get("_auth_context") or {}},
                 )
             if not recorded:
                 raise VerbError("spawn_fence_lost", "spawn intent reservation expired or was cancelled")

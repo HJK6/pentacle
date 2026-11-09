@@ -475,6 +475,9 @@ def test_close_racing_assignment_removal_at_final_fence_retains_obligation(assig
     async def run():
         from uiverbs import UIVerbs
         store, sessions, server, tmux, row = await environment()
+        if assignment:
+            from work_lane_link import link_specs
+            await link_specs(store, assignment)
         other = await store.open_session(HOST, "other", role="lead", assigned_spec_id="spec_demo__item_00")
         # A real assignment update must queue behind the close's graph fence.
         entered, release = asyncio.Event(), asyncio.Event()

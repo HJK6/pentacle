@@ -165,7 +165,8 @@ def test_all_members_show_and_inline_inventory_keep_membership_order():
         shown = await server._on_work_lanes_show({"lane_id": lane["lane_id"], "members": True,
                                                  "_auth_context": {"operator_authenticated": True}})
         assert [m["spec_id"] for m in shown["members"]] == sorted(ids)
-        assert shown["projection"]["members"] == shown["members"]
+        from work_lanes_projection import detail_member_keys
+        assert shown["projection"]["members"] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in shown["members"]]
     run(body)
 
 
@@ -300,7 +301,7 @@ def test_every_done_to_open_conflicts_without_consuming_confirmation(to):
         history = await a1_close(env, (await env.adopt("stream:history", owner="operator", members=[A]))["lane"])
         holder = await a1_holder(env)
         confirmation = env.confirm("reopen-confirm", history["lane_id"], "set_state:" + to)
-        payload = {"to": to, "reason": "Reopen fixture", "operator_confirmation": confirmation}
+        payload = {"to": to, "reason": "Reopen fixture", "next_action": "Resume after dependency clears", "operator_confirmation": confirmation}
         if to == "blocked":
             payload["blocker"] = "Fixture dependency"
         before = await a1_snapshot(env)
@@ -321,7 +322,7 @@ def test_done_membership_repair_allows_reopen(replacement):
         await env.adopt("stream:current", state="paused", owner="operator", members=[A])
         fixed = (await env.op("set_members", {"members": replacement, "no_spec_reason": None if replacement else "Replanned"},
                             lane=history["lane_id"], version=history["version"]))["lane"]
-        result = await env.op("set_state", {"to": "paused", "reason": "Replanned"}, lane=fixed["lane_id"], version=fixed["version"])
+        result = await env.op("set_state", {"to": "paused", "reason": "Replanned", "next_action": "Resume after the fixture dependency clears"}, lane=fixed["lane_id"], version=fixed["version"])
         assert result["lane"]["work_state"] == "paused"
     run(body)
 
@@ -338,7 +339,7 @@ def test_replay_before_conflict(operation):
             if operation == "reopen":
                 lane = await a1_close(env, lane)
                 lane = (await env.op("set_members", {"members": [A]}, lane=lane["lane_id"], version=lane["version"]))["lane"]
-                payload, verb = {"to": "paused", "reason": "Resume fixture"}, "set_state"
+                payload, verb = {"to": "paused", "reason": "Resume fixture", "next_action": "Resume after the fixture dependency clears"}, "set_state"
             else:
                 payload, verb = {"members": [A]}, "set_members"
             kwargs = {"lane": lane["lane_id"], "version": lane["version"]}
@@ -374,7 +375,7 @@ def test_member_conflict_before_cas(operation):
         if operation == "reopen":
             lane = await a1_close(env, await a1_holder(env))
             holder = (await env.adopt("stream:current", state="paused", owner="operator", members=[A]))["lane"]
-            verb, payload = "set_state", {"to": "paused", "reason": "Resume"}
+            verb, payload = "set_state", {"to": "paused", "reason": "Resume", "next_action": "Resume after the fixture dependency clears"}
         else:
             holder = await a1_holder(env)
             lane = (await env.adopt("stream:target", state="paused", owner="operator"))["lane"]
@@ -449,7 +450,8 @@ def test_additive_estimate_metadata_persists_projection_restart_last_good(tmp_pa
         assert [member["spec_id"] for member in frame["lanes"][0]["members"]] == [A, B]
         assert [member["spec_id"] for member in listed["lanes"][0]["members"]] == [A, B]
         assert [member["spec_id"] for member in shown["members"]] == sorted([A, B])
-        assert shown["projection"]["members"] == shown["members"]
+        from work_lanes_projection import detail_member_keys
+        assert shown["projection"]["members"] == [{k: v for k, v in m.items() if k not in detail_member_keys()} for m in shown["members"]]
         for lane in (frame["lanes"][0], listed["lanes"][0], shown["projection"]):
             by_id = {member["spec_id"]: member for member in lane["members"]}
             assert set(by_id) == {A, B}

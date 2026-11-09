@@ -162,7 +162,7 @@ def test_closed_lead_product_reopen_and_generation_replacement_retain_report():
         completed = await complete(env, lane, lead, dispatch)
         done = await env.op("set_state", {"to": "done", "outcome": "Synthetic completion"},
                             lane=lane["lane_id"], version=completed["version"])
-        await env.op("set_state", {"to": "paused"}, lane=lane["lane_id"], version=done["lane"]["version"])
+        await env.op("set_state", {"to": "paused", "reason": "Fixture checkpoint hold", "next_action": "Resume after the fixture dependency clears"}, lane=lane["lane_id"], version=done["lane"]["version"])
         await env.store.mark_closed(*lead[0].split(":", 1), closed_at="2026-01-02T00:00:00Z", pane_status="closed")
         assert (await projected(env.store, lane["lane_id"]))["lead_reported_done"] is True
         await env.seat("closed-lead", role="lead", parent_stream_id=FD)

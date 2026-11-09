@@ -39,6 +39,8 @@ def _owners(conn):
                             "WHERE s.status='open' AND s.role IN ('lead','nexus','planner')"):
         row = _hydrate_spec_row(_row(raw))
         row["stream_id"] = f"{row['host']}:{row['session_name']}"
+        from store_work_lanes import fd_backend_conn
+        row["_fd_backend"] = fd_backend_conn(conn, row["stream_id"])
         spec = effective_assignment(row)
         if task_owner(row):
             stream = f"{row['host']}:{row['session_name']}"
