@@ -148,16 +148,21 @@ async function installedJourney(ctx, descriptor) {
       }
     } else if (descriptor.phase === 'question') {
       await open(descriptor.fixtures[0]);
+      const portal = '#desktop-question-portal-' + descriptor.fixtures[0].stream_id.replace(/[^a-zA-Z0-9_-]/g, '-');
+      const card = portal + ' [data-notification-id="' + descriptor.notification_id + '"]';
       await wait("!!document.querySelector('#cell-0 .slot-chat-question-open')");
       await session.click('#cell-0 .slot-chat-question-open');
-      await wait("Array.from(document.querySelectorAll('.slot-chat-question-option')).some(e => e.textContent.includes('Fixture'))");
-      await session.eval("Array.from(document.querySelectorAll('.slot-chat-question-option')).find(e => e.textContent.includes('Fixture')).click()");
-      await session.click('.slot-chat-question-submit');
+      await wait(`!!document.querySelector(${JSON.stringify(card)})`);
+      const options = card + ' .slot-chat-question-option';
+      await wait(`Array.from(document.querySelectorAll(${JSON.stringify(options)})).some(e => e.textContent.includes('Fixture'))`);
+      await session.eval(`Array.from(document.querySelectorAll(${JSON.stringify(options)})).find(e => e.textContent.includes('Fixture')).click()`);
+      await session.click(portal + ' .slot-chat-question-submit');
       const query = `window.cc.promptList({producer_stream_id:${JSON.stringify(descriptor.fixtures[0].stream_id)},open:false})`;
       await wait(`(async () => { const r=await ${query}; return r.questions?.some(q => q.question_id === ${JSON.stringify(descriptor.question_id)} && q.state !== 'open'); })()`);
       await session.send('Page.reload');
       await wait('!!window.cc && !!window.PentacleChatStore');
       observation.questions = await session.eval(query, { awaitPromise:true });
+      observation.answered_notification_id = descriptor.notification_id;
     } else if (descriptor.phase === 'report') {
       await open(descriptor.fixtures[0]);
       const tab = '.slot-asset-tab[data-asset-id="' + descriptor.asset_id + '"]';

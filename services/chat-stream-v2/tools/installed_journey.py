@@ -531,7 +531,7 @@ class Journey:
                 require(asked.get('type') == 'prompt.ask.ok', 'fixture question was held or refused')
                 self.scope_controls(actor, receiver, question_id=question)
                 self.active_row = 'P5.question'
-                self.browser('question', question_id=question)
+                self.browser('question', question_id=question, notification_id=asked['question']['notification_id'])
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     status = self.call({'type': 'prompt.status', 'question_id': question})
