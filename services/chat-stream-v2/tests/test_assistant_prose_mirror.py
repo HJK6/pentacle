@@ -444,6 +444,14 @@ def test_restart_replay_and_generation_rebind(tmp_path):
                 "fixture-root", "visible", provider="codex", pane_pid="4242",
             )
             assert replacement["session_generation"] != old_generation
+            # Admit a current-lifecycle operator input without changing the
+            # stale mirror binding, so generation admission is the only blocker.
+            current = AssistantComposite(store, config=_config(replacement["session_generation"]))
+            try:
+                await _operator_trigger(store, current, identity="unbound-generation-operator")
+            finally:
+                await current.stop()
+            assert (await store.assistant_mirror_state(ASSISTANT))["binding"]["source_generation"] == old_generation
             await _append(store, "before rebind", identity="new-generation-unbound")
             assert [row["daemon_seq"] for row in await _answer_rows(store)] == [first_id]
             await composite.stop()
@@ -948,7 +956,27 @@ def test_structured_dispatch_turn_correlation_and_next_non_dispatch_reply():
                 await composite.publish(payload, actor_stream_id=ROOT)
                 assert (await composite.publish(payload, actor_stream_id=ROOT))["duplicate"] is True
                 # Other input in this same provider turn must not hide the dispatch identity.
-                await _normalized_turn_event(store, provider=provider, kind="USER", text="Peer context", identity="peer-input")
+                # Persist the existing daemon-owned pre-input delivery proof;
+                # an unverified USER here would stop at the unknown guard.
+                from comms import payload_digest
+                peer_wire = "[from fixture:peer] [tell:turn-peer]\nPeer context"
+                digest = payload_digest(ROOT, peer_wire)
+                seat = await store.fetch_session(*ROOT.split(":", 1))
+                await store.put_tell_delivery("turn-peer", {"payload_digest": digest,
+                    "reply": {"to_stream_id": ROOT, "tell_id": "turn-peer",
+                              "delivery_status": "committed_pending_proof"},
+                    "delivery": {"tell_id": "turn-peer", "to_stream_id": ROOT, "text": peer_wire,
+                        "sender_verified": True, "sender_kind": "peer", "sender_generation": "peer-generation",
+                        "from_stream_id": "fixture:peer", "proof_generation": root["session_generation"],
+                        "proof_session_created_at": seat["created_at"], "proof_watermark": 0,
+                        "proof_watermark_state": "reachable", "request_payload_hash": digest,
+                        "delivery_status": "committed_pending_proof"}})
+                peer_seq = await _normalized_turn_event(store, provider=provider, kind="USER",
+                    text=peer_wire, identity="peer-input")
+                peer_row = next(row for row in await store.fetch_session_event_tail(ROOT, limit=100)
+                                if row["daemon_seq"] == peer_seq)
+                assert peer_row["raw"]["input_provenance"] == {
+                    "kind": "peer", "verified": True, "sender": "fixture:peer", "generation": "peer-generation"}
                 def age_publication(conn):
                     conn.execute("UPDATE v2_assistant_composite_publications SET created_at=? WHERE dispatch_id=?",
                                  ((datetime.now(timezone.utc)-timedelta(minutes=10)).isoformat(), route["dispatch_id"]))
