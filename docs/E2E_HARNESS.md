@@ -25,6 +25,53 @@ Use the default owned gate for automation. External `--profile` configurations
 are operator-provided live inputs and need separate resource authority. Keep raw
 receipts outside shared memory and retain only location/hash metadata there.
 
+## Finite installed journey
+
+After the release owner grants an installed/native window, run:
+
+```bash
+python3 services/chat-stream-v2/tools/installed_journey.py --manifest PRIVATE.json --evidence-dir FRESH_DIR
+```
+
+The composition reuses `tools.live_window` for authenticated ownership and
+generation-fenced fixture cleanup, and `web_gate` in served-page mode for its
+owned browser. It creates two empty Codex chats (the question producer uses
+the existing visible-seat policy), an unrelated sentinel and,
+when configured, one remote Codex fixture. It checks actual browser text/image
+input, logical-ID retry, durable/native/rendered correspondence, small-page
+history, scoped refusals, a non-authorizing question and a structured report.
+It never starts, stops or restarts an installed service.
+
+The private JSON manifest has schema `pentacle.installed-journey.v1` and these
+required fields: `web_url`, `expected_build_id`, full `source_sha`, `ws_url`,
+`operator_token_path`, `operator_registry_path`, `local_host`, `machine_cwd`,
+`spec_hashes` (absolute spec paths mapped to SHA256), `daemon` (`pid`, UTC
+`ps lstart` string `birth`, boot identity `boot`, `checkout`, `executable`),
+`cli` (`executable`, `sha256`, full release SHA `version`, `manifest_path`,
+`manifest_sha256`, and actual imported `modules` for `cli` and `wsclient`, each
+with `file` and `sha256`), and `provider` (`alias`, `generation`,
+`executable`, `executable_sha256`, `version`, `model`, `effort`). `remote`, when
+present, supplies `host`, `cwd`, `provider` with the same tuple fields and optional
+`tmux_bin`. Local `tmux_bin` is also optional. Credentials are paths to secure
+stores; inline secrets are refused. The caller must provide admitted accounts
+and a current release tuple. Source checkout and running artifact remain
+separate identities.
+
+Exit status is 0 PASS, 1 FAIL, or 2 BLOCKED. `rows.json` retains each check's
+`row`, `result`, `primary_error`, `harness_error`, `fixture_ids` and `cleanup`;
+`run-manifest.json` binds exact owned IDs and artifact identities. Evidence
+directories must be fresh; a dirty directory is refused without replacing its
+earlier receipts. `--expect-build-id deliberately-wrong` tests build refusal
+against the actual served page before fixture or credential mutations.
+
+Historical Claude replay uses `claude_replay` (`path`, `sha256`, original
+`host`, `session_name`, `provenance`) with the actual normalizer. It cannot
+qualify live Claude, which has its own NOT TESTED row and `live_claude_limit`.
+This finite runner does not qualify the strict-full soak, mobile certification,
+offline peers or an observation period. Keep those receipts and limits in the
+parent acceptance matrix. Scheduled admission and quiet/window checks belong
+to the existing nightly wrapper; this command creates no standing window.
+
 ## Scheduled strict-full soak
 
 The nightly soak uses `tools/nightly_journey.py admit --job nightly-soak` and
