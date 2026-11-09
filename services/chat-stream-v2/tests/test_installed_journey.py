@@ -16,6 +16,7 @@ def manifest():
         spec_hashes={'/fixture/spec.md':'d' * 64},
         cli={'executable': '/fixture/cli', 'sha256': 'b' * 64, 'version':'a' * 40,
              'manifest_path':'/fixture/release.json','manifest_sha256':'e' * 64,'modules':{'cli':{},'wsclient':{}}},
+        web={'source_sha':'a' * 40, 'artifact':'/fixture/web', 'build_id':'accepted'},
         daemon={'pid': 123, 'birth': 'fixture-birth', 'boot': 'fixture-boot', 'checkout': '/fixture', 'executable':'/fixture/python'},
         provider=dict(alias='ours', generation='fixture-generation', executable='/fixture/native',
             executable_sha256='c' * 64, version='fixture-version', model='fixture-model', effort='high'))
@@ -261,3 +262,90 @@ def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
     run.child = child
     assert run.browser('history', allow_failure=True)['primary_error'] == 'known-history-defect'
     assert run.cleanup['errors'] == []
+
+
+@pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'web-source', 'manifest-package',
+                                 'installed-package', 'import-binding', 'web-stamp', 'web-build',
+                                 'served-build', 'served-bytes', 'artifact-bytes'])
+def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, monkeypatch, fault):
+    import io
+    import subprocess
+    checkout = tmp_path / 'source'
+    checkout.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    package = checkout / subject.CLI_SOURCE
+    package.mkdir(parents=True)
+    contents = {'cli.py': b'CLI release fixture\n', 'wsclient.py': b'CLI transport fixture\n'}
+    for name, data in contents.items():
+        (package / name).write_bytes(data)
+    (checkout / 'renderer').mkdir()
+    (checkout / 'renderer/app.js').write_text('web source fixture')
+    git('add', '.')
+    git('commit', '-qm', 'component release')
+    released = git('rev-parse', 'HEAD')
+    if fault == 'cli-source':
+        (package / 'cli.py').write_text('incompatible daemon-side CLI')
+    elif fault == 'web-source':
+        (checkout / 'renderer/app.js').write_text('incompatible daemon-side web')
+    (checkout / 'daemon-only').write_text('independent daemon release')
+    git('add', '.')
+    git('commit', '-qm', 'daemon release')
+    daemon = git('rev-parse', 'HEAD')
+    version = daemon if fault == 'equal' else released
+    release_root = tmp_path / 'release'
+    installed = release_root / 'runtime/site-packages/agent_orch'
+    installed.mkdir(parents=True)
+    for name, data in contents.items():
+        (installed / name).write_bytes(data)
+    tree_hash = hashlib.sha256(b''.join(name.encode() + b'\0' + data for name, data in sorted(contents.items()))).hexdigest()
+    modules = {name: {'file': str(installed / (name + '.py')), 'sha256': hashlib.sha256(contents[name + '.py']).hexdigest()}
+               for name in ('cli', 'wsclient')}
+    artifact = tmp_path / 'web'
+    dist = artifact / 'renderer/dist/web'
+    dist.mkdir(parents=True)
+    (artifact / 'build-sha.txt').write_text(released)
+    (dist / 'web.html').write_text('<script src="bundle.js"></script>')
+    (dist / 'bundle.js').write_text('installed web bundle')
+    frozen = json.loads(subprocess.check_output(['node', '-e',
+        'const s=require(process.argv[1]).freezeWebDist(process.argv[2]); console.log(JSON.stringify({buildId:s.buildId}))',
+        str(subject.ROOT / 'server/web_build_id.js'), str(dist)], text=True))['buildId']
+    value = manifest()
+    value['source_sha'] = daemon
+    value['daemon']['checkout'] = str(checkout)
+    value['cli'].update(version=version, manifest_path=str(release_root / 'manifest.json'))
+    value['web'] = {'source_sha': released, 'artifact': str(artifact), 'build_id': frozen}
+    value['expected_build_id'] = frozen
+    release = {'runtime_package': {'path': subject.CLI_SOURCE, 'sha256': tree_hash}}
+    expected = {'cli-source': 'CLI source incompatible', 'web-source': 'web source incompatible',
+                'manifest-package': 'CLI manifest package differs', 'installed-package': 'installed CLI package differs',
+                'import-binding': 'imported CLI module differs', 'web-stamp': 'web artifact source stamp drift',
+                'web-build': 'web artifact/served build identity mismatch', 'served-build': 'web artifact/served build identity mismatch',
+                'served-bytes': 'served web asset differs', 'artifact-bytes': 'web artifact/served build identity mismatch'}
+    if fault == 'manifest-package':
+        release['runtime_package']['sha256'] = 'f' * 64
+    elif fault == 'installed-package':
+        (installed / 'cli.py').write_text('replaced installed CLI')
+    elif fault == 'import-binding':
+        modules['wsclient']['sha256'] = 'f' * 64
+    elif fault == 'web-stamp':
+        (artifact / 'build-sha.txt').write_text(daemon)
+    elif fault == 'web-build':
+        value['web']['build_id'] = 'wrong'
+    elif fault == 'artifact-bytes':
+        (dist / 'bundle.js').write_text('changed installed bundle')
+    monkeypatch.setattr(subject, 'served_build', lambda url: 'wrong' if fault == 'served-build' else frozen)
+    monkeypatch.setattr(subject, 'urlopen', lambda url, timeout: io.BytesIO(
+        b'wrong served bytes' if fault == 'served-bytes' else (dist / 'bundle.js').read_bytes()))
+    run = subject.Journey(value, tmp_path)
+    if fault in ('mixed', 'equal'):
+        proof = run.component_identity(release, modules)
+        assert proof['cli_version'] == version and proof['web_source_sha'] == released
+        assert proof['web_build_id'] == frozen and run.fixtures == []
+    else:
+        with pytest.raises(AssertionError, match=expected[fault]):
+            run.component_identity(release, modules)
+        assert run.fixtures == []

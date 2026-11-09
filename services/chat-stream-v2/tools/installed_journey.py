@@ -24,10 +24,15 @@ import tempfile
 import time
 from types import SimpleNamespace
 from urllib.request import urlopen
+from urllib.parse import quote, urljoin
 import uuid
 
 SERVICE = Path(__file__).resolve().parents[1]
 ROOT = SERVICE.parents[1]
+CLI_SOURCE = 'services/agent-orch/agent_orch'
+WEB_SOURCES = ('assets', 'configs', 'config-loader.js', 'hosts.js', 'lib', 'main',
+               'package.json', 'package-lock.json', 'pentacle-chat-core', 'renderer',
+               'scripts/build-web.js', 'server', 'vendor')
 for directory in (SERVICE, SERVICE.parent):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
@@ -70,7 +75,7 @@ def validate_manifest(value):
     if not isinstance(value, dict) or value.get('schema') != 'pentacle.installed-journey.v1':
         raise Blocked('manifest schema must be pentacle.installed-journey.v1')
     for name in ('web_url', 'expected_build_id', 'source_sha', 'ws_url', 'operator_token_path',
-                 'operator_registry_path', 'local_host', 'machine_cwd', 'cli', 'daemon', 'provider', 'spec_hashes'):
+                 'operator_registry_path', 'local_host', 'machine_cwd', 'cli', 'web', 'daemon', 'provider', 'spec_hashes'):
         if not value.get(name):
             raise Blocked('manifest missing ' + name)
     if not re.fullmatch('[0-9a-f]{40}', value['source_sha']):
@@ -79,7 +84,8 @@ def validate_manifest(value):
         if not value['provider'].get(key):
             raise Blocked('manifest provider missing ' + key)
     for section, keys in (('daemon', ('pid', 'birth', 'boot', 'checkout', 'executable')),
-                          ('cli', ('executable', 'sha256', 'version', 'manifest_path', 'manifest_sha256', 'modules'))):
+                          ('cli', ('executable', 'sha256', 'version', 'manifest_path', 'manifest_sha256', 'modules')),
+                          ('web', ('source_sha', 'artifact', 'build_id'))):
         if not isinstance(value[section], dict) or any(not value[section].get(key) for key in keys):
             raise Blocked('manifest ' + section + ' identity is incomplete')
     # Values belong in secure stores. Reject the usual accidental inline forms.
@@ -300,7 +306,8 @@ class Journey:
         require(version == self.m['provider']['version'], 'native provider executable version drift')
         cli = self.m['cli']
         require(digest(cli['manifest_path']) == cli['manifest_sha256'], 'installed CLI release manifest drift')
-        require(json.loads(Path(cli['manifest_path']).read_text()).get('commit') == cli['version'] == self.m['source_sha'],
+        release = json.loads(Path(cli['manifest_path']).read_text())
+        require(release.get('commit') == cli['version'],
                 'installed CLI release version mismatch')
         launcher = Path(cli['executable']).read_text().splitlines()[0]
         require(launcher.startswith('#!'), 'installed CLI interpreter binding missing')
@@ -311,11 +318,71 @@ class Journey:
                    'for k,m in [("cli",cli),("wsclient",wsclient)]}))')
         modules = json.loads(subprocess.check_output([python, '-I', '-c', program], text=True, timeout=15))
         require(modules == cli['modules'], 'actual imported CLI modules differ from the accepted artifact')
+        components = self.component_identity(release, modules)
         for path, expected in self.m['spec_hashes'].items():
             require(digest(path) == expected, 'acceptance spec changed since manifest freeze')
         return {'source_sha': self.m['source_sha'], 'pid': int(pid), 'birth': birth, 'boot': boot,
-                'cli': self.m['cli'], 'native_executable_sha256': digest(self.m['provider']['executable']),
+                'cli': self.m['cli'], 'components': components, 'native_executable_sha256': digest(self.m['provider']['executable']),
                 'native_version': version, 'daemon_code':daemon_code, 'spec_hashes':self.m['spec_hashes']}
+
+    def component_identity(self, release, modules):
+        """Verify released bytes and source compatibility, independently per component."""
+        checkout = self.m['daemon']['checkout']
+
+        def git(*args):
+            return subprocess.check_output(['git', '-C', checkout, *args], timeout=30)
+
+        def compatible(version, paths, name):
+            require(isinstance(version, str) and re.fullmatch('[0-9a-f]{40}', version), name + ' source SHA missing')
+            source = git('ls-tree', '-r', '-z', version, '--', *paths)
+            daemon = git('ls-tree', '-r', '-z', self.m['source_sha'], '--', *paths)
+            require(bool(source) and source == daemon, name + ' source incompatible with daemon')
+            return hashlib.sha256(source).hexdigest()
+
+        cli = self.m['cli']
+        cli_source = compatible(cli['version'], (CLI_SOURCE,), 'CLI')
+        package = release.get('runtime_package') or {}
+        require(package.get('path') == CLI_SOURCE, 'CLI package source missing')
+        # Use the installer's existing source/archive and installed-tree oracles.
+        sys.path.insert(0, str(ROOT / 'services/agent-orch/deploy'))
+        from install_fleet_spawn_tooling import _archive_tree_sha256, _tree_sha256
+        with tempfile.NamedTemporaryFile(suffix='.tar') as archive:
+            subprocess.run(['git', '-C', checkout, 'archive', '--format=tar', cli['version'], CLI_SOURCE],
+                           stdout=archive, check=True, timeout=30)
+            archive.flush()
+            require(_archive_tree_sha256(Path(archive.name), CLI_SOURCE) == package.get('sha256'),
+                    'CLI manifest package differs from release source')
+        root = Path(modules['cli']['file']).resolve().parent
+        release_root = Path(cli['manifest_path']).resolve().parent
+        require(root.is_relative_to(release_root / 'runtime'), 'CLI package outside installed release')
+        require(_tree_sha256(root) == package['sha256'], 'installed CLI package differs from release source')
+        for name in ('cli', 'wsclient'):
+            source = git('show', cli['version'] + ':' + CLI_SOURCE + '/' + name + '.py')
+            require(Path(modules[name]['file']).resolve() == root / (name + '.py')
+                    and modules[name]['sha256'] == hashlib.sha256(source).hexdigest(),
+                    'imported CLI module differs from release source: ' + name)
+
+        web = self.m['web']
+        web_source = compatible(web['source_sha'], WEB_SOURCES, 'web')
+        artifact = Path(web['artifact'])
+        require((artifact / 'build-sha.txt').read_text().strip() == web['source_sha'], 'web artifact source stamp drift')
+        program = ('const s=require(process.argv[1]).freezeWebDist(process.argv[2]); '
+                   'console.log(JSON.stringify({buildId:s.buildId,manifest:s.manifest}))')
+        frozen = json.loads(subprocess.check_output(['node', '-e', program, str(ROOT / 'server/web_build_id.js'),
+                                                     str(artifact / 'renderer/dist/web')], text=True, timeout=30))
+        require(frozen['buildId'] == web['build_id'] == self.m['expected_build_id'] == served_build(self.m['web_url']),
+                'web artifact/served build identity mismatch')
+        for asset in frozen['manifest']:
+            if asset['path'] == 'web.html':  # The host injects runtime config into this page.
+                continue
+            hashed = hashlib.sha256()
+            with urlopen(urljoin(self.m['web_url'].rstrip('/') + '/', quote(asset['path'])), timeout=20) as response:
+                for chunk in iter(lambda: response.read(1024 * 1024), b''):
+                    hashed.update(chunk)
+            require(hashed.hexdigest() == asset['sha256'], 'served web asset differs from installed artifact: ' + asset['path'])
+        return {'cli_version': cli['version'], 'cli_source_index_sha256': cli_source,
+                'cli_package_sha256': package['sha256'], 'web_source_sha': web['source_sha'],
+                'web_source_index_sha256': web_source, 'web_build_id': frozen['buildId']}
 
     def actor_cli(self, fixture, *args):
         from launch import stream_token_file_for

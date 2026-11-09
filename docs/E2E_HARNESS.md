@@ -57,6 +57,17 @@ stores; inline secrets are refused. The caller must provide admitted accounts
 and a current release tuple. Source checkout and running artifact remain
 separate identities.
 
+Releases are component-scoped: `source_sha` binds the daemon; CLI `version`
+binds its own release manifest and installed/imported package bytes. The runner
+checks the CLI source tree is identical between that release and the daemon
+source. `web` supplies its own full `source_sha`, installed `artifact` directory
+and `build_id`. The runner verifies the artifact's `build-sha.txt`, uses the
+existing web build-ID oracle and checks served JS/CSS bytes against the artifact.
+Tracked web inputs (renderer, client core, server, assets, configs, libraries,
+main, vendor, package locks, web build script and root config/host loaders)
+must be identical between the web release and daemon source. A content mismatch
+refuses admission; a different component commit alone does not.
+
 Exit status is 0 PASS, 1 FAIL, or 2 BLOCKED. `rows.json` retains each check's
 `row`, `result`, `primary_error`, `harness_error`, `fixture_ids` and `cleanup`;
 `run-manifest.json` binds exact owned IDs and artifact identities. Evidence
