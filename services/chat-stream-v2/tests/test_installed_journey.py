@@ -16,6 +16,7 @@ def manifest():
         spec_hashes={'/fixture/spec.md':'d' * 64},
         cli={'executable': '/fixture/cli', 'sha256': 'b' * 64, 'version':'a' * 40,
              'manifest_path':'/fixture/release.json','manifest_sha256':'e' * 64,'modules':{'cli':{},'wsclient':{}}},
+        web={'source_sha':'a' * 40, 'artifact':'/fixture/web', 'build_id':'accepted'},
         daemon={'pid': 123, 'birth': 'fixture-birth', 'boot': 'fixture-boot', 'checkout': '/fixture', 'executable':'/fixture/python'},
         provider=dict(alias='ours', generation='fixture-generation', executable='/fixture/native',
             executable_sha256='c' * 64, version='fixture-version', model='fixture-model', effort='high'))
@@ -261,3 +262,151 @@ def test_browser_expected_failure_still_requires_attested_cleanup(tmp_path):
     run.child = child
     assert run.browser('history', allow_failure=True)['primary_error'] == 'known-history-defect'
     assert run.cleanup['errors'] == []
+
+
+@pytest.mark.parametrize('fault', ['mixed', 'equal', 'cli-source', 'shared-contract', 'web-source', 'manifest-package',
+                                 'installed-package', 'import-binding', 'web-stamp', 'web-build',
+                                 'served-build', 'served-bytes', 'artifact-bytes', 'cli-ahead', 'web-ahead', 'foreign-ahead',
+                                 'cli-foreign-ahead', 'web-shared-ahead', 'web-ahead-records'])
+def test_component_identity_uses_own_release_and_checks_compatibility(tmp_path, monkeypatch, fault):
+    import io
+    import subprocess
+    checkout = tmp_path / 'source'
+    checkout.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    package = checkout / subject.CLI_SOURCE
+    package.mkdir(parents=True)
+    contents = {'cli.py': b'CLI release fixture\n', 'wsclient.py': b'CLI transport fixture\n'}
+    for name, data in contents.items():
+        (package / name).write_bytes(data)
+    shared = checkout / 'services/_shared'
+    shared.mkdir()
+    (shared / 'spawn_profiles.py').write_text('shared admission contract')
+    (shared / 'asset_schema.py').write_text('shared asset contract')
+    (checkout / 'renderer').mkdir()
+    (checkout / 'renderer/app.js').write_text('web source fixture')
+    git('add', '.')
+    git('commit', '-qm', 'component release')
+    released = git('rev-parse', 'HEAD')
+    if fault == 'cli-source':
+        (package / 'cli.py').write_text('independent daemon-side CLI')
+    elif fault == 'cli-ahead':
+        contents['cli.py'] = b'independently released CLI\n'
+        (package / 'cli.py').write_bytes(contents['cli.py'])
+    elif fault in ('shared-contract', 'web-shared-ahead'):
+        (shared / 'spawn_profiles.py').write_text('incompatible daemon-side contract')
+    elif fault in ('web-source', 'web-ahead', 'web-ahead-records'):
+        (checkout / 'renderer/app.js').write_text('independent daemon-side web')
+    if fault == 'web-ahead-records':
+        for name in ('docs/web.md', 'test/web.test.js'):
+            target = checkout / name
+            target.parent.mkdir(exist_ok=True)
+            target.write_text('component evidence')
+    if fault not in ('cli-ahead', 'web-ahead', 'web-shared-ahead', 'web-ahead-records'):
+        (checkout / 'daemon-only').write_text('independent daemon release')
+    git('add', '.')
+    git('commit', '-qm', 'daemon release')
+    daemon = git('rev-parse', 'HEAD')
+    version = daemon if fault == 'equal' else released
+    web_version = released
+    if fault in ('cli-ahead', 'web-ahead', 'foreign-ahead', 'cli-foreign-ahead', 'web-shared-ahead', 'web-ahead-records'):
+        if fault in ('cli-ahead', 'cli-foreign-ahead'):
+            version = daemon
+        else:
+            web_version = daemon
+        daemon = released
+    release_root = tmp_path / 'release'
+    installed = release_root / 'runtime/site-packages/agent_orch'
+    installed.mkdir(parents=True)
+    for name, data in contents.items():
+        (installed / name).write_bytes(data)
+    tree_hash = hashlib.sha256(b''.join(name.encode() + b'\0' + data for name, data in sorted(contents.items()))).hexdigest()
+    modules = {name: {'file': str(installed / (name + '.py')), 'sha256': hashlib.sha256(contents[name + '.py']).hexdigest()}
+               for name in ('cli', 'wsclient')}
+    artifact = tmp_path / 'web'
+    dist = artifact / 'renderer/dist/web'
+    dist.mkdir(parents=True)
+    (artifact / 'build-sha.txt').write_text(web_version)
+    (dist / 'web.html').write_text('<script src="bundle.js"></script>')
+    (dist / 'bundle.js').write_text('installed web bundle')
+    frozen = json.loads(subprocess.check_output(['node', '-e',
+        'const s=require(process.argv[1]).freezeWebDist(process.argv[2]); console.log(JSON.stringify({buildId:s.buildId}))',
+        str(subject.ROOT / 'server/web_build_id.js'), str(dist)], text=True))['buildId']
+    value = manifest()
+    value['source_sha'] = daemon
+    value['daemon']['checkout'] = str(checkout)
+    value['cli'].update(version=version, manifest_path=str(release_root / 'manifest.json'))
+    value['web'] = {'source_sha': web_version, 'artifact': str(artifact), 'build_id': frozen}
+    value['expected_build_id'] = frozen
+    release = {'runtime_package': {'path': subject.CLI_SOURCE, 'sha256': tree_hash}}
+    expected = {'shared-contract': 'CLI shared contracts incompatible', 'foreign-ahead': 'web release changes outside its owned paths',
+                'cli-foreign-ahead': 'CLI release changes outside its owned paths', 'web-shared-ahead': 'web shared contracts incompatible',
+                'manifest-package': 'CLI manifest package differs', 'installed-package': 'installed CLI package differs',
+                'import-binding': 'imported CLI module differs', 'web-stamp': 'web artifact source stamp drift',
+                'web-build': 'web artifact/served build identity mismatch', 'served-build': 'web artifact/served build identity mismatch',
+                'served-bytes': 'served web asset differs', 'artifact-bytes': 'web artifact/served build identity mismatch'}
+    if fault == 'manifest-package':
+        release['runtime_package']['sha256'] = 'f' * 64
+    elif fault == 'installed-package':
+        (installed / 'cli.py').write_text('replaced installed CLI')
+    elif fault == 'import-binding':
+        modules['wsclient']['sha256'] = 'f' * 64
+    elif fault == 'web-stamp':
+        (artifact / 'build-sha.txt').write_text(daemon)
+    elif fault == 'web-build':
+        value['web']['build_id'] = 'wrong'
+    elif fault == 'artifact-bytes':
+        (dist / 'bundle.js').write_text('changed installed bundle')
+    monkeypatch.setattr(subject, 'served_build', lambda url: 'wrong' if fault == 'served-build' else frozen)
+    monkeypatch.setattr(subject, 'urlopen', lambda url, timeout: io.BytesIO(
+        b'wrong served bytes' if fault == 'served-bytes' else (dist / 'bundle.js').read_bytes()))
+    run = subject.Journey(value, tmp_path)
+    if fault in ('mixed', 'equal', 'cli-source', 'web-source', 'cli-ahead', 'web-ahead', 'web-ahead-records'):
+        proof = run.component_identity(release, modules)
+        assert proof['cli_version'] == version and proof['web_source_sha'] == web_version
+        assert proof['web_build_id'] == frozen and run.fixtures == []
+        if fault == 'web-ahead-records':
+            assert proof['web_compatibility']['component_forward_paths'] == ['renderer/app.js']
+            assert proof['web_compatibility']['record_forward_paths'] == ['docs/web.md', 'test/web.test.js']
+    else:
+        with pytest.raises(AssertionError, match=expected[fault]):
+            run.component_identity(release, modules)
+        assert run.fixtures == []
+
+
+@pytest.mark.parametrize('component', ['CLI', 'web'])
+@pytest.mark.parametrize('destination', ['owned', 'docs', 'test'])
+def test_component_compatibility_rejects_foreign_source_renames(tmp_path, component, destination):
+    import subprocess
+    checkout = tmp_path / 'source'
+    checkout.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(checkout), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'diff.renames', 'true')
+    owned = subject.CLI_OWNED if component == 'CLI' else subject.WEB_SOURCES
+    own_root = owned[0] if component == 'CLI' else 'renderer'
+    for name, contents in ((own_root + '/existing.py', 'owned source'),
+                           ('services/_shared/contract.py', 'shared source'),
+                           ('foreign/runtime.py', 'foreign runtime, unique content for exact rename')):
+        target = checkout / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    git('add', '.')
+    git('commit', '-qm', 'base')
+    daemon = git('rev-parse', 'HEAD')
+    renamed = (own_root if destination == 'owned' else destination) + '/renamed.py'
+    (checkout / renamed).parent.mkdir(parents=True, exist_ok=True)
+    git('mv', 'foreign/runtime.py', renamed)
+    git('commit', '-qm', 'foreign source moved into allowed destination')
+    version = git('rev-parse', 'HEAD')
+    # Prove this is a detected rename, rather than a vacuous path-control test.
+    assert git('diff', '--find-renames', '--name-status', daemon, version) == 'R100\tforeign/runtime.py\t' + renamed
+    with pytest.raises(AssertionError, match=component + ' release changes outside its owned paths'):
+        subject.component_compatibility(checkout, version, daemon, owned, component)
