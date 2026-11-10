@@ -257,7 +257,7 @@ def test_real_failed_socket_is_aborted_inside_the_budget(tmp_path, monkeypatch, 
             if not data:
                 break
         # The owned receive machinery terminates without waiting for the peer.
-        deadline = _time.monotonic() + 0.5
+        deadline = _time.monotonic() + 2.0  # guaranteed by close_socket; scheduling only (0.5 s flaked 1/20 under load)
         while any(t.is_alive() for t in set(threading.enumerate()) - before - {peer.thread}) and _time.monotonic() < deadline:
             _time.sleep(0.02)
         assert not [t for t in set(threading.enumerate()) - before - {peer.thread} if t.is_alive()]
@@ -304,3 +304,62 @@ def test_late_welcome_gets_no_hello_and_no_retry(tmp_path, monkeypatch):
     with pytest.raises(core.LiveWindowError, match="deadline"):
         core._OperatorConnection("ws://127.0.0.1:0", tmp_path / "t.json", 5.0, None).__enter__()
     assert sent == [] and connects == [1]
+
+
+# --- cycle 2 re-review (3585799e): proof latency and a peer close before hello ---
+def test_no_hello_after_proof_consumes_the_deadline(tmp_path, monkeypatch):
+    clock = {"mono": 0.0}; sent = []
+    class Socket:
+        def recv(self, timeout):
+            return json.dumps({"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": 1e12}}})
+        def send(self, payload): sent.append(payload)
+        def close_socket(self): pass
+    def slow_proof(path, welcome):
+        clock["mono"] = 5.1
+        return {"type": "hello"}
+    monkeypatch.setattr(core, "connect", lambda url, **kw: Socket())
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(core, "operator_hello", slow_proof)
+    with pytest.raises(core.LiveWindowError, match="deadline"):
+        core._OperatorConnection("ws://127.0.0.1:0", tmp_path / "t.json", 5.0, None).__enter__()
+    assert sent == []
+
+
+def test_real_peer_close_before_hello_stays_inside_the_budget(tmp_path, monkeypatch):
+    from websockets.protocol import CLOSING
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
+    peer = RawPeer([("send", welcome), ("sleep", 0.8), ("close",)])
+    sockets = []
+    real_connect = core.connect
+    monkeypatch.setattr(core, "connect", lambda *a, **kw: (sockets.append(real_connect(*a, **kw)), sockets[-1])[1])
+    def proof_until_peer_closes(path, welcome):
+        end = _time.monotonic() + 1.2
+        while sockets[0].protocol.state is not CLOSING and _time.monotonic() < end:
+            _time.sleep(0.002)
+        assert sockets[0].protocol.state is CLOSING
+        return {"type": "hello"}
+    monkeypatch.setattr(core, "operator_hello", proof_until_peer_closes)
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 1.5, None)
+    started = _time.monotonic()
+    try:
+        with pytest.raises(Exception):
+            connection.__enter__()
+        assert _time.monotonic() - started < 1.5
+        assert connection._socket is None
+    finally:
+        connection._abort()
+        peer.stop()
+
+
+def test_real_successful_handshake_keeps_the_library_close_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
+    peer = RawPeer([("send", welcome), ("read",), ("send", {"type": "snapshot", "sessions": []})])
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 2.0, None)
+    try:
+        assert connection.__enter__().snapshot == {"type": "snapshot", "sessions": []}
+        # Ordinary RPC and shutdown after a good handshake keep websockets' own close deadline.
+        assert connection._socket.close_deadline is None
+    finally:
+        connection._abort()
+        peer.stop()
