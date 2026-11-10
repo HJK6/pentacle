@@ -34,9 +34,12 @@ async function installedJourney(ctx, descriptor) {
           if (!record) return;
           pending.delete(reply.id);
           record.settled_at = Date.now();
-          record.state = reply.ok === false || reply.result?.error_code ? 'error' : 'success';
-          record.error_code = reply.error?.code || reply.result?.error_code || null;
           const result = reply.result || {};
+          record.state = reply.ok === false || result.ok === false || result.error_code ? 'error' : 'success';
+          record.error_code = reply.error?.code || result.error_code || result.error?.code || null;
+          const error = reply.error?.message || result.error?.message || (typeof result.error === 'string' ? result.error : null);
+          record.error = typeof error === 'string' ? error.slice(0, 1024) : null;
+          record.error_truncated = typeof error === 'string' && error.length > 1024;
           const asset = result.asset;
           const ownAsset = asset?.asset_id === reportAsset && asset?.session_key?.stream_id === reportOwner;
           record.response = { type:result.type, asset_id:asset?.asset_id,
@@ -127,7 +130,10 @@ async function installedJourney(ctx, descriptor) {
       report_id:!!root && Array.from(root.querySelectorAll('h2')).filter(e => e.textContent.trim() === ${JSON.stringify(descriptor.report_id)}).length === 1 };
     checks.pass = Object.values(checks).every(Boolean);
     const store = window.PentacleChatStore?.getState?.() || {};
-    return { evaluated_at:Date.now(), checks, bodyDOM:body?.outerHTML || null,
+    return { evaluated_at:Date.now(), checks,
+      diagnostics:{ whole_cell_summary:!!cell?.textContent.includes(${JSON.stringify(descriptor.summary)}),
+        whole_cell_report_id:!!cell?.textContent.includes(${JSON.stringify(descriptor.report_id)}) },
+      bodyDOM:body?.outerHTML || null,
       cellDOM:cell?.outerHTML || null, cellText:cell?.textContent || null,
       tabs:tabs.map(e => ({ stream_id:e.dataset.streamId, asset_id:e.dataset.assetId, asset_key:e.dataset.assetKey, active:e.classList.contains('active') })),
       store_events:(Array.isArray(store.events) ? store.events : []).filter(e => e.stream_id === ${JSON.stringify(descriptor.fixtures[0].stream_id)}),

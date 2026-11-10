@@ -133,6 +133,8 @@ for (const mode of ['wrong-slot','wrong-stream','duplicate']) test('actual repor
 });
 test('actual report reader refuses header decoy without a rendered body',async()=>{
   const r=await readReport('header-decoy'); assert.ok(r.error,'header text cannot qualify report rendering');
+  assert.deepEqual(r.observation.report.last_sample.diagnostics,{ whole_cell_summary:true, whole_cell_report_id:true });
+  assert.equal(r.observation.report.last_sample.checks.pass,false);
 });
 for (const mode of ['rpc-error','rpc-pending']) test('actual report reader retains failure DOM and scoped '+mode+' evidence',async()=>{
   const r=await readReport(mode); assert.ok(r.error); const e=r.observation.report;
@@ -147,4 +149,32 @@ test('actual report reader preserves primary failure when diagnostic capture fai
 test('actual report reader accepts the selected visible report body',async()=>{
   const r=await readReport('good');assert.equal(r.error,undefined);assert.equal(r.observation.report.click_result,true);assert.equal(r.observation.report.last_sample.checks.pass,true);
   assert.ok(r.observation.report.rpc.some(x=>x.state==='success' && x.response.body==='owned report payload'));
+});
+
+// Real asset handlers return an application failure inside the host's successful RPC envelope.
+const { registerAssetIpcHandlers } = require('../../main/asset_ipc_bridge');
+for (const method of ['chat-stream:asset-get','chat-stream:asset-comments-list']) test('actual report RPC recorder retains nested handler failure for '+method,async()=>{
+  const handlers=new Map();
+  registerAssetIpcHandlers({ handle:(name,fn)=>handlers.set(name,fn) },{
+    assetGet:async()=>{throw new Error('owned body unavailable');},
+    assetCommentsList:async()=>{throw new Error('owned comments unavailable');},
+  });
+  let source;
+  await assert.rejects(installedJourney({session:{send:async(_,args)=>{source=args.source;throw new Error('hook captured');}},report:{}},
+    {phase:'report',fixtures:[{stream_id:'fixture:report'}],asset_id:'owned-asset'}),/hook captured/);
+  class Socket {
+    constructor(){this.listeners=[];}
+    addEventListener(type,fn){if(type==='message')this.listeners.push(fn);}
+    send(){}
+    receive(frame){for(const fn of this.listeners)fn({data:JSON.stringify(frame)});}
+  }
+  const window={WebSocket:Socket}; vm.runInNewContext(source,{window,Date,Map,JSON});
+  const socket=new window.WebSocket('wss://fixture.invalid/cc');
+  const args={stream_id:'fixture:report',asset_id:'owned-asset'};
+  const result=await handlers.get(method)(null,args);
+  assert.equal(result.ok,false);
+  socket.send(JSON.stringify({id:1,method,args:[args]}));
+  socket.receive({id:1,ok:true,result}); // Actual server/ws_bridge invoke response.
+  const record=window.__installedJourney.reportRpc[0];
+  assert.equal(record.state,'error'); assert.match(record.error,/owned (body|comments) unavailable/);
 });
