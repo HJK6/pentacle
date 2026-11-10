@@ -31,7 +31,8 @@ class Counterparts:
         self.repo.mkdir()
         self.calls, self.failures = [], set()
         self.source, self.policy, self.pid = "prior", "prior", 111
-        self.catalog_drift = self.input_drift = False
+        self.catalog_drift = self.input_drift = self.identity_mismatch = False
+        self.verified_prior = self.recovery_authorization = None
 
     def event(self, name):
         self.calls.append(name)
@@ -74,13 +75,31 @@ class Counterparts:
         direction = "prior" if rollback else "target"
         self.event("bootstrap_" + direction)
         self.pid = 222 if rollback else 333
+        if rollback:
+            # Observed fresh boot, PID change and runtime SHA readback.
+            self.verified_prior = {"pid": 222, "birth": "prior-birth", "sha": "c" * 40}
+        completed = []
         for step in ("readback", "dispatch", "canary", "slow_consumer", "cleanup"):
-            self.event(step + "_" + direction)
+            try:
+                self.event(step + "_" + direction)
+            except RuntimeError as exc:
+                exc.partial_result = {"outcome": "failed", "completed": list(completed)}
+                raise
+            completed.append(step)
+        if "unhealthy_" + direction in self.failures:
+            return {"outcome": "failed", "fleet_smoke": {"outcome": "failed"}, "slow_consumer": {"outcome": "passed"},
+                    "boot": {"outcome": "observed"}, "runtime": {"sha": "b" * 40}, "helper_dispatch": [],
+                    **({"restoration": {"outcome": "failed"}} if rollback else {})}
         return ({"outcome":"passed", "restoration":{"outcome":"passed"},
                  "model_canary":{"outcome":"not_run_by_design"}} if rollback else {"outcome":"passed"})
 
+    def prior_still_running(self, receipt, identity):
+        self.event("confirm_prior")
+        return not self.identity_mismatch and self.pid == identity["pid"]
+
     def validate_recovery(self, receipt, journal):
         self.event("validate_recovery")
+        self.seen_authorization = self.recovery_authorization
         if self.catalog_drift: raise c.Invalid("catalog drift")
         if journal["phase"] == "committed" and self.current(receipt) != journal["postimage"]:
             raise c.Invalid("post-commit drift")
@@ -89,6 +108,7 @@ class Counterparts:
         assert self.current(receipt) == journal["restored"]
 
     def keep_stopped(self, receipt):
+        self.event("keep_stopped")
         self.pid = None
 
 
@@ -325,6 +345,12 @@ def test_actual_identity_and_account_verifier_accept_only_matching_source_pairs(
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "skip_kickstart": True},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "release_inputs": Path("/input")},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "rollback": True},
+    {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "recovery_authorization": Path("/auth")},
+    {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "prepare_only": True,
+     "recovery_authorization": Path("/auth")},
+    {"rollback": True, "recovery_authorization": Path("/auth"), "recovery_go_tell_id": "go"},
+    {"rollback": True, "coordinated_receipt": Path("/receipt"), "recovery_authorization": Path("/auth")},
+    {"rollback": True, "coordinated_receipt": Path("/receipt"), "recovery_go_tell_id": "go"},
 ])
 def test_unsupported_flag_combinations_refuse_before_mutation(tmp_path, kwargs):
     calls = []
@@ -358,6 +384,187 @@ def test_journal_write_failure_after_stop_is_never_a_refusal(transaction, monkey
     assert result["phase"] == "recovery_required" and adapter.pid is None
 
 
+def _journal(tx, path):
+    return tx.load(path)[1]
+
+
+def test_failed_forward_health_result_is_journaled_before_raise(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.add("unhealthy_target")
+    result = tx.apply(intent, path)
+    journal = _journal(tx, path)
+    assert result["forward_failure"]["reason"] == "candidate health failed"
+    assert journal["result"]["outcome"] == "failed"
+    assert {"fleet_smoke", "slow_consumer", "boot", "runtime", "helper_dispatch"} <= set(journal["result"])
+    assert journal["phase"] == "rolled_back"
+
+
+def test_verifier_raise_after_fleet_smoke_journals_partial_result(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.add("slow_consumer_target")
+    result = tx.apply(intent, path)
+    journal = _journal(tx, path)
+    assert result["forward_failure"]["reason"] == "slow_consumer_target"
+    assert journal["partial_result"]["completed"] == ["readback", "dispatch", "canary"]
+
+
+def test_failed_health_journal_failure_keeps_original_exception(transaction, monkeypatch):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.add("unhealthy_target")
+    real = c.atomic_json
+    def no_result(destination, value):
+        if Path(destination).name == "journal.json" and "result" in value:
+            raise OSError("owned journal unavailable")
+        return real(destination, value)
+    monkeypatch.setattr(c, "atomic_json", no_result)
+    result = tx.apply(intent, path)
+    assert result["forward_failure"]["reason"] == "candidate health failed"
+    assert result["journal_failure"] == "OSError"
+
+
+@pytest.mark.parametrize("failure", ["readback_prior", "dispatch_prior", "canary_prior",
+                                     "slow_consumer_prior", "cleanup_prior", "unhealthy_prior"])
+def test_prior_proof_failure_after_verified_boot_leaves_prior_running(transaction, failure):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.update({"canary_target", failure})
+    result = tx.apply(intent, path)
+    journal = _journal(tx, path)
+    assert result["phase"] == "recovery_required" and result["exit_code"] == 12 and result["outcome"] == "failed"
+    assert adapter.pid == 222 and "keep_stopped" not in adapter.calls
+    assert adapter.calls.index("confirm_prior") > adapter.calls.index("bootstrap_prior")
+    assert journal["rollback_result"]["outcome"] == "failed"
+    assert journal["rollback_result"]["prior_identity"] == {"pid": 222, "birth": "prior-birth", "sha": "c" * 40}
+    assert journal["prior_running"] == journal["rollback_result"]["prior_identity"]
+    assert journal["forward_failure"]["reason"] == "canary_target"
+    assert result["full_fleet_acceptance"] is False
+
+
+@pytest.mark.parametrize("failure", ["switch_prior", "policy_prior", "bootstrap_prior"])
+def test_admitted_failure_before_verified_boot_keeps_stopping(transaction, failure):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.update({"canary_target", failure})
+    result = tx.apply(intent, path)
+    assert result["phase"] == "recovery_required" and adapter.pid is None
+    assert "keep_stopped" in adapter.calls and "confirm_prior" not in adapter.calls
+    assert "prior_running" not in _journal(tx, path)
+
+
+def test_identity_mismatch_at_decision_point_signals_nothing(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.update({"canary_target", "dispatch_prior"})
+    adapter.identity_mismatch = True
+    result = tx.apply(intent, path)
+    journal = _journal(tx, path)
+    assert result["phase"] == "recovery_required"
+    assert "keep_stopped" not in adapter.calls and adapter.pid == 222
+    assert journal["prior_identity_mismatch"] == {"pid": 222, "birth": "prior-birth", "sha": "c" * 40}
+    assert "prior_running" not in journal
+
+
+def test_journal_failure_after_passed_restoration_leaves_proven_prior_running(transaction, monkeypatch):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.add("canary_target")
+    real = c.atomic_json
+    def fail_rolled_back(destination, value):
+        if Path(destination).name == "journal.json" and value.get("phase") == "rolled_back":
+            raise OSError("owned journal unavailable")
+        return real(destination, value)
+    monkeypatch.setattr(c, "atomic_json", fail_rolled_back)
+    result = tx.apply(intent, path)
+    assert result["phase"] == "recovery_required" and result["journal_failure"] == "OSError"
+    assert adapter.pid == 222 and "keep_stopped" not in adapter.calls
+    assert _journal(tx, path)["prior_running"]["pid"] == 222
+
+
+def test_pre_admission_refusal_of_explicit_recovery_leaves_running_prior_untouched(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.update({"canary_target", "dispatch_prior"})
+    tx.apply(intent, path)
+    adapter.failures.clear(); adapter.calls.clear(); adapter.catalog_drift = True
+    with pytest.raises(c.Invalid, match="catalog drift"):
+        tx.rollback(path)
+    assert adapter.pid == 222 and "stop" not in adapter.calls and "keep_stopped" not in adapter.calls
+    adapter.catalog_drift = False
+    assert tx.rollback(path)["phase"] == "rolled_back" and adapter.pid == 222
+
+
+def _authorization(tx, path, **changes):
+    receipt = c.load_receipt(path)
+    value = {"transaction_id": receipt["intent"]["transaction_id"], "receipt_sha256": receipt["receipt_sha256"],
+             "original_controller_sha": receipt["intent"]["controller_sha"], "replacement_controller_sha": "e" * 40,
+             "operation": "recovery", "expected_prior_sha": receipt["intent"]["prior_sha"],
+             "expected_target_sha": receipt["intent"]["target_sha"],
+             "expected_live": {"sha": receipt["intent"]["prior_sha"], "pid": 222, "birth": "prior-birth"},
+             "authorized_by": "host:fd-example", "fd_gate_reference": "fd-gate-example"}
+    for key, item in changes.items():
+        if item is None: value.pop(key)
+        else: value[key] = item
+    return private_json(Path(receipt["transaction_directory"]) / "recovery-authorization.json", value)
+
+
+def _running_prior_after_proof_failure(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    adapter.failures.update({"canary_target", "dispatch_prior"})
+    tx.apply(intent, path)
+    adapter.failures.clear(); adapter.calls.clear()
+    return tx, adapter, path
+
+
+def test_authorized_replacement_recovery_is_admitted_and_journaled(transaction):
+    tx, adapter, path = _running_prior_after_proof_failure(transaction)
+    auth = _authorization(tx, path)
+    result = tx.rollback(path, authorization=auth, go_tell_id="go-tell-example")
+    journal = _journal(tx, path)
+    assert result["phase"] == "rolled_back"
+    assert adapter.seen_authorization["replacement_controller_sha"] == "e" * 40
+    assert journal["recovery_authorization"] == {"sha256": c.file_digest(auth), "replacement_controller_sha": "e" * 40,
+        "original_controller_sha": "a" * 40, "authorized_by": "host:fd-example",
+        "fd_gate_reference": "fd-gate-example", "go_tell_id": "go-tell-example"}
+
+
+@pytest.mark.parametrize("change", [
+    {"transaction_id": "other-transaction-01"}, {"receipt_sha256": "0" * 64},
+    {"original_controller_sha": "b" * 40}, {"replacement_controller_sha": "a" * 40},
+    {"replacement_controller_sha": "E" * 40}, {"operation": "forward"},
+    {"expected_prior_sha": "d" * 40}, {"expected_target_sha": "d" * 40},
+    {"expected_live": {"sha": "c" * 40, "pid": 222}}, {"authorized_by": None}, {"fd_gate_reference": ""},
+    {"extra": "field"}, "world_readable", "outside_transaction", "no_go_tell"])
+def test_invalid_recovery_authorization_refuses_before_stop(transaction, change):
+    tx, adapter, path = _running_prior_after_proof_failure(transaction)
+    if isinstance(change, dict):
+        auth = _authorization(tx, path, **change)
+    else:
+        auth = _authorization(tx, path)
+        if change == "world_readable": auth.chmod(0o644)
+        elif change == "outside_transaction":
+            auth = private_json(path.parent / "recovery-authorization.json", json.loads(auth.read_bytes()))
+    with pytest.raises(c.Invalid):
+        tx.rollback(path, authorization=auth, go_tell_id=None if change == "no_go_tell" else "go-tell-example")
+    assert adapter.pid == 222 and "stop" not in adapter.calls and "keep_stopped" not in adapter.calls
+    assert "recovery_authorization" not in _journal(tx, path)
+
+
+def test_recovery_authorization_is_refused_by_forward_apply_and_prepare(transaction):
+    tx, adapter, intent, path = transaction
+    tx.prepare(intent, path)
+    auth = _authorization(tx, path)
+    adapter.calls.clear()
+    with pytest.raises(c.Invalid, match="recovery authorization"):
+        tx.apply(intent, path, authorization=auth)
+    with pytest.raises(c.Invalid, match="recovery authorization"):
+        tx.prepare(intent, path.with_name("receipt-other.json"), authorization=auth)
+    assert adapter.calls == [] and adapter.pid == 111
+
+
 def test_real_disposable_process_helper_forward_failure_and_explicit_rollback(tmp_path):
     from deploy.coordinated_harness import Bindings, run
     root = tmp_path / "process-rehearsal"
@@ -367,6 +574,39 @@ def test_real_disposable_process_helper_forward_failure_and_explicit_rollback(tm
     assert result["outcome"] == "passed" and result["fleet_readiness"] == "not_tested"
     assert len([e for e in result["events"] if e["event"] == "started"]) == 5
     assert len([e for e in result["events"] if e["event"] == "exited"]) == 5
+
+
+def test_real_disposable_process_prior_proof_failure_leaves_prior_serving(tmp_path):
+    from deploy.coordinated_harness import Bindings, Rehearsal
+    root = tmp_path / "process-prior-proof"
+    bindings = Bindings(root, "com.pentacle.test.coordinated.prior", "ws://127.0.0.1:0", root / "config.json",
+        c.state_root(root / "release"), root / "logs", root / "schedule.plist", root / "collector.plist")
+    adapter = Rehearsal(bindings, Path(__file__).resolve().parents[3])
+    try:
+        adapter.start()
+        machines = bindings.root / "machines.json"
+        c.atomic_json(machines, [{"name": "fixture", "ssh_target": None}])
+        intent, receipt = bindings.root / "intent.json", bindings.root / "receipt.json"
+        c.atomic_json(intent, {"schema": c.INTENT_SCHEMA, "transaction_id": "disposable-prior-proof",
+            "controller_sha": "a" * 40, "target_sha": adapter.target, "prior_sha": adapter.prior,
+            "machines_file": str(machines), "policy_file": str(adapter.policy), "excluded_hosts": [],
+            "gate_evidence": str(bindings.root / "synthetic-target-gate.json"),
+            "prior_gate_evidence": str(bindings.root / "synthetic-prior-gate.json")})
+        with c.transaction_lock(adapter.repo) as state:
+            tx = c.Transaction(adapter, state)
+            tx.prepare(intent, receipt)
+            adapter.fail_forward = adapter.fail_prior_proof = True
+            result = tx.apply(intent, receipt)
+            serving = adapter.process
+            assert result["phase"] == "recovery_required" and result["exit_code"] == 12
+            assert serving is not None and serving.poll() is None
+            assert tx.load(receipt)[1]["prior_running"]["pid"] == serving.pid
+            assert adapter.git("rev-parse", "HEAD") == adapter.prior
+            adapter.fail_prior_proof = False
+            assert tx.rollback(receipt)["phase"] == "rolled_back"
+            assert serving.poll() is not None and adapter.process.poll() is None
+    finally:
+        adapter.close()
 
 
 @pytest.mark.parametrize("field,value", [("label", "com.pentacle.chat-streamd-v2"),
@@ -503,7 +743,8 @@ def test_runtime_prepare_rejects_other_entrypoint_prefixes_before_staging(runtim
     assert before == (fixture.git("rev-parse", "HEAD"), fixture.policy.read_bytes(), plist_path.read_bytes())
 
 
-def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch(runtime_preparation, monkeypatch):
+def _concrete_counterparts(runtime_preparation, monkeypatch):
+    """Real Runtime with launchd/daemon-wire counterparts; returns the shared lifecycle."""
     import time
     runtime, fixture, intent, root = runtime_preparation
     plan = private_json(root / "intent.json", intent)
@@ -594,6 +835,12 @@ def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch
                 send_close=lambda payload:rpc(payload,"close"), wait_gone=lambda owned,deadline:not rows, timeout=1)
         yield rpc, lambda stream:None, lambda *a:pytest.fail("no model response expected"), register, close
     monkeypatch.setattr(restoration, "_operator_connection", connection)
+    runtime.d._launchd_state = lambda label, runner: deploy_mod.LaunchdState(loaded=running["pid"] is not None, pid=running["pid"])
+    return runtime, fixture, plan, receipt_path, running, lifecycle
+
+
+def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch(runtime_preparation, monkeypatch):
+    runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
     with c.transaction_lock(runtime.repo) as folder:
         tx = c.Transaction(runtime, folder)
         tx.prepare(plan, receipt_path)
@@ -602,6 +849,151 @@ def test_concrete_adapter_apply_and_committed_rollback_with_real_helper_dispatch
         assert tx.rollback(receipt_path)["phase"] == "rolled_back"
         assert fixture.git("rev-parse", "HEAD") == fixture.prior
     assert lifecycle == ["stop", "bootstrap", "stop", "bootstrap"]
+
+
+@pytest.mark.parametrize("kind", ["unhealthy", "raises"])
+def test_concrete_forward_failure_journals_verification(runtime_preparation, monkeypatch, kind):
+    runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
+    def slow(*a, **k):
+        if fixture.git("rev-parse", "HEAD") == fixture.prior: return {"outcome": "passed"}
+        if kind == "raises": raise c.Invalid("slow-consumer scan unavailable")
+        return {"outcome": "failed", "keepalive_timeout": 2}
+    runtime.d._scan_slow_consumer_window = slow
+    with c.transaction_lock(runtime.repo) as folder:
+        tx = c.Transaction(runtime, folder)
+        tx.prepare(plan, receipt_path)
+        result = tx.apply(plan, receipt_path)
+        journal = tx.load(receipt_path)[1]
+    assert result["phase"] == "rolled_back" and result["exit_code"] == 12
+    if kind == "unhealthy":
+        assert result["forward_failure"]["reason"] == "candidate health failed"
+        assert journal["result"]["outcome"] == "failed" and journal["result"]["fleet_smoke"]["outcome"] == "passed"
+        assert journal["result"]["slow_consumer"] == {"outcome": "failed", "keepalive_timeout": 2}
+        assert {"boot", "runtime", "helper_dispatch"} <= set(journal["result"])
+    else:
+        assert result["forward_failure"]["reason"] == "slow-consumer scan unavailable"
+        partial = journal["partial_result"]
+        assert partial["fleet_smoke"]["outcome"] == "passed" and {"boot", "runtime"} <= set(partial)
+        assert "slow_consumer" not in partial
+
+
+def test_concrete_prior_proof_failure_after_verified_boot_leaves_prior_running(runtime_preparation, monkeypatch):
+    runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
+    runtime.d._scan_slow_consumer_window = lambda *a, **k: (
+        {"outcome": "passed"} if fixture.git("rev-parse", "HEAD") == fixture.prior else {"outcome": "failed"})
+    def no_restoration(*a, **k):
+        raise c.Invalid("incomplete no-input restoration proof")
+    runtime.restoration_proof = no_restoration
+    with c.transaction_lock(runtime.repo) as folder:
+        tx = c.Transaction(runtime, folder)
+        tx.prepare(plan, receipt_path)
+        result = tx.apply(plan, receipt_path)
+        journal = tx.load(receipt_path)[1]
+    assert result["phase"] == "recovery_required" and result["exit_code"] == 12
+    assert lifecycle == ["stop", "bootstrap", "stop", "bootstrap"] and running["pid"] == 223
+    assert fixture.git("rev-parse", "HEAD") == fixture.prior
+    assert journal["prior_running"] == {"pid": 223, "birth": "counterpart-start", "sha": fixture.prior}
+    assert journal["rollback_failure"]["reason"] == "incomplete no-input restoration proof"
+
+
+def test_concrete_identity_mismatch_at_decision_point_signals_nothing(runtime_preparation, monkeypatch):
+    runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
+    runtime.d._scan_slow_consumer_window = lambda *a, **k: (
+        {"outcome": "passed"} if fixture.git("rev-parse", "HEAD") == fixture.prior else {"outcome": "failed"})
+    def replaced(*a, **k):
+        running["pid"] = 999  # launchd now names a different process
+        raise c.Invalid("incomplete no-input restoration proof")
+    runtime.restoration_proof = replaced
+    with c.transaction_lock(runtime.repo) as folder:
+        tx = c.Transaction(runtime, folder)
+        tx.prepare(plan, receipt_path)
+        result = tx.apply(plan, receipt_path)
+        journal = tx.load(receipt_path)[1]
+    assert result["phase"] == "recovery_required"
+    assert lifecycle == ["stop", "bootstrap", "stop", "bootstrap"] and running["pid"] == 999
+    assert journal["prior_identity_mismatch"]["pid"] == 223 and "prior_running" not in journal
+
+
+def _replacement_controller(runtime):
+    (runtime.controller / "replacement.txt").write_text("repaired controller\n")
+    for command in (["git", "add", "."], ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "replacement"]):
+        subprocess.run(command, cwd=runtime.controller, check=True, capture_output=True)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=runtime.controller, text=True).strip()
+
+
+def _prepared_receipt(runtime, intent, root, name):
+    folder = root / name; folder.mkdir(mode=0o700)
+    receipt = {"intent": intent, "transaction_directory": str(folder), "receipt_path": str(folder / "receipt.json"),
+               "receipt_sha256": "0" * 64, **runtime.prepare(intent, folder)}
+    runtime.guard = lambda *a, **k: {"sole_deployer": True}
+    return receipt
+
+
+def _runtime_authorization(intent, replacement, **live):
+    return {"transaction_id": intent["transaction_id"], "original_controller_sha": intent["controller_sha"],
+            "replacement_controller_sha": replacement, "operation": "recovery",
+            "expected_prior_sha": intent["prior_sha"], "expected_target_sha": intent["target_sha"],
+            "expected_live": {"sha": intent["prior_sha"], "pid": 4242, "birth": "live-birth", **live},
+            "authorized_by": "fixture:fd", "fd_gate_reference": "fixture-gate"}
+
+
+def test_replacement_controller_admitted_only_with_exact_authorization(runtime_preparation):
+    runtime, fixture, intent, root = runtime_preparation
+    receipt = _prepared_receipt(runtime, intent, root, "replacement")
+    # An authorization in force binds the replacement exactly; the original
+    # pinned controller no longer satisfies it.
+    runtime.recovery_authorization = _runtime_authorization(intent, "f" * 40)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+    runtime.recovery_authorization = None
+    runtime.validate_common(receipt, forward=False)
+    replacement = _replacement_controller(runtime)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+    runtime.recovery_authorization = _runtime_authorization(intent, replacement)
+    runtime.validate_common(receipt, forward=False)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=True)
+    runtime.recovery_authorization = _runtime_authorization(intent, "f" * 40)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+    runtime.recovery_authorization = _runtime_authorization(intent, replacement)
+    (runtime.controller / "dirty.txt").write_text("drift")
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+    (runtime.controller / "dirty.txt").unlink()
+    subprocess.run(["git", "remote", "set-url", "origin", "https://example.invalid/other.git"], cwd=runtime.controller, check=True)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+
+
+@pytest.mark.parametrize("kind", ["match", "helper_proof", "live_pid", "live_birth", "live_sha"])
+def test_authorized_recovery_recomputes_prior_proofs_and_live_identity_before_admission(runtime_preparation, kind):
+    runtime, fixture, intent, root = runtime_preparation
+    receipt = _prepared_receipt(runtime, intent, root, "recompute-" + kind)
+    runtime.recovery_authorization = _runtime_authorization(intent, _replacement_controller(runtime))
+    runtime.d._launchd_state = lambda label, runner: deploy_mod.LaunchdState(loaded=True, pid=4242)
+    runtime.d._process_start = lambda pid, runner: "live-birth" if pid == 4242 else None
+    calls = []
+    real = runtime.helper_proof
+    def proof(*args, **kwargs):
+        calls.append(kwargs.get("verify_release"))
+        return real(*args, **kwargs)
+    runtime.helper_proof = proof
+    if kind == "helper_proof":
+        for helper in receipt["source"]["prior"]["original_helpers"].values():
+            helper["proof"] = {**helper["proof"], "code_identity": "substituted"}
+    elif kind == "live_pid": runtime.recovery_authorization["expected_live"]["pid"] = 4343
+    elif kind == "live_birth": runtime.recovery_authorization["expected_live"]["birth"] = "other-birth"
+    elif kind == "live_sha": runtime.recovery_authorization["expected_live"]["sha"] = intent["target_sha"]
+    journal = {"phase": "recovery_required"}
+    if kind == "match":
+        runtime.validate_recovery(receipt, journal)
+        assert calls.count(False) == len(receipt["source"]["prior"]["original_helpers"])
+    else:
+        with pytest.raises(c.Invalid, match="before stop" if kind == "helper_proof" else "expected live"):
+            runtime.validate_recovery(receipt, journal)
+    assert not runtime.stopped and fixture.git("rev-parse", "HEAD") == fixture.prior
 
 
 def test_identity_change_refuses_before_active_checkout(isolated_release, monkeypatch):
@@ -660,6 +1052,11 @@ def test_parser_exposes_coordinated_intent_and_receipt():
         "--coordinated-receipt", "/private/receipt.json", "--prepare-only",
     ])
     assert args.prepare_only
+    args = deploy_mod.build_parser().parse_args([
+        "chat-streamd-v2", "--rollback", "--coordinated-receipt", "/private/receipt.json",
+        "--recovery-controller-authorization", "/private/auth.json", "--recovery-go-tell-id", "go-tell",
+    ])
+    assert args.recovery_controller_authorization == Path("/private/auth.json") and args.recovery_go_tell_id == "go-tell"
 
 
 def test_managed_helper_root_is_stable_after_a_coordinated_release(tmp_path):

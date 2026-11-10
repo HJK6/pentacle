@@ -241,6 +241,56 @@ attributed slow-consumer/cleanup checks remain required. Raw RPC sends no
 prompt, brief, role baseline or subsequent input; the existing `promptless`
 smoke does send a marker and is not used for rollback.
 
+A failed forward health result is journaled as `result` (boot, runtime, fleet
+smoke, slow consumer and helper dispatch kept separate) before
+`candidate health failed` is raised. A verifier that raises journals the
+sub-results completed before it as `partial_result`; a journal write failure
+keeps the original failure and records `journal_failure`.
+
+Recovery never stops a prior that has proved its identity. When the exact prior
+source, policy and plist are restored, a fresh launchd boot with a new PID is
+observed and its loaded runtime SHA equals the receipt's prior SHA, a later
+restoration-proof, helper-dispatch or slow-consumer failure, or a journal write
+failure after a passed proof, leaves that daemon serving. The journal records
+`prior_running` {pid, birth, sha} and a failed `rollback_result` with
+`prior_identity`; the phase stays `recovery_required` (exit 12, not qualified).
+Launchd PID, process start and checkout SHA are re-read at that decision point;
+on any mismatch nothing is signalled and `prior_identity_mismatch` is recorded.
+A failure before that identity is proven still stops only the owned process,
+and a refusal before admission touches nothing.
+
+A sealed receipt pins its controller SHA. To recover it from a repaired
+controller, the FD places an owner-only authorization file in the transaction
+directory and sends a GO tell quoting the file's sha256 and the replacement SHA:
+
+```json
+{"transaction_id": "...", "receipt_sha256": "...",
+ "original_controller_sha": "<receipt intent.controller_sha>",
+ "replacement_controller_sha": "<clean controller HEAD>", "operation": "recovery",
+ "expected_prior_sha": "...", "expected_target_sha": "...",
+ "expected_live": {"sha": "...", "pid": 123, "birth": "<ps lstart>"},
+ "authorized_by": "host:fd-stream", "fd_gate_reference": "..."}
+```
+
+```bash
+.venv/bin/python deploy/deploy.py chat-streamd-v2 \
+  --release-checkout /absolute/runtime --rollback \
+  --coordinated-receipt /private/receipt.json \
+  --recovery-controller-authorization /private/<transaction>/recovery-authorization.json \
+  --recovery-go-tell-id <GO tell id> --deployer-stream-id host:deployer
+```
+
+It is accepted only with `--rollback --coordinated-receipt`. While it is in
+force the original controller no longer qualifies. Before admission, recovery
+requires the controller to be clean at exactly the replacement SHA with the
+receipt's origin, the live launchd PID, process start and checkout SHA to equal
+`expected_live`, and the replacement installer to reproduce every sealed prior
+`original_helpers` proof (`original helper proof drift before stop`). All
+existing receipt, preimage, catalog, account, gate and drift checks still apply,
+and forward apply stays pinned to the receipt controller. The journal records
+the authorization digest, replacement SHA, `authorized_by`, `fd_gate_reference`
+and the GO tell id.
+
 Remote-creation witness rollout requires a qualified compatible reader before
 any writer-enabled release. Seal that exact live reader as the writer release's
 prior and record the actual deploy-controller checkout/SHA separately from the

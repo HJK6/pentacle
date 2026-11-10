@@ -6,6 +6,27 @@ nonce/proof handshake, records immutable spawn ownership (request ID,
 idempotency key, stream ID, host/name, and session generation), and refuses to
 send a close frame unless all bindings still match authoritative inventory.
 
+The handshake makes at most one fresh-socket re-proof, within the original
+timeout, and only when the hello was sent before the welcome's advertised
+`expires_at` and its `hello.error` arrived at or after it (or carries
+`code: operator_nonce_expired`): the server judged a timely hello after it had
+queued. A late send, a denial before expiry or a second failure raises
+`LiveWindowError` with the first failure retained in
+`handshake_diagnostics`. Both timing samples are wall clock in the same domain
+as `expires_at`, which holds for the same-host loopback restoration and smoke
+callers; a cross-host caller is still bounded to one retry. Each failed socket
+is aborted without waiting for any close handshake (websockets `close_socket`,
+which also ends the receiver), a re-proof transport failure still reports the
+first failure, and no application request is ever retried. One absolute
+deadline covers both attempts: every step uses only the remaining budget, and
+a welcome, error or snapshot that arrives at or after it is never acted on.
+The deadline is rechecked after proof construction, and a peer that has begun
+closing gets no hello. Each proof socket is opened with `close_timeout=0`, so
+no send or close waits for a closing peer. Only after a timely snapshot, with
+the deadline and an open, non-closing state rechecked under the protocol lock,
+does the connection get its normal close timeout; a connection the peer has
+begun closing fails the handshake instead.
+
 The authenticated snapshot must advertise
 `capabilities.close_expected_generation=true` before normal activation. That
 wire capability is forwarded to the runtime's lifecycle lock, so a close

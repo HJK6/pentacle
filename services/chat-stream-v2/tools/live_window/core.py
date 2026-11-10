@@ -25,6 +25,11 @@ from websockets.exceptions import ConnectionClosed
 
 from _shared import operator_auth
 
+# Wall clock in the domain of the welcome's advertised ``expires_at``. Valid for
+# the same-host loopback restoration and smoke callers this handshake serves.
+_wall_clock = time.time
+NONCE_EXPIRED_CODE = "operator_nonce_expired"
+
 
 _PUSH_TYPES = frozenset({
     "chat.event", "child_report_ready", "host.status", "hosts.stats",
@@ -361,6 +366,7 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         self.sent_frame_observer = sent_frame_observer
         self._socket: Any | None = None
         self.snapshot: dict[str, Any] | None = None
+        self.handshake_diagnostics: list[dict[str, Any]] = []
 
     @property
     def socket(self) -> Any:
@@ -369,21 +375,116 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         return self._socket
 
     def __enter__(self) -> "_OperatorConnection":
-        self._socket = connect(self.url, open_timeout=self.timeout, close_timeout=self.timeout)
-        welcome = self._receive(self.timeout)
-        if welcome.get("type") != "welcome":
-            raise LiveWindowError(f"operator connection expected welcome: {welcome!r}")
-        hello = operator_hello(self.token_path, welcome)
-        self._send(hello)
+        # One budget covers both attempts. A hello sent before the advertised
+        # expiry but judged after it (queued behind the server's ordering lock)
+        # earns exactly one fresh-socket re-proof; nothing else is retried.
         deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            frame = self._receive(max(0.05, deadline - time.monotonic()))
-            if frame.get("type") == "hello.error":
-                raise LiveWindowError(f"operator nonce proof rejected: {frame!r}")
-            if frame.get("type") == "snapshot":
-                self.snapshot = frame
-                return self
-        raise LiveWindowError("operator handshake did not yield a snapshot")
+        first = self._handshake(deadline)
+        if first is None:
+            return self
+        if not first["reproof_eligible"] or time.monotonic() >= deadline:
+            raise LiveWindowError(f"operator nonce proof rejected: {first['error']!r}")
+        try:
+            second = self._handshake(deadline)
+        except Exception as exc:
+            raise LiveWindowError(f"operator re-proof failed: {exc}; first failure: {first['error']!r}") from exc
+        if second is None:
+            return self
+        raise LiveWindowError(f"operator nonce proof rejected after one re-proof: {second['error']!r}; "
+                              f"first failure: {first['error']!r}")
+
+    def _handshake(self, deadline: float) -> dict[str, Any] | None:
+        """Return None on snapshot, or the recorded hello.error with its socket aborted.
+
+        Every step uses the positive remaining budget of one absolute deadline,
+        and a frame that arrives at or after it is never acted on.
+        """
+        # Proof runs with no graceful-close wait, so a peer that begins closing
+        # can never hold a send or close past the deadline; _promote restores
+        # the normal close policy only for a proven, still-open connection.
+        self._socket = connect(self.url, open_timeout=self._remaining(deadline), close_timeout=0)
+        try:
+            welcome = self._receive(self._remaining(deadline))
+            self._remaining(deadline)
+            if welcome.get("type") != "welcome":
+                raise LiveWindowError(f"operator connection expected welcome: {welcome!r}")
+            hello = operator_hello(self.token_path, welcome)
+            self._remaining(deadline)
+            if self._peer_closing():
+                raise LiveWindowError("operator connection closed by peer before hello")
+            expires_at = ((welcome.get("auth") or {}).get("operator") or {}).get("expires_at")
+            self._send(hello)
+            sent_at = _wall_clock()
+            while True:
+                frame = self._receive(self._remaining(deadline))
+                self._remaining(deadline)
+                if frame.get("type") == "hello.error":
+                    error_at = _wall_clock()
+                    # A legacy generic error after expiry is possible expiry,
+                    # never proof of cause; a late send is never retried.
+                    timely = type(expires_at) in (int, float) and sent_at < expires_at
+                    record = {"error": frame, "sent_at": sent_at, "error_at": error_at, "expires_at": expires_at,
+                              "reproof_eligible": bool(timely and (error_at >= expires_at
+                                                                   or frame.get("code") == NONCE_EXPIRED_CODE))}
+                    self.handshake_diagnostics.append(record)
+                    self._abort()
+                    return record
+                if frame.get("type") == "snapshot":
+                    self._promote(deadline)
+                    self.snapshot = frame
+                    return None
+        except BaseException:
+            self._abort()
+            raise
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LiveWindowError("operator handshake deadline expired")
+        return remaining
+
+    def _promote(self, deadline: float) -> None:
+        """Give a proven socket the normal close policy, only while it is open and on time.
+
+        Checked under the protocol lock, so a connection the peer has begun
+        closing is a failed handshake and is never rescued.
+        """
+        sock = self._socket
+        mutex = getattr(sock, "protocol_mutex", None)
+        if mutex is None:  # test doubles
+            self._remaining(deadline)
+            return
+        # Real sockets only; the module's import surface stays connect + ConnectionClosed.
+        from websockets.protocol import OPEN
+        with mutex:
+            self._remaining(deadline)
+            if sock.protocol.state is not OPEN or sock.close_deadline is not None:
+                raise LiveWindowError("operator connection closed by peer during handshake")
+            sock.close_timeout = self.timeout
+
+    def _peer_closing(self) -> bool:
+        protocol = getattr(self._socket, "protocol", None)
+        if protocol is None:  # test doubles
+            return False
+        from websockets.protocol import OPEN
+        return protocol.state is not OPEN
+
+    def _abort(self) -> None:
+        """Drop a failed handshake socket without waiting on any close handshake.
+
+        websockets' close_socket shuts the transport and closes the receive
+        assembler, so its receiver ends without waiting for the peer. Only test
+        doubles without it fall back to close().
+        """
+        sock, self._socket = self._socket, None
+        if sock is None:
+            return
+        try:
+            abort = getattr(sock, "close_socket", None)
+            abort() if abort is not None else sock.close()
+        except Exception as exc:  # never mask the handshake failure
+            self.handshake_diagnostics.append({"cleanup_failure": f"{type(exc).__name__}: {exc}"})
 
     def __exit__(self, *_unused: object) -> None:
         self.close()

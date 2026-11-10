@@ -2024,7 +2024,13 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            skip_kickstart: bool = False, log_guard_dir: str | Path | None = None,
            boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
-           prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None, runner: Runner) -> dict[str, object]:
+           prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None,
+           recovery_authorization: Path | None = None, recovery_go_tell_id: str | None = None,
+           runner: Runner) -> dict[str, object]:
+    if (recovery_authorization is not None or recovery_go_tell_id is not None) and (
+            not rollback or coordinated_receipt is None or coordinated_plan is not None or prepare_only
+            or recovery_authorization is None or not recovery_go_tell_id):
+        raise DeployError("recovery controller authorization requires --rollback --coordinated-receipt and --recovery-go-tell-id")
     coordinated_mode = coordinated_plan is not None or coordinated_receipt is not None or prepare_only
     if smoke_accounts is not None and (coordinated_mode or release_inputs is not None):
         raise DeployError('account mapping belongs in coordinated intent or release-input activation')
@@ -2043,7 +2049,8 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                     boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir)
                 transaction = coordinated.Transaction(adapter, root)
                 if rollback:
-                    return transaction.rollback(coordinated_receipt)
+                    return transaction.rollback(coordinated_receipt, authorization=recovery_authorization,
+                                                go_tell_id=recovery_go_tell_id)
                 if prepare_only:
                     return transaction.prepare(coordinated_plan, coordinated_receipt)
                 return transaction.apply(coordinated_plan, coordinated_receipt)
@@ -2344,6 +2351,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coordinated-plan", type=Path, help="Private coordinated deployment intent.")
     parser.add_argument("--coordinated-receipt", type=Path, help="Sealed preparation receipt, also used for whole-transaction rollback.")
     parser.add_argument("--prepare-only", action="store_true", help="Stage inert helpers and seal the coordinated receipt only.")
+    parser.add_argument("--recovery-controller-authorization", type=Path,
+                        help="Private FD authorization for recovering the receipt from a replacement controller (rollback only).")
+    parser.add_argument("--recovery-go-tell-id", help="Ledger id of the FD GO tell quoting the authorization digest.")
     parser.add_argument("--release-inputs", type=Path, help="Observed installed baselines and external tuples for qualified seam admission.")
     parser.add_argument('--account', action='append', default=None, help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS for legacy full-matrix smoke')
     parser.add_argument("--deployer-stream-id", default=None)
@@ -2400,6 +2410,8 @@ def main(argv: list[str] | None = None) -> int:
             coordinated_receipt=args.coordinated_receipt,
             prepare_only=args.prepare_only,
             smoke_accounts=args.account,
+            recovery_authorization=args.recovery_controller_authorization,
+            recovery_go_tell_id=args.recovery_go_tell_id,
             runner=_run,
         )
     except DeployError as exc:
