@@ -198,7 +198,7 @@ def test_handoff_omitted_tuple_inherits_cross_provider_source(monkeypatch, tmp_p
     assert cli.spawn(_args(provider=None)) == 0
     assert {field: captured["payload"][field] for field in ("provider", "model", "effort")} == {
         "provider": "claude",
-        "model": "claude-fable-5-1",
+        "model": "claude-fable-5-2",
         "effort": "xhigh",
     }
     assert captured["payload"]["resolution_source"] == "handoff_inherited"
@@ -219,7 +219,7 @@ def test_handoff_same_tuple_alias_needs_no_confirmation(monkeypatch, tmp_path):
     )
 
     assert cli.spawn(_args(provider="claude", model="fable", effort="high")) == 0
-    assert captured["payload"]["model"] == "claude-fable-5-1"
+    assert captured["payload"]["model"] == "claude-fable-5-2"
     assert captured["payload"]["resolution_source"] == "handoff_inherited"
 
 
