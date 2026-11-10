@@ -1836,7 +1836,7 @@ class Comms:
                     current = await self.store.fetch_session(host,name) or {}
                     try:
                         await self.store.require_lane_execution(effective_assignment(current),
-                            target_stream_id=target, linked_only=True)
+                            target_stream_id=target, linked_only=True, fd_input=True)
                     except VerbError as exc:
                         exc.extra.setdefault("phase", phase)
                         raise

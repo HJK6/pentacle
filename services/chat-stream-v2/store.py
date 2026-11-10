@@ -6169,7 +6169,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             from store_work_lanes import require_lane_execution_conn
             destination = _session_for_stream_conn(conn, target)
             require_lane_execution_conn(conn, effective_assignment(destination), target_stream_id=target,
-                                        linked_only=True, live_sessions=lane_live)
+                                        linked_only=True, live_sessions=lane_live, fd_input=True)
             row = _insert_send_receipt_row(
                 conn, to_stream_id=target, request_id=request, receipt_id=receipt,
                 state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,
