@@ -12,7 +12,8 @@ local to that call and is discarded on success or exception. It is never stored
 on the Store or in a process cache. Write, promotion, single-event, and native
 input-splitting callers continue to use current transaction data without it.
 
-The object reads `tell_id,reply` once, lazily at the first delivery lookup. It
+The object reads `tell_id,reply` and SQLite’s extracted delivery target and text
+once, lazily at the first delivery lookup. It
 parses rows once, groups candidates by exact target and text, groups overlap
 checks by target, and retains each delivery text digest. An authenticated
 operator dispatch returns before that lookup and does not build the table.
@@ -31,12 +32,18 @@ Reuse applies only when every row meets the following boundary:
 - Delivery target and text are absent, null, or strings containing neither NUL
   nor an unpaired surrogate. The same string rule applies to lookup arguments.
 
-These checks exclude SQLite/Python disagreements in duplicate-key selection,
-JSON extensions, scalar and collection extraction, NUL string handling, and
-surrogate encoding. Valid escaped surrogate pairs decode to ordinary Unicode
-and stay eligible. Unexpected parsing failures also disable reuse. When a row
-or lookup falls outside the boundary, the current and subsequent lookups use
-the original SQL and parsing, including its exceptions. There is no schema or
+The same build statement extracts the two lookup fields with SQLite
+`json_extract`. Each extracted value must equal Python’s parsed value in both
+type and value, and must be null or a string. This runtime agreement check is
+additional to the guards above. It catches differences such as NUL inside an
+object key aliasing a normal key in SQLite. Valid escaped surrogate pairs
+decode to ordinary Unicode and stay eligible when both parsers agree.
+
+Every row is validated before either lookup map is exposed. A mismatch on a
+later row invalidates the entire build. SQL, fetch, or parse failures disable
+reuse; the build cursor closes before fallback. When a row or lookup falls
+outside the boundary, the current and subsequent lookups use the original SQL
+and parsing for their own answers or exceptions. There is no schema or
 index change and no new proof condition.
 
 ## Regression evidence
@@ -44,7 +51,7 @@ index change and no new proof condition.
 `tests/test_read_projection_deliveries.py` drives real Store inventory and
 history APIs. Its scale guard checks one delivery table read and exactly the
 row population as message count doubles and unrelated deliveries grow. It also
-checks six literal expected origins, projection freshness and exception
+checks seven literal expected origins, projection freshness and exception
 cleanup, and current-data promotion behavior.
 
 The complete ordered origin logs and projected events are compared against
@@ -53,4 +60,5 @@ The complete ordered origin logs and projected events are compared against
 `29cc4e6c1f84051d28442d2dc094a41596569eda6fe824e7721198f30dfcef75`.
 That oracle covers clean and unusual JSON, unrelated malformed rows, dispatches,
 peer and service input, missing proof records, lifecycle mismatches, unsplit
-quotations, overlapping deliveries, and own-row exclusion.
+quotations, overlapping deliveries, own-row exclusion, and NUL-key aliases
+before and after ordinary rows. The alias case independently expects unknown.

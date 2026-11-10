@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 
 from submission_events import EventProof, provider_text_digest
 from retention import history_query
@@ -51,8 +52,12 @@ class ProjectionDeliveries:
             return None
         if self._by_target is None:
             by_target, by_input = {}, {}
+            cursor = None
             try:
-                for row in conn.execute("SELECT tell_id,reply FROM v2_tell_deliveries"):
+                cursor = conn.execute(
+                    "SELECT tell_id,reply,json_extract(reply,'$.delivery.to_stream_id') AS sql_target,"
+                    "json_extract(reply,'$.delivery.text') AS sql_text FROM v2_tell_deliveries")
+                for row in cursor:
                     if not isinstance(row["reply"], str):
                         raise ValueError("non-text JSON")
                     payload = json.loads(row["reply"], object_pairs_hook=_unique_object,
@@ -63,17 +68,23 @@ class ProjectionDeliveries:
                     if delivery is not None and not isinstance(delivery, dict):
                         raise ValueError("non-object delivery")
                     delivery = delivery or {}
-                    for key in ("to_stream_id", "text"):
+                    for key, column in (("to_stream_id", "sql_target"), ("text", "sql_text")):
                         value = delivery.get(key)
                         if value is not None and not _lookup_string(value):
                             raise ValueError("unclean delivery lookup value")
+                        extracted = row[column]
+                        if type(extracted) is not type(value) or extracted != value:
+                            raise ValueError("SQLite/Python delivery lookup disagreement")
                     item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery,
                             "text_digest": provider_text_digest(delivery.get("text"))}
                     by_target.setdefault(delivery.get("to_stream_id"), []).append(item)
                     by_input.setdefault((delivery.get("to_stream_id"), delivery.get("text")), []).append(payload)
-            except (TypeError, ValueError, AttributeError, RecursionError):
+            except (sqlite3.Error, TypeError, ValueError, AttributeError, RecursionError):
                 self._legacy = True
                 return None
+            finally:
+                if cursor is not None:
+                    cursor.close()
             self._by_target, self._by_input = by_target, by_input
         return self._by_target.get(target, [])
 

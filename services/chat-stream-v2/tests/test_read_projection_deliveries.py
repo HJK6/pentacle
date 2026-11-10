@@ -34,7 +34,7 @@ async def measure(store, action):
     statements = []
     rows = []
     def row_factory(cursor, row):
-        if {column[0] for column in cursor.description} in ({'tell_id', 'reply'}, {'reply'}):
+        if {'tell_id', 'reply'} <= {column[0] for column in cursor.description} or {column[0] for column in cursor.description} == {'reply'}:
             rows.append(1)
         return sqlite3.Row(cursor, row)
     def begin(conn):
@@ -381,6 +381,164 @@ def test_single_event_and_write_projection_never_receive_table(monkeypatch):
             result = await store.fetch_projected_session_event('host-a:proof', event['daemon_seq'])
             assert result['raw']['input_provenance']['kind'] == 'peer'
             assert (await store.project_session_events([event]))[0]['raw']['input_provenance']['kind'] == 'peer'
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def alias_payload(payload, case, key_order="alias-first"):
+    import copy
+    value = copy.deepcopy(payload)
+    delivery = value['delivery']
+    if case == 'target-number':
+        value['delivery']['to_stream_id'] = 7
+    elif case == 'text-number':
+        value['delivery']['text'] = 7
+    elif case.startswith('root'):
+        alias = {**delivery, 'to_stream_id': 'host-b:other'}
+        value = {'delivery\x00suffix': alias, **({} if case.endswith('only') else value)}
+    elif case.startswith('target'):
+        value['delivery'] = {'to_stream_id\x00suffix': 'host-b:other', **delivery}
+        if case.endswith('only'):
+            value['delivery'].pop('to_stream_id')
+    elif case.startswith('text'):
+        value['delivery'] = {'text\x00suffix': 'other text', **delivery}
+        if case.endswith('only'):
+            value['delivery'].pop('text')
+    if key_order == 'normal-first':
+        for mapping in (value, value.get('delivery', {})):
+            for key in list(mapping):
+                if '\x00' in key:
+                    item = mapping.pop(key)
+                    mapping[key] = item
+    return value
+
+
+@pytest.mark.parametrize('case', ['root-only', 'root-both', 'target-only', 'target-both',
+                                  'text-only', 'text-both', 'target-number', 'text-number'])
+@pytest.mark.parametrize('position', ['before', 'after'])
+@pytest.mark.parametrize('key_order', ['alias-first', 'normal-first'])
+def test_agreement_rule_full_ordered_oracle(case, position, key_order):
+    import copy
+    import tell_proof
+    import read_projection_legacy as legacy
+    from store import _project_session_events_conn
+    async def run():
+        store = Store(); store.start()
+        try:
+            events, payloads = await corpus(store)
+            alias = alias_payload(payloads['peer'], case, key_order)
+            def compare(conn):
+                # Place the changed row on either side of a valid row for this target.
+                originals = list(conn.execute('SELECT tell_id,reply,created_at FROM v2_tell_deliveries'))
+                normal = ('normal-other', json.dumps({'delivery': {'to_stream_id': 'host-a:proof', 'text': 'other'}}), 1.0)
+                rows = [('peer', json.dumps(alias), 1.0), normal]
+                if position == 'after':
+                    rows.reverse()
+                conn.execute('DELETE FROM v2_tell_deliveries')
+                conn.executemany('INSERT INTO v2_tell_deliveries VALUES(?,?,?)', rows + [tuple(r) for r in originals if r['tell_id'] != 'peer'])
+                conn.commit()
+                def outcome(fn):
+                    try:
+                        return ('ok', fn())
+                    except Exception as error:
+                        return ('error', type(error).__name__, str(error))
+                conn.execute('SAVEPOINT agreement_projection')
+                try:
+                    expected = [(e['stream_id'], e['daemon_seq'], outcome(lambda e=e: legacy.input_origin(conn, e, e['daemon_seq']))) for e in events]
+                    table = tell_proof.ProjectionDeliveries()
+                    actual = [(e['stream_id'], e['daemon_seq'], outcome(lambda e=e: tell_proof.input_origin(conn, e, e['daemon_seq'], deliveries=table))) for e in events]
+                    assert actual == expected
+                    real = tell_proof.input_origin
+                    try:
+                        tell_proof.input_origin = lambda c, e, i, **kwargs: legacy.input_origin(c, e, i)
+                        expected_events = outcome(lambda: _project_session_events_conn(conn, copy.deepcopy(events)))
+                    finally:
+                        tell_proof.input_origin = real
+                    actual_events = outcome(lambda: _project_session_events_conn(conn, copy.deepcopy(events), deliveries=tell_proof.ProjectionDeliveries()))
+                    assert actual_events == expected_events
+                    # Agreement rejection is sticky even for a later clean message.
+                    statements = []
+                    conn.set_trace_callback(statements.append)
+                    try:
+                        follow = events[-1]
+                        tell_proof.input_origin(conn, follow, follow['daemon_seq'], deliveries=table)
+                    finally:
+                        conn.set_trace_callback(None)
+                    legacy_lookup = any("WHERE json_extract(reply,'$.delivery.to_stream_id')" in sql for sql in statements)
+                    # With the ordinary key first, both engines choose the same
+                    # value; a harmless alias remains eligible for reuse.
+                    assert legacy_lookup == (not (case.endswith('both') and key_order == 'normal-first'))
+                finally:
+                    conn.execute('RELEASE agreement_projection')
+            await store.submit(compare)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_nul_key_alias_independent_expected_unknown():
+    async def run():
+        store = Store(); store.start()
+        try:
+            events, payloads = await corpus(store)
+            payload = alias_payload(payloads['peer'], 'target-both')
+            await store.submit(lambda conn: (conn.execute("UPDATE v2_tell_deliveries SET reply=? WHERE tell_id='peer'", (json.dumps(payload),)), conn.commit()))
+            projected = await store.fetch_session_event_tail('host-a:proof', limit=100)
+            peer = next(e for e in projected if e.get('raw', {}).get('fixture') == 'peer')
+            assert peer['raw']['input_provenance'] == {'kind': 'unknown', 'verified': False}
+            assert peer['kind'] == 'USER'
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure', ['execute', 'fetch'])
+def test_build_sql_or_fetch_error_closes_cursor_then_uses_legacy(failure):
+    import tell_proof
+    import read_projection_legacy as legacy
+    async def run():
+        store = Store(); store.start()
+        try:
+            events, _ = await corpus(store)
+            def prove(conn):
+                state = {'attempts': 0, 'closed': False, 'legacy_calls': 0}
+                class Cursor:
+                    def __init__(self, wrapped):
+                        self.wrapped = wrapped
+                        self.count = 0
+                    def __iter__(self):
+                        return self
+                    def __next__(self):
+                        if self.count == 1:
+                            raise sqlite3.OperationalError('injected build fetch failure')
+                        self.count += 1
+                        return next(self.wrapped)
+                    def close(self):
+                        self.wrapped.close()
+                        state['closed'] = True
+                class Connection:
+                    def __getattr__(self, name):
+                        return getattr(conn, name)
+                    def execute(self, sql, params=()):
+                        if sql.startswith('SELECT tell_id,reply,json_extract'):
+                            state['attempts'] += 1
+                            if failure == 'execute':
+                                raise sqlite3.OperationalError('injected build execute failure')
+                            return Cursor(conn.execute(sql, params))
+                        if "WHERE json_extract(reply,'$.delivery.to_stream_id')" in sql:
+                            assert failure == 'execute' or state['closed']
+                            state['legacy_calls'] += 1
+                        return conn.execute(sql, params)
+                event = events[1]
+                table = tell_proof.ProjectionDeliveries()
+                expected = legacy.input_origin(conn, event, event['daemon_seq'])
+                assert expected['kind'] == 'peer'
+                for _ in range(2):
+                    assert tell_proof.input_origin(Connection(), event, event['daemon_seq'], deliveries=table) == expected
+                assert state['attempts'] == 1 and state['legacy_calls'] == 2
+                assert failure == 'execute' or state['closed']
+            await store.submit(prove)
         finally:
             store.stop()
     asyncio.run(run())
