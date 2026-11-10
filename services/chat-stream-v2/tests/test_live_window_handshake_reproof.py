@@ -200,14 +200,19 @@ def _frame(opcode, payload):
 
 class RawPeer:
     """Owned loopback WebSocket peer that never answers a close handshake."""
-    def __init__(self, script):
-        self.script, self.listener = script, _socket.socket()
-        self.listener.bind(("127.0.0.1", 0)); self.listener.listen(1)
+    def __init__(self, script, *more_scripts):
+        self.scripts, self.listener = [script, *more_scripts], _socket.socket()
+        self.listener.bind(("127.0.0.1", 0)); self.listener.listen(len(self.scripts))
         self.url = "ws://127.0.0.1:%d" % self.listener.getsockname()[1]
         self.conn, self.done = None, threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True); self.thread.start()
 
     def serve(self):
+        for script in self.scripts:
+            self.serve_one(script)
+        self.done.wait(10)  # hold the socket open; never answer a close
+
+    def serve_one(self, script):
         conn, _ = self.listener.accept(); self.conn = conn
         request = b""
         while b"\r\n\r\n" not in request:
@@ -215,7 +220,7 @@ class RawPeer:
         key = [l.split(b":", 1)[1].strip() for l in request.split(b"\r\n") if l.lower().startswith(b"sec-websocket-key")][0]
         accept = base64.b64encode(_hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
         conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n")
-        for step in self.script:
+        for step in script:
             if step[0] == "send":
                 conn.sendall(_frame(0x1, json.dumps(step[1]).encode()))
             elif step[0] == "close":
@@ -224,7 +229,8 @@ class RawPeer:
                 _time.sleep(step[1])
             elif step[0] == "read":
                 conn.recv(65536)
-        self.done.wait(10)  # hold the socket open; never answer a close
+            elif step[0] == "wait":
+                step[1].wait(5)
 
     def stop(self):
         self.done.set()
@@ -351,15 +357,97 @@ def test_real_peer_close_before_hello_stays_inside_the_budget(tmp_path, monkeypa
         peer.stop()
 
 
-def test_real_successful_handshake_keeps_the_library_close_timeout(tmp_path, monkeypatch):
+# --- cycle 3 (ruling stage-a-cycle3): proof runs with close_timeout=0; success restores it ---
+def _closing(sock):
+    from websockets.protocol import OPEN
+    return sock.protocol.state is not OPEN
+
+
+def _owned_threads_end(before, peer):
+    deadline = _time.monotonic() + 2.0  # close_socket guarantees exit; scheduling only
+    while any(t.is_alive() for t in set(threading.enumerate()) - before - {peer.thread}) and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    return not [t for t in set(threading.enumerate()) - before - {peer.thread} if t.is_alive()]
+
+
+@pytest.mark.parametrize("reproof", [False, True])
+def test_real_success_survives_idle_then_rpc_and_normal_shutdown(tmp_path, monkeypatch, reproof):
     monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
     welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
-    peer = RawPeer([("send", welcome), ("read",), ("send", {"type": "snapshot", "sessions": []})])
-    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 2.0, None)
+    success = [("send", welcome), ("read",), ("send", {"type": "snapshot", "sessions": []}),
+               ("read",), ("send", {"type": "pong", "request_id": "after-idle"})]
+    expired = [("send", welcome), ("read",), ("send", {"type": "hello.error", "code": core.NONCE_EXPIRED_CODE})]
+    peer = RawPeer(*([expired, success] if reproof else [success]))
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 0.5, None)
     try:
         assert connection.__enter__().snapshot == {"type": "snapshot", "sessions": []}
-        # Ordinary RPC and shutdown after a good handshake keep websockets' own close deadline.
-        assert connection._socket.close_deadline is None
+        assert len(connection.handshake_diagnostics) == (1 if reproof else 0)
+        sock = connection.socket
+        assert sock.close_timeout == 0.5 and sock.close_deadline is None and sock.socket.gettimeout() is None
+        _time.sleep(0.8)  # idle beyond the whole handshake budget
+        assert connection.rpc({"type": "ping", "request_id": "after-idle"}) == {"type": "pong", "request_id": "after-idle"}
+        started = _time.monotonic()
+        connection.close()  # normal shutdown: the peer never answers, so the restored close policy bounds it
+        assert connection._socket is None and 0.3 < _time.monotonic() - started < 1.5
+    finally:
+        connection._abort()
+        peer.stop()
+
+
+def test_real_peer_close_between_check_and_send_adds_no_close_wait(tmp_path, monkeypatch):
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
+    release = threading.Event()
+    peer = RawPeer([("send", welcome), ("wait", release), ("close",)])
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    checked = {}
+    original = core._OperatorConnection._peer_closing
+    def check_then_peer_closes(self):
+        result = original(self)  # still OPEN at the check
+        release.set()
+        end = _time.monotonic() + 1.0
+        while not _closing(self._socket) and _time.monotonic() < end:
+            _time.sleep(0.002)
+        assert _closing(self._socket)
+        checked["at"] = _time.monotonic()
+        return result
+    monkeypatch.setattr(core._OperatorConnection, "_peer_closing", check_then_peer_closes)
+    before = set(threading.enumerate())
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 5.0, None)
+    try:
+        assert checked == {} and not connection.handshake_diagnostics
+        with pytest.raises(Exception):
+            connection.__enter__()
+        assert _time.monotonic() - checked["at"] < 0.25  # no graceful-close wait for a peer that never completes
+        assert connection._socket is None and connection.snapshot is None
+        assert _owned_threads_end(before, peer)
+    finally:
+        connection._abort()
+        peer.stop()
+
+
+def test_real_peer_close_at_snapshot_handoff_is_not_promoted(tmp_path, monkeypatch):
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
+    peer = RawPeer([("send", welcome), ("read",), ("send", {"type": "snapshot", "sessions": []}), ("close",)])
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    original = core._OperatorConnection._receive
+    def receive_then_peer_closes(self, timeout):
+        frame = original(self, timeout)
+        if frame.get("type") == "snapshot":
+            end = _time.monotonic() + 1.0
+            while not _closing(self._socket) and _time.monotonic() < end:
+                _time.sleep(0.002)
+            assert _closing(self._socket)
+        return frame
+    monkeypatch.setattr(core._OperatorConnection, "_receive", receive_then_peer_closes)
+    before = set(threading.enumerate())
+    connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 5.0, None)
+    started = _time.monotonic()
+    try:
+        with pytest.raises(core.LiveWindowError, match="closed by peer"):
+            connection.__enter__()
+        assert _time.monotonic() - started < 1.0
+        assert connection._socket is None and connection.snapshot is None
+        assert _owned_threads_end(before, peer)
     finally:
         connection._abort()
         peer.stop()
