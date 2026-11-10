@@ -21,6 +21,7 @@ def peer(transport):
 
 async def sensitive_frames(daemon):
     await issue_seat(daemon)
+    await daemon.store.open_session("fixture", "other", provider="codex", pane_status="pane_alive")
     await daemon.sessions.refresh()
     sessions = daemon.sessions.list_open()
     assert any(row["stream_id"] == "fixture:seat" for row in sessions)
@@ -88,6 +89,15 @@ def test_application_fanout_auth_matrix(daemon, monkeypatch, transport, stage):
                     await daemon.broadcast(frame)
                 await flush(daemon)
                 assert sent_since(socket, start) == []
+    asyncio.run(run())
+
+
+def test_fresh_native_no_claim_hello_still_gets_bootstrap_ready(daemon):
+    async def run():
+        async with connected(daemon, peer("native")) as (socket, _, _):
+            reply = await socket.rpc({"type": "hello", "client": "native-bootstrap",
+                                      "subscribe": {"mode": "rpc", "snapshot": False}})
+            assert reply["type"] == "ready"
     asyncio.run(run())
 
 

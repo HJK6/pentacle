@@ -61,7 +61,7 @@ EVENT_FIELDS = {
         "traffic", "initiator", "termination", "close_code", "close_reason",
         "close_sent_code", "close_received_code", "close_sent_reason",
         "close_received_reason", "duration_ms", "auth_state", "rx_messages",
-        "rx_bytes", "tx_messages", "tx_bytes", "queue_snapshot_age_ms",
+        "rx_bytes", "tx_messages", "tx_bytes", "non_handshake_tx", "queue_snapshot_age_ms",
         "auth_suppressed_total", "pressure_episodes_suppressed_total",
     },
 }

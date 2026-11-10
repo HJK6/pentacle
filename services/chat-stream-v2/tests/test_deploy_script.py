@@ -930,7 +930,9 @@ def test_u2_missing_marker_selects_empty_window(boot_line):
     )
     assert scan == {"class": "slow_consumer", "outcome": deploy_mod.SLOW_CONSUMER_PASSED,
                     "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
-                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [], "kinds": {}}
+                    "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [], "kinds": {},
+                    "excluded_auth_failure_count": 0, "excluded_auth_failure_conn_ids": [],
+                    "excluded_auth_failures": []}
 
 
 def test_u2_explicit_no_marker_scans_whole_text():
@@ -1449,7 +1451,7 @@ def test_stage_d_excludes_only_proven_handshake_only_failures(kind, order):
     'legacy', 'positive', 'pre_rejection', 'accepted', 'pending', 'no_auth_fail',
     'auth_ok_before', 'auth_ok_after', 'other_conn', 'unknown', 'boolean', 'float',
     'string', 'negative', 'conflicting_close', 'legacy_duplicate', 'accepted_duplicate',
-    'suppressed_auth', 'tx_inconsistent',
+    'suppressed_auth', 'tx_inconsistent', 'traffic_inconsistent',
 ])
 def test_stage_d_ambiguous_or_contradictory_evidence_keeps_failure(case):
     fields = dict(close_code=1011, close_reason='keepalive_ping_timeout',
@@ -1486,6 +1488,8 @@ def test_stage_d_ambiguous_or_contradictory_evidence_keeps_failure(case):
         fields['auth_suppressed_total'] = 1
     elif case == 'tx_inconsistent':
         fields['tx_messages'] = -1
+    elif case == 'traffic_inconsistent':
+        fields['traffic'] = {'chat.event': {'direct_sent': 1, 'broadcast_sent': 0}}
     scan = deploy_mod.classify_slow_consumer_lines([*before, _u2_line('close', **fields), *after])
     assert scan['outcome'] == 'failed'
     assert scan['kinds'] == {'keepalive_timeout': 1}
@@ -1514,3 +1518,56 @@ def test_stage_d_excluded_reporting_survives_example_cap():
     assert scan['excluded_auth_failure_count'] == 2
     assert scan['excluded_auth_failure_conn_ids'] == ['first', 'second']
     assert len(scan['excluded_auth_failures']) == 1
+
+
+def test_stage_d_plaintext_failure_cannot_borrow_structured_exclusion():
+    conn_id = _u2_record()['conn_id']
+    scan = deploy_mod.classify_slow_consumer_lines([
+        _u2_line('auth_fail'),
+        _u2_line('close', close_code=1011, auth_state='failed', non_handshake_tx=0),
+        f'websocket close 1011 client={conn_id}',
+    ])
+    assert scan['failure_count'] == 1 and scan['kinds'] == {'1011_close': 1}
+    assert scan['excluded_auth_failure_count'] == 1
+
+
+@pytest.mark.parametrize('case', ['sensitive_bytes', 'message_total', 'byte_total', 'negative_bytes', 'malformed_bytes'])
+def test_stage_d_delivery_bytes_and_totals_cannot_contradict_zero(case):
+    record = _u2_record('close', close_code=1011, auth_state='failed', non_handshake_tx=0)
+    if case == 'sensitive_bytes':
+        record['traffic']['chat.event']['broadcast_sent_bytes'] = 224000
+    elif case == 'message_total':
+        record['traffic']['other']['direct_sent'] = 2
+    elif case == 'byte_total':
+        record['tx_bytes'] = 19
+    elif case == 'negative_bytes':
+        record['tx_bytes'] = -1
+    else:
+        record['traffic']['other']['direct_sent_bytes'] = '0'
+    scan = deploy_mod.classify_slow_consumer_lines([_u2_line('auth_fail'), 'conn_diag ' + json.dumps(record)])
+    assert scan['outcome'] == 'failed'
+    assert scan['excluded_auth_failure_count'] == 0
+
+
+@pytest.mark.parametrize('messages,size,expected', [(0, 19, 'failed'), (2, 0, 'failed'), (2, 1, 'failed'), (0, 0, 'passed'), (2, 400, 'passed')])
+@pytest.mark.parametrize('with_traffic', [False, True])
+def test_stage_d_delivery_evidence_coherence_with_or_without_buckets(messages, size, expected, with_traffic):
+    close = dict(schema=1, event='close', conn_id='coherence', close_code=1011,
+                 auth_state='failed', non_handshake_tx=0, tx_messages=messages, tx_bytes=size)
+    if with_traffic:
+        close['traffic'] = {'other': {'direct_sent': messages, 'direct_sent_bytes': size,
+                                      'broadcast_sent': 0, 'broadcast_sent_bytes': 0}}
+    scan = deploy_mod.classify_slow_consumer_lines([
+        'conn_diag ' + json.dumps(dict(schema=1, event='auth_fail', conn_id='coherence')),
+        'conn_diag ' + json.dumps(close),
+    ])
+    assert scan['outcome'] == expected
+    assert scan['excluded_auth_failure_count'] == (expected == 'passed')
+
+
+def test_stage_d_explicit_zero_needs_no_legacy_counter_proxy():
+    records = [dict(schema=1, event='auth_fail', conn_id='minimal'),
+               dict(schema=1, event='close', conn_id='minimal', close_code=1011,
+                    auth_state='failed', non_handshake_tx=0)]
+    scan = deploy_mod.classify_slow_consumer_lines('conn_diag ' + json.dumps(r) for r in records)
+    assert scan['outcome'] == 'passed' and scan['excluded_auth_failure_count'] == 1
