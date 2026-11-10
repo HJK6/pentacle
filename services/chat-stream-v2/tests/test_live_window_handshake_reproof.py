@@ -178,3 +178,117 @@ def test_reproof_transport_failure_keeps_the_first_failure(tmp_path, monkeypatch
         enter(tmp_path)
     assert "connection refused" in str(caught.value) and "first failure" in str(caught.value)
     assert "operator_auth_invalid" in str(caught.value)
+
+
+# --- cycle 2: real websockets client against an owned raw loopback peer ---
+import base64
+import hashlib as _hashlib
+import socket as _socket
+import struct
+import threading
+import time as _time
+
+
+def _frame(opcode, payload):
+    head = bytes([0x80 | opcode])
+    return head + (bytes([len(payload)]) if len(payload) < 126 else bytes([126]) + struct.pack("!H", len(payload))) + payload
+
+
+class RawPeer:
+    """Owned loopback WebSocket peer that never answers a close handshake."""
+    def __init__(self, script):
+        self.script, self.listener = script, _socket.socket()
+        self.listener.bind(("127.0.0.1", 0)); self.listener.listen(1)
+        self.url = "ws://127.0.0.1:%d" % self.listener.getsockname()[1]
+        self.conn, self.done = None, threading.Event()
+        self.thread = threading.Thread(target=self.serve, daemon=True); self.thread.start()
+
+    def serve(self):
+        conn, _ = self.listener.accept(); self.conn = conn
+        request = b""
+        while b"\r\n\r\n" not in request:
+            request += conn.recv(4096)
+        key = [l.split(b":", 1)[1].strip() for l in request.split(b"\r\n") if l.lower().startswith(b"sec-websocket-key")][0]
+        accept = base64.b64encode(_hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+        for step in self.script:
+            if step[0] == "send":
+                conn.sendall(_frame(0x1, json.dumps(step[1]).encode()))
+            elif step[0] == "close":
+                conn.sendall(_frame(0x8, struct.pack("!H", 1000)))
+            elif step[0] == "sleep":
+                _time.sleep(step[1])
+            elif step[0] == "read":
+                conn.recv(65536)
+        self.done.wait(10)  # hold the socket open; never answer a close
+
+    def stop(self):
+        self.done.set()
+        for s in (self.conn, self.listener):
+            try:
+                s and s.close()
+            except OSError:
+                pass
+
+
+@pytest.mark.parametrize("peer_closes", [False, True])
+def test_real_failed_socket_is_aborted_inside_the_budget(tmp_path, monkeypatch, peer_closes):
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": _time.time() + 600}}}
+    script = [("send", welcome), ("read",), ("sleep", 1.2), ("send", {"type": "hello.error", "error": "DENIED"})]
+    peer = RawPeer(script + ([("close",)] if peer_closes else []))
+    before = set(threading.enumerate())
+    started = _time.monotonic()
+    try:
+        with pytest.raises(core.LiveWindowError, match="DENIED"):
+            core._OperatorConnection(peer.url, tmp_path / "token.json", 2.0, None).__enter__()
+        elapsed = _time.monotonic() - started
+        assert elapsed < 2.0, elapsed
+        # The owned receive machinery terminates without waiting for the peer.
+        deadline = _time.monotonic() + 0.5
+        while any(t.is_alive() for t in set(threading.enumerate()) - before - {peer.thread}) and _time.monotonic() < deadline:
+            _time.sleep(0.02)
+        assert not [t for t in set(threading.enumerate()) - before - {peer.thread} if t.is_alive()]
+    finally:
+        peer.stop()
+
+
+@pytest.mark.parametrize("snapshot_at,accepted", [(4.999, True), (5.0, False), (5.03, False)])
+def test_snapshot_at_or_after_the_deadline_is_rejected(tmp_path, monkeypatch, snapshot_at, accepted):
+    clock = {"mono": 0.0}
+    frames = [({"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": 1e12}}}, 4.99),
+              ({"type": "snapshot", "sessions": []}, snapshot_at)]
+    class Socket:
+        closed = False
+        def recv(self, timeout):
+            assert timeout > 0 and clock["mono"] + timeout <= 5.0 + 1e-9  # never past the absolute deadline
+            frame, at = frames.pop(0); clock["mono"] = at; return json.dumps(frame)
+        def send(self, payload): pass
+        def close(self): self.closed = True
+    sock = Socket()
+    monkeypatch.setattr(core, "connect", lambda url, **kw: sock)
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    connection = core._OperatorConnection("ws://127.0.0.1:0", tmp_path / "t.json", 5.0, None)
+    if accepted:
+        assert connection.__enter__().snapshot is not None
+    else:
+        with pytest.raises(core.LiveWindowError, match="deadline"):
+            connection.__enter__()
+        assert sock.closed
+
+
+def test_late_welcome_gets_no_hello_and_no_retry(tmp_path, monkeypatch):
+    clock = {"mono": 0.0}; sent = []; connects = []
+    class Socket:
+        def recv(self, timeout):
+            clock["mono"] = 5.2
+            return json.dumps({"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": 1e12}}})
+        def send(self, payload): sent.append(payload)
+        def close(self): pass
+    monkeypatch.setattr(core, "connect", lambda url, **kw: (connects.append(1), Socket())[1])
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    with pytest.raises(core.LiveWindowError, match="deadline"):
+        core._OperatorConnection("ws://127.0.0.1:0", tmp_path / "t.json", 5.0, None).__enter__()
+    assert sent == [] and connects == [1]
