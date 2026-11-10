@@ -15,9 +15,11 @@ queued. A late send, a denial before expiry or a second failure raises
 `handshake_diagnostics`. Both timing samples are wall clock in the same domain
 as `expires_at`, which holds for the same-host loopback restoration and smoke
 callers; a cross-host caller is still bounded to one retry. Each failed socket
-is closed with its close handshake bounded by the remaining budget, a
-re-proof transport failure still reports the first failure, and no application
-request is ever retried.
+is aborted without waiting for any close handshake (websockets `close_socket`,
+which also ends the receiver), a re-proof transport failure still reports the
+first failure, and no application request is ever retried. One absolute
+deadline covers both attempts: every step uses only the remaining budget, and
+a welcome, error or snapshot that arrives at or after it is never acted on.
 
 The authenticated snapshot must advertise
 `capabilities.close_expected_generation=true` before normal activation. That

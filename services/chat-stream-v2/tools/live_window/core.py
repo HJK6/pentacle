@@ -394,21 +394,24 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                               f"first failure: {first['error']!r}")
 
     def _handshake(self, deadline: float) -> dict[str, Any] | None:
-        """Return None on snapshot, or the recorded hello.error with its socket closed."""
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise LiveWindowError("operator handshake did not yield a snapshot")
-        self._socket = connect(self.url, open_timeout=remaining, close_timeout=self.timeout)
+        """Return None on snapshot, or the recorded hello.error with its socket aborted.
+
+        Every step uses the positive remaining budget of one absolute deadline,
+        and a frame that arrives at or after it is never acted on.
+        """
+        self._socket = connect(self.url, open_timeout=self._remaining(deadline), close_timeout=self.timeout)
         try:
-            welcome = self._receive(max(0.05, deadline - time.monotonic()))
+            welcome = self._receive(self._remaining(deadline))
+            self._remaining(deadline)
             if welcome.get("type") != "welcome":
                 raise LiveWindowError(f"operator connection expected welcome: {welcome!r}")
             hello = operator_hello(self.token_path, welcome)
             expires_at = ((welcome.get("auth") or {}).get("operator") or {}).get("expires_at")
             self._send(hello)
             sent_at = _wall_clock()
-            while time.monotonic() < deadline:
-                frame = self._receive(max(0.05, deadline - time.monotonic()))
+            while True:
+                frame = self._receive(self._remaining(deadline))
+                self._remaining(deadline)
                 if frame.get("type") == "hello.error":
                     error_at = _wall_clock()
                     # A legacy generic error after expiry is possible expiry,
@@ -418,21 +421,37 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                               "reproof_eligible": bool(timely and (error_at >= expires_at
                                                                    or frame.get("code") == NONCE_EXPIRED_CODE))}
                     self.handshake_diagnostics.append(record)
-                    self._close_within(deadline)
+                    self._abort()
                     return record
                 if frame.get("type") == "snapshot":
                     self.snapshot = frame
                     return None
-            raise LiveWindowError("operator handshake did not yield a snapshot")
         except BaseException:
-            self._close_within(deadline)
+            self._abort()
             raise
 
-    def _close_within(self, deadline: float) -> None:
-        # A failed socket's close handshake may not outlast the caller's budget.
-        if self._socket is not None and hasattr(self._socket, "close_timeout"):
-            self._socket.close_timeout = max(0.0, deadline - time.monotonic())
-        self.close()
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LiveWindowError("operator handshake deadline expired")
+        return remaining
+
+    def _abort(self) -> None:
+        """Drop a failed handshake socket without waiting on any close handshake.
+
+        websockets' close_socket shuts the transport and closes the receive
+        assembler, so its receiver ends without waiting for the peer. Only test
+        doubles without it fall back to close().
+        """
+        sock, self._socket = self._socket, None
+        if sock is None:
+            return
+        try:
+            abort = getattr(sock, "close_socket", None)
+            abort() if abort is not None else sock.close()
+        except Exception as exc:  # never mask the handshake failure
+            self.handshake_diagnostics.append({"cleanup_failure": f"{type(exc).__name__}: {exc}"})
 
     def __exit__(self, *_unused: object) -> None:
         self.close()

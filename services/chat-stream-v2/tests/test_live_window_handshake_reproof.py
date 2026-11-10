@@ -109,7 +109,8 @@ def test_retry_never_extends_the_original_deadline(tmp_path, monkeypatch):
             monotonic["now"] = 6.0  # the first error consumed the whole budget
         return frame
     monkeypatch.setattr(FakeSocket, "recv", slow)
-    with pytest.raises(core.LiveWindowError, match="operator nonce proof rejected"):
+    # The error arrived after the absolute deadline: it is not acted on, and no retry follows.
+    with pytest.raises(core.LiveWindowError, match="deadline"):
         enter(tmp_path, timeout=5.0)
     assert len(server.sockets) == 1 and server.sockets[0].closed
 
@@ -141,6 +142,9 @@ class SlowClose:
 
     def close(self):
         self.clock["mono"] += self.close_timeout
+        self.closed = True
+
+    def close_socket(self):  # real websockets abort: no close-handshake wait
         self.closed = True
 
 
@@ -240,10 +244,18 @@ def test_real_failed_socket_is_aborted_inside_the_budget(tmp_path, monkeypatch, 
     before = set(threading.enumerate())
     started = _time.monotonic()
     try:
+        connection = core._OperatorConnection(peer.url, tmp_path / "token.json", 2.0, None)
         with pytest.raises(core.LiveWindowError, match="DENIED"):
-            core._OperatorConnection(peer.url, tmp_path / "token.json", 2.0, None).__enter__()
+            connection.__enter__()
         elapsed = _time.monotonic() - started
         assert elapsed < 2.0, elapsed
+        connection.close(); connection._abort()  # repeated cleanup is idempotent
+        assert connection._socket is None and connection.handshake_diagnostics[0]["error"]["error"] == "DENIED"
+        peer.conn.settimeout(0.5)
+        while True:  # the owned transport is actually closed: the peer reads EOF
+            data = peer.conn.recv(65536)
+            if not data:
+                break
         # The owned receive machinery terminates without waiting for the peer.
         deadline = _time.monotonic() + 0.5
         while any(t.is_alive() for t in set(threading.enumerate()) - before - {peer.thread}) and _time.monotonic() < deadline:
