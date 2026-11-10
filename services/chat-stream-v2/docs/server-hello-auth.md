@@ -27,6 +27,21 @@ The queued broadcast writer checks the marker under its send lock before every
 send, so a projection queued before rejection is dropped without recording it
 as delivered. Direct handshake error replies remain available.
 
+A rejected claimed proof, including replay of a consumed hello challenge, also
+invalidates earlier operator trust on that socket. Cached authentication cannot
+restore it after an intervening wait. Ordinary RPC admission rechecks rejection
+before invoking its handler. Recovery requires a fresh socket and challenge;
+the credential registry and other connections are not revoked.
+
+Direct replies recheck rejection under the same send lock for every frame,
+including asynchronous blob/history iterators and batches. A sensitive reply
+still awaiting send is replaced by a minimal correlated authentication refusal,
+and its remaining iterator is closed. Error responses contain no withheld
+application payload. Already handed-to-transport bytes cannot be recalled.
+The intentionally unauthenticated endpoint policies, including
+`screen.lease.status`, are unchanged. Successful sends and earlier `auth_ok`
+records remain historical evidence; rejection does not erase prior access.
+
 The deliberate native-loopback, no-claim bootstrap remains available. An Origin
 header removes that exception, including empty and `null` Origin values. Remote
 unauthenticated clients do not gain broadcast access. Existing authenticated
@@ -79,3 +94,8 @@ valid operator, seat and scoped principals, plus rejected-proof RPC admission
 and rejection while queued inventory waits for the writer lock. Existing browser-origin and smoke
 connection-logging tests additionally exercise disposable local WebSocket
 servers. No production endpoints are needed.
+
+`tests/test_server_rejection_egress.py` covers the direct-lock race, previously
+authenticated remote/native/Origin sockets, rejection across iterator and
+authentication waits, minimal errors, fresh-socket recovery with the same
+credential, and preservation of prior-access evidence for the classifier.
