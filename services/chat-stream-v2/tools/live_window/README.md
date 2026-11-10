@@ -20,6 +20,10 @@ which also ends the receiver), a re-proof transport failure still reports the
 first failure, and no application request is ever retried. One absolute
 deadline covers both attempts: every step uses only the remaining budget, and
 a welcome, error or snapshot that arrives at or after it is never acted on.
+The deadline is rechecked after proof construction, and a peer that has begun
+closing gets no hello. During the handshake the socket's close deadline is the
+handshake deadline, so a library wait after a peer close cannot outlast it;
+after a snapshot the socket's own `close_timeout` applies again.
 
 The authenticated snapshot must advertise
 `capabilities.close_expected_generation=true` before normal activation. That

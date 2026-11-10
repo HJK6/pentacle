@@ -401,11 +401,17 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         """
         self._socket = connect(self.url, open_timeout=self._remaining(deadline), close_timeout=self.timeout)
         try:
+            # websockets keeps the first close deadline it sees, and a send after
+            # a peer close waits on it; owning it here bounds that wait too.
+            self._set_close_deadline(self._remaining(deadline))
             welcome = self._receive(self._remaining(deadline))
             self._remaining(deadline)
             if welcome.get("type") != "welcome":
                 raise LiveWindowError(f"operator connection expected welcome: {welcome!r}")
             hello = operator_hello(self.token_path, welcome)
+            self._remaining(deadline)
+            if self._peer_closing():
+                raise LiveWindowError("operator connection closed by peer before hello")
             expires_at = ((welcome.get("auth") or {}).get("operator") or {}).get("expires_at")
             self._send(hello)
             sent_at = _wall_clock()
@@ -425,6 +431,7 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                     return record
                 if frame.get("type") == "snapshot":
                     self.snapshot = frame
+                    self._set_close_deadline(None)
                     return None
         except BaseException:
             self._abort()
@@ -436,6 +443,28 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
         if remaining <= 0:
             raise LiveWindowError("operator handshake deadline expired")
         return remaining
+
+    def _set_close_deadline(self, timeout: float | None) -> None:
+        """Set the socket's close deadline; None restores its own close_timeout once the handshake succeeds."""
+        sock = self._socket
+        mutex = getattr(sock, "protocol_mutex", None)
+        if mutex is None:  # test doubles
+            return
+        # Real sockets only; the module's import surface stays connect + ConnectionClosed.
+        from websockets.protocol import OPEN
+        from websockets.sync.utils import Deadline
+        with mutex:
+            if timeout is not None:
+                sock.close_deadline = Deadline(timeout)
+            elif sock.protocol.state is OPEN:
+                sock.close_deadline = None
+
+    def _peer_closing(self) -> bool:
+        protocol = getattr(self._socket, "protocol", None)
+        if protocol is None:  # test doubles
+            return False
+        from websockets.protocol import OPEN
+        return protocol.state is not OPEN
 
     def _abort(self) -> None:
         """Drop a failed handshake socket without waiting on any close handshake.
