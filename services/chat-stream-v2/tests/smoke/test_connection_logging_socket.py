@@ -870,6 +870,10 @@ def test_socket_privacy_captures_all_loggers_not_only_diagnostics(tmp_path, capl
                 sentinels["credential"] = cid
                 sentinels["secret"] = operator_auth.encode_b64url(identity["proof_key"])
                 sentinels["proof"] = operator_auth.make_proof(identity["proof_key"], sentinels["nonce"], cid, "pentacle-mobile")
+                def broken_sessions():
+                    raise RuntimeError(sentinels["contents"] + sentinels["path"])
+                monkeypatch.setattr(server.sessions, "list_open", broken_sessions)
+                assert (await wire.rpc("list_sessions", request_id=sentinels["request"]))["error_code"] == "internal_error"
                 frames = await wire.hello(
                     client=sentinels["client"], build_sha=sentinels["hash"], app_build=sentinels["token"],
                     build_number={"private": sentinels["device"]}, stream_token=sentinels["token"],
@@ -884,10 +888,7 @@ def test_socket_privacy_captures_all_loggers_not_only_diagnostics(tmp_path, capl
                 assert result["error_code"] == "unsupported_in_v2"
                 await wire.send("{" + sentinels["body"])
                 assert (await wire.recv())["error_code"] == "bad_json"
-                def broken_sessions():
-                    raise RuntimeError(sentinels["contents"] + sentinels["path"])
-                monkeypatch.setattr(server.sessions, "list_open", broken_sessions)
-                assert (await wire.rpc("list_sessions", request_id=sentinels["request"]))["error_code"] == "internal_error"
+                assert (await wire.rpc("list_sessions", request_id=sentinels["request"]))["error_code"] == "authentication_required"
                 await wire.ws.close(code=4000, reason=sentinels["close"])
             all_output = caplog.text
             for name, value in sentinels.items():
