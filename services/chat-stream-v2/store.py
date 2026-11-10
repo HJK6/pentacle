@@ -641,7 +641,9 @@ def _project_send_receipt_row(
     return result
 
 
-def _restore_message_summary_conn(conn: sqlite3.Connection, session: dict[str, Any]) -> None:
+def _restore_message_summary_conn(
+    conn: sqlite3.Connection, session: dict[str, Any], *, deliveries=None,
+) -> None:
     """Rebuild one preview from a bounded, lifecycle-matched projected tail."""
     tail = conn.execute(
         "SELECT event_id, event_json FROM session_event_tail "
@@ -656,12 +658,12 @@ def _restore_message_summary_conn(conn: sqlite3.Connection, session: dict[str, A
             continue
         if isinstance(event, dict):
             events.append({**event, "daemon_seq": int(item["event_id"])})
-    for event in _project_session_events_conn(conn, events):
+    for event in _project_session_events_conn(conn, events, deliveries=deliveries):
         apply_message_summary(session, event)
 
 
 def _project_session_events_conn(
-    conn: sqlite3.Connection, events: list[dict[str, Any]],
+    conn: sqlite3.Connection, events: list[dict[str, Any]], *, deliveries=None,
 ) -> list[dict[str, Any]]:
     """Project immutable history, including metadata on old stamped USER rows."""
     projected = _project_daemon_notice_events_conn(conn, events)
@@ -669,8 +671,12 @@ def _project_session_events_conn(
     for index, event in enumerate(projected):
         raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
         if event.get("kind") in {"USER", "TELL"}:
-            origin = ({"kind": "service", "verified": True, "generation": None}
-                      if raw.get("daemon_notice") else input_origin(conn, event, event.get("daemon_seq")))
+            if raw.get("daemon_notice"):
+                origin = {"kind": "service", "verified": True, "generation": None}
+            elif deliveries is None:
+                origin = input_origin(conn, event, event.get("daemon_seq"))
+            else:
+                origin = input_origin(conn, event, event.get("daemon_seq"), deliveries=deliveries)
             event = {**event, "raw": {**raw, "input_provenance": origin}}
             if event.get("kind") == "TELL" and origin["kind"] != "peer":
                 event["raw"]["input_source_kind"] = "TELL"
@@ -6733,9 +6739,18 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     # value here as on its live broadcast (append_session_event).
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
-            return list(reversed(_project_session_events_conn(conn, newest_first)))
+            from tell_proof import ProjectionDeliveries
+            return list(reversed(_project_session_events_conn(
+                conn, newest_first, deliveries=ProjectionDeliveries())))
 
-        return await self.submit(_op)
+        def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            conn.execute("SAVEPOINT session_history_snapshot")
+            try:
+                return _op(conn)
+            finally:
+                conn.execute("RELEASE session_history_snapshot")
+
+        return await self.submit(snapshot)
 
     async def fetch_session_event_tail(self, stream_id: str, *, limit: int, generation: str | None = None) -> list[dict[str, Any]]:
         """The newest `limit` events for a stream, returned oldest-first."""
@@ -6789,8 +6804,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 """
             ).fetchall()
             result = [_session_row(conn, row) for row in rows]
+            from tell_proof import ProjectionDeliveries
+            deliveries = ProjectionDeliveries()
             for session in result:
-                _restore_message_summary_conn(conn, session)
+                _restore_message_summary_conn(conn, session, deliveries=deliveries)
             return result
 
         def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:

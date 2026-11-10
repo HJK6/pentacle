@@ -3,10 +3,95 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 
 from submission_events import EventProof, provider_text_digest
 from retention import history_query
 from message_envelopes import strip_peer_delivery
+
+
+def _lookup_string(value):
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _nonfinite_constant(value):
+    raise ValueError("nonstandard JSON constant")
+
+
+class ProjectionDeliveries:
+    """Lazy delivery snapshot owned and passed by one savepoint-held read.
+
+    Any parser/equality uncertainty disables reuse for the rest of that read;
+    the original SQL and parsing then determine both answers and exceptions.
+    """
+
+    def __init__(self):
+        self._by_target = None
+        self._by_input = None
+        self._legacy = False
+
+    def rows_for(self, conn, target, text):
+        if not _lookup_string(target) or not _lookup_string(text):
+            self._legacy = True
+        if self._legacy:
+            return None
+        if self._by_target is None:
+            by_target, by_input = {}, {}
+            cursor = None
+            try:
+                cursor = conn.execute(
+                    "SELECT tell_id,reply,json_extract(reply,'$.delivery.to_stream_id') AS sql_target,"
+                    "json_extract(reply,'$.delivery.text') AS sql_text FROM v2_tell_deliveries")
+                for row in cursor:
+                    if not isinstance(row["reply"], str):
+                        raise ValueError("non-text JSON")
+                    payload = json.loads(row["reply"], object_pairs_hook=_unique_object,
+                                         parse_constant=_nonfinite_constant)
+                    if not isinstance(payload, dict):
+                        raise ValueError("non-object JSON root")
+                    delivery = payload.get("delivery")
+                    if delivery is not None and not isinstance(delivery, dict):
+                        raise ValueError("non-object delivery")
+                    delivery = delivery or {}
+                    for key, column in (("to_stream_id", "sql_target"), ("text", "sql_text")):
+                        value = delivery.get(key)
+                        if value is not None and not _lookup_string(value):
+                            raise ValueError("unclean delivery lookup value")
+                        extracted = row[column]
+                        if type(extracted) is not type(value) or extracted != value:
+                            raise ValueError("SQLite/Python delivery lookup disagreement")
+                    item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery,
+                            "text_digest": provider_text_digest(delivery.get("text"))}
+                    by_target.setdefault(delivery.get("to_stream_id"), []).append(item)
+                    by_input.setdefault((delivery.get("to_stream_id"), delivery.get("text")), []).append(payload)
+            except (sqlite3.Error, TypeError, ValueError, AttributeError, RecursionError):
+                self._legacy = True
+                return None
+            finally:
+                if cursor is not None:
+                    cursor.close()
+            self._by_target, self._by_input = by_target, by_input
+        return self._by_target.get(target, [])
+
+    def candidates(self, conn, target, text):
+        if self.rows_for(conn, target, text) is None:
+            return None
+        return list(self._by_input.get((target, text), []))
 
 
 def finalize_prepared(conn, original, result):
@@ -37,7 +122,7 @@ def finalize_prepared(conn, original, result):
     return result
 
 
-def retained_proof(conn, payload):
+def retained_proof(conn, payload, *, deliveries=None):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}
     target = delivery.get("to_stream_id")
@@ -87,18 +172,20 @@ def retained_proof(conn, payload):
     event_id, timestamp = matches[0]
     # Bare operator/system text lacks the unique peer tell-id envelope. Another
     # overlapping identical input makes ownership ambiguous, even with one USER.
-    for row in conn.execute("SELECT tell_id,reply FROM v2_tell_deliveries"):
+    rows = deliveries.rows_for(conn, target, text) if deliveries is not None else None
+    for row in (rows if rows is not None else conn.execute("SELECT tell_id,reply FROM v2_tell_deliveries")):
         if row["tell_id"] == delivery.get("tell_id"):
             continue
         try:
-            other = json.loads(row["reply"]).get("delivery") or {}
+            other = row["delivery"] if rows is not None else json.loads(row["reply"]).get("delivery") or {}
             lower = other.get("proof_watermark")
             upper = other.get("proof_event_id")
             if (other.get("to_stream_id") == target
                     and other.get("proof_generation") == generation
                     and type(lower) is int and lower < event_id
                     and not (type(upper) is int and upper <= watermark)
-                    and provider_text_digest(other.get("text")) == provider_text_digest(text)):
+                    and (row["text_digest"] if rows is not None else provider_text_digest(other.get("text")))
+                    == provider_text_digest(text)):
                 return None
         except (TypeError, ValueError, AttributeError):
             return None  # Unverifiable ownership never establishes delivery.
@@ -268,7 +355,7 @@ def split_native_input(conn, event):
     return result
 
 
-def input_origin(conn, event, event_id):
+def input_origin(conn, event, event_id, *, deliveries=None):
     """Read-only classification against exact dispatch/delivery occurrence."""
     text = delivery_wire(event)
     target = event.get('stream_id')
@@ -281,15 +368,18 @@ def input_origin(conn, event, event_id):
     if generation and operator_dispatch(conn, target, text, generation):
         return {'kind': 'operator', 'verified': True, 'generation': None}
     matches = []
-    payloads = [json.loads(row["reply"]) for row in conn.execute(
-        "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
-        "AND json_extract(reply,'$.delivery.text')=?", (target, text))]
+    payloads = deliveries.candidates(conn, target, text) if deliveries is not None else None
+    if payloads is None:
+        payloads = [json.loads(row["reply"]) for row in conn.execute(
+            "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
+            "AND json_extract(reply,'$.delivery.text')=?", (target, text))]
     payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
     for payload in payloads:
         delivery = payload.get('delivery') or {}
         if delivery.get('text') != text or delivery.get('proof_generation') != generation:
             continue
-        proof = retained_proof(conn, payload)
+        proof = (retained_proof(conn, payload) if deliveries is None
+                 else retained_proof(conn, payload, deliveries=deliveries))
         if proof is None or proof.get('proof_event_id') != event_id:
             continue
         kind = delivery.get('sender_kind')
