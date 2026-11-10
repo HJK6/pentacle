@@ -1429,3 +1429,88 @@ def test_process_identity_bad_proofs_still_refuse(fault, tmp_path):
     from deploy.packet.log_scan import IncompleteScan
     with pytest.raises((deploy_mod.AttributionAmbiguous, IncompleteScan)):
         deploy_mod.generation_ranges(groups, expected_pid, expected_start)
+
+
+@pytest.mark.parametrize('kind', ['keepalive_timeout', '1011_close'])
+@pytest.mark.parametrize('order', ['before', 'after'])
+def test_stage_d_excludes_only_proven_handshake_only_failures(kind, order):
+    auth = _u2_line('auth_fail')
+    close = _u2_line('close', close_code=1011, auth_state='failed', non_handshake_tx=0,
+                     close_reason='keepalive_ping_timeout' if kind == 'keepalive_timeout' else 'unknown')
+    scan = deploy_mod.classify_slow_consumer_lines([auth, close] if order == 'before' else [close, auth])
+    assert scan['outcome'] == 'passed'
+    assert scan['failure_count'] == 0 and scan['kinds'] == {}
+    assert scan['excluded_auth_failure_count'] == 1
+    assert scan['excluded_auth_failure_conn_ids'] == [_u2_record()['conn_id']]
+    assert scan['excluded_auth_failures'][0]['kind'] == kind
+
+
+@pytest.mark.parametrize('case', [
+    'legacy', 'positive', 'pre_rejection', 'accepted', 'pending', 'no_auth_fail',
+    'auth_ok_before', 'auth_ok_after', 'other_conn', 'unknown', 'boolean', 'float',
+    'string', 'negative', 'conflicting_close', 'legacy_duplicate', 'accepted_duplicate',
+    'suppressed_auth', 'tx_inconsistent',
+])
+def test_stage_d_ambiguous_or_contradictory_evidence_keeps_failure(case):
+    fields = dict(close_code=1011, close_reason='keepalive_ping_timeout',
+                  auth_state='failed', non_handshake_tx=0)
+    before, after = [_u2_line('auth_fail')], []
+    if case in {'legacy', 'unknown'}:
+        fields.pop('non_handshake_tx')
+        if case == 'unknown':
+            fields['non_handshake_tx'] = None
+    elif case in {'positive', 'pre_rejection'}:
+        fields.update(non_handshake_tx=1, tx_messages=3)
+        if case == 'pre_rejection':
+            fields['sticky_rejected'] = True
+    elif case in {'accepted', 'pending'}:
+        fields['auth_state'] = case
+    elif case == 'no_auth_fail':
+        before = []
+    elif case.startswith('auth_ok'):
+        (before if case == 'auth_ok_before' else after).append(_u2_line('auth_ok'))
+    elif case == 'other_conn':
+        before = [_u2_line('auth_fail', conn_id='another-connection')]
+    elif case in {'boolean', 'float', 'string', 'negative'}:
+        fields['non_handshake_tx'] = {'boolean': False, 'float': 0.0, 'string': '0', 'negative': -1}[case]
+    elif case in {'conflicting_close', 'legacy_duplicate', 'accepted_duplicate'}:
+        duplicate = dict(fields)
+        if case == 'conflicting_close':
+            duplicate['non_handshake_tx'] = 1
+        elif case == 'legacy_duplicate':
+            duplicate.pop('non_handshake_tx')
+        else:
+            duplicate['auth_state'] = 'accepted'
+        after.append(_u2_line('close', **duplicate))
+    elif case == 'suppressed_auth':
+        fields['auth_suppressed_total'] = 1
+    elif case == 'tx_inconsistent':
+        fields['tx_messages'] = -1
+    scan = deploy_mod.classify_slow_consumer_lines([*before, _u2_line('close', **fields), *after])
+    assert scan['outcome'] == 'failed'
+    assert scan['kinds'] == {'keepalive_timeout': 1}
+    assert scan['excluded_auth_failure_count'] == 0
+
+
+@pytest.mark.parametrize('kind', ['overflow', 'peer_liveness'])
+def test_stage_d_auth_exclusion_never_hides_other_failure_kinds(kind):
+    force = _u2_line('force_close') if kind == 'overflow' else _u2_liveness()
+    scan = deploy_mod.classify_slow_consumer_lines([
+        _u2_line('auth_fail'), force,
+        _u2_line('close', close_code=1011, close_reason='keepalive_ping_timeout', auth_state='failed', non_handshake_tx=0),
+    ])
+    assert scan['kinds'] == {kind: 1}
+    assert scan['failure_count'] == 1
+    assert scan['excluded_auth_failure_count'] == 0
+
+
+def test_stage_d_excluded_reporting_survives_example_cap():
+    rows = []
+    for conn_id in ('first', 'second'):
+        rows.extend([_u2_line('auth_fail', conn_id=conn_id),
+                     _u2_line('close', conn_id=conn_id, close_code=1011, auth_state='failed', non_handshake_tx=0)])
+    scan = deploy_mod.classify_slow_consumer_lines(iter(rows), max_examples=1)
+    assert scan['outcome'] == 'passed'
+    assert scan['excluded_auth_failure_count'] == 2
+    assert scan['excluded_auth_failure_conn_ids'] == ['first', 'second']
+    assert len(scan['excluded_auth_failures']) == 1
