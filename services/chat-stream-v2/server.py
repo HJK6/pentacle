@@ -109,6 +109,9 @@ _CONN_REASONS = frozenset({"absent", "malformed", "expired", "wrong-seat", "inte
                           "system_producer_auth_required", "revoked", "tls_required"})
 _CONN_LOG_SAFE: ContextVar[bool] = ContextVar("accepted_connection_log_projection", default=False)
 _CONN_AUTH: ContextVar[Any] = ContextVar("connection_auth_diagnostic", default=None)
+# Transport-owned application receive time, inherited only by this request's task.
+# It is never populated from a client field. The challenge uses the same wall clock.
+_HELLO_RECEIVED_AT: ContextVar[Any] = ContextVar("hello_received_at", default=None)
 
 
 def _conn_bucket(value: Any) -> str:
@@ -172,6 +175,7 @@ class _ConnectionDiagnostic:
     rx_messages: int = 0
     rx_bytes: int = 0
     tx_messages: int = 0
+    non_handshake_tx: int = 0
     tx_bytes: int = 0
     last_rx: float | None = None
     last_tx: float | None = None
@@ -824,6 +828,7 @@ class Server:
         self.lifecycle: Any = None
         self._clients: set[Any] = set()
         self._connection_diagnostics: dict[Any, _ConnectionDiagnostic] = {}
+        self._operator_rejected: set[Any] = set()
         #: Broadcasts stay bounded behind one writer per client. RPC replies
         #: write from their request task and use the shared send lock below.
         self._client_send_queues: dict[Any, asyncio.Queue] = {}
@@ -1461,6 +1466,8 @@ class Server:
         state.traffic[bucket][prefix + "_sent"] += 1
         state.traffic[bucket][prefix + "_sent_bytes"] += size
         state.tx_messages += 1
+        if frame_type not in {"welcome", "hello.error"}:
+            state.non_handshake_tx += 1
         state.tx_bytes += size
         state.last_tx = now
         if bucket == "pong":
@@ -1468,14 +1475,18 @@ class Server:
 
     @staticmethod
     def _diag_frame_type(frame: Any) -> str:
+        def kind(value):
+            # Preserve handshake identity for the whole-connection access count;
+            # traffic buckets and emitted diagnostic types remain unchanged.
+            return value if isinstance(value, str) and value in {"welcome", "hello.error"} else _conn_bucket(value)
         if isinstance(frame, _EncodedFrame):
-            return _conn_bucket(frame.frame_type)
+            return kind(frame.frame_type)
         if isinstance(frame, dict):
-            return _conn_bucket(frame.get("type"))
+            return kind(frame.get("type"))
         # Only already-encoded direct frames lack a top-level object here.
         try:
             decoded = json.loads(frame)
-            return _conn_bucket(decoded.get("type")) if isinstance(decoded, dict) else "other"
+            return kind(decoded.get("type")) if isinstance(decoded, dict) else "other"
         except (TypeError, ValueError):
             return "other"
 
@@ -1667,6 +1678,7 @@ class Server:
                 close_sent_reason=sent_reason, close_received_reason=received_reason,
                 auth_state=state.auth_state, rx_messages=state.rx_messages, rx_bytes=state.rx_bytes,
                 tx_messages=state.tx_messages, tx_bytes=state.tx_bytes,
+                non_handshake_tx=state.non_handshake_tx,
                 queue_snapshot_age_ms=0 if queue is not None or state.snapshot_at is None else _conn_ms(state.snapshot_at, now),
                 auth_suppressed_total=state.auth_suppressed_total,
                 pressure_episodes_suppressed_total=state.pressure_suppressed_total,
@@ -1771,6 +1783,7 @@ class Server:
         hello_barrier: asyncio.Task | None = None
         try:
             async for raw in websocket:
+                received_at = time.time()
                 self._diag_rx(websocket, raw)
                 # One task per request: a verb that parks (`await_report`) must
                 # not hold up the requests behind it. Replies correlate by
@@ -1803,7 +1816,11 @@ class Server:
                 if credit is None:
                     self._refuse_request(websocket, request)
                     continue
-                task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier, credit))
+                received_token = _HELLO_RECEIVED_AT.set((websocket, received_at) if is_hello else None)
+                try:
+                    task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier, credit))
+                finally:
+                    _HELLO_RECEIVED_AT.reset(received_token)
                 task.add_done_callback(credit.release)
                 if is_hello:
                     hello_barrier = task
@@ -1968,6 +1985,12 @@ class Server:
             )
             groups.setdefault(key, []).append(websocket)
         for clients in groups.values():
+            # Proof rejection is connection-bound, unlike the shared projection.
+            # Recheck after grouping's awaited auth checks and before choosing a
+            # representative, so neither member order can bypass or poison it.
+            clients = [client for client in clients if client not in self._operator_rejected]
+            if not clients:
+                continue
             projected = self._frame_for_client(clients[0], frame_type, frame)
             if projected is None:
                 continue
@@ -2044,6 +2067,7 @@ class Server:
         self._client_scoped_revoked.discard(websocket)
         self._tls_connections.discard(websocket)
         self._operator_challenges.pop(websocket, None)
+        self._operator_rejected.discard(websocket)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
         self._client_send_locks.pop(websocket, None)
@@ -3376,6 +3400,8 @@ class Server:
     def _frame_for_client(
         self, websocket: Any, frame_type: str, payload: dict[str, Any],
     ) -> dict[str, Any] | None:
+        if websocket in self._operator_rejected:
+            return None
         if not (self._is_loopback_client(websocket)
                 or self._operator_authenticated(websocket)
                 or websocket in self._client_authenticated_streams):
@@ -3550,11 +3576,16 @@ class Server:
     def _authenticate_operator_hello(self, websocket: Any, msg: dict[str, Any]) -> str | None:
         """Bind a v2 UI principal to this socket, or fail the claimed proof closed."""
         challenge = self._operator_challenges.pop(websocket, None)
+        if websocket in self._operator_rejected:
+            self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
+            return "operator_auth_invalid"
         auth_v2 = msg.get("auth_v2")
         if auth_v2 is None:
             return None
         try:
-            if challenge is None or time.time() > challenge[1]:
+            received = _HELLO_RECEIVED_AT.get()
+            received_at = received[1] if received is not None and received[0] is websocket else time.time()
+            if challenge is None or received_at > challenge[1]:
                 raise operator_auth.OperatorAuthError("operator auth challenge unavailable")
             if not isinstance(auth_v2, dict) or set(auth_v2) != {"scheme", "credential_id", "proof"}:
                 raise operator_auth.OperatorAuthError("invalid operator auth frame")
@@ -3569,6 +3600,7 @@ class Server:
                 credential_id, client_kind, challenge[0], operator_auth.encode_b64url(proof),
             )
         except operator_auth.OperatorAuthError:
+            self._operator_rejected.add(websocket)
             self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
             return "operator_auth_invalid"
         self._connection_trust[websocket] = trust
