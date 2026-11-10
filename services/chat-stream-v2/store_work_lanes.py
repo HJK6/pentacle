@@ -316,11 +316,15 @@ def fd_backend_conn(conn, stream_id, front_desk=None):
 
 
 def require_lane_execution_conn(conn, spec_id, *, lane_id=None, front_desk=None, target_stream_id=None,
-                                provisioning=False, linked_only=False, live_sessions=()):
+                                provisioning=False, linked_only=False, live_sessions=(), fd_input=False):
     """Shared execution admission; caller holds the graph fence through its commit."""
     from sessions import VerbError
     if not spec_id:
         return None  # unrelated operator chat/control remains outside lane execution
+    if fd_input and target_stream_id and fd_backend_conn(conn, target_stream_id, front_desk):
+        # Input admission only (send receipt, physical input): the current FD desk receives
+        # operator/control input despite a custodial assignment. Execution callers never pass this.
+        return None
     snapshot = effective_membership_conn(conn)
     lanes = [dict(row) for row in conn.execute(
         "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL ORDER BY lane_id")
