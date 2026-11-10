@@ -2096,6 +2096,10 @@ class Server:
                     with self._diag_wait(websocket) as measurement:
                         async with lock:
                             self._diag_acquired(websocket, measurement)
+                            # Projection may predate a proof rejection while
+                            # this queued frame waits for the send lock.
+                            if websocket in self._operator_rejected:
+                                continue
                             with self._diag_send(websocket, frame, _frame_type, broadcast=True):
                                 await websocket.send(frame)
                     # Record the DELIVERED digest (not at enqueue): byte-identical
@@ -2461,7 +2465,7 @@ class Server:
                 return [self._unsupported(verb, request_id, caller=caller)]
             auth = dispatch_msg["_auth_context"]
             code = None
-            if not self._is_loopback_client(websocket) and verb not in {
+            if (websocket in self._operator_rejected or not self._is_loopback_client(websocket)) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
                 if not any(auth.get(key) for key in (
@@ -2469,7 +2473,8 @@ class Server:
                     "scoped_principal",
                 )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
-            # Local bootstrap is retained for ordinary RPCs. Minting a seat
+            # Local bootstrap is retained for ordinary RPCs only before a
+            # claimed proof is rejected on this connection. Minting a seat
             # credential or changing spawn admission always requires proof,
             # even from a native loopback peer. Restricted producer and scoped
             # connection checks still apply before the handler is reached.

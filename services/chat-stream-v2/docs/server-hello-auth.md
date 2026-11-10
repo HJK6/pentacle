@@ -22,6 +22,10 @@ Later hellos on that connection cannot return to native-loopback bootstrap.
 `broadcast()` also filters marked members before selecting a shared projection
 representative, so an eligible peer cannot lend its projection to a rejected
 peer and a rejected representative cannot suppress an eligible peer.
+Ordinary RPC dispatch also removes the native-loopback exemption after rejection.
+The queued broadcast writer checks the marker under its send lock before every
+send, so a projection queued before rejection is dropped without recording it
+as delivered. Direct handshake error replies remain available.
 
 The deliberate native-loopback, no-claim bootstrap remains available. An Origin
 header removes that exception, including empty and `null` Origin values. Remote
@@ -71,6 +75,7 @@ including a real 11-second ordering wait and nonce/proof/revocation controls.
 `tests/test_server_fanout_auth_boundary.py` uses the real application read,
 authentication, broadcast and writer paths with an in-memory transport adapter.
 It covers the 3-by-3 transport/hello-state matrix, both mixed-group orders and
-valid operator, seat and scoped principals. Existing browser-origin and smoke
+valid operator, seat and scoped principals, plus rejected-proof RPC admission
+and rejection while queued inventory waits for the writer lock. Existing browser-origin and smoke
 connection-logging tests additionally exercise disposable local WebSocket
 servers. No production endpoints are needed.

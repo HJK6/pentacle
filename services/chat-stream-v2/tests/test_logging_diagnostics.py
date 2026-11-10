@@ -293,6 +293,13 @@ def test_all_logs_discard_private_wire_values_and_exception_text(caplog, tmp_pat
                     identity["proof_key"], operator_auth.encode_b64url(b"x" * operator_auth.AUTH_NONCE_BYTES), identity["credential_id"], identity["client_kind"],
                 )
                 sentinels["proof_key"] = operator_auth.encode_b64url(identity["proof_key"])
+                # An injected external business callback exercises the real
+                # generic dispatch exception boundary, including its old log.
+                async def broken_business_handler(_msg):
+                    raise RuntimeError(sentinels["file_content"] + sentinels["file_path"])
+                daemon.handlers["fixture-failure"] = broken_business_handler
+                await daemon._serve(peer, json.dumps({"type": "fixture-failure", "request_id": sentinels["request"], "text": sentinels["text"]}))
+                assert json.loads(peer.sent[-1])["error_code"] == "internal_error"
                 await daemon._serve(peer, json.dumps({
                     "type": "hello", "client": "pentacle", "request_id": sentinels["request"],
                     "auth_v2": {"scheme": operator_auth.AUTH_SCHEME, "credential_id": identity["credential_id"], "proof": sentinels["proof"]},
@@ -308,13 +315,8 @@ def test_all_logs_discard_private_wire_values_and_exception_text(caplog, tmp_pat
                 assert json.loads(peer.sent[-1])["type"] == "hello.error" and json.loads(peer.sent[-1])["error_code"] == "operator_auth_invalid"  # sticky rejection
                 await daemon._serve(peer, json.dumps({"type": sentinels["verb"], "request_id": sentinels["request"], "text": sentinels["text"]}))
                 assert json.loads(peer.sent[-1])["error_code"] == "unsupported_in_v2"
-                # An injected external business callback exercises the real
-                # generic dispatch exception boundary, including its old log.
-                async def broken_business_handler(_msg):
-                    raise RuntimeError(sentinels["file_content"] + sentinels["file_path"])
-                daemon.handlers["fixture-failure"] = broken_business_handler
                 await daemon._serve(peer, json.dumps({"type": "fixture-failure", "request_id": sentinels["request"], "text": sentinels["text"]}))
-                assert json.loads(peer.sent[-1])["error_code"] == "internal_error"
+                assert json.loads(peer.sent[-1])["error_code"] == "authentication_required"
                 await daemon._serve(peer, json.dumps({
                     "type": "notification.resolve", "request_id": sentinels["request"],
                     "notification_id": sentinels["udid"], "text": sentinels["text"],
