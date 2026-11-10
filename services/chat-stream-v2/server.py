@@ -1915,13 +1915,15 @@ class Server:
                         else frame
                         for frame in result
                     ]
-                await self._send_direct(websocket, result)
+                await self._send_direct(websocket, result, request_type="hello", request_id=request.get("request_id"))
             return
         result = await self._dispatch(raw, websocket=websocket)
         await asyncio.sleep(0)
         sent = await self._send_direct(
             websocket, result,
             interleave_history=isinstance(request, dict) and request.get("type") == "request_stream_events",
+            request_type=request.get("type") if isinstance(request, dict) else None,
+            request_id=request.get("request_id") if isinstance(request, dict) else None,
         )
         if isinstance(request, dict) and request.get("type") in {
             "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
@@ -2251,38 +2253,76 @@ class Server:
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _send_direct(self, websocket: Any, frames: Any, *, interleave_history: bool = False) -> bool:
+    def _rejected_direct_frame(self, frame: Any, request_type: str | None, request_id: Any) -> tuple[Any, bool]:
+        """Keep control/refusal delivery, replacing application payloads at egress."""
+        value = frame.payload if isinstance(frame, _EncodedFrame) else frame
+        if not isinstance(value, dict):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = {}
+        if not isinstance(value, dict):
+            value = {}
+        kind = str(value.get("type") or "")
+        # These endpoints intentionally have their own unauthenticated policy.
+        # In particular, screen.lease.status is outside this rejection change.
+        if kind in {
+            "welcome", "pong", "enroll.ok", "enroll.error",
+            "event.push.ok", "event.push.error", "host.stats.ok", "host.stats.error",
+            "screen.lease.status.ok", "screen.lease.status.error",
+        }:
+            return frame, False
+        correlation = value.get("request_id", request_id)
+        if kind.endswith(".error"):
+            code = value.get("error_code")
+            safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "authentication_required"
+            return self._auth_error_frame(kind.removesuffix(".error"), correlation, safe_code), False
+        verb = request_type
+        if not verb:
+            family, _, suffix = kind.rpartition(".")
+            verb = family if suffix in {"ok", "chunk", "result", "ack"} else "protocol"
+        return self._auth_error_frame(verb, correlation, "authentication_required"), True
+
+    async def _send_direct(
+        self, websocket: Any, frames: Any, *, interleave_history: bool = False,
+        request_type: str | None = None, request_id: Any = None,
+    ) -> bool:
         """Write greeting or results without entering broadcast fanout."""
         lock = self._client_send_locks.get(websocket)
         if websocket not in self._clients or lock is None:
             return False
+
+        async def send_frame(frame):
+            # Caller holds the existing send lock. Iterator/storage and earlier
+            # sends may have yielded since admission; recheck for every frame.
+            suppressed = False
+            if websocket in self._operator_rejected:
+                frame, suppressed = self._rejected_direct_frame(frame, request_type, request_id)
+            payload = frame.payload if isinstance(frame, _EncodedFrame) else frame if isinstance(frame, str) else _encode_frame(frame)
+            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
+                await websocket.send(payload)
+            return not suppressed
+
         try:
             if interleave_history and hasattr(frames, "__aiter__"):
-                try:
-                    # Fetch/encode outside the lock; history retains its fair yields.
-                    async for frame in frames:
-                        payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                        with self._diag_wait(websocket) as measurement:
-                            async with lock:
-                                self._diag_acquired(websocket, measurement)
-                                if websocket not in self._clients:
-                                    return False
-                                with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                    await websocket.send(payload)
-                        await asyncio.sleep(0)
-                finally:
-                    close = getattr(frames, "aclose", None)
-                    if callable(close):
-                        await close()
+                # Fetch outside the lock; history retains its fair yields.
+                async for frame in frames:
+                    with self._diag_wait(websocket) as measurement:
+                        async with lock:
+                            self._diag_acquired(websocket, measurement)
+                            if websocket not in self._clients:
+                                return False
+                            if not await send_frame(frame):
+                                return False
+                    await asyncio.sleep(0)
                 return True
             with self._diag_wait(websocket) as measurement:
                 async with lock:
                     self._diag_acquired(websocket, measurement)
                     if hasattr(frames, "__aiter__"):
                         async for frame in frames:
-                            payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                await websocket.send(payload)
+                            if not await send_frame(frame):
+                                return False
                     else:
                         for frame in ((frames,) if isinstance(frames, str) else frames):
                             # Snapshot assembly can await storage while the finisher
@@ -2297,15 +2337,18 @@ class Server:
                                     **frame.get("capabilities", {}),
                                     "error_alerts_v1": True, "outbound_commit_v1": True,
                                 }, "error_reporting_credential_id": self._connection_trust[websocket].credential_id}
-                            payload = frame if isinstance(frame, str) else _encode_frame(frame)
-                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                await websocket.send(payload)
+                            if not await send_frame(frame):
+                                return False
         except ConnectionClosed as exc:
             state = self._connection_diagnostics.get(websocket)
             if state is not None:
                 state.close_exception = exc
             self._unregister_client(websocket)
             return False
+        finally:
+            close = getattr(frames, "aclose", None)
+            if callable(close):
+                await close()
         return True
 
 
@@ -2374,6 +2417,9 @@ class Server:
         }
         if websocket is not None:
             dispatch_msg["_auth_context"] = await self._auth_context(websocket, msg)
+            if self._rejected_rpc(websocket, verb):
+                self._diag_auth_failure(websocket, "authentication_required")
+                return [self._auth_error_frame(verb, request_id, "authentication_required")]
             service_auth = dispatch_msg["_auth_context"]
             if verb in {"upload_blob_init", "upload_blob_chunk"} and msg.get("protocol") == 2:
                 # This opt-in surface always requires a current registered v2
@@ -2465,7 +2511,7 @@ class Server:
                 return [self._unsupported(verb, request_id, caller=caller)]
             auth = dispatch_msg["_auth_context"]
             code = None
-            if (websocket in self._operator_rejected or not self._is_loopback_client(websocket)) and verb not in {
+            if not self._is_loopback_client(websocket) and verb not in {
                 "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
             }:
                 if not any(auth.get(key) for key in (
@@ -2556,8 +2602,12 @@ class Server:
             if actor_reset is not None and verb not in {'spawn','await_report','notification.await','request_stream_events'}:
                 async with self.host_transfer.actor_lock(actor):
                     await self.store.require_current_actor(*actor)
+                    if self._rejected_rpc(websocket, verb):
+                        return [self._auth_error_frame(verb, request_id, "authentication_required")]
                     reply = await handler(dispatch_msg)
             else:
+                if self._rejected_rpc(websocket, verb):
+                    return [self._auth_error_frame(verb, request_id, "authentication_required")]
                 reply = await handler(dispatch_msg)
         except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
@@ -2639,7 +2689,17 @@ class Server:
             return TOKEN_REASON_MALFORMED
         return None
 
+    def _rejected_rpc(self, websocket: Any, verb: str) -> bool:
+        return websocket in self._operator_rejected and verb not in {
+            "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
+        }
+
     def _diag_auth_result(self, websocket: Any, msg: dict, context: dict, started: float | None) -> dict:
+        # A context may have captured operator trust before a storage/thread
+        # await. It cannot restore that authority after rejection on this socket.
+        if websocket in self._operator_rejected:
+            context.update(operator_authenticated=False, operator_principal="",
+                           operator_trusted=False, credential_id="", scoped_principal=False)
         if started is not None:
             self._diag_auth_observe(websocket, msg, context, _monotonic() - started)
         return context
@@ -3548,7 +3608,8 @@ class Server:
         """
         trust = self._connection_trust.get(websocket)
         return bool(
-            trust
+            websocket not in self._operator_rejected
+            and trust
             and trust.transport == "v2"
             and trust.operator_trusted
             and not getattr(trust, "scope", None)
@@ -3606,6 +3667,7 @@ class Server:
             )
         except operator_auth.OperatorAuthError:
             self._operator_rejected.add(websocket)
+            self._connection_trust.pop(websocket, None)
             self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
             return "operator_auth_invalid"
         self._connection_trust[websocket] = trust
