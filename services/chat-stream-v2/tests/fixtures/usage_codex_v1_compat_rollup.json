@@ -5,7 +5,7 @@
     "provider": "claude"
   },
   "generated_at": "2026-10-10T00:00:00Z",
-  "pricing_version": "2026-10-07.2",
+  "pricing_version": "2026-11-10.1",
   "schema_version": 1,
   "since": null,
   "specs": [
