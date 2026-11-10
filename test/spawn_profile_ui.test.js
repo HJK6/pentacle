@@ -35,6 +35,7 @@ test('modelLabel formats catalog ids and keeps the raw fallback', () => {
   assert.equal(modelLabel('claude-sonnet-5'), 'Sonnet 5');
   assert.equal(modelLabel('claude-fable-5'), 'Fable 5');
   assert.equal(modelLabel('claude-fable-5-1'), 'Fable 5.1');
+  assert.equal(modelLabel('claude-fable-5-2'), 'Fable 5.2');
   assert.equal(modelLabel('gpt-5.6-sol'), '5.6 Sol');
   assert.equal(modelLabel('gpt-5.6-terra'), '5.6 Terra');
   assert.equal(modelLabel('gpt-6-astra'), '6 Astra');

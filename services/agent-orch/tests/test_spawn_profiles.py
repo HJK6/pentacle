@@ -38,7 +38,7 @@ def test_validate_v2_accepts_alias_and_returns_canonical() -> None:
         catalog_version="spawn-catalog-v2",
         resolution_source="explicit_override",
     )
-    assert resolved["model"] == "claude-fable-5-1"
+    assert resolved["model"] == "claude-fable-5-2"
     try:
         validate_v2(
             provider="claude",
@@ -267,6 +267,42 @@ def test_handoff_inherits_source_effective_tuple_not_host_defaults(monkeypatch, 
         spawn_profiles.load_spawn_config.cache_clear()
 
 
+def test_fable_5_2_is_the_fable_default_and_5_1_stays_by_full_id() -> None:
+    claude = spawn_profiles.MODELS["claude"]
+    assert claude["claude-fable-5-2"] == {
+        "aliases": ("fable", "claude-fable-5-2", "claude-fable-5"),
+        "efforts": ("low", "medium", "high", "xhigh", "max"),
+    }
+    assert claude["claude-fable-5-1"]["aliases"] == ("claude-fable-5-1",)
+    for alias, canonical in (
+        ("fable", "claude-fable-5-2"), ("claude-fable-5", "claude-fable-5-2"),
+        ("claude-fable-5-2", "claude-fable-5-2"), ("claude-fable-5-1", "claude-fable-5-1"),
+    ):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            resolved = resolve_spawn(provider="claude", model=alias, effort=effort)
+            assert (resolved["model"], resolved["effort"]) == (canonical, effort)
+            revalidated = validate_v2(
+                provider="claude", spawn_profile="agent_orch", schema="SpawnRequestV2",
+                model=canonical, effort=effort, catalog_version="spawn-catalog-v2",
+                resolution_source="explicit_override",
+            )
+            assert revalidated["model"] == canonical
+    # the Claude profile default and the intentionally-unspawnable set are untouched
+    assert resolve_spawn(provider="claude")["model"] == "claude-opus-4-8"
+    assert "claude-fable-5" in spawn_profiles.INTENTIONALLY_UNSPAWNABLE["claude"]
+    assert "claude-fable-5-2" not in spawn_profiles.INTENTIONALLY_UNSPAWNABLE["claude"]
+
+
+def test_handoff_from_fable_5_2_source_inherits_5_2() -> None:
+    resolution = resolve_handoff(
+        source_provider="claude", source_model="claude-fable-5-2", source_effort="high",
+        provider="claude", model="fable", effort="high",
+    )
+    assert resolution.changed is False
+    assert resolution.source["model"] == "claude-fable-5-2"
+    assert resolution.spawn["model"] == "claude-fable-5-2"
+
+
 def test_handoff_canonicalizes_alias_and_identifies_exact_changes() -> None:
     same = resolve_handoff(
         source_provider="claude",
@@ -475,7 +511,7 @@ def test_available_models_installation_config_narrows_the_picker_only(monkeypatc
         # Narrowing is picker-only: a model absent from available_models still
         # resolves (compatibility / explicit / handoff launches).
         assert resolve_spawn(provider="codex", model="gpt-6-luna", effort="max")["model"] == "gpt-6-luna"
-        assert resolve_spawn(provider="claude", model="fable", effort="high")["model"] == "claude-fable-5-1"
+        assert resolve_spawn(provider="claude", model="fable", effort="high")["model"] == "claude-fable-5-2"
     finally:
         spawn_profiles.load_spawn_config.cache_clear()
 

@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-07.2",
+  "version": "2026-11-10.1",
   "unit": "usd_per_mtok",
   "basis": "API-equivalent weights named in spec_pentacle__usage_rollup_and_calibration_2026_10 (Claude) and spec_pentacle__usage_codex_rollup_and_calibration_2026_10 (Codex); a weighted proxy for limit consumption, not billing.",
   "classes": {
@@ -18,6 +18,7 @@
     "claude-opus-5": {"class": "opus"},
     "claude-opus-5-5": {"class": "opus"},
     "claude-fable-5-1": {"class": "opus", "assumption": "Fable priced as Opus-class (named assumption)"},
+    "claude-fable-5-2": {"class": "opus", "assumption": "Fable 5.2 kept in the existing opus consumption-proxy class (15/75 weights) for compatibility with the Fable 5.1 proxy; deliberately not the first-party list price ($8/$40 per MTok, 2026-11-10); non-billing, no recalibration"},
     "claude-sonnet-5": {"class": "sonnet"},
     "claude-sonnet-5-5": {"class": "sonnet"},
     "<synthetic>": {"class": "zero", "assumption": "Claude Code synthetic messages carry no model usage"},

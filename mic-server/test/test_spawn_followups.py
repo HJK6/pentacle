@@ -131,7 +131,7 @@ def test_invalid_option_repair_preserves_task(dialogue):
     start('Spawn a unicorn agent to Review tests.', model='unicorn', task='Review tests.')
     answer('Fable', model='fable')
     claim = listener.wake.claim(actions_version=2)
-    assert claim['action']['task'] == 'Review tests.' and claim['action']['model'] == 'claude-fable-5-1'
+    assert claim['action']['task'] == 'Review tests.' and claim['action']['model'] == 'claude-fable-5-2'
 
 
 def test_pending_invalid_effort_cannot_disappear_when_answer_only_supplies_model():
