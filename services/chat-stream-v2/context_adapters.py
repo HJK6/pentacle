@@ -31,6 +31,8 @@ _CLAUDE_MODEL_WINDOWS = {
     "claude-sonnet-4-6": 1_000_000,
     "claude-haiku-5-5": 1_000_000,
     "claude-haiku-4-5": 200_000,
+    "claude-fable-5-1": 1_000_000,
+    "claude-fable-5-2": 1_000_000,
 }
 
 _DEFAULT_CLAUDE_WINDOW = 1_000_000

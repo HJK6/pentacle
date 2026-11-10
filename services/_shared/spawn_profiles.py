@@ -45,7 +45,8 @@ MODELS = {
         "claude-opus-5": {"aliases": ("claude-opus-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-sonnet-5-5": {"aliases": ("claude-sonnet-5-5", "sonnet-5.5", "sonnet"), "efforts": ("low", "medium", "high", "xhigh", "max")},
         "claude-sonnet-5": {"aliases": ("claude-sonnet-5",), "efforts": ("low", "medium", "high", "xhigh", "max")},
-        "claude-fable-5-1": {"aliases": ("fable", "claude-fable-5-1", "claude-fable-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "claude-fable-5-1": {"aliases": ("claude-fable-5-1",), "efforts": ("low", "medium", "high", "xhigh", "max")},
+        "claude-fable-5-2": {"aliases": ("fable", "claude-fable-5-2", "claude-fable-5"), "efforts": ("low", "medium", "high", "xhigh", "max")},
     },
     "codex": {
         "gpt-5.6-terra": {"aliases": ("gpt-5.6-terra",), "efforts": ("low", "medium", "high", "xhigh", "max")},
@@ -81,9 +82,11 @@ MODELS = {
 # claude-sonnet-5-5; claude-sonnet-5 remains available by full ID (operator direct
 # 2026-09-29, dispatch 98810e03: use Sonnet 5.5 in lieu of the Luna/max tier). Unlike
 # "opus", "sonnet" is not a profile default, so moving it does not diverge from any
-# no-model default. "claude-fable-5" stays an alias of claude-fable-5-1 (operator
-# ruling 2026-09-01: never launch Fable 5 when 5.1 exists) so old clients and
-# handoffs from Fable 5 seats resolve to 5.1 instead of failing. The bare "terra"
+# no-model default. The bare "fable" alias and "claude-fable-5" select
+# claude-fable-5-2 (operator 2026-11-10); claude-fable-5-1 remains available by
+# full ID. "claude-fable-5" stays an alias rather than its own spawn target
+# (operator ruling 2026-09-01: never launch Fable 5 when a later Fable exists) so
+# old clients and handoffs from Fable 5 seats resolve instead of failing. The bare "terra"
 # alias follows gpt-6.1-terra like "sol" (operator 2026-10-26); gpt-5.6-terra
 # remains available by full ID. Codex also reports an "ultra" effort, which no
 # catalog entry offers yet.

@@ -47,7 +47,7 @@ As of 2026-10-08. This profile assigns by task class and risk, without requiring
 | Implementation judgment: accepted design, cross-file interactions, bounded failure | `claude / claude-sonnet-5-5 / high` or `codex / gpt-6.1-sol / medium` | `codex / gpt-6.1-sol / medium` or `claude / claude-opus-5-5 / medium`, independent of the implementer |
 | Demanding reasoning: competing causes, subtle invariants, hard regressions | `claude / claude-opus-5-5 / medium` or `codex / gpt-6.1-sol / high` | As for implementation judgment, or the hard-problem path when the risk warrants it |
 | Hard problem: reframing, deep root cause, substantial investigation and fix | `codex / gpt-6-astra / high` as a scoped lead | A reviewer from the other provider, named explicitly in the commission |
-| Planning and bounded advice | `codex / gpt-6-astra / high` or `claude / claude-fable-5-1 / high` | Spec QA chosen by the class of the work being specified |
+| Planning and bounded advice | `codex / gpt-6-astra / high` or `claude / claude-fable-5-2 / high` | Spec QA chosen by the class of the work being specified |
 | Multi-lane coordinator | `claude / claude-opus-5-5 / high` | None of its own; each lane carries its QA |
 
 - Complexity and risk choose the row. File count or patch size alone is not a reason to escalate, and you select the required row directly rather than failing at lower rows first.
