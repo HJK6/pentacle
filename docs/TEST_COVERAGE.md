@@ -162,8 +162,10 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
 the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
 every requested selection; it does not substitute for the full merge gate.
-`v2-merge-capacity` uses unit 1260s / smoke 900s; CI uses its separately
-declared `v2-merge-ci` profile. The shell smoke/soak wrappers call the same
+`v2-merge-capacity` uses unit 1260s / smoke 900s. Public CI runs six serial
+`v2-unit-ci-shard` cells and a verified join with one `v2-smoke` invocation;
+the source-matched serial control keeps the separate `v2-merge-ci` profile.
+The shell smoke/soak wrappers call the same
 `run_gate.py`; their existence does not add tests to merge.
 
 Gate calibration on the frozen `cca674eb` base measured a serial macOS unit
@@ -171,17 +173,18 @@ tier of 1553.424s. The candidate at `3945cf1e` measured 648.759s with two
 workers and the same executable pass-set, a 58.2% reduction. These are
 calibration measurements, not the final three-run acceptance series. Local
 unit and merge profiles use two workers with worker restarts disabled; the
-hosted CI profile stays serial. Its earlier serial calibration measured
-1830.653s, so no hosted wall-time reduction is claimed. Smoke remains 900s;
-the standalone unit and CI unit caps remain 900s and 2100s. The capacity unit
+hosted control profile and each hosted partition stay serial. An earlier
+serial calibration measured 1830.653s; it does not measure the new partitions.
+Smoke and the standalone unit cap remain 900s. The capacity unit
 bound is twice the final local maximum rounded up to a minute: the three
 eligible quiet finals on `3daecb7a` measured 611.754s, 605.996s and 614.533s,
 a 60.44% reduction from the serial reference. The resulting capacity unit
 bound is 1260s, for a 2160s unit-plus-smoke total. The budget-only correction
-retains those measurements under an explicit evidence-reuse decision; timed
-test bytes are unchanged. Hosted final receipts must still independently
-satisfy the lower-only CI formula. All receipts preserve the pass-set,
-progress journal and owned-process cleanup.
+retains those measurements under an explicit budget-only evidence-reuse
+decision. They remain historical evidence on the named sources; upstream
+test changes need a fresh reference and final series. Hosted partition
+measurements independently calibrate only their own lower-only target bound.
+All receipts preserve the pass-set, progress journal and owned-process cleanup.
 
 [`gate_web.py`](../scripts/gate_web.py) invokes
 [`web_gate.js`](../test/e2e/web_gate.js) and the separate interrupt test.
@@ -446,7 +449,7 @@ this section neither certifies runtime deployment nor commissions extra work.
 
 ### Hosted daemon CI budget
 
-The serial hosted unit tier uses 4320s, with the existing 900s smoke tier,
+The serial hosted control uses 4320s, with the existing 900s smoke tier,
 for a 5220s merge target and maximum. Successful hosted unit logs measured
 2059.04s and 2071.48s. Another run exhausted its former 2100s unit limit
 after 13010 of 13285 nodes; average-throughput extrapolation gives about
@@ -455,7 +458,24 @@ observed or projected cost, rounded up to a minute, gives the new unit
 envelope. Individual test timers and assertions remain unchanged.
 
 The existing runner allowances produce a 5340s deadline and 5370s outer
-gate limit. The daemon job allows 110 minutes, leaving 630s after that
+gate limit. The serial-control job allows 110 minutes, leaving 630s after that
 outer limit and the existing 600s package step for other setup and artifact
 retention. This changes the suite and job envelopes; it does not enable
 parallel hosted workers or alter local gate budgets.
+
+Pushes and pull requests use six independent, serial unit partitions. Their
+initial `v2-unit-ci-shard` unit bound and maximum are 1200s; calibration sets
+both to `min(1200, max(300, ceil_minute(2 * max_cell_unit_duration)))` before
+the frozen final measurements. Unit-cell and join jobs each allow 40 minutes;
+the join runs smoke once, with its unchanged 900s bound, after verifying all
+six actual manifests, JUnit files and complete journals. A distinct union
+receipt records the source, disjoint coverage, retained hashes and smoke;
+local/deploy merge-receipt semantics stay unchanged. Successful and failed
+raw evidence is retained for seven days under job/shard/run/attempt names.
+
+The hosted target is at most 720s job wall per cell, aiming at 600s. Record
+queue delay, every cell's unit duration and job wall, join/smoke wall, daemon
+critical path and total runner minutes separately. Summed partition durations
+are not a wall-time improvement. One source-matched Linux serial control
+must have the same normalized executable outcomes and collection skips as
+the union; missing, overlapping or damaged cells fail before smoke starts.

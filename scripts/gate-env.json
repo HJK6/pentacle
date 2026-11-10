@@ -245,6 +245,19 @@
           "capabilities": "v2_host",
           "timeout_s": 900,
           "max_timeout_s": 900
+        },
+        "v2-unit-ci-shard": {
+          "kind": "run_gate",
+          "gate": "unit",
+          "needs": [
+            "python",
+            "node",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "timeout_s": 1200,
+          "max_timeout_s": 1200,
+          "shardable": true
         }
       }
     }

@@ -102,6 +102,9 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
                 if "unit_workers" in target and (target.get("kind") != "run_gate" or target.get("gate") not in ("unit", "merge")
                                                  or type(target["unit_workers"]) is not int or target["unit_workers"] < 1):
                     problems.append("unit_workers of " + tname)
+                if "shardable" in target and (type(target["shardable"]) is not bool or target.get("kind") != "run_gate"
+                                               or target.get("gate") != "unit" or target.get("unit_workers", 1) != 1):
+                    problems.append("shardable of " + tname)
 
     if problems:
         raise SetupFailure([fail("config", "malformed gate-env.json: " + ", ".join(problems), "restore the checked-in scripts/gate-env.json")])
@@ -479,6 +482,16 @@ def run_preflight_script(run, script: Path, env: Dict[str, str]) -> List[Dict[st
 
 # ------------------------------------------------------------ selection
 
+def validate_shards(target: Dict[str, Any], index: Optional[int], count: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    if index is None and count is None:
+        return index, count
+    if (type(index) is not int or type(count) is not int or count < 2 or not 0 <= index < count
+            or target.get("kind") != "run_gate" or target.get("gate") != "unit"
+            or target.get("shardable") is not True or target.get("unit_workers", 1) != 1):
+        raise SetupFailure([fail("selection", "shards require a valid index/count pair and a serial shardable unit target")])
+    return index, count
+
+
 def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path) -> List[str]:
     spec = target.get("select")
     if not select:
@@ -720,6 +733,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--target")
     parser.add_argument("--select", action="append", default=[], help="run only: test files/nodes; required for pytest targets (never defaults to the full suite)")
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--shard-count", type=int)
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
     parser.add_argument("--spec")
     parser.add_argument("--series")
@@ -801,6 +816,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if timeout_s > target["max_timeout_s"]:
             raise SetupFailure([fail("selection", "--timeout-seconds %d exceeds the target maximum %d" % (timeout_s, target["max_timeout_s"]))])
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
+        validate_shards(target, args.shard_index, args.shard_count)
         resolved_selection = list(selection)  # retained even when setup fails before prepared
         # This explicitly selected integration file boots the same fixture as web-gate.
         # Reuse its declared prerequisites before preparing the exact child context.
@@ -913,7 +929,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if target["kind"] == "prepare":
             state.update(outcome="pass", first_failure=None)
         else:
-            command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
+            command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env,
+                                             **({"shard_index": args.shard_index, "shard_count": args.shard_count}
+                                                if args.shard_index is not None else {}))
             if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
@@ -1031,7 +1049,9 @@ def profile_root(service_dir: Path, checkout: Path) -> str:
 
 
 def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
-                  selection: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[List[str], Dict[str, Any]]:
+                  selection: List[str], timeout_s: int, env: Dict[str, str], *, shard_index: Optional[int] = None,
+                  shard_count: Optional[int] = None) -> Tuple[List[str], Dict[str, Any]]:
+    validate_shards(target, shard_index, shard_count)
     gate_dir = evidence / "gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
     kind = target["kind"]
@@ -1054,6 +1074,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
             deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
+        if shard_index is not None:
+            command += ["--shard-index", str(shard_index), "--shard-count", str(shard_count)]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
         return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":

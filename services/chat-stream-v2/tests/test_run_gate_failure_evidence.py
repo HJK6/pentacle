@@ -109,6 +109,35 @@ def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
         case = tmp_path / str(workers)
         case.mkdir()
         _check_pass_with_deadline(case, workers)
+    shard = tmp_path / 'shard'
+    shard.mkdir()
+    nested = PASSING + '''
+def test_nested_argv_is_private(tmp_path):
+    import os, subprocess, sys
+    assert 'PYTEST_ADDOPTS' not in os.environ
+    assert not any('SHARD' in key for key in os.environ)
+    child = tmp_path / 'isolated.py'
+    child.write_text('def test_one(): pass\\ndef test_two(): pass\\n')
+    done = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', str(child)],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0 and '2 tests collected' in done.stdout, done.stdout + done.stderr
+'''
+    code, data, out = _gate(shard, nested, argv=['unit', '--shard-index', '0', '--shard-count', '2'])
+    unit = data['tiers'][0]
+    assert code == 0 and unit['progress']['complete'] and unit['progress']['collected'] == 2, out
+    assert '-p' in unit['command'] and 'tools.gate_shard' in unit['command'] and '-n' not in unit['command']
+    assert (shard / 'evidence/unit.shard-manifest.json').is_file()
+    assert _subject_gone(unit)
+    for gate, flags in [('unit', ['--shard-index', '0']), ('unit', ['--shard-count', '6']),
+                        ('unit', ['--shard-index', '-1', '--shard-count', '6']),
+                        ('unit', ['--shard-index', '6', '--shard-count', '6']),
+                        ('unit', ['--shard-index', '0', '--shard-count', '1']),
+                        ('unit', ['--shard-index', '0', '--shard-count', '6', '--unit-workers', '2']),
+                        *[(gate, ['--shard-index', '0', '--shard-count', '6']) for gate in ('merge', 'smoke', 'soak')]]:
+        refused = tmp_path / 'refused'
+        done = subprocess.run([sys.executable, str(run_gate.__file__), gate, *flags, '--evidence-dir', str(refused)],
+                              capture_output=True, text=True, timeout=10)
+        assert done.returncode == 2 and not refused.exists(), done.stdout + done.stderr
 
 
 def _check_pass_with_deadline(tmp_path: Path, workers: int) -> None:
@@ -123,6 +152,7 @@ def _check_pass_with_deadline(tmp_path: Path, workers: int) -> None:
     assert not (tmp_path / "base" / "unit").exists()
     assert ("-n" in unit["command"]) == (workers > 1)
     assert ("--max-worker-restart=0" in unit["command"]) == (workers > 1)
+    assert 'tools.gate_shard' not in unit['command'] and not any('--gate-shard-' in arg for arg in unit['command'])
     assert unit["progress"]["collected"] == unit["progress"]["started_nodes"] == unit["progress"]["completed_nodes"] == 1
 
 
@@ -134,6 +164,7 @@ def test_assertion_and_setup_errors_name_nodes(tmp_path: Path) -> None:
     assert {"node": "test_synthetic.py::test_a", "phase": "call"} in unit["progress"]["failed"]
     assert {"node": "test_synthetic.py::test_b", "phase": "setup"} in unit["progress"]["failed"]
     assert _subject_gone(unit)
+
 
 
 def test_per_test_timeout_hard_exit_keeps_active_node(tmp_path: Path) -> None:
@@ -157,6 +188,15 @@ def test_per_test_timeout_hard_exit_keeps_active_node(tmp_path: Path) -> None:
     assert unit["progress"]["active_nodes"] == ["test_synthetic.py::test_hang"]
     assert {"node": "test_synthetic.py::test_hang", "phase": "???"} in unit["progress"]["failed"]
     assert unit["progress"]["last_completed"] == "test_synthetic.py::test_first"
+    assert _subject_gone(unit)
+
+    sharded = tmp_path / 'sharded-hard-exit'
+    sharded.mkdir()
+    code, data, out = _gate(sharded, source, argv=['unit', '--shard-index', '0', '--shard-count', '2'])
+    unit = data['tiers'][0]
+    assert code == 1 and not data['passed'] and not unit['progress']['complete'], out
+    assert unit['progress']['active_nodes'] == ['test_synthetic.py::test_hang']
+    assert (sharded / 'evidence/unit.shard-manifest.json').is_file()
     assert _subject_gone(unit)
 
 

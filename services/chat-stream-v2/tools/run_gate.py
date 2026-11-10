@@ -274,7 +274,8 @@ def _classify(*, code: int, timed_out: bool, terminated: bool, counts: dict[str,
         # The subject looked green but its evidence is partial: never a green verdict.
         primary = "evidence_incomplete"
     return primary, reporting
-def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1) -> dict[str, Any]:
+def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, manifest: Path, unit_workers: int = 1,
+              shard_index: int | None = None, shard_count: int | None = None) -> dict[str, Any]:
     if "TMUX" in os.environ:
         return _result(tier, code=2, passed=False, reason="ambient_tmux")
     junit, log = evidence / f"{tier}.junit.xml", evidence / f"{tier}.log"
@@ -304,6 +305,9 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
     if tier == "unit" and unit_workers > 1:
         command += ["-n", str(unit_workers), "--dist", "loadfile", "--max-worker-restart=0"]
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
+    if tier == "unit" and shard_index is not None:
+        command += ["-p", "tools.gate_shard", f"--gate-shard-index={shard_index}",
+                    f"--gate-shard-count={shard_count}", f"--gate-shard-manifest={evidence / 'unit.shard-manifest.json'}"]
     print(f"[v2-gate] {tier}: {' '.join(command)}")
     _LAST_PROCESS.clear()
     code, timed_out = _run_process(command, env=env, log_path=log, timeout=timeout)
@@ -412,6 +416,8 @@ def main() -> int:
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
     parser.add_argument("--unit-workers", type=int, default=1, help="fixed unit-tier workers; 1 keeps serial execution")
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--shard-count", type=int)
     parser.add_argument("--deadline-seconds", type=_positive_finite,
                         help="total time this runner may use; refuse before launch or a tier that cannot fit")
     parser.add_argument("--deadline-reserve-seconds", type=_positive_finite, default=DEFAULT_RESERVE_S,
@@ -426,6 +432,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.unit_workers < 1 or (args.unit_workers > 1 and args.gate not in {"unit", "merge"}):
         parser.error("--unit-workers must be positive and parallel workers require unit or merge")
+    if args.shard_index is not None or args.shard_count is not None:
+        if (args.shard_index is None or args.shard_count is None or args.shard_count < 2
+                or not 0 <= args.shard_index < args.shard_count or args.gate != "unit" or args.unit_workers > 1):
+            parser.error("shards require both index and count >= 2, a valid index and serial unit execution")
     if bool(args.usage_manifest) != bool(args.usage_deployment_contract):
         parser.error("--usage-manifest and --usage-deployment-contract must be supplied together")
     if args.usage_manifest and args.gate != "merge":
@@ -469,7 +479,9 @@ def main() -> int:
                     if index and (refusal := _deadline_check(deadline, clock_start, "deadline", limits[index:], usage_pending=False)):
                         results.append(refusal)
                         break
-                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers))
+                    results.append(_run_tier(tier, evidence, limit, basetemp=basetemp, manifest=manifest, unit_workers=args.unit_workers,
+                                             **({"shard_index": args.shard_index, "shard_count": args.shard_count}
+                                                if args.shard_index is not None else {})))
     except KeyboardInterrupt:
         _TERMINATION_REQUESTED = True
         results.append(_result("owner", code=143, passed=False, reason="terminated", termination={"kind": "external_signal", "signal": _TERMINATION_SIGNAL or "SIGINT"}))

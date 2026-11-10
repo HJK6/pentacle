@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-EXPECTED_JOB_IDS = ('frontend', 'web', 'daemon', 'contracts')
+EXPECTED_JOB_IDS = ('frontend', 'web', 'daemon-unit', 'daemon', 'daemon-serial-control', 'contracts')
 
 
 def main():
@@ -16,8 +16,13 @@ def main():
     if not isinstance(needs, dict) or set(needs) != set(EXPECTED_JOB_IDS):
         print('checks: needs must exactly match expected partitions', file=sys.stderr)
         return 1
+    event = os.environ.get('CI_EVENT_NAME')
+    if event not in ('push', 'pull_request', 'workflow_dispatch'):
+        print('checks: unsupported or missing event', file=sys.stderr)
+        return 1
+    skipped = {'daemon-unit', 'daemon'} if event == 'workflow_dispatch' else {'daemon-serial-control'}
     failed = [job for job, data in needs.items()
-              if not isinstance(data, dict) or data.get('result') != 'success']
+              if not isinstance(data, dict) or data.get('result') != ('skipped' if job in skipped else 'success')]
     if failed:
         print('checks: non-success partitions: ' + ', '.join(sorted(failed)), file=sys.stderr)
         return 1
