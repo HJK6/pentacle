@@ -57,6 +57,21 @@ stores; inline secrets are refused. The caller must provide admitted accounts
 and a current release tuple. Source checkout and running artifact remain
 separate identities.
 
+Releases are component-scoped: `source_sha` binds the daemon; CLI `version`
+binds its own release manifest and installed/imported package bytes. The runner
+checks compatibility independently of release order. `web` supplies its own full `source_sha`, installed `artifact` directory
+and `build_id`. The runner verifies the artifact's `build-sha.txt`, uses the
+existing web build-ID oracle and checks served JS/CSS bytes against the artifact.
+Web-owned paths (renderer, client core, server, assets, configs, libraries,
+main, vendor, package locks, web build script and root config/host loaders)
+may change independently. Changes introduced by a component since its merge-base
+with the daemon must stay within that component's runtime paths (`services/agent-orch`
+for CLI releases); accompanying records under `docs` and `test` are listed separately.
+Older component releases remain valid across daemon-only
+changes. Shared contracts under `services/_shared` must be identical between
+component and daemon source. These source compatibility checks do not waive
+verification of each component's actual installed bytes and build identity.
+
 Exit status is 0 PASS, 1 FAIL, or 2 BLOCKED. `rows.json` retains each check's
 `row`, `result`, `primary_error`, `harness_error`, `fixture_ids` and `cleanup`;
 `run-manifest.json` binds exact owned IDs and artifact identities. Evidence

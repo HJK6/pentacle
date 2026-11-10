@@ -139,7 +139,7 @@ async function installedJourney(ctx, descriptor) {
         assert.equal(pages.at(-1)?.exhausted, true, 'bounded history walk exhausted the fixture');
         const after = project(await rows(fixture.stream_id));
         assert.deepEqual(after, before, 'reload/paging preserves ordered durable identities');
-        const dom = await session.eval(`Array.from(document.querySelectorAll('${list} .slot-chat-user-bubble')).map(e => e.textContent.replace(/\s+/g,' ').trim())`);
+        const dom = await session.eval(`Array.from(document.querySelectorAll('${list} .slot-chat-user-bubble')).map(e => e.textContent.replace(/\\s+/g,' ').trim())`);
         for (const ownInput of descriptor.inputs[String(i)]) {
           assert.equal(dom.filter(text => text === ownInput.replace(/\s+/g,' ').trim()).length, 1, 'rendered logical input appears once');
         }
