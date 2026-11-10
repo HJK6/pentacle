@@ -18,15 +18,49 @@ async function installedJourney(ctx, descriptor) {
   const hook = await session.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
     const Native = window.WebSocket;
     window.__installedJourney = { requests: [], dropNext: false, retryRequested: false, sockets: [] };
+    const reportOwner = ${JSON.stringify(descriptor.phase === 'report' ? descriptor.fixtures[0].stream_id : null)};
+    const reportAsset = ${JSON.stringify(descriptor.asset_id || null)};
+    window.__installedJourney.reportRpc = [];
+    let socketOrdinal = 0;
     window.WebSocket = class extends Native {
       constructor(...args) {
         super(...args);
         if (!String(args[0]).endsWith('/cc')) return;
         window.__installedJourney.sockets.push(this);
+        const socket = ++socketOrdinal, pending = new Map();
+        this.addEventListener('message', event => {
+          let reply; try { reply = JSON.parse(event.data); } catch (_) { return; }
+          const record = pending.get(reply?.id);
+          if (!record) return;
+          pending.delete(reply.id);
+          record.settled_at = Date.now();
+          record.state = reply.ok === false || reply.result?.error_code ? 'error' : 'success';
+          record.error_code = reply.error?.code || reply.result?.error_code || null;
+          const result = reply.result || {};
+          const asset = result.asset;
+          const ownAsset = asset?.asset_id === reportAsset && asset?.session_key?.stream_id === reportOwner;
+          record.response = { type:result.type, asset_id:asset?.asset_id,
+            stream_id:asset?.session_key?.stream_id,
+            body:ownAsset && typeof asset.body === 'string' ? asset.body.slice(0, 65536) : undefined,
+            body_truncated:ownAsset && typeof asset.body === 'string' && asset.body.length > 65536,
+            comments_count:Array.isArray(result.comments) ? result.comments.length : undefined,
+            assets:Array.isArray(result.assets) ? result.assets.filter(a => a.asset_id === reportAsset && a.session_key?.stream_id === reportOwner)
+              .map(a => ({ asset_id:a.asset_id, session_key:a.session_key, content_type:a.content_type })) : undefined };
+        });
         this.send = bytes => {
           let frame; try { frame = JSON.parse(bytes); } catch (_) {}
           const capture = window.__installedJourney;
           const a = frame?.args;
+          const scope = a?.[0];
+          if (reportOwner && ['chat-stream:asset-list','chat-stream:asset-get','chat-stream:asset-comments-list'].includes(frame?.method)
+              && scope?.stream_id === reportOwner && (!scope.asset_id || scope.asset_id === reportAsset)) {
+            const record = { socket, id:frame.id, method:frame.method, state:'pending', started_at:Date.now(),
+              stream_id:reportOwner, asset_id:scope.asset_id || null };
+            const records = capture.reportRpc;
+            if (records.length >= 128) { records.shift(); capture.reportRpcTruncated = true; }
+            if (pending.size >= 128) pending.delete(pending.keys().next().value);
+            records.push(record); pending.set(frame.id, record);
+          }
           const ours = frame?.method === 'chat-stream:send' && Array.isArray(a)
             && ${JSON.stringify(fixtureIds)}.includes(a[0] + ':' + a[1]);
           if (ours) capture.requests.push({ host:a[0], session:a[1], text:a[2], requestId:a[3], optimisticId:a[4] });
@@ -73,6 +107,50 @@ async function installedJourney(ctx, descriptor) {
     await session.click('#cell-0 .slot-chat-compose-send');
     await wait(`(window.PentacleChatStore.getState().events || []).some(e => ['ASSIST_TEXT','ASSIST'].includes(e.kind) && e.text?.trim() === ${JSON.stringify(reply)})`);
     await wait(`document.querySelector('${list}')?.textContent.includes(${JSON.stringify(reply)})`);
+  }
+  let reportAssetKey = null;
+  if (descriptor.phase === 'report') observation.report = { click_result:null, snapshots:[], rpc:[], capture_errors:[] };
+  const reportSample = () => `(() => {
+    const cell = document.querySelector('#cell-0');
+    const tabs = Array.from(document.querySelectorAll('#header-0 .slot-asset-tab')).filter(e =>
+      e.dataset.streamId === ${JSON.stringify(descriptor.fixtures[0].stream_id)} && e.dataset.assetId === ${JSON.stringify(descriptor.asset_id)});
+    const selected = tabs.filter(e => e.classList.contains('active'));
+    const body = cell?.querySelector('.slot-asset-view-body');
+    const roots = Array.from(body?.querySelectorAll('.slot-asset-report') || []);
+    const visible = e => { const style=getComputedStyle(e), box=e.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0; };
+    const root = roots.length === 1 ? roots[0] : null;
+    const checks = { unique_tab:tabs.length === 1,
+      selected:selected.length === 1 && selected[0].dataset.assetKey === ${JSON.stringify(reportAssetKey)},
+      visible_body:!!root && visible(root),
+      summary:!!root && root.querySelector('h1')?.textContent.trim() === ${JSON.stringify(descriptor.summary)},
+      report_id:!!root && Array.from(root.querySelectorAll('h2')).filter(e => e.textContent.trim() === ${JSON.stringify(descriptor.report_id)}).length === 1 };
+    checks.pass = Object.values(checks).every(Boolean);
+    const store = window.PentacleChatStore?.getState?.() || {};
+    return { evaluated_at:Date.now(), checks, bodyDOM:body?.outerHTML || null,
+      cellDOM:cell?.outerHTML || null, cellText:cell?.textContent || null,
+      tabs:tabs.map(e => ({ stream_id:e.dataset.streamId, asset_id:e.dataset.assetId, asset_key:e.dataset.assetKey, active:e.classList.contains('active') })),
+      store_events:(Array.isArray(store.events) ? store.events : []).filter(e => e.stream_id === ${JSON.stringify(descriptor.fixtures[0].stream_id)}),
+      private_asset_cache:'unavailable through existing harness surface', private_render_generation:'unavailable through existing harness surface' };
+  })()`;
+  async function captureReport(label) {
+    if (!observation.report) return null;
+    try {
+      const captured = await session.eval(`(() => { /* reportEvidenceSnapshot:${label} */
+        return { last_sample:window.__installedJourney?.reportLastSample || null,
+          current:${reportSample()}, rpc:window.__installedJourney?.reportRpc || [],
+          rpc_truncated:!!window.__installedJourney?.reportRpcTruncated }; })()`);
+      observation.report.snapshots.push({ label, ...captured.current });
+      if (captured.last_sample) observation.report.last_sample = captured.last_sample;
+      observation.report.rpc = captured.rpc;
+      observation.report.rpc_truncated = captured.rpc_truncated;
+      observation.report.console = (session.consoleLines || []).slice(-100);
+      fs.writeFileSync(path.join(report.dir, 'installed-observation.json'), JSON.stringify(observation, null, 2));
+      return captured.current;
+    } catch (error) {
+      observation.report.capture_errors.push({ label, error:error.message });
+      return null; // Diagnostic failure never replaces the primary assertion.
+    }
   }
   const project = events => events.filter(e => ['USER','ASSIST_TEXT','ASSIST'].includes(e.kind))
     .map(e => ({ daemon_seq:e.correlatedDaemonSeq ?? e.daemon_seq, kind:e.kind, text:e.text,
@@ -166,10 +244,21 @@ async function installedJourney(ctx, descriptor) {
       observation.answered_notification_id = descriptor.notification_id;
     } else if (descriptor.phase === 'report') {
       await open(descriptor.fixtures[0]);
-      const tab = '.slot-asset-tab[data-asset-id="' + descriptor.asset_id + '"]';
+      const tab = '#header-0 .slot-asset-tab[data-stream-id=' + JSON.stringify(descriptor.fixtures[0].stream_id)
+        + '][data-asset-id=' + JSON.stringify(descriptor.asset_id) + ']';
       await wait(`!!document.querySelector(${JSON.stringify(tab)})`);
-      await session.click(tab);
-      await wait(`document.querySelector('#cell-0')?.textContent.includes(${JSON.stringify(descriptor.summary)}) && document.querySelector('#cell-0')?.textContent.includes(${JSON.stringify(descriptor.report_id)})`);
+      const target = await captureReport('before-target-assertion');
+      assert.equal(target?.tabs.length, 1, 'report tab must have one matching slot/stream/asset');
+      reportAssetKey = target.tabs[0].asset_key;
+      assert.ok(reportAssetKey, 'report scoped asset key missing');
+      observation.report.click_result = await session.click(tab);
+      await captureReport('after-click-before-dispatch-assertion');
+      assert.equal(observation.report.click_result, true, 'report tab click dispatch was not proved');
+      await captureReport('before-rendered-body-predicate');
+      await wait(`(() => { const sample = ${reportSample()};
+        window.__installedJourney.reportLastSample = sample; return sample.checks.pass; })()`);
+      const rendered = await captureReport('before-rendered-body-assertion');
+      assert.equal(rendered?.checks.pass, true, 'selected visible report body must contain summary and report ID');
       observation.rendered = { asset_id:descriptor.asset_id, report_id:descriptor.report_id, summary:descriptor.summary };
       await session.screenshot(path.join(report.dir, 'installed-report.png'));
     } else {
@@ -180,6 +269,7 @@ async function installedJourney(ctx, descriptor) {
   } catch (error) {
     observation.status = 'FAIL';
     observation.primary_error = error.message;
+    await captureReport('failure');
     throw error;
   } finally {
     fs.writeFileSync(path.join(report.dir, 'installed-observation.json'), JSON.stringify(observation, null, 2));
