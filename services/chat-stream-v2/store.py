@@ -6743,6 +6743,27 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             stream_id, before_daemon_seq=None, limit=limit, generation=generation,
         )
 
+    async def list_open_usage_fence_rows(self, host: str) -> list[dict[str, Any]]:
+        """Current host fence metadata in one snapshot, without history hydration."""
+        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """SELECT s.host, s.session_name, s.provider, s.pane_pid,
+                          s.created_at, s.account_binding,
+                          g.generation AS session_generation
+                   FROM sessions s
+                   LEFT JOIN v2_session_generations g
+                     ON g.host=s.host AND g.session_name=s.session_name
+                   WHERE s.host=? AND s.status='open'
+                     AND s.provider IN ('codex','claude')
+                   ORDER BY s.rowid""",
+                (host,),
+            ).fetchall()
+            # Preserve the ordinary row decoder's optional binding semantics;
+            # _session_row would also hydrate usage/report/capacity state.
+            return [_row(row) for row in rows]
+
+        return await self.submit(_op)
+
     async def list_open_sessions_with_event_summary(self) -> list[dict[str, Any]]:
         """Open rows plus lifecycle-matched event state from one DB snapshot."""
 
