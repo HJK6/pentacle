@@ -94,10 +94,82 @@ def test_application_fanout_auth_matrix(daemon, monkeypatch, transport, stage):
 
 def test_fresh_native_no_claim_hello_still_gets_bootstrap_ready(daemon):
     async def run():
+        await sensitive_frames(daemon)
         async with connected(daemon, peer("native")) as (socket, _, _):
             reply = await socket.rpc({"type": "hello", "client": "native-bootstrap",
                                       "subscribe": {"mode": "rpc", "snapshot": False}})
             assert reply["type"] == "ready"
+            inventory = await socket.rpc({"type": "list_sessions"})
+            assert inventory["type"] == "list_sessions.ok"
+            assert any(row["stream_id"] == "fixture:seat" for row in inventory["active"])
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["remote", "native", "origin"])
+def test_rejected_proof_cannot_reenter_bootstrap_through_rpc(daemon, transport):
+    async def run():
+        await sensitive_frames(daemon)
+        async with connected(daemon, peer(transport)) as (socket, welcome, _):
+            _, hello = signed_hello(daemon, welcome)
+            hello["auth_v2"]["proof"] = operator_auth.encode_b64url(b"x" * operator_auth.AUTH_PROOF_BYTES)
+            assert (await socket.rpc(hello))["error_code"] == "operator_auth_invalid"
+            start = len(socket.sent)
+            reply = await socket.rpc({"type": "list_sessions"})
+            assert reply["type"] == "list_sessions.error", (transport, reply)
+            assert reply["error_code"] == "authentication_required"
+            assert not any("active" in frame or "sessions" in frame for frame in sent_since(socket, start))
+    asyncio.run(run())
+
+
+def test_queued_native_inventory_is_dropped_after_rejection_while_writer_waits(daemon, monkeypatch):
+    async def run():
+        frames = await sensitive_frames(daemon)
+        async with connected(daemon, peer("native")) as (socket, welcome, _):
+            dequeued, rejected = asyncio.Event(), asyncio.Event()
+            queue = daemon._client_send_queues[socket]
+            removed = daemon._diag_removed
+            failed = daemon._diag_auth_failure
+
+            def observed_remove(target, frame_type, **kwargs):
+                removed(target, frame_type, **kwargs)
+                if target is queue and frame_type == "session.inventory":
+                    dequeued.set()
+
+            def observed_rejection(target, *args, **kwargs):
+                failed(target, *args, **kwargs)
+                if target is socket and target in daemon._operator_rejected:
+                    rejected.set()
+
+            monkeypatch.setattr(daemon, "_diag_removed", observed_remove)
+            monkeypatch.setattr(daemon, "_diag_auth_failure", observed_rejection)
+            lock = daemon._client_send_locks[socket]
+            start = len(socket.sent)
+            before = daemon._connection_diagnostics[socket].non_handshake_tx
+            await lock.acquire()
+            try:
+                for frame in frames[:2]:
+                    await daemon.broadcast(frame)
+                await asyncio.wait_for(dequeued.wait(), 1)
+                # The inventory left the queue and is waiting on our held lock.
+                assert queue.qsize() == 1
+                assert socket in daemon._client_inflight_coalescible
+                assert sent_since(socket, start) == []
+                _, hello = signed_hello(daemon, welcome)
+                hello["auth_v2"]["proof"] = operator_auth.encode_b64url(b"x" * operator_auth.AUTH_PROOF_BYTES)
+                socket.feed(hello)
+                await asyncio.wait_for(rejected.wait(), 1)
+                assert socket in daemon._operator_rejected
+            finally:
+                lock.release()
+            # hello.error uses direct send and must still reach the peer.
+            assert (await socket.receive(kind="hello.error"))["error_code"] == "operator_auth_invalid"
+            await flush(daemon)
+            delivered = sent_since(socket, start)
+            assert [frame["type"] for frame in delivered] == ["hello.error"]
+            assert daemon._connection_diagnostics[socket].non_handshake_tx == before
+            assert not daemon._client_last_sent_digest.get(socket)
+            assert socket not in daemon._client_inflight_coalescible
+            assert all(bucket["broadcast_sent"] == 0 for bucket in daemon._connection_diagnostics[socket].traffic.values())
     asyncio.run(run())
 
 
