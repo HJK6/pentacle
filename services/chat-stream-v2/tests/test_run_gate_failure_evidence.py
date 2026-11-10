@@ -105,7 +105,44 @@ def _subject_gone(tier: dict) -> bool:
 
 
 def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
-    code, data, out = _gate(tmp_path, PASSING, argv=["unit", "--timeout-seconds", "20", "--deadline-seconds", "120"])
+    for workers in (1, 2):
+        case = tmp_path / str(workers)
+        case.mkdir()
+        _check_pass_with_deadline(case, workers)
+    shard = tmp_path / 'shard'
+    shard.mkdir()
+    nested = PASSING + '''
+def test_nested_argv_is_private(tmp_path):
+    import os, subprocess, sys
+    assert 'PYTEST_ADDOPTS' not in os.environ
+    assert not any('SHARD' in key for key in os.environ)
+    child = tmp_path / 'isolated.py'
+    child.write_text('def test_one(): pass\\ndef test_two(): pass\\n')
+    done = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', str(child)],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0 and '2 tests collected' in done.stdout, done.stdout + done.stderr
+'''
+    code, data, out = _gate(shard, nested, argv=['unit', '--shard-index', '0', '--shard-count', '2'])
+    unit = data['tiers'][0]
+    assert code == 0 and unit['progress']['complete'] and unit['progress']['collected'] == 2, out
+    assert '-p' in unit['command'] and 'tools.gate_shard' in unit['command'] and '-n' not in unit['command']
+    assert (shard / 'evidence/unit.shard-manifest.json').is_file()
+    assert _subject_gone(unit)
+    for gate, flags in [('unit', ['--shard-index', '0']), ('unit', ['--shard-count', '6']),
+                        ('unit', ['--shard-index', '-1', '--shard-count', '6']),
+                        ('unit', ['--shard-index', '6', '--shard-count', '6']),
+                        ('unit', ['--shard-index', '0', '--shard-count', '1']),
+                        ('unit', ['--shard-index', '0', '--shard-count', '6', '--unit-workers', '2']),
+                        *[(gate, ['--shard-index', '0', '--shard-count', '6']) for gate in ('merge', 'smoke', 'soak')]]:
+        refused = tmp_path / 'refused'
+        done = subprocess.run([sys.executable, str(run_gate.__file__), gate, *flags, '--evidence-dir', str(refused)],
+                              capture_output=True, text=True, timeout=10)
+        assert done.returncode == 2 and not refused.exists(), done.stdout + done.stderr
+
+
+def _check_pass_with_deadline(tmp_path: Path, workers: int) -> None:
+    code, data, out = _gate(tmp_path, PASSING, argv=["unit", "--timeout-seconds", "20", "--deadline-seconds", "120",
+                                                  *([] if workers == 1 else ["--unit-workers", str(workers)])])
     unit = data["tiers"][0]
     assert code == 0 and data["passed"] is True and data["finished"] is True, out
     assert unit["reason"] is None and unit["secondary_outcomes"] == [] and unit["progress"]["complete"] is True
@@ -113,6 +150,10 @@ def test_pass_with_deadline_records_complete_progress(tmp_path: Path) -> None:
     check = data["deadline"]["checks"][0]
     assert check["ok"] and check["tier_bounds_s"] == {"unit": 20.0} and check["reserve_s"] == run_gate.DEFAULT_RESERVE_S
     assert not (tmp_path / "base" / "unit").exists()
+    assert ("-n" in unit["command"]) == (workers > 1)
+    assert ("--max-worker-restart=0" in unit["command"]) == (workers > 1)
+    assert 'tools.gate_shard' not in unit['command'] and not any('--gate-shard-' in arg for arg in unit['command'])
+    assert unit["progress"]["collected"] == unit["progress"]["started_nodes"] == unit["progress"]["completed_nodes"] == 1
 
 
 def test_assertion_and_setup_errors_name_nodes(tmp_path: Path) -> None:
@@ -125,6 +166,7 @@ def test_assertion_and_setup_errors_name_nodes(tmp_path: Path) -> None:
     assert _subject_gone(unit)
 
 
+
 def test_per_test_timeout_hard_exit_keeps_active_node(tmp_path: Path) -> None:
     source = "import time\ndef test_first():\n    pass\ndef test_hang():\n    time.sleep(30)\n"
     code, data, _ = _gate(tmp_path, source)
@@ -133,6 +175,29 @@ def test_per_test_timeout_hard_exit_keeps_active_node(tmp_path: Path) -> None:
     assert "journal_incomplete" in unit["secondary_outcomes"]
     assert unit["progress"]["active_nodes"] == ["test_synthetic.py::test_hang"]
     assert unit["progress"]["last_completed"] == "test_synthetic.py::test_first"
+    parallel = tmp_path / "parallel"
+    parallel.mkdir()
+    code, data, output = _gate(parallel, source,
+        argv=["unit", "--unit-workers", "2", "--timeout-seconds", "20"])
+    unit = data["tiers"][0]
+    assert code == 1 and data["finished"] and not data["passed"], output
+    assert unit["reason"] == "test_failures" and not unit["timed_out"]
+    assert unit["counts"]["errors"] == 1 and unit["counts"]["failures"] == 0
+    assert "--max-worker-restart=0" in unit["command"]
+    assert "journal_incomplete" in unit["secondary_outcomes"]
+    assert unit["progress"]["active_nodes"] == ["test_synthetic.py::test_hang"]
+    assert {"node": "test_synthetic.py::test_hang", "phase": "???"} in unit["progress"]["failed"]
+    assert unit["progress"]["last_completed"] == "test_synthetic.py::test_first"
+    assert _subject_gone(unit)
+
+    sharded = tmp_path / 'sharded-hard-exit'
+    sharded.mkdir()
+    code, data, out = _gate(sharded, source, argv=['unit', '--shard-index', '0', '--shard-count', '2'])
+    unit = data['tiers'][0]
+    assert code == 1 and not data['passed'] and not unit['progress']['complete'], out
+    assert unit['progress']['active_nodes'] == ['test_synthetic.py::test_hang']
+    assert (sharded / 'evidence/unit.shard-manifest.json').is_file()
+    assert _subject_gone(unit)
 
 
 def test_outer_timeout_is_primary_with_missing_junit_secondary(tmp_path: Path) -> None:
@@ -252,13 +317,21 @@ def test_invalid_deadline_rejected_before_launch(tmp_path: Path, value: str) -> 
     proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 2 and "--deadline-seconds" in proc.stderr
     assert not evidence.exists()
+    for gate, workers in (("unit", "0"), ("unit", "-1"), ("unit", "auto"), ("unit", "1.5"), ("smoke", "2"), ("soak", "2")):
+        config_path = Path(command[-1])
+        config = json.loads(config_path.read_text())
+        config["argv"] = [gate, "--unit-workers", workers]
+        config_path.write_text(json.dumps(config))
+        invalid = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        assert invalid.returncode == 2 and "--unit-workers" in invalid.stderr
+        assert not evidence.exists()
 
 
 def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     clock = [1000.0]
     seen: list[str] = []
 
-    def fake_tier(tier, evidence_dir, limit, *, basetemp, manifest):
+    def fake_tier(tier, evidence_dir, limit, *, basetemp, manifest, unit_workers=1):
         seen.append(tier)
         clock[0] += 50.0  # unit overran its 10s bound (terminate/drain), leaving too little for smoke
         return run_gate._result(tier, code=0, passed=True)

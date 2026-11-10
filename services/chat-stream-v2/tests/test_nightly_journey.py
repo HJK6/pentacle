@@ -129,16 +129,19 @@ def test_bound_success(tmp_path):
 
 
 def test_bound_contains_term_resistant_separate_sessions(tmp_path):
+    # Leave room for real process inventory within the synthetic envelope.
+    # Production's 1200/2400-second jobs give that snapshot up to five seconds.
+    envelope_s = 3
     marker = tmp_path / "escaped"
-    descendant = f"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(1); open({str(marker)!r},'w').write('escaped')"
+    descendant = f"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep({envelope_s + 0.1}); open({str(marker)!r},'w').write('escaped')"
     child = f"import subprocess,sys,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); subprocess.Popen([sys.executable,'-c',{descendant!r}],start_new_session=True); time.sleep(10)"
     receipt = tmp_path / "bound.json"
-    assert sa.bounded([sys.executable, "-c", child], 0.6, receipt) == 2
+    assert sa.bounded([sys.executable, "-c", child], envelope_s, receipt) == 2
     value = json.loads(receipt.read_text())
     assert value["terminated_at_bound"] and len(value["owned_at_stop"]) >= 2
     assert len(value["killed_owned_pids"]) >= 2
     assert not value.get("cleanup_errors")
-    assert value["elapsed_s"] < 0.6
+    assert value["elapsed_s"] < envelope_s
     time.sleep(0.7)
     assert not marker.exists()
 

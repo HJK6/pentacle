@@ -148,7 +148,15 @@ class ConfigFailsClosed(Tmp):
         return path
 
     def test_checked_in_config_loads(self):
-        self.assertEqual(ge.load_config(HERE / "gate-env.json")["schema"], "pentacle.gate-env.v1")
+        config = ge.load_config(HERE / "gate-env.json")
+        self.assertEqual(config["schema"], "pentacle.gate-env.v1")
+        workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
+                   if "unit_workers" in target}
+        self.assertEqual(workers, {"v2-unit": 2, "v2-merge": 2, "v2-merge-capacity": 2, "v2-merge-ci": 1})
+        shard = config["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"]
+        self.assertEqual((shard['gate'], shard['shardable'], shard.get('unit_workers', 1)), ('unit', True, 1))
+        self.assertEqual(shard['timeout_s'], shard['max_timeout_s'])
+        self.assertLessEqual(shard['timeout_s'], 1200)
 
     def test_malformed_variants_are_refused(self):
         bad = {
@@ -159,6 +167,14 @@ class ConfigFailsClosed(Tmp):
             "invalid required selection": lambda c: c["profiles"]["pentacle"]["targets"]["v2-pytest"].update(required_select="tests/test_x.py"),
             "no targets": lambda c: c["profiles"]["pentacle"].update(targets={}),
             "deadline budget": lambda c: c["deadline"].update(slack_s=-1),
+            **{f"invalid workers {value!r}": lambda c, v=value: c["profiles"]["pentacle"]["targets"]["v2-unit"].update(unit_workers=v)
+               for value in (True, False, 0, -1, 1.5, "2", None)},
+            **{f"workers on {target}": lambda c, t=target: c["profiles"]["pentacle"]["targets"][t].update(unit_workers=2)
+               for target in ("v2-smoke", "v2-pytest", "npm-test")},
+            **{f"shardable {value!r}": lambda c, v=value: c["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"].update(shardable=v)
+               for value in (1, 'true', None)},
+            **{f"shardable on {name}": lambda c, n=name: c["profiles"]["pentacle"]["targets"][n].update(shardable=True)
+               for name in ('v2-smoke', 'v2-pytest', 'v2-merge', 'v2-unit')},
         }
         for label, mutate in bad.items():
             with self.subTest(label), self.assertRaises(ge.SetupFailure):
@@ -561,6 +577,7 @@ class DeadlineEnvelope(Tmp):
         (service / "tools").mkdir(parents=True, exist_ok=True)
         (service / "tools" / "run_gate.py").write_text(runner_text)
         target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
+        target.pop("unit_workers", None)  # existing serial/deadline and legacy controls
         command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
         return command, results
 
@@ -571,10 +588,36 @@ class DeadlineEnvelope(Tmp):
         self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+        service = self.tmp / "svc"
+        for gate in ("unit", "merge"):
+            target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], unit_workers=2)
+            command, _ = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service,
+                                           self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], {})
+            self.assertEqual(command[command.index("--unit-workers") + 1], "2")
+        target = dict(REAL_CONFIG['profiles']['pentacle']['targets']['v2-unit-ci-shard'])
+        unsharded, _ = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                        self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {})
+        self.assertNotIn('--shard-index', unsharded)
+        sharded, result = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                           self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {},
+                                           shard_index=0, shard_count=6)
+        self.assertEqual(sharded[-4:], ['--shard-index', '0', '--shard-count', '6'])
+        self.assertEqual(sharded[:-4], unsharded)
+        self.assertEqual(sharded[sharded.index('--deadline-seconds') + 1], str(target['timeout_s'] + 90))
+        self.assertEqual(ge.validate_shards(target, 0, 6), (0, 6))
+        self.assertEqual(ge.validate_shards(target, None, None), (None, None))
+        for index, count in ((None, 6), (0, None), (-1, 6), (6, 6), (0, 1), (True, 6), (0, False)):
+            with self.subTest(index=index, count=count), self.assertRaises(ge.SetupFailure):
+                ge.validate_shards(target, index, count)
+        for name, other in REAL_CONFIG['profiles']['pentacle']['targets'].items():
+            if name != 'v2-unit-ci-shard':
+                with self.subTest(target=name), self.assertRaises(ge.SetupFailure):
+                    ge.validate_shards(other, 0, 6)
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
         self.assertNotIn("--deadline-seconds", command)
+        self.assertNotIn("--unit-workers", command)
         self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
@@ -683,6 +726,7 @@ class EntrypointReceipts(Tmp):
         self.assertEqual(observed, [(str(venv / 'bin/python'), str(venv / 'bin/python'))])
         prepared = next(e for e in events if e['state'] == 'prepared')
         self.assertEqual(prepared['toolchain']['python']['version'], '3.13.1')
+        self.assertEqual(prepared['host_cpu'], ge.host_cpu_identity())
         self.assertIn('PENTACLE_PYTHON', prepared['env_names'])
 
     def test_unknown_target_is_a_retained_setup_failure_and_missing_identity_is_unknown_history(self):
@@ -1141,7 +1185,7 @@ class MigratedTargets(Tmp):
         standard = profile["targets"]["v2-merge"]
         for key in ("kind", "gate", "needs", "capabilities", "preflight_script"):
             self.assertEqual(target[key], standard[key])
-        self.assertEqual(target["timeout_s"], 2700)
+        self.assertEqual(target["timeout_s"], 2160)
         self.assertEqual(target["max_timeout_s"], 2700)
         self.assertEqual(profile["targets"]["v2-unit"]["timeout_s"], 900)
         self.assertEqual(standard["timeout_s"], 1800)
@@ -1149,13 +1193,15 @@ class MigratedTargets(Tmp):
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S": "1", "V2_SMOKE_TIMEOUT_S": "1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"], env["V2_SMOKE_TIMEOUT_S"]), ("1800", "900"))
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"], env["V2_SMOKE_TIMEOUT_S"]), ("1260", "900"))
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
+        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
+        self.assertNotIn("PYTEST_ADDOPTS", env)
         self.assertIn("merge", cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2820)
-        self.assertEqual(result["wall_s"], 2850)
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2280)
+        self.assertEqual(result["wall_s"], 2310)
 
     def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
         cfg = ge.load_config()

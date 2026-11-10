@@ -50,7 +50,8 @@ def test_start_timeout_is_not_ready_and_keeps_worker_owner(monkeypatch):
     store = Store()
     try:
         with pytest.raises(TimeoutError, match="initializ"):
-            store.start()
+            store.start(timeout=0.1)
+        assert entered.wait(1), "initialization did not reach the held boundary"
         assert entered.is_set() and not store._ready.is_set()
         owner = store._thread
         assert owner is not None and owner.is_alive()
@@ -622,6 +623,7 @@ def test_rebuild_stale_source_cannot_replace_current_epoch(legacy):
     assert projected(conn) == [("tell", "same-id", "current epoch")]
 
 
+@pytest.mark.usefixtures("short_pane_evidence_wait")
 def test_socket_restart_keeps_replay_identity_and_never_redelivers(tmp_path):
     import hashlib
     import json
