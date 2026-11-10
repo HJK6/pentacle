@@ -103,6 +103,14 @@ systemctl --user disable --now pentacle-chat-streamd-v2.service  # Linux
 python3 install_daemon_service.py --rollback
 ```
 
+If a watchdog outside Pentacle restarts the daemon when it finds it down, mark any
+intentional stop outside `deploy.py` as maintenance first, using that watchdog's own
+runbook. This covers the `bootout` before `--rollback` and any manual
+`launchctl bootout`. Otherwise the watchdog starts the daemon again, and
+`--rollback` refuses because the service is no longer stopped. Remove the marker, or let
+it expire, when the stop is over. `deploy.py` needs no marker: the watchdog takes the
+same deploy lock.
+
 Rollback restores what was at the unit path before the first install: the earlier
 file, or nothing. It does not stop the service. It changes a file only when the
 service manager explicitly reports the service stopped (launchd no longer knows the
