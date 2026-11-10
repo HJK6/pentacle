@@ -1174,7 +1174,45 @@ def classify_slow_consumer_log(
 
 
 def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=None):
-    """The existing classifier over a stream; count all failures, cap examples."""
+    """Count failures, excluding only connection-proven handshake-only auth failures."""
+    def handshake_only(record):
+        count = record.get("non_handshake_tx")
+        if record.get("auth_state") != "failed" or type(count) is not int or count != 0:
+            return False
+        for field in ("tx_messages", "tx_bytes", "auth_suppressed_total"):
+            if field in record and (type(record[field]) is not int or record[field] < 0):
+                return False
+        if record.get("auth_suppressed_total", 0) != 0:
+            return False
+
+        def coherent(messages, size):
+            # Successful handshake frames are nonempty. Missing optional totals
+            # are not substitutes for the explicit whole-connection zero above.
+            return (messages is None or size is None
+                    or (bool(messages) == bool(size) and size >= messages))
+
+        if not coherent(record.get("tx_messages"), record.get("tx_bytes")):
+            return False
+        if "traffic" not in record:
+            return True
+        traffic = record["traffic"]
+        if not isinstance(traffic, dict):
+            return False
+        messages = sent_bytes = 0
+        for bucket, metrics in traffic.items():
+            if not isinstance(metrics, dict):
+                return False
+            for prefix in ("direct", "broadcast"):
+                sent, size = metrics.get(prefix + "_sent"), metrics.get(prefix + "_sent_bytes")
+                if type(sent) is not int or type(size) is not int or sent < 0 or size < 0:
+                    return False
+                if not coherent(sent, size) or (bucket != "other" and (sent or size)):
+                    return False
+                messages += sent
+                sent_bytes += size
+        return (("tx_messages" not in record or record["tx_messages"] == messages)
+                and ("tx_bytes" not in record or record["tx_bytes"] == sent_bytes))
+
     queue_depth_warnings = 0
     unparsed_conn_diag = 0
     failures: list[dict[str, str]] = []
@@ -1182,9 +1220,14 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
     peer_4000_connections: list[str] = []
     priority = {"1011_close": 1, "keepalive_timeout": 2, "peer_liveness": 3, "overflow": 4}
     keepalive_connections: set[str] = set()
+    auth_failed: set[str] = set()
+    auth_accepted: set[str] = set()
+    handshake_only_closes: dict[str, bool] = {}
     for raw_line in lines:
         raw_line = raw_line.rstrip("\r\n")
-        if len(connection_failures) + len(peer_4000_connections) + len(failures) + len(keepalive_connections) > 100000:
+        if (len(connection_failures) + len(peer_4000_connections) + len(failures)
+                + len(keepalive_connections) + len(auth_failed) + len(auth_accepted)
+                + len(handshake_only_closes)) > 100000:
             raise ValueError("diagnostic identity resource limit")
         line = raw_line.strip()
         if "conn_diag " in raw_line:
@@ -1207,6 +1250,15 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
                 unparsed_conn_diag += 1
                 continue
             event = record["event"]
+            if event == "auth_fail":
+                auth_failed.add(conn_id)
+            elif event == "auth_ok":
+                auth_accepted.add(conn_id)
+            elif event == "close":
+                # Missing legacy counts, suppressed auth evidence, and contradictory
+                # copies of a close cannot become proof through a later zero row.
+                proven = bool(conn_id) and handshake_only(record)
+                handshake_only_closes[conn_id] = handshake_only_closes.get(conn_id, True) and proven
             if event == "slow_consumer" and record.get("phase") == "enter":
                 queue_depth_warnings += 1
             kind: str | None = None
@@ -1282,6 +1334,21 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
         if failures[index]["kind"] in ("overflow", "peer_liveness")
     }
     peer_4000_other = sum(conn_id not in forced_connections for conn_id in peer_4000_connections)
+    # Decide only after the whole window: auth_ok or conflicting close evidence
+    # may occur later or in a different selected log sink. Sticky rejection is
+    # deliberately not evidence; pre-rejection frames still count as access.
+    excluded = []
+    retained = []
+    for index, row in enumerate(failures):
+        conn_id = row["client"]
+        if (row["kind"] in {"1011_close", "keepalive_timeout"}
+                and connection_failures.get(conn_id) == index
+                and conn_id in auth_failed and conn_id not in auth_accepted
+                and handshake_only_closes.get(conn_id, False)):
+            excluded.append(row)
+        else:
+            retained.append(row)
+    failures = retained
     overflow_drops = sum(row["kind"] == "overflow" for row in failures)
     kinds = {kind: sum(row["kind"] == kind for row in failures)
              for kind in sorted({row["kind"] for row in failures})}
@@ -1296,6 +1363,9 @@ def classify_slow_consumer_lines(lines, *, boot_marker_seen=True, max_examples=N
         "unparsed_conn_diag": unparsed_conn_diag,
         "failure_count": len(failures),
         "failures": failures if max_examples is None else failures[:max_examples],
+        "excluded_auth_failure_count": len(excluded),
+        "excluded_auth_failure_conn_ids": [row["client"] for row in excluded],
+        "excluded_auth_failures": excluded if max_examples is None else excluded[:max_examples],
     }
 
 
