@@ -280,8 +280,9 @@ directory and sends a GO tell quoting the file's sha256 and the replacement SHA:
   --recovery-go-tell-id <GO tell id> --deployer-stream-id host:deployer
 ```
 
-It is accepted only with `--rollback --coordinated-receipt`. Before admission,
-recovery requires the controller to be clean at the replacement SHA with the
+It is accepted only with `--rollback --coordinated-receipt`. While it is in
+force the original controller no longer qualifies. Before admission, recovery
+requires the controller to be clean at exactly the replacement SHA with the
 receipt's origin, the live launchd PID, process start and checkout SHA to equal
 `expected_live`, and the replacement installer to reproduce every sealed prior
 `original_helpers` proof (`original helper proof drift before stop`). All

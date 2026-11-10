@@ -15,7 +15,9 @@ queued. A late send, a denial before expiry or a second failure raises
 `handshake_diagnostics`. Both timing samples are wall clock in the same domain
 as `expires_at`, which holds for the same-host loopback restoration and smoke
 callers; a cross-host caller is still bounded to one retry. Each failed socket
-is closed, and no application request is ever retried.
+is closed with its close handshake bounded by the remaining budget, a
+re-proof transport failure still reports the first failure, and no application
+request is ever retried.
 
 The authenticated snapshot must advertise
 `capabilities.close_expected_generation=true` before normal activation. That

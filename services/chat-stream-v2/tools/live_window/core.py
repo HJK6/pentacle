@@ -384,7 +384,10 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
             return self
         if not first["reproof_eligible"] or time.monotonic() >= deadline:
             raise LiveWindowError(f"operator nonce proof rejected: {first['error']!r}")
-        second = self._handshake(deadline)
+        try:
+            second = self._handshake(deadline)
+        except Exception as exc:
+            raise LiveWindowError(f"operator re-proof failed: {exc}; first failure: {first['error']!r}") from exc
         if second is None:
             return self
         raise LiveWindowError(f"operator nonce proof rejected after one re-proof: {second['error']!r}; "
@@ -415,15 +418,21 @@ class _OperatorConnection(AbstractContextManager["_OperatorConnection"]):
                               "reproof_eligible": bool(timely and (error_at >= expires_at
                                                                    or frame.get("code") == NONCE_EXPIRED_CODE))}
                     self.handshake_diagnostics.append(record)
-                    self.close()
+                    self._close_within(deadline)
                     return record
                 if frame.get("type") == "snapshot":
                     self.snapshot = frame
                     return None
             raise LiveWindowError("operator handshake did not yield a snapshot")
         except BaseException:
-            self.close()
+            self._close_within(deadline)
             raise
+
+    def _close_within(self, deadline: float) -> None:
+        # A failed socket's close handshake may not outlast the caller's budget.
+        if self._socket is not None and hasattr(self._socket, "close_timeout"):
+            self._socket.close_timeout = max(0.0, deadline - time.monotonic())
+        self.close()
 
     def __exit__(self, *_unused: object) -> None:
         self.close()

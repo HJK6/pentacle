@@ -581,12 +581,12 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
     def controller_admitted(self, receipt, *, forward):
         head = self.d._git(self.controller, "rev-parse", "HEAD", runner=self.runner)
         pinned = receipt["intent"]["controller_sha"]
-        if head == pinned:
-            return True
-        # Only recovery of this sealed receipt may run the FD-authorized
-        # replacement; forward apply stays pinned to the receipt controller.
         auth = self.recovery_authorization
-        return bool(auth and not forward and auth["original_controller_sha"] == pinned
+        if auth is None:
+            return head == pinned
+        # An authorization in force binds exactly the FD-named replacement, and
+        # only for recovery of this sealed receipt; forward stays pinned.
+        return bool(not forward and auth["original_controller_sha"] == pinned
                     and head == auth["replacement_controller_sha"]
                     and self.d._git(self.controller, "remote", "get-url", "origin", runner=self.runner) == receipt["origin"])
 

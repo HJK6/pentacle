@@ -123,3 +123,58 @@ def test_failed_socket_is_closed_when_welcome_is_malformed(tmp_path, monkeypatch
     with pytest.raises(core.LiveWindowError, match="expected welcome"):
         enter(tmp_path)
     assert server.sockets[0].closed
+
+
+class SlowClose:
+    """Models websockets.sync close: waits up to its close_timeout for the peer."""
+    def __init__(self, clock, frames):
+        self.clock, self.frames, self.close_timeout, self.closed = clock, frames, None, False
+
+    def recv(self, timeout):
+        frame = self.frames.pop(0)
+        if frame["type"] == "hello.error":
+            self.clock.update(mono=4.9, wall=101.0)
+        return json.dumps(frame)
+
+    def send(self, payload):
+        pass
+
+    def close(self):
+        self.clock["mono"] += self.close_timeout
+        self.closed = True
+
+
+def _slow_close_server(monkeypatch, frames_per_socket):
+    clock = {"mono": 0.0, "wall": 99.0}
+    sockets = []
+    def connect(url, **kwargs):
+        socket = SlowClose(clock, frames_per_socket.pop(0)); socket.close_timeout = kwargs["close_timeout"]
+        sockets.append(socket); return socket
+    monkeypatch.setattr(core, "connect", connect)
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(core, "_wall_clock", lambda: clock["wall"])
+    monkeypatch.setattr(core, "operator_hello", lambda path, welcome: {"type": "hello"})
+    return clock, sockets
+
+
+def test_failed_socket_cleanup_stays_inside_the_original_budget(tmp_path, monkeypatch):
+    welcome = {"type": "welcome", "auth": {"operator": {"nonce": "n", "expires_at": 100.0}}}
+    clock, sockets = _slow_close_server(monkeypatch, [[welcome, {"type": "hello.error", "error": "FIRST_AUTH_FAILURE"}]])
+    with pytest.raises(core.LiveWindowError, match="FIRST_AUTH_FAILURE"):
+        enter(tmp_path, timeout=5.0)
+    assert len(sockets) == 1 and sockets[0].closed
+    assert clock["mono"] <= 5.0
+
+
+def test_reproof_transport_failure_keeps_the_first_failure(tmp_path, monkeypatch):
+    server = FakeServer(monkeypatch, [{"expires_at": 100.0, "send_at": 99.9, "error_at": 113.4}])
+    original = server.connect
+    def connect(url, **kwargs):
+        if server.sockets:
+            raise OSError("connection refused")
+        return original(url, **kwargs)
+    monkeypatch.setattr(core, "connect", connect)
+    with pytest.raises(core.LiveWindowError) as caught:
+        enter(tmp_path)
+    assert "connection refused" in str(caught.value) and "first failure" in str(caught.value)
+    assert "operator_auth_invalid" in str(caught.value)

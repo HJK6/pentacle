@@ -940,6 +940,13 @@ def _runtime_authorization(intent, replacement, **live):
 def test_replacement_controller_admitted_only_with_exact_authorization(runtime_preparation):
     runtime, fixture, intent, root = runtime_preparation
     receipt = _prepared_receipt(runtime, intent, root, "replacement")
+    # An authorization in force binds the replacement exactly; the original
+    # pinned controller no longer satisfies it.
+    runtime.recovery_authorization = _runtime_authorization(intent, "f" * 40)
+    with pytest.raises(c.Invalid, match="controller source drift"):
+        runtime.validate_common(receipt, forward=False)
+    runtime.recovery_authorization = None
+    runtime.validate_common(receipt, forward=False)
     replacement = _replacement_controller(runtime)
     with pytest.raises(c.Invalid, match="controller source drift"):
         runtime.validate_common(receipt, forward=False)
