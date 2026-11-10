@@ -114,7 +114,7 @@ EVENT_FIELDS = {
     "close": QUEUE | TIMING | {
         "traffic", "initiator", "termination", "close_code", "close_reason", "close_sent_code",
         "close_received_code", "close_sent_reason", "close_received_reason", "duration_ms", "auth_state",
-        "rx_messages", "rx_bytes", "tx_messages", "tx_bytes", "queue_snapshot_age_ms",
+        "rx_messages", "rx_bytes", "tx_messages", "tx_bytes", "non_handshake_tx", "queue_snapshot_age_ms",
         "auth_suppressed_total", "pressure_episodes_suppressed_total",
     },
 }
@@ -207,7 +207,7 @@ def assert_conn_diag_schema(payload):
         for side in ("sent", "received"):
             assert payload[f"close_{side}_code"] is None or type(payload[f"close_{side}_code"]) is int
             assert payload[f"close_{side}_reason"] in CLOSE_REASONS
-        for key in ("duration_ms", "rx_messages", "rx_bytes", "tx_messages", "tx_bytes", "queue_snapshot_age_ms", "auth_suppressed_total", "pressure_episodes_suppressed_total"):
+        for key in ("duration_ms", "rx_messages", "rx_bytes", "tx_messages", "tx_bytes", "non_handshake_tx", "queue_snapshot_age_ms", "auth_suppressed_total", "pressure_episodes_suppressed_total"):
             _uint(payload[key])
         assert payload["duration_ms"] == payload["age_ms"]
         assert payload["tx_messages"] == sum(b["direct_sent"] + b["broadcast_sent"] for b in payload["traffic"].values())
@@ -293,6 +293,13 @@ def test_all_logs_discard_private_wire_values_and_exception_text(caplog, tmp_pat
                     identity["proof_key"], operator_auth.encode_b64url(b"x" * operator_auth.AUTH_NONCE_BYTES), identity["credential_id"], identity["client_kind"],
                 )
                 sentinels["proof_key"] = operator_auth.encode_b64url(identity["proof_key"])
+                # An injected external business callback exercises the real
+                # generic dispatch exception boundary, including its old log.
+                async def broken_business_handler(_msg):
+                    raise RuntimeError(sentinels["file_content"] + sentinels["file_path"])
+                daemon.handlers["fixture-failure"] = broken_business_handler
+                await daemon._serve(peer, json.dumps({"type": "fixture-failure", "request_id": sentinels["request"], "text": sentinels["text"]}))
+                assert json.loads(peer.sent[-1])["error_code"] == "internal_error"
                 await daemon._serve(peer, json.dumps({
                     "type": "hello", "client": "pentacle", "request_id": sentinels["request"],
                     "auth_v2": {"scheme": operator_auth.AUTH_SCHEME, "credential_id": identity["credential_id"], "proof": sentinels["proof"]},
@@ -305,16 +312,11 @@ def test_all_logs_discard_private_wire_values_and_exception_text(caplog, tmp_pat
                     "build_number": sentinels["udid"], "request_id": sentinels["request"],
                     "subscribe": {"mode": "rpc", "snapshot": False},
                 }))
-                assert json.loads(peer.sent[-1])["type"] == "ready"  # unchanged loopback exemption
+                assert json.loads(peer.sent[-1])["type"] == "hello.error" and json.loads(peer.sent[-1])["error_code"] == "operator_auth_invalid"  # sticky rejection
                 await daemon._serve(peer, json.dumps({"type": sentinels["verb"], "request_id": sentinels["request"], "text": sentinels["text"]}))
                 assert json.loads(peer.sent[-1])["error_code"] == "unsupported_in_v2"
-                # An injected external business callback exercises the real
-                # generic dispatch exception boundary, including its old log.
-                async def broken_business_handler(_msg):
-                    raise RuntimeError(sentinels["file_content"] + sentinels["file_path"])
-                daemon.handlers["fixture-failure"] = broken_business_handler
                 await daemon._serve(peer, json.dumps({"type": "fixture-failure", "request_id": sentinels["request"], "text": sentinels["text"]}))
-                assert json.loads(peer.sent[-1])["error_code"] == "internal_error"
+                assert json.loads(peer.sent[-1])["error_code"] == "authentication_required"
                 await daemon._serve(peer, json.dumps({
                     "type": "notification.resolve", "request_id": sentinels["request"],
                     "notification_id": sentinels["udid"], "text": sentinels["text"],

@@ -109,6 +109,9 @@ _CONN_REASONS = frozenset({"absent", "malformed", "expired", "wrong-seat", "inte
                           "system_producer_auth_required", "revoked", "tls_required"})
 _CONN_LOG_SAFE: ContextVar[bool] = ContextVar("accepted_connection_log_projection", default=False)
 _CONN_AUTH: ContextVar[Any] = ContextVar("connection_auth_diagnostic", default=None)
+# Transport-owned application receive time, inherited only by this request's task.
+# It is never populated from a client field. The challenge uses the same wall clock.
+_HELLO_RECEIVED_AT: ContextVar[Any] = ContextVar("hello_received_at", default=None)
 
 
 def _conn_bucket(value: Any) -> str:
@@ -172,6 +175,7 @@ class _ConnectionDiagnostic:
     rx_messages: int = 0
     rx_bytes: int = 0
     tx_messages: int = 0
+    non_handshake_tx: int = 0
     tx_bytes: int = 0
     last_rx: float | None = None
     last_tx: float | None = None
@@ -824,6 +828,7 @@ class Server:
         self.lifecycle: Any = None
         self._clients: set[Any] = set()
         self._connection_diagnostics: dict[Any, _ConnectionDiagnostic] = {}
+        self._operator_rejected: set[Any] = set()
         #: Broadcasts stay bounded behind one writer per client. RPC replies
         #: write from their request task and use the shared send lock below.
         self._client_send_queues: dict[Any, asyncio.Queue] = {}
@@ -1461,6 +1466,8 @@ class Server:
         state.traffic[bucket][prefix + "_sent"] += 1
         state.traffic[bucket][prefix + "_sent_bytes"] += size
         state.tx_messages += 1
+        if frame_type not in {"welcome", "hello.error"}:
+            state.non_handshake_tx += 1
         state.tx_bytes += size
         state.last_tx = now
         if bucket == "pong":
@@ -1468,14 +1475,18 @@ class Server:
 
     @staticmethod
     def _diag_frame_type(frame: Any) -> str:
+        def kind(value):
+            # Preserve handshake identity for the whole-connection access count;
+            # traffic buckets and emitted diagnostic types remain unchanged.
+            return value if isinstance(value, str) and value in {"welcome", "hello.error"} else _conn_bucket(value)
         if isinstance(frame, _EncodedFrame):
-            return _conn_bucket(frame.frame_type)
+            return kind(frame.frame_type)
         if isinstance(frame, dict):
-            return _conn_bucket(frame.get("type"))
+            return kind(frame.get("type"))
         # Only already-encoded direct frames lack a top-level object here.
         try:
             decoded = json.loads(frame)
-            return _conn_bucket(decoded.get("type")) if isinstance(decoded, dict) else "other"
+            return kind(decoded.get("type")) if isinstance(decoded, dict) else "other"
         except (TypeError, ValueError):
             return "other"
 
@@ -1667,6 +1678,7 @@ class Server:
                 close_sent_reason=sent_reason, close_received_reason=received_reason,
                 auth_state=state.auth_state, rx_messages=state.rx_messages, rx_bytes=state.rx_bytes,
                 tx_messages=state.tx_messages, tx_bytes=state.tx_bytes,
+                non_handshake_tx=state.non_handshake_tx,
                 queue_snapshot_age_ms=0 if queue is not None or state.snapshot_at is None else _conn_ms(state.snapshot_at, now),
                 auth_suppressed_total=state.auth_suppressed_total,
                 pressure_episodes_suppressed_total=state.pressure_suppressed_total,
@@ -1771,6 +1783,7 @@ class Server:
         hello_barrier: asyncio.Task | None = None
         try:
             async for raw in websocket:
+                received_at = time.time()
                 self._diag_rx(websocket, raw)
                 # One task per request: a verb that parks (`await_report`) must
                 # not hold up the requests behind it. Replies correlate by
@@ -1803,7 +1816,11 @@ class Server:
                 if credit is None:
                     self._refuse_request(websocket, request)
                     continue
-                task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier, credit))
+                received_token = _HELLO_RECEIVED_AT.set((websocket, received_at) if is_hello else None)
+                try:
+                    task = asyncio.create_task(self._serve_after_hello(websocket, raw, hello_barrier, credit))
+                finally:
+                    _HELLO_RECEIVED_AT.reset(received_token)
                 task.add_done_callback(credit.release)
                 if is_hello:
                     hello_barrier = task
@@ -1898,13 +1915,15 @@ class Server:
                         else frame
                         for frame in result
                     ]
-                await self._send_direct(websocket, result)
+                await self._send_direct(websocket, result, request_type="hello", request_id=request.get("request_id"))
             return
         result = await self._dispatch(raw, websocket=websocket)
         await asyncio.sleep(0)
         sent = await self._send_direct(
             websocket, result,
             interleave_history=isinstance(request, dict) and request.get("type") == "request_stream_events",
+            request_type=request.get("type") if isinstance(request, dict) else None,
+            request_id=request.get("request_id") if isinstance(request, dict) else None,
         )
         if isinstance(request, dict) and request.get("type") in {
             "notification.resolve", "notification.resolve_by_dedup", "prompt.answer",
@@ -1968,6 +1987,12 @@ class Server:
             )
             groups.setdefault(key, []).append(websocket)
         for clients in groups.values():
+            # Proof rejection is connection-bound, unlike the shared projection.
+            # Recheck after grouping's awaited auth checks and before choosing a
+            # representative, so neither member order can bypass or poison it.
+            clients = [client for client in clients if client not in self._operator_rejected]
+            if not clients:
+                continue
             projected = self._frame_for_client(clients[0], frame_type, frame)
             if projected is None:
                 continue
@@ -2044,6 +2069,7 @@ class Server:
         self._client_scoped_revoked.discard(websocket)
         self._tls_connections.discard(websocket)
         self._operator_challenges.pop(websocket, None)
+        self._operator_rejected.discard(websocket)
         self._connection_trust.pop(websocket, None)
         self._client_send_queues.pop(websocket, None)
         self._client_send_locks.pop(websocket, None)
@@ -2072,6 +2098,10 @@ class Server:
                     with self._diag_wait(websocket) as measurement:
                         async with lock:
                             self._diag_acquired(websocket, measurement)
+                            # Projection may predate a proof rejection while
+                            # this queued frame waits for the send lock.
+                            if websocket in self._operator_rejected:
+                                continue
                             with self._diag_send(websocket, frame, _frame_type, broadcast=True):
                                 await websocket.send(frame)
                     # Record the DELIVERED digest (not at enqueue): byte-identical
@@ -2223,38 +2253,76 @@ class Server:
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _send_direct(self, websocket: Any, frames: Any, *, interleave_history: bool = False) -> bool:
+    def _rejected_direct_frame(self, frame: Any, request_type: str | None, request_id: Any) -> tuple[Any, bool]:
+        """Keep control/refusal delivery, replacing application payloads at egress."""
+        value = frame.payload if isinstance(frame, _EncodedFrame) else frame
+        if not isinstance(value, dict):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = {}
+        if not isinstance(value, dict):
+            value = {}
+        kind = str(value.get("type") or "")
+        # These endpoints intentionally have their own unauthenticated policy.
+        # In particular, screen.lease.status is outside this rejection change.
+        if kind in {
+            "welcome", "pong", "enroll.ok", "enroll.error",
+            "event.push.ok", "event.push.error", "host.stats.ok", "host.stats.error",
+            "screen.lease.status.ok", "screen.lease.status.error",
+        }:
+            return frame, False
+        correlation = value.get("request_id", request_id)
+        if kind.endswith(".error"):
+            code = value.get("error_code")
+            safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "authentication_required"
+            return self._auth_error_frame(kind.removesuffix(".error"), correlation, safe_code), False
+        verb = request_type
+        if not verb:
+            family, _, suffix = kind.rpartition(".")
+            verb = family if suffix in {"ok", "chunk", "result", "ack"} else "protocol"
+        return self._auth_error_frame(verb, correlation, "authentication_required"), True
+
+    async def _send_direct(
+        self, websocket: Any, frames: Any, *, interleave_history: bool = False,
+        request_type: str | None = None, request_id: Any = None,
+    ) -> bool:
         """Write greeting or results without entering broadcast fanout."""
         lock = self._client_send_locks.get(websocket)
         if websocket not in self._clients or lock is None:
             return False
+
+        async def send_frame(frame):
+            # Caller holds the existing send lock. Iterator/storage and earlier
+            # sends may have yielded since admission; recheck for every frame.
+            suppressed = False
+            if websocket in self._operator_rejected:
+                frame, suppressed = self._rejected_direct_frame(frame, request_type, request_id)
+            payload = frame.payload if isinstance(frame, _EncodedFrame) else frame if isinstance(frame, str) else _encode_frame(frame)
+            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
+                await websocket.send(payload)
+            return not suppressed
+
         try:
             if interleave_history and hasattr(frames, "__aiter__"):
-                try:
-                    # Fetch/encode outside the lock; history retains its fair yields.
-                    async for frame in frames:
-                        payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                        with self._diag_wait(websocket) as measurement:
-                            async with lock:
-                                self._diag_acquired(websocket, measurement)
-                                if websocket not in self._clients:
-                                    return False
-                                with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                    await websocket.send(payload)
-                        await asyncio.sleep(0)
-                finally:
-                    close = getattr(frames, "aclose", None)
-                    if callable(close):
-                        await close()
+                # Fetch outside the lock; history retains its fair yields.
+                async for frame in frames:
+                    with self._diag_wait(websocket) as measurement:
+                        async with lock:
+                            self._diag_acquired(websocket, measurement)
+                            if websocket not in self._clients:
+                                return False
+                            if not await send_frame(frame):
+                                return False
+                    await asyncio.sleep(0)
                 return True
             with self._diag_wait(websocket) as measurement:
                 async with lock:
                     self._diag_acquired(websocket, measurement)
                     if hasattr(frames, "__aiter__"):
                         async for frame in frames:
-                            payload = frame.payload if isinstance(frame, _EncodedFrame) else _encode_frame(frame)
-                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                await websocket.send(payload)
+                            if not await send_frame(frame):
+                                return False
                     else:
                         for frame in ((frames,) if isinstance(frames, str) else frames):
                             # Snapshot assembly can await storage while the finisher
@@ -2269,15 +2337,18 @@ class Server:
                                     **frame.get("capabilities", {}),
                                     "error_alerts_v1": True, "outbound_commit_v1": True,
                                 }, "error_reporting_credential_id": self._connection_trust[websocket].credential_id}
-                            payload = frame if isinstance(frame, str) else _encode_frame(frame)
-                            with self._diag_send(websocket, payload, self._diag_frame_type(frame)):
-                                await websocket.send(payload)
+                            if not await send_frame(frame):
+                                return False
         except ConnectionClosed as exc:
             state = self._connection_diagnostics.get(websocket)
             if state is not None:
                 state.close_exception = exc
             self._unregister_client(websocket)
             return False
+        finally:
+            close = getattr(frames, "aclose", None)
+            if callable(close):
+                await close()
         return True
 
 
@@ -2346,6 +2417,9 @@ class Server:
         }
         if websocket is not None:
             dispatch_msg["_auth_context"] = await self._auth_context(websocket, msg)
+            if self._rejected_rpc(websocket, verb):
+                self._diag_auth_failure(websocket, "authentication_required")
+                return [self._auth_error_frame(verb, request_id, "authentication_required")]
             service_auth = dispatch_msg["_auth_context"]
             if verb in {"upload_blob_init", "upload_blob_chunk"} and msg.get("protocol") == 2:
                 # This opt-in surface always requires a current registered v2
@@ -2445,7 +2519,8 @@ class Server:
                     "scoped_principal",
                 )) and not (verb == 'assistant.transfer' and auth.get('retired_transfer_owner')):
                     code = "authentication_required"
-            # Local bootstrap is retained for ordinary RPCs. Minting a seat
+            # Local bootstrap is retained for ordinary RPCs only before a
+            # claimed proof is rejected on this connection. Minting a seat
             # credential or changing spawn admission always requires proof,
             # even from a native loopback peer. Restricted producer and scoped
             # connection checks still apply before the handler is reached.
@@ -2527,8 +2602,12 @@ class Server:
             if actor_reset is not None and verb not in {'spawn','await_report','notification.await','request_stream_events'}:
                 async with self.host_transfer.actor_lock(actor):
                     await self.store.require_current_actor(*actor)
+                    if self._rejected_rpc(websocket, verb):
+                        return [self._auth_error_frame(verb, request_id, "authentication_required")]
                     reply = await handler(dispatch_msg)
             else:
+                if self._rejected_rpc(websocket, verb):
+                    return [self._auth_error_frame(verb, request_id, "authentication_required")]
                 reply = await handler(dispatch_msg)
         except (VerbError, StatusCardError, host_transfer.TransferError) as exc:  # expected business failures
             reply = {"type": f"{verb}.error", "error_code": exc.code, "error": str(exc),
@@ -2610,7 +2689,17 @@ class Server:
             return TOKEN_REASON_MALFORMED
         return None
 
+    def _rejected_rpc(self, websocket: Any, verb: str) -> bool:
+        return websocket in self._operator_rejected and verb not in {
+            "ping", "hello", "enroll", "event.push", "host.stats", "screen.lease.status",
+        }
+
     def _diag_auth_result(self, websocket: Any, msg: dict, context: dict, started: float | None) -> dict:
+        # A context may have captured operator trust before a storage/thread
+        # await. It cannot restore that authority after rejection on this socket.
+        if websocket in self._operator_rejected:
+            context.update(operator_authenticated=False, operator_principal="",
+                           operator_trusted=False, credential_id="", scoped_principal=False)
         if started is not None:
             self._diag_auth_observe(websocket, msg, context, _monotonic() - started)
         return context
@@ -3376,6 +3465,8 @@ class Server:
     def _frame_for_client(
         self, websocket: Any, frame_type: str, payload: dict[str, Any],
     ) -> dict[str, Any] | None:
+        if websocket in self._operator_rejected:
+            return None
         if not (self._is_loopback_client(websocket)
                 or self._operator_authenticated(websocket)
                 or websocket in self._client_authenticated_streams):
@@ -3517,7 +3608,8 @@ class Server:
         """
         trust = self._connection_trust.get(websocket)
         return bool(
-            trust
+            websocket not in self._operator_rejected
+            and trust
             and trust.transport == "v2"
             and trust.operator_trusted
             and not getattr(trust, "scope", None)
@@ -3550,11 +3642,16 @@ class Server:
     def _authenticate_operator_hello(self, websocket: Any, msg: dict[str, Any]) -> str | None:
         """Bind a v2 UI principal to this socket, or fail the claimed proof closed."""
         challenge = self._operator_challenges.pop(websocket, None)
+        if websocket in self._operator_rejected:
+            self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
+            return "operator_auth_invalid"
         auth_v2 = msg.get("auth_v2")
         if auth_v2 is None:
             return None
         try:
-            if challenge is None or time.time() > challenge[1]:
+            received = _HELLO_RECEIVED_AT.get()
+            received_at = received[1] if received is not None and received[0] is websocket else time.time()
+            if challenge is None or received_at > challenge[1]:
                 raise operator_auth.OperatorAuthError("operator auth challenge unavailable")
             if not isinstance(auth_v2, dict) or set(auth_v2) != {"scheme", "credential_id", "proof"}:
                 raise operator_auth.OperatorAuthError("invalid operator auth frame")
@@ -3569,6 +3666,8 @@ class Server:
                 credential_id, client_kind, challenge[0], operator_auth.encode_b64url(proof),
             )
         except operator_auth.OperatorAuthError:
+            self._operator_rejected.add(websocket)
+            self._connection_trust.pop(websocket, None)
             self._diag_auth_failure(websocket, "operator_auth_invalid", "operator_v2")
             return "operator_auth_invalid"
         self._connection_trust[websocket] = trust
