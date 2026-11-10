@@ -23,6 +23,9 @@ RECEIPT_SCHEMA = "pentacle.coordinated-deploy.receipt.v2"
 PHASES = {"prepared", "discarded", "stopping", "stopped", "switching", "verifying", "committed",
           "rolling_back", "rolled_back", "recovery_required"}
 TERMINAL = {"committed", "rolled_back", "discarded"}
+AUTHORIZATION_FIELDS = {"transaction_id", "receipt_sha256", "original_controller_sha", "replacement_controller_sha",
+                        "operation", "expected_prior_sha", "expected_target_sha", "expected_live",
+                        "authorized_by", "fd_gate_reference"}
 
 
 class Invalid(RuntimeError):
@@ -227,6 +230,40 @@ def legacy_guard(repo, stamp, *, rollback):
     return ancestry
 
 
+def recovery_authorization(path, receipt, go_tell_id):
+    """FD-authorized replacement controller for recovering one sealed receipt.
+
+    The file is not self-authorizing: the FD GO tell quotes its digest and the
+    replacement SHA, and its id is journaled with the recovery evidence.
+    """
+    path = private_file(path)
+    if path.parent != Path(receipt["transaction_directory"]):
+        raise Invalid("recovery authorization must be in the transaction directory")
+    value = read_json(path)
+    intent = receipt["intent"]
+    sha = re.compile(r"[0-9a-f]{40}")
+    live = value.get("expected_live")
+    if (set(value) != AUTHORIZATION_FIELDS
+            or any(not isinstance(value[key], str) or not sha.fullmatch(value[key])
+                   for key in ("original_controller_sha", "replacement_controller_sha", "expected_prior_sha", "expected_target_sha"))
+            or value["transaction_id"] != intent["transaction_id"] or value["receipt_sha256"] != receipt["receipt_sha256"]
+            or value["original_controller_sha"] != intent["controller_sha"]
+            or value["replacement_controller_sha"] == intent["controller_sha"]
+            or value["operation"] != "recovery" or value["expected_prior_sha"] != intent["prior_sha"]
+            or value["expected_target_sha"] != intent["target_sha"]
+            or not isinstance(live, dict) or set(live) != {"sha", "pid", "birth"}
+            or not isinstance(live["sha"], str) or not sha.fullmatch(live["sha"])
+            or type(live["pid"]) is not int or live["pid"] <= 0 or not isinstance(live["birth"], str) or not live["birth"]
+            or any(not isinstance(value[key], str) or not value[key].strip() or len(value[key]) > 1024
+                   for key in ("authorized_by", "fd_gate_reference"))
+            or not isinstance(go_tell_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", go_tell_id)):
+        raise Invalid("recovery authorization does not bind this transaction, receipt and FD GO")
+    record = {"sha256": file_digest(path), "replacement_controller_sha": value["replacement_controller_sha"],
+              "original_controller_sha": value["original_controller_sha"], "authorized_by": value["authorized_by"],
+              "fd_gate_reference": value["fd_gate_reference"], "go_tell_id": go_tell_id}
+    return value, record
+
+
 def seal_receipt(receipt):
     receipt = copy.deepcopy(receipt)
     receipt["receipt_sha256"] = digest(receipt)
@@ -255,7 +292,9 @@ class Transaction:
         journal.setdefault("history", []).append(phase)
         atomic_json(self.root / journal["transaction_id"] / "journal.json", journal)
 
-    def prepare(self, intent_path, receipt_path):
+    def prepare(self, intent_path, receipt_path, authorization=None):
+        if authorization is not None:
+            raise Invalid("recovery authorization is accepted only by --rollback --coordinated-receipt")
         intent = validate_intent(intent_path)
         receipt_path = absolute(str(receipt_path))
         private_directory(receipt_path.parent)
@@ -321,7 +360,9 @@ class Transaction:
         finally:
             self.adapter.helper_wait_observer = previous
 
-    def apply(self, intent_path, receipt_path):
+    def apply(self, intent_path, receipt_path, authorization=None):
+        if authorization is not None:
+            raise Invalid("recovery authorization is accepted only by --rollback --coordinated-receipt")
         receipt, journal = self.load(receipt_path)
         with self.helper_wait_journal(journal):
             return self._apply(intent_path, receipt, journal)
@@ -355,8 +396,19 @@ class Transaction:
             self.phase(journal, "switching")
             self.adapter.switch(receipt, rollback=False)
             self.phase(journal, "verifying", installed=self.adapter.current(receipt))
-            result = self.adapter.start_verify(receipt, rollback=False)
+            try:
+                result = self.adapter.start_verify(receipt, rollback=False)
+            except Exception as exc:
+                # Keep the sub-results a later verifier's raise would discard.
+                if isinstance(getattr(exc, "partial_result", None), dict):
+                    journal["partial_result"] = copy.deepcopy(exc.partial_result)
+                raise
             if result.get("outcome") != "passed":
+                journal["result"] = result
+                try:
+                    atomic_json(self.root / journal["transaction_id"] / "journal.json", journal)
+                except OSError as journal_exc:
+                    journal["journal_failure"] = type(journal_exc).__name__
                 raise Invalid("candidate health failed")
             self.phase(journal, "committed", result=result, postimage=self.adapter.current(receipt))
             return self.result(receipt, journal)
@@ -370,12 +422,18 @@ class Transaction:
             self.recover(receipt, journal, automatic=True)
             return self.result(receipt, journal)
 
-    def rollback(self, receipt_path):
+    def rollback(self, receipt_path, authorization=None, go_tell_id=None):
         receipt, journal = self.load(receipt_path)
+        record = None
+        if authorization is not None or go_tell_id is not None:
+            if journal["phase"] in {"prepared", "discarded", "rolled_back"}:
+                raise Invalid("recovery authorization requires an unfinished applied transaction")
+            value, record = recovery_authorization(authorization, receipt, go_tell_id)
+            self.adapter.recovery_authorization = value
         with self.helper_wait_journal(journal):
-            return self._rollback(receipt, journal)
+            return self._rollback(receipt, journal, record)
 
-    def _rollback(self, receipt, journal):
+    def _rollback(self, receipt, journal, authorization=None):
         if journal["phase"] in {"prepared", "discarded"}:
             # Apply persists 'stopping' before its first runtime side effect.
             # A never-applied preparation needs no restoration or live proofs:
@@ -390,29 +448,61 @@ class Transaction:
             self.adapter.validate_restored(receipt, journal)
             return self.result(receipt, journal, explicit_rollback=True)
         self.adapter.validate_recovery(receipt, journal)
-        self.recover(receipt, journal, automatic=False)
+        self.recover(receipt, journal, automatic=False, authorization=authorization)
         return self.result(receipt, journal, explicit_rollback=True)
 
-    def recover(self, receipt, journal, *, automatic):
+    def recover(self, receipt, journal, *, automatic, authorization=None):
         admitted = False
+        result = None
         try:
             # Validate readbacks/preimages before stopping an unrelated process.
             self.adapter.validate_recovery(receipt, journal)
             admitted = True
+            self.adapter.verified_prior = None
+            if authorization is not None:
+                journal["recovery_authorization"] = authorization
             self.phase(journal, "rolling_back")
             self.adapter.stop(receipt, provenance=journal.get("stop_provenance"))
             self.adapter.revalidate_stopped(receipt, rollback=True)
             self.adapter.switch(receipt, rollback=True)
-            result = self.adapter.start_verify(receipt, rollback=True)
+            try:
+                result = self.adapter.start_verify(receipt, rollback=True)
+            except Exception as exc:
+                partial = getattr(exc, "partial_result", None)
+                result = copy.deepcopy(partial) if isinstance(partial, dict) else None
+                raise
             if (result.get("outcome") != "passed"
                     or (result.get("restoration") or {}).get("outcome") != "passed"
                     or (result.get("model_canary") or {}).get("outcome") != "not_run_by_design"):
                 raise Invalid("prior no-input restoration failed or missing")
-            self.phase(journal, "rolled_back", rollback_result=result,
-                       restored=self.adapter.current(receipt), rollback_failure=None)
+            try:
+                self.phase(journal, "rolled_back", rollback_result=result,
+                           restored=self.adapter.current(receipt), rollback_failure=None)
+            except OSError as journal_exc:
+                journal["journal_failure"] = type(journal_exc).__name__
+                journal.pop("restored", None)
+                if journal.get("history", [])[-1:] == ["rolled_back"]:
+                    journal["history"].pop()  # never persisted
+                raise
         except Exception as exc:
             journal["rollback_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
-            if admitted:
+            identity = getattr(self.adapter, "verified_prior", None) if admitted else None
+            if identity:
+                # The exact prior booted and identified itself; only proof or
+                # evidence failed. Leave it serving unless it is no longer the
+                # process we observed, and then signal nothing at all.
+                try:
+                    running = self.adapter.prior_still_running(receipt, identity)
+                except Exception as check_exc:
+                    running = False
+                    journal["prior_identity_check_failure"] = type(check_exc).__name__
+                if running:
+                    journal["prior_running"] = copy.deepcopy(identity)
+                    journal["rollback_result"] = {**(result or {}), "outcome": "failed",
+                                                  "prior_identity": copy.deepcopy(identity)}
+                else:
+                    journal["prior_identity_mismatch"] = copy.deepcopy(identity)
+            elif admitted:
                 try:
                     self.adapter.keep_stopped(receipt)
                 except Exception as stop_exc:

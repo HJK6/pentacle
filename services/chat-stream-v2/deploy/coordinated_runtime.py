@@ -128,6 +128,7 @@ class Runtime:
         self.controller = Path(__file__).resolve().parents[3]
         self.installer = load_installer(self.controller)
         self.stopped = False
+        self.recovery_authorization = self.verified_prior = None
 
     def checked(self, argv, cwd=None):
         result = self.runner(tuple(str(a) for a in argv), cwd or self.repo)
@@ -577,9 +578,20 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             if file_digest(private_file(receipt[key]["path"])) != receipt[key]["sha256"]:
                 raise Invalid("sealed postimage drift")
 
+    def controller_admitted(self, receipt, *, forward):
+        head = self.d._git(self.controller, "rev-parse", "HEAD", runner=self.runner)
+        pinned = receipt["intent"]["controller_sha"]
+        if head == pinned:
+            return True
+        # Only recovery of this sealed receipt may run the FD-authorized
+        # replacement; forward apply stays pinned to the receipt controller.
+        auth = self.recovery_authorization
+        return bool(auth and not forward and auth["original_controller_sha"] == pinned
+                    and head == auth["replacement_controller_sha"]
+                    and self.d._git(self.controller, "remote", "get-url", "origin", runner=self.runner) == receipt["origin"])
+
     def validate_common(self, receipt, *, forward=True):
-        if (self.d._git(self.controller, "rev-parse", "HEAD", runner=self.runner) != receipt["intent"]["controller_sha"]
-                or self.d._dirty_entries(self.controller, self.runner)):
+        if not self.controller_admitted(receipt, forward=forward) or self.d._dirty_entries(self.controller, self.runner):
             raise Invalid("controller source drift")
         if self.git("remote", "get-url", "origin") != receipt["origin"]:
             raise Invalid("daemon source origin drift")
@@ -837,6 +849,19 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
                     allowed.add(value)
             if value not in allowed:
                 raise Invalid("unrelated policy/plist/schedule/stamp drift blocks recovery")
+        auth = self.recovery_authorization
+        if auth is not None:
+            live = auth["expected_live"]
+            state = self.d._launchd_state(self.service.launchd_label, self.runner)
+            if (not state.answered or state.pid != live["pid"] or now["sha"] != live["sha"]
+                    or self.d._process_start(state.pid, self.runner) != live["birth"]):
+                raise Invalid("expected live daemon identity drift")
+            # The replacement controller's installer must reproduce the sealed
+            # prior proofs before any stop, as forward revalidate does.
+            prior = receipt["source"]["prior"]
+            for helper in prior["original_helpers"].values():
+                if self.helper_proof(helper, receipt["accounts"], prior["code_identity"], prior["manifest"], prior["sha"], verify_release=False) != helper["proof"]:
+                    raise Invalid("original helper proof drift before stop")
 
     def validate_restored(self, receipt, journal):
         self.validate_common(receipt, forward=False)
@@ -846,7 +871,23 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
     def keep_stopped(self, receipt):
         self.stop(receipt)
 
+    def prior_still_running(self, receipt, identity):
+        state = self.d._launchd_state(self.service.launchd_label, self.runner)
+        return bool(state.answered and state.loaded and state.pid == identity["pid"]
+                    and self.d._process_start(state.pid, self.runner) == identity["birth"]
+                    and self.git("rev-parse", "HEAD") == identity["sha"])
+
     def start_verify(self, receipt, *, rollback):
+        self.verified_prior = None
+        partial = {}
+        try:
+            return self._start_verify(receipt, rollback=rollback, partial=partial)
+        except Exception as exc:
+            # Completed sub-results survive a later verifier's raise.
+            exc.partial_result = {"outcome": "failed", **copy.deepcopy(partial)}
+            raise
+
+    def _start_verify(self, receipt, *, rollback, partial):
         self.verification_started = time.time()
         direction = "prior" if rollback else "target"
         source = receipt["source"][direction]
@@ -863,13 +904,20 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             prior_pid=self.old_pid, wait_seconds=self.boot_wait_seconds, runner=self.runner)
         if boot.outcome != self.d.BOOT_OBSERVED or boot.pid == self.old_pid:
             raise Invalid("fresh daemon boot not proven")
+        partial["boot"] = boot.as_stamp()
         confirmed, runtime = self.d._verify_runtime_sha(source["sha"], boot.pid)
         if not confirmed:
             raise Invalid("loaded runtime SHA not confirmed")
+        partial["runtime"] = runtime
         self.validate_common(receipt, forward=not rollback)
         restoration = None
         if rollback:
+            birth = self.d._process_start(boot.pid, self.runner)
+            if birth:
+                # Exact prior files restored, fresh launchd boot, SHA confirmed.
+                self.verified_prior = {"pid": boot.pid, "birth": birth, "sha": source["sha"]}
             restoration = self.restoration_proof(receipt, source, boot)
+            partial["restoration"] = restoration
             verdict = None
         else:
             if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
@@ -879,10 +927,12 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]), self.repo)
             verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
                         declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
+            partial["fleet_smoke"] = verdict
         self.validate_common(receipt, forward=not rollback)
         slow = self.d._scan_slow_consumer_window(self.service, self.log_offsets,
             expected_pid=boot.pid, expected_start=self.d._process_start(boot.pid, self.runner),
             prior_pid=self.old_pid, prior_start=self.old_start, no_outgoing_writer=self.old_pid is None, runner=self.runner)
+        partial["slow_consumer"] = slow
         dispatch = self.dispatched_proofs(receipt, source, boot)
         result = {"outcome": "passed" if (restoration if rollback else verdict)["outcome"] == "passed" and slow.get("outcome") == "passed" else "failed",
                   "boot": boot.as_stamp(), "runtime": runtime, "slow_consumer": slow,
