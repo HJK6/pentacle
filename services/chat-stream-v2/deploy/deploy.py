@@ -674,6 +674,22 @@ def _load_gate_evidence(path: Path, sha: str) -> dict[str, object]:
     return raw
 
 
+def _load_read_timing_receipt(path: Path | None, sha: str) -> dict[str, object]:
+    """Admit a forward daemon deploy only with a passing read-timing receipt for ``sha``."""
+    from tools import read_timing
+    if path is None:
+        raise DeployError("forward daemon deploy requires --read-timing-receipt from tools/read_timing.py")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise DeployError(f"invalid read-timing receipt: {exc}") from exc
+    try:
+        read_timing.check_receipt(raw, sha)
+    except ValueError as exc:
+        raise DeployError(f"read-timing receipt refused: {exc}") from exc
+    return raw
+
+
 def _venv_python(repo: Path, service: ServiceConfig | None = None) -> Path:
     configured_service = service or SERVICES["chat-streamd-v2"]
     service_dir = Path(configured_service.requirements_path).parent
@@ -2096,7 +2112,7 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
            prepare_only: bool = False, smoke_accounts: Sequence[str] | None = None,
            recovery_authorization: Path | None = None, recovery_go_tell_id: str | None = None,
-           runner: Runner) -> dict[str, object]:
+           read_timing_receipt: Path | None = None, runner: Runner) -> dict[str, object]:
     if (recovery_authorization is not None or recovery_go_tell_id is not None) and (
             not rollback or coordinated_receipt is None or coordinated_plan is not None or prepare_only
             or recovery_authorization is None or not recovery_go_tell_id):
@@ -2116,7 +2132,8 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                 from deploy.coordinated_runtime import Runtime
                 adapter = Runtime(sys.modules[__name__], service, repo, runner,
                     stream=deployer_stream_id or os.environ.get("AGENT_ORCH_STREAM_ID", ""),
-                    boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir)
+                    boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir,
+                    read_timing_receipt=read_timing_receipt)
                 transaction = coordinated.Transaction(adapter, root)
                 if rollback:
                     return transaction.rollback(coordinated_receipt, authorization=recovery_authorization,
@@ -2128,7 +2145,8 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
             return _deploy_legacy(service, release_checkout=repo, ref=ref, rollback=rollback,
                 gate_evidence=gate_evidence, release_inputs=release_inputs, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
-                boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts, runner=runner)
+                boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts,
+                read_timing_receipt=read_timing_receipt, runner=runner)
     except (coordinated.Invalid, OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as exc:
         raise DeployError(str(exc)) from exc
 
@@ -2175,6 +2193,7 @@ def _deploy_legacy(
     log_guard_dir: str | Path | None = None,
     boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
     smoke_accounts: Sequence[str] | None = None,
+    read_timing_receipt: Path | None = None,
     runner: Runner,
 ) -> dict[str, object]:
     repo = release_checkout.expanduser().resolve()
@@ -2221,6 +2240,8 @@ def _deploy_legacy(
                 repo / DEFAULT_STAMP_DIR / f"{service.name}.gate.json", sha
             )
             evidence_source = "inline"
+        if service.name == "chat-streamd-v2" and not rollback:
+            _load_read_timing_receipt(read_timing_receipt, sha)
         gates = {
             "gate": evidence.get("gate"),
             "tiers": list(evidence.get("tiers") or []),
@@ -2418,6 +2439,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--gate-evidence", type=Path)
+    parser.add_argument("--read-timing-receipt", type=Path,
+                        help="Passing tools/read_timing.py receipt for the exact forward daemon SHA.")
     parser.add_argument("--coordinated-plan", type=Path, help="Private coordinated deployment intent.")
     parser.add_argument("--coordinated-receipt", type=Path, help="Sealed preparation receipt, also used for whole-transaction rollback.")
     parser.add_argument("--prepare-only", action="store_true", help="Stage inert helpers and seal the coordinated receipt only.")
@@ -2482,6 +2505,7 @@ def main(argv: list[str] | None = None) -> int:
             smoke_accounts=args.account,
             recovery_authorization=args.recovery_controller_authorization,
             recovery_go_tell_id=args.recovery_go_tell_id,
+            read_timing_receipt=args.read_timing_receipt,
             runner=_run,
         )
     except DeployError as exc:

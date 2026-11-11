@@ -101,6 +101,11 @@ The inline gate runs with the qualified `v2-merge-capacity` tier bounds (unit
 Reusing evidence grants no restart authority and preserves the deploy transaction,
 rollback, and runtime readback requirements above.
 
+Every forward daemon deploy also takes `--read-timing-receipt` from
+`services/chat-stream-v2/tools/read_timing.py`, run on a clean checkout of the
+exact candidate; see
+[Read-timing receipt](../services/chat-stream-v2/deploy/daemon/README.md#read-timing-receipt).
+
 Release notes are the root `CHANGELOG.md`. A PR with a user-visible change adds
 a bullet under `## Unreleased`. Before the release candidate's `Public checks`
 run, the release owner cuts the UTC dated section on that branch and adds a
