@@ -171,7 +171,7 @@ Gate calibration on the frozen `cca674eb` base measured a serial macOS unit
 tier of 1553.424s. The candidate at `3945cf1e` measured 648.759s with two
 workers and the same executable pass-set, a 58.2% reduction. These are
 calibration measurements, not the final three-run acceptance series. Local
-unit and merge profiles use two workers with worker restarts disabled; the
+unit and merge profiles use four workers with worker restarts disabled; the
 each hosted partition stays serial. An earlier
 serial calibration measured 1830.653s; it does not measure the new partitions.
 Smoke and the standalone unit cap remain 900s. The capacity budget remains
@@ -443,5 +443,5 @@ this section neither certifies runtime deployment nor commissions extra work.
 
 Pushes and pull requests run six serial unit partitions, assigned by a stable
 hash of the test file path. The aggregate requires every partition and the
-smoke job to pass. Local merge gates use two file-grouped pytest workers.
+smoke job to pass. Local merge gates use four file-grouped pytest workers.
 The serial and parallel test sets are compared once for this change.

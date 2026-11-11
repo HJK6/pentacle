@@ -152,7 +152,7 @@ class ConfigFailsClosed(Tmp):
         self.assertEqual(config["schema"], "pentacle.gate-env.v1")
         workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
                    if "unit_workers" in target}
-        self.assertEqual(workers, {"v2-unit": 2, "v2-merge": 2, "v2-merge-capacity": 2, "v2-merge-ci": 1})
+        self.assertEqual(workers, {"v2-unit": 4, "v2-merge": 4, "v2-merge-capacity": 4, "v2-merge-ci": 1})
         shard = config["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"]
         self.assertEqual((shard['gate'], shard['shardable'], shard.get('unit_workers', 1)), ('unit', True, 1))
         self.assertEqual(shard['timeout_s'], shard['max_timeout_s'])
