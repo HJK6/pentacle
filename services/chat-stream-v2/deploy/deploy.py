@@ -675,10 +675,17 @@ def _load_gate_evidence(path: Path, sha: str) -> dict[str, object]:
 
 
 def _load_read_timing_receipt(path: Path | None, sha: str) -> dict[str, object]:
-    """Admit a forward daemon deploy only with a passing read-timing receipt for ``sha``."""
+    """Validate a read-timing receipt for ``sha`` when one is supplied.
+
+    The receipt is an optional manual check, not a forward-deploy requirement
+    (operator decision 2026-11-11): tools/read_timing.py and ``--read-timing-receipt``
+    stay available, and a supplied receipt is still validated for the exact SHA,
+    but a forward deploy without one is no longer blocked. Fix 2's store-call
+    lines name every slow call within the first hour live, which already covers
+    the read-regression class this guard watched for."""
     from tools import read_timing
     if path is None:
-        raise DeployError("forward daemon deploy requires --read-timing-receipt from tools/read_timing.py")
+        return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

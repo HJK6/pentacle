@@ -244,10 +244,12 @@ def test_read_timing_receipt_refusals(tmp_path, mutate):
         _load_timing(tmp_path, payload)
 
 
-def test_missing_or_invalid_read_timing_receipt_is_refused(tmp_path):
+def test_read_timing_receipt_optional_but_validated_when_supplied(tmp_path):
+    # Operator decision 2026-11-11: the receipt is an optional manual check, not a
+    # forward-deploy requirement, so a missing one is admitted (returns {}). A
+    # supplied receipt is still validated for the exact SHA.
     from deploy.deploy import _load_read_timing_receipt
-    with pytest.raises(DeployError, match="requires --read-timing-receipt"):
-        _load_read_timing_receipt(None, SHA)
+    assert _load_read_timing_receipt(None, SHA) == {}
     with pytest.raises(DeployError, match="^invalid read-timing receipt"):
         _load_read_timing_receipt(tmp_path / "absent.json", SHA)
     with pytest.raises(DeployError, match="^invalid read-timing receipt"):
@@ -272,12 +274,13 @@ def _runtime(receipt):
     return runtime
 
 
-def test_coordinated_prepare_binds_receipt_to_the_intent_it_seals(tmp_path):
+def test_coordinated_prepare_binds_a_supplied_receipt_to_the_intent_it_seals(tmp_path):
+    # A supplied receipt is still bound to the sealed target SHA; one for another
+    # SHA is refused. (A missing receipt no longer blocks — see the optional test.)
     other = tmp_path / "other.json"
     other.write_text(json.dumps(read_timing_receipt("d" * 40)))
-    for receipt, message in ((None, "requires --read-timing-receipt"), (other, "sha does not match deploy sha")):
-        with pytest.raises(DeployError, match=message):
-            _runtime(receipt).prepare({"target_sha": SHA}, tmp_path / "unused")
+    with pytest.raises(DeployError, match="sha does not match deploy sha"):
+        _runtime(other).prepare({"target_sha": SHA}, tmp_path / "unused")
 
 
 def test_coordinated_apply_checks_the_sealed_target_before_any_stop(tmp_path, monkeypatch):
@@ -288,16 +291,18 @@ def test_coordinated_apply_checks_the_sealed_target_before_any_stop(tmp_path, mo
     sealed = {"intent": {"target_sha": SHA, "prior_sha": "e" * 40}}
     other = tmp_path / "other.json"
     other.write_text(json.dumps(read_timing_receipt("d" * 40)))
-    for receipt in (None, other):
-        with pytest.raises(DeployError):
-            _runtime(receipt).revalidate(sealed, forward=True)
+    # A supplied receipt for the wrong SHA is still refused before validate_common.
+    with pytest.raises(DeployError):
+        _runtime(other).revalidate(sealed, forward=True)
     assert reached == []
     good = tmp_path / "good.json"
     good.write_text(json.dumps(read_timing_receipt()))
-    for receipt, forward in ((good, True), (None, False)):  # rollback revalidation is never gated
+    # A good receipt passes the check; a missing one no longer gates a forward
+    # deploy; rollback revalidation is never gated. All reach validate_common.
+    for receipt, forward in ((good, True), (None, True), (None, False)):
         with pytest.raises(RuntimeError, match="past the read-timing check"):
             _runtime(receipt).revalidate(sealed, forward=forward)
-    assert reached == [True, False]
+    assert reached == [True, True, False]
 
 
 def test_coordinated_deploy_hands_the_receipt_to_the_transaction_runtime(tmp_path, monkeypatch):
