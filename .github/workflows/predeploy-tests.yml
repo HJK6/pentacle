@@ -352,5 +352,4 @@ jobs:
     - name: Require every partition to succeed
       env:
         CI_REQUIRED_NEEDS: ${{ toJSON(needs) }}
-        CI_EVENT_NAME: ${{ github.event_name }}
       run: python3 scripts/ci_required_aggregate.py

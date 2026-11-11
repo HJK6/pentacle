@@ -81,7 +81,6 @@ class WorkflowControls(unittest.TestCase):
         aggregate = next(step for step in jobs['checks']['steps'] if 'run' in step)
         self.assertEqual(aggregate['run'], 'python3 scripts/ci_required_aggregate.py')
         self.assertEqual(aggregate['env']['CI_REQUIRED_NEEDS'], '${{ toJSON(needs) }}')
-        self.assertEqual(aggregate['env']['CI_EVENT_NAME'], '${{ github.event_name }}')
 
     def test_isolation_and_failure_policy(self):
         for job_id, job in self.workflow['jobs'].items():

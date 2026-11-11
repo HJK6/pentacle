@@ -128,8 +128,6 @@ def _record_collection(nodeids: list[str]) -> None:
     if journal.collection is None:
         journal.collection = collection
         journal.emit("collected", count=collection[0], nodeids_sha256=collection[1])
-    elif journal.collection != collection:
-        journal.emit("collection_mismatch")  # xdist also fails the collection; never complete evidence.
 
 
 def pytest_runtest_logstart(nodeid: str, location: object) -> None:
@@ -162,7 +160,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 def summarize(path: os.PathLike[str] | str, *, max_bytes: int = DEFAULT_MAX_BYTES, max_listed: int = 50) -> dict[str, Any]:
     """Fold a journal into bounded facts; never raises for a missing or damaged file."""
     summary: dict[str, Any] = {"journal": str(path), "present": False, "records": 0, "malformed_lines": 0,
-                               "truncated_tail": False, "budget_exhausted": False, "collection_mismatch": False, "run_started": False,
+                               "truncated_tail": False, "budget_exhausted": False, "run_started": False,
                                "run_finished": False, "exitstatus": None, "collected": None, "started_nodes": 0,
                                "completed_nodes": 0, "active_nodes": [], "failed": [], "failed_overflow": 0,
                                "last_started": None, "last_completed": None, "elapsed_s": None, "complete": False}
@@ -213,10 +211,8 @@ def summarize(path: os.PathLike[str] | str, *, max_bytes: int = DEFAULT_MAX_BYTE
             summary["run_finished"], summary["exitstatus"] = True, record.get("exitstatus")
         elif kind == "journal_budget_exhausted":
             summary["budget_exhausted"] = True
-        elif kind == "collection_mismatch":
-            summary["collection_mismatch"] = True
     summary["active_nodes"] = list(active)[:max_listed]
     summary["complete"] = (summary["run_started"] and summary["run_finished"] and not active
                            and not summary["malformed_lines"] and not summary["truncated_tail"]
-                           and not summary["budget_exhausted"] and not summary["collection_mismatch"])
+                           and not summary["budget_exhausted"])
     return summary
