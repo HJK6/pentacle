@@ -148,7 +148,15 @@ class ConfigFailsClosed(Tmp):
         return path
 
     def test_checked_in_config_loads(self):
-        self.assertEqual(ge.load_config(HERE / "gate-env.json")["schema"], "pentacle.gate-env.v1")
+        config = ge.load_config(HERE / "gate-env.json")
+        self.assertEqual(config["schema"], "pentacle.gate-env.v1")
+        workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
+                   if "unit_workers" in target}
+        self.assertEqual(workers, {"v2-unit": 2, "v2-merge": 2, "v2-merge-capacity": 2, "v2-merge-ci": 1})
+        shard = config["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"]
+        self.assertEqual((shard['gate'], shard['shardable'], shard.get('unit_workers', 1)), ('unit', True, 1))
+        self.assertEqual(shard['timeout_s'], shard['max_timeout_s'])
+        self.assertLessEqual(shard['timeout_s'], 1200)
 
     def test_malformed_variants_are_refused(self):
         bad = {
@@ -561,6 +569,7 @@ class DeadlineEnvelope(Tmp):
         (service / "tools").mkdir(parents=True, exist_ok=True)
         (service / "tools" / "run_gate.py").write_text(runner_text)
         target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
+        target.pop("unit_workers", None)  # existing serial/deadline and legacy controls
         command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
         return command, results
 
@@ -571,10 +580,27 @@ class DeadlineEnvelope(Tmp):
         self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+        service = self.tmp / "svc"
+        for gate in ("unit", "merge"):
+            target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], unit_workers=2)
+            command, _ = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service,
+                                           self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], {})
+            self.assertEqual(command[command.index("--unit-workers") + 1], "2")
+        target = dict(REAL_CONFIG['profiles']['pentacle']['targets']['v2-unit-ci-shard'])
+        unsharded, _ = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                        self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {})
+        self.assertNotIn('--shard-index', unsharded)
+        sharded, result = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                           self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {},
+                                           shard_index=0, shard_count=6)
+        self.assertEqual(sharded[-4:], ['--shard-index', '0', '--shard-count', '6'])
+        self.assertEqual(sharded[:-4], unsharded)
+        self.assertEqual(sharded[sharded.index('--deadline-seconds') + 1], str(target['timeout_s'] + 90))
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
         self.assertNotIn("--deadline-seconds", command)
+        self.assertNotIn("--unit-workers", command)
         self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
@@ -1153,6 +1179,8 @@ class MigratedTargets(Tmp):
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
+        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
+        self.assertNotIn("PYTEST_ADDOPTS", env)
         self.assertIn("merge", cmd)
         self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 3420)
         self.assertEqual(result["wall_s"], 3450)

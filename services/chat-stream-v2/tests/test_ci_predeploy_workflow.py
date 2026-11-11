@@ -21,7 +21,8 @@ PROFILE = CONFIG['profiles']['pentacle']
 def _step():
     workflow = yaml.safe_load(PREDEPLOY.read_text())
     expected = {'frontend': {'npm-test'}, 'web': {'web-gate'},
-                'daemon': {'v2-merge-ci'}, 'contracts': {'cli-pytest', 'shared-pytest'}}
+                'daemon-unit': {'v2-unit-ci-shard'}, 'daemon': {'v2-smoke'},
+                'contracts': {'cli-pytest', 'shared-pytest'}}
     jobs = workflow['jobs']
     assert set(jobs) == set(expected) | {'checks'}
     assert set(jobs['checks']['needs']) == set(expected)
@@ -31,18 +32,18 @@ def _step():
     for job_id, targets in expected.items():
         lines = [line for step in jobs[job_id]['steps'] for line in step.get('run', '').splitlines()
                  if 'scripts/gate_env.py' in line]
-        argv = [shlex.split(line) for line in lines]
+        argv = [shlex.split(line.replace('${{ matrix.shard }}', '0')) for line in lines]
         assert len(argv) == len(targets)
         assert all(args[:3] == ['python3', 'scripts/gate_env.py', 'run'] for args in argv)
         assert {args[args.index('--target') + 1] for args in argv} == targets
-        if job_id in ('daemon', 'contracts'):
-            commands.extend(line.replace('${GITHUB_JOB}', job_id) for line in lines)
+        if job_id in ('daemon-unit', 'daemon', 'contracts'):
+            commands.extend(line.replace('${GITHUB_JOB}', job_id).replace('${{ matrix.shard }}', '0') for line in lines)
     return workflow, {'run': '\n'.join(commands)}
 
 
 def _invocations(step):
     commands = [shlex.split(line) for line in step['run'].splitlines() if 'scripts/gate_env.py' in line]
-    assert len(commands) == 3
+    assert len(commands) == 4
     assert all(argv[:3] == ['python3', 'scripts/gate_env.py', 'run'] for argv in commands)
     assert all(argv[argv.index('--profile') + 1] == 'pentacle' for argv in commands)
     return {argv[argv.index('--target') + 1]: argv for argv in commands}
@@ -52,6 +53,8 @@ def _trace(name, argv, tmp_path, *, scratch=None, workspace=None, evidence=None)
     target = PROFILE['targets'][name]
     selection = [argv[i+1] for i,v in enumerate(argv) if v == '--select']
     selection = ge.validate_selection(target, selection, ROOT)
+    index = int(argv[argv.index('--shard-index') + 1]) if '--shard-index' in argv else None
+    count = int(argv[argv.index('--shard-count') + 1]) if '--shard-count' in argv else None
     workspace = workspace or tmp_path / 'gate-env'
     evidence = evidence or tmp_path / 'gate-evidence' / name
     home, tmp, base = ge.scratch_paths(workspace, Path('/tmp/ge-ci'), '12345678-owned')
@@ -59,18 +62,20 @@ def _trace(name, argv, tmp_path, *, scratch=None, workspace=None, evidence=None)
                        home=home, tmp=tmp, locale_name='C.UTF-8', evidence=evidence, attempt_id='ci', pass_env={},
                        ambient={'PYTHONPATH':'/wrong', 'AWS_SECRET_ACCESS_KEY':'fixture-secret', 'HOME':'/operator'})
     command, result = ge.build_command(CONFIG, target, tmp_path / 'venv', ROOT, ROOT / PROFILE['service_dir'],
-                                       tmp_path / 'command-evidence' / name, scratch or base, selection, target['timeout_s'], env)
+                                       tmp_path / 'command-evidence' / name, scratch or base, selection, target['timeout_s'], env,
+                                       shard_index=index, shard_count=count)
     return target, command, result, env, (home,tmp,base)
 
 
 def test_predeploy_runs_only_the_v2_gate_and_agent_orch_suite(tmp_path):
     _, step = _step()
     invocations = _invocations(step)
-    assert set(invocations) == {'v2-merge-ci', 'cli-pytest', 'shared-pytest'}
-    target, command, result, _, _ = _trace('v2-merge-ci', invocations['v2-merge-ci'], tmp_path)
-    assert target['kind'] == 'run_gate' and target['gate'] == 'merge'
-    assert command[1:3] == [str(ROOT / 'services/chat-stream-v2/tools/run_gate.py'), 'merge']
-    assert result['cwd'] == ROOT
+    assert set(invocations) == {'v2-unit-ci-shard', 'v2-smoke', 'cli-pytest', 'shared-pytest'}
+    shard, command, _, shard_env, _ = _trace('v2-unit-ci-shard', invocations['v2-unit-ci-shard'], tmp_path)
+    assert shard['kind'] == 'run_gate' and shard['gate'] == 'unit' and shard['shardable'] is True
+    assert command[-4:] == ['--shard-index', '0', '--shard-count', '6']
+    assert '--unit-workers' not in command
+    assert not any('SHARD' in key or key == 'PYTEST_ADDOPTS' for key in shard_env)
     for name, service in [('cli-pytest','agent-orch'), ('shared-pytest','_shared')]:
         argv = invocations[name]
         assert argv[argv.index('--select')+1] == 'tests'
@@ -97,23 +102,13 @@ def test_predeploy_uses_the_shared_services_import_root(tmp_path):
 
 def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     workflow, step = _step()
-    job = workflow['jobs']['daemon']
-    assert job['timeout-minutes'] == 110
-    argv = _invocations(step)['v2-merge-ci']
-    target, command, _, env, _ = _trace('v2-merge-ci', argv, tmp_path)
-    assert target['tier_timeouts'] == {'unit':4320, 'smoke':900}
-    assert target['timeout_s'] == target['max_timeout_s'] == 5220
-    assert command[command.index('--deadline-seconds') + 1] == '5340'
-    assert command[command.index('--deadline-reserve-seconds') + 1] == '60'
-    assert env['V2_UNIT_TIMEOUT_S'] == '4320' and env['V2_SMOKE_TIMEOUT_S'] == '900'
-    assert 'V2_SOAK_TIMEOUT_S' not in env and '--timeout-seconds' not in command
-    assert CONFIG['profiles']['pentacle']['targets']['v2-unit']['timeout_s'] == 900
-    assert CONFIG['profiles']['pentacle']['targets']['v2-smoke']['timeout_s'] == 900
-    assert CONFIG['profiles']['pentacle']['targets']['v2-merge']['timeout_s'] == 1800
+    assert all(CONFIG['profiles']['pentacle']['targets'][name]['unit_workers'] == 2
+               for name in ('v2-unit', 'v2-merge', 'v2-merge-capacity'))
     runner_temp = tmp_path / 'runner-temp'
     root = runner_temp / 'gate-evidence'
     patterns = []
-    for job_id in ('frontend', 'web', 'daemon', 'contracts'):
+    job_ids = ('frontend', 'web', 'daemon-unit', 'daemon', 'contracts')
+    for job_id in job_ids:
         uploads = [s for s in workflow['jobs'][job_id]['steps']
                    if s.get('uses') == 'actions/upload-artifact@v4' and s.get('if') == '${{ failure() }}']
         assert len(uploads) == 1
@@ -124,11 +119,24 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
         assert selected and all(p.startswith(str(job_root) + '/') and '..' not in Path(p).parts for p in selected)
         patterns.extend(selected)
         assert any(fnmatch.fnmatch(str(job_root / 'attempt-manifest.json'), pattern) for pattern in selected)
-        for other in ('frontend', 'web', 'daemon', 'contracts'):
+        for other in job_ids:
             if other != job_id:
                 assert not any(fnmatch.fnmatch(str(root / other / 'attempt-manifest.json'), pattern) for pattern in selected)
     included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in patterns)
-    for required in ['daemon/daemon/gate/v2-merge-evidence.json','daemon/daemon/gate/unit.log','daemon/daemon/gate/unit.junit.xml',
+    success_patterns = []
+    for job_id in job_ids:
+        uploads = [s for s in workflow['jobs'][job_id]['steps']
+                   if s.get('uses') == 'actions/upload-artifact@v4' and s.get('if') == '${{ always() }}']
+        assert len(uploads) == 1 and uploads[0]['with']['retention-days'] == 7
+        selected = uploads[0]['with']['path'].replace('${{ runner.temp }}', str(runner_temp)).replace('${{ github.job }}', job_id).splitlines()
+        assert all(p.startswith(str(root / job_id) + '/') and '..' not in Path(p).parts for p in selected)
+        success_patterns.extend(selected)
+    success_included = lambda p: any(fnmatch.fnmatch(str(p), pattern) for pattern in success_patterns)
+    for required in ('daemon-unit/daemon/gate/v2-unit-evidence.json', 'daemon-unit/daemon/gate/unit.junit.xml',
+                     'daemon-unit/daemon/gate/unit.progress.jsonl', 'daemon/smoke/gate/v2-smoke-evidence.json',
+                     'daemon/smoke/gate/smoke.junit.xml', 'daemon/smoke/gate/smoke.progress.jsonl'):
+        assert success_included(root / required), required
+    for required in ['daemon/daemon/gate/unit.log','daemon-unit/daemon/gate/unit.junit.xml',
                      'daemon/daemon/attempts/a/0001-started.json','daemon/attempt-manifest.json','web/web/gate/web/verdict.json',
                      'frontend/npm/attempts/a/0001-started.json','contracts/cli/gate/pytest.junit.xml',
                      'contracts/shared/gate/pytest.junit.xml']:
@@ -142,6 +150,7 @@ def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
         for excluded in [base/'unit/owned-case/sessions.db',tmp/'scratch',home/'.aws/credentials',home/'.env',
                          home/'Library/Keychains/login.keychain-db',workspace/'prepared/venv']:
             assert not included(excluded), str(excluded)
+            assert not success_included(excluded), str(excluded)
 
 
 def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(tmp_path, monkeypatch):
@@ -153,8 +162,8 @@ def test_hosted_gate_scratch_is_accepted_by_real_isolation_guard(tmp_path, monke
     workspace = Path('/opt/ci-runner/_temp/gate-env/daemon')
     evidence = Path('/opt/ci-runner/_temp/gate-evidence/daemon/daemon')
     home,tmp,base = ge.scratch_paths(workspace, Path('/tmp/ge-ci'), '12345678-owned')
-    argv = _invocations(step)['v2-merge-ci']
-    _, command, _, _, _ = _trace('v2-merge-ci',argv,tmp_path,scratch=base,workspace=workspace,evidence=evidence)
+    argv = _invocations(step)['v2-unit-ci-shard']
+    _, command, _, _, _ = _trace('v2-unit-ci-shard',argv,tmp_path,scratch=base,workspace=workspace,evidence=evidence)
     scratch = Path(command[command.index('--basetemp')+1])
     accepted = harness.assert_disposable_root(scratch/'unit'/'owned-case')
     assert accepted == (scratch/'unit'/'owned-case').resolve()

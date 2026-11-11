@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-EXPECTED_JOB_IDS = ('frontend', 'web', 'daemon', 'contracts')
+EXPECTED_JOB_IDS = ('frontend', 'web', 'daemon-unit', 'daemon', 'contracts')
 
 
 def main():

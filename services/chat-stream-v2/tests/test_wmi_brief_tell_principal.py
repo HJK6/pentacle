@@ -356,6 +356,7 @@ def test_disabled_composite_and_stale_generation_refuse(credentials, tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("short_pane_evidence_wait")
 def test_committed_composite_tell_preserves_do_not_resend_ack(credentials, tmp_path):
     async def run():
         async with Harness(tmp_path / "committed.db") as h:

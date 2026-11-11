@@ -12,6 +12,8 @@ from test_context_compaction import IDLE_CAPTURED_LAYOUT, MAIN_ROSTER
 from test_context_nudges import _context_harness
 from test_nudges import HOST, _iso, _new_store
 
+pytestmark = pytest.mark.usefixtures("virtual_submission_clock")
+
 
 async def cross(h, at, tokens=500_000):
     await RoutingIntegrity(h.store, h.sessions).observe_context(
