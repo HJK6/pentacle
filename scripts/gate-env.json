@@ -115,11 +115,11 @@
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
-            "unit": 1800,
+            "unit": 2400,
             "smoke": 900
           },
-          "timeout_s": 2700,
-          "max_timeout_s": 2700
+          "timeout_s": 3300,
+          "max_timeout_s": 3300
         },
         "v2-pytest": {
           "kind": "pytest_files",

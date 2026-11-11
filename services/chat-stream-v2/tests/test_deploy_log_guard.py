@@ -558,16 +558,19 @@ def test_real_boot_producer_preserves_existing_port_readers(monkeypatch, capsys,
     assert re.search(r'chat_streamd_v2 listening on 127\.0\.0\.1:(\d+)', captured.out)[1] == '1234'
 
 
-def test_forward_deploy_refuses_without_passing_read_timing_receipt_before_any_stop(isolated_release, tmp_path):
+def test_forward_deploy_refuses_a_wrong_sha_receipt_but_allows_a_missing_one(isolated_release, tmp_path):
     module, service, repo, prior, target, before, calls, activate = isolated_release
     other = tmp_path / "other-sha-read-timing.json"
     other.write_text(json.dumps(read_timing_receipt(prior)))
-    for receipt, message in ((False, "requires --read-timing-receipt"), (other, "sha does not match deploy sha")):
-        with pytest.raises(module.DeployError, match=message):
-            activate(read_timing=receipt)
-        assert not [call for call in calls if call[0] == "launchctl"], "refused before any service stop"
-        assert module._stamp_path(repo, service).read_bytes() == before
-        assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == prior
+    # A supplied receipt for the wrong SHA is still refused before any service stop.
+    with pytest.raises(module.DeployError, match="sha does not match deploy sha"):
+        activate(read_timing=other)
+    assert not [call for call in calls if call[0] == "launchctl"], "refused before any service stop"
+    assert module._stamp_path(repo, service).read_bytes() == before
+    assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == prior
+    # A missing receipt no longer blocks a forward deploy (operator decision
+    # 2026-11-11): it proceeds and activates the target.
+    assert activate(read_timing=False)["sha"] == target
 
 
 def test_rollback_restoration_needs_no_read_timing_receipt(isolated_release):

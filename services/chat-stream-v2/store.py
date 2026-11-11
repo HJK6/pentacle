@@ -948,6 +948,35 @@ CREATE TABLE IF NOT EXISTS v2_session_generations (
 )
 """
 
+# A single-row counter bumped by database triggers whenever a mutation could
+# change what `list_session_lineage` returns: new or removed sessions/generations
+# and changes to the exact columns that read projects (`parent_stream_id`,
+# `handoff_from_stream_id`, `visibility`; the joined `generation`). It is the
+# invalidation key for the in-process lineage cache. Because the triggers live in
+# the database, every writer is covered — including the direct-SQL paths in
+# store_host_transfer, store_routing's composite projection, and the close
+# reapers — without a hand-maintained Python writer list. Non-lineage column
+# updates (e.g. observer_binding, context_tokens) deliberately do not fire, so
+# routine usage polling does not invalidate the cache.
+LINEAGE_CACHE_VERSION_DDL = [
+    "CREATE TABLE IF NOT EXISTS _lineage_cache_version ("
+    "id INTEGER PRIMARY KEY CHECK(id=0), version INTEGER NOT NULL DEFAULT 0)",
+    "INSERT OR IGNORE INTO _lineage_cache_version(id, version) VALUES (0, 0)",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_ai AFTER INSERT ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_ad AFTER DELETE ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_sessions_au AFTER UPDATE OF "
+    "parent_stream_id, handoff_from_stream_id, visibility ON sessions "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_ai AFTER INSERT ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_ad AFTER DELETE ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+    "CREATE TRIGGER IF NOT EXISTS _lineage_generations_au AFTER UPDATE OF generation ON v2_session_generations "
+    "BEGIN UPDATE _lineage_cache_version SET version=version+1 WHERE id=0; END",
+]
+
 # v1's `session_event_tail` DDL, VERBATIM (not `v2_`-prefixed — this is a v1
 # table both daemons share, so pre-cutover rows render after the swap and v1's
 # retention/archive tool keeps working). Chat transcript events (B13 ingest)
@@ -1544,6 +1573,15 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # (stream_id, session_created_at) -> the stream's other event lifecycles;
         # read and written only on the store thread.
         self._other_event_lifecycles: dict[tuple[str, str], tuple[str, ...]] = {}
+        # (version, rows) cache for list_session_lineage; read and written only on
+        # the store thread. `version` is the trigger-maintained _lineage_cache_version
+        # row, so the cache is reused only while no lineage-relevant session or
+        # generation mutation has happened.
+        self._lineage_cache: tuple[int, list[dict[str, Any]]] | None = None
+        # The version table + triggers are created on the first lineage read,
+        # not at init (only question/asset scope read lineage), so most Stores
+        # never pay the DDL. Store-thread only.
+        self._lineage_ddl_ready = False
         self.schedule_schema_health = "initializing"
         # Bounded (QA #8): an unbounded write queue is exactly the growth that
         # helped wedge v1 — a stalled store thread let callers pile work up
@@ -1699,6 +1737,13 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     def _run(self) -> None:
         conn = None
+        # A fresh connection (first start, or a stop()/start() restart on a
+        # :memory: or re-created DB) has no lineage version table yet, and any
+        # cache from a previous connection is stale. Re-arm lazy creation and
+        # drop the cache so the first lineage read on this connection rebuilds
+        # the table+triggers and re-scans, exactly as init did before.
+        self._lineage_ddl_ready = False
+        self._lineage_cache = None
         try:
             # Escape the literal store filename while enabling no-create URI
             # ATTACH for configured retention archives. Memory stores stay local.
@@ -3476,8 +3521,28 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
         Scope walks do not need session JSON, usage or report hydration. Keep
         table order so question scope retains the full-read API's ordering.
+
+        Called on the order of thousands of times an hour by question/asset
+        scope. The rows change only on a lineage-relevant session or generation
+        mutation, tracked by the trigger-maintained `_lineage_cache_version`, so
+        an unchanged version serves the cached rows instead of re-scanning every
+        session. Rows and order are identical to the direct query.
         """
         def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if not self._lineage_ddl_ready:
+                # Create the version table and its triggers on the first lineage
+                # read rather than at every Store init. Idempotent (IF NOT
+                # EXISTS), so a reopened DB that already has them is cheap; a
+                # fresh process re-arms the flag and re-asserts them once.
+                for ddl in LINEAGE_CACHE_VERSION_DDL:
+                    conn.execute(ddl)
+                conn.commit()
+                self._lineage_ddl_ready = True
+            version = conn.execute(
+                "SELECT version FROM _lineage_cache_version WHERE id=0").fetchone()[0]
+            cache = self._lineage_cache
+            if cache is not None and cache[0] == version:
+                return cache[1]
             rows = conn.execute(
                 """SELECT s.host, s.session_name, s.parent_stream_id,
                           s.handoff_from_stream_id, s.visibility, g.generation
@@ -3486,13 +3551,15 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                      ON g.host=s.host AND g.session_name=s.session_name
                    ORDER BY s.rowid"""
             ).fetchall()
-            return [{
+            result = [{
                 "stream_id": f"{row['host']}:{row['session_name']}",
                 "parent_stream_id": row["parent_stream_id"],
                 "handoff_from_stream_id": row["handoff_from_stream_id"],
                 "visibility": row["visibility"],
                 "session_generation": str(row["generation"]) if row["generation"] is not None else "",
             } for row in rows]
+            self._lineage_cache = (version, result)
+            return result
 
         return await self.submit(_op)
 
@@ -6688,12 +6755,21 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         before_daemon_seq: int | None,
         limit: int,
         generation: str | None = None,
+        deliveries_cache: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch one newest-first cursor page, returned oldest-first.
 
         The SQL limit is the page bound, not the requested history length. A
         caller can therefore walk a permanently large tail without loading the
         whole stream into one Python list or frame.
+
+        ``deliveries_cache`` lets a caller that walks several pages of one
+        request (``_stream_request_stream_events``) build the delivery table
+        once instead of once per page. It is reused only while the Store
+        connection's cumulative change counter is unchanged since the table was
+        built; any intervening write (a delivery insert/update/delete among
+        them) rebuilds it on the Store thread before the next page, so the
+        answer always equals a fresh-per-page projection.
         """
         if not stream_id or limit <= 0:
             return []
@@ -6745,8 +6821,19 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
             from tell_proof import ProjectionDeliveries
+            if deliveries_cache is None:
+                deliveries = ProjectionDeliveries()
+            else:
+                # One table per request: reuse only while no write has landed on
+                # this connection since it was built (total_changes is a superset
+                # of delivery mutations), otherwise rebuild for this page.
+                changes = conn.total_changes
+                if deliveries_cache.get("deliveries") is None or deliveries_cache.get("total_changes") != changes:
+                    deliveries_cache["deliveries"] = ProjectionDeliveries()
+                    deliveries_cache["total_changes"] = changes
+                deliveries = deliveries_cache["deliveries"]
             return list(reversed(_project_session_events_conn(
-                conn, newest_first, deliveries=ProjectionDeliveries())))
+                conn, newest_first, deliveries=deliveries)))
 
         def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             conn.execute("SAVEPOINT session_history_snapshot")

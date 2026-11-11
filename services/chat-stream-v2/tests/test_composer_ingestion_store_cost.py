@@ -271,9 +271,27 @@ def test_scope_uses_one_lineage_select_without_hydration(tmp_path, monkeypatch, 
                 actual = await call()
                 # Exact ordered equality, not membership-only, precedes witnesses.
                 assert actual == expected
-                assert len(statements) == 1, f"scope SELECT count: {len(statements)}"
-                tables = re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", statements[0], re.I)
+                # list_session_lineage now serves from a cache keyed on a cheap
+                # single-row version read; a cold read adds exactly one full
+                # lineage scan (sessions JOIN v2_session_generations) and no
+                # row hydration.
+                # Count only the full lineage SCAN (a SELECT joining sessions and
+                # v2_session_generations), not the one-time CREATE TRIGGER DDL that
+                # names that table — the version table + triggers are now created
+                # lazily on this first lineage read.
+                lineage_scans = [sql for sql in statements
+                                 if sql.lstrip().upper().startswith("SELECT")
+                                 and "from sessions s" in sql.lower()
+                                 and "v2_session_generations" in sql.lower()]
+                assert len(lineage_scans) == 1, f"cold lineage scans: {lineage_scans}"
+                tables = re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", lineage_scans[0], re.I)
                 assert {table.lower() for table in tables} == {"sessions", "v2_session_generations"}
+                assert not hydrated
+                # A warm repeat with no intervening session mutation serves the
+                # cache: the version read stays but the full scan does not recur.
+                statements.clear()
+                assert await call() == expected
+                assert [sql for sql in statements if "v2_session_generations" in sql.lower()] == []
                 assert not hydrated
         finally:
             if assets is not None:

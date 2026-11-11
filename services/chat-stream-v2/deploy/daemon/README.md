@@ -135,12 +135,19 @@ passes its native runner explicitly; direct library callers must do the same onl
 inside their authorized live path. Collector bootstrap failures propagate instead
 of being reported as a successful install.
 
-### Read-timing receipt
+### Read-timing receipt (optional manual check)
 
-Every forward daemon deploy, plain or coordinated (prepare and apply), needs
-`--read-timing-receipt` naming a passing receipt for the exact target SHA.
-Fixture-scale tests cannot see a read that is slow only on real data, so the
-receipt times the candidate's main reads on copies of the live database:
+`--read-timing-receipt` is an optional manual check, not a forward-deploy
+requirement (operator decision 2026-11-11). A forward daemon deploy, plain or
+coordinated, proceeds without one; when a receipt **is** passed it is still
+validated for the exact target SHA, so the tool stays usable for a spot check
+before a risky read change. The read-regression class it watched for is now
+covered live by the per-call store-call lines, which name every slow call within
+the first hour after a release, for all calls rather than three, with rollback
+ungated.
+
+When you choose to run it, it times the candidate's main reads on copies of the
+live database:
 
 ```sh
 python services/chat-stream-v2/tools/read_timing.py \
@@ -172,14 +179,15 @@ NOT_EVALUATED (anything that kept a read from running). Both copies are always
 removed; the copies need free disk of both files plus 20%, and the backup holds a
 read transaction on the live database while it runs.
 
-`deploy.py` refuses a forward deploy, before any service is stopped, when the
-receipt is missing, for another SHA or budget version (version 1 single-sample
+`deploy.py` no longer refuses a forward deploy for a missing receipt. When a
+receipt **is** supplied it is still validated and refuses, before any service is
+stopped, if it is for another SHA or budget version (version 1 single-sample
 receipts included), from a dirty source, not passing, or has an absent, failing,
-unevaluated, repeated or contradictory read. It requires a warm-up and exactly
-three finite non-negative samples with full output per read and per host, and
-recomputes the median itself.
-There is no bypass: rerun the command, or change a budget by editing the spec and
-the command together. Rollback and coordinated recovery never need a receipt.
+unevaluated, repeated or contradictory read; it then requires a warm-up and
+exactly three finite non-negative samples with full output per read and per host,
+and recomputes the median itself. To re-check after a refusal, rerun the command,
+or change a budget by editing the spec and the command together. Rollback and
+coordinated recovery never need a receipt.
 
 ### Coordinated helper and daemon deployment
 

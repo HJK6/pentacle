@@ -82,19 +82,49 @@ class LaneEpisodeSink(Protocol):
         ...
 
 
-def lead_reported_done_conn(conn, lane: dict) -> bool | None:
-    """Only persisted, resolved routing evidence can establish a report fact."""
+def resolved_route_dispatch_map(conn) -> dict[tuple[str, str], set[str]]:
+    """``(stream_id, lane_id) -> {dispatch_id}`` for every resolved route, in two
+    table scans for the whole pass instead of one correlated scan per lane.
+
+    Identical association to ``lead_reported_done_conn``'s per-lane predicate:
+    a resolved route whose ``route_json`` names the lane, or whose dispatch is
+    bound to the lane by a ``lane.admit`` receipt. Verified to produce equal
+    dispatch-id sets for every lane against the per-lane statement (prototype
+    db/scripts/plans2.py, ``current == proto`` for all sampled lanes)."""
+    once: dict[tuple[str, str], set[str]] = {}
+    for row in conn.execute(
+        "SELECT r.stream_id, r.dispatch_id, "
+        "json_extract(COALESCE(NULLIF(r.route_json,''),'{}'),'$.lane_id') AS lane_id "
+        "FROM v2_assistant_composite_routes AS r WHERE r.routing_state='resolved'"):
+        if row["lane_id"] is not None:
+            once.setdefault((row["stream_id"], row["lane_id"]), set()).add(row["dispatch_id"])
+    for row in conn.execute(
+        "SELECT o.stream_id, o.dispatch_id, o.lane_id FROM v2_assistant_composite_operations AS o "
+        "JOIN v2_assistant_composite_routes AS r ON r.stream_id=o.stream_id "
+        "AND r.dispatch_id=o.dispatch_id AND r.routing_state='resolved' "
+        "WHERE o.operation='lane.admit'"):
+        once.setdefault((row["stream_id"], row["lane_id"]), set()).add(row["dispatch_id"])
+    return once
+
+
+def lead_reported_done_conn(conn, lane: dict, route_dispatch_ids: set | None = None) -> bool | None:
+    """Only persisted, resolved routing evidence can establish a report fact.
+
+    ``route_dispatch_ids`` is this lane's resolved-route dispatch set. A caller
+    reconciling many lanes passes it from ``resolved_route_dispatch_map`` so the
+    per-lane scan runs once per pass; omitting it falls back to the single-lane
+    query with the same answer."""
     # Same predicate as store_routing._assistant_route_lane_conn (route_json
-    # names the lane, or a lane.admit receipt binds its dispatch), evaluated in
-    # one query instead of decoding every resolved route of the stream per lane.
-    route_dispatch_ids = {r["dispatch_id"] for r in conn.execute(
-        "SELECT r.dispatch_id FROM v2_assistant_composite_routes AS r "
-        "WHERE r.stream_id=? AND r.routing_state='resolved' AND ("
-        "json_extract(COALESCE(NULLIF(r.route_json,''),'{}'),'$.lane_id')=? "
-        "OR EXISTS (SELECT 1 FROM v2_assistant_composite_operations AS o "
-        "WHERE o.stream_id=r.stream_id AND o.dispatch_id=r.dispatch_id "
-        "AND o.lane_id=? AND o.operation='lane.admit'))",
-        (lane["stream_id"], lane["lane_id"], lane["lane_id"]))}
+    # names the lane, or a lane.admit receipt binds its dispatch).
+    if route_dispatch_ids is None:
+        route_dispatch_ids = {r["dispatch_id"] for r in conn.execute(
+            "SELECT r.dispatch_id FROM v2_assistant_composite_routes AS r "
+            "WHERE r.stream_id=? AND r.routing_state='resolved' AND ("
+            "json_extract(COALESCE(NULLIF(r.route_json,''),'{}'),'$.lane_id')=? "
+            "OR EXISTS (SELECT 1 FROM v2_assistant_composite_operations AS o "
+            "WHERE o.stream_id=r.stream_id AND o.dispatch_id=r.dispatch_id "
+            "AND o.lane_id=? AND o.operation='lane.admit'))",
+            (lane["stream_id"], lane["lane_id"], lane["lane_id"]))}
     if not route_dispatch_ids:
         return None
     prior = lane.get("lead_reported_done")
@@ -125,9 +155,18 @@ class WorkLaneEpisodesStoreMixin:
             try:
                 # Re-read membership, observations, lead and routing in this writer
                 # transaction; never apply a projection captured before set_members.
+                # A done lane can neither open an episode (lane_progress/estimate/
+                # lead_lost are all False once work_state=='done') nor hold one to
+                # clear unless it already has an uncleared episode, so skip the
+                # episode checks for done lanes with none. The lead_reported_done
+                # write and the pending drain below stay unconditional.
+                open_episode_lanes = {r[0] for r in conn.execute(
+                    "SELECT DISTINCT lane_id FROM v2_work_lane_episodes WHERE cleared_at IS NULL")}
                 for lane in work_lane_rows_conn(conn, include_done=True):
                     conn.execute("UPDATE v2_assistant_composite_lanes SET lead_reported_done=? WHERE lane_id=?",
                                  (lane["_lead_reported_done"], lane["lane_id"]))
+                    if lane["work_state"] == "done" and lane["lane_id"] not in open_episode_lanes:
+                        continue
                     facts = lane_progress(lane, now_iso=stamp)
                     for kind, condition in (("completed", facts["completion_pending"]), ("stale", facts["stale"]),
                                             ("estimate_missing", lane_estimate_missing(lane)),

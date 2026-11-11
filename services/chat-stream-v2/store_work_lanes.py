@@ -22,7 +22,8 @@ from _shared.lane_icons import validate_icon
 from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
                               effective_membership_conn, effective_member_ids, enrich_goals_conn)
-from store_work_lane_episodes import ensure_work_lane_episodes_schema, lead_reported_done_conn
+from store_work_lane_episodes import (ensure_work_lane_episodes_schema, lead_reported_done_conn,
+                                       resolved_route_dispatch_map)
 from work_lane_migration import upgrade_events
 from assistant_policy import AssistantPolicy
 from store_routing import _assistant_actor_conn, _record_publication_conn
@@ -590,6 +591,7 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
     parameters = (*states, lane_id) if lane_id is not None else states
     lanes = [dict(r) for r in conn.execute(
         f"SELECT * FROM v2_assistant_composite_lanes WHERE {condition}", parameters)]
+    route_dispatch_map = resolved_route_dispatch_map(conn)
     for lane in lanes:
         lane["_members"] = members_conn(conn, lane, snapshot)
         enrich_goals_conn(conn, lane, snapshot)
@@ -608,7 +610,8 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
         lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
         lane["_lead_row"] = lead
         lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
-        lane["_lead_reported_done"] = lead_reported_done_conn(conn, lane)
+        lane["_lead_reported_done"] = lead_reported_done_conn(
+            conn, lane, route_dispatch_ids=route_dispatch_map.get((lane["stream_id"], lane["lane_id"]), set()))
         lane["_chat_kind"], lane["_chat_available"] = _chat_available(conn, lane)
         last = conn.execute(
             "SELECT update_id,update_kind,publication_event_id,created_at FROM v2_work_lane_events "
