@@ -44,6 +44,7 @@ from retention import (HistoryConnection, prepare_history_schema, history_query,
                        migrate_route_batch_archive)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
+import store_call_diag
 from prockill import canonical_start
 from session_summary import SUMMARY_TAIL_LIMIT, apply_message_summary
 
@@ -1549,6 +1550,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # without limit. Past the cap `submit` fails fast rather than growing.
         self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=max_pending)
         self.progress = StoreProgress()
+        self.call_diag = store_call_diag.StoreCallDiag()
         self._thread: threading.Thread | None = None
         # Serializes the start/stop transition against `submit` so no callable is
         # ever enqueued after the stop sentinel — such a future would never run
@@ -1999,7 +2001,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 item = self._queue.get()
                 if item is None:
                     break
-                fn, fut, loop, queued, timing = item
+                fn, fut, loop, queued, timing, name, quiet = item
                 started = time.monotonic()
                 self.progress.start(started)
                 try:
@@ -2015,6 +2017,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 if timing is not None:
                     loop.call_soon_threadsafe(timing.add, queued, started, finished)
                 loop.call_soon_threadsafe(_set_exception if failed else _set_result, fut, outcome)
+                self.call_diag.record(name, quiet, loop, queued, started, finished)
                 # A stop that found the queue full queued no sentinel; once
                 # closing, exit when the queue drains. Checked under the lock so
                 # a concurrent stop's sentinel is either queued or not needed.
@@ -2044,6 +2047,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         `settle_on_cancel` callers (attachment lock owners) keep awaiting an
         enqueued callable through caller cancellation until it has actually
         run or been drained, then re-raise the cancellation."""
+        # Name the caller's operation before any wrapper replaces it.
+        name, quiet = store_call_diag.admit(fn)
         actor = host_transfer.actor_context.get()
         if actor is not None:
             operation = fn
@@ -2063,7 +2068,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 # Never block the event loop: past the cap fail fast rather than
                 # wait for the worker to drain (QA #8).
                 self.progress.enqueue(self._queue.put_nowait,
-                                      (fn, fut, loop, time.monotonic(), request_timing.get()))
+                                      (fn, fut, loop, time.monotonic(), request_timing.get(), name, quiet))
             except queue.Full as exc:
                 raise RuntimeError("store overloaded: pending write queue is full") from exc
         if settle_on_cancel:
