@@ -2127,14 +2127,13 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
         raise DeployError("coordinated prepare/apply requires intent and receipt; rollback requires receipt only")
     repo = release_checkout.expanduser().resolve()
     try:
-        if coordinated_mode and not rollback:
-            _load_read_timing_receipt(read_timing_receipt, coordinated.validate_intent(coordinated_plan)["target_sha"])
         with coordinated.transaction_lock(repo) as root:
             if coordinated_mode:
                 from deploy.coordinated_runtime import Runtime
                 adapter = Runtime(sys.modules[__name__], service, repo, runner,
                     stream=deployer_stream_id or os.environ.get("AGENT_ORCH_STREAM_ID", ""),
-                    boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir)
+                    boot_wait_seconds=boot_wait_seconds, log_guard_dir=log_guard_dir,
+                    read_timing_receipt=read_timing_receipt)
                 transaction = coordinated.Transaction(adapter, root)
                 if rollback:
                     return transaction.rollback(coordinated_receipt, authorization=recovery_authorization,

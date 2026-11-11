@@ -175,6 +175,18 @@ import json, os, sqlite3, time
 SETTINGS = json.loads({settings!r})
 
 
+class Escaping(sqlite3.Connection):
+    """An ordinary factory whose own __init__ runs SQL on the new connection."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        outside = SETTINGS["outside"]
+        if SETTINGS.get("escape") == "factory_bound":
+            self.execute("ATTACH DATABASE ? AS f", (outside,))
+            self.execute("CREATE TABLE f.escaped(a)")
+        else:
+            self.executescript("ATTACH DATABASE '" + outside + "' AS f; CREATE TABLE f.escaped(a);")
+
+
 class Store:
     def __init__(self, path, *, archive_path=None):
         self.path = path
@@ -195,6 +207,10 @@ class Store:
                 self.conn.execute("CREATE TABLE x.t(a)")
             elif SETTINGS.get("escape") == "attach_literal":
                 self.conn.executescript("ATTACH DATABASE '" + outside + "' AS y; CREATE TABLE y.t(a);")
+            elif SETTINGS.get("escape") in ("factory_script", "factory_bound"):
+                sqlite3.connect(self.path, factory=Escaping)
+            elif SETTINGS.get("escape") == "factory_positional":
+                sqlite3.connect(self.path, 5.0, 0, "DEFERRED", True, Escaping)
         except sqlite3.Error:
             if not SETTINGS.get("swallow"):
                 raise
@@ -230,6 +246,13 @@ class Store:
         return await self.submit(op)
 
     async def list_open_usage_fence_rows(self, host):
+        if host == SETTINGS.get("fence_raises_for"):
+            raise RuntimeError("this host's read failed")
+        if host == SETTINGS.get("fence_slow_for"):
+            def slow(conn):
+                time.sleep(0.15)
+                return conn.execute("SELECT * FROM sessions WHERE host=?", (host,)).fetchall()
+            return await self.submit(slow)
         return await self.submit(lambda conn: conn.execute(
             "SELECT * FROM sessions WHERE host=? AND status='open'", (host,)).fetchall())
 
@@ -246,7 +269,7 @@ def _fake_candidate(root: Path, **settings) -> Path:
     return _commit(root)
 
 
-def _fake_world(directory: Path, *, status="open", events=200) -> Path:
+def _fake_world(directory: Path, *, status="open", events=200, hosts=("host-a",)) -> Path:
     directory.mkdir(exist_ok=True)
     db = directory / "sessions.db"
     with _db(db) as conn:
@@ -254,7 +277,7 @@ def _fake_world(directory: Path, *, status="open", events=200) -> Path:
         conn.execute("CREATE TABLE session_event_tail(event_id INTEGER PRIMARY KEY, stream_id, "
                      "session_created_at, event_json)")
         conn.execute("CREATE TABLE v2_session_generations(host, session_name, generation)")
-        conn.execute("INSERT INTO sessions VALUES('host-a','seat',?,?)", (status, BIRTH))
+        conn.executemany("INSERT INTO sessions VALUES(?,'seat',?,?)", ((host, status, BIRTH) for host in hosts))
         conn.execute("INSERT INTO v2_session_generations VALUES('host-a','seat','gen')")
         conn.executemany("INSERT INTO session_event_tail(stream_id,session_created_at,event_json) VALUES(?,?,?)",
                          (("host-a:seat", BIRTH, json.dumps({"kind": "TELL" if j % 4 == 0 else "TOOL_USE"}))
@@ -281,7 +304,8 @@ def test_fake_world_passes_and_its_receipt_is_admitted(tmp_path):
     read_timing.check_receipt(receipt, receipt["sha"])
 
 
-@pytest.mark.parametrize("escape", ["connect", "uri", "attach_param", "attach_literal"])
+@pytest.mark.parametrize("escape", ["connect", "uri", "attach_param", "attach_literal",
+                                    "factory_script", "factory_bound", "factory_positional"])
 @pytest.mark.parametrize("swallow", [False, True], ids=["raised", "swallowed"])
 def test_outside_database_is_refused_before_open(tmp_path, escape, swallow):
     sentinel = tmp_path / "outside" / "sentinel.db"
@@ -370,3 +394,14 @@ def test_deadline_kills_child_closes_source_removes_copy_and_fails(tmp_path):
     with _db(world, timeout=0) as conn:
         conn.execute("BEGIN EXCLUSIVE")  # no reader still holds the source
         conn.rollback()
+
+
+def test_one_host_failing_keeps_every_other_host_row_and_its_fail(tmp_path):
+    candidate = _fake_candidate(tmp_path / "c", fence_slow_for="host-a", fence_raises_for="host-b")
+    world = _fake_world(tmp_path / "w", hosts=("host-a", "host-b", "host-c"))
+    receipt = read_timing.run(candidate, tmp_path / "r.json", db=world, work_root=tmp_path)
+    fence = _rows(receipt)[FENCE]
+    assert receipt["verdict"] == "FAIL" and fence["verdict"] == "FAIL"
+    assert fence["expected_hosts"] == ["host-a", "host-b", "host-c"]
+    assert [(row["host"], row["verdict"]) for row in fence["hosts"]] == [
+        ("host-a", "FAIL"), ("host-b", "NOT_EVALUATED"), ("host-c", "PASS")]

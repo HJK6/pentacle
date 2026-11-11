@@ -108,6 +108,8 @@ def check_receipt(raw: object, sha: str) -> None:
         raise ValueError("receipt source was not clean")
     if raw.get("passed") is not True or raw.get("verdict") != PASS:
         raise ValueError("receipt is not passing")
+    if raw.get("refusals") != []:
+        raise ValueError("receipt records a refusal")
     reads = raw.get("reads")
     if not isinstance(reads, list):
         raise ValueError("receipt reads must be a list")
@@ -227,29 +229,41 @@ def _install_guard(owned: Path) -> None:
             return False
         return isinstance(value, (str, bytes)) and inside(value, True)
 
+    class Opened(sqlite3.Connection):
+        """Placed directly above sqlite3.Connection in every guarded class, so
+        the authorizer exists the moment the database opens: before any code
+        in a candidate factory's __init__ can run SQL on the connection."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sqlite3.Connection.set_authorizer(self, authorize)
+
+    class Guard:
+        def execute(self, sql, parameters=(), /):
+            ok = bound(sql, parameters)
+            if ok is False:
+                raise sqlite3.DatabaseError("read timing refused an ATTACH outside the owned directory")
+            approved.value = bool(ok)
+            try:
+                return super().execute(sql, parameters)
+            finally:
+                approved.value = False
+
+        def set_authorizer(self, callback):
+            def both(*args):
+                verdict = authorize(*args)
+                return verdict if verdict != sqlite3.SQLITE_OK or callback is None else callback(*args)
+            super().set_authorizer(both)
+
     classes: dict[type, type] = {}
 
     def guarded(factory):
         if factory not in classes:
-            class Guarded(factory):
-                def execute(self, sql, parameters=(), /):
-                    ok = bound(sql, parameters)
-                    if ok is False:
-                        raise sqlite3.DatabaseError("read timing refused an ATTACH outside the owned directory")
-                    approved.value = bool(ok)
-                    try:
-                        return super().execute(sql, parameters)
-                    finally:
-                        approved.value = False
-
-                def set_authorizer(self, callback):
-                    def both(*args):
-                        verdict = authorize(*args)
-                        return verdict if verdict != sqlite3.SQLITE_OK or callback is None else callback(*args)
-                    super().set_authorizer(both)
-
-            Guarded.__name__ = Guarded.__qualname__ = factory.__name__
-            classes[factory] = Guarded
+            if not (isinstance(factory, type) and issubclass(factory, sqlite3.Connection)):
+                _emit(kind="refused", reason=f"unsupported SQLite connection factory: {factory!r}")
+                raise sqlite3.OperationalError("read timing refused an unsupported connection factory")
+            bases = (Guard, Opened) if factory is sqlite3.Connection else (Guard, factory, Opened)
+            classes[factory] = type(factory.__name__, bases, {"__qualname__": factory.__qualname__,
+                                                              "__module__": factory.__module__})
         return classes[factory]
 
     def connect(database, *args, **kwargs):
@@ -260,9 +274,7 @@ def _install_guard(owned: Path) -> None:
             args = (*args[:4], guarded(args[4]), *args[5:])
         else:
             kwargs["factory"] = guarded(kwargs.get("factory", sqlite3.Connection))
-        conn = real_connect(database, *args, **kwargs)
-        conn.set_authorizer(None)
-        return conn
+        return real_connect(database, *args, **kwargs)
 
     sqlite3.connect = connect
     sqlite3.dbapi2.connect = connect
@@ -454,9 +466,12 @@ async def _reads(store, cls) -> None:
             return {"name": FENCE, "verdict": NOT_EVALUATED, "expected_hosts": [], "hosts": [],
                     "detail": "no open session to select a host"}
         hosts = []
-        for host in expected:
-            row = await _time(store, FENCE, lambda: store.list_open_usage_fence_rows(host))
-            del row["name"], row["budget_s"]
+        for host in expected:  # independent: one host's failure never drops another's row
+            try:
+                row = await _time(store, FENCE, lambda: store.list_open_usage_fence_rows(host))
+                del row["name"], row["budget_s"]
+            except Exception as exc:
+                row = {"verdict": NOT_EVALUATED, "detail": f"{type(exc).__name__}: {exc}"[:500]}
             hosts.append({"host": host, **row})
         verdicts = {row["verdict"] for row in hosts}
         verdict = FAIL if FAIL in verdicts else NOT_EVALUATED if NOT_EVALUATED in verdicts else PASS

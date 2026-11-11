@@ -197,6 +197,8 @@ def _summary(name, **changes):
     lambda p: p["source"].update(clean_after=False),
     lambda p: p.update(passed=False),
     lambda p: p.update(verdict="FAIL"),
+    lambda p: p.update(refusals=["database outside the owned directory: /outside/sessions_archive.db"]),
+    lambda p: p.pop("refusals"),
     _drop_read, _fail_read, _unevaluated_read, _duplicate_read, _host_without_row, _host_failed,
     _sample(INV, 0, seconds=float("nan")),
     _sample(INV, 1, seconds=float("inf")),
@@ -225,7 +227,8 @@ def _summary(name, **changes):
     _sample(PAGE, 1, events=12), _sample(PAGE, "warmup", events=0), _sample(PAGE, 2, user_or_tell=3),
     _sample(INV, 0, rows=0), _sample(INV, 1, statements=0), _sample(INV, "warmup", statements=0),
 ], ids=["wrong_schema", "single_sample_v1", "bool_budget_version", "wrong_sha", "source_sha_after",
-        "dirty_before", "dirty_after", "passed_false", "verdict_fail", "read_absent", "read_failed",
+        "dirty_before", "dirty_after", "passed_false", "verdict_fail", "recorded_refusal",
+        "refusals_absent", "read_absent", "read_failed",
         "read_not_evaluated", "duplicate_read", "host_without_row", "host_failed", "nan_sample",
         "inf_sample", "negative_sample", "string_sample", "bool_sample", "nan_warm_up",
         "summary_not_median", "nan_summary", "median_over_budget", "history_median_over_budget",
@@ -260,47 +263,72 @@ def test_deploy_parser_has_receipt_argument_and_no_bypass():
     assert not {option for option in options if "timing" in option} - {"--read-timing-receipt"}
 
 
-@pytest.mark.parametrize("prepare_only", [False, True], ids=["apply", "prepare"])
-def test_coordinated_forward_needs_receipt_and_rollback_does_not(tmp_path, monkeypatch, prepare_only):
-    from deploy import coordinated, coordinated_runtime
+def _runtime(receipt):
+    """A coordinated Runtime holding only the deployer and the receipt path."""
+    from deploy.coordinated_runtime import Runtime
     import deploy.deploy as module
-    calls = []
+    runtime = Runtime.__new__(Runtime)
+    runtime.d, runtime.read_timing_receipt = module, receipt
+    return runtime
 
-    class Transaction:
-        def __init__(self, _adapter, _root):
-            pass
 
-        def apply(self, _plan, _receipt):
-            calls.append("apply")
-            return {}
-
-        def prepare(self, _plan, _receipt):
-            calls.append("prepare")
-            return {}
-
-        def rollback(self, _receipt, **_kwargs):
-            calls.append("rollback")
-            return {}
-
-    monkeypatch.setattr(coordinated, "Transaction", Transaction)
-    monkeypatch.setattr(coordinated, "validate_intent", lambda _path: {"target_sha": SHA})
-    monkeypatch.setattr(coordinated_runtime, "Runtime", lambda *_a, **_k: None)
-    service = module.SERVICES["chat-streamd-v2"]
-    (tmp_path / "release").mkdir()
-    common = {"release_checkout": tmp_path / "release", "ref": "origin/main",
-              "coordinated_receipt": tmp_path / "receipt.json", "runner": module._run}
-    forward = {**common, "coordinated_plan": tmp_path / "intent.json", "prepare_only": prepare_only}
+def test_coordinated_prepare_binds_receipt_to_the_intent_it_seals(tmp_path):
     other = tmp_path / "other.json"
     other.write_text(json.dumps(read_timing_receipt("d" * 40)))
     for receipt, message in ((None, "requires --read-timing-receipt"), (other, "sha does not match deploy sha")):
         with pytest.raises(DeployError, match=message):
-            module.deploy(service, **forward, read_timing_receipt=receipt)
-    assert calls == []
+            _runtime(receipt).prepare({"target_sha": SHA}, tmp_path / "unused")
+
+
+def test_coordinated_apply_checks_the_sealed_target_before_any_stop(tmp_path, monkeypatch):
+    from deploy.coordinated_runtime import Runtime
+    reached = []
+    monkeypatch.setattr(Runtime, "validate_common", lambda self, receipt, forward: reached.append(forward)
+                        or (_ for _ in ()).throw(RuntimeError("past the read-timing check")))
+    sealed = {"intent": {"target_sha": SHA, "prior_sha": "e" * 40}}
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps(read_timing_receipt("d" * 40)))
+    for receipt in (None, other):
+        with pytest.raises(DeployError):
+            _runtime(receipt).revalidate(sealed, forward=True)
+    assert reached == []
     good = tmp_path / "good.json"
     good.write_text(json.dumps(read_timing_receipt()))
-    module.deploy(service, **forward, read_timing_receipt=good)
+    for receipt, forward in ((good, True), (None, False)):  # rollback revalidation is never gated
+        with pytest.raises(RuntimeError, match="past the read-timing check"):
+            _runtime(receipt).revalidate(sealed, forward=forward)
+    assert reached == [True, False]
+
+
+def test_coordinated_deploy_hands_the_receipt_to_the_transaction_runtime(tmp_path, monkeypatch):
+    from deploy import coordinated, coordinated_runtime
+    import deploy.deploy as module
+    seen = []
+
+    class Transaction:
+        def __init__(self, adapter, _root):
+            seen.append(adapter)
+
+        def apply(self, _plan, _receipt):
+            return {}
+
+        prepare = apply
+
+        def rollback(self, _receipt, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(coordinated, "Transaction", Transaction)
+    monkeypatch.setattr(coordinated_runtime, "Runtime", lambda *_a, **kwargs: kwargs.get("read_timing_receipt"))
+    service = module.SERVICES["chat-streamd-v2"]
+    (tmp_path / "release").mkdir()
+    common = {"release_checkout": tmp_path / "release", "ref": "origin/main",
+              "coordinated_receipt": tmp_path / "receipt.json", "runner": module._run}
+    timing = tmp_path / "timing.json"
+    module.deploy(service, **common, coordinated_plan=tmp_path / "intent.json", read_timing_receipt=timing)
+    module.deploy(service, **common, coordinated_plan=tmp_path / "intent.json", prepare_only=True,
+                  read_timing_receipt=timing)
     module.deploy(service, **common, rollback=True)
-    assert calls == ["prepare" if prepare_only else "apply", "rollback"]
+    assert seen == [timing, timing, None]
 
 
 def test_one_slow_sample_under_a_passing_median_is_admitted(tmp_path):
