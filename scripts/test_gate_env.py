@@ -1141,21 +1141,21 @@ class MigratedTargets(Tmp):
         standard = profile["targets"]["v2-merge"]
         for key in ("kind", "gate", "needs", "capabilities", "preflight_script"):
             self.assertEqual(target[key], standard[key])
-        self.assertEqual(target["timeout_s"], 2700)
-        self.assertEqual(target["max_timeout_s"], 2700)
+        self.assertEqual(target["timeout_s"], 3300)
+        self.assertEqual(target["max_timeout_s"], 3300)
         self.assertEqual(profile["targets"]["v2-unit"]["timeout_s"], 900)
         self.assertEqual(standard["timeout_s"], 1800)
         self.assertEqual(profile["targets"]["v2-merge-ci"]["tier_timeouts"], {"unit": 4320, "smoke": 900})
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S": "1", "V2_SMOKE_TIMEOUT_S": "1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"], env["V2_SMOKE_TIMEOUT_S"]), ("1800", "900"))
+        self.assertEqual((env["V2_UNIT_TIMEOUT_S"], env["V2_SMOKE_TIMEOUT_S"]), ("2400", "900"))
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
         self.assertIn("merge", cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 2820)
-        self.assertEqual(result["wall_s"], 2850)
+        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 3420)
+        self.assertEqual(result["wall_s"], 3450)
 
     def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
         cfg = ge.load_config()
