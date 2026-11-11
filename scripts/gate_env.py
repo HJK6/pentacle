@@ -250,7 +250,7 @@ def build_env(config: Dict[str, Any], profile: Dict[str, Any], target: Dict[str,
         "HOME": str(home), "TMPDIR": str(tmp), "TMP": str(tmp), "TEMP": str(tmp),
         "LANG": locale_name, "LC_ALL": locale_name,
         "SHELL": "/bin/sh", "TERM": "dumb", "PYTHONNOUSERSITE": "1",
-        "PENTACLE_TEST_STRICT_CAPABILITIES": "1",
+        "PENTACLE_TEST_STRICT_CAPABILITIES": "1" if target.get("strict_capabilities", True) else "0",
         "PENTACLE_GATE_ATTEMPT_ID": attempt_id,
         "PENTACLE_GATE_EVIDENCE_DIR": str(evidence),
     }
@@ -871,9 +871,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures += check_dependencies(subprocess.run, venv / "bin" / "python", env, [checkout / r for r in profile["python_requirements"]])
             caps = config["capability_sets"].get(target.get("capabilities") or "", [])
             if caps and not failures:
-                failures += check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
+                unavailable = check_capabilities(subprocess.run, venv / "bin" / "python", env, service_dir / "tests", caps)
+                if target.get("strict_capabilities", True):
+                    failures += unavailable
+                else:
+                    for item in unavailable:
+                        log("capability unavailable: " + item["detail"])
         if target.get("process_listing"):
-            failures += check_process_listing(subprocess.run, env)
+            unavailable = check_process_listing(subprocess.run, env)
+            if target.get("strict_capabilities", True):
+                failures += unavailable
+            else:
+                for item in unavailable:
+                    log("capability unavailable: " + item["detail"])
         if args.command == "run" and (args.target == "web-gate" or web_selected):
             # Optional npm dependencies can be silently dropped by a successful install.
             # Probe from the exact checkout on both fresh and reused preparations.

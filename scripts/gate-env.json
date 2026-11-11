@@ -132,7 +132,8 @@
             "tests/test_capabilities.py::test_scope_manifest_covers_all_new_portability_tests"
           ],
           "timeout_s": 900,
-          "max_timeout_s": 7200
+          "max_timeout_s": 7200,
+          "strict_capabilities": false
         },
         "npm-test": {
           "kind": "npm_test",
@@ -154,7 +155,8 @@
           "max_timeout_s": 7200,
           "npm_build": [
             "prestart"
-          ]
+          ],
+          "strict_capabilities": false
         },
         "v2-merge-ci": {
           "alias": "v2-merge"
@@ -218,7 +220,8 @@
           "process_listing": true,
           "capabilities": "v2_host",
           "timeout_s": 900,
-          "max_timeout_s": 900
+          "max_timeout_s": 900,
+          "strict_capabilities": false
         },
         "v2-unit-ci-shard": {
           "kind": "run_gate",

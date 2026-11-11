@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+
+import pytest
 import subprocess
 import sys
 import tempfile
@@ -94,3 +97,20 @@ def test_gate_env_deadline_is_accepted_by_the_real_runner_envelope(tmp_path) -> 
             deadline = {"deadline_s": deadline_s, "reserve_s": float(config["deadline"]["reserve_s"]), "checks": []}
             assert run_gate._deadline_check(deadline, time.monotonic() - startup_s, "deadline", tiers, usage_pending=False) is None
         assert results["wall_s"] > deadline_s
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin libproc identity")
+def test_owner_identity_without_ps_preserves_legacy_unknown(monkeypatch):
+    from tools import gate_owner_manifest as owner
+
+    def denied(*args, **kwargs):
+        raise PermissionError("ps unavailable")
+
+    monkeypatch.setattr(owner, "_REAL_POPEN", denied)
+    identity = owner.process_start_identity(os.getpid())
+    assert identity and identity.startswith("libproc:")
+    assert owner._current({"owner_pid": os.getpid(), "owner_start_identity": identity})
+    # A legacy ps-format identity cannot be compared to a libproc identity.
+    assert not owner._stale({"owner_pid": os.getpid(), "owner_start_identity": "legacy ps time"})
+    with pytest.raises(owner.ManifestError, match="unreadable or recycled"):
+        owner._matching_leader(os.getpgrp(), os.getpid(), "legacy ps time")
