@@ -39,9 +39,14 @@ def report(status, report_id):
             "summary": "checkpoint", "findings": [], "next_action": "continue"}
 
 
+NOT_PLAIN = LABELLED.replace("**Status** — Cut.", "**Status** — Cut; glue next.")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["done", "progress"])
-async def test_owner_report_with_malformed_source_is_durable_with_warning(memory, status):
+@pytest.mark.parametrize("source", [PROSE, NOT_PLAIN])
+async def test_owner_report_with_malformed_source_is_durable_with_warning(memory, status, source):
+    (memory / "summary.md").write_text(source)
     store, ledger = await ledger_with({"role": "lead", "assigned_spec_id": "spec_demo__bridge"})
     try:
         reply = await ledger.report(report(status, "r-1"))
@@ -72,6 +77,10 @@ async def test_new_readiness_requires_current_checkpoint_and_verified_qa_then_re
         with pytest.raises(VerbError) as exc:
             await ledger.report(ready)
         assert exc.value.code == "work_checkpoint_invalid" and await store.get_report("ready-checkpoint") is None
+        summary.write_text(NOT_PLAIN)
+        with pytest.raises(VerbError) as exc:
+            await ledger.report(ready)
+        assert [d["code"] for d in exc.value.extra["work_checkpoint"]["deficiencies"]] == ["status_not_plain"]
         summary.write_text(LABELLED)
         # Change only the shared policy: the real report gate and actual detail
         # projection must follow the same definition, including a future field.

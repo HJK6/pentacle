@@ -103,7 +103,8 @@ def test_inventory_omits_detail_arrays_but_show_keeps_all_members():
     assert inventory["icon"] == "phone" and len(inventory["members"]) == 8 and len(shown["members"]) == 27
     for item in inventory["members"]:
         assert "criteria" not in item and "transitions" not in item
-        assert item["status_line"] == "Tests pass." and item["next_line"] == "Review the result."
+        assert item["status_line"] == "Tests pass. Next sentence." and item["next_line"] == "Review the result."
+        assert "blocked_line" not in item
         assert item["worked"] is None and item["lead_seat"] is None
     assert all(item["criteria"] == member()["criteria"] and item["transitions"] == member()["transitions"]
                for item in shown["members"])
@@ -146,7 +147,7 @@ def test_real_index_show_and_material_journal(tmp_path, monkeypatch):
         item = shown["members"][0]
         assert item["criteria"] == [{"title": "First check", "disposition": "open"}]
         assert item["transitions"] == [{"status": "backlog", "at": "2026-01-01"}, {"status": "in_progress", "at": "2026-01-03"}]
-        assert item["status_line"] == "Tests pass."
+        assert item["status_line"] == "Tests pass. Review pending"
         inventory = await server.work_lanes.current()
         assert "criteria" not in inventory["lanes"][0]["members"][0]
         assert "transitions" not in inventory["lanes"][0]["members"][0]
@@ -221,8 +222,8 @@ def _budget_frame(count):
             stream_id = f"host-a:lead{lane_index}-{i}"
             members.append(member(spec_id=identity, title="Z" * measured["p95_member_title_chars"],
                                   terminal=None, estimate=None, estimate_exempt=False,
-                                  status_text="Z" * 159 + ". " + "Y" * 119,
-                                  next_action_text="Y" * 159 + ". " + "Z" * 119,
+                                  status_text="Z" * 159 + ".",
+                                  next_action_text="Y" * 159 + ".",
                                   source_changed_at="2026-01-01T00:00:00Z", obs_rev=1,
                                   observation={"quality": "fresh", "observed_at": "2026-01-01T00:00:00Z", "error": None}))
             sessions[stream_id] = {

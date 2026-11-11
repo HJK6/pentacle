@@ -41,7 +41,7 @@ def test_reproduced_display_gap_names_each_exact_fix():
     spec = SPEC.format(estimate="- remaining_work_h: 2–5 (median 3) as_of 2026-10-15, provisional")
     facts, found = checkpoint_deficiencies(spec, PROSE_SUMMARY, "blocked")
     assert (facts["ac_checked"], facts["ac_total"]) == (1, 2)
-    assert [d["code"] for d in found] == ["progress_missing", "status_missing", "next_action_missing", "blockers_missing", "estimate_invalid"]
+    assert [d["code"] for d in found] == ["status_missing", "next_action_missing", "blockers_missing", "estimate_invalid"]
     by_code = {d["code"]: d["fix"] for d in found}
     assert "**Status**" in by_code["status_missing"]
     assert "**Next action**" in by_code["next_action_missing"]

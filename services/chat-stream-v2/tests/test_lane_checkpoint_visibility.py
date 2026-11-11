@@ -30,11 +30,11 @@ def test_checkpoint_age_is_source_change_not_scan_history_or_policy(monkeypatch)
     record = advance(record, candidate(source_hash="history-only"), 2000)
     assert record["member"]["checkpoint_changed_at"] is None
     assert record["member"]["checkpoint_first_observed_at"] == first
-    record = advance(record, candidate(SUMMARY.replace("Reproduced F12.", "Fixed F12; 12 tests pass."), "changed"), 3000)
+    record = advance(record, candidate(SUMMARY.replace("Awaiting source review.", "Fixed the source review gap."), "changed"), 3000)
     changed = record["member"]["checkpoint_changed_at"]
     assert changed == "1970-01-01T00:50:00.000Z"
     monkeypatch.setattr(policy, "FIELDS", tuple(replace(f, description=f.description + " Updated guidance.") for f in policy.FIELDS))
-    record = advance(record, candidate(SUMMARY.replace("Reproduced F12.", "Fixed F12; 12 tests pass."), "changed"), 4000)
+    record = advance(record, candidate(SUMMARY.replace("Awaiting source review.", "Fixed the source review gap."), "changed"), 4000)
     assert record["member"]["checkpoint_changed_at"] == changed
     record = advance(record, {"quality": "stale", "error": "root unavailable"}, 5000)
     assert record["member"]["checkpoint_state"] == "unverifiable"
@@ -43,7 +43,7 @@ def test_checkpoint_age_is_source_change_not_scan_history_or_policy(monkeypatch)
         record = advance(record, {"quality": "missing", "error": "summary unavailable"}, now)
     assert record["member"]["checkpoint_first_observed_at"] == first
     record = json.loads(json.dumps(record))
-    record = advance(record, candidate(SUMMARY.replace("Reproduced F12.", "Fixed F12; 12 tests pass."), "changed"), 8000)
+    record = advance(record, candidate(SUMMARY.replace("Awaiting source review.", "Fixed the source review gap."), "changed"), 8000)
     assert record["member"]["checkpoint_changed_at"] == changed
     assert record["member"]["checkpoint_first_observed_at"] == first
 
@@ -107,7 +107,8 @@ def test_actual_populated_detail_serializer_stays_bounded():
     shown = {"lane": lane, "events": [], "updates": [], "_projection_row": lane, "_work_index": {"available": True}}
     response = page_lane_detail(shown, detail)
     assert len(json.dumps(response).encode()) <= 4194304
-    assert json.dumps(response).count('"progress_text"') == 32
+    assert json.dumps(response).count('"blockers_text": ') == 32
+    assert json.dumps(response).count('"blocked_line"') == 32 and '"progress_text"' not in json.dumps(response)
     assert json.dumps(response).count('"checkpoint_revision"') == 32
     assert json.dumps(response).count('"goal_text"') == 32
     assert all("checkpoint" not in member for member in response["members"])

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from _shared.specs_parser import parse_work_facts
-from _shared.summary_prose import CONTRACT_PATH, summary_line
+from _shared.summary_prose import CONTRACT_PATH, field_line, violation
 from _shared.work_observations import MATERIAL_FIELDS, advance_observation
 
 
@@ -14,19 +14,35 @@ def spec(body="", status="in_progress", created="2026-01-01"):
     return f"---\nid: spec_demo__detail\nstatus: {status}\ncreated_at: '{created}'\n---\n{body}"
 
 
-CASES = json.loads(CONTRACT_PATH.read_text())["cases"]
+CONTRACT = json.loads(CONTRACT_PATH.read_text())
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
-def test_shared_prose_contract(case):
-    assert summary_line(case["label"]) == case["daemon_line"]
+@pytest.mark.parametrize("case", CONTRACT["cases"], ids=lambda case: case["name"])
+def test_shared_field_contract(case):
+    assert violation(case["field"], case["value"]) == case["code"]
+    assert field_line(case["field"], case["value"]) == (None if case["code"] else case["value"])
 
 
-def test_parser_keeps_legacy_text_and_derives_clean_lines():
+@pytest.mark.parametrize("case", CONTRACT["summary_cases"], ids=lambda case: case["name"])
+def test_shared_summary_label_contract(case):
+    facts = parse_work_facts(spec(status=case["status"]), case["summary"], case["status"])
+    assert [d["code"] for d in facts["checkpoint_deficiencies"]] == case["codes"]
+    lines = {"status": facts["status_line"], "next_action": facts["next_line"], "blockers": facts["blocked_line"]}
+    assert lines == case["lines"]
+
+
+def test_every_field_has_passing_and_failing_cases():
+    for field in CONTRACT["fields"]:
+        codes = {case["code"] for case in CONTRACT["cases"] if case["field"] == field}
+        assert None in codes and codes - {None}, field
+    assert not {"terminal", "abbreviations", "limit"} & (set(CONTRACT) | set(CONTRACT["patterns"]))
+
+
+def test_parser_keeps_legacy_text_and_derives_whole_lines():
     result = parse_work_facts(spec(), "**Status** — Tests pass. Review pending\n**Next action** — Review scripts/check.py now.", "in_progress")
     assert result["status_text"] == "Tests pass. Review pending"
     assert result["next_action_text"] == "Review scripts/check.py now."
-    assert result["status_line"] == "Tests pass."
+    assert result["status_line"] == "Tests pass. Review pending"
     assert result["next_line"] is None
 
 

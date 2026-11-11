@@ -1,190 +1,626 @@
 {
-  "limit": 160,
-  "abbreviations": [
-    "e.g.",
-    "i.e.",
-    "vs.",
-    "etc."
-  ],
   "patterns": {
-    "label": "^\\*\\*(Status|Next action)\\*\\*\\s*[—–-]\\s*(.*)$",
+    "label": "^\\*\\*(Status|Next action|Blockers)\\*\\*[ \\t]*[—–-][ \\t]*(.*)$",
     "fence": "^\\s*(`{3,}|~{3,})",
-    "terminal": "[.!?](?=\\s|$)",
     "semicolon": ";",
     "hex": "(?i)(?=[0-9a-f]*[a-f])[0-9a-f]{8,}",
     "seat": "\\w+:v2-[0-9a-fA-F]+",
     "work_id": "(?:spec_|work_)\\w+",
     "path": "(^|\\s)[\\w./-]*/[\\w.-]+\\.[a-z]{1,5}\\b",
-    "joined_token": "[A-Za-z]{3,}[0-9]{2,}[0-9A-Za-z]*"
+    "joined_token": "[A-Za-z]{3,}[0-9]{2,}[0-9A-Za-z]*",
+    "stage_lead": "(?i)^(?:backlog|analysis|ready[ _]for[ _]dev(?:elopment)?|in[ _]progress|needs[ _]qa|blocked|completed|deprecated|paused|parked|active|done)\\s*(?:$|[0-9;:,.—–-])"
+  },
+  "plain": [
+    "semicolon",
+    "hex",
+    "seat",
+    "work_id",
+    "path",
+    "joined_token"
+  ],
+  "placeholders": [
+    "todo",
+    "tbd",
+    "placeholder"
+  ],
+  "fields": {
+    "goal_title": {
+      "source": "lane-scoped epic title",
+      "limit": 40,
+      "rules": [
+        "plain"
+      ]
+    },
+    "goal_summary": {
+      "source": "lane-scoped epic summary",
+      "limit": 160,
+      "rules": [
+        "plain"
+      ]
+    },
+    "spec_title": {
+      "source": "live work item spec.md title",
+      "limit": 60,
+      "rules": [
+        "plain"
+      ]
+    },
+    "spec_summary": {
+      "source": "live work item spec.md summary",
+      "limit": 200,
+      "rules": [
+        "plain"
+      ]
+    },
+    "status": {
+      "source": "summary.md Status label",
+      "label": "Status",
+      "limit": 160,
+      "rules": [
+        "placeholder",
+        "stage_lead",
+        "plain"
+      ],
+      "required": "always"
+    },
+    "next_action": {
+      "source": "summary.md Next action label",
+      "label": "Next action",
+      "limit": 160,
+      "rules": [
+        "placeholder",
+        "plain"
+      ],
+      "required": "nonterminal"
+    },
+    "blockers": {
+      "source": "summary.md Blockers label",
+      "label": "Blockers",
+      "limit": 160,
+      "rules": [
+        "placeholder",
+        "plain"
+      ],
+      "required": "blocked"
+    }
   },
   "cases": [
     {
       "name": "template_status",
-      "label": "**Status** — Backlog, requirements not yet gathered.",
-      "lint_ok": true,
-      "daemon_line": "Backlog, requirements not yet gathered."
+      "field": "status",
+      "value": "Requirements are not gathered yet.",
+      "code": null
     },
     {
       "name": "template_next_action",
-      "label": "**Status** — Gather requirements with the user and fill the spec.",
-      "lint_ok": true,
-      "daemon_line": "Gather requirements with the user and fill the spec."
-    },
-    {
-      "name": "old_template",
-      "label": "**Status** — backlog; requirements not yet gathered.",
-      "lint_ok": false,
-      "daemon_line": null
+      "field": "next_action",
+      "value": "Gather requirements with the user and fill the spec.",
+      "code": null
     },
     {
       "name": "multiple_sentences",
-      "label": "**Status** — Tests pass. Review the result.",
-      "lint_ok": false,
-      "daemon_line": "Tests pass."
-    },
-    {
-      "name": "abbreviation",
-      "label": "**Status** — Review examples, e.g. the short label.",
-      "lint_ok": true,
-      "daemon_line": "Review examples, e.g. the short label."
-    },
-    {
-      "name": "other_abbreviations",
-      "label": "**Status** — Compare checks, i.e. local vs. remote, etc. before release.",
-      "lint_ok": true,
-      "daemon_line": "Compare checks, i.e. local vs. remote, etc. before release."
-    },
-    {
-      "name": "decimal",
-      "label": "**Status** — Review takes 1.5 h.",
-      "lint_ok": true,
-      "daemon_line": "Review takes 1.5 h."
-    },
-    {
-      "name": "version",
-      "label": "**Status** — Review v2.1 before release.",
-      "lint_ok": true,
-      "daemon_line": "Review v2.1 before release."
-    },
-    {
-      "name": "bare_filename",
-      "label": "**Status** — Review README.md before release.",
-      "lint_ok": true,
-      "daemon_line": "Review README.md before release."
-    },
-    {
-      "name": "date",
-      "label": "**Status** — Review starts 20261108.",
-      "lint_ok": true,
-      "daemon_line": "Review starts 20261108."
-    },
-    {
-      "name": "sha",
-      "label": "**Status** — Review abcdef0123456789abcdef0123456789abcdef01.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "seat",
-      "label": "**Status** — Review host:v2-ab12.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "spec_id",
-      "label": "**Status** — Review spec_example.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "work_id",
-      "label": "**Status** — Review work_example.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "path",
-      "label": "**Status** — Review scripts/check.py now.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "joined_token",
-      "label": "**Status** — Review ticket12 now.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "length_160",
-      "label": "**Status** — ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
-      "lint_ok": true,
-      "daemon_line": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ."
-    },
-    {
-      "name": "length_161",
-      "label": "**Status** — ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "semicolon",
-      "label": "**Status** — Tests pass; review the result.",
-      "lint_ok": false,
-      "daemon_line": null
-    },
-    {
-      "name": "hyphen",
-      "label": "**Status** - Review the result.",
-      "lint_ok": true,
-      "daemon_line": "Review the result."
-    },
-    {
-      "name": "en_dash",
-      "label": "**Status** – Review the result.",
-      "lint_ok": true,
-      "daemon_line": "Review the result."
-    },
-    {
-      "name": "missing",
-      "label": null,
-      "lint_ok": false,
-      "daemon_line": null
+      "field": "status",
+      "value": "Tests pass. Review the result.",
+      "code": null
     },
     {
       "name": "no_terminal",
-      "label": "**Status** — Review the result",
-      "lint_ok": false,
-      "daemon_line": null
+      "field": "status",
+      "value": "Review the result",
+      "code": null
     },
     {
-      "name": "empty",
-      "label": "**Status** — ",
-      "lint_ok": false,
-      "daemon_line": null
+      "name": "abbreviation",
+      "field": "status",
+      "value": "Review examples, e.g. the short label.",
+      "code": null
     },
     {
-      "name": "trailing_fragment",
-      "label": "**Status** — Tests pass. Review pending",
-      "lint_ok": false,
-      "daemon_line": "Tests pass."
+      "name": "decimal",
+      "field": "status",
+      "value": "Review takes 1.5 h.",
+      "code": null
+    },
+    {
+      "name": "version",
+      "field": "status",
+      "value": "Review v2.1 before release.",
+      "code": null
+    },
+    {
+      "name": "bare_filename",
+      "field": "status",
+      "value": "Review README.md before release.",
+      "code": null
+    },
+    {
+      "name": "date",
+      "field": "status",
+      "value": "Review starts 20261108.",
+      "code": null
+    },
+    {
+      "name": "product_name",
+      "field": "status",
+      "value": "TODOist v2.3 passes 12 fixtures.",
+      "code": null
+    },
+    {
+      "name": "blocked_on",
+      "field": "status",
+      "value": "Blocked on the next failure.",
+      "code": null
     },
     {
       "name": "question",
-      "label": "**Status** — Can review start?",
-      "lint_ok": true,
-      "daemon_line": "Can review start?"
+      "field": "status",
+      "value": "Can review start?",
+      "code": null
     },
     {
-      "name": "exclamation",
-      "label": "**Status** — Review is ready!",
-      "lint_ok": true,
-      "daemon_line": "Review is ready!"
+      "name": "length_160",
+      "field": "status",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
+      "code": null
     },
     {
-      "name": "abbreviation_only",
-      "label": "**Status** — e.g.",
-      "lint_ok": false,
-      "daemon_line": null
+      "name": "length_161",
+      "field": "status",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.",
+      "code": "too_long"
+    },
+    {
+      "name": "empty",
+      "field": "status",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "old_template",
+      "field": "status",
+      "value": "backlog; requirements not yet gathered.",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_dash",
+      "field": "status",
+      "value": "blocked — handed off",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_underscore_date",
+      "field": "status",
+      "value": "in_progress 2026-11-09",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_done",
+      "field": "status",
+      "value": "Done.",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_active",
+      "field": "status",
+      "value": "Active",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_ready_for_dev",
+      "field": "status",
+      "value": "Ready for dev, waiting on a lead.",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_needs_qa",
+      "field": "status",
+      "value": "needs_qa: final review.",
+      "code": "stage_lead"
+    },
+    {
+      "name": "stage_parked_hyphen",
+      "field": "status",
+      "value": "Parked - waiting.",
+      "code": "stage_lead"
+    },
+    {
+      "name": "placeholder_status",
+      "field": "status",
+      "value": "TODO",
+      "code": "placeholder"
+    },
+    {
+      "name": "placeholder_brackets",
+      "field": "status",
+      "value": "<placeholder>",
+      "code": "placeholder"
+    },
+    {
+      "name": "semicolon",
+      "field": "status",
+      "value": "Tests pass; review the result.",
+      "code": "not_plain"
+    },
+    {
+      "name": "sha",
+      "field": "status",
+      "value": "Review abcdef0123456789abcdef0123456789abcdef01.",
+      "code": "not_plain"
+    },
+    {
+      "name": "seat",
+      "field": "status",
+      "value": "Review host:v2-ab12.",
+      "code": "not_plain"
+    },
+    {
+      "name": "spec_id",
+      "field": "status",
+      "value": "Review spec_example.",
+      "code": "not_plain"
+    },
+    {
+      "name": "work_id",
+      "field": "status",
+      "value": "Review work_example.",
+      "code": "not_plain"
+    },
+    {
+      "name": "path",
+      "field": "status",
+      "value": "Review scripts/check.py now.",
+      "code": "not_plain"
+    },
+    {
+      "name": "joined_token",
+      "field": "status",
+      "value": "Review ticket12 now.",
+      "code": "not_plain"
+    },
+    {
+      "name": "next_plain",
+      "field": "next_action",
+      "value": "Run the final gate, then ask for the relay.",
+      "code": null
+    },
+    {
+      "name": "next_stage_word_allowed",
+      "field": "next_action",
+      "value": "Done when the gate passes.",
+      "code": null
+    },
+    {
+      "name": "next_placeholder",
+      "field": "next_action",
+      "value": "tbd",
+      "code": "placeholder"
+    },
+    {
+      "name": "next_path",
+      "field": "next_action",
+      "value": "Review scripts/check.py now.",
+      "code": "not_plain"
+    },
+    {
+      "name": "next_length_161",
+      "field": "next_action",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "next_empty",
+      "field": "next_action",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "blockers_plain",
+      "field": "blockers",
+      "value": "Waiting for the operator to approve the window.",
+      "code": null
+    },
+    {
+      "name": "blockers_placeholder",
+      "field": "blockers",
+      "value": "Placeholder",
+      "code": "placeholder"
+    },
+    {
+      "name": "blockers_seat",
+      "field": "blockers",
+      "value": "Waiting on host:v2-ab12.",
+      "code": "not_plain"
+    },
+    {
+      "name": "blockers_length_161",
+      "field": "blockers",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "blockers_empty",
+      "field": "blockers",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "goal_title_plain",
+      "field": "goal_title",
+      "value": "Readable lanes",
+      "code": null
+    },
+    {
+      "name": "goal_title_length_40",
+      "field": "goal_title",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": null
+    },
+    {
+      "name": "goal_title_length_41",
+      "field": "goal_title",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "goal_title_joined_token",
+      "field": "goal_title",
+      "value": "Release ticket12",
+      "code": "not_plain"
+    },
+    {
+      "name": "goal_title_stage_word_allowed",
+      "field": "goal_title",
+      "value": "Done right",
+      "code": null
+    },
+    {
+      "name": "goal_title_empty",
+      "field": "goal_title",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "goal_summary_plain",
+      "field": "goal_summary",
+      "value": "Every lane shows short plain lines a person can read.",
+      "code": null
+    },
+    {
+      "name": "goal_summary_length_161",
+      "field": "goal_summary",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "goal_summary_semicolon",
+      "field": "goal_summary",
+      "value": "Short lines; plain words.",
+      "code": "not_plain"
+    },
+    {
+      "name": "goal_summary_empty",
+      "field": "goal_summary",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "spec_title_plain",
+      "field": "spec_title",
+      "value": "Enforce readable work fields at write time",
+      "code": null
+    },
+    {
+      "name": "spec_title_length_60",
+      "field": "spec_title",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": null
+    },
+    {
+      "name": "spec_title_length_61",
+      "field": "spec_title",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "spec_title_work_id",
+      "field": "spec_title",
+      "value": "Follow up spec_example",
+      "code": "not_plain"
+    },
+    {
+      "name": "spec_title_empty",
+      "field": "spec_title",
+      "value": "",
+      "code": "empty"
+    },
+    {
+      "name": "spec_summary_plain",
+      "field": "spec_summary",
+      "value": "One shared rule keeps titles and status lines short and plain.",
+      "code": null
+    },
+    {
+      "name": "spec_summary_length_200",
+      "field": "spec_summary",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": null
+    },
+    {
+      "name": "spec_summary_length_201",
+      "field": "spec_summary",
+      "value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+      "code": "too_long"
+    },
+    {
+      "name": "spec_summary_path",
+      "field": "spec_summary",
+      "value": "Changes scripts/memory_write.py only.",
+      "code": "not_plain"
+    },
+    {
+      "name": "spec_summary_empty",
+      "field": "spec_summary",
+      "value": "",
+      "code": "empty"
+    }
+  ],
+  "summary_cases": [
+    {
+      "name": "valid_in_progress",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "hyphen_and_en_dash",
+      "summary": "**Status** - Tests pass.\n**Next action** – Review the result.\n",
+      "status": "in_progress",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "missing_status",
+      "summary": "**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [
+        "status_missing"
+      ],
+      "lines": {
+        "status": null,
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "missing_next_action_nonterminal",
+      "summary": "**Status** — Tests pass.\n",
+      "status": "in_progress",
+      "codes": [
+        "next_action_missing"
+      ],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": null,
+        "blockers": null
+      }
+    },
+    {
+      "name": "missing_next_action_terminal",
+      "summary": "**Status** — The work shipped.\n",
+      "status": "completed",
+      "codes": [],
+      "lines": {
+        "status": "The work shipped.",
+        "next_action": null,
+        "blockers": null
+      }
+    },
+    {
+      "name": "blocked_needs_blockers",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n",
+      "status": "blocked",
+      "codes": [
+        "blockers_missing"
+      ],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "blocked_with_blockers",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n**Blockers** — Waiting for the release window.\n",
+      "status": "blocked",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": "Waiting for the release window."
+      }
+    },
+    {
+      "name": "empty_label",
+      "summary": "**Status** — \n**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [
+        "status_empty"
+      ],
+      "lines": {
+        "status": null,
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "duplicate_label",
+      "summary": "**Status** — Tests pass.\n**Status** — Another line.\n**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [
+        "status_duplicate"
+      ],
+      "lines": {
+        "status": null,
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "fenced_label_ignored",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n```md\n**Status** — Blocked\n```\n",
+      "status": "in_progress",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "progress_label_ignored",
+      "summary": "**Progress** — Fixed v2.3; 12 checks pass.\n**Status** — Tests pass.\n**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "stage_lead_status",
+      "summary": "**Status** — in_progress 2026-11-09\n**Next action** — Review the result.\n",
+      "status": "in_progress",
+      "codes": [
+        "status_stage_lead"
+      ],
+      "lines": {
+        "status": null,
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "not_plain_next",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review scripts/check.py now.\n",
+      "status": "in_progress",
+      "codes": [
+        "next_action_not_plain"
+      ],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": null,
+        "blockers": null
+      }
     }
   ]
 }

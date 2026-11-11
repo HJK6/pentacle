@@ -48,11 +48,11 @@ The inventory's existing eight inline members carry optional display facts:
   including provider, observed activity, ETA and active status-card step.
   Steps longer than 120 characters are truncated with an ellipsis.
   Workers, QA seats and planners never qualify. No qualifying seat yields null.
-- `status_line` and `next_line`: the first passing sentence from the original
-  Status/Next labels. The original `status_text` and `next_action_text` remain
-  available. Rules and examples live only in
-  `pentacle-chat-core/tests/fixtures/summary_prose_cases.json`; the daemon loads
-  those patterns and accepts the first sentence of a longer label.
+- `status_line` and `next_line`: the whole Status/Next action label when it
+  passes the shared readable-fields contract, otherwise null. `work_lanes.show`
+  adds `blocked_line` with the same meaning for Blockers. The original
+  `status_text` and `next_action_text` remain available. Limits, rules and
+  examples live only in `pentacle-chat-core/tests/fixtures/summary_prose_cases.json`.
 
 `work_lanes.show` returns a cursor page of up to 32 lane members and adds
 `criteria` and `transitions`; complete readers accumulate one source revision

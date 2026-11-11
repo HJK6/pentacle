@@ -17,7 +17,7 @@ id: work_demo__visibility
 def test_authored_checkpoint_survives_punctuation_and_filter():
     facts = parse_work_facts(SPEC, SUMMARY, "in_progress")
     assert facts.get("checkpoint_state") == "valid"
-    assert facts.get("progress_text") == "Finished the CI repair for v2.3; 12 fixtures pass."
+    assert "progress_text" not in facts and [f.id for f in policy.FIELDS] == ["status", "next_action", "blockers"]
     assert facts.get("goal_text") == "Explain current work."
 
 
@@ -32,7 +32,7 @@ def test_duplicate_and_overlength_checkpoint_are_not_truncated_to_valid():
     facts = parse_work_facts(SPEC, text, "in_progress")
     assert facts.get("checkpoint_state") == "invalid"
     assert facts.get("checkpoint_deficiencies", [])[0]["code"] == "status_duplicate"
-    facts = parse_work_facts(SPEC, SUMMARY.replace("Waiting for the authorized release slot.", "界" * 241), "in_progress")
+    facts = parse_work_facts(SPEC, SUMMARY.replace("Waiting for the authorized release slot.", "界" * 161), "in_progress")
     assert any(d["code"] == "status_too_long" for d in facts["checkpoint_deficiencies"])
 
 
@@ -54,10 +54,13 @@ def test_policy_substitution_uses_unchanged_source_pipeline(monkeypatch):
     assert parse_work_facts(SPEC, SUMMARY, "in_progress")["checkpoint_state"] == "valid"
 
 
-@pytest.mark.parametrize("status", ["In progress.", "Blocked", "ready_for_dev", "TODO", "<placeholder>"])
-def test_structural_boilerplate_only(status):
+@pytest.mark.parametrize("status,code", [("In progress.", "status_stage_lead"), ("Blocked", "status_stage_lead"),
+                                         ("ready_for_dev", "status_stage_lead"), ("TODO", "status_placeholder"),
+                                         ("<placeholder>", "status_placeholder"), ("Waiting; then relay.", "status_not_plain")])
+def test_structural_boilerplate_only(status, code):
     facts = parse_work_facts(SPEC, SUMMARY.replace("Waiting for the authorized release slot.", status), "in_progress")
     assert facts["checkpoint_state"] == "invalid"
+    assert [d["code"] for d in facts["checkpoint_deficiencies"]] == [code]
     # A product name or broader prose is never semantically classified.
     assert parse_work_facts(SPEC, SUMMARY.replace("Waiting for the authorized release slot.", "TODOist v2.3 passes 12 fixtures."), "in_progress")["checkpoint_state"] == "valid"
 
@@ -65,3 +68,40 @@ def test_structural_boilerplate_only(status):
 def test_fences_do_not_create_competing_checkpoint():
     fenced = SUMMARY + "```md\n**Status** — Blocked\n```\n"
     assert parse_work_facts(SPEC, fenced, "in_progress")["checkpoint_state"] == "valid"
+
+
+def test_contract_bytes_bind_policy_revision(monkeypatch):
+    from _shared import summary_prose
+    revision = policy.policy_revision()
+    monkeypatch.setattr(summary_prose, "CONTRACT_DIGEST", "0" * 64)
+    policy._policy_revision.cache_clear()
+    try:
+        assert policy.policy_revision() != revision
+    finally:
+        monkeypatch.undo()
+        policy._policy_revision.cache_clear()
+    assert policy.policy_revision() == revision
+
+
+def test_contract_only_change_reevaluates_cached_facts_without_moving_checkpoint(tmp_path, monkeypatch):
+    from _shared import summary_prose
+    from _shared.work_observations import advance_observation, read_work_candidate
+    folder = tmp_path / "work/in_progress/demo__visibility"
+    folder.mkdir(parents=True)
+    (folder / "spec.md").write_text(SPEC)
+    (folder / "summary.md").write_text(SUMMARY)
+    first = read_work_candidate(folder, "in_progress", now=1e10, quiet_s=0)
+    record, _ = advance_observation("spec_demo__visibility", None, first, now=1e9, settle_s=0, sweep=True)
+    assert read_work_candidate(folder, "in_progress", now=1e10, quiet_s=0, previous=first) == first
+    monkeypatch.setattr(summary_prose, "CONTRACT_DIGEST", "0" * 64)
+    policy._policy_revision.cache_clear()
+    try:
+        second = read_work_candidate(folder, "in_progress", now=1e10, quiet_s=0, previous=first)
+        assert second is not first and second["facts"]["checkpoint_policy_revision"] != first["facts"]["checkpoint_policy_revision"]
+        record, _ = advance_observation("spec_demo__visibility", record, second, now=1e9 + 60, settle_s=0, sweep=True)
+        assert record["member"]["checkpoint_changed_at"] is None
+        assert record["member"]["checkpoint_policy_revision"] == second["facts"]["checkpoint_policy_revision"]
+    finally:
+        monkeypatch.undo()
+        policy._policy_revision.cache_clear()
+

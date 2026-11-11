@@ -8,7 +8,7 @@ from datetime import date
 import yaml
 from pathlib import Path
 
-from .summary_prose import summary_line
+from .summary_prose import field_line
 
 DEFAULT_STATUSES = [
     {
@@ -268,7 +268,9 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     return {"title": fm.get("title"), "status": status, **organization, **checkpoint,
             "goal_text": goal["text"], "goal_text_truncated": goal["truncated"],
             "criteria": _criteria(ac, parked), "transitions": _transitions(tracking, fm.get("created_at"), status),
-            "status_line": summary_line(status_text), "next_line": summary_line(next_text),
+            "status_line": field_line("status", checkpoint.get("status_text")),
+            "next_line": field_line("next_action", checkpoint.get("next_action_text")),
+            "blocked_line": field_line("blockers", checkpoint.get("blockers_text")),
             **({"parked_declaration": parked} if parked else {}),
             "terminal": status if status in ("completed", "deprecated") else None,
             "ac_checked": checked if ac is not None else None,

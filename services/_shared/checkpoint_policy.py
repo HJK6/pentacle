@@ -14,6 +14,9 @@ import inspect
 from functools import lru_cache
 from typing import Callable
 
+from . import summary_prose
+from .summary_prose import placeholder, stage_lead, plain  # noqa: F401 - rule names in the contract
+
 _RELEASE_BYTES = Path(__file__).read_bytes()
 
 
@@ -29,18 +32,7 @@ def blocked(status):
     return status == "blocked"
 
 
-def normalized(value):
-    return " ".join("".join(c.lower() if c.isalnum() else " " for c in value).split())
-
-
-def placeholder(value):
-    return "placeholder" if normalized(value) in {"todo", "tbd", "placeholder"} else None
-
-
-def lifecycle_only(value):
-    return "boilerplate" if normalized(value) in {
-        "backlog", "analysis", "ready for dev", "ready for development", "in progress", "needs qa",
-        "blocked", "completed", "deprecated", "paused", "active", "done"} else None
+REQUIRED = {"always": always, "nonterminal": nonterminal, "blocked": blocked}
 
 
 @dataclass(frozen=True)
@@ -54,12 +46,17 @@ class Field:
     validators: tuple = (placeholder,)
 
 
+def _contract_field(field_id, wire_key, description):
+    # Limits, rules and requirement come from the shared contract fixture.
+    spec = summary_prose.FIELDS[field_id]
+    return Field(field_id, spec["label"], wire_key, description, REQUIRED[spec["required"]], spec["limit"],
+                 tuple(summary_prose.RULES[rule] for rule in spec["rules"]))
+
+
 FIELDS = (
-    Field("progress", "Progress", "progress_text", "Latest achieved result, or honestly no result yet."),
-    Field("status", "Status", "status_text", "Present situation beyond a lifecycle label.", always,
-          validators=(placeholder, lifecycle_only)),
-    Field("next_action", "Next action", "next_action_text", "Concrete next action or resume condition."),
-    Field("blockers", "Blockers", "blockers_text", "Impediment and responsible party or dependency.", blocked),
+    _contract_field("status", "status_text", "The present situation in plain words, without a stage name."),
+    _contract_field("next_action", "next_action_text", "The concrete next action or resume condition in plain words."),
+    _contract_field("blockers", "blockers_text", "The impediment and who or what it waits on, in plain words."),
 )
 
 
@@ -69,13 +66,15 @@ def policy_revision(fields=None):
 
 @lru_cache(maxsize=32)
 def _policy_revision(fields):
-    # The released module bytes bind validator logic and global rule constants;
+    # The released module bytes and the loaded contract digest bind validator
+    # logic and rule constants;
     # declarations additionally bind injected policies in substitution tests.
     def rule(fn):
         return [fn.__name__, inspect.getsource(fn)]
     declared = [[f.id, f.label, f.wire_key, f.description, f.limit, rule(f.required_when),
                  [rule(v) for v in f.validators]] for f in fields]
-    return hashlib.sha256(_RELEASE_BYTES + json.dumps(declared, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(_RELEASE_BYTES + summary_prose.CONTRACT_DIGEST.encode()
+                          + json.dumps(declared, sort_keys=True).encode()).hexdigest()
 
 
 def detail_field_keys(fields=None):
@@ -106,7 +105,7 @@ def parse_checkpoint(summary, status, *, fields=None):
         values[field.wire_key] = found[0] if len(found) == 1 and found[0] and not code else None
         if code:
             deficiencies.append({"field": field.wire_key, "code": field.id + "_" + code,
-                                 "fix": f"summary.md: write one **{field.label}** line (1-{field.limit} characters). {field.description}"})
+                                 "fix": f"summary.md: write one **{field.label}** line (1-{field.limit} characters, no semicolons, ids, paths or joined letter-digit tokens). {field.description}"})
     revision = hashlib.sha256(json.dumps([status, canonical], sort_keys=True, ensure_ascii=False,
                                          separators=(",", ":")).encode()).hexdigest()
     return {**values, "checkpoint_state": "invalid" if deficiencies else "valid",
