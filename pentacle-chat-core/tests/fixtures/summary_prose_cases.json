@@ -1,7 +1,7 @@
 {
   "patterns": {
     "label": "^\\*\\*(Status|Next action|Blockers)\\*\\*[ \\t]*[—–-][ \\t]*(.*)$",
-    "fence": "^\\s*(`{3,}|~{3,})",
+    "fence": "^ {0,3}(`{3,}|~{3,})(.*)$",
     "semicolon": ";",
     "hex": "(?i)(?=[0-9a-f]*[a-f])[0-9a-f]{8,}",
     "seat": "\\w+:v2-[0-9a-fA-F]+",
@@ -581,6 +581,30 @@
       "codes": [],
       "lines": {
         "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "fenced_example_with_info_string_inside",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n```md\n```example\n**Status** — Sample; ignore it.\n```\n",
+      "status": "in_progress",
+      "codes": [],
+      "lines": {
+        "status": "Tests pass.",
+        "next_action": "Review the result.",
+        "blockers": null
+      }
+    },
+    {
+      "name": "indented_four_spaces_is_not_a_fence",
+      "summary": "**Status** — Tests pass.\n**Next action** — Review the result.\n    ```\n**Status** — Another line.\n",
+      "status": "in_progress",
+      "codes": [
+        "status_duplicate"
+      ],
+      "lines": {
+        "status": null,
         "next_action": "Review the result.",
         "blockers": null
       }

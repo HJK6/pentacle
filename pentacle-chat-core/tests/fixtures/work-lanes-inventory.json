@@ -3137,7 +3137,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3180,7 +3180,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3408,7 +3408,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3445,7 +3445,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3663,7 +3663,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3700,7 +3700,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -3737,7 +3737,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -4000,7 +4000,7 @@
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
               "blocked_line": null
@@ -4775,16 +4775,16 @@
           "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
           "blocked_line": null,
-          "goal_text": null,
           "goal_source": null,
-          "checkpoint_state": "unverifiable",
-          "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
-          "checkpoint_revision": null,
-          "blockers_text": null,
           "checkpoint_first_observed_at": null,
-          "checkpoint_deficiencies": [],
+          "checkpoint_state": "unverifiable",
+          "blockers_text": null,
           "checkpoint_changed_at": null,
-          "goal_text_truncated": null
+          "checkpoint_revision": null,
+          "checkpoint_deficiencies": [],
+          "goal_text_truncated": null,
+          "goal_text": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
         }
       ],
       "members_total": 1,
@@ -5138,16 +5138,16 @@
           "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
           "blocked_line": null,
-          "goal_text": null,
           "goal_source": null,
-          "checkpoint_state": "unverifiable",
-          "checkpoint_policy_revision": "a476e4837e5fdfae16a71920663ea35e1a00238f19dea7063c2818ca7babe978",
-          "checkpoint_revision": null,
-          "blockers_text": null,
           "checkpoint_first_observed_at": null,
-          "checkpoint_deficiencies": [],
+          "checkpoint_state": "unverifiable",
+          "blockers_text": null,
           "checkpoint_changed_at": null,
-          "goal_text_truncated": null
+          "checkpoint_revision": null,
+          "checkpoint_deficiencies": [],
+          "goal_text_truncated": null,
+          "goal_text": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
         }
       ],
       "members_total": 1,

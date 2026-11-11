@@ -32,6 +32,13 @@ def detail_member_keys():
         "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
         "goal_text", "goal_text_truncated", "goal_source"}
 
+def _line(member, field_id, raw_key):
+    """Whole valid label or null; a duplicate label is never valid, though raw text keeps the first."""
+    if any(d.get("code") == field_id + "_duplicate" for d in member.get("checkpoint_deficiencies") or []):
+        return None
+    return field_line(field_id, member.get(raw_key))
+
+
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
 _STATE_ORDER = {"blocked": 0, "active": 1, "paused": 2, "done": 3}
@@ -169,9 +176,9 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                                if not k.startswith("_") and (all_members or k not in detail_keys | {"criteria", "transitions"})},
                              "worked": (worked_by_spec or {}).get(member["spec_id"]),
                              "lead_seat": member.get("lead_seat"),
-                             "status_line": field_line("status", member.get("status_text")),
-                             "next_line": field_line("next_action", member.get("next_action_text")),
-                             **({"blocked_line": field_line("blockers", member.get("blockers_text")),
+                             "status_line": _line(member, "status", "status_text"),
+                             "next_line": _line(member, "next_action", "next_action_text"),
+                             **({"blocked_line": _line(member, "blockers", "blockers_text"),
                                  "criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]

@@ -112,3 +112,17 @@ def test_actual_populated_detail_serializer_stays_bounded():
     assert json.dumps(response).count('"checkpoint_revision"') == 32
     assert json.dumps(response).count('"goal_text"') == 32
     assert all("checkpoint" not in member for member in response["members"])
+
+
+def test_duplicate_labels_stay_null_from_parser_to_inventory_and_show():
+    summary = ("**Status** — Tests pass.\n**Status** — Review pending.\n"
+               "**Next action** — Review the result.\n**Next action** — Publish the result.\n")
+    facts = candidate(summary)["facts"]
+    assert facts["status_line"] is None and facts["next_line"] is None
+    assert facts["status_text"] == "Tests pass." and facts["next_action_text"] == "Review the result."
+    member = {"spec_id": "spec_demo__visible", **facts, "observation": {"quality": "fresh"}}
+    lane = {"lane_id": "wl-dup", "version": 1, "work_state": "paused", "_members": [member], "_work_index_available": True}
+    for shown in (build_frame([lane], {}, now_iso=NOW)["lanes"][0]["members"][0],
+                  project_lane(lane, None, NOW, all_members=True)["members"][0]):
+        assert shown["status_line"] is None and shown["next_line"] is None
+        assert shown["status_text"] == "Tests pass."
