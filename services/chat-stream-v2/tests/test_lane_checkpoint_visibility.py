@@ -97,15 +97,28 @@ def test_actual_populated_detail_serializer_stays_bounded():
     summary = "\n".join(f"**{f.label}** — {text}" for f in policy.FIELDS)
     facts = candidate(summary, spec=spec)["facts"]
     for member in lane["_members"]:
-        member.update(facts)
+        member.update(facts, summary_line="\U0001f9ed" * 200, _progress_at="2026-01-01T00:00:00Z",
+                      estimate_first={"p25": 99999.99, "p75": 99999.99, "median": 99999.99})
     detail = project_lane(lane, None, NOW, all_members=True, sessions_by_stream=seats, questions_by_spec=questions)
-    for member in detail["members"]:
-        new = {key: value for key, value in member.items() if key in policy.detail_field_keys()
+    # Six maximum trail entries and four unblocks per member, at their caps.
+    line = "\U0001f9ed" * 160
+    events = [{"event_id": f"item:wl-visible:{m['spec_id']}:{i}", "created_at": "2026-01-01T00:00:00.000Z",
+               "payload": {"spec_id": m["spec_id"], "prior": {"status": "in_progress", "status_line": "Old line."},
+                           "next": {"status": "in_progress", "status_line": line}}}
+              for m in lane["_members"] for i in range(6)]
+    from _shared.work_goals import wire_title
+    unblocks = {m["spec_id"]: [{"spec_id": "spec_" + "z" * 120, "title": wire_title("\U0001f9ed" * 240)}] * 4
+                for m in lane["_members"]}
+    shown = {"lane": lane, "events": [], "updates": [], "_projection_row": lane, "_work_index": {"available": True},
+             "_trail_events": events, "_unblocks": unblocks}
+    response = page_lane_detail(shown, detail)
+    added = policy.detail_field_keys() | {"progress_at", "summary_line", "estimate_first", "unblocks", "recent"}
+    for member in response["members"]:
+        assert len(member["recent"]) == 6 and len(member["unblocks"]) == 4
+        new = {key: value for key, value in member.items() if key in added
                or key.startswith("checkpoint_") or key.startswith("goal_")}
         assert len(json.dumps(new).encode()) <= 49152
         assert member["goal_text_truncated"] is True
-    shown = {"lane": lane, "events": [], "updates": [], "_projection_row": lane, "_work_index": {"available": True}}
-    response = page_lane_detail(shown, detail)
     assert len(json.dumps(response).encode()) <= 4194304
     assert json.dumps(response).count('"blockers_text": ') == 32
     assert json.dumps(response).count('"blocked_line"') == 32 and '"progress_text"' not in json.dumps(response)

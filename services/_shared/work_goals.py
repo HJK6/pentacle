@@ -61,8 +61,10 @@ def parse_goal_facts(text: str) -> dict:
     from .checkpoint_policy import bounded_prose
     goal = bounded_prose(_section(_without_fences(text), 'Goal'))
     summary_prose = bounded_prose(summary)
+    from .summary_prose import field_line
     result = {'epic_id': identity, 'title': title, 'lane_id': lane, 'rank': rank,
               '_detail': {'summary_text': summary_prose['text'], 'summary_text_truncated': summary_prose['truncated'],
+                          'summary_line': field_line('goal_summary', summary),
                           'goal_text': goal['text'], 'goal_text_truncated': goal['truncated']}}
     if 'target_date' in metadata:
         target = metadata['target_date']
@@ -123,8 +125,17 @@ def wire_title(title: str) -> str:
     return title[:low]
 
 
+MOVING = ('analysis', 'in_progress', 'needs_qa')
+# Selection group per class: working and moving first, then blocked, then the rest.
+CLASS_GROUP = {'w': 0, 'm': 0, 'b': 1, 'q': 2, 'd': 2}
+
+
+def _status(member: dict):
+    return member.get('_goal_status', member.get('status'))
+
+
 def goal_progress(members: list[dict], *, certain: bool = True) -> dict:
-    status = lambda member: member.get('_goal_status', member.get('status'))
+    status = _status
     included = [member for member in members if status(member) != 'deprecated']
     total = len(included)
     done = sum(status(member) == 'completed' for member in included)
@@ -137,31 +148,68 @@ def goal_progress(members: list[dict], *, certain: bool = True) -> dict:
     return {'state': state, 'done': done, 'total': total}
 
 
+def goal_class(members: list[dict], working_ids: set[str]) -> str:
+    """One of done/working/moving/blocked/queued as d/w/m/b/q, in that order."""
+    counted = [member for member in members if _status(member) != 'deprecated']
+    if counted and all(_status(member) == 'completed' for member in counted):
+        return 'd'
+    if any(_status(member) in MOVING for member in counted):
+        return 'w' if any(member['spec_id'] in working_ids for member in counted) else 'm'
+    return 'b' if any(_status(member) == 'blocked' for member in counted) else 'q'
+
+
+def goal_detail(members: list[dict], working: bool) -> dict:
+    """Detail-only goal facts over the goal's full membership."""
+    counted = [member for member in members if _status(member) != 'deprecated']
+    # The same open, non-exempt population aggregate_members uses for the lane.
+    population = [member for member in members if member.get('status') not in
+                  ('completed', 'deprecated', 'missing', 'ambiguous') and not member.get('estimate_exempt', False)]
+    known = population and all(member.get('estimate') is not None
+                               and member.get('observation', {}).get('quality') == 'fresh' for member in population)
+    stamps = [member['_progress_at'] for member in members if member.get('_progress_at')]
+    return {'moving': sum(_status(member) in MOVING for member in counted),
+            'blocked': sum(_status(member) == 'blocked' for member in counted), 'working': working,
+            'left_h': min(round(sum(member['estimate']['median'] for member in population), 1), 99999.9) if known else None,
+            'progress_at': max(stamps) if stamps else None}
+
+
 def project_goals(lane: dict, *, all_goals: bool = False) -> dict:
-    goals, seen = [], set()
+    goals, seen, classes = [], set(), {}
     members = lane.get('_members') or []
+    working_ids = lane.get('_working_specs') or set()
     for identity, record in sorted((lane.get('_goals') or {}).items()):
         facts = record['facts']
         wire_id = goal_id(identity)
         if wire_id in seen:
             raise ValueError('work_goal_id_collision')
         seen.add(wire_id)
+        owned = [member for member in members if member.get('goal_id') == wire_id]
+        classes[wire_id] = goal_class(owned, working_ids)
         goals.append({'goal_id': wire_id, 'title': wire_title(facts['title']),
-                      **goal_progress([member for member in members if member.get('goal_id') == wire_id],
-                                      certain=record['quality'] == 'fresh' and lane.get('_work_index_available', False)),
+                      **goal_progress(owned, certain=record['quality'] == 'fresh' and lane.get('_work_index_available', False)),
                       'rank': facts['rank'],
                       **({'icon': facts['icon']} if 'icon' in facts else {}),
-                      **({'target_date': facts['target_date']} if 'target_date' in facts else {})})
+                      **({'target_date': facts['target_date']} if 'target_date' in facts else {}),
+                      **(goal_detail(owned, classes[wire_id] == 'w') if all_goals else {})})
     order = lambda goal: (goal['rank'], goal['goal_id'])
     goals.sort(key=order)
     if len(goals) > MAX_COUNT:
         raise ValueError('work_lane_goal_count_overflow')
     selected = goals if all_goals else sorted(
-        sorted(goals, key=lambda goal: (goal['state'] != 'in_progress', *order(goal)))[:8], key=order)
+        sorted(goals, key=lambda goal: (CLASS_GROUP[classes[goal['goal_id']]], *order(goal)))[:8], key=order)
     result = {'goals': selected, 'goals_total': len(goals)}
-    legacy = [member for member in members if not member.get('goal_id') and member.get('_goal_status', member.get('status')) != 'deprecated']
+    legacy = [member for member in members if not member.get('goal_id') and _status(member) != 'deprecated']
+    default = goal_class(legacy, working_ids) if legacy else None
     if legacy:
-        result['default_goal'] = goal_progress(legacy, certain=lane.get('_work_index_available', False))
+        # Detail facts read every unplaced member; goal_detail leaves deprecated ones out of its counts.
+        unplaced = [member for member in members if not member.get('goal_id')]
+        result['default_goal'] = {**goal_progress(legacy, certain=lane.get('_work_index_available', False)),
+                                  **(goal_detail(unplaced, default == 'w') if all_goals else {})}
+    letters = [classes[goal['goal_id']] for goal in goals] + ([default] if default else [])
+    # Working goals count as moving.
+    result['goal_classes'] = ''.join(classes[goal['goal_id']] for goal in selected) + (default or '-')
+    result['goal_counts'] = [sum(letter in 'wm' for letter in letters), letters.count('b'),
+                             letters.count('q'), letters.count('d')]
     if lane.get('_detail_revision'):
         result['detail_revision'] = lane['_detail_revision']
     return result

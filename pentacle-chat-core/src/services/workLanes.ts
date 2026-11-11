@@ -58,10 +58,24 @@ export type WorkLaneSeat = {
   last_activity: string | null;
 };
 
-export type WorkLaneGoalProgress = { state: 'not_started' | 'in_progress' | 'done'; done: number; total: number };
+/** Detail-only (work_lanes.show) goal facts over the goal's full membership. */
+export type WorkLaneGoalDetail = {
+  moving?: number; blocked?: number; working?: boolean;
+  /** Hours left over open, non-exempt members; null when unknown or incomplete. */
+  left_h?: number | null;
+  progress_at?: string | null;
+};
+export type WorkLaneGoalProgress = { state: 'not_started' | 'in_progress' | 'done'; done: number; total: number } & WorkLaneGoalDetail;
 export type WorkLaneGoal = WorkLaneGoalProgress & {
   goal_id: string; title: string; rank: number; target_date?: string; icon?: LaneIconKey | null;
 };
+export type WorkLaneGoalClass = 'done' | 'working' | 'moving' | 'blocked' | 'queued';
+/** One entry of real progress, newest first; titles come from the member. */
+export type WorkLaneProgressEntry =
+  | { at: string; spec_id: string; kind: 'note'; text: string | null }
+  | { at: string; spec_id: string; kind: 'checks'; count: number }
+  | { at: string; spec_id: string; kind: 'done' }
+  | { at: string; spec_id: string; kind: 'blocked'; text: string | null };
 
 export type WorkLaneMember = {
   /** Optional released policy fields survive normalization, including retired fields. */
@@ -91,6 +105,12 @@ export type WorkLaneMember = {
   next_line?: string | null;
   /** Detail-only (work_lanes.show), same rule for the Blockers label. */
   blocked_line?: string | null;
+  /** Detail-only derived facts: last real progress, readable summary, first estimate, what it unblocks, its trail. */
+  progress_at?: string | null;
+  summary_line?: string | null;
+  estimate_first?: { p25: number; p75: number; median: number } | null;
+  unblocks?: Array<{ spec_id: string; title: string | null }>;
+  recent?: WorkLaneProgressEntry[];
   worked?: {
     elapsed_h: number | null; censored: boolean; active_h: number | null;
     seats: number; qa_rounds: number; as_of: string;
@@ -140,11 +160,21 @@ export type WorkIndexStatus = {
 
 export type WorkLane = {
   visibility_counts?: Record<string, unknown>;
-  selected_goal?: WorkLaneGoal & Record<string, unknown>;
+  selected_goal?: WorkLaneGoal & Record<string, unknown> & { summary_line?: string | null; recent?: WorkLaneProgressEntry[] };
   lane_id: string;
   goals?: WorkLaneGoal[];
   goals_total?: number;
   default_goal?: WorkLaneGoalProgress | null;
+  /** One class letter per goal, then the default goal; read it only through workLaneGoalClasses. */
+  goal_classes?: string | null;
+  /** Over every goal and the default goal; working goals count as moving. */
+  goal_counts?: { moving: number; blocked: number; queued: number; done: number } | null;
+  /** Newest real progress over the lane's full membership. */
+  progress_at?: string | null;
+  /** When the lane entered its current state. */
+  state_at?: string | null;
+  /** Detail-only progress trail for the whole lane. */
+  recent?: WorkLaneProgressEntry[];
   detail_revision?: string | null;
   title: string;
   icon?: LaneIconKey | null;
@@ -285,11 +315,51 @@ const goalId = (value: unknown): string | null =>
 const count = (value: unknown): number | null =>
   typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2147483647 ? value : null;
 
+function normalizeGoalDetail(raw: Rec): WorkLaneGoalDetail {
+  const moving = count(raw.moving), blocked = count(raw.blocked);
+  return {
+    ...(moving !== null ? { moving } : {}), ...(blocked !== null ? { blocked } : {}),
+    ...(typeof raw.working === 'boolean' ? { working: raw.working } : {}),
+    ...('left_h' in raw ? { left_h: finite(raw.left_h) !== null && (raw.left_h as number) >= 0 ? raw.left_h as number : null } : {}),
+    ...('progress_at' in raw ? { progress_at: str(raw.progress_at) } : {}),
+  };
+}
+
 function normalizeGoalProgress(raw: unknown): WorkLaneGoalProgress | null {
   if (!isRec(raw) || !['not_started', 'in_progress', 'done'].includes(raw.state as string)) return null;
   const done = count(raw.done), total = count(raw.total);
   if (done === null || total === null || done > total) return null;
-  return { state: raw.state as WorkLaneGoalProgress['state'], done, total };
+  return { state: raw.state as WorkLaneGoalProgress['state'], done, total, ...normalizeGoalDetail(raw) };
+}
+
+const TRAIL_KINDS = new Set(['note', 'checks', 'done', 'blocked']);
+
+function normalizeTrail(raw: unknown): WorkLaneProgressEntry[] {
+  return (Array.isArray(raw) ? raw : []).flatMap((item): WorkLaneProgressEntry[] => {
+    if (!isRec(item) || !nonEmpty(item.at) || !nonEmpty(item.spec_id) || !TRAIL_KINDS.has(item.kind as string)) return [];
+    const base = { at: item.at as string, spec_id: item.spec_id as string };
+    if (item.kind === 'checks') {
+      const rise = count(item.count);
+      return rise ? [{ ...base, kind: 'checks', count: rise }] : [];
+    }
+    if (item.kind === 'done') return [{ ...base, kind: 'done' }];
+    return [{ ...base, kind: item.kind as 'note' | 'blocked', text: str(item.text) }];
+  }).slice(0, 6);
+}
+
+const GOAL_CLASS_NAMES: Record<string, WorkLaneGoalClass> = {
+  d: 'done', w: 'working', m: 'moving', b: 'blocked', q: 'queued',
+};
+
+/** The one reader of goal_classes: named classes for each sent goal and the default goal. */
+export function workLaneGoalClasses(lane: Pick<WorkLane, 'goals' | 'goal_classes'>):
+  { goals: Record<string, WorkLaneGoalClass>; default_goal: WorkLaneGoalClass | null } | null {
+  const goals = lane.goals ?? [], letters = lane.goal_classes;
+  if (typeof letters !== 'string' || letters.length !== goals.length + 1) return null;
+  return {
+    goals: Object.fromEntries(goals.map((goal, index) => [goal.goal_id, GOAL_CLASS_NAMES[letters[index]]])),
+    default_goal: GOAL_CLASS_NAMES[letters[goals.length]] ?? null,
+  };
 }
 
 function normalizeGoal(raw: unknown): WorkLaneGoal | null {
@@ -331,6 +401,12 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
     next_action_text: str(raw.next_action_text),
     status_line: str(raw.status_line), next_line: str(raw.next_line),
     ...('blocked_line' in raw ? { blocked_line: str(raw.blocked_line) } : {}),
+    ...('progress_at' in raw ? { progress_at: str(raw.progress_at) } : {}),
+    ...('summary_line' in raw ? { summary_line: str(raw.summary_line) } : {}),
+    ...('estimate_first' in raw ? { estimate_first: normalizeRange(raw.estimate_first) } : {}),
+    ...('unblocks' in raw ? { unblocks: (Array.isArray(raw.unblocks) ? raw.unblocks : []).flatMap((item) =>
+      isRec(item) && nonEmpty(item.spec_id) ? [{ spec_id: item.spec_id as string, title: str(item.title) }] : []).slice(0, 4) } : {}),
+    ...('recent' in raw ? { recent: normalizeTrail(raw.recent) } : {}),
     worked: normalizeWorked(raw.worked), lead_seat: normalizeLeadSeat(raw.lead_seat),
     ...(Array.isArray(raw.criteria) ? { criteria: raw.criteria.flatMap((item) =>
       isRec(item) && typeof item.title === 'string' && typeof item.disposition === 'string'
@@ -389,14 +465,29 @@ function normalizeLane(raw: unknown): WorkLane | null {
   const state = raw.state;
   if (!laneId || (state !== 'active' && state !== 'paused' && state !== 'blocked')) return null;
   const last = raw.last_update;
+  const rawGoals = Array.isArray(raw.goals) ? raw.goals : [];
+  const goals = rawGoals.map(normalizeGoal);
+  // One letter per raw goal plus the default goal; dropped goals drop their letter.
+  const letters = typeof raw.goal_classes === 'string' && raw.goal_classes.length === rawGoals.length + 1
+    && /^[dwmbq]*[dwmbq-]$/.test(raw.goal_classes) ? raw.goal_classes : null;
+  const counts = Array.isArray(raw.goal_counts) && raw.goal_counts.length === 4 ? raw.goal_counts.map(count) : null;
   return {
     lane_id: laneId,
     ...(isRec(raw.visibility_counts) ? { visibility_counts: raw.visibility_counts } : {}),
     ...(isRec(raw.selected_goal) && normalizeGoal(raw.selected_goal)
-      ? { selected_goal: { ...raw.selected_goal, ...normalizeGoal(raw.selected_goal)! } } : {}),
-    goals: (Array.isArray(raw.goals) ? raw.goals : []).map(normalizeGoal).filter((goal): goal is WorkLaneGoal => goal !== null),
+      ? { selected_goal: { ...raw.selected_goal, ...normalizeGoal(raw.selected_goal)!,
+        ...('summary_line' in raw.selected_goal ? { summary_line: str(raw.selected_goal.summary_line) } : {}),
+        ...('recent' in raw.selected_goal ? { recent: normalizeTrail(raw.selected_goal.recent) } : {}) } } : {}),
+    goals: goals.filter((goal): goal is WorkLaneGoal => goal !== null),
     goals_total: count(raw.goals_total) ?? 0,
     default_goal: normalizeGoalProgress(raw.default_goal),
+    ...('goal_classes' in raw ? { goal_classes: letters
+      ? goals.flatMap((goal, index) => (goal ? [letters[index]] : [])).join('') + letters[rawGoals.length] : null } : {}),
+    ...('goal_counts' in raw ? { goal_counts: counts && counts.every((value) => value !== null)
+      ? { moving: counts[0]!, blocked: counts[1]!, queued: counts[2]!, done: counts[3]! } : null } : {}),
+    ...('progress_at' in raw ? { progress_at: str(raw.progress_at) } : {}),
+    ...('state_at' in raw ? { state_at: str(raw.state_at) } : {}),
+    ...('recent' in raw ? { recent: normalizeTrail(raw.recent) } : {}),
     detail_revision: typeof raw.detail_revision === 'string' && /^[0-9a-f]{64}$/.test(raw.detail_revision)
       ? raw.detail_revision : null,
     title: str(raw.title) ?? '',

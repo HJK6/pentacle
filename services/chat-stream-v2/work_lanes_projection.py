@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from work_lane_progress import lane_state, members_working, lane_progress, seat_live, seat_working
+from work_lane_progress import lane_state, lane_progress, seat_live, seat_working, working_spec_ids
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
@@ -30,7 +30,8 @@ from _shared.checkpoint_policy import detail_field_keys, policy_revision
 def detail_member_keys():
     return detail_field_keys() | {"blocked_line", "checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
         "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
-        "goal_text", "goal_text_truncated", "goal_source"}
+        "goal_text", "goal_text_truncated", "goal_source",
+        "progress_at", "summary_line", "estimate_first", "unblocks", "recent"}
 
 def _line(member, field_id, raw_key):
     """Whole valid label or null; a duplicate label is never valid, though raw text keeps the first."""
@@ -158,7 +159,8 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                                    and (not presence.get("session_generation")
                                         or presence["session_generation"] == lane.get("bound_generation")))
     # Presence supplies activity only; it never grants ownership or activation.
-    lane["_members_working"] = members_working(lane, list((sessions_by_stream or {}).values()))
+    lane["_working_specs"] = working_spec_ids(lane, list((sessions_by_stream or {}).values()))
+    lane["_members_working"] = bool(lane["_working_specs"])
     state, reason = lane_state(lane)
     progress = lane_progress(lane, now_iso=now_iso, index_available=index_available, all_members=all_members)
     detail_keys = detail_member_keys()
@@ -179,13 +181,14 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                              "status_line": _line(member, "status", "status_text"),
                              "next_line": _line(member, "next_action", "next_action_text"),
                              **({"blocked_line": _line(member, "blockers", "blockers_text"),
+                                 "progress_at": member.get("_progress_at"),
                                  "criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]
     if all_members:
         for member in progress["members"]:
             for key in detail_keys:
-                member.setdefault(key, [] if key == "checkpoint_deficiencies" else None)
+                member.setdefault(key, [] if key in {"checkpoint_deficiencies", "unblocks", "recent"} else None)
             if not lane.get("_work_index_available") or member.get("observation", {}).get("quality") != "fresh":
                 member["checkpoint_state"] = "unverifiable"
             member["checkpoint_policy_revision"] = member.get("checkpoint_policy_revision") or policy_revision()
@@ -203,6 +206,8 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                          "kind": lane.get("_chat_kind") or "session",
                          "available": lane.get("_chat_available") or "unavailable"},
         "last_update": lane.get("_last_update"),
+        "progress_at": max((m["_progress_at"] for m in lane.get("_members") or [] if m.get("_progress_at")), default=None),
+        "state_at": lane.get("_state_at"),
         **progress, **project_goals(lane, all_goals=all_members),
         **({"visibility_counts": visibility_counts(lane.get("_members") or [], sessions_by_stream, questions_by_spec,
                                                   source_available=lane.get("_work_index_available", False))}
@@ -244,11 +249,16 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
     remaining = [member for member in selected if members_after is None or member["spec_id"] > members_after]
     page = remaining[:members_limit]
     cursor = page[-1]["spec_id"] if page and len(remaining) > len(page) else None
+    from work_lane_progress import progress_trail
+    trail_events, unblocks = shown.get("_trail_events") or [], shown.get("_unblocks") or {}
+    page = [{**member, "unblocks": unblocks.get(member["spec_id"], [])[:4],
+             "recent": progress_trail(trail_events, {member["spec_id"]})} for member in page]
     # Keep the legacy projection page, but serialize new source prose/metadata
     # only in the canonical top-level detail members, never twice per response.
     legacy_page = [{key: value for key, value in member.items() if key not in detail_member_keys()} for member in page]
     projection = {**{key: value for key, value in projected.items() if not key.startswith("_")}, "members": legacy_page, "members_total": total,
-                  "members_next": cursor}
+                  "members_next": cursor,
+                  "recent": progress_trail(trail_events, {member["spec_id"] for member in projected["members"]})}
     if goal_filter is not None:
         # Reuse the full membership census, not this cursor page. Goal prose is
         # included once for the selected goal, never in goal previews.
@@ -260,8 +270,10 @@ def page_lane_detail(shown: dict, projected: dict, *, members_limit=32,
         from _shared.work_goals import goal_id
         record = next((r for identity, r in (shown.get("_projection_row", {}).get("_goals") or {}).items()
                        if goal_id(identity) == goal_filter), {})
-        projection["selected_goal"] = {**selected, "visibility_counts": goal_counts,
-                                       **(record.get("facts", {}).get("_detail") or {}),
+        detail = record.get("facts", {}).get("_detail") or {}
+        projection["selected_goal"] = {**selected, "visibility_counts": goal_counts, **detail,
+                                       "summary_line": detail.get("summary_line"),
+                                       "recent": progress_trail(trail_events, {member["spec_id"] for member in members}),
                                        "source": {"epic_id": record.get("facts", {}).get("epic_id"),
                                                   "revision": record.get("source_hash")}}
     lane = {key: value for key, value in shown["lane"].items()

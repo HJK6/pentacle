@@ -205,6 +205,31 @@ def _transitions(tracking: str, created_at: str | None, status: str) -> list[dic
     return entries[-8:]
 
 
+def _estimate(declaration: str) -> dict | None:
+    number = r"(?:[0-9]+(?:\.[0-9]+)?)"
+    match = re.fullmatch(rf"({number})[ \t]*[–—-][ \t]*({number})"
+                         rf"[ \t]*\(median[ \t]+({number})\)[ \t]+as_of[ \t]+"
+                         r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ \t]+(provisional))?", declaration)
+    if not match:
+        return None
+    p25, p75, median = map(float, match.groups()[:3])
+    try:
+        date.fromisoformat(match[4])
+    except ValueError:
+        return None
+    if all(math.isfinite(n) for n in (p25, p75, median)) and 0 < p25 <= median <= p75:
+        return {"p25": p25, "p75": p75, "median": median, "as_of": match[4], "provisional": match[5] is not None}
+    return None
+
+
+def _blocked_by(value) -> list[str] | None:
+    """Private source fact for derived ``unblocks``; never sent on the wire."""
+    if (not isinstance(value, list) or not 1 <= len(value) <= 4
+            or not all(isinstance(item, str) and WORK_SPEC_ID_RE.fullmatch(item) for item in value)):
+        return None
+    return list(value)
+
+
 def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     """Parse file-owned lane facts without inferring completion or estimates."""
     fm = load_frontmatter(spec_text)
@@ -218,24 +243,13 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
     estimate_text = _section(spec, "Estimate") or ""
     # Select the physical declaration BEFORE validation. Invalid latest values
     # suppress history; elapsed_delivery_h remains an immutable delivery baseline.
-    declarations = re.findall(r"^[ \t]*(?:- )?remaining_work_h:[ \t]*(.*)$", estimate_text, re.M)
-    selected = declarations[-1].strip() if declarations else ""
+    declarations = [value.strip() for value in
+                    re.findall(r"^[ \t]*(?:- )?remaining_work_h:[ \t]*(.*)$", estimate_text, re.M)]
+    selected = declarations[-1] if declarations else ""
     estimate_exempt = bool(re.fullmatch(r"n/a[ \t]+—[ \t]+(?:umbrella|coordination)", selected))
-    number = r"(?:[0-9]+(?:\.[0-9]+)?)"
-    match = re.fullmatch(rf"({number})[ \t]*[–—-][ \t]*({number})"
-                         rf"[ \t]*\(median[ \t]+({number})\)[ \t]+as_of[ \t]+"
-                         r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ \t]+(provisional))?", selected)
-    estimate = None
-    if match:
-        p25, p75, median = map(float, match.groups()[:3])
-        try:
-            date.fromisoformat(match[4])
-        except ValueError:
-            pass
-        else:
-            if all(math.isfinite(n) for n in (p25, p75, median)) and 0 < p25 <= median <= p75:
-                estimate = {"p25": p25, "p75": p75, "median": median,
-                            "as_of": match[4], "provisional": match[5] is not None}
+    estimate = _estimate(selected)
+    first = next((value for value in map(_estimate, declarations) if value is not None), None)
+    estimate_first = {key: first[key] for key in ("p25", "p75", "median")} if first else None
 
     def label(name):
         found = re.search(rf"^\*\*{re.escape(name)}\*\*[ \t]*[—–-][ \t]*(.+)$", summary, re.M)
@@ -271,11 +285,14 @@ def parse_work_facts(spec_text: str, summary_text: str, status: str) -> dict:
             "status_line": field_line("status", checkpoint.get("status_text")),
             "next_line": field_line("next_action", checkpoint.get("next_action_text")),
             "blocked_line": field_line("blockers", checkpoint.get("blockers_text")),
+            "summary_line": field_line("spec_summary", fm.get("summary") if isinstance(fm.get("summary"), str) else None),
+            "_blocked_by": _blocked_by(summary_fm.get("blocked_by")),
             **({"parked_declaration": parked} if parked else {}),
             "terminal": status if status in ("completed", "deprecated") else None,
             "ac_checked": checked if ac is not None else None,
             "ac_total": len(boxes) if ac is not None else None,
-            "estimate": estimate, "estimate_exempt": estimate_exempt, "status_text": status_text, "next_action_text": next_text}
+            "estimate": estimate, "estimate_first": estimate_first, "estimate_exempt": estimate_exempt,
+            "status_text": status_text, "next_action_text": next_text}
 
 
 def _heading_text(path: Path, heading: str) -> str:
@@ -343,5 +360,5 @@ def parse_work_folder(folder: str | Path, lifecycle: str, statuses: list[dict]):
         **{key: value for key, value in parse_work_facts(
             (folder / "spec.md").read_text(encoding="utf-8") if (folder / "spec.md").exists() else "",
             (folder / "summary.md").read_text(encoding="utf-8") if (folder / "summary.md").exists() else "",
-            status).items() if key != "title"},
+            status).items() if key not in {"title", "summary_line", "estimate_first", "_blocked_by"}},
     }

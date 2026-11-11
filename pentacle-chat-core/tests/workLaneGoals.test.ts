@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { normalizeWorkLanesInventory, LANE_HUE_KEYS } from '../src/services/workLanes.ts';
+import { normalizeWorkLanesInventory, LANE_HUE_KEYS, workLaneGoalClasses } from '../src/services/workLanes.ts';
 
 const goal = { goal_id: 'g_' + 'a'.repeat(24), title: 'Finish the fixture', state: 'in_progress',
   done: 1, total: 2, rank: 17, icon: 'cube', target_date: '2026-11-30' };
@@ -61,5 +61,73 @@ test('shared daemon fixture preserves complete goal wire fields on both surfaces
     assert.equal(value.detail_revision, raw.detail_revision);
     assert.equal(value.hue, raw.hue);
     assert.equal(value.progress!.members[0].goal_id, raw.members[0].goal_id);
+  }
+});
+
+test('lane progress keys normalize and decode through the one class reader', () => {
+  const second = { ...goal, goal_id: 'g_' + 'c'.repeat(24) };
+  const value = lane({ ...raw, goals: [goal, second], goal_classes: 'wbm', goal_counts: [2, 1, 4, 0],
+    progress_at: '2026-11-10T10:00:00Z', state_at: '2026-11-09T08:00:00Z' });
+  assert.deepEqual(workLaneGoalClasses(value), {
+    goals: { [goal.goal_id]: 'working', [second.goal_id]: 'blocked' }, default_goal: 'moving' });
+  assert.deepEqual(value.goal_counts, { moving: 2, blocked: 1, queued: 4, done: 0 });
+  assert.equal(value.progress_at, '2026-11-10T10:00:00Z');
+  assert.equal(value.state_at, '2026-11-09T08:00:00Z');
+  // A dropped goal drops its letter; the default goal may be absent.
+  const dropped = lane({ ...raw, goals: [{ ...goal, done: -1 }, second], goal_classes: 'dq-' });
+  assert.deepEqual(workLaneGoalClasses(dropped), { goals: { [second.goal_id]: 'queued' }, default_goal: null });
+  for (const bad of ['wb', 'wbx', 'w-m', 7]) {
+    assert.equal(lane({ ...raw, goals: [goal, second], goal_classes: bad }).goal_classes, null);
+  }
+  assert.equal(lane({ ...raw, goal_counts: [1, 2, 3] }).goal_counts, null);
+});
+
+test('older frames without the progress keys stay sparse', () => {
+  const value = lane(raw);
+  for (const key of ['goal_classes', 'goal_counts', 'progress_at', 'state_at', 'recent']) assert.equal(key in value, false);
+  assert.equal(workLaneGoalClasses(value), null);
+  const member = value.progress!.members[0];
+  for (const key of ['progress_at', 'summary_line', 'estimate_first', 'unblocks', 'recent']) assert.equal(key in member, false);
+  assert.equal('moving' in value.default_goal!, false);
+});
+
+test('detail goal, member and trail keys normalize', () => {
+  const entries = [
+    { at: '2026-11-10T10:00:00Z', spec_id: 'spec_demo__a', kind: 'note', text: 'Assemble the span.' },
+    { at: '2026-11-10T09:00:00Z', spec_id: 'spec_demo__a', kind: 'checks', count: 2 },
+    { at: '2026-11-10T08:00:00Z', spec_id: 'spec_demo__b', kind: 'done' },
+    { at: '2026-11-10T07:00:00Z', spec_id: 'spec_demo__b', kind: 'blocked', text: null },
+    { at: '2026-11-10T06:00:00Z', spec_id: 'spec_demo__b', kind: 'unknown' },
+    { at: '2026-11-10T05:00:00Z', spec_id: 'spec_demo__b', kind: 'checks', count: 0 },
+  ];
+  const detail = { moving: 1, blocked: 2, working: true, left_h: 3.5, progress_at: '2026-11-10T10:00:00Z' };
+  const value = lane({ ...raw, goals: [{ ...goal, ...detail }], default_goal: { ...raw.default_goal, ...detail, left_h: null },
+    recent: entries, selected_goal: { ...goal, ...detail, summary_line: 'A finite outcome.', recent: entries },
+    members: [{ spec_id: 'spec_demo__a', progress_at: null, summary_line: 'Readable summary.',
+      estimate_first: { p25: 1, p75: 3, median: 2 }, unblocks: [{ spec_id: 'spec_demo__b', title: 'B' }, { title: 'x' }],
+      recent: entries.slice(0, 2) }] });
+  assert.deepEqual(value.goals![0], { ...goal, ...detail });
+  assert.equal(value.default_goal!.left_h, null);
+  assert.deepEqual(value.recent, entries.slice(0, 4));
+  assert.equal(value.selected_goal!.summary_line, 'A finite outcome.');
+  assert.deepEqual(value.selected_goal!.recent, entries.slice(0, 4));
+  const member = value.progress!.members[0];
+  assert.equal(member.progress_at, null);
+  assert.equal(member.summary_line, 'Readable summary.');
+  assert.deepEqual(member.estimate_first, { p25: 1, p75: 3, median: 2 });
+  assert.deepEqual(member.unblocks, [{ spec_id: 'spec_demo__b', title: 'B' }]);
+  assert.deepEqual(member.recent, entries.slice(0, 2));
+  assert.equal(lane({ ...raw, goals: [{ ...goal, left_h: -1 }] }).goals![0].left_h, null);
+});
+
+test('shared daemon fixture classes decode on both surfaces', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-lanes-inventory.json', import.meta.url), 'utf8')).goals_v1;
+  for (const raw of [fixture.inventory_frame.lanes[0], fixture.show_projection]) {
+    const value = lane(raw);
+    assert.equal(value.goal_classes, raw.goal_classes);
+    const classes = workLaneGoalClasses(value)!;
+    assert.equal(Object.keys(classes.goals).length, raw.goals.length);
+    assert.deepEqual(value.goal_counts, { moving: raw.goal_counts[0], blocked: raw.goal_counts[1],
+      queued: raw.goal_counts[2], done: raw.goal_counts[3] });
   }
 });

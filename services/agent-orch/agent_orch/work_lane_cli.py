@@ -69,7 +69,8 @@ def _print_members(members):
             if member.get(field.wire_key):
                 print(f"      {field.label}: {member[field.wire_key]}")
         for key in ("worked", "lead_seat", "criteria", "transitions", "checkpoint_state", "checkpoint_deficiencies",
-                    "checkpoint_changed_at", "checkpoint_first_observed_at", "goal_text"):
+                    "checkpoint_changed_at", "checkpoint_first_observed_at", "goal_text",
+                    "progress_at", "summary_line", "estimate_first", "unblocks", "recent"):
             if key in member:
                 print(f"      {key}: {json.dumps(member[key], ensure_ascii=False, default=str)}")
 
@@ -213,7 +214,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"    stored {stored.get('work_state')} ({stored.get('work_state_reason')})  "
           f"owner_kind={stored.get('owner_kind')}  version={stored.get('version')}")
     print(f"    icon: {lane.get('icon') or '-'}")
-    for key in ("visibility_counts", "selected_goal"):
+    for key in ("visibility_counts", "selected_goal", "goal_classes", "goal_counts", "progress_at", "state_at",
+                "goals", "default_goal", "recent"):
         if key in lane:
             print(f"    {key}: {json.dumps(lane[key], ensure_ascii=False, default=str)}")
     _print_members(response.get("members", lane.get("members", [])))

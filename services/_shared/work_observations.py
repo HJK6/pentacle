@@ -25,6 +25,11 @@ def timestamp(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def progress_stamp(epoch: float) -> str:
+    """Progress times are UTC to the second."""
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _signature(path: Path) -> tuple:
     if path.is_symlink():
         raise ValueError("work_source_symlink")
@@ -85,7 +90,7 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
     """
     record = copy.deepcopy(previous) if previous else {
         "member": unresolved_member(spec_id), "last_good": None, "source_hash": None,
-        "path": None, "incident": None, "bad_since": None, "bad_sweeps": 0,
+        "path": None, "incident": None, "bad_since": None, "bad_sweeps": 0, "progress_at": None,
     }
     record["member"].setdefault("estimate_exempt", False)
     old = record.get("last_good")
@@ -116,12 +121,25 @@ def advance_observation(spec_id: str, previous: dict | None, candidate: dict, *,
         member["checkpoint_changed_at"] = timestamp(now) if checkpoint_changed else record["member"].get("checkpoint_changed_at")
         member["checkpoint_first_observed_at"] = (record["member"].get("checkpoint_first_observed_at") or timestamp(now))
         member["goal_source"] = {"spec_id": spec_id, "revision": (candidate.get("document_revisions") or {}).get("spec.md")}
+        # A Status line is comparable only under one policy revision; otherwise
+        # the new line is a baseline, as for checkpoint_changed_at.
+        prior_line = (old.get("status_line") if old is not None and old.get("checkpoint_policy_revision")
+                      == facts.get("checkpoint_policy_revision") else None)
+        progressed = old is not None and (
+            old.get("status") != facts.get("status")
+            or isinstance(old.get("ac_checked"), int) and isinstance(facts.get("ac_checked"), int)
+            and facts["ac_checked"] > old["ac_checked"]
+            or prior_line is not None and facts.get("status_line") not in (None, prior_line))
         if material:
             fields = ("status", "ac_checked", "ac_total", "estimate", "estimate_exempt")
             change = {"spec_id": spec_id, "obs_rev": rev,
-                      "prior": {k: old.get(k) for k in fields}, "next": {k: facts.get(k) for k in fields},
+                      "prior": {**{k: old.get(k) for k in fields}, "status_line": prior_line,
+                                "blocked_line": old.get("blocked_line")},
+                      "next": {**{k: facts.get(k) for k in fields}, "status_line": facts.get("status_line"),
+                               "blocked_line": facts.get("blocked_line")},
                       "source_changed_at": source_changed}
         record.update(member=member, last_good=copy.deepcopy(facts), path=candidate["path"],
+                      progress_at=progress_stamp(now) if progressed else record.get("progress_at"),
                       source_hash=candidate["source_hash"], progress_changed_at=progress_changed,
                       document_revisions=candidate.get("document_revisions") or {},
                       incident=None, bad_since=None, bad_sweeps=0)
