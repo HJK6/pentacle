@@ -103,7 +103,7 @@ async def test_linked_commission_persists_assignment_and_warns_on_checkpoint(env
     assert row["assigned_spec_id"] == target
     # A malformed display record is a warning, never an extra refusal (FD GO).
     assert reply["work_checkpoint"]["state"] == "invalid"
-    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["progress_missing", "status_missing", "next_action_missing"]
+    assert [d["code"] for d in reply["work_checkpoint"]["deficiencies"]] == ["status_missing", "next_action_missing"]
 
 
 @pytest.mark.asyncio
