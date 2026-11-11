@@ -72,6 +72,9 @@ WORK_LANE_INDEX_DDL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_work_lane_events_consumed_question "
     "ON v2_work_lane_events(consumed_question_id) WHERE consumed_question_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_v2_work_lane_events_lane ON v2_work_lane_events(lane_id, created_at)",
+    # The bounded progress trail read walks this index newest first.
+    "CREATE INDEX IF NOT EXISTS idx_v2_work_lane_events_trail "
+    "ON v2_work_lane_events(lane_id, operation, created_at, event_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_assistant_composite_lanes_adoption_key "
     "ON v2_assistant_composite_lanes(adoption_key) WHERE adoption_key IS NOT NULL",
 )
@@ -513,6 +516,30 @@ def _event_out(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+TRAIL_EVENT_BOUND = 500
+
+
+def trail_events_conn(conn, lane_id: str) -> list[dict[str, Any]]:
+    """The lane's newest item changes, newest first, never its whole history."""
+    return [{"event_id": row[0], "created_at": row[1], "payload": json.loads(row[2])} for row in conn.execute(
+        "SELECT event_id,created_at,payload_json FROM v2_work_lane_events WHERE lane_id=? AND operation='item_change' "
+        "ORDER BY created_at DESC, event_id DESC LIMIT ?", (lane_id, TRAIL_EVENT_BOUND))]
+
+
+def unblocks_conn(conn) -> dict[str, list[dict[str, Any]]]:
+    """Work currently in blocked, by each spec its source ``blocked_by`` names."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for spec_id, raw, title in conn.execute(
+            "SELECT spec_id,json_extract(record_json,'$.last_good._blocked_by'),json_extract(record_json,'$.member.title') "
+            "FROM v2_work_item_observations WHERE json_extract(record_json,'$.member.status')='blocked' "
+            "AND json_type(record_json,'$.last_good._blocked_by')='array' ORDER BY spec_id"):
+        for target in json.loads(raw):
+            entries = result.setdefault(target, [])
+            if len(entries) < 4:
+                entries.append({"spec_id": spec_id, "title": title})
+    return result
+
+
 def lane_events_conn(conn, lane_id: str) -> list[dict[str, Any]]:
     return [_event_out(r) for r in conn.execute(
         "SELECT * FROM v2_work_lane_events WHERE lane_id=? ORDER BY created_at, rowid", (lane_id,))]
@@ -570,6 +597,12 @@ def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None
             f"SELECT MAX(created_at) FROM v2_work_lane_events WHERE lane_id=? AND operation IN ({marks})",
             (lane["lane_id"], *PRODUCT_OPERATIONS)).fetchone()[0]
         lane["_fd_updated_at"] = fd_stamp or lane.get("first_admitted_at")
+        # Entry into the current state; renames and membership edits keep their state.
+        state_at = conn.execute(
+            "SELECT created_at FROM v2_work_lane_events WHERE lane_id=? AND next_state IS NOT NULL "
+            "AND prior_state IS NOT next_state ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (lane["lane_id"],)).fetchone()
+        lane["_state_at"] = state_at[0][:19] + "Z" if state_at else None
         lead = _session_conn(conn, lane["bound_stream_id"]) if lane.get("bound_stream_id") else None
         lane["_lead_row"] = lead
         lane["_qualifies"] = work_lane_lead_qualifies(lane, lead)
@@ -680,7 +713,8 @@ class _WorkLanesStoreMixin:
                               for member in internal_members]
             return {"lane": lane, "events": events, "updates": updates,
                     "members": public_members,
-                    "_projection_row": row, "_work_index": index_status_conn(conn)}
+                    "_projection_row": row, "_work_index": index_status_conn(conn),
+                    "_trail_events": trail_events_conn(conn, lane_id), "_unblocks": unblocks_conn(conn)}
         def coherent(conn):
             with hue_transaction(conn):
                 return _op(conn)

@@ -67,6 +67,25 @@ def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys
     assert "Progress:" not in output and "Retired field." not in output
 
 
+def test_show_prints_lane_progress_keys(monkeypatch, capsys):
+    entry = {"at": "2026-11-10T10:00:00Z", "spec_id": "spec_demo__detail", "kind": "checks", "count": 1}
+    member = {"spec_id": "spec_demo__detail", "status": "in_progress", "progress_at": "2026-11-10T10:00:00Z",
+              "summary_line": "Readable summary.", "estimate_first": {"p25": 1, "p75": 3, "median": 2},
+              "unblocks": [{"spec_id": "spec_demo__waiting", "title": "Waiting item"}], "recent": [entry]}
+    projection = {"lane_id": "wl-1", "goal_classes": "wq-", "goal_counts": [1, 0, 1, 0],
+                  "progress_at": "2026-11-10T10:00:00Z", "state_at": "2026-11-09T08:00:00Z",
+                  "goals": [{"goal_id": "g_" + "a" * 24, "left_h": 3.5, "moving": 1}],
+                  "default_goal": {"state": "in_progress", "left_h": None}, "recent": [entry]}
+    _wire(monkeypatch, {"type": "work_lanes.show.ok", "lane": {"lane_id": "wl-1"},
+                        "projection": projection, "members": [member]})
+    assert _run(["work-lane", "show", "wl-1"]) == 0
+    output = capsys.readouterr().out
+    for key in ("goal_classes", "goal_counts", "progress_at", "state_at", "goals", "default_goal", "recent",
+                "summary_line", "estimate_first", "unblocks"):
+        assert f"{key}:" in output, key
+    assert "Waiting item" in output and '"left_h": 3.5' in output and "2026-11-09T08:00:00Z" in output
+
+
 def test_detail_rendering_follows_released_policy_declarations(monkeypatch, capsys):
     from _shared import checkpoint_policy as policy
     from agent_orch.work_lane_cli import _print_members

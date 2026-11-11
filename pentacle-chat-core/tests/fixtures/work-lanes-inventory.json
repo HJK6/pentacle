@@ -1092,6 +1092,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -1191,7 +1193,14 @@
               "state": "in_progress",
               "done": 1,
               "total": 2
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -1344,6 +1353,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -1478,7 +1489,14 @@
               "state": "in_progress",
               "done": 1,
               "total": 2
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -1581,6 +1599,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -1645,7 +1665,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -1742,6 +1769,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -1796,7 +1825,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "q",
+            "goal_counts": [
+              0,
+              0,
+              1,
+              0
+            ]
           }
         ],
         "counts": {
@@ -1893,6 +1929,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -1947,7 +1985,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "q",
+            "goal_counts": [
+              0,
+              0,
+              1,
+              0
+            ]
           }
         ],
         "counts": {
@@ -2044,6 +2089,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -2098,7 +2145,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -2175,6 +2229,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [],
             "members_total": 0,
             "no_spec_reason": "Exploratory conversation.",
@@ -2194,7 +2250,14 @@
             "lead_reported_done": null,
             "stale": false,
             "goals": [],
-            "goals_total": 0
+            "goals_total": 0,
+            "goal_classes": "-",
+            "goal_counts": [
+              0,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -2297,6 +2360,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -2361,7 +2426,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -2489,6 +2561,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -2584,7 +2658,14 @@
               "state": "in_progress",
               "done": 1,
               "total": 1
-            }
+            },
+            "goal_classes": "d",
+            "goal_counts": [
+              0,
+              0,
+              0,
+              1
+            ]
           }
         ],
         "counts": {
@@ -2712,6 +2793,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -2807,7 +2890,14 @@
               "state": "done",
               "done": 1,
               "total": 1
-            }
+            },
+            "goal_classes": "d",
+            "goal_counts": [
+              0,
+              0,
+              0,
+              1
+            ]
           }
         ],
         "counts": {
@@ -2959,6 +3049,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -3058,7 +3150,14 @@
               "state": "in_progress",
               "done": 1,
               "total": 2
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -3140,7 +3239,14 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": {
+                "p25": 2.0,
+                "p75": 4.0,
+                "median": 3.0
+              },
+              "_blocked_by": null,
+              "summary_line": null
             },
             {
               "spec_id": "spec_demo__remaining_only_2",
@@ -3183,7 +3289,14 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": {
+                "p25": 1.0,
+                "p75": 3.0,
+                "median": 2.0
+              },
+              "_blocked_by": null,
+              "summary_line": null
             }
           ],
           "no_spec_reason": null,
@@ -3222,6 +3335,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__remaining_only_1",
@@ -3321,7 +3436,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 2
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -3411,7 +3533,10 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": null,
+              "_blocked_by": null,
+              "summary_line": null
             },
             {
               "spec_id": "spec_demo__elapsed_only_ignored_2",
@@ -3448,7 +3573,10 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": null,
+              "_blocked_by": null,
+              "summary_line": null
             }
           ],
           "no_spec_reason": null,
@@ -3487,6 +3615,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__elapsed_only_ignored_1",
@@ -3570,7 +3700,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 2
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -3666,7 +3803,14 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": {
+                "p25": 2.0,
+                "p75": 4.0,
+                "median": 3.0
+              },
+              "_blocked_by": null,
+              "summary_line": null
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_2",
@@ -3703,7 +3847,10 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": null,
+              "_blocked_by": null,
+              "summary_line": null
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_3",
@@ -3740,7 +3887,10 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": null,
+              "_blocked_by": null,
+              "summary_line": null
             }
           ],
           "no_spec_reason": null,
@@ -3779,6 +3929,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__umbrella_exempt_1",
@@ -3901,7 +4053,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 3
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -4003,7 +4162,14 @@
               "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
               "goal_text_truncated": false,
-              "blocked_line": null
+              "blocked_line": null,
+              "estimate_first": {
+                "p25": 2.0,
+                "p75": 4.0,
+                "median": 3.0
+              },
+              "_blocked_by": null,
+              "summary_line": null
             }
           ],
           "no_spec_reason": null,
@@ -4042,6 +4208,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__member_conflict_1",
@@ -4106,7 +4274,14 @@
               "state": "in_progress",
               "done": 0,
               "total": 1
-            }
+            },
+            "goal_classes": "m",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -4351,6 +4526,8 @@
               "available": "open"
             },
             "last_update": null,
+            "progress_at": null,
+            "state_at": null,
             "members": [
               {
                 "spec_id": "spec_demo__item_1",
@@ -4486,7 +4663,14 @@
               "state": "in_progress",
               "done": 1,
               "total": 2
-            }
+            },
+            "goal_classes": "w",
+            "goal_counts": [
+              1,
+              0,
+              0,
+              0
+            ]
           }
         ],
         "counts": {
@@ -4602,6 +4786,8 @@
             "available": "unavailable"
           },
           "last_update": null,
+          "progress_at": null,
+          "state_at": null,
           "members": [
             {
               "spec_id": "spec_demo__detail",
@@ -4670,7 +4856,14 @@
             "state": "in_progress",
             "done": 0,
             "total": 1
-          }
+          },
+          "goal_classes": "w",
+          "goal_counts": [
+            1,
+            0,
+            0,
+            0
+          ]
         }
       ],
       "counts": {
@@ -4711,6 +4904,8 @@
         "available": "unavailable"
       },
       "last_update": null,
+      "progress_at": null,
+      "state_at": null,
       "members": [
         {
           "spec_id": "spec_demo__detail",
@@ -4775,16 +4970,21 @@
           "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
           "blocked_line": null,
-          "goal_source": null,
-          "checkpoint_first_observed_at": null,
-          "checkpoint_state": "unverifiable",
-          "blockers_text": null,
+          "progress_at": null,
+          "unblocks": [],
           "checkpoint_changed_at": null,
-          "checkpoint_revision": null,
-          "checkpoint_deficiencies": [],
-          "goal_text_truncated": null,
+          "recent": [],
+          "blockers_text": null,
           "goal_text": null,
-          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
+          "goal_text_truncated": null,
+          "checkpoint_state": "unverifiable",
+          "summary_line": null,
+          "checkpoint_revision": null,
+          "goal_source": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "checkpoint_first_observed_at": null,
+          "estimate_first": null,
+          "checkpoint_deficiencies": []
         }
       ],
       "members_total": 1,
@@ -4809,8 +5009,20 @@
       "default_goal": {
         "state": "in_progress",
         "done": 0,
-        "total": 1
+        "total": 1,
+        "moving": 1,
+        "blocked": 0,
+        "working": true,
+        "left_h": null,
+        "progress_at": null
       },
+      "goal_classes": "w",
+      "goal_counts": [
+        1,
+        0,
+        0,
+        0
+      ],
       "visibility_counts": {
         "unfinished": null,
         "working": 1,
@@ -4946,6 +5158,8 @@
             "available": "unavailable"
           },
           "last_update": null,
+          "progress_at": null,
+          "state_at": null,
           "members": [
             {
               "spec_id": "spec_demo__detail",
@@ -5032,6 +5246,13 @@
             }
           ],
           "goals_total": 2,
+          "goal_classes": "wq-",
+          "goal_counts": [
+            1,
+            0,
+            1,
+            0
+          ],
           "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
       ],
@@ -5073,6 +5294,8 @@
         "available": "unavailable"
       },
       "last_update": null,
+      "progress_at": null,
+      "state_at": null,
       "members": [
         {
           "spec_id": "spec_demo__detail",
@@ -5138,16 +5361,21 @@
           "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
           "blocked_line": null,
-          "goal_source": null,
-          "checkpoint_first_observed_at": null,
-          "checkpoint_state": "unverifiable",
-          "blockers_text": null,
+          "progress_at": null,
+          "unblocks": [],
           "checkpoint_changed_at": null,
-          "checkpoint_revision": null,
-          "checkpoint_deficiencies": [],
-          "goal_text_truncated": null,
+          "recent": [],
+          "blockers_text": null,
           "goal_text": null,
-          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
+          "goal_text_truncated": null,
+          "checkpoint_state": "unverifiable",
+          "summary_line": null,
+          "checkpoint_revision": null,
+          "goal_source": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
+          "checkpoint_first_observed_at": null,
+          "estimate_first": null,
+          "checkpoint_deficiencies": []
         }
       ],
       "members_total": 1,
@@ -5176,7 +5404,12 @@
           "total": 1,
           "rank": 0,
           "icon": "cube",
-          "target_date": "2026-11-30"
+          "target_date": "2026-11-30",
+          "moving": 1,
+          "blocked": 0,
+          "working": true,
+          "left_h": null,
+          "progress_at": null
         },
         {
           "goal_id": "g_91716977daa6ddedd93acce6",
@@ -5186,10 +5419,22 @@
           "total": 0,
           "rank": 1,
           "icon": null,
-          "target_date": "2026-11-30"
+          "target_date": "2026-11-30",
+          "moving": 0,
+          "blocked": 0,
+          "working": false,
+          "left_h": null,
+          "progress_at": null
         }
       ],
       "goals_total": 2,
+      "goal_classes": "wq-",
+      "goal_counts": [
+        1,
+        0,
+        1,
+        0
+      ],
       "detail_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "visibility_counts": {
         "unfinished": null,

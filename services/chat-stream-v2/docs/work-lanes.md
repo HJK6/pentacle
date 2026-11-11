@@ -634,8 +634,10 @@ work-progress freshness. Actual member-set replacement clears the former lane
 completion episode atomically, including replacement by already terminal work.
 
 `WorkLane.goals` contains at most eight records in inventory/list, with
-`goals_total` counting all named goals. Selection prefers `in_progress` goals,
-then rank/goal_id, and the selected records display in rank/goal_id order. Show
+`goals_total` counting all named goals. Selection takes working and moving
+goals first, then blocked, then the rest, by rank/goal_id inside each group (see
+[Derived lane progress](#derived-lane-progress)); the selected records display in
+rank/goal_id order. Show
 includes every named goal. Each record has `goal_id`, title, state, done, total,
 rank and optional target_date/icon. `goal_id` is `g_` plus the first 24 lowercase
 SHA256 hex characters of the epic ID; collisions are typed diagnostics. Title
@@ -722,3 +724,71 @@ A NEW open assigned execution lead's `implementation_ready` assertion requires a
 The authenticated current FD can use `agent-orch spawn --role lead --spec-id SPEC --provision-only [--lane-id LANE]` to create an ordinary promptless lead. The CLI sends neither task nor baseline input. The daemon verifies FD identity and role/input constraints again at commit. Explicit lane targeting resolves ambiguous membership. Then use existing `work-lane set-lead`, explicit `set-state --to active` (including blocked resolution), and ordinary admitted `send`. Binding alone never activates; a failed/spoofed provision delivers no task. Provisioning is control work; ordinary execution still follows existing commissioning rules.
 
 Before enforcement activation, the release owner inventories open lanes and pending work, binds legitimate non-FD leads or deliberately drains/holds them, removes FD execution assignments, and retains per-lane before/after evidence. Unresolved legacy ACTIVE ownership stops rollout. Preserve runtime artifacts and ownership/input history for rollback; no automatic state migration, new timer or forced kill is introduced.
+
+## Derived lane progress
+
+The daemon derives these facts from observations it already keeps; nothing is
+authored. All are additive and optional for older clients. Times are UTC to the
+second (`YYYY-MM-DDTHH:MM:SSZ`); null means unknown, never "now".
+
+**Goal classes.** Each goal, and the default goal when it has members, has one
+class, evaluated in order: done `d` (at least one counted member, all completed),
+working `w` (a moving member, and a seat effectively assigned to one of the
+goal's members is working now, measured over all sessions before caps), moving
+`m` (a member in analysis, in_progress or needs_qa), blocked `b` (a member in
+blocked), queued `q` (everything else, including a goal with no members).
+Deprecated members are not counted. Clients read the letters only through
+chat-core `workLaneGoalClasses`.
+
+**Lane record (inventory, list and show).** `goal_classes` has one letter per
+record in `goals`, in order, then the default goal's letter or `-`.
+`goal_counts` is `[moving, blocked, queued, done]` over every goal and the
+default goal; working counts as moving. `progress_at` is the newest member
+`progress_at` over the full membership. `state_at` is the newest stored lane
+event whose next state differs from its prior state; a rename or membership
+edit does not move it. `freshness_at` and `updated_at` keep their meaning. At
+worst-case values the four keys add 158 bytes per lane; the goal envelope and
+frame limits are unchanged.
+
+**Detail goals.** Show goal records and `default_goal` add `moving`, `blocked`
+(member counts), `working` (class is working), `left_h` and `progress_at` over
+full membership. `left_h` sums estimate medians over members that are not
+completed, deprecated, missing or ambiguous and not estimate-exempt (the lane
+`open_estimate_h` population), rounded to one decimal and capped at 99999.9; it
+is null when that population is empty, any member has no estimate, or any is
+not fresh. Inventory goal records and `default_goal` gain nothing. A
+goal-filtered page's `selected_goal` adds `summary_line` (the epic `summary`
+when it passes `goal_summary`) and `recent`. The goal filter is unchanged; the
+default goal is its unplaced members in the unfiltered pages and has no
+`summary_line` or `recent`.
+
+**Member progress time.** The observation record keeps `progress_at`: the scan
+time of the newest stage change, checked-criteria rise, or change of a valid
+`status_line` to a different valid one under the same checkpoint policy
+revision. Null-to-valid lines and policy- or contract-only re-parses set a
+baseline. File touches, estimate edits, criteria rewording, goal moves and lane
+state changes are not progress. Records written before this field are filled
+once from stored `item_change` events showing a stage change or checked rise,
+else null.
+
+**Detail members.** Show members add `progress_at`, `summary_line` (spec.md
+`summary` when it passes `spec_summary`), `estimate_first` (the first valid
+`remaining_work_h` declaration as `p25,p75,median`), `unblocks` (up to four
+`spec_id,title` of work currently in blocked whose summary.md `blocked_by` names
+this spec, by spec id) and `recent`. `blocked_by` is parsed but never sent.
+
+**Progress trail.** `item_change` payload `prior`/`next` gain `status_line` and
+`blocked_line`; `prior.status_line` is null when the policy revision changed.
+`recent` lists at most six newest-first entries: `note` (`text`, a valid Status
+line replaced by a different valid line), `checks` (`count`, the checked rise),
+`done` (stage became completed) and `blocked` (`text`, the `blocked_line` then,
+or null). Every entry has `at`, `spec_id` and `kind`. It appears on
+`projection.recent` for the whole lane, on `selected_goal` for that goal's
+current members and on each detail member. Events of specs no longer in the lane
+or goal are skipped before the cap. The read walks at most the lane's 500 newest
+`item_change` events (by `created_at`, then `event_id`, on
+`idx_v2_work_lane_events_trail`). Events written before this change yield only
+`checks`, `done` and `blocked` entries with null text.
+
+Rollback is a revert: the previous daemon ignores the observation `progress_at`
+and the added payload keys, and the added index is unused.

@@ -94,6 +94,7 @@ def effective_membership_conn(conn) -> dict:
                                          "error": goal.get("error") or "work_goal_source_uncertain"}
         if record.get("progress_changed_at"):
             member["_progress_changed_at"] = record["progress_changed_at"]
+        member["_progress_at"] = record.get("progress_at")
         members[identity] = member
     return {**snapshot, "records": records, "members": members}
 
@@ -170,7 +171,24 @@ def _observed_record(record: dict, state: dict) -> dict:
     return record
 
 
-def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: bool, known_lanes: set[str]):
+def progress_backfill_conn(conn) -> dict | None:
+    """One-time progress times for records written before they were kept.
+
+    Only stored stage changes and checked-count rises count; null means unknown.
+    """
+    if not conn.execute("SELECT 1 FROM v2_work_item_observations "
+                        "WHERE json_type(record_json,'$.progress_at') IS NULL LIMIT 1").fetchone():
+        return None
+    rows = conn.execute(
+        "SELECT json_extract(payload_json,'$.spec_id'),MAX(created_at) FROM v2_work_lane_events "
+        "WHERE operation='item_change' AND (json_extract(payload_json,'$.prior.status') "
+        "IS NOT json_extract(payload_json,'$.next.status') OR json_extract(payload_json,'$.next.ac_checked') "
+        "> json_extract(payload_json,'$.prior.ac_checked')) GROUP BY 1")
+    return {spec_id: stamp[:19] + "Z" for spec_id, stamp in rows if spec_id and stamp}
+
+
+def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: bool, known_lanes: set[str],
+                     backfill: dict | None = None):
     """Compute a delta without retaining a second decoded population or a cache."""
     known_ids = set()
     delta = {}
@@ -178,8 +196,11 @@ def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: b
     now = float(scan["scanned_at"])
     goals = advance_goals(state.get("goal_observations", {}), scan, known_lanes)
 
-    def advance(spec_id, previous):
+    def advance(spec_id, stored):
         nonlocal accepted
+        previous = stored
+        if stored is not None and "progress_at" not in stored:
+            previous = {**stored, "progress_at": (backfill or {}).get(spec_id)}
         candidate = _candidate(scan, spec_id, previous)
         if candidate["quality"] == "fresh":
             facts = candidate["facts"]
@@ -205,7 +226,7 @@ def _prepare_records(rows, state: dict, scan: dict, *, settle_s: float, sweep: b
                   and now - previous["bad_since"] >= settle_s):
                 # Once settled, counting more sweeps cannot change the decision.
                 record["bad_sweeps"] = previous["bad_sweeps"]
-        if record != previous:
+        if record != stored:
             delta[spec_id] = (json.dumps(record, separators=(",", ":")),
                               transition, record["member"]["obs_rev"])
 
@@ -226,7 +247,9 @@ def _prepare_file(path: str, scan: dict, *, settle_s: float, sweep: bool):
         rows = conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations").fetchall()
         known_lanes = {row[0] for row in conn.execute(
             "SELECT lane_id FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL")}
-    return _prepare_records(rows, state, scan, settle_s=settle_s, sweep=sweep, known_lanes=known_lanes)
+        backfill = progress_backfill_conn(conn)
+    return _prepare_records(rows, state, scan, settle_s=settle_s, sweep=sweep, known_lanes=known_lanes,
+                            backfill=backfill)
 
 
 class WorkIndexStoreMixin:
@@ -309,8 +332,9 @@ class WorkIndexStoreMixin:
                     # Memory Stores and a concurrent accepted scan use the same
                     # oracle here. Never publish a delta against a changed base.
                     current = _prepare_records(conn.execute(
-                        "SELECT spec_id,record_json FROM v2_work_item_observations"),
-                        state, scan, settle_s=settle_s, sweep=sweep, known_lanes=known_lanes)
+                        "SELECT spec_id,record_json FROM v2_work_item_observations").fetchall(),
+                        state, scan, settle_s=settle_s, sweep=sweep, known_lanes=known_lanes,
+                        backfill=progress_backfill_conn(conn))
                 _, known_ids, delta, accepted, goals, _ = current
                 # Membership may have changed while the read-only snapshot was
                 # prepared. Resolve new unknown members against this transaction.

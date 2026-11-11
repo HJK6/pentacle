@@ -64,13 +64,18 @@ def lane_estimate_missing(lane: dict[str, Any], *, index_available: bool | None 
 
 def members_working(lane: dict[str, Any], sessions: list[dict[str, Any]] | None = None) -> bool:
     """Actual activity over all effective assignments, before presentation caps."""
-    from store_specs import effective_assignment
     if sessions is None:
         return bool(lane.get("_members_working"))
+    return bool(working_spec_ids(lane, sessions))
+
+
+def working_spec_ids(lane: dict[str, Any], sessions: list[dict[str, Any]]) -> set[str]:
+    """Members with a working effectively assigned seat."""
+    from store_specs import effective_assignment
     # Residual execution on terminal/unresolved work stays observable. It grants
     # no ownership or admission, both of which have independent policy checks.
     members = {member["spec_id"] for member in lane.get("_members") or []}
-    return any(seat_working(row, descendants=False) and effective_assignment(row) in members for row in sessions)
+    return {effective_assignment(row) for row in sessions if seat_working(row, descendants=False)} & members
 
 
 def seat_live(row: dict[str, Any] | None) -> bool:
@@ -88,6 +93,43 @@ def seat_working(row: dict[str, Any] | None, *, descendants=True) -> bool:
     busy = row.get("busy") and (descendants or not row.get("busy_reasons")
                                or bool({"generating", "background"} & set(row["busy_reasons"])))
     return bool(busy or row.get("working") or row.get("background_busy"))
+
+
+TRAIL_LIMIT = 6
+
+
+def _trail_entries(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Real progress in one stored item change: stage end, checked rise, new Status."""
+    payload = event["payload"]
+    prior, after = payload.get("prior") or {}, payload.get("next") or {}
+    base = {"at": event["created_at"][:19] + "Z", "spec_id": payload["spec_id"]}
+    entries = []
+    if prior.get("status") != after.get("status") and after.get("status") == "completed":
+        entries.append({**base, "kind": "done"})
+    elif prior.get("status") != after.get("status") and after.get("status") == "blocked":
+        line = after.get("blocked_line")
+        entries.append({**base, "kind": "blocked", "text": line[:160] if isinstance(line, str) else None})
+    checked = prior.get("ac_checked"), after.get("ac_checked")
+    if all(isinstance(value, int) for value in checked) and checked[1] > checked[0]:
+        entries.append({**base, "kind": "checks", "count": checked[1] - checked[0]})
+    # The payload carries a null prior line when the policy revision changed.
+    line = after.get("status_line")
+    if isinstance(prior.get("status_line"), str) and isinstance(line, str) and line != prior["status_line"]:
+        entries.append({**base, "kind": "note", "text": line[:160]})
+    return entries
+
+
+def progress_trail(events: list[dict[str, Any]], spec_ids: set[str], limit: int = TRAIL_LIMIT) -> list[dict[str, Any]]:
+    """Newest-first entries over current members only, from an already bounded read."""
+    trail = []
+    for event in events:
+        if event["payload"].get("spec_id") not in spec_ids:
+            continue
+        for entry in _trail_entries(event):
+            trail.append(entry)
+            if len(trail) == limit:
+                return trail
+    return trail
 
 
 def lane_state(lane: dict[str, Any]) -> tuple[str, str | None]:
