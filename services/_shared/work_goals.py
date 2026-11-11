@@ -201,8 +201,10 @@ def project_goals(lane: dict, *, all_goals: bool = False) -> dict:
     legacy = [member for member in members if not member.get('goal_id') and _status(member) != 'deprecated']
     default = goal_class(legacy, working_ids) if legacy else None
     if legacy:
+        # Detail facts read every unplaced member; goal_detail leaves deprecated ones out of its counts.
+        unplaced = [member for member in members if not member.get('goal_id')]
         result['default_goal'] = {**goal_progress(legacy, certain=lane.get('_work_index_available', False)),
-                                  **(goal_detail(legacy, default == 'w') if all_goals else {})}
+                                  **(goal_detail(unplaced, default == 'w') if all_goals else {})}
     letters = [classes[goal['goal_id']] for goal in goals] + ([default] if default else [])
     # Working goals count as moving.
     result['goal_classes'] = ''.join(classes[goal['goal_id']] for goal in selected) + (default or '-')

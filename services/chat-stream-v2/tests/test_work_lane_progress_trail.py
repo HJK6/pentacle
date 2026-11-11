@@ -202,3 +202,65 @@ def test_state_at_moves_only_on_a_state_change(tmp_path):
         changed = [e for e in events if e['operation'] == 'set_state'][-1]
         assert blocked['state_at'] == changed['created_at'][:19] + 'Z' and blocked['state'] == 'blocked'
     run(body)
+
+
+def test_default_goal_progress_time_reads_deprecated_unplaced_members():
+    from work_lanes_projection import project_lane
+    members = [{'spec_id': 'spec_demo__open', 'status': 'in_progress', 'observation': {'quality': 'fresh'},
+                '_progress_at': '2026-11-01T00:00:00Z'},
+               {'spec_id': 'spec_demo__dropped', 'status': 'deprecated', 'observation': {'quality': 'fresh'},
+                '_progress_at': '2026-11-10T00:00:00Z'}]
+    row = {'lane_id': 'wl-fixture', 'version': 1, 'work_state': 'paused', '_members': members, '_work_index_available': True}
+    shown = project_lane(row, None, '2026-11-11T00:00:00Z', all_members=True)
+    assert shown['default_goal']['progress_at'] == shown['progress_at'] == '2026-11-10T00:00:00Z'
+    assert (shown['default_goal']['total'], shown['default_goal']['moving']) == (1, 1)
+
+
+def test_unblocks_dedupes_ids_and_keeps_four_by_spec_id(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        _seed(root, lane['lane_id'])
+        for name in ('w1', 'w2', 'w3', 'w4', 'w5'):
+            folder = write_item(root, name, status='blocked', epic=None)
+            ids = '- spec_demo__alpha\n- spec_demo__alpha\n' if name == 'w1' else '- spec_demo__alpha\n'
+            _edit(folder, '---\n---\n', '---\nblocked_by:\n' + ids + '---\n', 'summary.md')
+        await reconcile(env.store, scanner(root))
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        members = {m['spec_id']: m for m in page_lane_detail(shown, projected(shown))['members']}
+        assert [entry['spec_id'] for entry in members['spec_demo__alpha']['unblocks']] == [
+            'spec_demo__w1', 'spec_demo__w2', 'spec_demo__w3', 'spec_demo__w4']
+        assert members['spec_demo__alpha']['unblocks'][0]['title'] == 'Item w1'
+        def retitle(conn):
+            raw = conn.execute("SELECT record_json FROM v2_work_item_observations WHERE spec_id='spec_demo__w1'").fetchone()[0]
+            record = json.loads(raw)
+            record['member']['title'] = '\U0001f9ed' * 240
+            conn.execute("UPDATE v2_work_item_observations SET record_json=? WHERE spec_id='spec_demo__w1'", (json.dumps(record),))
+            conn.commit()
+        await env.store.submit(retitle)
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        title = page_lane_detail(shown, projected(shown))['members'][0]['unblocks'][0]['title']
+        assert 0 < len(json.dumps(title, ensure_ascii=False).encode()) <= 120
+    run(body)
+
+
+def test_equal_time_events_read_newest_event_id_first(tmp_path):
+    root = tmp_path / 'memory'
+    async def body(env):
+        lane = (await env.adopt(state='paused', owner='operator'))['lane']
+        _seed(root, lane['lane_id'])
+        await reconcile(env.store, scanner(root))
+        def insert(conn):
+            from store_work_lanes import _insert_event
+            row = dict(conn.execute('SELECT * FROM v2_assistant_composite_lanes WHERE lane_id=?', (lane['lane_id'],)).fetchone())
+            for spec, rev in (('spec_demo__alpha', 7), ('spec_demo__beta', 7)):
+                payload = {'spec_id': spec, 'obs_rev': rev, 'prior': state(checked=0), 'next': state(checked=1)}
+                _insert_event(conn, event_id=f'item:{row["lane_id"]}:{spec}:{rev}', lane=row, operation='item_change',
+                              source_id=f'fixture-{spec}', actor='daemon:index', generation=None, prior=row['work_state'],
+                              nxt=row['work_state'], expected=None, payload=payload, stamp='2026-11-10T00:00:00.000Z')
+            conn.commit()
+        await env.store.submit(insert)
+        shown = await env.store.get_work_lane(lane['lane_id'])
+        trail = page_lane_detail(shown, projected(shown))['projection']['recent']
+        assert [entry['spec_id'] for entry in trail] == ['spec_demo__beta', 'spec_demo__alpha']
+    run(body)

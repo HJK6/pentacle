@@ -528,15 +528,17 @@ def trail_events_conn(conn, lane_id: str) -> list[dict[str, Any]]:
 
 def unblocks_conn(conn) -> dict[str, list[dict[str, Any]]]:
     """Work currently in blocked, by each spec its source ``blocked_by`` names."""
+    from _shared.work_goals import wire_title
     result: dict[str, list[dict[str, Any]]] = {}
     for spec_id, raw, title in conn.execute(
             "SELECT spec_id,json_extract(record_json,'$.last_good._blocked_by'),json_extract(record_json,'$.member.title') "
             "FROM v2_work_item_observations WHERE json_extract(record_json,'$.member.status')='blocked' "
             "AND json_type(record_json,'$.last_good._blocked_by')='array' ORDER BY spec_id"):
-        for target in json.loads(raw):
+        for target in dict.fromkeys(json.loads(raw)):
             entries = result.setdefault(target, [])
             if len(entries) < 4:
-                entries.append({"spec_id": spec_id, "title": title})
+                # The goal title clip keeps the detail member inside its byte bound.
+                entries.append({"spec_id": spec_id, "title": wire_title(title) if isinstance(title, str) else None})
     return result
 
 

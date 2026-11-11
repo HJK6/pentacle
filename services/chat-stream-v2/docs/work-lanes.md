@@ -775,7 +775,8 @@ else null.
 `summary` when it passes `spec_summary`), `estimate_first` (the first valid
 `remaining_work_h` declaration as `p25,p75,median`), `unblocks` (up to four
 `spec_id,title` of work currently in blocked whose summary.md `blocked_by` names
-this spec, by spec id) and `recent`. `blocked_by` is parsed but never sent.
+this spec, by spec id, repeated ids counted once, titles clipped like goal titles
+to 120 JSON bytes) and `recent`. `blocked_by` is parsed but never sent.
 
 **Progress trail.** `item_change` payload `prior`/`next` gain `status_line` and
 `blocked_line`; `prior.status_line` is null when the policy revision changed.
