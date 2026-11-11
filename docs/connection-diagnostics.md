@@ -94,6 +94,25 @@ Concurrent requests have separate aggregates; completed contexts reject updates
 from tasks that outlive their originating request. These diagnostics do not
 change RPC authorization, admission, time budgets or response payloads.
 
+## Named Store calls
+
+`Store.submit` names every call at admission, before any actor wrapper, from the
+callable's `__qualname__` reduced to `[A-Za-z0-9._:-]` and 96 characters, or
+`unnamed`. Client, actor-wrapped and internal-job calls are all covered
+(`store_call_diag.py`, thresholds at the top):
+
+- `store_call_slow {"name","queue_ms","execution_ms"}` for each call executing
+  over 250 ms; fast calls write nothing.
+- `store_call_top {"window_s","top","instrumentation_failures"}` once an hour:
+  the five operations with the most execution time, with call counts.
+- A call over 2 s records `daemon_runtime.v1` / `store_call_slow` through the
+  error-alert route, episode `<name>:<UTC date>`, at most once per operation per
+  day. The worker schedules it on the event loop and never waits; Store calls
+  made by that alert task log but never alert.
+
+Lines and alerts carry names and numbers only. Instrumentation runs after the
+call's outcome is captured, inside one guard; a failure is counted and dropped.
+
 Portable focused checks are `tests/test_loop_stall_guard.py`, the existing
 logging/adapter/core suites and held-component process tests. Required installed
 acceptance additionally holds actual MAIN and Store faults until an independent
