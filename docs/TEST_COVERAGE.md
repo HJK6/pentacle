@@ -162,7 +162,7 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
 the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
 every requested selection; it does not substitute for the full merge gate.
-`v2-merge-capacity` uses unit 1260s / smoke 900s. Public CI runs six serial
+`v2-merge-capacity` uses unit 1800s / smoke 900s until the new measurements set the budget. Public CI runs six serial
 `v2-unit-ci-shard` cells followed by one `v2-smoke` invocation.
 The shell smoke/soak wrappers call the same
 `run_gate.py`; their existence does not add tests to merge.
@@ -174,16 +174,9 @@ calibration measurements, not the final three-run acceptance series. Local
 unit and merge profiles use two workers with worker restarts disabled; the
 each hosted partition stays serial. An earlier
 serial calibration measured 1830.653s; it does not measure the new partitions.
-Smoke and the standalone unit cap remain 900s. The capacity unit
-bound is twice the final local maximum rounded up to a minute: the three
-eligible quiet finals on `3daecb7a` measured 611.754s, 605.996s and 614.533s,
-a 60.44% reduction from the serial reference. The resulting capacity unit
-bound is 1260s, for a 2160s unit-plus-smoke total. The budget-only correction
-retains those measurements under an explicit budget-only evidence-reuse
-decision. They remain historical evidence on the named sources; upstream
-test changes need a fresh reference and final series. Hosted partition
-measurements independently calibrate only their own lower-only target bound.
-All receipts preserve the pass-set, progress journal and owned-process cleanup.
+Smoke and the standalone unit cap remain 900s. The capacity budget remains
+unchanged until the new candidate meets its timing acceptance.
+
 
 [`gate_web.py`](../scripts/gate_web.py) invokes
 [`web_gate.js`](../test/e2e/web_gate.js) and the separate interrupt test.

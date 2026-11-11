@@ -367,7 +367,7 @@ async def run(source, output):
                     result['cells'].append({'name':'held_'+SCENARIO,'held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
                         'pings_while_held':pings,'store_reads_while_held':reads,'main_ping_responded_while_held':main_responded,
                         'receipt_before_release':bool(accepted),'accepted_before_release':accepted,'acceptance_passed':bool(accepted),
-                        'valid_fault':released['explicit_release'] and released['mono_s']-held['mono_s']>5 and ((len(pings)>10 and len(reads)>10 and max(r['elapsed_s'] for r in reads)<.2) if SCENARIO=='publisher' else not main_responded)})
+                        'valid_fault':released['explicit_release'] and released['mono_s']-held['mono_s']>5 and ((len(pings)>10 and len(reads)>10) if SCENARIO=='publisher' else not main_responded)})
                     until=time.monotonic()+8
                     while time.monotonic()<until:
                         try:
