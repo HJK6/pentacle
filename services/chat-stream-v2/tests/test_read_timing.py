@@ -178,7 +178,10 @@ SETTINGS = json.loads({settings!r})
 class Escaping(sqlite3.Connection):
     """An ordinary factory whose own __init__ runs SQL on the new connection."""
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        if SETTINGS.get("escape") == "factory_explicit":
+            sqlite3.Connection.__init__(self, *args, **kwargs)  # names the base, skipping super()
+        else:
+            super().__init__(*args, **kwargs)
         outside = SETTINGS["outside"]
         if SETTINGS.get("escape") == "factory_bound":
             self.execute("ATTACH DATABASE ? AS f", (outside,))
@@ -207,8 +210,45 @@ class Store:
                 self.conn.execute("CREATE TABLE x.t(a)")
             elif SETTINGS.get("escape") == "attach_literal":
                 self.conn.executescript("ATTACH DATABASE '" + outside + "' AS y; CREATE TABLE y.t(a);")
-            elif SETTINGS.get("escape") in ("factory_script", "factory_bound"):
+            elif SETTINGS.get("escape") in ("factory_script", "factory_bound", "factory_explicit"):
                 sqlite3.connect(self.path, factory=Escaping)
+            elif SETTINGS.get("escape") == "connection_literal":
+                self.conn.execute("ATTACH DATABASE '" + outside + "' AS y")
+                self.conn.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") in ("cursor_bound", "cursor_literal"):
+                cursor = self.conn.cursor()
+                if SETTINGS["escape"] == "cursor_bound":
+                    cursor.execute("ATTACH DATABASE ? AS y", (outside,))
+                else:
+                    cursor.execute("ATTACH DATABASE '" + outside + "' AS y")
+                cursor.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") == "same_sql_second":
+                inside = os.path.join(os.path.dirname(self.path), "inside.db")
+                self.conn.execute("ATTACH DATABASE ? AS y", (inside,))
+                self.conn.execute("DETACH DATABASE y")
+                self.conn.execute("ATTACH DATABASE ? AS y", (outside,))
+                self.conn.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") == "exception_then_outside":
+                inside = os.path.join(os.path.dirname(self.path), "inside.db")
+                try:
+                    self.conn.execute("ATTACH DATABASE ? AS y", (inside,))
+                    self.conn.execute("SELECT * FROM no_such_table")
+                except sqlite3.OperationalError:
+                    pass
+                self.conn.execute("ATTACH DATABASE ? AS z", (outside,))
+                self.conn.execute("CREATE TABLE z.t(a)")
+            elif SETTINGS.get("escape") == "foreign_factory":
+                class Foreign:
+                    pass
+                sqlite3.connect(outside, factory=Foreign)
+            elif SETTINGS.get("escape") == "foreign_cursor":
+                self.conn.cursor(object)
+            elif SETTINGS.get("escape") == "replace_authorizer":
+                self.conn.set_authorizer(None)
+                self.conn.execute("ATTACH DATABASE '" + outside + "' AS y")
+                self.conn.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") == "load_extension":
+                self.conn.enable_load_extension(True)
             elif SETTINGS.get("escape") == "factory_positional":
                 sqlite3.connect(self.path, 5.0, 0, "DEFERRED", True, Escaping)
         except sqlite3.Error:
@@ -304,8 +344,16 @@ def test_fake_world_passes_and_its_receipt_is_admitted(tmp_path):
     read_timing.check_receipt(receipt, receipt["sha"])
 
 
-@pytest.mark.parametrize("escape", ["connect", "uri", "attach_param", "attach_literal",
-                                    "factory_script", "factory_bound", "factory_positional"])
+PATH_ESCAPES = ["connect", "uri", "attach_param", "attach_literal", "connection_literal", "cursor_bound",
+                "cursor_literal", "factory_script", "factory_bound", "factory_positional", "factory_explicit",
+                "same_sql_second", "exception_then_outside"]
+ROUTE_ESCAPES = {"foreign_factory": "connection factory outside the guarded base",
+                 "foreign_cursor": "cursor factory outside the guarded base",
+                 "replace_authorizer": "replacing the SQLite authorizer",
+                 "load_extension": "enabling SQLite extension loading"}
+
+
+@pytest.mark.parametrize("escape", PATH_ESCAPES + sorted(ROUTE_ESCAPES))
 @pytest.mark.parametrize("swallow", [False, True], ids=["raised", "swallowed"])
 def test_outside_database_is_refused_before_open(tmp_path, escape, swallow):
     sentinel = tmp_path / "outside" / "sentinel.db"
@@ -316,7 +364,8 @@ def test_outside_database_is_refused_before_open(tmp_path, escape, swallow):
     candidate = _fake_candidate(tmp_path / "c", escape=escape, outside=str(sentinel), swallow=swallow)
     receipt = read_timing.run(candidate, tmp_path / "r.json", db=_fake_world(tmp_path / "w"), work_root=tmp_path)
     assert receipt["verdict"] == "NOT_EVALUATED" and receipt["passed"] is False
-    assert any(str(sentinel.resolve()) in reason for reason in receipt["refusals"]), receipt["refusals"]
+    expected = ROUTE_ESCAPES.get(escape, str(sentinel.resolve()))
+    assert any(expected in reason for reason in receipt["refusals"]), receipt["refusals"]
     assert _digest(sentinel) == before
     assert sorted(path.name for path in sentinel.parent.iterdir()) == ["sentinel.db"]
 

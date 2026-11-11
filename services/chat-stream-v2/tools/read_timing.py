@@ -31,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 
 SCHEMA = "pentacle.v2.read-timing.v1"
 #: 2: one untimed warm-up, three timed samples, median against the budget.
@@ -205,15 +206,23 @@ def _install_guard(owned: Path) -> None:
         _emit(kind="refused", reason=f"database outside the owned directory: {path}")
         return False
 
-    def authorize(action, arg1, *_rest):
-        if action != sqlite3.SQLITE_ATTACH:
-            return sqlite3.SQLITE_OK
-        if arg1 is not None:
-            return sqlite3.SQLITE_OK if inside(arg1, True) else sqlite3.SQLITE_DENY
-        if getattr(approved, "value", False):
-            return sqlite3.SQLITE_OK
-        _emit(kind="refused", reason="ATTACH with an unresolved filename")
-        return sqlite3.SQLITE_DENY
+    def authorizer(conn):
+        """Per connection. A bound target is approved only for the one guarded
+        execution on this connection whose parameters were resolved inside,
+        and the approval is consumed by its first use."""
+        owner = weakref.ref(conn)
+
+        def authorize(action, arg1, *_rest):
+            if action != sqlite3.SQLITE_ATTACH:
+                return sqlite3.SQLITE_OK
+            if arg1 is not None:
+                return sqlite3.SQLITE_OK if inside(arg1, True) else sqlite3.SQLITE_DENY
+            if getattr(approved, "value", None) is not None and approved.value() is owner():
+                approved.value = None
+                return sqlite3.SQLITE_OK
+            _emit(kind="refused", reason="ATTACH with an unresolved filename")
+            return sqlite3.SQLITE_DENY
+        return authorize
 
     def bound(sql, parameters):
         match = attach.match(sql) if isinstance(sql, str) else None
@@ -229,55 +238,77 @@ def _install_guard(owned: Path) -> None:
             return False
         return isinstance(value, (str, bytes)) and inside(value, True)
 
-    class Opened(sqlite3.Connection):
-        """Placed directly above sqlite3.Connection in every guarded class, so
-        the authorizer exists the moment the database opens: before any code
-        in a candidate factory's __init__ can run SQL on the connection."""
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            sqlite3.Connection.set_authorizer(self, authorize)
+    def refuse(reason: str, error=sqlite3.OperationalError):
+        _emit(kind="refused", reason=reason)
+        raise error("read timing refused: " + reason)
 
-    class Guard:
+    def run(conn, method, sql, parameters):
+        # Checked on every execution, so a cached prepared ATTACH (which the
+        # authorizer never sees again) is rechecked with its new parameters.
+        ok = bound(sql, parameters)
+        if ok is False:
+            refuse("ATTACH outside the owned directory or with an unresolved target", sqlite3.DatabaseError)
+        approved.value = weakref.ref(conn) if ok else None
+        try:
+            return method(sql, parameters)
+        finally:
+            approved.value = None
+
+    real_cursor = sqlite3.Cursor
+
+    class Cursor(real_cursor):
         def execute(self, sql, parameters=(), /):
-            ok = bound(sql, parameters)
-            if ok is False:
-                raise sqlite3.DatabaseError("read timing refused an ATTACH outside the owned directory")
-            approved.value = bool(ok)
-            try:
-                return super().execute(sql, parameters)
-            finally:
-                approved.value = False
+            return run(self.connection, super().execute, sql, parameters)
 
-        def set_authorizer(self, callback):
-            def both(*args):
-                verdict = authorize(*args)
-                return verdict if verdict != sqlite3.SQLITE_OK or callback is None else callback(*args)
-            super().set_authorizer(both)
+        def executemany(self, sql, parameters, /):
+            if isinstance(sql, str) and attach.match(sql):
+                refuse("ATTACH through executemany", sqlite3.DatabaseError)
+            return super().executemany(sql, parameters)
 
-    classes: dict[type, type] = {}
+    real_connection = sqlite3.Connection
 
-    def guarded(factory):
-        if factory not in classes:
-            if not (isinstance(factory, type) and issubclass(factory, sqlite3.Connection)):
-                _emit(kind="refused", reason=f"unsupported SQLite connection factory: {factory!r}")
-                raise sqlite3.OperationalError("read timing refused an unsupported connection factory")
-            bases = (Guard, Opened) if factory is sqlite3.Connection else (Guard, factory, Opened)
-            classes[factory] = type(factory.__name__, bases, {"__qualname__": factory.__qualname__,
-                                                              "__module__": factory.__module__})
-        return classes[factory]
+    class Connection(real_connection):
+        """Replaces sqlite3.Connection before candidate import, so every
+        candidate factory subclasses it and both super().__init__ and an
+        explicit sqlite3.Connection.__init__ resolve here: the path is checked
+        and the ATTACH authorizer installed before any candidate SQL runs."""
+        def __init__(self, database, *args, **kwargs):
+            uri = kwargs.get("uri", args[6] if len(args) > 6 else False)
+            if not inside(database, bool(uri)):
+                raise sqlite3.OperationalError("read timing refused a database outside the owned directory")
+            super().__init__(database, *args, **kwargs)
+            real_connection.set_authorizer(self, authorizer(self))
+
+        def cursor(self, factory=Cursor):
+            # An unguarded cursor could rerun a cached ATTACH unchecked.
+            if not (isinstance(factory, type) and issubclass(factory, Cursor)):
+                refuse(f"cursor factory outside the guarded base: {factory!r}")
+            return super().cursor(factory)
+
+        def execute(self, sql, parameters=(), /):
+            return self.cursor().execute(sql, parameters)
+
+        def executemany(self, sql, parameters, /):
+            return self.cursor().executemany(sql, parameters)
+
+        def set_authorizer(self, _callback):
+            refuse("replacing the SQLite authorizer", sqlite3.NotSupportedError)
+
+        def enable_load_extension(self, enabled, /):
+            if enabled:
+                refuse("enabling SQLite extension loading", sqlite3.NotSupportedError)
+            return super().enable_load_extension(enabled)
+
+    Connection.__module__ = Cursor.__module__ = "sqlite3"
 
     def connect(database, *args, **kwargs):
-        uri = kwargs.get("uri", args[6] if len(args) > 6 else False)
-        if not inside(database, bool(uri)):
-            raise sqlite3.OperationalError("read timing refused a database outside the owned directory")
-        if len(args) > 4:  # positional factory follows timeout..check_same_thread
-            args = (*args[:4], guarded(args[4]), *args[5:])
-        else:
-            kwargs["factory"] = guarded(kwargs.get("factory", sqlite3.Connection))
+        factory = args[4] if len(args) > 4 else kwargs.setdefault("factory", Connection)
+        if not (isinstance(factory, type) and issubclass(factory, Connection)):
+            refuse(f"connection factory outside the guarded base: {factory!r}")
         return real_connect(database, *args, **kwargs)
 
-    sqlite3.connect = connect
-    sqlite3.dbapi2.connect = connect
+    for module in (sqlite3, sqlite3.dbapi2):
+        module.Connection, module.Cursor, module.connect = Connection, Cursor, connect
 
 
 def _backup(source: Path, target: Path) -> float:

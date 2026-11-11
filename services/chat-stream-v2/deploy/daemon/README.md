@@ -151,8 +151,13 @@ Run it with the daemon's provisioned interpreter on a clean checkout of the
 candidate. It backs up `sessions.db` and the archive it is bound to through
 SQLite's backup API from read-only sources into one temporary directory, rebinds
 the copy to the copied archive, then starts the candidate's own `Store` on the
-copies. Every SQLite open or `ATTACH` outside that directory is refused before it
-happens. Budget version 2 calls each read once untimed to warm the caches of the
+copies. Before the candidate is imported, the `sqlite3` module's `Connection`,
+`Cursor` and `connect` are replaced with guarded versions, so every candidate
+connection, factory subclass and cursor checks its path and `ATTACH` target before
+SQLite opens it; replacing the authorizer or enabling extensions is refused, and
+any refusal makes the run NOT_EVALUATED. This stops accidents in ordinary
+repository code; deliberate bypass (`_sqlite3`, `ctypes`, raw file I/O, another
+process) is out of scope. Budget version 2 calls each read once untimed to warm the caches of the
 fresh copy, then three times timed, and compares the median store execution with
 the budget. It certifies warmed median execution only: not a cold first read, a
 read after cache invalidation, or tail latency. A failed or short invocation,
