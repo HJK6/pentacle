@@ -229,14 +229,30 @@ class Store:
                 self.conn.execute("ATTACH DATABASE ? AS y", (outside,))
                 self.conn.execute("CREATE TABLE y.t(a)")
             elif SETTINGS.get("escape") == "exception_then_outside":
-                inside = os.path.join(os.path.dirname(self.path), "inside.db")
+                # The approved ATTACH itself raises (inside, but no such
+                # directory); a leaked approval would then admit an unresolved target.
+                missing = os.path.join(os.path.dirname(self.path), "missing", "inside.db")
                 try:
-                    self.conn.execute("ATTACH DATABASE ? AS y", (inside,))
-                    self.conn.execute("SELECT * FROM no_such_table")
+                    self.conn.execute("ATTACH DATABASE ? AS y", (missing,))
                 except sqlite3.OperationalError:
                     pass
-                self.conn.execute("ATTACH DATABASE ? AS z", (outside,))
-                self.conn.execute("CREATE TABLE z.t(a)")
+                half = len(outside) // 2
+                self.conn.executescript("ATTACH DATABASE '" + outside[:half] + "' || '" + outside[half:]
+                                        + "' AS z; CREATE TABLE z.t(a);")
+            elif SETTINGS.get("escape") == "conform_subclass":
+                class Target(str):
+                    def __conform__(self, protocol):
+                        return outside
+                inside = os.path.join(os.path.dirname(self.path), "inside.db")
+                self.conn.execute("ATTACH DATABASE ? AS y", (Target(inside),))
+                self.conn.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") == "registered_adapter":
+                inside = os.path.join(os.path.dirname(self.path), "inside.db")
+                sqlite3.register_adapter(str, lambda value: outside if value == inside else value)
+                self.conn.execute("ATTACH DATABASE ? AS y", (inside,))
+                self.conn.execute("CREATE TABLE y.t(a)")
+            elif SETTINGS.get("escape") == "direct_load_extension":
+                self.conn.load_extension("read-timing-no-such-extension")
             elif SETTINGS.get("escape") == "foreign_factory":
                 class Foreign:
                     pass
@@ -346,11 +362,15 @@ def test_fake_world_passes_and_its_receipt_is_admitted(tmp_path):
 
 PATH_ESCAPES = ["connect", "uri", "attach_param", "attach_literal", "connection_literal", "cursor_bound",
                 "cursor_literal", "factory_script", "factory_bound", "factory_positional", "factory_explicit",
-                "same_sql_second", "exception_then_outside"]
+                "same_sql_second"]
 ROUTE_ESCAPES = {"foreign_factory": "connection factory outside the guarded base",
                  "foreign_cursor": "cursor factory outside the guarded base",
                  "replace_authorizer": "replacing the SQLite authorizer",
-                 "load_extension": "enabling SQLite extension loading"}
+                 "load_extension": "enabling SQLite extension loading",
+                 "direct_load_extension": "loading a SQLite extension",
+                 "exception_then_outside": "ATTACH with an unresolved filename",
+                 "conform_subclass": "not an exact unadapted str or bytes",
+                 "registered_adapter": "not an exact unadapted str or bytes"}
 
 
 @pytest.mark.parametrize("escape", PATH_ESCAPES + sorted(ROUTE_ESCAPES))

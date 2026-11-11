@@ -225,18 +225,31 @@ def _install_guard(owned: Path) -> None:
         return authorize
 
     def bound(sql, parameters):
+        """None for no bound ATTACH; else the exact parameters to execute
+        with, holding only a checked target; False to refuse. Only an exact
+        str or bytes with no registered adapter is accepted, and it is the
+        value executed, so SQLite binds precisely the checked filename."""
         match = attach.match(sql) if isinstance(sql, str) else None
         if match is None:
             return None
         token = match.group(1)
         try:
-            if token.startswith("?"):
-                value = parameters[int(token[1:] or 1) - 1]
-            else:
+            if token in ("?", "?1"):
+                if len(parameters) != 1:
+                    return False
+                value = parameters[0]
+            elif token[0] in ":@$":
                 value = parameters[token[1:]]
+            else:
+                return False
         except (LookupError, TypeError, ValueError):
             return False
-        return isinstance(value, (str, bytes)) and inside(value, True)
+        if type(value) not in (str, bytes) or (type(value), sqlite3.PrepareProtocol) in sqlite3.adapters:
+            _emit(kind="refused", reason="bound ATTACH target is not an exact unadapted str or bytes")
+            return False
+        if not inside(value, True):
+            return False
+        return (value,) if token.startswith("?") else {token[1:]: value}
 
     def refuse(reason: str, error=sqlite3.OperationalError):
         _emit(kind="refused", reason=reason)
@@ -245,12 +258,12 @@ def _install_guard(owned: Path) -> None:
     def run(conn, method, sql, parameters):
         # Checked on every execution, so a cached prepared ATTACH (which the
         # authorizer never sees again) is rechecked with its new parameters.
-        ok = bound(sql, parameters)
-        if ok is False:
+        exact = bound(sql, parameters)
+        if exact is False:
             refuse("ATTACH outside the owned directory or with an unresolved target", sqlite3.DatabaseError)
-        approved.value = weakref.ref(conn) if ok else None
+        approved.value = None if exact is None else weakref.ref(conn)
         try:
-            return method(sql, parameters)
+            return method(sql, parameters if exact is None else exact)
         finally:
             approved.value = None
 
@@ -293,6 +306,9 @@ def _install_guard(owned: Path) -> None:
 
         def set_authorizer(self, _callback):
             refuse("replacing the SQLite authorizer", sqlite3.NotSupportedError)
+
+        def load_extension(self, *_args, **_kwargs):
+            refuse("loading a SQLite extension", sqlite3.NotSupportedError)
 
         def enable_load_extension(self, enabled, /):
             if enabled:
