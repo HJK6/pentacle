@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from .test_deploy_gate_evidence import read_timing_receipt
 from .test_deploy_script import DEPLOY_PATH
 
 
@@ -177,13 +178,17 @@ sys.exit(payload['returncode'])
     }))
 
     def activate(*, reload=False, rollback=False, same_ref=False, fail=False, override=None,
-                 release_inputs=None):
+                 release_inputs=None, read_timing=None):
         selected = module._read_stamp(repo, service)["prior_sha"] if rollback else prior if same_ref else target
         actual_prior = git("rev-parse", "HEAD")
         payload = json.loads(evidence.read_text())
         payload["sha"] = selected
         payload["source"].update(sha_before=selected, sha_after=selected)
         evidence.write_text(json.dumps(payload))
+        # Forward deploys carry a passing receipt for the selected SHA; rollback carries none.
+        if read_timing is None and not rollback:
+            read_timing = tmp_path / "read-timing.json"
+            read_timing.write_text(json.dumps(read_timing_receipt(selected)))
         monkeypatch.setattr(module, "_ensure_launchd_environment", lambda *_a, **_k: reload)
 
         def runner(command, cwd):
@@ -208,7 +213,7 @@ sys.exit(payload['returncode'])
             service, release_checkout=repo,
             ref=prior if rollback or same_ref else "origin/main", rollback=rollback,
             gate_evidence=evidence, deployer_stream_id="test-host:deployer",
-            log_guard_dir=override, runner=runner,
+            log_guard_dir=override, runner=runner, read_timing_receipt=read_timing or None,
             **({"release_inputs": release_inputs} if release_inputs is not None else {}),
         )
 
@@ -551,3 +556,22 @@ def test_real_boot_producer_preserves_existing_port_readers(monkeypatch, capsys,
     # These are the existing wire/soak readers, unchanged.
     assert int(captured.out.rsplit(':', 1)[1].strip()) == 1234
     assert re.search(r'chat_streamd_v2 listening on 127\.0\.0\.1:(\d+)', captured.out)[1] == '1234'
+
+
+def test_forward_deploy_refuses_without_passing_read_timing_receipt_before_any_stop(isolated_release, tmp_path):
+    module, service, repo, prior, target, before, calls, activate = isolated_release
+    other = tmp_path / "other-sha-read-timing.json"
+    other.write_text(json.dumps(read_timing_receipt(prior)))
+    for receipt, message in ((False, "requires --read-timing-receipt"), (other, "sha does not match deploy sha")):
+        with pytest.raises(module.DeployError, match=message):
+            activate(read_timing=receipt)
+        assert not [call for call in calls if call[0] == "launchctl"], "refused before any service stop"
+        assert module._stamp_path(repo, service).read_bytes() == before
+        assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == prior
+
+
+def test_rollback_restoration_needs_no_read_timing_receipt(isolated_release):
+    module, service, repo, prior, target, _before, calls, activate = isolated_release
+    stamp = activate(rollback=True)
+    assert stamp["sha"] == target
+    assert [call[1] for call in calls if call[0] == "launchctl"] == ["kickstart"]

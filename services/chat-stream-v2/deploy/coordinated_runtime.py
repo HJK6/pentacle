@@ -122,9 +122,13 @@ def load_installer(controller):
 
 
 class Runtime:
-    def __init__(self, deployer, service, repo, runner, *, stream, boot_wait_seconds, log_guard_dir=None):
+    read_timing_receipt = None
+
+    def __init__(self, deployer, service, repo, runner, *, stream, boot_wait_seconds, log_guard_dir=None,
+                 read_timing_receipt=None):
         self.d, self.service, self.repo, self.runner = deployer, service, Path(repo).resolve(), runner
         self.stream, self.boot_wait_seconds, self.log_guard_dir = stream, boot_wait_seconds, log_guard_dir
+        self.read_timing_receipt = read_timing_receipt
         self.controller = Path(__file__).resolve().parents[3]
         self.installer = load_installer(self.controller)
         self.stopped = False
@@ -251,6 +255,8 @@ class Runtime:
         return manifest
 
     def prepare(self, intent, folder):
+        # Bound to the intent this transaction seals, under its lock.
+        self.d._load_read_timing_receipt(self.read_timing_receipt, intent["target_sha"])
         self.d.verify_release_checkout(self.repo, self.runner)
         if self.repo == self.controller or self.controller.is_relative_to(self.repo):
             raise Invalid("controller must be separate from mutable daemon checkout")
@@ -687,6 +693,8 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             rollback_from_sha=self.git("rev-parse", "HEAD"), sessions_db=Path(receipt["accounts"]["database"]))
 
     def revalidate(self, receipt, *, forward):
+        if forward:  # the sealed target, before any stop; rollback is never gated
+            self.d._load_read_timing_receipt(self.read_timing_receipt, receipt["intent"]["target_sha"])
         self.validate_common(receipt, forward=forward)
         now = self.current(receipt)
         if now["sha"] != receipt["intent"]["prior_sha"] or any(now["files"][key] != value["sha256"] for key, value in receipt["preimages"].items()):

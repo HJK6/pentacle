@@ -135,6 +135,52 @@ passes its native runner explicitly; direct library callers must do the same onl
 inside their authorized live path. Collector bootstrap failures propagate instead
 of being reported as a successful install.
 
+### Read-timing receipt
+
+Every forward daemon deploy, plain or coordinated (prepare and apply), needs
+`--read-timing-receipt` naming a passing receipt for the exact target SHA.
+Fixture-scale tests cannot see a read that is slow only on real data, so the
+receipt times the candidate's main reads on copies of the live database:
+
+```sh
+python services/chat-stream-v2/tools/read_timing.py \
+  --candidate /absolute/clean-candidate-checkout --out /private/read-timing.json
+```
+
+Run it with the daemon's provisioned interpreter on a clean checkout of the
+candidate. It backs up `sessions.db` and the archive it is bound to through
+SQLite's backup API from read-only sources into one temporary directory, rebinds
+the copy to the copied archive, then starts the candidate's own `Store` on the
+copies. Before the candidate is imported, the `sqlite3` module's `Connection`,
+`Cursor` and `connect` are replaced with guarded versions, so every candidate
+connection, factory subclass and cursor checks its path and `ATTACH` target before
+SQLite opens it; replacing the authorizer or enabling extensions is refused, and
+any refusal makes the run NOT_EVALUATED. This stops accidents in ordinary
+repository code; deliberate bypass (`_sqlite3`, `ctypes`, raw file I/O, another
+process) is out of scope. Budget version 2 calls each read once untimed to warm the caches of the
+fresh copy, then three times timed, and compares the median store execution with
+the budget. It certifies warmed median execution only: not a cold first read, a
+read after cache invalidation, or tail latency. A failed or short invocation,
+warm-up included, makes that read NOT_EVALUATED. The reads are
+`list_open_sessions_with_event_summary` (3.0 s), the newest 200-event
+`fetch_session_event_page` of the open session with the most events, called as the
+daemon calls it for an open chat, without a generation (1.0 s, and
+the page must hold at least 10 user or tell events), and
+`list_open_usage_fence_rows` for every host with an open session (0.1 s each).
+It exits 0 for PASS, 1 for FAIL (a breach, or the 15-minute deadline) and 2 for
+NOT_EVALUATED (anything that kept a read from running). Both copies are always
+removed; the copies need free disk of both files plus 20%, and the backup holds a
+read transaction on the live database while it runs.
+
+`deploy.py` refuses a forward deploy, before any service is stopped, when the
+receipt is missing, for another SHA or budget version (version 1 single-sample
+receipts included), from a dirty source, not passing, or has an absent, failing,
+unevaluated, repeated or contradictory read. It requires a warm-up and exactly
+three finite non-negative samples with full output per read and per host, and
+recomputes the median itself.
+There is no bypass: rerun the command, or change a budget by editing the spec and
+the command together. Rollback and coordinated recovery never need a receipt.
+
 ### Coordinated helper and daemon deployment
 
 A forward release that changes `provider_cli_artifact.code_identity()` requires
@@ -171,11 +217,13 @@ From the pinned controller root, use its provisioned interpreter:
 ```sh
 python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
   --release-checkout /absolute/runtime --coordinated-plan /private/intent.json \
-  --coordinated-receipt /private/receipt.json --prepare-only
+  --coordinated-receipt /private/receipt.json --prepare-only \
+  --read-timing-receipt /private/read-timing.json
 # Inside the separately granted deployment window:
 python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
   --release-checkout /absolute/runtime --coordinated-plan /private/intent.json \
-  --coordinated-receipt /private/receipt.json --deployer-stream-id host:deployer
+  --coordinated-receipt /private/receipt.json --deployer-stream-id host:deployer \
+  --read-timing-receipt /private/read-timing.json
 # Whole-transaction recovery, including a committed transaction or down daemon:
 python services/chat-stream-v2/deploy/deploy.py chat-streamd-v2 \
   --release-checkout /absolute/runtime --rollback \

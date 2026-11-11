@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from .test_deploy_script import deploy_mod
+from .test_deploy_gate_evidence import read_timing_receipt
 from .test_deploy_log_guard import isolated_release
 from .test_deploy_fleet_verdict import _rows
 from deploy import coordinated as c
@@ -683,7 +684,10 @@ def runtime_preparation(tmp_path, monkeypatch):
         if argv[0] == "/usr/bin/env" and result.returncode:
             pytest.fail("disposable target runner failed: " + result.stderr)
         return result
-    runtime = Runtime(d, service, fixture.repo, runner, stream="fixture:deployer", boot_wait_seconds=2)
+    timing = root / "read-timing.json"
+    timing.write_text(json.dumps(read_timing_receipt(fixture.target)))
+    runtime = Runtime(d, service, fixture.repo, runner, stream="fixture:deployer", boot_wait_seconds=2,
+                      read_timing_receipt=timing)
     runtime.controller = controller
     intent = {"schema": c.INTENT_SCHEMA, "transaction_id": "runtime-prepare-example", "controller_sha": d._git(controller, "rev-parse", "HEAD", runner=runner),
         "target_sha": fixture.target, "prior_sha": fixture.prior, "machines_file": str(machines), "policy_file": str(fixture.policy), "excluded_hosts": []}
