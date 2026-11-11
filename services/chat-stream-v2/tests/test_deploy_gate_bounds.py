@@ -33,7 +33,8 @@ STUB_RUN_GATE = textwrap.dedent(
     json.dump({"schema": "pentacle.v2.gate-evidence.v1", "gate": "merge", "sha": sha,
                "source": {"sha_before": sha, "sha_after": sha, "clean_before": True, "clean_after": True},
                "tiers": [row("unit"), row("smoke")], "passed": True,
-               "observed_env": {name: os.environ.get(name) for name in %r}},
+               "observed_env": {name: os.environ.get(name) for name in %r},
+               "observed_argv": sys.argv[1:], "observed_addopts": os.environ.get("PYTEST_ADDOPTS")},
               open(out, "w"))
     """
     % (SHA, BOUND_NAMES)
@@ -72,6 +73,16 @@ def _captured_bounds(tmp_path: Path) -> dict[str, str]:
     return {name: assignments.get(name) for name in BOUND_NAMES}
 
 
+def _subject_profile(repo: Path, *, workers=None, unit=1800) -> Path:
+    target = {"kind": "run_gate", "gate": "merge", "tier_timeouts": {"unit": unit, "smoke": 900}, "timeout_s": unit + 900}
+    if workers is not None:
+        target["unit_workers"] = workers
+    path = repo / "scripts" / "gate-env.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"schema": "pentacle.gate-env.v1", "profiles": {"pentacle": {"targets": {"v2-merge-capacity": target}}}}))
+    return path
+
+
 def test_inline_gate_uses_capacity_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in BOUND_NAMES:
         monkeypatch.delenv(name, raising=False)
@@ -84,6 +95,11 @@ def test_inline_gate_forwards_override(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.delenv("V2_SMOKE_TIMEOUT_S", raising=False)
 
     assert _captured_bounds(tmp_path) == {"V2_UNIT_TIMEOUT_S": "1500", "V2_SMOKE_TIMEOUT_S": "900"}
+    repo = tmp_path / "release"
+    _subject_profile(repo, workers=2, unit=600)
+    evidence = deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "override.json", SHA, deploy_mod._run)
+    assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": "1500", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert evidence["observed_argv"][:3] == ["merge", "--unit-workers", "2"]
 
 
 @pytest.mark.parametrize("value", ["abc", "", "0", "-5", "inf", "nan"])
@@ -99,6 +115,20 @@ def test_invalid_override_refuses_before_the_gate_runs(
             lambda command, _cwd: calls.append(tuple(command)),
         )
     assert calls == []
+    monkeypatch.delenv("V2_SMOKE_TIMEOUT_S")
+    repo = tmp_path / "release"
+    path = _subject_profile(repo, workers=2)
+    valid = json.loads(path.read_text())
+    target = valid["profiles"]["pentacle"]["targets"]["v2-merge-capacity"]
+    for invalid in ("{", "null", json.dumps({**valid, "schema": "future"}),
+                    *(json.dumps({**valid, "profiles": {"pentacle": {"targets": {"v2-merge-capacity": {**target, "unit_workers": v}}}}})
+                      for v in (True, 0, -1, "2", 1.5, None)),
+                    json.dumps({**valid, "profiles": {"pentacle": {"targets": {"v2-merge-capacity": {**target, "timeout_s": 1}}}}})):
+        path.write_text(invalid)
+        with pytest.raises(deploy_mod.DeployError, match="gate_profile_invalid"):
+            deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "bad.json", SHA,
+                                                  lambda command, _cwd: calls.append(tuple(command)))
+        assert calls == []
 
 
 def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,15 +141,29 @@ def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch:
     )
 
     assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert "--unit-workers" not in evidence["observed_argv"]
+    # The same loaded deploy module observes each checked-out subject, including
+    # a forward parallel profile followed by a legacy serial rollback profile.
+    for workers, unit in ((2, 600), (None, 1800), (1, 700)):
+        _subject_profile(repo, workers=workers, unit=unit)
+        evidence = deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, deploy_mod._run)
+        assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": str(unit), "V2_SMOKE_TIMEOUT_S": "900"}
+        assert evidence["observed_addopts"] is None
+        assert ("--unit-workers" in evidence["observed_argv"]) == (workers is not None)
+        if workers is not None:
+            assert evidence["observed_argv"][:3] == ["merge", "--unit-workers", str(workers)]
 
 
 def test_defaults_match_capacity_profile() -> None:
     profile = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
     capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge-capacity"]["tier_timeouts"]
 
-    assert deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS == {
+    assert deploy_mod._subject_gate_settings(REPO_ROOT)[0] == {
         f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in capacity.items()
     }
+    assert deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS == {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
+    target = profile["profiles"]["pentacle"]["targets"]["v2-merge-capacity"]
+    assert deploy_mod._subject_gate_settings(REPO_ROOT)[1] == ["--unit-workers", str(target["unit_workers"])]
 
 
 def test_hung_tier_still_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

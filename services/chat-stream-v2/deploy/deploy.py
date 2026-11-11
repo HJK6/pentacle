@@ -297,9 +297,8 @@ def _new_restart_activation(
 GATE_REQUIRED_TIER = "merge"
 GATE_REQUIRED_EXECUTABLES = ("git", "tmux")
 GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
-# The inline gate runs under `env -i`, so run_gate.py would fall back to 900 s per
-# tier. Use the qualified v2-merge-capacity tier bounds (scripts/gate-env.json);
-# a caller's own V2_<TIER>_TIMEOUT_S still wins.
+# Serial fallback for subjects predating the capacity profile. Read newer
+# worker/budget pairs from the checked-out subject, including during rollback.
 DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "1800", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
@@ -313,8 +312,40 @@ def _gate_path(repo: Path, service: ServiceConfig | None = None) -> str:
     return os.pathsep.join(dict.fromkeys(paths))
 
 
-def _gate_tier_timeouts() -> dict[str, str]:
-    bounds = {name: os.environ.get(name, default) for name, default in DEPLOY_GATE_TIER_TIMEOUTS.items()}
+def _subject_gate_settings(repo: Path) -> tuple[dict[str, str], list[str]]:
+    """The config marker and runner support belong to the same subject SHA."""
+    path = repo / "scripts" / "gate-env.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(DEPLOY_GATE_TIER_TIMEOUTS), []
+    except (OSError, ValueError) as exc:
+        raise DeployError(f"gate_profile_invalid: {path}: {exc}") from exc
+    try:
+        if config["schema"] != "pentacle.gate-env.v1" or not isinstance(config["profiles"], dict):
+            raise ValueError("unsupported profile schema")
+        targets = config["profiles"].get("pentacle", {}).get("targets", {})
+        if not isinstance(targets, dict):
+            raise ValueError("targets must be an object")
+        if "v2-merge-capacity" not in targets:
+            return dict(DEPLOY_GATE_TIER_TIMEOUTS), []
+        target = targets["v2-merge-capacity"]
+        limits = target["tier_timeouts"]
+        if (target["kind"] != "run_gate" or target["gate"] != "merge" or not isinstance(limits, dict)
+                or set(limits) != {"unit", "smoke"} or any(type(v) is not int or v <= 0 for v in limits.values())
+                or type(target["timeout_s"]) is not int or sum(limits.values()) != target["timeout_s"]):
+            raise ValueError("invalid capacity tier bounds")
+        workers = target.get("unit_workers", 1)
+        if type(workers) is not int or workers < 1:
+            raise ValueError("unit_workers must be a positive integer")
+        return ({f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in limits.items()},
+                ["--unit-workers", str(workers)] if "unit_workers" in target else [])
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise DeployError(f"gate_profile_invalid: {path}: {exc}") from exc
+
+
+def _gate_tier_timeouts(defaults: dict[str, str] | None = None) -> dict[str, str]:
+    bounds = {name: os.environ.get(name, default) for name, default in (defaults if defaults is not None else DEPLOY_GATE_TIER_TIMEOUTS).items()}
     for name, value in bounds.items():
         try:
             seconds = float(value)
@@ -325,7 +356,7 @@ def _gate_tier_timeouts() -> dict[str, str]:
     return bounds
 
 
-def _gate_environment(repo: Path, service: ServiceConfig | None = None) -> dict[str, str]:
+def _gate_environment(repo: Path, service: ServiceConfig | None = None, *, tier_timeouts: dict[str, str] | None = None) -> dict[str, str]:
     python = _venv_python(repo, service)
     if not python.is_file() or not os.access(python, os.X_OK):
         raise DeployError(f"gate_environment_interpreter_missing: {python}")
@@ -339,14 +370,14 @@ def _gate_environment(repo: Path, service: ServiceConfig | None = None) -> dict[
         "PATH": path,
         "PYTHON": str(python),
         "PYTHONNOUSERSITE": "1",
-        **_gate_tier_timeouts(),
+        **_gate_tier_timeouts(tier_timeouts),
     }
 
 
 def _gate_command(
-    repo: Path, *command: str, service: ServiceConfig | None = None
+    repo: Path, *command: str, service: ServiceConfig | None = None, tier_timeouts: dict[str, str] | None = None
 ) -> tuple[str, ...]:
-    environment = _gate_environment(repo, service)
+    environment = _gate_environment(repo, service, tier_timeouts=tier_timeouts)
     return ("/usr/bin/env", "-i", *(f"{key}={environment[key]}" for key in sorted(environment)), *command)
 
 
@@ -609,14 +640,17 @@ def run_gate_and_write_evidence(
     """Run and validate the canonical v2 merge gate in the release checkout."""
     if tuple(tiers) != (GATE_REQUIRED_TIER,):
         raise DeployError(f"v2 deploy requires exactly the {GATE_REQUIRED_TIER} gate")
+    tier_timeouts, worker_argv = _subject_gate_settings(repo)
     cmd = _gate_command(
         repo,
         str(_venv_python(repo, service)),
         str(repo / V2_SERVICE_PATH / "tools" / "run_gate.py"),
         GATE_REQUIRED_TIER,
+        *worker_argv,
         "--evidence-out",
         str(out_path),
         service=service,
+        tier_timeouts=tier_timeouts,
     )
     result = runner(tuple(str(part) for part in cmd), repo)
     if result.returncode != 0:
