@@ -144,8 +144,8 @@ def test_real_candidate_times_copies_and_never_touches_the_originals(real_candid
         bound = Path(conn.execute("SELECT archive_path FROM v2_send_receipt_sequence").fetchone()[0])
     assert bound.name == "sessions_archive.db" and bound.parent.name.startswith("pentacle-read-timing-")
     rows = _rows(receipt)
-    assert rows[HISTORY]["stream_id"] == "host-a:seat-0" and rows[HISTORY]["events"] == 200
-    assert rows[HISTORY]["user_or_tell"] >= 10
+    assert rows[HISTORY]["stream_id"] == "host-a:seat-0"
+    assert all(sample["events"] == 200 and sample["user_or_tell"] >= 10 for sample in rows[HISTORY]["samples"])
     assert rows[FENCE]["expected_hosts"] == ["host-a", "host-b"]
     assert receipt["database"]["path"] == str(db.resolve())
     assert receipt["database"]["archive_path"] == str(archive.resolve())
@@ -206,17 +206,27 @@ class Store:
     async def submit(self, fn, *, settle_on_cancel=False):
         return fn(self.conn)
 
+    calls = {{"inventory": 0, "history": 0}}
+
     async def list_open_sessions_with_event_summary(self):
+        call = self.calls["inventory"]
+        self.calls["inventory"] += 1
         def op(conn):
-            time.sleep(SETTINGS.get("inventory_sleep", 0))
+            sleeps = SETTINGS.get("inventory_sleeps", [0])
+            time.sleep(sleeps[min(call, len(sleeps) - 1)])
             return conn.execute("SELECT * FROM sessions WHERE status='open'").fetchall()
         return await self.submit(op)
 
     async def fetch_session_event_page(self, stream_id, *, before_daemon_seq, limit, generation=None):
+        call = self.calls["history"]
+        self.calls["history"] += 1
+        if call == SETTINGS.get("history_raises_on"):
+            raise RuntimeError("one invocation failed")
         def op(conn):
             rows = conn.execute("SELECT event_json FROM session_event_tail ORDER BY event_id DESC LIMIT ?",
                                 (limit,)).fetchall()
-            return [json.loads(row[0]) for row in rows]
+            page = [json.loads(row[0]) for row in rows]
+            return page[:12] if call == SETTINGS.get("history_short_on") else page
         return await self.submit(op)
 
     async def list_open_usage_fence_rows(self, host):
@@ -262,8 +272,12 @@ def test_fake_world_passes_and_its_receipt_is_admitted(tmp_path):
                                  "clean_before": True, "clean_after": True}
     assert set(receipt["database"]) >= {"path", "size_bytes", "max_event_id", "backup_seconds"}
     assert receipt["database"]["max_event_id"] == 200
-    for row in receipt["reads"]:
-        assert set(row) >= {"name", "verdict", "seconds", "statements"}
+    rows = _rows(receipt)
+    for row in (rows[INVENTORY], rows[HISTORY], *rows[FENCE]["hosts"]):
+        assert set(row) >= {"verdict", "seconds", "warmup", "samples"} and len(row["samples"]) == 3
+        for invocation in (row["warmup"], *row["samples"]):
+            assert set(invocation) >= {"seconds", "statements"} and invocation["statements"] >= 1
+    assert rows[HISTORY]["samples"][0]["events"] == 200 and rows[INVENTORY]["samples"][0]["rows"] == 1
     read_timing.check_receipt(receipt, receipt["sha"])
 
 
@@ -299,15 +313,16 @@ def test_unrunnable_reads_are_not_evaluated_and_exit_nonzero(tmp_path, case):
     rows = _rows(receipt)
     assert code == 2 and receipt["verdict"] == "NOT_EVALUATED" and receipt["passed"] is False
     expected = {"missing_method": {FENCE}, "dirty_tree": {INVENTORY, HISTORY, FENCE},
-                "no_open_session": {HISTORY, FENCE}, "short_page": {HISTORY}, "no_user_or_tell": {HISTORY}}[case]
+                "no_open_session": {INVENTORY, HISTORY, FENCE}, "short_page": {HISTORY}, "no_user_or_tell": {HISTORY}}[case]
     assert {name for name, row in rows.items() if row["verdict"] == "NOT_EVALUATED"} == expected
     assert {name for name, row in rows.items() if row["verdict"] == "PASS"} == set(rows) - expected
     if case == "dirty_tree":
         assert receipt["source"]["clean_before"] is False and "database" in receipt
 
 
-def test_budget_breach_fails_without_hiding_other_reads(tmp_path):
-    candidate = _fake_candidate(tmp_path / "c", inventory_sleep=3.2, omit=[FENCE])
+def test_median_breach_fails_without_hiding_other_reads(tmp_path):
+    # warm-up fast, then samples slow, fast, slow: the median breaches.
+    candidate = _fake_candidate(tmp_path / "c", inventory_sleeps=[0, 3.1, 0, 3.1], omit=[FENCE])
     out = tmp_path / "r.json"
     code = read_timing.main(["--candidate", str(candidate), "--out", str(out),
                              "--db", str(_fake_world(tmp_path / "w"))])
@@ -315,12 +330,33 @@ def test_budget_breach_fails_without_hiding_other_reads(tmp_path):
     rows = _rows(receipt)
     assert code == 1 and receipt["verdict"] == "FAIL"
     assert rows[INVENTORY]["verdict"] == "FAIL" and rows[INVENTORY]["seconds"] > 3.0
+    assert len(rows[INVENTORY]["samples"]) == 3
     assert rows[HISTORY]["verdict"] == "PASS" and rows[FENCE]["verdict"] == "NOT_EVALUATED"
+
+
+def test_warmed_median_excludes_a_slow_warm_up_and_one_slow_sample(tmp_path):
+    """The stated guarantee is warmed median execution, not first-read or tail latency."""
+    candidate = _fake_candidate(tmp_path / "c", inventory_sleeps=[3.2, 0, 3.2, 0])
+    receipt = read_timing.run(candidate, tmp_path / "r.json", db=_fake_world(tmp_path / "w"), work_root=tmp_path)
+    row = _rows(receipt)[INVENTORY]
+    assert receipt["verdict"] == "PASS" and row["warmup"]["seconds"] > 3.0
+    assert sorted(sample["seconds"] > 3.0 for sample in row["samples"]) == [False, False, True]
+    read_timing.check_receipt(receipt, receipt["sha"])
+
+
+@pytest.mark.parametrize("settings", [{"history_short_on": 0}, {"history_short_on": 2},
+                                      {"history_raises_on": 3}], ids=["short_warm_up", "short_sample", "failed_sample"])
+def test_one_bad_invocation_cannot_hide_behind_a_passing_median(tmp_path, settings):
+    candidate = _fake_candidate(tmp_path / "c", **settings)
+    receipt = read_timing.run(candidate, tmp_path / "r.json", db=_fake_world(tmp_path / "w"), work_root=tmp_path)
+    rows = _rows(receipt)
+    assert receipt["verdict"] == "NOT_EVALUATED" and rows[HISTORY]["verdict"] == "NOT_EVALUATED"
+    assert rows[INVENTORY]["verdict"] == "PASS" and rows[FENCE]["verdict"] == "PASS"
 
 
 def test_deadline_kills_child_closes_source_removes_copy_and_fails(tmp_path):
     pidfile = tmp_path / "child.pid"
-    candidate = _fake_candidate(tmp_path / "c", inventory_sleep=120, pidfile=str(pidfile))
+    candidate = _fake_candidate(tmp_path / "c", inventory_sleeps=[120], pidfile=str(pidfile))
     world = _fake_world(tmp_path / "w")
     work = tmp_path / "work"
     work.mkdir()

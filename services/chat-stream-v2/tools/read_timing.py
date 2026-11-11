@@ -7,9 +7,11 @@ checks the pair identity, rebinds the hot copy to the archive copy, closes both
 sources, and only then imports the candidate ``store`` module. From that point
 every SQLite open and ATTACH is resolved to a real path and refused before
 SQLite sees it when it lies outside the owned directory. The candidate's real
-``Store`` then serves three frozen reads, each timed as store execution.
+``Store`` then serves three frozen reads. Each gets one untimed warm-up call and
+three timed calls; the median store execution is compared with the budget. That
+certifies warmed median execution only, not a cold first read or the tail.
 
-PASS needs all three reads to run within budget version 1. A breach or the
+PASS needs all three reads to run within budget version 2. A breach or the
 deadline is FAIL; anything that keeps a read from running is NOT_EVALUATED.
 FAIL exits 1, NOT_EVALUATED exits 2. ``deploy.py`` admits a forward daemon
 deploy only with a passing receipt for its exact SHA (``check_receipt``).
@@ -31,11 +33,14 @@ import threading
 import time
 
 SCHEMA = "pentacle.v2.read-timing.v1"
-BUDGET_VERSION = 1
+#: 2: one untimed warm-up, three timed samples, median against the budget.
+#: Version 1 receipts (one cold sample) are refused.
+BUDGET_VERSION = 2
+SAMPLES = 3
 INVENTORY = "list_open_sessions_with_event_summary"
 HISTORY = "fetch_session_event_page"
 FENCE = "list_open_usage_fence_rows"
-#: Budget version 1, seconds of store execution. Changing one is a spec edit.
+#: Seconds of warmed median store execution. Changing one is a spec edit.
 BUDGETS = {INVENTORY: 3.0, HISTORY: 1.0, FENCE: 0.1}
 HISTORY_LIMIT = 200
 HISTORY_MIN_USER_OR_TELL = 10
@@ -50,15 +55,44 @@ HOT_COPY, ARCHIVE_COPY = "sessions.db", "sessions_archive.db"
 
 # -- admission (imported by deploy.py) ----------------------------------------
 
-def _seconds(value, where: str, budget: float) -> None:
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+def _number(value) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _check_invocation(invocation, where: str, read: str) -> None:
+    if not isinstance(invocation, dict) or not _number(invocation.get("seconds")):
         raise ValueError(f"{where} timing is not a finite non-negative number")
-    if value > budget:
-        raise ValueError(f"{where} timing exceeds budget version {BUDGET_VERSION}")
+    if type(invocation.get("statements")) is not int or invocation["statements"] < 1:
+        raise ValueError(f"{where} ran no store statements")
+    if read == HISTORY:
+        complete = (type(invocation.get("events")) is int and invocation["events"] == HISTORY_LIMIT
+                    and type(invocation.get("user_or_tell")) is int
+                    and invocation["user_or_tell"] >= HISTORY_MIN_USER_OR_TELL)
+    else:
+        rows = invocation.get("rows")
+        complete = type(rows) is int and rows >= (0 if read == FENCE else 1)
+    if not complete:
+        raise ValueError(f"{where} returned short output")
+
+
+def _check_timed(row: dict, where: str, read: str) -> None:
+    if row.get("verdict") != PASS:
+        raise ValueError(f"{where} is {row.get('verdict')}")
+    _check_invocation(row.get("warmup"), f"{where} warm-up", read)
+    samples = row.get("samples")
+    if not isinstance(samples, list) or len(samples) != SAMPLES:
+        raise ValueError(f"{where} needs exactly {SAMPLES} samples")
+    for index, sample in enumerate(samples):
+        _check_invocation(sample, f"{where} sample {index + 1}", read)
+    median = sorted(sample["seconds"] for sample in samples)[SAMPLES // 2]
+    if row.get("seconds") != median or not _number(row.get("seconds")):
+        raise ValueError(f"{where} summary contradicts its samples")
+    if median > BUDGETS[read]:
+        raise ValueError(f"{where} median exceeds budget version {BUDGET_VERSION}")
 
 
 def check_receipt(raw: object, sha: str) -> None:
-    """Raise ValueError unless ``raw`` is a passing version-1 receipt for ``sha``."""
+    """Raise ValueError unless ``raw`` is a passing current-version receipt for ``sha``."""
     if not isinstance(raw, dict):
         raise ValueError("receipt is not an object")
     if raw.get("schema") != SCHEMA:
@@ -84,19 +118,13 @@ def check_receipt(raw: object, sha: str) -> None:
         if row["name"] in rows:
             raise ValueError(f"receipt repeats read {row['name']}")
         rows[row["name"]] = row
-    for name, budget in BUDGETS.items():
-        row = rows.get(name)
-        if row is None:
+    for name in BUDGETS:
+        if name not in rows:
             raise ValueError(f"receipt lacks required read {name}")
-        if row.get("verdict") != PASS:
-            raise ValueError(f"required read {name} is {row.get('verdict')}")
-        _seconds(row.get("seconds"), name, budget)
-        if type(row.get("statements")) is not int or row["statements"] < 1:
-            raise ValueError(f"required read {name} ran no store statements")
-    page = rows[HISTORY]
-    if (type(page.get("events")) is not int or page["events"] != HISTORY_LIMIT
-            or type(page.get("user_or_tell")) is not int or page["user_or_tell"] < HISTORY_MIN_USER_OR_TELL):
-        raise ValueError("history page did not exercise a full page")
+        if rows[name].get("verdict") != PASS:
+            raise ValueError(f"required read {name} is {rows[name].get('verdict')}")
+    _check_timed(rows[INVENTORY], INVENTORY, INVENTORY)
+    _check_timed(rows[HISTORY], HISTORY, HISTORY)
     fence = rows[FENCE]
     expected, hosts = fence.get("expected_hosts"), fence.get("hosts")
     if (not isinstance(expected, list) or not expected or len(set(map(str, expected))) != len(expected)
@@ -108,10 +136,9 @@ def check_receipt(raw: object, sha: str) -> None:
             raise ValueError("usage-fence host row is malformed, unexpected or repeated")
         seen[row["host"]] = row
     for host in expected:
-        row = seen.get(host)
-        if row is None or row.get("verdict") != PASS:
+        if host not in seen:
             raise ValueError(f"usage-fence host {host} has no passing row")
-        _seconds(row.get("seconds"), f"{FENCE}({host})", BUDGETS[FENCE])
+        _check_timed(seen[host], f"{FENCE}({host})", FENCE)
 
 
 # -- child: copy, contain, time -----------------------------------------------
@@ -344,17 +371,44 @@ def _timed_store(base):
     return Timed
 
 
-async def _time(store, name: str, call) -> tuple[dict, object]:
+async def _measure(store, call) -> tuple[dict, object]:
     store.timing = meter = {"seconds": 0.0, "statements": 0, "calls": 0}
     try:
-        result = await call()
+        return meter, await call()
     finally:
         store.timing = None
-    row = {"name": name, "seconds": round(meter["seconds"], 6), "statements": meter["statements"],
-           "budget_s": BUDGETS[name]}
-    if meter["calls"] == 0:
-        return {**row, "verdict": NOT_EVALUATED, "detail": "read did not run through Store.submit"}, result
-    return {**row, "verdict": PASS if meter["seconds"] <= BUDGETS[name] else FAIL}, result
+
+
+def _coverage(read: str, result) -> tuple[dict, bool]:
+    """What one invocation returned, and whether it exercised the real read."""
+    if not isinstance(result, list):
+        return {"rows": None}, False
+    if read == HISTORY:
+        visible = sum(1 for event in result if isinstance(event, dict) and event.get("kind") in ("USER", "TELL"))
+        return ({"events": len(result), "user_or_tell": visible},
+                len(result) == HISTORY_LIMIT and visible >= HISTORY_MIN_USER_OR_TELL)
+    return {"rows": len(result)}, read == FENCE or len(result) >= 1
+
+
+async def _time(store, name: str, call) -> dict:
+    """Timing protocol of budget version 2: one untimed warm-up, then
+    SAMPLES timed calls; the budget is compared with their median. This
+    certifies warmed median store execution only, not a cold first read or
+    worst-case latency. Any invocation that fails or returns short output
+    leaves the read NOT_EVALUATED; it cannot hide behind a passing median."""
+    invocations = []
+    for _ in range(1 + SAMPLES):
+        meter, result = await _measure(store, call)
+        coverage, complete = _coverage(name, result)
+        invocations.append(({"seconds": round(meter["seconds"], 6), "statements": meter["statements"], **coverage},
+                            complete and meter["calls"] > 0 and meter["statements"] > 0))
+    warmup, samples = invocations[0][0], [invocation for invocation, _ in invocations[1:]]
+    median = sorted(sample["seconds"] for sample in samples)[SAMPLES // 2]
+    row = {"name": name, "budget_s": BUDGETS[name], "seconds": median, "warmup": warmup, "samples": samples}
+    if not all(complete for _, complete in invocations):
+        return {**row, "verdict": NOT_EVALUATED,
+                "detail": "an invocation returned short output or ran no store statements"}
+    return {**row, "verdict": PASS if median <= BUDGETS[name] else FAIL}
 
 
 async def _reads(store, cls) -> None:
@@ -376,8 +430,7 @@ async def _reads(store, cls) -> None:
         _emit(kind="read", row=row)
 
     async def inventory():
-        row, _ = await _time(store, INVENTORY, store.list_open_sessions_with_event_summary)
-        return row
+        return await _time(store, INVENTORY, store.list_open_sessions_with_event_summary)
 
     async def history():
         pick = await store.submit(lambda conn: conn.execute(
@@ -390,14 +443,9 @@ async def _reads(store, cls) -> None:
         stream_id, rows = pick[0], pick[1]
         # The daemon's open-chat request: no generation, so the page is the
         # current birth's (only recovered closed history passes a generation).
-        row, page = await _time(store, HISTORY, lambda: store.fetch_session_event_page(
+        row = await _time(store, HISTORY, lambda: store.fetch_session_event_page(
             stream_id, before_daemon_seq=None, limit=HISTORY_LIMIT))
-        page = page if isinstance(page, list) else []
-        visible = sum(1 for event in page if isinstance(event, dict) and event.get("kind") in ("USER", "TELL"))
-        row.update(stream_id=stream_id, tail_rows=rows, events=len(page), user_or_tell=visible)
-        if row["verdict"] == PASS and (len(page) != HISTORY_LIMIT or visible < HISTORY_MIN_USER_OR_TELL):
-            row.update(verdict=NOT_EVALUATED, detail="page was short or lacked user/tell events")
-        return row
+        return {**row, "stream_id": stream_id, "tail_rows": rows}
 
     async def fence():
         expected = [r[0] for r in await store.submit(lambda conn: conn.execute(
@@ -407,14 +455,13 @@ async def _reads(store, cls) -> None:
                     "detail": "no open session to select a host"}
         hosts = []
         for host in expected:
-            row, _ = await _time(store, FENCE, lambda: store.list_open_usage_fence_rows(host))
-            hosts.append({"host": host, "verdict": row["verdict"], "seconds": row["seconds"],
-                          "statements": row["statements"]})
+            row = await _time(store, FENCE, lambda: store.list_open_usage_fence_rows(host))
+            del row["name"], row["budget_s"]
+            hosts.append({"host": host, **row})
         verdicts = {row["verdict"] for row in hosts}
         verdict = FAIL if FAIL in verdicts else NOT_EVALUATED if NOT_EVALUATED in verdicts else PASS
         return {"name": FENCE, "verdict": verdict, "budget_s": BUDGETS[FENCE], "expected_hosts": expected,
-                "hosts": hosts, "seconds": max(row["seconds"] for row in hosts),
-                "statements": sum(row["statements"] for row in hosts)}
+                "hosts": hosts}
 
     await guarded(INVENTORY, inventory)
     await guarded(HISTORY, history)

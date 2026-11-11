@@ -105,21 +105,28 @@ def test_existing_refusals_keep_their_messages(tmp_path, field, value, message):
 
 # -- read-timing receipt (spec_pentacle__prerelease_live_read_timing_2026_11) --
 
+def _timed(seconds, **coverage):
+    """Warm-up then three samples; the summary is the samples' median."""
+    invocations = [{"seconds": value, "statements": 3, **coverage} for value in seconds]
+    return {"verdict": "PASS", "seconds": sorted(seconds[1:])[1],
+            "warmup": invocations[0], "samples": invocations[1:]}
+
+
 def read_timing_receipt(sha=SHA):
-    """A passing budget-version-1 receipt, shaped as tools/read_timing.py writes it."""
+    """A passing budget-version-2 receipt, shaped as tools/read_timing.py writes it."""
+    page = {"events": 200, "user_or_tell": 31}
     return {
-        "schema": "pentacle.v2.read-timing.v1", "budget_version": 1, "sha": sha,
+        "schema": "pentacle.v2.read-timing.v1", "budget_version": 2, "sha": sha,
         "source": {"sha_before": sha, "sha_after": sha, "clean_before": True, "clean_after": True},
         "verdict": "PASS", "passed": True, "refusals": [],
         "reads": [
-            {"name": "list_open_sessions_with_event_summary", "verdict": "PASS", "seconds": 2.6,
-             "statements": 40, "budget_s": 3.0},
-            {"name": "fetch_session_event_page", "verdict": "PASS", "seconds": 0.5, "statements": 9,
-             "budget_s": 1.0, "events": 200, "user_or_tell": 31},
-            {"name": "list_open_usage_fence_rows", "verdict": "PASS", "seconds": 0.004, "statements": 2,
-             "budget_s": 0.1, "expected_hosts": ["host-a", "host-b"],
-             "hosts": [{"host": "host-a", "verdict": "PASS", "seconds": 0.004, "statements": 1},
-                       {"host": "host-b", "verdict": "PASS", "seconds": 0.003, "statements": 1}]},
+            {"name": "list_open_sessions_with_event_summary", "budget_s": 3.0,
+             **_timed([6.9, 2.4, 2.9, 2.3], rows=40)},
+            {"name": "fetch_session_event_page", "budget_s": 1.0, **_timed([0.4, 0.36, 0.37, 0.35], **page)},
+            {"name": "list_open_usage_fence_rows", "verdict": "PASS", "budget_s": 0.1,
+             "expected_hosts": ["host-a", "host-b"],
+             "hosts": [{"host": "host-a", **_timed([0.03, 0.004, 0.005, 0.003], rows=2)},
+                       {"host": "host-b", **_timed([0.02, 0.003, 0.002, 0.004], rows=0)}]},
         ],
     }
 
@@ -136,6 +143,9 @@ def test_passing_read_timing_receipt_is_admitted(tmp_path):
     assert _load_timing(tmp_path, payload) == payload
 
 
+INV, PAGE, FENCE = "list_open_sessions_with_event_summary", "fetch_session_event_page", "list_open_usage_fence_rows"
+
+
 def _read(payload, name):
     return next(row for row in payload["reads"] if row["name"] == name)
 
@@ -145,7 +155,7 @@ def _drop_read(p):
 
 
 def _fail_read(p):
-    _read(p, "list_open_sessions_with_event_summary").update(verdict="FAIL", seconds=15.2)
+    _read(p, INV).update(verdict="FAIL")
 
 
 def _unevaluated_read(p):
@@ -161,16 +171,25 @@ def _host_without_row(p):
 
 
 def _host_failed(p):
-    _read(p, "list_open_usage_fence_rows")["hosts"][1].update(verdict="FAIL", seconds=0.4)
+    _read(p, FENCE)["hosts"][1].update(verdict="FAIL")
 
 
-def _timing(name, value):
-    return lambda p: _read(p, name).update(seconds=value)
+def _sample(name, index, host=None, **changes):
+    def mutate(p):
+        row = _read(p, name)
+        if host is not None:
+            row = row["hosts"][host]
+        (row["warmup"] if index == "warmup" else row["samples"][index]).update(changes)
+    return mutate
+
+
+def _summary(name, **changes):
+    return lambda p: _read(p, name).update(changes)
 
 
 @pytest.mark.parametrize("mutate", [
     lambda p: p.update(schema="pentacle.v2.gate-evidence.v1"),
-    lambda p: p.update(budget_version=2),
+    lambda p: p.update(budget_version=1),
     lambda p: p.update(budget_version=True),
     lambda p: p.update(sha="d" * 40),
     lambda p: p["source"].update(sha_after="d" * 40),
@@ -179,27 +198,42 @@ def _timing(name, value):
     lambda p: p.update(passed=False),
     lambda p: p.update(verdict="FAIL"),
     _drop_read, _fail_read, _unevaluated_read, _duplicate_read, _host_without_row, _host_failed,
-    _timing("list_open_sessions_with_event_summary", float("nan")),
-    _timing("list_open_sessions_with_event_summary", float("inf")),
-    _timing("fetch_session_event_page", -0.1),
-    _timing("fetch_session_event_page", "0.5"),
-    _timing("fetch_session_event_page", True),
-    _timing("list_open_sessions_with_event_summary", 3.01),
-    _timing("fetch_session_event_page", 1.5),
-    lambda p: _read(p, "list_open_usage_fence_rows")["hosts"][0].update(seconds=0.2),
-    lambda p: _read(p, "list_open_usage_fence_rows")["hosts"][0].update(seconds=float("nan")),
-    lambda p: _read(p, "list_open_usage_fence_rows").update(expected_hosts=[]),
-    lambda p: _read(p, "list_open_usage_fence_rows")["hosts"].append(
-        {"host": "host-a", "verdict": "PASS", "seconds": 0.001}),
-    lambda p: _read(p, "fetch_session_event_page").update(events=12),
-    lambda p: _read(p, "fetch_session_event_page").update(user_or_tell=3),
-    lambda p: _read(p, "list_open_sessions_with_event_summary").update(statements=0),
-], ids=["wrong_schema", "wrong_budget_version", "bool_budget_version", "wrong_sha", "source_sha_after",
+    _sample(INV, 0, seconds=float("nan")),
+    _sample(INV, 1, seconds=float("inf")),
+    _sample(PAGE, 2, seconds=-0.1),
+    _sample(PAGE, 0, seconds="0.36"),
+    _sample(PAGE, 0, seconds=True),
+    _sample(INV, "warmup", seconds=float("nan")),
+    _summary(INV, seconds=2.3),
+    _summary(INV, seconds=float("nan")),
+    lambda p: _read(p, INV).update(seconds=3.2, samples=[
+        {"seconds": v, "statements": 3, "rows": 40} for v in (3.2, 3.3, 2.0)]),
+    lambda p: _read(p, PAGE).update(seconds=1.4, samples=[
+        {"seconds": v, "statements": 3, "events": 200, "user_or_tell": 31} for v in (1.4, 1.5, 0.3)]),
+    lambda p: _read(p, INV)["samples"].pop(),
+    lambda p: _read(p, INV)["samples"].append({"seconds": 2.0, "statements": 3, "rows": 40}),
+    lambda p: _read(p, INV).pop("warmup"),
+    lambda p: _read(p, INV).pop("samples"),
+    lambda p: _read(p, FENCE)["hosts"][0].update(seconds=0.2, samples=[
+        {"seconds": v, "statements": 3, "rows": 2} for v in (0.2, 0.3, 0.01)]),
+    _sample(FENCE, 0, host=0, seconds=0.2),
+    _sample(FENCE, 2, host=1, seconds=float("nan")),
+    lambda p: _read(p, FENCE)["hosts"][0]["samples"].pop(),
+    _sample(FENCE, 0, host=1, rows=None),
+    lambda p: _read(p, FENCE).update(expected_hosts=[]),
+    lambda p: _read(p, FENCE)["hosts"].append(dict(_read(p, FENCE)["hosts"][0])),
+    _sample(PAGE, 1, events=12), _sample(PAGE, "warmup", events=0), _sample(PAGE, 2, user_or_tell=3),
+    _sample(INV, 0, rows=0), _sample(INV, 1, statements=0), _sample(INV, "warmup", statements=0),
+], ids=["wrong_schema", "single_sample_v1", "bool_budget_version", "wrong_sha", "source_sha_after",
         "dirty_before", "dirty_after", "passed_false", "verdict_fail", "read_absent", "read_failed",
-        "read_not_evaluated", "duplicate_read", "host_without_row", "host_failed", "nan_timing",
-        "inf_timing", "negative_timing", "string_timing", "bool_timing", "inventory_over_budget",
-        "history_over_budget", "host_over_budget", "host_nan_timing", "no_expected_hosts",
-        "duplicate_host_row", "short_page", "page_without_user_or_tell", "no_statements"])
+        "read_not_evaluated", "duplicate_read", "host_without_row", "host_failed", "nan_sample",
+        "inf_sample", "negative_sample", "string_sample", "bool_sample", "nan_warm_up",
+        "summary_not_median", "nan_summary", "median_over_budget", "history_median_over_budget",
+        "two_samples", "four_samples", "no_warm_up", "no_samples", "host_median_over_budget",
+        "host_sample_contradicts_summary", "host_nan_sample", "host_two_samples", "host_sample_without_output",
+        "no_expected_hosts", "duplicate_host_row", "short_sample_page", "short_warm_up_page",
+        "sample_without_user_or_tell", "inventory_sample_empty", "sample_without_statements",
+        "warm_up_without_statements"])
 def test_read_timing_receipt_refusals(tmp_path, mutate):
     payload = read_timing_receipt()
     mutate(payload)
@@ -267,3 +301,11 @@ def test_coordinated_forward_needs_receipt_and_rollback_does_not(tmp_path, monke
     module.deploy(service, **forward, read_timing_receipt=good)
     module.deploy(service, **common, rollback=True)
     assert calls == ["prepare" if prepare_only else "apply", "rollback"]
+
+
+def test_one_slow_sample_under_a_passing_median_is_admitted(tmp_path):
+    """Version 2 certifies warmed median execution, not the tail or a cold first read."""
+    payload = read_timing_receipt()
+    _read(payload, INV).update(seconds=2.4, samples=[
+        {"seconds": v, "statements": 3, "rows": 40} for v in (2.4, 9.0, 2.2)])
+    assert _load_timing(tmp_path, payload) == payload
