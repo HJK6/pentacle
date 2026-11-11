@@ -48,13 +48,15 @@ test('structured spec fields survive normalization and older frames default safe
   for (const key of ['worked', 'lead_seat', 'status_line', 'next_line']) {
     assert.deepEqual((member as Record<string, unknown>)[key], cell.inventory_frame.lanes[0].members[0][key]);
   }
-  assert.equal(member.status_line, 'Tests pass.');
+  assert.equal(member.status_line, 'Tests pass. Review pending');
+  assert.equal('blocked_line' in member, false);
   assert.equal(member.lead_seat?.active_step, 'Review the result.');
   assert.equal(member.criteria, undefined);
   assert.equal(member.transitions, undefined);
   const detail = normalizeWorkLanesInventory({ ...cell.inventory_frame, lanes: [cell.show_projection] })!.lanes[0].progress!.members[0];
   assert.deepEqual(detail.criteria, cell.show_projection.members[0].criteria);
   assert.deepEqual(detail.transitions, cell.show_projection.members[0].transitions);
+  assert.equal(detail.blocked_line, null);
   const old = normalizeWorkLanesInventory(fixture.inventory_frame)!.lanes[0];
   assert.equal(old.icon, null);
 });

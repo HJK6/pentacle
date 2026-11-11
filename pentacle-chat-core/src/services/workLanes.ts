@@ -77,7 +77,6 @@ export type WorkLaneMember = {
   estimate_exempt: boolean;
   status_text: string | null;
   next_action_text: string | null;
-  progress_text?: string | null;
   blockers_text?: string | null;
   checkpoint_state?: 'valid' | 'invalid' | 'unverifiable' | null;
   checkpoint_deficiencies?: Array<{ field: string; code: string; fix: string }>;
@@ -87,8 +86,11 @@ export type WorkLaneMember = {
   checkpoint_first_observed_at?: string | null;
   goal_text?: string | null;
   goal_text_truncated?: boolean;
+  /** Whole authored label when it passes the shared readable-fields contract, else null. */
   status_line?: string | null;
   next_line?: string | null;
+  /** Detail-only (work_lanes.show), same rule for the Blockers label. */
+  blocked_line?: string | null;
   worked?: {
     elapsed_h: number | null; censored: boolean; active_h: number | null;
     seats: number; qa_rounds: number; as_of: string;
@@ -328,6 +330,7 @@ function normalizeMember(raw: unknown): WorkLaneMember | null {
     status_text: str(raw.status_text),
     next_action_text: str(raw.next_action_text),
     status_line: str(raw.status_line), next_line: str(raw.next_line),
+    ...('blocked_line' in raw ? { blocked_line: str(raw.blocked_line) } : {}),
     worked: normalizeWorked(raw.worked), lead_seat: normalizeLeadSeat(raw.lead_seat),
     ...(Array.isArray(raw.criteria) ? { criteria: raw.criteria.flatMap((item) =>
       isRec(item) && typeof item.title === 'string' && typeof item.disposition === 'string'

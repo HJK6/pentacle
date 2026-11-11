@@ -48,7 +48,8 @@ def test_list_and_show_are_read_verbs(monkeypatch, capsys):
 
 def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys):
     member = {"spec_id": "spec_demo__detail", "status": "in_progress", "status_line": "Tests pass.",
-              "status_text": "Tests pass. Awaiting F12 review.", "progress_text": "Fixed v2.3; 12 checks pass.",
+              "status_text": "Tests pass. Awaiting F12 review.", "blockers_text": "Waiting for the release window.",
+              "progress_text": "Retired field.",
               "next_action_text": "Review the result.",
               "next_line": "Review the result.", "worked": {"active_h": 0.5},
               "lead_seat": {"stream_id": "host-a:lead"},
@@ -59,10 +60,11 @@ def test_show_prints_structured_details_without_members_flag(monkeypatch, capsys
     assert _run(["work-lane", "show", "wl-1"]) == 0
     output = capsys.readouterr().out
     assert "icon: phone" in output
-    for key in ("worked", "lead_seat", "criteria", "transitions", "Progress", "Status", "Next action"):
+    for key in ("worked", "lead_seat", "criteria", "transitions", "Status", "Next action", "Blockers"):
         assert f"{key}:" in output
     assert "Check `code`" in output and "Tests pass." in output
-    assert "F12 review" in output and "Fixed v2.3; 12 checks pass." in output
+    assert "F12 review" in output and "Waiting for the release window." in output
+    assert "Progress:" not in output and "Retired field." not in output
 
 
 def test_detail_rendering_follows_released_policy_declarations(monkeypatch, capsys):

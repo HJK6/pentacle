@@ -21,16 +21,23 @@ from work_lane_progress import lane_state, members_working, lane_progress, seat_
 from store_work_lane_episodes import LaneEpisodeSink
 from _shared.lane_icons import resolve_icon
 from _shared.lane_hues import resolve_hue
-from _shared.summary_prose import summary_line
+from _shared.summary_prose import field_line
 from work_lane_worked import WorkedCache
 from _shared.work_goals import project_goals
 from _shared.checkpoint_policy import detail_field_keys, policy_revision
 
 
 def detail_member_keys():
-    return detail_field_keys() | {"checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
+    return detail_field_keys() | {"blocked_line", "checkpoint_state", "checkpoint_deficiencies", "checkpoint_revision",
         "checkpoint_policy_revision", "checkpoint_changed_at", "checkpoint_first_observed_at",
         "goal_text", "goal_text_truncated", "goal_source"}
+
+def _line(member, field_id, raw_key):
+    """Whole valid label or null; a duplicate label is never valid, though raw text keeps the first."""
+    if any(d.get("code") == field_id + "_duplicate" for d in member.get("checkpoint_deficiencies") or []):
+        return None
+    return field_line(field_id, member.get(raw_key))
+
 
 LANE_FRAME_CAP = 64
 log = logging.getLogger(__name__)
@@ -169,9 +176,10 @@ def project_lane(lane: dict[str, Any], presence: dict[str, Any] | None, now_iso:
                                if not k.startswith("_") and (all_members or k not in detail_keys | {"criteria", "transitions"})},
                              "worked": (worked_by_spec or {}).get(member["spec_id"]),
                              "lead_seat": member.get("lead_seat"),
-                             "status_line": summary_line(member.get("status_text")),
-                             "next_line": summary_line(member.get("next_action_text")),
-                             **({"criteria": member.get("criteria", []),
+                             "status_line": _line(member, "status", "status_text"),
+                             "next_line": _line(member, "next_action", "next_action_text"),
+                             **({"blocked_line": _line(member, "blockers", "blockers_text"),
+                                 "criteria": member.get("criteria", []),
                                  "transitions": member.get("transitions", [])} if all_members else {})}
                             for member in progress["members"]]
     if all_members:

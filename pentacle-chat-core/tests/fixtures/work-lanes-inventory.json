@@ -3127,25 +3127,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             },
             {
               "spec_id": "spec_demo__remaining_only_2",
@@ -3175,25 +3170,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             }
           ],
           "no_spec_reason": null,
@@ -3408,25 +3398,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             },
             {
               "spec_id": "spec_demo__elapsed_only_ignored_2",
@@ -3450,25 +3435,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             }
           ],
           "no_spec_reason": null,
@@ -3673,25 +3653,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_2",
@@ -3715,25 +3690,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             },
             {
               "spec_id": "spec_demo__umbrella_exempt_3",
@@ -3757,25 +3727,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             }
           ],
           "no_spec_reason": null,
@@ -4025,25 +3990,20 @@
               "transitions": [],
               "status_line": null,
               "next_line": "Inspect the deck.",
-              "progress_text": null,
               "blockers_text": null,
               "checkpoint_state": "invalid",
               "checkpoint_deficiencies": [
                 {
-                  "field": "progress_text",
-                  "code": "progress_missing",
-                  "fix": "summary.md: write one **Progress** line (1-240 characters). Latest achieved result, or honestly no result yet."
-                },
-                {
                   "field": "status_text",
                   "code": "status_missing",
-                  "fix": "summary.md: write one **Status** line (1-240 characters). Present situation beyond a lifecycle label."
+                  "fix": "summary.md: write one **Status** line (1-160 characters, no semicolons, ids, paths or joined letter-digit tokens). The present situation in plain words, without a stage name."
                 }
               ],
               "checkpoint_revision": "2f51306af16716912d0e0ef6cbe4e6c206b377576c9f0f7a55bb3c8aea2be02c",
-              "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
+              "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0",
               "goal_text": null,
-              "goal_text_truncated": false
+              "goal_text_truncated": false,
+              "blocked_line": null
             }
           ],
           "no_spec_reason": null,
@@ -4683,7 +4643,7 @@
                 "qa_rounds": 1,
                 "as_of": "2026-01-03T00:00:00Z"
               },
-              "status_line": "Tests pass.",
+              "status_line": "Tests pass. Review pending",
               "next_line": "Review the result."
             }
           ],
@@ -4812,19 +4772,19 @@
             "qa_rounds": 1,
             "as_of": "2026-01-03T00:00:00Z"
           },
-          "status_line": "Tests pass.",
+          "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
-          "checkpoint_changed_at": null,
-          "goal_text": null,
-          "checkpoint_revision": null,
-          "blockers_text": null,
+          "blocked_line": null,
+          "goal_source": null,
+          "checkpoint_first_observed_at": null,
           "checkpoint_state": "unverifiable",
+          "blockers_text": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_revision": null,
           "checkpoint_deficiencies": [],
           "goal_text_truncated": null,
-          "checkpoint_first_observed_at": null,
-          "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
-          "progress_text": null,
-          "goal_source": null
+          "goal_text": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
         }
       ],
       "members_total": 1,
@@ -5028,7 +4988,7 @@
                 "qa_rounds": 1,
                 "as_of": "2026-01-03T00:00:00Z"
               },
-              "status_line": "Tests pass.",
+              "status_line": "Tests pass. Review pending",
               "next_line": "Review the result."
             }
           ],
@@ -5175,19 +5135,19 @@
             "qa_rounds": 1,
             "as_of": "2026-01-03T00:00:00Z"
           },
-          "status_line": "Tests pass.",
+          "status_line": "Tests pass. Review pending",
           "next_line": "Review the result.",
-          "checkpoint_changed_at": null,
-          "goal_text": null,
-          "checkpoint_revision": null,
-          "blockers_text": null,
+          "blocked_line": null,
+          "goal_source": null,
+          "checkpoint_first_observed_at": null,
           "checkpoint_state": "unverifiable",
+          "blockers_text": null,
+          "checkpoint_changed_at": null,
+          "checkpoint_revision": null,
           "checkpoint_deficiencies": [],
           "goal_text_truncated": null,
-          "checkpoint_first_observed_at": null,
-          "checkpoint_policy_revision": "afa9c34ff7c8f12a0323347a6d5f46851799d9e3dc844c70a0734e7af472ff30",
-          "progress_text": null,
-          "goal_source": null
+          "goal_text": null,
+          "checkpoint_policy_revision": "b06b0f151405485ac13dc29823b6ed66dbd3db60c2abc8a3c9407a79995c11b0"
         }
       ],
       "members_total": 1,
