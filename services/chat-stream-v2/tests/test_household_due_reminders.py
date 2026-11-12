@@ -69,7 +69,17 @@ def config(tmp_path):
             "self_person": "owner", "cosmo_url": "https://household.example.invalid",
             "cosmo_token_file": str(tmp_path / "cosmo.token"), "host_id": "fixture-host",
             "seat_cwd": str(tmp_path), "composite_stream_id": "fixture-chat:assistant",
+            "operator_request_ref": "message:fixture-request",
             "ws_url": "ws://127.0.0.1:7799", "agent_orch": ["agent-orch"]}
+
+
+@pytest.mark.parametrize('ref', [None, '', 'wake:fixture', 'message:', 'message:two words'])
+def test_invalid_operator_request_reference_fails_before_publish(config, ref):
+    config['operator_request_ref'] = ref
+    sink = Sink()
+    with pytest.raises(tool.Failure, match='invalid_operator_request_ref'):
+        invoke(config, sink=sink)
+    assert sink.publish_attempts == []
 
 
 def invoke(config, data=None, sink=None, at=DAY + "T08:00:00-06:00", **kwargs):

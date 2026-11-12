@@ -23,9 +23,10 @@ def child_script(url=URL, receipt=None, code=0, delay=0):
 
 def test_private_relay_delivers_once_and_prints_only_safe_ids(capsys):
     seen = []
-    def publish(url, op):
+    def publish(url, op, ref):
+        assert ref == "message:fixture"
         seen.append((url, op)); return {"publication_id": "pub", "question_id": "prompt"}
-    result = tool.relay(child_script(), "op", publish=publish)
+    result = tool.relay(child_script(), "op", "message:fixture", publish=publish)
     assert seen == [(URL, "op")]
     assert result == {"publication_id": "pub", "question_id": "prompt", "outcome": "ok"}
     assert capsys.readouterr() == ("", "")
@@ -36,7 +37,7 @@ def test_private_relay_delivers_once_and_prints_only_safe_ids(capsys):
     "https://auth.openai.com/\nsecond", "https://auth.openai.com/#secret", "not-a-url", "x"*8193])
 def test_malicious_url_never_publishes_or_leaks(url, capsys):
     seen = []
-    with pytest.raises(AccountError): tool.relay(child_script(url), "op", publish=lambda *a: seen.append(a))
+    with pytest.raises(AccountError): tool.relay(child_script(url), "op", "message:fixture", publish=lambda *a: seen.append(a))
     assert not seen and capsys.readouterr() == ("", "")
 
 
@@ -53,7 +54,7 @@ def test_failure_masks_child_output_and_reaps_owned_child(case, capsys):
         delay=10 if case == "timeout" else 0)
     if case == "no-url": argv = [sys.executable, "-c", "import os;os.write(2,b'{}')"]
     with pytest.raises(AccountError):
-        tool.relay(argv, "op", publish=publish, popen=popen, timeout=.1 if case == "timeout" else 10)
+        tool.relay(argv, "op", "message:fixture", publish=publish, popen=popen, timeout=.1 if case == "timeout" else 10)
     assert len(processes) == 1 and processes[0].poll() is not None
     assert capsys.readouterr() == ("", "")
 
@@ -65,9 +66,22 @@ def test_publish_precedes_action_prompt_and_url_is_absent_from_prompt():
         if argv[:2] == ["assistant", "publish"]:
             return {"type": "assistant.publish.ok", "publication_key": "pub"}
         return {"type": "prompt.ask.ok", "question": {"question_id": "q", "notification_id": "notice"}, "notification":{"surfaced_to_stream_id":"fixture:assistant"}}
-    assert tool.publish_url(URL, "op", command=command, verify=lambda: "fixture:assistant") == {"publication_id": "pub", "question_id": "q"}
+    assert tool.publish_url(URL, "op", "message:fixture", command=command, verify=lambda: "fixture:assistant") == {"publication_id": "pub", "question_id": "q"}
     assert URL in seen[0] and URL not in " ".join(seen[1])
+    assert seen[0][seen[0].index('--note-type') + 1] == 'problem'
+    assert seen[0][seen[0].index('--ref') + 1] == 'message:fixture'
+    assert len(seen[1][seen[1].index('--body') + 1]) <= 300
     assert seen[1][-4:] == ["--option", "Done", "--option", "Not yet"]
+
+
+def test_login_requires_reference_before_start(monkeypatch):
+    monkeypatch.setattr(tool, 'verify_front_desk', lambda: pytest.fail('must not start'))
+    argv = ['--policy', '/fixture', '--host', 'h', '--provider', 'codex', '--account', 'a',
+            '--login-generation', 'old', '--new-generation', 'new', '--operation-id', 'op']
+    with pytest.raises(SystemExit):
+        tool.main(argv)
+    with pytest.raises(SystemExit):
+        tool.main(argv + ['--ref', 'lane:wrong'])
 
 
 @pytest.mark.parametrize("reply", [{}, {"type": "prompt.ask.ok"},
@@ -76,7 +90,7 @@ def test_missing_prompt_delivery_refuses(reply):
     def command(argv):
         if argv[0] == "assistant": return {"type": "assistant.publish.ok", "publication_key": "pub"}
         return reply
-    with pytest.raises(AccountError): tool.publish_url(URL, "op", command=command, verify=lambda: "fixture:assistant")
+    with pytest.raises(AccountError): tool.publish_url(URL, "op", "message:fixture", command=command, verify=lambda: "fixture:assistant")
 
 
 def test_remote_contract_uses_policy_paths_hashed_operation_and_private_fd():
@@ -105,7 +119,7 @@ def test_remote_fd_adapter_preserves_only_url_on_stdout(tmp_path):
     script.write_text("import counterpart,os,json;os.write(3,b'" + URL + "\\n');os.close(3);print(json.dumps({'state':'done','outcome':'ok'}))")
     seen = []
     argv = [sys.executable, "-c", tool.REMOTE_RUNNER, str(script)]
-    assert tool.relay(argv, "op", publish=lambda url, op: seen.append(url) or {"publication_id":"p", "question_id":"q"})["outcome"] == "ok"
+    assert tool.relay(argv, "op", "message:fixture", publish=lambda url, op, ref: seen.append(url) or {"publication_id":"p", "question_id":"q"})["outcome"] == "ok"
     assert seen == [URL]
 
 
@@ -131,7 +145,7 @@ def test_main_masks_untrusted_exception_and_never_starts_for_non_fd(monkeypatch,
     monkeypatch.setattr(tool, "verify_front_desk", lambda: (_ for _ in ()).throw(RuntimeError(URL)))
     monkeypatch.setattr(tool, "relay", lambda *args: pytest.fail("unauthenticated remote mutation"))
     assert tool.main(["--policy", "/fixture", "--host", "host-target", "--provider", "codex", "--account", "ours",
-        "--login-generation", "old", "--new-generation", "new", "--operation-id", "op"]) == 1
+        "--login-generation", "old", "--new-generation", "new", "--operation-id", "op", "--ref", "message:fixture"]) == 1
     output = capsys.readouterr()
     assert output.err == "" and json.loads(output.out) == {"outcome":"operator_login_failed"}
 
@@ -158,7 +172,7 @@ def test_exited_child_cleanup_preserves_original_refusal(monkeypatch, capsys, si
 
     monkeypatch.setattr(tool.os, "killpg", exited_group)
     with pytest.raises(AccountError) as caught:
-        tool.relay(child_script(), "op", publish=publish, popen=popen)
+        tool.relay(child_script(), "op", "message:fixture", publish=publish, popen=popen)
     assert caught.value is refusal
     assert len(published) == 1
     assert processes[0].poll() is not None
@@ -194,7 +208,7 @@ def test_denied_live_child_cleanup_keeps_original_and_visible_failure(monkeypatc
     monkeypatch.setattr(tool.os, "killpg", denied_group)
     try:
         with pytest.raises(AccountError) as caught:
-            tool.relay(child_script(delay=30), "op", publish=publish, popen=popen)
+            tool.relay(child_script(delay=30), "op", "message:fixture", publish=publish, popen=popen)
         assert caught.value is refusal
         assert any("TimeoutExpired" in note for note in caught.value.__notes__)
         assert processes[0].poll() is None  # Never pretend the denied cleanup reaped it.
@@ -227,6 +241,6 @@ def test_cleanup_failure_without_original_exception_is_not_success(monkeypatch):
         return process
 
     with pytest.raises(subprocess.TimeoutExpired, match="owned relay cleanup"):
-        tool.relay(child_script(), "op", publish=lambda *args: {"publication_id": "pub"}, popen=popen)
+        tool.relay(child_script(), "op", "message:fixture", publish=lambda *args: {"publication_id": "pub"}, popen=popen)
     assert processes[0].poll() is not None
     assert processes[0].stdout.closed and processes[0].stderr.closed

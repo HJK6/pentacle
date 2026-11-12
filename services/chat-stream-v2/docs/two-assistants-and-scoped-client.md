@@ -3,7 +3,7 @@
 This is the chat-daemon foundation for a second always-on assistant (**Daff**,
 the operator's) living beside the **primary assistant** on the same host, plus a restricted phone client
 (**Cosmo**) that can use only Daff's chat. It is deliberately a *fixed two-assistant*
-design — not a multi-user platform. The primary assistant's behaviour is unchanged throughout.
+design — not a multi-user platform.
 
 ## A. Named assistants
 
@@ -27,6 +27,16 @@ legacy single `id=1` row to the primary name verbatim; `rollback_binding_to_sing
 restores the one-row form (used by the deploy rollback path). The mirror binding
 is a per-composite dict; the primary assistant keeps the legacy kv key `assistant.mirror.enabled`
 while others use `assistant.mirror.<name>.enabled`.
+
+Strict publication defaults on for the primary and off for Daff. The env key is
+`PENTACLE_ASSISTANT_STRICT_PUBLICATION` for the primary and
+`PENTACLE_ASSISTANT_<NAME>_STRICT_PUBLICATION` for a named assistant. The kv
+overrides are `assistant.strict_publication.enabled` and
+`assistant.strict_publication.<name>.enabled`; setting the primary key to `off`
+restores legacy mirror behavior immediately. `inspect_stream` reports the effective
+setting and source. Strict mode requires explicit replies and typed, referenced
+proactive notes, detects repeated note text, and sends missing-reply notices and
+unanswered markers for operator dispatches. Desk dispatches do not receive them.
 
 **Policy** (`AssistantPolicy`) protects a *set* of roles (`roles` = primary +
 `extra_roles`). `protects()` is membership, the singleton check in `available()`

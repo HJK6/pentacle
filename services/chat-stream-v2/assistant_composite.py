@@ -119,7 +119,7 @@ class AssistantCompositeConfig:
     direct_primary_generation: str = ""
     authority_stream_id: str = ""
     rebind_authorized_spec_ids: frozenset[str] = frozenset()
-    strict_publication_default: bool = True
+    strict_publication_default: bool | None = None
     mirror_enabled_default: bool = True
     title: str = "Zephyr"
 
@@ -787,12 +787,12 @@ class AssistantComposite:
             projected.pop("session_generation", None)
         return projected
 
-    async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None) -> dict[str, Any]:
+    async def accept_input(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None, desk_dispatch: bool | None = None) -> dict[str, Any]:
         """Accept literal operator input once and wake the routing consumer."""
         async with self._binding_lock:
-            return await self._accept_input_locked(msg, operator_principal=operator_principal, scoped_credential_id=scoped_credential_id)
+            return await self._accept_input_locked(msg, operator_principal=operator_principal, scoped_credential_id=scoped_credential_id, desk_dispatch=desk_dispatch)
 
-    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None) -> dict[str, Any]:
+    async def _accept_input_locked(self, msg: dict[str, Any], *, operator_principal: str | None = None, scoped_credential_id: str | None = None, desk_dispatch: bool | None = None) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("assistant_composite_disabled")
         body = msg.get("text") if "text" in msg else msg.get("message")
@@ -858,7 +858,7 @@ class AssistantComposite:
             reply_to_message_id=_optional_id(msg.get("reply_to_message_id")),
             reply_to_question_id=_optional_id(msg.get("reply_to_question_id")),
             actor_stream_id=operator_principal,
-            desk_dispatch=_is_desk_principal(operator_principal),
+            desk_dispatch=_is_desk_principal(operator_principal) if desk_dispatch is None else desk_dispatch,
             scoped_credential_id=scoped_credential_id,
             direct_primary=self.config.direct_primary,
             direct_target_stream_id=self.config.direct_primary_stream_id if self.config.direct_primary else None,
@@ -1704,6 +1704,7 @@ class AssistantComposite:
             "type", "request_id", "composite_stream_id", "dispatch_id",
             "reply_to_message_id", "reply_to_question_id", "publish_kind", "message",
             "attachment_ids", "evidence_refs", "response_state", "reply_to_message_ids",
+            "note_type", "ref",
         }
         if {str(key) for key in msg if not str(key).startswith("_")} - publish_fields:
             raise ValueError("assistant_publish_payload_invalid")
@@ -1790,6 +1791,9 @@ class AssistantComposite:
                     member_payload = json.loads(str((member or {}).get("route_json") or "{}"))
                 except (TypeError, ValueError):
                     member_payload = {}
+                if (member_payload.get("desk_dispatch") and
+                        (await self.store.strict_publication_state(self.config.stream_id))["enabled"]):
+                    raise ValueError("assistant_publish_desk_dispatch: use a relay note referencing the message")
                 if (not direct_route or member is None or not member.get("dispatch_id")
                         or member_payload.get("admission_mode") != "direct_primary"
                         or not await self._is_current_dispatch_actor(member, str(actor_stream_id or ""), allow_authority=False)):
@@ -1814,6 +1818,9 @@ class AssistantComposite:
             "attachment_ids": attachment_ids,
             "evidence_refs": evidence_refs,
         }
+        for field in ("note_type", "ref"):
+            if field in msg:
+                canonical_payload[field] = msg[field]
         if response_state is not None:
             canonical_payload["response_state"] = response_state
         if reply_to_message_ids is not None:
@@ -1848,6 +1855,9 @@ class AssistantComposite:
             # Mirror correlation matches a turn's proactive publication by seat and generation.
             event["raw"]["actor_generation"] = actor_generation
             event["raw"]["published_by"] = {"stream_id": actor_stream_id, "generation": actor_generation}
+            for field in ("note_type", "ref"):
+                if field in msg:
+                    event[field] = event["raw"][field] = msg[field]
         stored = await self.store.record_assistant_composite_publication(
             stream_id=self.config.stream_id, publication_key=publication_key,
             dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,

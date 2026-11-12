@@ -1,4 +1,4 @@
-"""RED tests for spec_pentacle__assistant_duplicate_reply_sources_2026_10.
+"""Rollback-mode coverage for spec_pentacle__assistant_duplicate_reply_sources_2026_10.
 
 Two operator-visible duplicate sources on the canonical assistant chat:
 
@@ -247,7 +247,7 @@ def test_batch_member_not_declared_by_the_publication_stays_open_without_a_secon
     asyncio.run(_go())
 
 
-def test_novel_proactive_with_no_open_dispatch_is_always_delivered():
+def test_novel_proactive_with_no_open_dispatch_is_delivered_with_strict_off():
     """Regression guard (operator 2026-10-14, dispatch b0223cd9): unprompted updates must never be
     blocked. A brand-new proactive update with no open dispatch goes through immediately, including
     on a seat that has never received an operator dispatch (the earlier bug: the front desk could

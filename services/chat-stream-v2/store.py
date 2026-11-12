@@ -1865,6 +1865,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_dispatch "
+                         "ON v2_assistant_composite_publications(stream_id,dispatch_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
+                         "ON v2_assistant_composite_publications(event_id)")
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)

@@ -377,29 +377,25 @@ progress should remain in the owner's visible chat unless a supported
 composite publication binding exists. No duplicate owner or reparenting is
 needed solely for presentation.
 
-## Direct reply mirroring
+## Direct replies and strict publication
 
-A direct-primary dispatch publishes its final answer through `assistant publish`
-with the dispatch's fixed request key and `response_state=final`. Publish the
-exact answer, preserving Markdown and whitespace. The canonical prose event is
-the authoritative reply; the shared transcript renderer handles its Markdown.
-If the seat ends that dispatch's turn with prose and no publication, the daemon
-shows that prose as an acknowledgment (see the turn-final exception below).
+With strict publication enabled, only an explicit `assistant publish` delivers a
+front-desk reply to the operator; turn text is never mirrored. The dispatch packet
+supplies `publish:<dispatch>` for a final and `publish:<dispatch>:ack` for an
+acknowledgment, and instructs the seat to end its turn with `done`. The original
+transcript remains intact. If a landed operator dispatch ends without any
+publication, a `dispatch_no_reply` notice immediately wakes the bound seat with
+both commands. After 300 seconds without a publication the chat gains one
+`unanswered` marker attached to the operator message. Desk-originated dispatches
+receive neither replies nor these reminders; use a proactive relay note instead.
 
-A structured final (Claude `end_turn`, Codex `final_answer`) is not mirrored
-when its own turn made a proactive publication (`assistant publish --proactive`)
-from the bound seat and its current generation. A publication belongs to the
-turn only when a tool row of the same transcript, after the previous final,
-names its request key. This works however late the turn's rows are ingested and
-compares no text. A turn without its own proactive publication mirrors as usual,
-even with the same text, including a final ingested after a later turn's
-publication. A publication from another seat, an earlier generation, or one
-without `raw.actor_generation` never suppresses a final. Known limit: a request
-key built at run time (for example `--request-id "$KEY"`) does not appear in the
-tool row, so the turn is not matched and its final mirrors. The result is a
-visible duplicate, which is acceptable; a lost message is not. Pass a literal
-`--request-id`. Each suppression logs
-`assistant mirror skipped proactive-published turn`.
+`PENTACLE_ASSISTANT_STRICT_PUBLICATION` defaults on for the primary assistant;
+`PENTACLE_ASSISTANT_<NAME>_STRICT_PUBLICATION` defaults off for other assistants.
+`inspect_stream` exposes the effective value and source. Set the primary kv
+`assistant.strict_publication.enabled` to `off` for immediate rollback; named
+assistants use `assistant.strict_publication.<name>.enabled`. With strict mode
+off the previous mirror and turn-final behavior and untyped proactive publishes
+remain available; Daff defaults to that behavior.
 
 ## Dispatch batching
 
@@ -440,89 +436,19 @@ to that seat. A closed seat's questions expire as usual. A failed binding read
 omits the stamp and the wider scope; it never fails hello or a list. Lane
 `question.open` is not used in this mode.
 
-Automatic mirroring requires a proven operator trigger in the same session
-lifecycle and source transcript. A USER matching this binding's resolved
-direct-primary wire envelope is an operator trigger, including queued-command
-USER rows. Later verified peer or service inputs do not take ownership from
-that operator. A turn containing only peer or service inputs does not mirror.
-Unknown inputs also stop automatic mirroring, including unverified tell or
-notice envelopes, direct provider-TUI text and prompts asking for visible
-output. They remain unverified in their source transcript and emit
-`assistant_mirror_unknown_trigger` telemetry with `mirror_action=suppressed`.
-SYSTEM, thinking, tool and assistant events do not replace the trigger. Lone
-glyph finals are dropped. Explicit authenticated dispatch publications and
-dispatch-correlated turn-final projection retain their existing behavior.
+## Proactive publications
 
-The current direct-primary binding can explicitly publish a user-directed
-milestone after an excluded trigger:
-
-```sh
-agent-orch assistant publish --proactive --request-id <stable-id> \
-  --composite-stream-id <assistant-stream> --publish-kind status --message <text>
-```
-
-Proactive publication accepts `prose` and `status` only. `question`, `result` and
-`reply_to_*` IDs are refused (`assistant_publish_payload_invalid`).
-
-It may carry managed `attachment_ids`; they resolve in the composite's own scope
-with the same ready-row, purpose and byte re-verification as a dispatch reply,
-and `--message` may then be empty. `agent-orch send-file <path> --to
-<assistant-stream> --proactive` is the one-command form; its request ID
-defaults to `send-file:<upload_id>`.
-
-A verified stream token must match the current binding and its live generation
-on every call, including retries. Unbound, stale, other and scoped/Dot callers
-are rejected with `assistant_publish_provenance_unverified`. A stale or
-other-binding seat that carries attachments gets `publish_not_authorized`
-instead. Identical request ID
-and payload retries return the same event; changed payloads return
-`assistant_publish_conflict` (`send-file` reports it as `publish_replay_conflict`).
-Rebinding or closing the seat revokes the
-old publisher. No glyph-only final is needed to hide notice-turn prose.
-
-The source transcript remains intact. In the same ingest transaction, the store
-omits a mirrored final when that source turn contains the route's exact frozen
-USER envelope and the same dispatch already has a final prose publication. It
-checks the source stream, current generation, session lifecycle and transcript
-identity. Claude `end_turn` and Codex `final_answer` delimit turns; separate text
-blocks from one provider record share that boundary. Classified commentary and
-tool-use text and sidechain finals do not end the primary turn. Legacy assistant rows without classification
-metadata conservatively fence the search during an upgrade.
-
-This correlation does not depend on identical answer text, publication age, or
-whether publication preceded source transcript ingestion. A following ordinary
-final still mirrors, even when it repeats the published answer. Active direct
-routes retain prepublication suppression through ambiguous delivery; a proven
-failed delivery releases it. Unclassified events retain the existing short-lived
-exact-text fallback. Existing historical duplicate events are not rewritten.
-
-One narrow exception covers a seat that ends a dispatch turn with prose but
-never publishes. For a Claude `end_turn` or Codex `final_answer`, the store takes
-the newest primary USER or normalized TELL after the previous final in the same
-transcript. It projects the final only when that row is a USER whose
-`optimistic_id` names a route on this composite that is resolved, direct-primary,
-targeted at the bound seat and generation, `landed`, and has no publication of
-any kind. The projection is publication `turnfinal:<dispatch_id>` with
-`publish_kind=status`, `response_state=acknowledged`, the route's
-`input_identity` as `reply_to_message_id`, and `mirrored_from` origin. It is an
-acknowledgment, never a final, so activity reports `acknowledged` and a later
-explicit final publish still lands. Keying by dispatch makes a restart re-read
-of the same turn a no-op. `intent`, `committed_pending` and `uncertain` routes,
-tell/notice-triggered turns, an ordinary USER after the dispatch, and any turn
-whose dispatch already has a publication keep today's suppression. Each
-projection logs `assistant_mirror_turnfinal_projected` with the final's and the
-trigger USER's event ids. The rule assumes file-order ingest: a USER row that
-never reached the tail can let a final attach to an older dispatch in the same
-window. The log makes that case auditable; it does not prevent it. This safety
-net does not replace the seat's acknowledgment and final publishes.
-
-Focused coverage is in `tests/test_assistant_dispatch_turn_final.py`,
-`tests/test_assistant_mirror_trigger_scope.py`,
-`tests/test_assistant_prose_mirror.py` and
-`tests/test_codex_rollout_norm.py` under `services/chat-stream-v2`, including an
-isolated authenticated WebSocket journey. Renderer coverage is in
-`test/shared_transcript_view.test.ts`. Tests use isolated streams/databases and
-never send dispatch probes to a configured live assistant.
+The current bound seat may publish a `prose` or `status` note with
+`assistant publish --proactive`, or `send-file --to <assistant-stream>
+--proactive`. With strict publication enabled, pass `--note-type` as `result`,
+`problem`, `reminder`, or `relay`, and `--ref <kind>:<id>` naming an existing
+`message`, `lane`, `report`, `wake`, or `tell`. A reminder refers to a wake or
+message; a relay refers to a tell or message. The publication and chat event
+retain both fields. A proactive note whose NFKC-normalized, lower-cased text
+matches a publication in the previous 60 minutes after Markdown emphasis and
+whitespace normalization is refused with `assistant_publish_duplicate_text`
+and the earlier event id. An identical request-key replay returns its receipt.
+The daemon verifies the bound seat and its generation on every publish.
 
 ## Working with your assistant (coordination practices)
 

@@ -205,6 +205,9 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         payload = dict(type='assistant.publish', composite_stream_id=target,
             **correlation, message=getattr(args, 'caption', '') or '',
             attachment_ids=[upload_id])
+        for field in ('note_type', 'ref'):
+            if getattr(args, field, None) is not None:
+                payload[field] = getattr(args, field)
         for field in ('reply_to_question_id', 'response_state'):
             if getattr(args, field, None):
                 payload[field] = getattr(args, field)
@@ -228,8 +231,16 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         elif code == 'assistant_publish_conflict':
             code = 'publish_replay_conflict'
         safe = code if code in ('publish_not_authorized', 'upload_unknown', 'blob_unknown',
-            'attachment_invalid', 'publish_correlation_invalid', 'publish_replay_conflict') else 'publish_failed'
-        _print({'type': 'assistant.publish.error', 'error_code': safe, 'upload_id': upload_id})
+            'attachment_invalid', 'publish_correlation_invalid', 'publish_replay_conflict',
+            'assistant_publish_note_type_required', 'assistant_publish_ref_required',
+            'assistant_publish_ref_not_found', 'assistant_publish_ref_kind_not_allowed',
+            'assistant_publish_duplicate_text', 'assistant_publish_desk_dispatch') else 'publish_failed'
+        result = {'type': 'assistant.publish.error', 'error_code': safe, 'upload_id': upload_id}
+        if code == 'assistant_publish_duplicate_text' and isinstance(response.get('error'), str):
+            prefix, _, event_id = response['error'].partition(':')
+            if prefix == code and event_id.isdecimal():
+                result['previous_event_id'] = int(event_id)
+        _print(result)
         return 1
     except AttachmentError as exc:
         _print({'type': 'send_file.error', 'error_code': exc.code})

@@ -363,6 +363,24 @@ def test_proactive_defaults_and_overrides(tmp_path, wire, capsys):
     assert lines[1] == {'type': 'assistant.publish.ok', 'request_id': 'send-file:synthetic-upload', 'upload_id': 'synthetic-upload'}
 
 
+def test_proactive_file_forwards_note_fields(wire):
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant',
+                              '--proactive', '--note-type', 'result', '--ref', 'report:report-1')) == 0
+    assert wire[0][1]['note_type'] == 'result'
+    assert wire[0][1]['ref'] == 'report:report-1'
+
+
+def test_proactive_file_duplicate_reports_earlier_event(monkeypatch, wire, capsys):
+    async def publish(_config, _payload, **_kw):
+        return {'type': 'assistant.publish.error', 'error_code': 'assistant_publish_duplicate_text',
+                'error': 'assistant_publish_duplicate_text:42'}
+    monkeypatch.setattr(cli, 'assistant_once', publish)
+    assert cli.send_file(args('--upload-id', 'synthetic-upload', '--to', 'home:assistant',
+                              '--proactive', '--note-type', 'result', '--ref', 'report:report-1')) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['error_code'] == 'assistant_publish_duplicate_text' and result['previous_event_id'] == 42
+
+
 @pytest.mark.parametrize('extra', [
     ['--dispatch-id', 'real'], ['--reply-to-message-id', 'input'], ['--reply-to-question-id', 'question'],
     ['--publish-kind', 'result'], ['--publish-kind', 'question'], ['--evidence-refs-json', '["receipt"]'],

@@ -19,6 +19,7 @@ The config must be an owned regular file with mode `0600`; state directories use
   "cosmo_token_file": "/private/config/household.token",
   "self_person": "owner",
   "composite_stream_id": "home:assistant",
+  "operator_request_ref": "message:operator-request-id",
   "host_id": "home",
   "seat_cwd": "/private/agent-workspace",
   "sessions_db": "/private/state/sessions.db",
@@ -45,7 +46,10 @@ credential loading. No operator authority, credential minting/copying, worker
 borrowing or generic identity selection is used. This path is specific to this
 FD-installed reminder job.
 
-After agreement, the verified current seat can run `assistant publish --proactive
+Set `operator_request_ref` to the existing operator dispatch or message that
+authorized these reminders. The job refuses missing or malformed values before
+publishing and sends that reference with `--note-type reminder`. After agreement,
+the verified current seat can run `assistant publish --proactive
 --publish-kind prose --response-state final` or `tell assistant`. The daemon also
 checks the current binding at publication. If no valid current local seat can
 authenticate, the job sends nothing and retains a durable unacknowledged BLOCKER

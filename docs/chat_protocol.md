@@ -77,7 +77,7 @@ Visible messages are ordered by event timestamp, then durable `daemon_seq`.
 The assistant composite stream's rows reach the store without a provider ingest
 event, so `AssistantComposite` advances its registry preview itself after each
 committed row: reply publication, work-lane publication, operator input
-admission, the mirror/turn-final projection and the authority-unavailable
+admission, the mirror/turn-final projection when strict publication is off, the unanswered marker and the authority-unavailable
 ruling status line. The composite's `last_text`
 therefore tracks its latest visible message without a daemon restart. The live inventory preserves that result across metadata refreshes and clears
 it when a session generation changes. Startup reconstructs each open session's
@@ -474,3 +474,15 @@ The chat button never toggles the host room microphone. The
 [separate room-mic path](desktop_config.md#per-chat-voice-messages) remains separate. See
 [web voice validation](E2E_HARNESS.md#web-voice-composer) for automated coverage
 and the distinction between fixture, browser and live release evidence.
+
+## Strict publication
+
+The primary composite defaults to strict publication: front-desk turn text is
+not projected into chat. Explicit publications deliver dispatch replies or
+proactive notes; the latter carry a note type and a reference to an existing
+record and are checked for duplicate normalized text over 60 minutes. A landed
+operator dispatch without a publish receives an immediate `dispatch_no_reply`
+notice and, after 300 seconds, an `unanswered` chat event tied to the input.
+Desk-originated dispatches receive neither. `inspect_stream` reports the setting
+and source. Set `assistant.strict_publication.enabled` to `off` in kv to restore
+legacy mirroring and untyped notes without a restart.

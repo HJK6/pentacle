@@ -4620,7 +4620,9 @@ class Server:
         from provider_accounts import AccountError, reject_overrides
         try: reject_overrides(msg)
         except AccountError as exc: raise VerbError(str(exc), str(exc), **exc.context) from None
+        original_msg = msg
         msg = desk_stamp.stamp_message(msg)
+        desk_dispatch = msg is not original_msg
         if _is_primary_alias(msg.get("to_stream_id")):
             return await self._alias_send(msg)
         host, name = await self.sessions.resolve(msg)
@@ -4666,6 +4668,7 @@ class Server:
                 accepted = await composite.accept_input(
                     {**msg, "attachments": attachments},
                     operator_principal=str(auth.get("operator_principal") or "") or None,
+                    desk_dispatch=desk_dispatch,
                 )
             except ValueError as exc:
                 raise VerbError(str(exc), str(exc)) from exc
@@ -5011,7 +5014,7 @@ class Server:
                 "assistant_direct_actor_unverified", "assistant_direct_dispatch_unverified",
             }:
                 raise VerbError("publish_not_authorized", "file publication requires an authorized current publisher") from exc
-            raise VerbError(str(exc), str(exc)) from exc
+            raise VerbError(str(exc).split(":", 1)[0], str(exc)) from exc
 
     async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:
         if self.notify is None:

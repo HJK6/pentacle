@@ -410,7 +410,7 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
                              authority_stream_id=None, direct_target_stream_id=None,
                              direct_target_generation=None, direct_single_final=False,
                              proactive_binding_name=None, proactive_env_binding=None,
-                             reply_to_message_ids=None) -> dict[str, Any]:
+                             reply_to_message_ids=None, strict_publication=False) -> dict[str, Any]:
     """Insert one assistant publication and its receipt on ``conn``.
 
     The caller owns the transaction: it must hold ``BEGIN IMMEDIATE`` and
@@ -481,6 +481,9 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
         saved.update({"event": replay_event, "duplicate": True,
                       "closed_dispatch_ids": _closed_dispatch_ids_conn(conn, int(saved["event_id"]), publication_key)})
         return saved
+    if proactive_binding_name is not None and strict_publication:
+        from strict_publication import validate
+        validate(conn, stream_id, canonical_payload)
     if actor_generation is not None and proactive_binding_name is None:
         route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
             conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
@@ -1545,6 +1548,7 @@ class _RoutingStoreMixin:
             return {}
         def _op(conn):
             params = [stream_id]
+            strict = self._strict_publication_state_conn(conn, stream_id)["enabled"]
             where = "r.stream_id=?"
             if input_ids is not None:
                 ids = list(dict.fromkeys(input_ids))[:2000]
@@ -1570,7 +1574,8 @@ class _RoutingStoreMixin:
                     lane = conn.execute("SELECT lane_id,phase,pending_question_id FROM v2_assistant_composite_lanes WHERE stream_id=? AND lane_id=?", (stream_id, lane_id)).fetchone()
                     if lane is not None:
                         lanes.append(dict(lane))
-                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]))
+                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]),
+                                                              strict_publication=strict)
             return result
         return await self.submit(_op)
 
@@ -1625,12 +1630,18 @@ class _RoutingStoreMixin:
         def _locked_op(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                strict = self._strict_publication_state_conn(conn, stream_id)["enabled"]
+                saved_payload, saved_event = canonical_payload, event
+                if proactive_binding_name is not None and not strict:
+                    saved_payload = {k: v for k, v in canonical_payload.items() if k not in {"note_type", "ref"}}
+                    saved_event = {k: v for k, v in event.items() if k not in {"note_type", "ref"}}
+                    saved_event["raw"] = {k: v for k, v in event["raw"].items() if k not in {"note_type", "ref"}}
                 stored = _record_publication_conn(
                     conn, stream_id=stream_id, publication_key=publication_key,
                     dispatch_id=dispatch_id, reply_to_message_id=reply_to_message_id,
                     reply_to_question_id=reply_to_question_id, publish_kind=publish_kind,
                     attachment_ids=attachment_ids, evidence_refs=evidence_refs,
-                    canonical_payload=canonical_payload, event=event,
+                    canonical_payload=saved_payload, event=saved_event,
                     actor_stream_id=actor_stream_id, actor_generation=actor_generation,
                     authority_stream_id=authority_stream_id,
                     direct_target_stream_id=direct_target_stream_id,
@@ -1638,6 +1649,7 @@ class _RoutingStoreMixin:
                     direct_single_final=direct_single_final,
                     proactive_binding_name=proactive_binding_name,
                     proactive_env_binding=proactive_env_binding,
+                    strict_publication=strict,
                     reply_to_message_ids=reply_to_message_ids,
                 )
                 conn.commit()

@@ -35,6 +35,13 @@ class Failure(Exception):
     """Only fixed safe classes cross the diagnostic boundary."""
 
 
+def operator_request_ref(config):
+    ref = config.get("operator_request_ref")
+    if not isinstance(ref, str) or not re.fullmatch(r"message:\S+", ref):
+        raise Failure("invalid_operator_request_ref")
+    return ref
+
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -260,9 +267,11 @@ class Publisher:
         return {**self.base_env, "AGENT_ORCH_STREAM_ID": stream, "AGENT_ORCH_STREAM_TOKEN_FILE": str(path)}
 
     def publish(self, request_id, message):
+        ref = operator_request_ref(self.config)
         binding = self.binding()  # resolve again on every attempt, never cache a seat across handoffs
         reply = self.rpc(["assistant", "publish", "--proactive", "--composite-stream-id",
                           self.config["composite_stream_id"], "--publish-kind", "prose", "--response-state", "final",
+                          "--note-type", "reminder", "--ref", ref,
                           "--request-id", request_id, "--message", message], self.seat_env(binding))
         if reply.get("type") != "assistant.publish.ok":
             raise Failure("publish_unconfirmed")
@@ -352,6 +361,8 @@ def run(config, now, *, to_fd=False, state_root=None, reader=None, publisher=Non
         raise Failure("production_state_override_refused")
     if not to_fd and not config.get("enabled", False):
         return {"status": "disabled"}
+    if not to_fd:
+        operator_request_ref(config)
     alert_namespace = "household-due:fd-test:" + digest(str(root))[:24] if to_fd else "household-due"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = root.stat()
