@@ -79,16 +79,15 @@ def env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unlinked_explicit_commission_is_refused_before_any_pane(env):
+async def test_unlinked_explicit_commission_is_admitted(env):
     target, home = item(env.root, "demo__target"), item(env.root, "demo__home")
     ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-home", home)
     caller = await seat(env.store, "caller", home, assigned=home)
-    err = await refused(ctl, agent(caller, spec=target, role="lead"))
-    assert err.code == "work_lane_assignment_unlinked"
-    # The repair names the caller's home lane and only the new member.
-    assert f"agent-orch work-lane add-member wl-home {target}" in str(err)
-    assert tmux.created == 0 and await env.store.fetch_session(HOST, "child") is None
+    reply = await ctl.spawn(agent(caller, spec=target, role="lead"), HOST)
+    assert reply["type"] == "spawn.ok"
+    assert tmux.created == 1
+    assert (await env.store.fetch_session(HOST, "child"))["assigned_spec_id"] == target
 
 
 @pytest.mark.asyncio
@@ -167,20 +166,16 @@ async def test_exempt_callers_are_never_refused(env, auth):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role, exempt", [("assistant", False), ("lead", False)])
-async def test_protected_assistant_caller_is_exempt_and_other_roles_are_not(env, role, exempt):
-    # A2/R5: a protected assistant seat is exempt; a seat's ordinary role never is.
+@pytest.mark.parametrize("role", ["assistant", "lead"])
+async def test_caller_role_does_not_require_lane_membership(env, role):
+    # Lane membership is not an execution authority check.
     env.monkeypatch.setenv("PENTACLE_ASSISTANT_ROLE", "assistant")
     target = item(env.root, "demo__target")
     ctl, _sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
     caller = await seat(env.store, "caller", role=role)  # unassigned, no spec, no lane
     msg = agent(caller, spec=target, parent=False)
-    if exempt:
-        assert (await ctl.spawn(msg, HOST))["type"] == "spawn.ok"
-        assert tmux.created == 1
-    else:
-        assert (await refused(ctl, msg)).code == "work_lane_assignment_unlinked"
-        assert tmux.created == 0
+    assert (await ctl.spawn(msg, HOST))["type"] == "spawn.ok"
+    assert tmux.created == 1
 
 
 @pytest.mark.asyncio
@@ -190,7 +185,7 @@ async def test_operator_elevated_seat_token_is_still_managed(env):
     caller = await seat(env.store, "caller", target, assigned=target)
     msg = agent(caller, spec=target, role="lead")
     msg["_auth_context"].update(operator_authenticated=True, operator_authority_source="stream_token")
-    assert (await refused(ctl, msg)).code == "work_lane_assignment_unlinked"
+    assert (await ctl.spawn(msg, HOST))["type"] == "spawn.ok"
 
 
 @pytest.mark.asyncio
@@ -210,12 +205,12 @@ async def test_admitted_retry_replays_after_membership_changes(env):
 
 
 @pytest.mark.asyncio
-async def test_done_lane_membership_is_not_a_link(env):
+async def test_done_lane_membership_does_not_refuse_spawn(env):
     target = item(env.root, "demo__target")
     ctl, _sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-old", target, state="done")
     caller = await seat(env.store, "caller", target, assigned=target)
-    assert (await refused(ctl, agent(caller, spec=target, role="lead"))).code == "work_lane_assignment_unlinked"
+    assert (await ctl.spawn(agent(caller, spec=target, role="lead"), HOST))["type"] == "spawn.ok"
 
 
 @pytest.mark.asyncio
@@ -253,21 +248,19 @@ async def spec_update(env, ctl, sessions, action, stream, spec=None, auth=None):
 
 
 @pytest.mark.asyncio
-async def test_fd_direct_execution_assign_checks_link_and_unassign_keeps_tags(env):
+async def test_fd_direct_execution_assign_ignores_lane_and_unassign_keeps_tags(env):
     specs = [item(env.root, f"demo__p{i}") for i in range(2)]
     target = item(env.root, "demo__target")
     ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-p", *specs)
     fd = await seat(env.store, "fd", *specs)
     agent_auth = {"token_verified": True, "stream_id": fd[0], "session_generation": fd[1]}
-    with pytest.raises(VerbError) as exc:
-        await spec_update(env, ctl, sessions, "assign", fd[0], target, agent_auth)
-    assert exc.value.code == "work_lane_assignment_unlinked"
-    assert (await env.store.fetch_session(HOST, "fd"))["assigned_spec_id"] is None
+    assigned = await spec_update(env, ctl, sessions, "assign", fd[0], target, agent_auth)
+    assert assigned["session"]["assigned_spec_id"] == target
     reply = await spec_update(env, ctl, sessions, "assign", fd[0], specs[0], agent_auth)
     assert reply["session"]["assigned_spec_id"] == specs[0] and reply["work_checkpoint"]["state"] == "valid"
     reply = await spec_update(env, ctl, sessions, "unassign", fd[0], auth=agent_auth)
-    assert reply["session"]["assigned_spec_id"] == UNASSIGNED and reply["session"]["spec_ids"] == specs
+    assert reply["session"]["assigned_spec_id"] == UNASSIGNED and reply["session"]["spec_ids"] == specs + [target]
     assert effective_assignment(reply["session"]) is None
 
 
@@ -287,7 +280,7 @@ async def test_operator_assign_is_recorded_without_refusal_and_detach_clears(env
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["attach", "detach"])
 @pytest.mark.parametrize("state", ["paused", "orphan", "fd", "active"])
-async def test_legacy_spec_tag_change_guards_proposed_effective_assignment(env, action, state):
+async def test_legacy_spec_tag_change_ignores_lane_execution_state(env, action, state):
     target, other = item(env.root, "demo__target"), item(env.root, "demo__other")
     ctl, sessions, _tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-tags", target, state="paused" if state == "paused" else "active")
@@ -305,17 +298,9 @@ async def test_legacy_spec_tag_change_guards_proposed_effective_assignment(env, 
     assert before["assigned_spec_id"] is None and effective_assignment(before) is None
     operator = {"operator_authenticated": True, "operator_principal": "operator:fixture"}
     changed_spec = other if action == "detach" else target
-    if state == "active":
-        reply = await spec_update(env, ctl, sessions, action, chat[0], changed_spec, operator)
-        assert reply["session"]["assigned_spec_id"] is None
-        assert effective_assignment(reply["session"]) == target
-    else:
-        with pytest.raises(VerbError) as exc:
-            await spec_update(env, ctl, sessions, action, chat[0], changed_spec, operator)
-        assert exc.value.code == {"paused": "work_lane_not_active", "orphan": "work_lane_visible_lead_required",
-                                  "fd": "work_lane_fd_execution_forbidden"}[state]
-        after = await env.store.fetch_session(HOST, "tag-chat")
-        assert after["spec_ids"] == before["spec_ids"] and effective_assignment(after) is None
+    reply = await spec_update(env, ctl, sessions, action, chat[0], changed_spec, operator)
+    assert reply["session"]["assigned_spec_id"] is None
+    assert effective_assignment(reply["session"]) == target
 
 
 @pytest.mark.asyncio
@@ -422,3 +407,14 @@ async def test_acceptance_spawns_still_require_work_binding(env, role, extra, re
     caller = await seat(env.store, "operator-chat", role=None)
     assert (await refused(ctl, agent(caller, role=role, **extra))).code == "work_assignment_required"
     assert tmux.created == 0
+
+
+def test_synthetic_membership_over_32_keeps_shape_and_duplicate_validation():
+    """Synthetic cap replay; historical input identities were not supplied."""
+    from work_lane_members import validate_members
+    members = [f"spec_demo__member_{i}" for i in range(40)]
+    assert validate_members(members, None) == (members, None)
+    with pytest.raises(ValueError, match="work_lane_members_invalid"):
+        validate_members(members + [members[0]], None)
+    with pytest.raises(ValueError, match="work_lane_members_invalid"):
+        validate_members(["not-a-spec"], None)

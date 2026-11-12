@@ -1831,15 +1831,6 @@ class Comms:
             # Provider preparation precedes this fence. Hold the graph only for
             # one physical action, never submission evidence or an Enter wait.
             async with account_guard, (self.sessions._graph_lock if execution else nullcontext()):
-                if execution:
-                    from store_specs import effective_assignment
-                    current = await self.store.fetch_session(host,name) or {}
-                    try:
-                        await self.store.require_lane_execution(effective_assignment(current),
-                            target_stream_id=target, linked_only=True, fd_input=True)
-                    except VerbError as exc:
-                        exc.extra.setdefault("phase", phase)
-                        raise
                 yield
         except AccountError as exc:
             if str(exc)=="provider_cli_input_maintenance" and phase!="not_started":

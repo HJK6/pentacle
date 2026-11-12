@@ -321,101 +321,8 @@ def fd_backend_conn(conn, stream_id, front_desk=None):
 
 def require_lane_execution_conn(conn, spec_id, *, lane_id=None, front_desk=None, target_stream_id=None,
                                 provisioning=False, linked_only=False, live_sessions=(), fd_input=False):
-    """Shared execution admission; caller holds the graph fence through its commit."""
-    from sessions import VerbError
-    if not spec_id:
-        return None  # unrelated operator chat/control remains outside lane execution
-    if fd_input and target_stream_id and fd_backend_conn(conn, target_stream_id, front_desk):
-        # Input admission only (send receipt, physical input): the current FD desk receives
-        # operator/control input despite a custodial assignment. Execution callers never pass this.
-        return None
-    snapshot = effective_membership_conn(conn)
-    lanes = [dict(row) for row in conn.execute(
-        "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL ORDER BY lane_id")
-        if spec_id in effective_member_ids(conn, dict(row), snapshot)]
-    if lane_id:
-        lanes = [lane for lane in lanes if lane["lane_id"] == lane_id]
-    if not lanes and linked_only and not lane_id:
-        return None
-    # A terminal membership is never an implicit reopen or execution grant.
-    opened = [lane for lane in lanes if lane["work_state"] != "done"]
-    if not opened:
-        raise VerbError("work_lane_assignment_unlinked", f"{spec_id} needs an explicitly owned open work lane",
-                        spec_id=spec_id)
-    if len(opened) != 1:
-        raise VerbError("work_lane_target_required", "Ambiguous spec membership: supply --lane-id", spec_id=spec_id)
-    lane = opened[0]
-    if target_stream_id and fd_backend_conn(conn, target_stream_id, front_desk):
-        raise VerbError("work_lane_fd_execution_forbidden", "FD administers lanes; assign execution to a dedicated lead")
-    if provisioning:
-        return lane
-    if lane["work_state"] != "active":
-        raise VerbError("work_lane_not_active", f"{lane['lane_id']} is {lane['work_state']}; bind a lead and explicitly activate first",
-                        lane_id=lane["lane_id"])
-    lead_id = lane.get("bound_stream_id")
-    lead = _session_conn(conn, lead_id) if lead_id else None
-    observed = next((row for row in live_sessions if row.get("stream_id") == lead_id), None)
-    if lead and observed:
-        if observed.get("session_generation") != lead.get("session_generation"):
-            lead = None
-        else:
-            lead = {**observed, **lead, "online": observed.get("online")}
-    if (not work_lane_lead_qualifies(lane, lead) or fd_backend_conn(conn, lead_id, front_desk)):
-        raise VerbError("work_lane_visible_lead_required", f"{lane['lane_id']} needs a live dedicated non-FD lead",
-                        lane_id=lane["lane_id"])
-    return lane
-
-
-def require_lane_drained_conn(conn, lane, live_sessions=()):
-    """One drain predicate: assigned/bound activity plus existing pending deliveries."""
-    from store_specs import effective_assignment
-    from sessions import VerbError
-    members = set(effective_member_ids(conn, lane))
-    live = {row.get("stream_id"): row for row in live_sessions}
-    seats, pending = [], []
-    relevant = {lane.get("bound_stream_id")}
-    for raw in conn.execute("SELECT s.*,g.generation AS session_generation FROM sessions s "
-                            "JOIN v2_session_generations g USING(host,session_name) WHERE s.status='open'"):
-        row = dict(raw)
-        sid = f"{row['host']}:{row['session_name']}"
-        if effective_assignment(row) not in members and sid != lane.get("bound_stream_id"):
-            continue
-        relevant.add(sid)
-        observed = live.get(sid, {})
-        if observed.get("session_generation") == row.get("session_generation") and seat_working({**observed, **row}):
-            seats.append(sid)
-    for raw in conn.execute("SELECT host,session_name,request_id,payload FROM v2_stream_reservations WHERE payload IS NOT NULL"):
-        intent = json.loads(raw["payload"])
-        fields = intent.get("open_fields") or {}
-        if (not intent.get("lane_provisioning") and (effective_assignment(fields) in members
-                                                     or fields.get("parent_stream_id") in relevant)):
-            pending.append("spawn:" + str(raw["request_id"]))
-    from retention import history_query
-    for raw in history_query(conn, "SELECT r.* FROM v2_send_receipts r WHERE r.rowid=(SELECT MAX(n.rowid) "
-                            "FROM v2_send_receipts n WHERE n.to_stream_id=r.to_stream_id AND n.request_id=r.request_id) "
-                            "AND r.state='accepted'"):
-        if raw["to_stream_id"] in relevant:
-            # A later pending/enrichment row may follow confirmed same-attempt
-            # delivery. Use the reader's proof/conflict/birth-fenced selection.
-            from store import _effective_send_receipt_row
-            receipt = _effective_send_receipt_row(conn, raw["to_stream_id"], raw["request_id"])
-            if receipt["state"] == "accepted" and receipt["reason"] != "front_desk_held":
-                pending.append("send:" + receipt["request_id"])
-    for raw in conn.execute("SELECT schedule_id,owner_spec_ids_json,owner_stream_id,handoff_from_stream_id FROM v2_schedules "
-                            "WHERE state IN ('pending','retry_pending','firing','indeterminate')"):
-        selected = json.loads(raw["owner_spec_ids_json"])
-        owner = _session_conn(conn, raw["owner_stream_id"]) if raw["owner_stream_id"] else None
-        assigned = effective_assignment(owner) if owner and raw["handoff_from_stream_id"] else (selected[0] if selected else None)
-        if assigned in members:
-            pending.append("schedule:" + raw["schedule_id"])
-    from queued_send_now import PREFIX, TERMINAL
-    for raw in conn.execute("SELECT v FROM kv WHERE k LIKE ?", (PREFIX + "%",)):
-        delivery = json.loads(raw[0])
-        if delivery.get("stream_id") in relevant and delivery.get("state") not in TERMINAL:
-            pending.append("queued:" + str(delivery.get("original_request_id") or delivery.get("key")))
-    if seats or pending:
-        raise VerbError("work_lane_drain_required", "Stop/checkpoint busy seats and hold or cancel pending work first",
-                        lane_id=lane["lane_id"], seat_ids=sorted(seats), delivery_ids=sorted(pending))
+    """Compatibility entry point for off-limit callers; lanes do not admit execution."""
+    return None
 
 
 def _chat_available(conn: sqlite3.Connection, lane: dict[str, Any]) -> tuple[str, str]:
@@ -664,10 +571,8 @@ class _WorkLanesStoreMixin:
             return await self.submit(_op)
 
     async def require_lane_execution(self, spec_id, **kwargs):
-        reader = getattr(self, "lane_presence_reader", None)
-        live = reader() if reader else ()
-        return await self.submit(lambda conn: require_lane_execution_conn(
-            conn, spec_id, front_desk=getattr(self, "lifecycle_front_desk", None), live_sessions=live, **kwargs))
+        # Off-limit spawn/store callers still use this API until fleet integration.
+        return None
 
     async def lane_provisioning_allowed(self, auth):
         def check(conn):
@@ -679,25 +584,8 @@ class _WorkLanesStoreMixin:
         return await self.submit(check)
 
     async def guard_lane_departure(self, stream_id, generation, *, assignment_change=False):
-        """Called under the existing graph fence before close/unassignment/role loss."""
-        reader = getattr(self, "lane_presence_reader", None)
-        live = reader() if reader else ()
-        def check(conn):
-            if assignment_change:
-                from store_specs import effective_assignment
-                current = _session_conn(conn, stream_id)
-                spec = effective_assignment(current)
-                for raw in conn.execute("SELECT * FROM v2_assistant_composite_lanes WHERE work_state IS NOT NULL"):
-                    lane = dict(raw)
-                    if spec and spec in effective_member_ids(conn, lane):
-                        require_lane_drained_conn(conn, lane, live)
-            for raw in conn.execute("SELECT * FROM v2_assistant_composite_lanes WHERE work_state='active' "
-                                    "AND bound_stream_id=? AND bound_generation=?", (stream_id, generation)):
-                lane = dict(raw)
-                from sessions import VerbError
-                raise VerbError("work_lane_lead_required", "Bind a qualifying successor or drain and pause/block/DONE before leaving",
-                                lane_id=lane["lane_id"])
-        await self.submit(check)
+        """Compatibility for off-limit close callers; lane ownership is display-only."""
+        return None
 
     async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
         def _op(conn):
@@ -975,8 +863,6 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 _require_qualifying_lead(lane, conn)
                 if lane.get("bound_stream_id") == actor:
                     raise ValueError("work_lane_lead_ineligible")
-            if to in {"paused", "blocked", "done"}:
-                require_lane_drained_conn(conn, lane, live_sessions)
             if to in {"paused", "blocked"}:
                 _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_reason_required", required=True)
                 _text(payload.get("next_action"), UPDATE_TEXT_MAX, "work_lane_next_action_required", required=True)
@@ -1010,7 +896,6 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                 raise ValueError("work_lane_payload_invalid")
             lead = payload["lead"]
             if lead is None:
-                require_lane_drained_conn(conn, lane, live_sessions)
                 changes.update(bound_stream_id=None, bound_generation=None, bound_backend_kind=None)
             else:
                 if not isinstance(lead, dict) or set(lead) != {"stream_id", "generation"}:
@@ -1056,12 +941,8 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
                                                   for identity in members)):
                 raise ValueError("work_lane_members_source_epic_required: change the source epic to move goal-derived work")
             legacy = [identity for identity in members if identity not in derived]
-            if len(legacy) > 32:
-                raise ValueError("work_lane_members_invalid")
             removal_reason = _text(payload.get("reason"), UPDATE_TEXT_MAX, "work_lane_payload_invalid")
             in_use = _assigned_seats_conn(conn, [identity for identity in prior_members if identity not in members])
-            if in_use:
-                require_lane_drained_conn(conn, lane, live_sessions)
             if members == prior_members and reason == lane.get("no_spec_reason"):
                 raise ValueError("work_lane_members_unchanged")
             changes.update(members_json=_canonical(legacy), no_spec_reason=reason)
