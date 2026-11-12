@@ -237,7 +237,12 @@ class ProjectionReuse:
                 continue  # instr(text, NULL) is NULL, never a candidate
             if not _lookup_string(wire):
                 return None  # SQLite would coerce/compare this, not Python
-            loaded.append((row, wire))
+            # The SQL-extracted lookup wire stays private to this cache; the
+            # row handed back to send_proofs must match the original
+            # `SELECT rowid,*` schema byte-for-byte (no `sql_wire` column), so
+            # the named send_proofs output is identical to the non-reuse path.
+            base = {k: row[k] for k in row.keys() if k != "sql_wire"}
+            loaded.append((base, wire))
         return loaded
 
 
@@ -443,7 +448,8 @@ def send_proofs(conn, target, text, *, reuse=None):
     """Read only daemon pre-input receipt JSON; public meta is voice-only.
 
     `reuse` (a `ProjectionReuse`) serves the stream's receipts from one read per
-    generation; its rows carry one extra `sql_wire` column.
+    generation; its rows carry the original `SELECT rowid,*` schema, identical
+    to the non-reuse path (the lookup wire is kept private to the cache).
     """
     attempts = {}
     no_input = set()

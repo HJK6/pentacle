@@ -680,11 +680,18 @@ def test_item2_send_proofs_equals_legacy_oracle_per_input():
                 reuse = tell_proof.ProjectionReuse()
                 for i in range(5):
                     text = f"prefix {i} msg {i} for {PAGE_STREAM} suffix"
-                    mine = [(p, {k: r[k] for k in r.keys() if k != "sql_wire"})
+                    # Full-row equality, no column excluded: the reuse path's
+                    # receipt rows must match the frozen oracle's schema exactly
+                    # (keys, values and order) -- the lookup wire is private to
+                    # the cache and never surfaces as a `sql_wire` column.
+                    mine = [(p, {k: r[k] for k in r.keys()})
                             for p, r in tell_proof.send_proofs(conn, PAGE_STREAM, text, reuse=reuse)]
                     theirs = [(p, {k: r[k] for k in r.keys()})
                               for p, r in legacy.send_proofs(conn, PAGE_STREAM, text)]
                     assert mine == theirs
+                    assert all("sql_wire" not in r for _, r in (
+                        (p, {k: r[k] for k in r.keys()})
+                        for p, r in tell_proof.send_proofs(conn, PAGE_STREAM, text, reuse=reuse)))
                     assert len(mine) == 1
                 other = list(tell_proof.send_proofs(conn, "host-a:other", f"msg 1 for {PAGE_STREAM}", reuse=reuse))
                 assert other == []
@@ -800,6 +807,51 @@ async def _single_writer(store, path, sqlite3):
     finally:
         external.close()
     assert await store.submit(lambda c: c.total_changes) == mid         # external writer invisible
+
+
+def test_item2_named_receipt_projection_is_independently_pinned():
+    # Residual-b (proof independence): the named receipt-composition oracle
+    # `_project_send_receipt_row` (and the page builder that calls it) is
+    # UNCHANGED in this diff, but `_legacy_projection` runs the live function on
+    # both the oracle and candidate sides, so a mutant there would cancel. Pin
+    # its serialized page output as a golden captured from the current (==
+    # pre-change) source, then prove the page equality is actually sensitive to
+    # that output: a receipt-metadata mutant makes the walk differ from the
+    # golden (RED under mutation), and restoring it re-equals the golden.
+    import store as store_mod
+
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, ladder=True))
+            golden = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            # Guard against a no-op fixture: every input is a receipt-backed USER
+            # row, so the receipt projection really runs on this page.
+            assert {kind for _, kind in _origins(golden)} == {"operator"}
+            assert all("meta" not in e for e in golden)   # no voice meta by default
+
+            original = store_mod._project_send_receipt_row
+
+            def forced_voice(conn, row, **options):
+                result = dict(original(conn, row, **options))
+                result["meta"] = {"voice": {"duration_s": 999.0}}
+                return result
+
+            store_mod._project_send_receipt_row = forced_voice
+            try:
+                mutated = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            finally:
+                store_mod._project_send_receipt_row = original
+            # The named oracle's output reaches the page: the mutant changes it.
+            assert mutated != golden
+            assert any((e.get("meta") or {}).get("voice", {}).get("duration_s") == 999.0
+                       for e in mutated)
+            # Restored: no leak of the mutation; the walk re-equals the golden.
+            assert await _walk(store, {}, limit=3, stream=PAGE_STREAM) == golden
+        finally:
+            store.stop()
+    asyncio.run(run())
 
 
 # --- Item 3: tail events once per request -------------------------------------
