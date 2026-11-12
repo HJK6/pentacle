@@ -329,7 +329,7 @@ def test_projections_refresh_and_promotions_read_current_rows(monkeypatch):
     asyncio.run(run())
 
 
-def test_raising_projection_releases_snapshot_and_object(monkeypatch):
+def test_raising_projection_releases_snapshot_and_call_reuse(monkeypatch):
     import gc
     import weakref
     import tell_proof
@@ -361,9 +361,12 @@ def test_raising_projection_releases_snapshot_and_object(monkeypatch):
             # Move the worker past the raising operation before collecting frames.
             await store.submit(lambda conn: None)
             gc.collect()
-            assert len(references) == 2 and all(ref() is None for ref in references)
+            assert len(references) == 1 and references[0]() is not None
+            assert await store.submit(lambda conn: conn.delivery_lookup.table.reuse is None)
         finally:
             store.stop()
+        gc.collect()
+        assert all(ref() is None for ref in references)
     asyncio.run(run())
 
 

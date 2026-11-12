@@ -48,12 +48,12 @@ CORPUS_DELIVERIES = 9  # peer, service, overlap, twin, generation, birth, unreco
 
 async def _walk_oracle(store):
     await store.submit(lambda c: setattr(c, "delivery_parse_cache", None))
-    return await _walk(store, None)
+    return await _walk(store, fresh=True)
 
 
 async def _walk_cached(store, counting):
     await store.submit(lambda c: setattr(c, "delivery_parse_cache", counting))
-    return await _walk(store, None)
+    return await _walk(store, fresh=True)
 
 
 def test_delivery_parse_cache_reused_across_builds():

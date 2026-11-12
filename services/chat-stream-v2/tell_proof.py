@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import sqlite3
 from bisect import bisect_right
 
@@ -37,9 +38,7 @@ def _nonfinite_constant(value):
 class TellDeliveryParseCache:
     """Connection-scoped memo of v2_tell_deliveries reply parses.
 
-    `ProjectionDeliveries` rebuilds per request (and per write on the
-    connection), re-decoding every delivery reply; that strict parse is the
-    remaining store-thread cost after the round-1 instance reuse. Keyed
+    Each `ProjectionDeliveries` rebuild can reuse unchanged strict parses. Keyed
     tell_id -> [reply_text, parsed, text_digest]: a changed reply (text
     differs) or a new tell_id misses and reparses with the identical strict
     hooks (dropping the digest with it), and tell_ids absent from a completed
@@ -82,7 +81,6 @@ class TellDeliveryParseCache:
 
 
 # Reuse bounds: a stream larger than these is read per call exactly as before.
-_RECEIPT_REUSE_MAX_ROWS = 2048
 _TAIL_REUSE_MAX_ROWS = 4096
 _TAIL_REUSE_MAX_BYTES = 8 * 1024 * 1024
 
@@ -129,43 +127,22 @@ class _TailWindow:
 
 
 class ProjectionReuse:
-    """Per-generation memo of the reads `input_origin` repeats for every input.
+    """Tail reads shared only within one projection call.
 
-    Owned by one `ProjectionDeliveries`, so it lives for one savepoint-held read
-    or one paged history request. It is keyed by stream and valid only while
-    `conn.total_changes` is unchanged since it was filled: the Store is one
-    thread on one connection and the daemon's only writer, so every mutation
-    advances that counter (a rolled-back write advances it too, which only
-    invalidates early). A write from any other connection would not advance it;
-    reuse is never offered across such a writer. Any uncertainty -- a value the
-    SQL predicate would coerce rather than compare, an oversized stream, a
-    failing read -- disables reuse for that stream, and the original SQL then
-    decides both the answer and any exception.
+    The total_changes guard also drops windows after writes within a private
+    projection. Store readers give each call a new instance, so neither another
+    connection's writes nor archive changes can outlive a call in this memo.
     """
 
     def __init__(self):
         self._changes = None
-        self._receipts = {}
         self._tail = {}
 
     def _fresh(self, conn):
         changes = conn.total_changes
         if changes != self._changes:
-            self._receipts = {}
             self._tail = {}
             self._changes = changes
-
-    def receipt_rows(self, conn, target, text):
-        """`send_proofs`' candidate rows for `text` (at most 513, rowid order), or None."""
-        if not _lookup_string(target) or not _lookup_string(text):
-            return None
-        self._fresh(conn)
-        if target not in self._receipts:
-            self._receipts[target] = self._load_receipts(conn, target)
-        loaded = self._receipts[target]
-        if loaded is None:
-            return None
-        return [row for row, wire in loaded if wire in text][:513]
 
     def tail_after(self, conn, target, birth, watermark):
         """The `_TailEvent`s with event_id > `watermark`, ascending, or None.
@@ -218,41 +195,79 @@ class ProjectionReuse:
         window.floor = floor
         return window
 
-    @staticmethod
-    def _load_receipts(conn, target):
+
+class DeliveryLookup:
+    """One delivery table for one Store connection, used only by its thread.
+
+    TEMP triggers observe local writes, including writes later rolled back.
+    main.data_version observes other connections' commits. The caller samples
+    it inside its read savepoint and never shares an outer transaction's table.
+    """
+
+    def __init__(self, conn):
+        self.table = None
+        self.version = None
+        self.dirty = True
+        self.disabled = False
+        opened = False
         try:
-            rows = history_query(conn,
-                "SELECT rowid,*,json_extract(meta_json,'$._input_proof.wire_text') AS sql_wire "
-                "FROM v2_send_receipts WHERE to_stream_id=? "
-                "AND json_type(meta_json,'$._input_proof')='object' ORDER BY rowid LIMIT ?",
-                (target, _RECEIPT_REUSE_MAX_ROWS + 1)).fetchall()
-        except Exception:
-            return None
-        if len(rows) > _RECEIPT_REUSE_MAX_ROWS:
-            return None
-        loaded = []
-        for row in rows:
-            wire = row["sql_wire"]
-            if wire is None:
-                continue  # instr(text, NULL) is NULL, never a candidate
-            if not _lookup_string(wire):
-                return None  # SQLite would coerce/compare this, not Python
-            # The SQL-extracted lookup wire stays private to this cache; the
-            # row handed back to send_proofs must match the original
-            # `SELECT rowid,*` schema byte-for-byte (no `sql_wire` column), so
-            # the named send_proofs output is identical to the non-reuse path.
-            base = {k: row[k] for k in row.keys() if k != "sql_wire"}
-            loaded.append((base, wire))
-        return loaded
+            conn.execute("SAVEPOINT delivery_lookup_install")
+            opened = True
+            conn.create_function("delivery_lookup_changed", 0, self._changed)
+            for action in ("insert", "update", "delete"):
+                conn.execute(
+                    f"CREATE TEMP TRIGGER delivery_lookup_{action} AFTER {action.upper()} "
+                    "ON main.v2_tell_deliveries BEGIN SELECT delivery_lookup_changed(); END")
+            conn.execute("RELEASE delivery_lookup_install")
+        except BaseException:
+            if opened:
+                conn.execute("ROLLBACK TO delivery_lookup_install")
+                conn.execute("RELEASE delivery_lookup_install")
+            self._disable()
+
+    def _disable(self):
+        self.table = None
+        if not self.disabled:
+            self.disabled = True
+            # Warning handlers must never turn invalidation into a failed write.
+            try:
+                logging.getLogger("chat_streamd_v2.store").warning(
+                    "Delivery lookup sharing disabled for this connection", exc_info=True)
+            except BaseException:
+                pass
+
+    def _invalidate(self):
+        self.dirty = True
+
+    def _changed(self):
+        try:
+            self._invalidate()
+        except BaseException:
+            self._disable()
+
+    @staticmethod
+    def _data_version(conn):
+        return conn.execute("PRAGMA main.data_version").fetchone()[0]
+
+    def get(self, conn, *, shared):
+        if self.disabled or not shared:
+            return ProjectionDeliveries()
+        version = self._data_version(conn)
+        if self.table is None or self.dirty or self.version != version:
+            self.table = ProjectionDeliveries()
+            self.version = version
+            self.dirty = False
+        else:
+            self.table.reuse = ProjectionReuse()
+        return self.table
 
 
 class ProjectionDeliveries:
-    """Lazy delivery snapshot owned and passed by one savepoint-held read.
+    """Lazy, read-only delivery lookup with a sticky SQL fallback.
 
-    Any parser/equality uncertainty disables reuse for the rest of that read;
-    the original SQL and parsing then determine both answers and exceptions.
-    It also carries the read's `ProjectionReuse` (send receipts), dropped with
-    the snapshot whenever the caller rebuilds it.
+    Store readers can retain the lookup across calls. Parser/equality uncertainty
+    keeps this object on the original SQL path until the lookup is rebuilt.
+    The attached tail reuse belongs to the current projection call only.
     """
 
     def __init__(self):
@@ -444,22 +459,15 @@ def retained_proof(conn, payload, *, deliveries=None):
                       event_ts=str(timestamp) if timestamp else None).audit_fields()
 
 
-def send_proofs(conn, target, text, *, reuse=None):
-    """Read only daemon pre-input receipt JSON; public meta is voice-only.
-
-    `reuse` (a `ProjectionReuse`) serves the stream's receipts from one read per
-    generation; its rows carry the original `SELECT rowid,*` schema, identical
-    to the non-reuse path (the lookup wire is kept private to the cache).
-    """
+def send_proofs(conn, target, text):
+    """Read only daemon pre-input receipt JSON; public meta is voice-only."""
     attempts = {}
     no_input = set()
-    rows = reuse.receipt_rows(conn, target, text) if reuse is not None else None
-    if rows is None:
-        rows = history_query(conn,
-            "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
-            "AND json_type(meta_json,'$._input_proof')='object' "
-            "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
-            (target, text)).fetchall()
+    rows = history_query(conn,
+        "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
+        "AND json_type(meta_json,'$._input_proof')='object' "
+        "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
+        (target, text)).fetchall()
     if len(rows) > 512:
         return  # Unbounded/ambiguous history is never an origin grant.
     for row in rows:
@@ -631,8 +639,7 @@ def input_origin(conn, event, event_id, *, deliveries=None):
         payloads = [json.loads(row["reply"]) for row in conn.execute(
             "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
             "AND json_extract(reply,'$.delivery.text')=?", (target, text))]
-    payloads.extend(payload for payload, _ in send_proofs(
-        conn, target, text, reuse=deliveries.reuse if deliveries is not None else None))
+    payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
     for payload in payloads:
         delivery = payload.get('delivery') or {}
         if delivery.get('text') != text or delivery.get('proof_generation') != generation:
