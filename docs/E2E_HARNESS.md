@@ -109,10 +109,9 @@ python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evid
 python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
   --target web-gate --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
 
-# Final daemon gate on a workstation with a measured unit tier exceeding 900s.
+# Final daemon merge gate.
 python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
-  --target v2-merge-capacity --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
-# On hosts that meet the 900s unit bound, use --target v2-merge instead.
+  --target v2-merge --spec SPEC --series SERIES --purpose acceptance --attempt-manifest MANIFEST
 
 # Final npm default union; omit --select. Bootstrap changes also need its selftest.
 python3 scripts/gate_env.py run --profile pentacle --workspace OWNED_ROOT --evidence-dir EVIDENCE \
@@ -201,17 +200,16 @@ Sandboxed seats use the same supported entry. Do not hand-build its venv with
 isolated interpreter. The prepared venv fully installs the declared requirements.
 The owned `HOME` also owns `.ssh/cm`; ambient SSH control-directory overrides are
 not forwarded. Keep the real SSH directory read-only. Put Python 3.13 and Node 22
-on the launching PATH, then select the serial closing target below;
+on the launching PATH, then select the merge target below;
 its child PATH and HOME come from the bootstrap rather than the launching shell.
 
-For a workstation with a measured unit tier exceeding 900 seconds,
-`v2-merge-capacity` is the supported closing target. Use ordinary `v2-merge`
-on hosts that meet the 900-second unit bound. The capacity target runs the same serial unit and smoke union with a 1,800-second unit limit
-and the unchanged 900-second smoke limit. Its runner deadline is 2,820 seconds,
-inside a 2,850-second outer subject bound. Qualify it with a complete supported
-gate on the intended host and retain the exact source, environment, node counts
-and timings. A pass establishes that observed window, not a timing guarantee.
-The default `v2-merge` and CI budgets are unchanged. The full 60-second hermetic
+`v2-merge` runs the full unit and smoke union with four unit workers and the
+bounds in `scripts/gate-env.json`. The older `v2-merge-capacity` and
+`v2-merge-ci` names are compatibility aliases of that same target. An explicitly
+serial merge run is diagnostic, not release evidence. Qualify the gate on the
+intended host and retain the exact source, environment, node counts and timings.
+A pass establishes that observed window, not a timing guarantee.
+The full 60-second hermetic
 daemon observation, loss-operation trials and durability assertions still run;
 the fixture speedup batches SQLite seed setup into one durable transaction per
 database without changing product synchronization or crash tests.

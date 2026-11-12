@@ -565,26 +565,6 @@ class AssetStore:
             ).fetchall()
         return [_row_to_dict(row) for row in rows]
 
-    def list_for_session_and_specs(
-        self,
-        *,
-        host: str,
-        session_name: str,
-        spec_ids: list[str] | None = None,
-        limit: int | None = None,
-    ) -> list[dict]:
-        records = self.list_assets(host=host, session_name=session_name, limit=None)
-        seen = {(record["host"], record["session_name"], record["asset_id"]) for record in records}
-        for spec_id in spec_ids or []:
-            for record in self.list_by_spec_id(spec_id):
-                key = (record["host"], record["session_name"], record["asset_id"])
-                if key not in seen:
-                    records.append(record)
-                    seen.add(key)
-        records.sort(key=lambda item: (item.get("updated_at") or "", item.get("asset_id") or ""), reverse=True)
-        if limit is not None:
-            records = records[: int(limit)]
-        return records
 
     def get_asset(self, *, host: str, session_name: str, asset_id: str) -> dict:
         with self._lock:
@@ -594,22 +574,6 @@ class AssetStore:
             raise AssetNotFound(asset_id)
         return record
 
-    def get_asset_for_session_and_specs(
-        self,
-        *,
-        host: str,
-        session_name: str,
-        asset_id: str,
-        spec_ids: list[str] | None = None,
-    ) -> dict:
-        with self._lock:
-            self._require_open()
-            record = self._get_locked(host, session_name, asset_id)
-            if record is None:
-                record = self._get_by_asset_id_and_specs_locked(asset_id, spec_ids or [])
-        if record is None:
-            raise AssetNotFound(asset_id)
-        return record
 
     def set_review_status(
         self,

@@ -1,7 +1,7 @@
 """The primary assistant's name and helpers come from config, not code.
 
 Public defaults are neutral; a deployment that sets its own values keeps its
-stored keys (binding rows, legacy mirror key, alias, retro identity). Each case
+stored keys (binding rows, legacy mirror key, alias). Each case
 runs in a fresh interpreter because these values are read at import.
 """
 from __future__ import annotations
@@ -78,17 +78,17 @@ def test_binding_seed_readers_and_legacy_mirror_key_follow_primary_name(env, nam
 
 
 @pytest.mark.parametrize("env,expected", [
-    ({}, "assistant assistant-say assistant ws://127.0.0.1:7791"),
+    ({}, "assistant assistant-say ws://127.0.0.1:7791"),
     (CONFIGURED,
-     "zed zed-say zed ws://127.0.0.1:7791"),
-    ({"PENTACLE_SATELLITE_WS": "ws://127.0.0.1:2"}, "assistant assistant-say assistant ws://127.0.0.1:2"),
+     "zed zed-say ws://127.0.0.1:7791"),
+    ({"PENTACLE_SATELLITE_WS": "ws://127.0.0.1:2"}, "assistant assistant-say ws://127.0.0.1:2"),
 ])
-def test_household_speak_retro_and_satellite_config(env, expected):
+def test_household_speak_and_satellite_config(env, expected):
     out = run(
-        "import household, satellite, daily_retro\n"
+        "import household, satellite\n"
         "from speaker_service import SpeakerService\n"
         "helper = SpeakerService().contract('c1')['helper'].split()[0]\n"
-        "print(household.COSMO_ASSISTANT, helper, daily_retro.primary_name(),"
+        "print(household.COSMO_ASSISTANT, helper,"
         " satellite.SatelliteConfig.from_env().coordinator_ws)\n",
         env)
     assert out == expected

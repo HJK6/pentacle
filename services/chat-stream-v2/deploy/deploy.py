@@ -305,9 +305,9 @@ GATE_REQUIRED_TIER = "merge"
 GATE_REQUIRED_EXECUTABLES = ("git", "tmux")
 GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 # The inline gate runs under `env -i`, so run_gate.py would fall back to 900 s per
-# tier. Use the qualified v2-merge-capacity tier bounds (scripts/gate-env.json);
+# tier. Use the qualified v2-merge tier bounds (scripts/gate-env.json);
 # a caller's own V2_<TIER>_TIMEOUT_S still wins.
-DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "2400", "V2_SMOKE_TIMEOUT_S": "900"}
+DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "699", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def _effective_home() -> Path:
@@ -596,6 +596,8 @@ def run_gate_and_write_evidence(
         str(_venv_python(repo, service)),
         str(repo / V2_SERVICE_PATH / "tools" / "run_gate.py"),
         GATE_REQUIRED_TIER,
+        "--unit-workers",
+        "4",
         "--evidence-out",
         str(out_path),
         service=service,
@@ -976,31 +978,6 @@ def _wait_launchd_unloaded(
     return state
 
 
-def reload_web(
-    label: str, plist: Path, runner: Runner, *, timeout_s: float = 10.0,
-    sleep: Callable[[float], None] = time.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> dict[str, object]:
-    """Reload only the caller's descriptor, after positively observing unload.
-
-    The web owner retains its artifact/config preimages, descriptor transaction,
-    PID/listener/served-build readback and exact rollback. This replaces only its
-    copied bootout/print/bootstrap block; it neither stages nor certifies a release.
-    Unlike daemon reload, web activation must refuse an unknown or stuck label.
-    """
-    plist = Path(plist)
-    if plistlib.loads(plist.read_bytes()).get("Label") != label:
-        raise DeployError("web descriptor Label does not match the requested label")
-    if not math.isfinite(timeout_s) or timeout_s <= 0:
-        raise DeployError("web unload timeout must be positive and finite")
-    target = _launchctl_target(label)
-    _checked(("launchctl", "bootout", target), Path.cwd(), runner)
-    state = _wait_launchd_unloaded(label, runner, timeout_s=timeout_s,
-                                  sleep=sleep, monotonic=monotonic)
-    if not state.answered or state.loaded:
-        raise DeployError(f"web label not positively unloaded within {timeout_s:g}s: {target}; {state.detail}")
-    _checked(("launchctl", "bootstrap", target.rsplit("/", 1)[0], str(plist)), Path.cwd(), runner)
-    return {"target": target, "unloaded": True, "plist": str(plist)}
 
 
 def _asset_store_identity(service: ServiceConfig) -> dict[str, object]:

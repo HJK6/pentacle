@@ -515,8 +515,6 @@ def _snapshot_legacy_residue(target: Target, stamp: str, *, dry_run: bool, runne
     _remote(target, _launcher_state_command(target, stamp, migrate=False), dry_run=dry_run, runner=runner)
 
 
-def _restore_legacy_residue(target: Target, stamp: str, *, dry_run: bool, runner: Callable[..., object] = subprocess.run) -> None:
-    _remote(target, _restore_launcher_state_command(target, stamp), dry_run=dry_run, runner=runner)
 
 
 def _restore_launcher_state_command(target: Target, stamp: str) -> str:

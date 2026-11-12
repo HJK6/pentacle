@@ -235,6 +235,7 @@ def _run_b_table(row,tmp_path,monkeypatch,subtests):
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.repin_exhaustive
 def test_b_table_n1_verifier(tmp_path,monkeypatch,subtests):
     _run_b_table('B-N1-verifier',tmp_path,monkeypatch,subtests)
 

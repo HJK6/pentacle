@@ -83,6 +83,11 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
             if not _NAME.match(pname) or not isinstance(profile.get("targets"), dict) or not profile["targets"]:
                 problems.append("profile " + pname)
                 continue
+            # Compatibility names share the canonical target's one configuration.
+            for tname, target in list(profile["targets"].items()):
+                if isinstance(target, dict) and set(target) == {"alias"}:
+                    name = target["alias"]
+                    profile["targets"][tname] = profile["targets"].get(name, {}) if isinstance(name, str) else {}
             for tname, target in profile["targets"].items():
                 if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test", "web_gate"):
                     problems.append("target " + tname)
@@ -707,6 +712,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--target")
     parser.add_argument("--select", action="append", default=[], help="run only: test files/nodes; required for pytest targets (never defaults to the full suite)")
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--shard-count", type=int)
     parser.add_argument("--pass-env", action="append", default=[], metavar="NAME")
     parser.add_argument("--spec")
     parser.add_argument("--series")
@@ -773,6 +780,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             target = profile["targets"].get(args.target)
             if target is None:
                 raise SetupFailure([fail("config", "unknown target %r" % args.target, "choose one of %s" % sorted(profile["targets"]))])
+        if args.shard_index is not None or args.shard_count is not None:
+            if (args.command != "run" or not target or not target.get("shardable")
+                    or args.shard_index is None or args.shard_count is None
+                    or not 0 <= args.shard_index < args.shard_count):
+                raise SetupFailure([fail("selection", "sharding requires a shardable target and 0 <= index < count")])
         if args.command == "prepare":
             # prepare never launches a subject: it provisions and preflights --target's needs (or every target's when none is named).
             if args.select:
@@ -899,7 +911,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if target["kind"] == "prepare":
             state.update(outcome="pass", first_failure=None)
         else:
-            command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env)
+            command, results = build_command(config, target, venv, checkout, service_dir, evidence, basetemp, selection, timeout_s, env,
+                                             **({"shard_index": args.shard_index, "shard_count": args.shard_count}
+                                                if args.shard_index is not None else {}))
             if target["kind"] == "pytest_files":  # establish ownership before claiming a subject start
                 owner = OwnedProcesses(service_dir, basetemp / ".owned.json")
                 env[OwnedProcesses.ENV] = str(owner.path)
@@ -1017,7 +1031,8 @@ def profile_root(service_dir: Path, checkout: Path) -> str:
 
 
 def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional[Path], checkout: Path, service_dir: Path, evidence: Path, basetemp: Path,
-                  selection: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[List[str], Dict[str, Any]]:
+                  selection: List[str], timeout_s: int, env: Dict[str, str], *, shard_index: Optional[int] = None,
+                  shard_count: Optional[int] = None) -> Tuple[List[str], Dict[str, Any]]:
     gate_dir = evidence / "gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
     kind = target["kind"]
@@ -1028,6 +1043,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
         runner = service_dir / "tools" / "run_gate.py"
         command = [str(venv / "bin" / "python"), str(runner), target["gate"], "--evidence-dir", str(gate_dir),
                    "--basetemp", str(basetemp)]
+        if "unit_workers" in target:
+            command += ["--unit-workers", str(target["unit_workers"])]
         if not limits:
             command += ["--timeout-seconds", str(tier_s)]
         wall_s = timeout_s + config["reserve_s"]
@@ -1038,6 +1055,8 @@ def build_command(config: Dict[str, Any], target: Dict[str, Any], venv: Optional
             deadline_s = (sum(limits.values()) if limits else tier_s * tiers) + budget["preflight_s"] * preflights + budget["reserve_s"] + budget["slack_s"]
             command += ["--deadline-seconds", str(deadline_s), "--deadline-reserve-seconds", str(budget["reserve_s"])]
             wall_s = deadline_s + budget["slack_s"]
+        if shard_index is not None:
+            command += ["--shard-index", str(shard_index), "--shard-count", str(shard_count)]
         out = gate_dir / ("v2-%s-evidence.json" % target["gate"])
         return command, {"cwd": checkout, "wall_s": wall_s, "classify": lambda rc, to: classify_run_gate(out, rc, to, False)}
     if kind == "pytest_files":

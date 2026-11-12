@@ -143,7 +143,7 @@ def test_abandoned_transcriptions_share_parked_bounds_without_blocking_ordinary_
                 assert not any(f.get("request_id") == "upload-capacity" for f in refusals(web))
             finally:
                 release.set()
-            await eventually(lambda: not request_tasks())
+            await eventually(lambda: not request_tasks() and all(pool.total[0] == 0 for pool in daemon._admission_pools.values()))
             assert all(pool.total[0] == 0 for pool in daemon._admission_pools.values())
         assert all(pool.total[0] == 0 for pool in daemon._admission_pools.values())
     asyncio.run(run())

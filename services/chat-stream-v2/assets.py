@@ -748,13 +748,6 @@ class Assets:
             return None
         return {"host": host, "session_name": name, "stream_id": f"{host}:{name}"}
 
-    def _spec_ids_from_msg(self, msg: dict, session_key: dict | None) -> list[str]:
-        """v1 `_asset_spec_ids_from_message`: explicit message spec ids win;
-        else the caller session's tagged spec ids."""
-        explicit = _normalize_spec_ids(msg.get("spec_ids"), msg.get("spec_id"))
-        if explicit:
-            return explicit
-        return self._session_spec_ids(session_key)
 
     def _session_spec_ids(self, session_key: dict | None) -> list[str]:
         """Source the session's spec ids from the v2 sessions store (raw TEXT

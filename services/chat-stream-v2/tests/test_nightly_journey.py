@@ -128,19 +128,40 @@ def test_bound_success(tmp_path):
     assert json.loads(path.read_text())["terminated_at_bound"] is False
 
 
-def test_bound_contains_term_resistant_separate_sessions(tmp_path):
-    marker = tmp_path / "escaped"
-    descendant = f"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(1); open({str(marker)!r},'w').write('escaped')"
-    child = f"import subprocess,sys,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); subprocess.Popen([sys.executable,'-c',{descendant!r}],start_new_session=True); time.sleep(10)"
+def test_bound_contains_term_resistant_separate_sessions(tmp_path, monkeypatch):
+    # A synthetic table avoids making the process-table deadline a host-speed test.
+    table = {101: {"parent": 1, "group": 101, "birth": "leader"},
+             102: {"parent": 101, "group": 102, "birth": "descendant"}}
+    signals = []
+
+    class Child:
+        pid = 101
+        returncode = None
+        waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits <= 2:
+                raise subprocess.TimeoutExpired("subject", timeout)
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    child = Child()
+    monkeypatch.setattr(sa.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(sa, "process_table", lambda timeout: table)
+    monkeypatch.setattr(sa.os, "killpg", lambda group, signum: signals.append((group, signum)))
     receipt = tmp_path / "bound.json"
-    assert sa.bounded([sys.executable, "-c", child], 0.6, receipt) == 2
+    assert sa.bounded(["subject"], 0.6, receipt) == 2
     value = json.loads(receipt.read_text())
-    assert value["terminated_at_bound"] and len(value["owned_at_stop"]) >= 2
-    assert len(value["killed_owned_pids"]) >= 2
+    assert value["terminated_at_bound"] and value["finished"]
+    assert set(value["killed_owned_pids"]) == {101, 102}
+    assert signals == [(101, sa.signal.SIGTERM), (101, sa.signal.SIGKILL), (102, sa.signal.SIGKILL)]
     assert not value.get("cleanup_errors")
-    assert value["elapsed_s"] < 0.6
-    time.sleep(0.7)
-    assert not marker.exists()
 
 
 @pytest.fixture

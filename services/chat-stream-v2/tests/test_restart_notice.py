@@ -492,7 +492,9 @@ def test_delivery_failure_records_error_on_the_marker(tmp_path):
 # (f) a stalled probe never delays the hook
 # --------------------------------------------------------------------------- #
 
-def test_stalled_probe_does_not_delay_the_hook_and_reads_unknown(tmp_path):
+def test_stalled_probe_does_not_delay_the_hook_and_reads_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn, "PROBE_TIMEOUT_S", 0.05)
+
     async def body(store):
         fd = await _seat(store, FD, role="assistant")
         await _seat(store, "hostx:v2-stuck", parent_stream_id=FD)

@@ -454,31 +454,13 @@ Synthetic tests of this adapter do not establish real-provider or live adoption.
 Historical per-attempt deployed-proof/rehearsal variants are retained as evidence
 and retired from future supported use in favor of this adapter. Native Mac/Windows
 keyboard proof still requires its existing allocated clipboard window. Shared
-activation remains an owner-authorized transaction; see the helper below.
+activation remains an owner-authorized transaction.
 
 ### Web activation sequencing
 
-The product owner retains artifact/config/plist preimages, descriptor replacement,
-PID/listener/served-build checks and its exact rollback transaction. Replace only
-the copied `bootout` / poll-any-error / `bootstrap` block in historical activation
-scripts with the supported callable (using the prepared daemon interpreter):
-
-```python
-# Put services/chat-stream-v2 on sys.path in the existing owner caller.
-from deploy.deploy import reload_web, _run
-reload_web("com.example.web", live_plist_path, _run)
-```
-
-The plist Label must match. This call waits for positive unloaded state before
-bootstrap; unknown inspection or a deadline fails with original diagnostics.
-It uses the existing daemon manager-state/wait primitive, while preserving the
-daemon reload policy. It does not stage an artifact or certify a deployment.
-Historical `switch-web.py` activation/rollback sequencing variants are retired
-from future supported use; their bytes and receipts remain evidence. The existing
-release owner adopts this callable at the next already-needed authorized activation.
-Until that real caller runs, source/disposable-label integration is proven only
-within that scope; ordinary adoption remains unproven. No activation is invented
-to fill an observation metric.
+The product owner retains artifact/config/plist preimages, PID/listener/served-build
+checks and the exact rollback transaction. The old standalone activation helper
+is retired; activation needs an owner-reviewed plan for the current artifact.
 
 Daemon summary inventories contain active sessions and omit persistence lifecycle fields. The host's `ChatStreamClient.snapshot()` materializes `status: 'open'` only when the wire row has no status property; explicit values, including `null` or `closed`, remain intact. Strict consumers such as microphone wake delivery can use that known active membership without treating bootstrap `state` as lifecycle or changing the daemon wire contract.
 # Mockups gallery

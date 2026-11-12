@@ -311,25 +311,6 @@ def leader_pgid(pid: int, timeout: float = 2.0) -> int:
         time.sleep(.01)
 
 
-def _entry_signalable(item: dict[str, Any]) -> bool:
-    """True only when the recorded group still holds the recorded process.
-
-    A bare pgid is never signalled: the number alone cannot distinguish the
-    original group from an unrelated one that inherited it after pid reuse.
-    """
-    pgid, pid = item.get("pgid"), item.get("leader_pid")
-    if not isinstance(pgid, int) or not isinstance(pid, int) or pid <= 0:
-        return False
-    if not _exists(pid):
-        return False
-    recorded = item.get("leader_start_identity")
-    observed = process_start_identity(pid)
-    if not isinstance(recorded, str) or not recorded or not observed or observed != recorded:
-        return False
-    try:
-        return os.getpgid(pid) == pgid
-    except (ProcessLookupError, PermissionError):
-        return False
 
 
 def _socket_binding(socket: str, binding: dict[str, Any]) -> dict[str, Any]:

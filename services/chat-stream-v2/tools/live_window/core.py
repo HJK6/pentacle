@@ -724,10 +724,6 @@ class LiveWindow(AbstractContextManager["LiveWindow"]):
             "owned": [asdict(item) for item in self._owned.values() if item.stream_id not in self._closed],
         })
 
-    def drop_primary_connection_for_recovery_test(self) -> None:
-        """Deliberately sever this client socket; next teardown must rescue fresh."""
-        if self._connection is not None:
-            self._connection.close()
 
     def teardown(self) -> list[str]:
         failures: list[str] = []

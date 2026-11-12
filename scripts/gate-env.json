@@ -75,8 +75,9 @@
             "tmux"
           ],
           "capabilities": "v2_host",
-          "timeout_s": 900,
-          "max_timeout_s": 7200
+          "timeout_s": 699,
+          "max_timeout_s": 699,
+          "unit_workers": 4
         },
         "v2-smoke": {
           "kind": "run_gate",
@@ -101,25 +102,16 @@
           ],
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "timeout_s": 1800,
-          "max_timeout_s": 14400
-        },
-        "v2-merge-capacity": {
-          "kind": "run_gate",
-          "gate": "merge",
-          "needs": [
-            "python",
-            "node",
-            "tmux"
-          ],
-          "capabilities": "v2_host",
-          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
-            "unit": 2400,
+            "unit": 699,
             "smoke": 900
           },
-          "timeout_s": 3300,
-          "max_timeout_s": 3300
+          "timeout_s": 1599,
+          "max_timeout_s": 1599,
+          "unit_workers": 4
+        },
+        "v2-merge-capacity": {
+          "alias": "v2-merge"
         },
         "v2-pytest": {
           "kind": "pytest_files",
@@ -165,21 +157,7 @@
           ]
         },
         "v2-merge-ci": {
-          "kind": "run_gate",
-          "gate": "merge",
-          "needs": [
-            "python",
-            "node",
-            "tmux"
-          ],
-          "capabilities": "v2_host",
-          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "tier_timeouts": {
-            "unit": 4320,
-            "smoke": 900
-          },
-          "timeout_s": 5220,
-          "max_timeout_s": 5220
+          "alias": "v2-merge"
         },
         "cli-pytest": {
           "kind": "pytest_files",
@@ -241,6 +219,19 @@
           "capabilities": "v2_host",
           "timeout_s": 900,
           "max_timeout_s": 900
+        },
+        "v2-unit-ci-shard": {
+          "kind": "run_gate",
+          "gate": "unit",
+          "needs": [
+            "python",
+            "node",
+            "tmux"
+          ],
+          "capabilities": "v2_host",
+          "timeout_s": 699,
+          "max_timeout_s": 699,
+          "shardable": true
         }
       }
     }

@@ -297,9 +297,6 @@ every local transcript once: Claude `~/.claude/projects/**/*.jsonl` (including
 # satellite host (its satellite.env supplies the WS URL and secrets)
 python3 services/chat-stream-v2/satellite.py --backfill --dry-run
 python3 services/chat-stream-v2/satellite.py --backfill
-# ledger host (Thoth), beside the running daemon
-python3 services/chat-stream-v2/tools/backfill_usage_provenance.py \
-  --db ~/.local/share/pentacle-stream/sessions.db --host thoth [--dry-run]
 ```
 
 ### Thread proof

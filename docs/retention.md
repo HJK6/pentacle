@@ -106,11 +106,7 @@ false absence or permission to submit again. An initialized allocator can still
 append distinct identities during an archive outage; replay/admission requiring
 historical knowledge fails closed.
 
-`daily_retro` combines receipt history before cutoff, latest-row, scope and budget
-selection, including older `--now` windows and archive-only recipient sessions.
-Every receipt union validates the archive pair and schema, including while the
-hot pair is pending bootstrap. An unavailable, mismatched or incompatible archive
-produces an explicit coverage gap. Managed
+Managed
 attachment GC retains archive-owned bytes, fails closed on unknown archive state,
 and never treats retention ownership as fetch authorization.
 
