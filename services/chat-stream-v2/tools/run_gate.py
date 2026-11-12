@@ -303,7 +303,7 @@ def _run_tier(tier: str, evidence: Path, timeout: float, *, basetemp: Path, mani
             return _result(tier, code=preflight, passed=False, reason="preflight_failed", timed_out=preflight_timeout, preflight=preflight, command=[str(PRE_FLIGHT)], junit=junit, log=log, soak=soak)
     command = _tier_command(tier, junit, basetemp)
     if tier == "unit" and unit_workers > 1:
-        command += ["-n", str(unit_workers), "--dist", "worksteal", "--max-worker-restart=0"]
+        command += ["-n", str(unit_workers), "--dist", "loadfile", "--max-worker-restart=0"]
     command += ["-p", "tools.gate_progress", f"--gate-progress-journal={journal}", f"--gate-progress-run-id={_ACTIVE_RUN_ID or ''}:{tier}"]
     if tier == "unit" and shard_index is not None:
         command += ["-p", "tools.gate_shard", f"--gate-shard-index={shard_index}",
