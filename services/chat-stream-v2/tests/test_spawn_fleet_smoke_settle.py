@@ -125,3 +125,64 @@ def test_real_smoke_payload_uses_test_profile_before_any_provider_call():
             verify_teardown=lambda *_: None)
     assert (captured[0]['model'], captured[0]['effort']) == ('gpt-6-luna', 'low')
     assert captured[0]['resolution_source'] == 'explicit_override'
+
+
+def test_rpc_timeout_reports_budget_and_elapsed_after_pushes(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(spawn_fleet_smoke, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    class PushSocket:
+        def send(self, _text):
+            pass
+
+        def recv(self, timeout=None):
+            if timeout > 0.03:
+                clock[0] += 0.04
+                return json.dumps({"type": "chat.event", "event": USER})
+            raise TimeoutError("timed out in 0.0s")
+
+    @contextmanager
+    def connection(*_args):
+        yield SimpleNamespace(snapshot=None, socket=PushSocket())
+
+    monkeypatch.setattr(spawn_fleet_smoke, "authenticated_operator_connection", connection)
+    registry = SimpleNamespace(configure_runtime=lambda _snapshot: None)
+    with spawn_fleet_smoke._operator_connection("ws://fixture", None, 0.1, registry) as closures:
+        rpc = closures[0]
+        with pytest.raises(RuntimeError, match=r"list_sessions.*budget.*elapsed") as error:
+            rpc({"type": "list_sessions"}, "list_sessions", deadline=spawn_fleet_smoke.time.monotonic() + 0.05)
+        assert isinstance(error.value.__cause__, TimeoutError)
+        assert "budget=0.050s" in str(error.value)
+        assert float(str(error.value).split("elapsed=")[1][:-1]) > 0
+
+
+def test_settle_timeout_is_its_own_gate(validate, monkeypatch):
+    socket, run = validate
+    original_send = socket.send
+    def send(text):
+        req = json.loads(text)
+        if req["type"] == "request_stream_events" and socket.snapshots:
+            socket.queue.append({"type": "chat.event", "event": SYSTEM})
+            return
+        original_send(text)
+    monkeypatch.setattr(socket, "send", send)
+    with pytest.raises(RuntimeError, match="authoritative event set did not settle"):
+        run()
+
+
+def test_convergence_rpc_timeout_returns_failed_gate(validate, monkeypatch):
+    socket, run = validate
+    original_send = socket.send
+    first = [True]
+    def send(text):
+        req = json.loads(text)
+        if req['type'] == 'list_sessions' and first[0]:
+            first[0] = False
+            socket.queue.append({'type': 'chat.event', 'event': SYSTEM})
+            return
+        original_send(text)
+    monkeypatch.setattr(socket, 'send', send)
+    metrics = run()
+    gate = metrics['convergence']
+    assert gate['passed'] is False
+    assert gate['wait_ms'] >= 0 and gate['pressure_cleared'] is True
+    assert 'timed out' in gate['error']
