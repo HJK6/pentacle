@@ -193,7 +193,7 @@ def test_cli_entrypoint_explicitly_supplies_native_runner(monkeypatch):
 
     def fake_deploy(service, **kwargs):
         seen.update(kwargs)
-        return {}
+        return {"disposition": "active and checks passed"}
 
     monkeypatch.setattr(deploy_mod, "deploy", fake_deploy)
     assert deploy_mod.main(["chat-streamd-v2"]) == 0

@@ -266,6 +266,10 @@ class Runtime:
             raise Invalid("controller must be a frozen clean tooling checkout")
         if self.git("rev-parse", "HEAD") != intent["prior_sha"]:
             raise Invalid("prior daemon SHA differs from intent")
+        try:
+            self.d._resolve_sha(self.repo, intent["target_sha"], self.runner)
+        except self.d.DeployError:
+            self.checked(("git", "fetch", "origin"))
         for sha in (intent["target_sha"], intent["prior_sha"]):
             self.d._verify_origin_reachable(self.repo, sha, self.runner)
         origin = self.git("remote", "get-url", "origin")
@@ -339,7 +343,7 @@ class Runtime:
             candidate_plist.setdefault("EnvironmentVariables", {}).update(dict(self.d._launchd_environment_for_release(self.repo, self.service)))
             # Render and validate inertly; no installed plist/collector changes.
             plistlib.loads(plistlib.dumps(candidate_plist))
-            for template in (self.d.USAGE_COLLECTOR_TEMPLATE, self.d.SPAWN_FLEET_SMOKE_TEMPLATE):
+            for template in (self.d.USAGE_COLLECTOR_TEMPLATE,):
                 data = (snapshot / template).read_bytes().replace(self.d.RELEASE_CHECKOUT_TOKEN, str(self.repo).encode())
                 plistlib.loads(data)
             helpers = {}
@@ -389,20 +393,7 @@ class Runtime:
                 "accounts": accounts, "source": source, "gates": evidence, "preimages": preimages,
                 "post_policy": {"path": str(post_policy_path), "sha256": file_digest(post_policy_path)},
                 "post_plist": {"path": str(post_plist_path), "sha256": file_digest(post_plist_path)}}
-        if intent.get('smoke_accounts') and not scope['excluded_hosts']:
-            path = folder/'schedule.after'
-            atomic_bytes(path, self.schedule_definition(source['target'], intent['smoke_accounts'], intent['machines_file']))
-            prepared['post_schedule'] = {'path': str(path), 'sha256': file_digest(path)}
         return prepared
-
-    def schedule_definition(self, source, accounts, machines=None):
-        from xml.sax.saxutils import escape
-        snapshot = Path(source['snapshot'])
-        value = plistlib.loads(self.d._render_v2_spawn_fleet_smoke_plist(snapshot, accounts=accounts).replace(
-            escape(str(snapshot)).encode(), escape(str(self.repo)).encode()))
-        if machines is not None:
-            value['EnvironmentVariables']['PENTACLE_MACHINES_FILE'] = str(machines)
-        return plistlib.dumps(value)
 
     def remote_json(self, helper, argv):
         target = self.installer.Target(**helper["target"])
@@ -527,14 +518,15 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             raise Invalid("included host lacks both provider bindings")
         return {"closure": closure, "artifacts": proofs}
 
-    def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False, test_profile=None):
+    def smoke_argv(self, snapshot, scope, machines, *, accounts=(), dry_run=False, test_profile=None, report_only=False):
         return ("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
                 "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS", "-u", "PENTACLE_SMOKE_ACCOUNTS", "PENTACLE_MACHINES_FILE=" + str(machines),
                 "PENTACLE_SMOKE_EXCLUDED_HOSTS=" + ",".join(r["host"] for r in scope["excluded_hosts"]),
                 str(self.d._venv_python(self.repo, self.service)), str(Path(snapshot) / RUNNER),
                 *(arg for entry in accounts for arg in ('--account', entry)),
                 *(("--test-profile-snapshot", str(test_profile)) if test_profile else ()),
-                *(("--dry-run",) if dry_run else ()))
+                *(("--dry-run",) if dry_run else ()),
+                *(("--report-only",) if report_only else ()))
 
     def smoke_plan(self, snapshot, scope, machines, *, accounts=(), test_profile=None):
         from deploy.coordinated import smoke_account_map
@@ -620,12 +612,9 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
         for key, name in (("post_policy", "policy.after"), ("post_plist", "daemon.after")):
             if receipt[key]["path"] != str(folder / name):
                 raise Invalid("postimage path substitution")
-        scheduled = bool(receipt['intent'].get('smoke_accounts') and not receipt['scope']['excluded_hosts'])
-        if scheduled != ('post_schedule' in receipt):
-            raise Invalid('scheduled account intent substitution')
-        if scheduled and (receipt['post_schedule']['path'] != str(folder/'schedule.after')
-                or Path(receipt['post_schedule']['path']).read_bytes() != self.schedule_definition(
-                    receipt['source']['target'], receipt['intent']['smoke_accounts'], receipt['intent']['machines_file'])):
+        # Older sealed receipts may carry the retired schedule preimage. They
+        # remain recoverable; no new forward transaction installs that job.
+        if 'post_schedule' in receipt and receipt['post_schedule']['path'] != str(folder/'schedule.after'):
             raise Invalid('scheduled account definition substitution')
         self.check_preimages(receipt)
         if (file_digest(receipt["intent"]["machines_file"]) != receipt["machines_sha256"]
@@ -831,8 +820,6 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             atomic_bytes(receipt["intent"]["policy_file"], Path(receipt["post_policy"]["path"]).read_bytes())
             atomic_bytes(receipt["preimages"]["plist"]["path"], Path(receipt["post_plist"]["path"]).read_bytes(),
                          mode=receipt["preimages"]["plist"]["mode"])
-            if 'post_schedule' in receipt:
-                atomic_bytes(receipt['preimages']['schedule']['path'], Path(receipt['post_schedule']['path']).read_bytes())
 
     def validate_recovery(self, receipt, journal):
         self.validate_common(receipt, forward=False)
@@ -918,54 +905,59 @@ print(json.dumps(dict(profile,identity=provider_cli_artifact.code_identity(),pyt
             raise Invalid("loaded runtime SHA not confirmed")
         partial["runtime"] = runtime
         self.validate_common(receipt, forward=not rollback)
-        restoration = None
+        dispatch = []
+        result = {"outcome": "passed", "boot": boot.as_stamp(), "runtime": runtime}
         if rollback:
             birth = self.d._process_start(boot.pid, self.runner)
             if birth:
-                # Exact prior files restored, fresh launchd boot, SHA confirmed.
                 self.verified_prior = {"pid": boot.pid, "birth": birth, "sha": source["sha"]}
-            restoration = self.restoration_proof(receipt, source, boot)
-            partial["restoration"] = restoration
-            verdict = None
+            # A late no-input report cannot veto a completely restored prior
+            # that booted and identified itself. Partial restoration still
+            # fails above and keeps the existing conservative recovery path.
+            try:
+                result["restoration"] = self.restoration_proof(receipt, source, boot)
+            except Exception as exc:
+                result["restoration"] = {"outcome": "failed", "reason": str(exc)}
+            if not self.verified_prior or not self.prior_still_running(receipt, self.verified_prior):
+                raise Invalid("prior process identity changed during restoration report")
+            result["model_canary"] = {"outcome": "not_run_by_design"}
+            row = receipt["preimages"]["stamp"]
+            if row["saved"]: atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
+            else: Path(row["path"]).unlink(missing_ok=True)
         else:
+            # Produce the existing actual dispatch proof without model input.
+            # Full fleet smoke is a later report, never a serving rollback gate.
+            from deploy.restoration import verify_no_input
+            bindings = [b for b in receipt["accounts"]["selected_bindings"]
+                        if b["host"] in receipt["scope"]["included_hosts"] and b["enabled"]]
+            verify_no_input(bindings, Path(receipt["transaction_directory"]) / "forward-owned")
+            dispatch = self.dispatched_proofs(receipt, source, boot)
+            self.validate_common(receipt, forward=True)
+            stamp.update(daemon_boot_readback=boot.as_stamp(), daemon_runtime_readback=runtime,
+                         coordinated_phase="committed")
+            self.d._write_stamp(self.repo, self.service, stamp)
+        result["helper_dispatch"] = dispatch
+        partial.update(result)
+        return result
+
+    def post_checks(self, receipt, serving):
+        source = receipt["source"]["target"]
+        stamp = self.d._read_stamp(self.repo, self.service)
+        def smoke_check():
             if file_digest(self.repo / RUNNER) != source["runner_sha256"]:
                 raise Invalid("installed smoke runner drift")
             if self.smoke_plan(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]) != source["smoke_plan"]:
                 raise Invalid("pre-canary runner plan drift")
-            smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"]), self.repo)
-            verdict = self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
+            smoke = self.runner(self.smoke_argv(self.repo, receipt["scope"], receipt["machines_snapshot"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=source["test_profile"]["path"], report_only=True), self.repo)
+            return self.d._fleet_smoke_verdict(smoke, receipt["machines_snapshot"],
                         declared_exclusions=receipt["intent"]["excluded_hosts"], accounts=receipt["intent"].get("smoke_accounts", []), test_profile=read_json(source["test_profile"]["path"]))
-            partial["fleet_smoke"] = verdict
-        self.validate_common(receipt, forward=not rollback)
-        slow = self.d._scan_slow_consumer_window(self.service, self.log_offsets,
-            expected_pid=boot.pid, expected_start=self.d._process_start(boot.pid, self.runner),
-            prior_pid=self.old_pid, prior_start=self.old_start, no_outgoing_writer=self.old_pid is None, runner=self.runner)
-        partial["slow_consumer"] = slow
-        dispatch = self.dispatched_proofs(receipt, source, boot)
-        result = {"outcome": "passed" if (restoration if rollback else verdict)["outcome"] == "passed" and slow.get("outcome") == "passed" else "failed",
-                  "boot": boot.as_stamp(), "runtime": runtime, "slow_consumer": slow,
-                  "helper_dispatch": dispatch}
-        if rollback:
-            result.update(restoration=restoration, model_canary={"outcome":"not_run_by_design"})
-        else:
-            result["fleet_smoke"] = verdict
-        if result['outcome'] == 'passed' and 'post_schedule' in receipt:
-            label = 'com.pentacle.spawn-fleet-smoke'
-            self.runner(('launchctl', 'bootout', self.d._launchctl_target(label)), self.repo)
-            schedule = receipt['preimages']['schedule']
-            if not rollback or schedule['saved']:
-                self.checked(('launchctl', 'bootstrap', self.d._launchctl_target(label).rsplit('/', 1)[0], schedule['path']))
-        stamp.update(daemon_boot_readback=boot.as_stamp(), daemon_runtime_readback=runtime,
-                     fleet_smoke=verdict, slow_consumer=slow, coordinated_phase="rolled_back" if rollback else "committed")
-        # Preserve original rollback stamp bytes; its separate verification is
-        # journaled. The active journal still prevents unsafe legacy rollback.
-        if not rollback:
-            self.d._write_stamp(self.repo, self.service, stamp)
-        else:
-            row = receipt["preimages"]["stamp"]
-            if row["saved"]: atomic_bytes(row["path"], Path(row["saved"]).read_bytes(), mode=row["mode"])
-            else: Path(row["path"]).unlink(missing_ok=True)
-        return result
+        boot = self.d.BootReadback(**serving["boot"])
+        checks = self.d.run_post_release_checks(self.service, self.repo, source["sha"], stamp,
+                    runner=self.runner, prior_log_size=self.log_offsets,
+                    prior_pid=self.old_pid, prior_start=self.old_start, boot=boot,
+                    fleet_smoke_check=smoke_check, no_outgoing_writer=self.old_pid is None)
+        self.d._write_stamp(self.repo, self.service, stamp)
+        return {**checks, "outcome": "passed" if all(value.get("outcome") == "passed" for value in checks.values()) else "failed"}
 
     def restoration_proof(self, receipt, source, boot):
         from deploy.restoration import verify_no_input

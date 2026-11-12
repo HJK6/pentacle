@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import shutil
 import uuid
 
 
@@ -216,7 +217,7 @@ def active_transaction(repo):
     return read_json(pointer) if pointer.exists() else None
 
 
-def legacy_guard(repo, stamp, *, rollback):
+def ordinary_guard(repo, stamp, *, rollback, helper_identity_equal=False):
     active = active_transaction(repo)
     ancestry = stamp.get("coordinated_receipt")
     if active:
@@ -225,7 +226,7 @@ def legacy_guard(repo, stamp, *, rollback):
             raise Invalid("unfinished coordinated transaction; recover with --rollback --coordinated-receipt " + active["receipt"])
         if journal["phase"] == "committed":
             ancestry = active["receipt"]
-    if rollback and ancestry:
+    if rollback and ancestry and not helper_identity_equal:
         raise Invalid("coordinated ancestry requires --rollback --coordinated-receipt " + str(ancestry))
     return ancestry
 
@@ -306,26 +307,36 @@ class Transaction:
         folder = self.root / intent["transaction_id"]
         if folder.exists():
             raise Invalid("transaction id already exists")
-        private_directory(folder)
-        prepared = self.adapter.prepare(intent, folder)
-        receipt = seal_receipt({"schema": RECEIPT_SCHEMA, "intent": intent,
-                                "intent_path": str(private_file(intent_path)),
-                                "intent_sha256": file_digest(intent_path),
-                                "repo": str(self.adapter.repo), "receipt_path": str(receipt_path),
-                                "transaction_directory": str(folder), **prepared})
-        atomic_json(receipt_path, receipt)
-        journal = {"transaction_id": intent["transaction_id"], "receipt": str(receipt_path),
-                   "receipt_sha256": receipt["receipt_sha256"], "forward_failure": None,
-                   "rollback_failure": None, "readbacks": [], "history": []}
-        if getattr(self.adapter, "helper_wait_events", None):
-            journal["helper_proof_waits"] = copy.deepcopy(self.adapter.helper_wait_events)
-        self.phase(journal, "prepared")
-        # Prepared transactions also block legacy deploys: their preimages must
-        # not silently become stale during the FD window.
-        atomic_json(self.root / "active.json", {"receipt": str(receipt_path),
-                    "receipt_sha256": receipt["receipt_sha256"], "journal": str(folder / "journal.json")})
-        return {"phase": "prepared", "coordinated_receipt": str(receipt_path),
-                "receipt_sha256": receipt["receipt_sha256"], "prepared_only": True}
+        # Claim a new directory exclusively. Never delete an existing/unowned one.
+        folder.mkdir(mode=0o700)
+        folder.chmod(0o700)
+        owned = folder.stat()
+        try:
+            prepared = self.adapter.prepare(intent, folder)
+            receipt = seal_receipt({"schema": RECEIPT_SCHEMA, "intent": intent,
+                                    "intent_path": str(private_file(intent_path)),
+                                    "intent_sha256": file_digest(intent_path),
+                                    "repo": str(self.adapter.repo), "receipt_path": str(receipt_path),
+                                    "transaction_directory": str(folder), **prepared})
+            atomic_json(receipt_path, receipt)
+            journal = {"transaction_id": intent["transaction_id"], "receipt": str(receipt_path),
+                       "receipt_sha256": receipt["receipt_sha256"], "forward_failure": None,
+                       "rollback_failure": None, "readbacks": [], "history": []}
+            if getattr(self.adapter, "helper_wait_events", None):
+                journal["helper_proof_waits"] = copy.deepcopy(self.adapter.helper_wait_events)
+            self.phase(journal, "prepared")
+            # Prepared transactions also block ordinary deploys: their preimages must
+            # not silently become stale during the FD window.
+            atomic_json(self.root / "active.json", {"receipt": str(receipt_path),
+                        "receipt_sha256": receipt["receipt_sha256"], "journal": str(folder / "journal.json")})
+            return {"phase": "prepared", "coordinated_receipt": str(receipt_path),
+                    "receipt_sha256": receipt["receipt_sha256"], "prepared_only": True}
+        except Exception:
+            if folder.exists() and folder.stat().st_ino == owned.st_ino and folder.stat().st_uid == os.getuid():
+                shutil.rmtree(folder)
+            # No receipt is usable unless preparation and its journal completed.
+            receipt_path.unlink(missing_ok=True)
+            raise
 
     def load(self, receipt_path):
         receipt = load_receipt(receipt_path)
@@ -410,8 +421,6 @@ class Transaction:
                 except OSError as journal_exc:
                     journal["journal_failure"] = type(journal_exc).__name__
                 raise Invalid("candidate health failed")
-            self.phase(journal, "committed", result=result, postimage=self.adapter.current(receipt))
-            return self.result(receipt, journal)
         except Exception as exc:
             # Never replace the original failure with a successful recovery.
             journal["forward_failure"] = {"type": type(exc).__name__, "reason": str(exc)}
@@ -421,6 +430,33 @@ class Transaction:
                 journal["journal_failure"] = type(journal_exc).__name__
             self.recover(receipt, journal, automatic=True)
             return self.result(receipt, journal)
+        try:
+            self.phase(journal, "committed", result=result, postimage=self.adapter.current(receipt))
+        except Exception as exc:
+            # Serving and helper proofs passed. A journal write failure is not
+            # authority to stop the proven candidate.
+            journal.update(phase="committed", result={**result, "outcome": "failed"},
+                           journal_failure=type(exc).__name__)
+            return self.result(receipt, journal)
+        # The commit is outside the automatic recovery region. Late failures,
+        # including exceptions and report persistence failures, never stop it.
+        try:
+            checks = self.adapter.post_checks(receipt, result)
+        except Exception as exc:
+            checks = {"outcome": "failed", "error": {"type": type(exc).__name__, "reason": str(exc)}}
+        journal["result"] = {**result, **checks}
+        try:
+            # Only our report stamp changed after the serving commit. Keep
+            # original source/policy/helper preimages for later drift checks.
+            postimage = copy.deepcopy(journal["postimage"])
+            current = self.adapter.current(receipt)
+            if "stamp" in postimage.get("files", {}):
+                postimage["files"]["stamp"] = current["files"]["stamp"]
+            self.phase(journal, "committed", postimage=postimage)
+        except Exception as exc:
+            journal["journal_failure"] = type(exc).__name__
+            journal["result"]["outcome"] = "failed"
+        return self.result(receipt, journal)
 
     def rollback(self, receipt_path, authorization=None, go_tell_id=None):
         receipt, journal = self.load(receipt_path)
@@ -443,7 +479,7 @@ class Transaction:
                 self.phase(journal, "discarded")
             return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
                     "phase": "discarded", "outcome": "discarded", "scope": "preparation_only",
-                    "full_fleet_acceptance": False, "runtime_mutated": False, "exit_code": 0}
+                    "full_fleet_acceptance": False, "runtime_mutated": False}
         if journal["phase"] == "rolled_back":
             self.adapter.validate_restored(receipt, journal)
             return self.result(receipt, journal, explicit_rollback=True)
@@ -471,10 +507,8 @@ class Transaction:
                 partial = getattr(exc, "partial_result", None)
                 result = copy.deepcopy(partial) if isinstance(partial, dict) else None
                 raise
-            if (result.get("outcome") != "passed"
-                    or (result.get("restoration") or {}).get("outcome") != "passed"
-                    or (result.get("model_canary") or {}).get("outcome") != "not_run_by_design"):
-                raise Invalid("prior no-input restoration failed or missing")
+            if result.get("outcome") != "passed":
+                raise Invalid("prior serving verification failed")
             try:
                 self.phase(journal, "rolled_back", rollback_result=result,
                            restored=self.adapter.current(receipt), rollback_failure=None)
@@ -516,13 +550,18 @@ class Transaction:
     @staticmethod
     def result(receipt, journal, *, explicit_rollback=False):
         scoped = bool(receipt["intent"]["excluded_hosts"])
-        success = journal["phase"] == ("rolled_back" if explicit_rollback else "committed")
+        active = journal["phase"] == "committed"
+        checks_passed = journal.get("result", {}).get("outcome") == "passed"
+        success = (journal["phase"] == "rolled_back" if explicit_rollback else active and checks_passed)
+        disposition = ("active and checks passed" if checks_passed else "active with failed checks") if active else (
+            "target not active, prior restored" if journal["phase"] == "rolled_back" else "target not active, restore unproven")
+        if explicit_rollback and success:
+            disposition = "active and checks passed"
         return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
-                "phase": journal["phase"], "outcome": "passed" if success else "failed",
+                "phase": journal["phase"], "outcome": "passed" if success else "failed", "disposition": disposition,
                 "scope": "declared_optional_exclusions" if scoped else "full_matrix",
                 "full_fleet_acceptance": success and not scoped and not explicit_rollback,
                 "verification_kind": "restoration" if explicit_rollback else "model_canary",
                 "forward_failure": journal.get("forward_failure"), "rollback_failure": journal.get("rollback_failure"),
                 "journal_failure": journal.get("journal_failure"),
-                "verification": journal.get("rollback_result" if explicit_rollback else "result"),
-                "exit_code": (11 if scoped else 0) if success else 12}
+                "verification": journal.get("rollback_result" if explicit_rollback else "result")}

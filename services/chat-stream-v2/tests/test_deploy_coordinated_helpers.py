@@ -80,19 +80,25 @@ class Counterparts:
             # Observed fresh boot, PID change and runtime SHA readback.
             self.verified_prior = {"pid": 222, "birth": "prior-birth", "sha": "c" * 40}
         completed = []
-        for step in ("readback", "dispatch", "canary", "slow_consumer", "cleanup"):
+        for step in (("readback", "dispatch", "canary", "slow_consumer", "cleanup") if rollback else ("readback", "dispatch")):
             try:
                 self.event(step + "_" + direction)
             except RuntimeError as exc:
                 exc.partial_result = {"outcome": "failed", "completed": list(completed)}
                 raise
             completed.append(step)
-        if "unhealthy_" + direction in self.failures:
+        if rollback and "unhealthy_" + direction in self.failures:
             return {"outcome": "failed", "fleet_smoke": {"outcome": "failed"}, "slow_consumer": {"outcome": "passed"},
                     "boot": {"outcome": "observed"}, "runtime": {"sha": "b" * 40}, "helper_dispatch": [],
                     **({"restoration": {"outcome": "failed"}} if rollback else {})}
         return ({"outcome":"passed", "restoration":{"outcome":"passed"},
                  "model_canary":{"outcome":"not_run_by_design"}} if rollback else {"outcome":"passed"})
+
+    def post_checks(self, receipt, serving):
+        for step in ("canary", "slow_consumer", "cleanup"):
+            self.event(step + "_target")
+        return {"outcome": "failed" if "unhealthy_target" in self.failures else "passed",
+                "fleet_smoke": {"outcome": "failed" if "unhealthy_target" in self.failures else "passed"}}
 
     def prior_still_running(self, receipt, identity):
         self.event("confirm_prior")
@@ -144,25 +150,24 @@ def test_prepare_apply_and_explicit_committed_rollback(transaction):
     assert (adapter.source, adapter.policy, adapter.pid) == ("prior", "prior", 111)
     sealed = path.read_bytes()
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 11 and result["full_fleet_acceptance"] is False
+    assert result["disposition"] == "active and checks passed" and result["full_fleet_acceptance"] is False
     assert result["phase"] == "committed"
     assert path.read_bytes() == sealed
     assert adapter.calls.index("stop") < adapter.calls.index("switch_target") < adapter.calls.index("bootstrap_target")
     restored = tx.rollback(path)
-    assert restored["phase"] == "rolled_back" and restored["exit_code"] == 11
+    assert restored["phase"] == "rolled_back" and restored["disposition"] == "active and checks passed"
     assert (adapter.source, adapter.policy) == ("prior", "prior")
     assert tx.rollback(path) == restored
     assert path.read_bytes() == sealed
 
 
 @pytest.mark.parametrize("failure", ["stop", "revalidate_stopped", "switch_target", "policy_target",
-    "bootstrap_target", "readback_target", "dispatch_target", "canary_target", "slow_consumer_target", "cleanup_target"])
+    "bootstrap_target", "readback_target", "dispatch_target"])
 def test_every_post_stop_failure_is_durable_and_failure_dominant(transaction, failure):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
     adapter.failures.add(failure)
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 12
     assert result["outcome"] == "failed"
     assert result["forward_failure"]["reason"] == failure
     assert result["phase"] in {"rolled_back", "recovery_required"}
@@ -175,14 +180,14 @@ def test_every_post_stop_failure_is_durable_and_failure_dominant(transaction, fa
 def test_failed_recovery_retries_idempotently_without_rpc(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures = {"canary_target", "policy_prior"}
+    adapter.failures = {"readback_target", "policy_prior"}
     result = tx.apply(intent, path)
     assert result["phase"] == "recovery_required" and adapter.pid is None
     adapter.failures.clear()
     result = tx.rollback(path)
     assert result["phase"] == "rolled_back"
-    assert result["forward_failure"]["reason"] == "canary_target"
-    assert result["exit_code"] == 11
+    assert result["forward_failure"]["reason"] == "readback_target"
+    assert result["disposition"] == "active and checks passed"
 
 
 @pytest.mark.parametrize("phase", ["stopping", "stopped", "switching", "verifying", "committed", "rolling_back"])
@@ -195,7 +200,7 @@ def test_kill_reentry_resumes_only_compensating_recovery(transaction, monkeypatc
         if stage == phase: raise KeyboardInterrupt("simulated process kill")
     monkeypatch.setattr(tx, "phase", killed)
     if phase == "rolling_back":
-        adapter.failures.add("canary_target")
+        adapter.failures.add("readback_target")
     with pytest.raises(KeyboardInterrupt): tx.apply(intent, path)
     monkeypatch.setattr(tx, "phase", persist)
     with pytest.raises(c.Invalid, match="prepared phase"): tx.apply(intent, path)
@@ -242,14 +247,14 @@ def test_prepared_rollback_discards_without_runtime_effects_and_allows_reprepare
     adapter.calls.clear()
     result = tx.rollback(path)
     assert result["phase"] == "discarded" and result["outcome"] == "discarded"
-    assert result["exit_code"] == 0 and result["full_fleet_acceptance"] is False
+    assert result["full_fleet_acceptance"] is False
     assert result["runtime_mutated"] is False
     assert adapter.calls == [] and (adapter.current(None), adapter.pid) == before
     assert path.read_bytes() == sealed and tx.rollback(path) == result
-    assert c.legacy_guard(adapter.repo, {}, rollback=False) is None
+    assert c.ordinary_guard(adapter.repo, {}, rollback=False) is None
     # Existing coordinated ancestry in a live stamp still requires its receipt.
     with pytest.raises(c.Invalid, match="coordinated ancestry"):
-        c.legacy_guard(adapter.repo, {"coordinated_receipt": "/prior/receipt"}, rollback=True)
+        c.ordinary_guard(adapter.repo, {"coordinated_receipt": "/prior/receipt"}, rollback=True)
     value = json.loads(intent.read_bytes()); value["transaction_id"] = "example-transaction-02"
     fresh_intent = private_json(intent.parent / "intent2.json", value)
     assert tx.prepare(fresh_intent, intent.parent / "receipt2.json")["phase"] == "prepared"
@@ -259,10 +264,10 @@ def test_prepared_rollback_discards_without_runtime_effects_and_allows_reprepare
 def test_legacy_forward_and_plain_rollback_cannot_bypass_journal(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    with pytest.raises(c.Invalid, match="unfinished"): c.legacy_guard(adapter.repo, {}, rollback=False)
+    with pytest.raises(c.Invalid, match="unfinished"): c.ordinary_guard(adapter.repo, {}, rollback=False)
     tx.apply(intent, path)
-    assert c.legacy_guard(adapter.repo, {}, rollback=False) == str(path)
-    with pytest.raises(c.Invalid, match=str(path)): c.legacy_guard(adapter.repo, {}, rollback=True)
+    assert c.ordinary_guard(adapter.repo, {}, rollback=False) == str(path)
+    with pytest.raises(c.Invalid, match=str(path)): c.ordinary_guard(adapter.repo, {}, rollback=True)
 
 
 def test_concurrent_apply_or_recovery_denied(transaction):
@@ -344,7 +349,6 @@ def test_actual_identity_and_account_verifier_accept_only_matching_source_pairs(
     {"prepare_only": True}, {"coordinated_plan": Path("/intent")},
     {"coordinated_receipt": Path("/receipt")},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "skip_kickstart": True},
-    {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "release_inputs": Path("/input")},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "rollback": True},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "recovery_authorization": Path("/auth")},
     {"coordinated_plan": Path("/intent"), "coordinated_receipt": Path("/receipt"), "prepare_only": True,
@@ -361,14 +365,11 @@ def test_unsupported_flag_combinations_refuse_before_mutation(tmp_path, kwargs):
     assert calls == []
 
 
-def test_scoped_exit_is_distinct_and_failed_forward_never_turns_zero(monkeypatch, capsys):
+def test_coordinated_disposition_uses_public_exit_map(monkeypatch, capsys):
     from .test_deploy_script import _run_main
-    for value, expected in (({"exit_code": 11, "phase": "committed"}, 11),
-                            ({"exit_code": 12, "phase": "rolled_back", "forward_failure": {"reason": "canary"}}, 12)):
+    for value, expected in (({"phase": "committed", "disposition":"active and checks passed"}, 0),
+                            ({"phase": "rolled_back", "disposition":"target not active, prior restored"}, 4)):
         assert _run_main(monkeypatch, capsys, stamp=value)[0] == expected
-    from deploy import release_selection
-    with pytest.raises(release_selection.Invalid, match="non-green"):
-        release_selection.check_result({"passed": True, "returncode": 11, "outcome": "pass"})
 
 
 def test_journal_write_failure_after_stop_is_never_a_refusal(transaction, monkeypatch):
@@ -381,7 +382,7 @@ def test_journal_write_failure_after_stop_is_never_a_refusal(transaction, monkey
         return real(destination, value)
     monkeypatch.setattr(c, "atomic_json", fail_after_stopped)
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 12 and result["journal_failure"] == "OSError"
+    assert result["outcome"] == "failed" and result["journal_failure"] == "OSError"
     assert result["phase"] == "recovery_required" and adapter.pid is None
 
 
@@ -389,32 +390,31 @@ def _journal(tx, path):
     return tx.load(path)[1]
 
 
-def test_failed_forward_health_result_is_journaled_before_raise(transaction):
+def test_failed_late_health_is_journaled_without_recovery(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
     adapter.failures.add("unhealthy_target")
     result = tx.apply(intent, path)
     journal = _journal(tx, path)
-    assert result["forward_failure"]["reason"] == "candidate health failed"
-    assert journal["result"]["outcome"] == "failed"
-    assert {"fleet_smoke", "slow_consumer", "boot", "runtime", "helper_dispatch"} <= set(journal["result"])
-    assert journal["phase"] == "rolled_back"
+    assert result["phase"] == "committed" and result["outcome"] == "failed"
+    assert journal["result"]["fleet_smoke"]["outcome"] == "failed"
+    assert journal["forward_failure"] is None and "switch_prior" not in adapter.calls
 
 
-def test_verifier_raise_after_fleet_smoke_journals_partial_result(transaction):
+def test_late_checker_raise_keeps_candidate_active(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
     adapter.failures.add("slow_consumer_target")
     result = tx.apply(intent, path)
     journal = _journal(tx, path)
-    assert result["forward_failure"]["reason"] == "slow_consumer_target"
-    assert journal["partial_result"]["completed"] == ["readback", "dispatch", "canary"]
+    assert result["phase"] == "committed" and result["outcome"] == "failed"
+    assert journal["result"]["error"]["reason"] == "slow_consumer_target"
+    assert "switch_prior" not in adapter.calls
 
 
-def test_failed_health_journal_failure_keeps_original_exception(transaction, monkeypatch):
+def test_committed_journal_failure_does_not_restore_serving_candidate(transaction, monkeypatch):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.add("unhealthy_target")
     real = c.atomic_json
     def no_result(destination, value):
         if Path(destination).name == "journal.json" and "result" in value:
@@ -422,8 +422,8 @@ def test_failed_health_journal_failure_keeps_original_exception(transaction, mon
         return real(destination, value)
     monkeypatch.setattr(c, "atomic_json", no_result)
     result = tx.apply(intent, path)
-    assert result["forward_failure"]["reason"] == "candidate health failed"
-    assert result["journal_failure"] == "OSError"
+    assert result["phase"] == "committed" and result["outcome"] == "failed"
+    assert result["journal_failure"] == "OSError" and "switch_prior" not in adapter.calls
 
 
 @pytest.mark.parametrize("failure", ["readback_prior", "dispatch_prior", "canary_prior",
@@ -431,16 +431,16 @@ def test_failed_health_journal_failure_keeps_original_exception(transaction, mon
 def test_prior_proof_failure_after_verified_boot_leaves_prior_running(transaction, failure):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.update({"canary_target", failure})
+    adapter.failures.update({"readback_target", failure})
     result = tx.apply(intent, path)
     journal = _journal(tx, path)
-    assert result["phase"] == "recovery_required" and result["exit_code"] == 12 and result["outcome"] == "failed"
+    assert result["phase"] == "recovery_required" and result["outcome"] == "failed"
     assert adapter.pid == 222 and "keep_stopped" not in adapter.calls
     assert adapter.calls.index("confirm_prior") > adapter.calls.index("bootstrap_prior")
     assert journal["rollback_result"]["outcome"] == "failed"
     assert journal["rollback_result"]["prior_identity"] == {"pid": 222, "birth": "prior-birth", "sha": "c" * 40}
     assert journal["prior_running"] == journal["rollback_result"]["prior_identity"]
-    assert journal["forward_failure"]["reason"] == "canary_target"
+    assert journal["forward_failure"]["reason"] == "readback_target"
     assert result["full_fleet_acceptance"] is False
 
 
@@ -448,7 +448,7 @@ def test_prior_proof_failure_after_verified_boot_leaves_prior_running(transactio
 def test_admitted_failure_before_verified_boot_keeps_stopping(transaction, failure):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.update({"canary_target", failure})
+    adapter.failures.update({"readback_target", failure})
     result = tx.apply(intent, path)
     assert result["phase"] == "recovery_required" and adapter.pid is None
     assert "keep_stopped" in adapter.calls and "confirm_prior" not in adapter.calls
@@ -458,7 +458,7 @@ def test_admitted_failure_before_verified_boot_keeps_stopping(transaction, failu
 def test_identity_mismatch_at_decision_point_signals_nothing(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.update({"canary_target", "dispatch_prior"})
+    adapter.failures.update({"readback_target", "dispatch_prior"})
     adapter.identity_mismatch = True
     result = tx.apply(intent, path)
     journal = _journal(tx, path)
@@ -471,7 +471,7 @@ def test_identity_mismatch_at_decision_point_signals_nothing(transaction):
 def test_journal_failure_after_passed_restoration_leaves_proven_prior_running(transaction, monkeypatch):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.add("canary_target")
+    adapter.failures.add("readback_target")
     real = c.atomic_json
     def fail_rolled_back(destination, value):
         if Path(destination).name == "journal.json" and value.get("phase") == "rolled_back":
@@ -487,7 +487,7 @@ def test_journal_failure_after_passed_restoration_leaves_proven_prior_running(tr
 def test_pre_admission_refusal_of_explicit_recovery_leaves_running_prior_untouched(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.update({"canary_target", "dispatch_prior"})
+    adapter.failures.update({"readback_target", "dispatch_prior"})
     tx.apply(intent, path)
     adapter.failures.clear(); adapter.calls.clear(); adapter.catalog_drift = True
     with pytest.raises(c.Invalid, match="catalog drift"):
@@ -514,7 +514,7 @@ def _authorization(tx, path, **changes):
 def _running_prior_after_proof_failure(transaction):
     tx, adapter, intent, path = transaction
     tx.prepare(intent, path)
-    adapter.failures.update({"canary_target", "dispatch_prior"})
+    adapter.failures.update({"readback_target", "dispatch_prior"})
     tx.apply(intent, path)
     adapter.failures.clear(); adapter.calls.clear()
     return tx, adapter, path
@@ -573,8 +573,8 @@ def test_real_disposable_process_helper_forward_failure_and_explicit_rollback(tm
         c.state_root(root / "release"), root / "logs", root / "schedule.plist", root / "collector.plist")
     result = run(bindings, Path(__file__).resolve().parents[3])
     assert result["outcome"] == "passed" and result["fleet_readiness"] == "not_tested"
-    assert len([e for e in result["events"] if e["event"] == "started"]) == 5
-    assert len([e for e in result["events"] if e["event"] == "exited"]) == 5
+    assert len([e for e in result["events"] if e["event"] == "started"]) == 9
+    assert len([e for e in result["events"] if e["event"] == "exited"]) == 9
 
 
 def test_real_disposable_process_prior_proof_failure_leaves_prior_serving(tmp_path):
@@ -599,13 +599,10 @@ def test_real_disposable_process_prior_proof_failure_leaves_prior_serving(tmp_pa
             adapter.fail_forward = adapter.fail_prior_proof = True
             result = tx.apply(intent, receipt)
             serving = adapter.process
-            assert result["phase"] == "recovery_required" and result["exit_code"] == 12
+            assert result["phase"] == "rolled_back" and result["outcome"] == "failed"
             assert serving is not None and serving.poll() is None
-            assert tx.load(receipt)[1]["prior_running"]["pid"] == serving.pid
+            assert tx.load(receipt)[1]["rollback_result"]["restoration"]["outcome"] == "failed"
             assert adapter.git("rev-parse", "HEAD") == adapter.prior
-            adapter.fail_prior_proof = False
-            assert tx.rollback(receipt)["phase"] == "rolled_back"
-            assert serving.poll() is not None and adapter.process.poll() is None
     finally:
         adapter.close()
 
@@ -766,6 +763,11 @@ def _concrete_counterparts(runtime_preparation, monkeypatch):
     runtime.d._verify_runtime_sha = lambda sha, pid: (True, {"sha": sha, "pid": pid})
     runtime.d._process_start = lambda *a: "counterpart-start"
     runtime.d._scan_slow_consumer_window = lambda *a, **k: {"outcome": "passed"}
+    # Shared report callable is defined in deploy.py; route its boundaries to
+    # this fixture's isolated counterparts rather than the host launchd/logs.
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *a, **k: runtime.d._scan_slow_consumer_window(*a, **k))
+    monkeypatch.setattr(deploy_mod, "_process_start", lambda *a: "counterpart-start")
+    monkeypatch.setattr(deploy_mod, "_notify_failed_checks", lambda *a: None)
     actual_runner = runtime.runner
     def runner(argv, cwd):
         if argv[0] == "launchctl":
@@ -773,6 +775,8 @@ def _concrete_counterparts(runtime_preparation, monkeypatch):
             lifecycle.append("bootstrap")
             running["pid"] = running["next"]; running["next"] += 1
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if any(str(arg).endswith("release_fd_check.py") for arg in argv):
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"outcome":"passed"}), "")
         if argv[0] == "/usr/bin/env" and "--dry-run" not in argv:
             policy = c.read_json(fixture.policy)
             sealed = c.load_receipt(receipt_path)
@@ -817,7 +821,9 @@ def _concrete_counterparts(runtime_preparation, monkeypatch):
             if prefix == "spawn":
                 sealed = c.load_receipt(receipt_path)
                 raw = next(b for b in sealed["accounts"]["selected_bindings"] if b["provider"]==payload["provider"])
-                helper = {**sealed["source"]["prior"]["original_helpers"][raw["host"]],
+                direction = "target" if fixture.git("rev-parse", "HEAD") == fixture.target else "prior"
+                helpers = sealed["source"][direction]["helpers" if direction == "target" else "original_helpers"]
+                helper = {**helpers[raw["host"]],
                           **c.read_json(fixture.policy)["executors"][raw["host"]]}
                 proof = runtime.remote_json(helper, [helper["python"], helper["script"], "verify-artifact",
                     "--provider", raw["provider"], "--account", raw["alias"], "--login-generation", raw["generation"],
@@ -868,23 +874,19 @@ def test_concrete_forward_failure_journals_verification(runtime_preparation, mon
         tx.prepare(plan, receipt_path)
         result = tx.apply(plan, receipt_path)
         journal = tx.load(receipt_path)[1]
-    assert result["phase"] == "rolled_back" and result["exit_code"] == 12
-    if kind == "unhealthy":
-        assert result["forward_failure"]["reason"] == "candidate health failed"
-        assert journal["result"]["outcome"] == "failed" and journal["result"]["fleet_smoke"]["outcome"] == "passed"
-        assert journal["result"]["slow_consumer"] == {"outcome": "failed", "keepalive_timeout": 2}
-        assert {"boot", "runtime", "helper_dispatch"} <= set(journal["result"])
-    else:
-        assert result["forward_failure"]["reason"] == "slow-consumer scan unavailable"
-        partial = journal["partial_result"]
-        assert partial["fleet_smoke"]["outcome"] == "passed" and {"boot", "runtime"} <= set(partial)
-        assert "slow_consumer" not in partial
+    assert result["phase"] == "committed"
+    assert result["disposition"] == "active with failed checks"
+    assert journal["result"]["outcome"] == "failed"
+    assert journal["result"]["slow_consumer"]["outcome"] == "failed"
+    assert {"boot", "runtime", "helper_dispatch"} <= set(journal["result"])
+    assert lifecycle == ["stop", "bootstrap"]
+    assert fixture.git("rev-parse", "HEAD") == fixture.target
 
 
 def test_concrete_prior_proof_failure_after_verified_boot_leaves_prior_running(runtime_preparation, monkeypatch):
     runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
-    runtime.d._scan_slow_consumer_window = lambda *a, **k: (
-        {"outcome": "passed"} if fixture.git("rev-parse", "HEAD") == fixture.prior else {"outcome": "failed"})
+    runtime.d._verify_runtime_sha = lambda sha, pid: (
+        sha == fixture.prior, {"sha": sha, "pid": pid})
     def no_restoration(*a, **k):
         raise c.Invalid("incomplete no-input restoration proof")
     runtime.restoration_proof = no_restoration
@@ -893,17 +895,17 @@ def test_concrete_prior_proof_failure_after_verified_boot_leaves_prior_running(r
         tx.prepare(plan, receipt_path)
         result = tx.apply(plan, receipt_path)
         journal = tx.load(receipt_path)[1]
-    assert result["phase"] == "recovery_required" and result["exit_code"] == 12
+    assert result["phase"] == "rolled_back" and result["outcome"] == "failed"
     assert lifecycle == ["stop", "bootstrap", "stop", "bootstrap"] and running["pid"] == 223
     assert fixture.git("rev-parse", "HEAD") == fixture.prior
-    assert journal["prior_running"] == {"pid": 223, "birth": "counterpart-start", "sha": fixture.prior}
-    assert journal["rollback_failure"]["reason"] == "incomplete no-input restoration proof"
+    assert journal["rollback_result"]["restoration"]["outcome"] == "failed"
+    assert journal["rollback_failure"] is None
 
 
 def test_concrete_identity_mismatch_at_decision_point_signals_nothing(runtime_preparation, monkeypatch):
     runtime, fixture, plan, receipt_path, running, lifecycle = _concrete_counterparts(runtime_preparation, monkeypatch)
-    runtime.d._scan_slow_consumer_window = lambda *a, **k: (
-        {"outcome": "passed"} if fixture.git("rev-parse", "HEAD") == fixture.prior else {"outcome": "failed"})
+    runtime.d._verify_runtime_sha = lambda sha, pid: (
+        sha == fixture.prior, {"sha": sha, "pid": pid})
     def replaced(*a, **k):
         running["pid"] = 999  # launchd now names a different process
         raise c.Invalid("incomplete no-input restoration proof")
@@ -1194,7 +1196,7 @@ def test_helper_child_post_stop_failure_keeps_diagnostic_in_recovery_journal(tra
     monkeypatch.setattr(adapter, 'start_verify', verify)
     result = tx.apply(intent, path)
     _, journal = tx.load(path)
-    assert result['exit_code'] == 12 and journal['phase'] == 'rolled_back'
+    assert result['outcome'] == 'failed' and journal['phase'] == 'rolled_back'
     assert 'account_busy' in journal['forward_failure']['reason']
     assert (adapter.source, adapter.policy) == ('prior', 'prior')
 
@@ -1394,3 +1396,25 @@ def test_legacy_dry_plan_still_refuses_forward_model_smoke(runtime_preparation):
     with pytest.raises(c.Invalid, match='compatible test profile'):
         runtime.smoke_plan(fixture.repo, scope, intent['machines_file'])
     assert not runtime.stopped
+
+
+def test_prepare_fetches_missing_target_before_reachability(runtime_preparation):
+    runtime, fixture, intent, root = runtime_preparation
+    observed = []
+    def missing(*args):
+        raise deploy_mod.DeployError('missing local object')
+    runtime.d._resolve_sha = missing
+    actual = runtime.runner
+    def runner(argv, cwd):
+        if tuple(argv[:3]) == ('git', 'fetch', 'origin'):
+            observed.append(tuple(argv))
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        return actual(argv, cwd)
+    runtime.runner = runner
+    def reachable(*args):
+        assert observed == [('git', 'fetch', 'origin')]
+        raise c.Invalid('stop before fixture staging')
+    runtime.d._verify_origin_reachable = reachable
+    folder = root / 'fetch-check'; folder.mkdir(mode=0o700)
+    with pytest.raises(c.Invalid, match='stop before fixture staging'):
+        runtime.prepare(intent, folder)

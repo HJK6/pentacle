@@ -23,7 +23,7 @@ def _rows(host: str, outcome: str = "passed", reason: str | None = None) -> list
     ]
 
 
-def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None, selection=None):
+def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None):
     machines_file = tmp_path / "synthetic-machines.json"
     machines_file.write_text(json.dumps(machines if machines is not None else [
         {"name": "primary", "ssh_target": None},
@@ -32,14 +32,11 @@ def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None, selection=Non
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _label: {
         "PENTACLE_MACHINES_FILE": str(machines_file),
     })
-    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {})
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {"outcome": "passed"})
     writes, schedules = [], []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(json.loads(json.dumps(stamp))))
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (rc, json.dumps(payload), "")})
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (rc, json.dumps(payload), ""), "release_fd_check.py": (0, '{"outcome":"passed"}', "")})
     stamp = {"sha": TARGET_SHA}
-    if selection is not None:
-        stamp["release_selection"] = selection
     deploy_mod._apply_post_activation(
         V2_SERVICE, Path("/synthetic-release"), TARGET_SHA, stamp,
         prior_log_size=0, prior_pid=111, reload_launchd=False, runner=runner,
@@ -50,42 +47,15 @@ def _apply(tmp_path, monkeypatch, payload, rc=0, *, machines=None, selection=Non
     assert writes[-1] == stamp
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     assert len([call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call)]) == 1
-    if selection is not None:
-        smoke_call = next(call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call))
-        assert smoke_call[-2:] == ("ws://127.0.0.1:12345", "primary")
     return stamp, schedules
 
 
-def _qualified_scope():
-    return {"identity": {"activation": {"url": "ws://127.0.0.1:12345", "host": "primary"},
-                         "required_cells": [{"host": "primary", "provider": "codex", "prompt_mode": "promptless"}]}}
 
 
-def test_qualified_canary_narrows_invocation_and_verdict_without_full_matrix_claim(tmp_path, monkeypatch):
-    cell = {"host": "primary", "provider": "codex", "prompt_mode": "promptless", "outcome": "passed"}
-    stamp, schedules = _apply(tmp_path, monkeypatch, {"ok": True, "status": "PASS", "cells": [cell]},
-                              selection=_qualified_scope())
-    assert stamp["fleet_smoke"]["outcome"] == "passed"
-    assert stamp["fleet_smoke"]["scope"] == "qualified_affected"
-    assert stamp["fleet_smoke"]["full_fleet_acceptance"] is False
-    assert len(stamp["fleet_smoke"]["not_selected"]) == 7
-    assert {c["outcome"] for c in stamp["fleet_smoke"]["not_selected"]} == {"UNTESTED"}
-    assert schedules == []  # scheduled full matrix retains its separate policy
 
 
-@pytest.mark.parametrize("state", ["missing", "quota", "failed", "cleanup"])
-def test_qualified_scope_missing_or_non_green_cell_never_passes(tmp_path, monkeypatch, state):
-    cells = [] if state == "missing" else [{"host": "primary", "provider": "codex", "prompt_mode": "promptless",
-             "outcome": "untested" if state == "quota" else "failed", "reason": state}]
-    stamp, schedules = _apply(tmp_path, monkeypatch, {"cells": cells}, selection=_qualified_scope())
-    assert stamp["fleet_smoke"]["outcome"] in {"untested", "failed"}
-    assert schedules == []
 
 
-def test_qualified_scope_rejects_unexpected_cell_instead_of_silently_broadening(tmp_path, monkeypatch):
-    stamp, _ = _apply(tmp_path, monkeypatch, {"cells": _rows("primary")}, selection=_qualified_scope())
-    assert stamp["fleet_smoke"]["outcome"] == "untested"
-    assert any("unconfigured_or_invalid_cell" in issue for issue in stamp["fleet_smoke"]["issues"])
 
 
 def _partial_payload():
@@ -104,10 +74,9 @@ def test_local_pass_remote_unreachable_is_partial_never_a_release_pass(tmp_path,
     assert stamp["fleet_smoke"]["local_hosts"] == ["primary"]
     assert schedules == []
     code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_PARTIAL == 10
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
     assert code != deploy_mod.EXIT_OK
-    assert "PARTIAL" in error and "satellite" in error
-    assert "do NOT retry" in error
+    assert "active with failed checks" in error
     assert json.loads(output)["fleet_smoke"]["outcome"] == "partial"
 
 
@@ -124,7 +93,7 @@ def test_failure_only_in_failures_dominates_pass_evidence(tmp_path, monkeypatch,
     # Even a contradictory zero exit and pass row cannot erase explicit failure evidence.
     stamp, schedules = _apply(tmp_path, monkeypatch, payload)
     code, output, _error = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
     assert schedules == []
     cells = json.loads(output)["fleet_smoke"]["cells"]
     failed = [row for row in cells if row["outcome"] == "failed"]
@@ -143,7 +112,7 @@ def test_local_incomplete_never_becomes_partial(tmp_path, monkeypatch, capsys, l
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=2)
     assert stamp["fleet_smoke"]["outcome"] == "untested"
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_UNTESTED == 9
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
     assert schedules == []
     assert len(stamp["fleet_smoke"]["cells"]) == 8
 
@@ -155,7 +124,7 @@ def test_remote_environmental_error_is_still_exit_9(tmp_path, monkeypatch, capsy
         row["reason"] = reason
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=2)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_UNTESTED == 9
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
     assert schedules == []
     assert not stamp["fleet_smoke"]["issues"]
     assert all(reason in row["reasons"] for row in stamp["fleet_smoke"]["cells"]
@@ -170,7 +139,7 @@ def test_every_host_cell_and_reason_survives_stamp_and_stdout(tmp_path, monkeypa
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=1)
     code, output, _err = _run_main(monkeypatch, capsys, stamp=stamp)
     smoke = json.loads(output)["fleet_smoke"]
-    assert code == 6 and schedules == []
+    assert code == 3 and schedules == []
     assert len(smoke["cells"]) == 8
     assert smoke["evidence"] == payload
     merged = next(row for row in smoke["cells"] if row["host"] == "satellite" and row["provider"] == "codex" and row["prompt_mode"] == "promptless")
@@ -181,7 +150,7 @@ def test_every_host_cell_and_reason_survives_stamp_and_stdout(tmp_path, monkeypa
 def test_full_pass_alone_installs_schedule_and_stays_exit_zero(tmp_path, monkeypatch, capsys):
     payload = {"ok": True, "status": "PASS", "cells": _rows("primary") + _rows("satellite"), "failures": [], "untested": []}
     stamp, schedules = _apply(tmp_path, monkeypatch, payload)
-    assert schedules == [True]
+    assert schedules == []  # recurring smoke installer is retired
     assert {row["outcome"] for row in stamp["fleet_smoke"]["cells"]} == {"passed"}
     code, _output, _error = _run_main(monkeypatch, capsys, stamp=stamp)
     assert code == 0
@@ -193,7 +162,7 @@ def test_zero_exit_without_complete_evidence_is_untested(tmp_path, monkeypatch, 
     assert schedules == []
     assert any(row["reason"] == "missing_evidence" for row in stamp["fleet_smoke"]["cells"])
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9
+    assert code == 3
 
 
 @pytest.mark.parametrize("extra", [
@@ -205,7 +174,7 @@ def test_unrecognized_evidence_is_preserved_and_never_green(tmp_path, monkeypatc
     payload = {"cells": _rows("primary") + _rows("satellite") + [extra]}
     stamp, schedules = _apply(tmp_path, monkeypatch, payload)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     assert stamp["fleet_smoke"]["evidence"] == payload
 
 
@@ -215,13 +184,13 @@ def test_unknown_local_identity_never_partial(tmp_path, monkeypatch, capsys):
         {"name": "satellite", "ssh_target": "satellite.example.com"},
     ])
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
 
 
-@pytest.mark.parametrize("state,expected_code", [
-    ("missing", 9), ("quota", 9), ("unreachable", 10), ("failed", 6),
+@pytest.mark.parametrize("state,expected_outcome", [
+    ("missing", "untested"), ("quota", "untested"), ("unreachable", "partial"), ("failed", "failed"),
 ])
-def test_incomplete_remote_cell_never_hides_behind_other_passes(tmp_path, monkeypatch, capsys, state, expected_code):
+def test_incomplete_remote_cell_never_hides_behind_other_passes(tmp_path, monkeypatch, capsys, state, expected_outcome):
     cells = _rows("primary") + _rows("satellite")
     cell = cells.pop()
     if state != "missing":
@@ -230,23 +199,26 @@ def test_incomplete_remote_cell_never_hides_behind_other_passes(tmp_path, monkey
         cells.append(cell)
     stamp, schedules = _apply(tmp_path, monkeypatch, {"cells": cells})
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == expected_code and schedules == []
+    assert code == 3 and schedules == []
+    assert stamp["fleet_smoke"]["outcome"] == expected_outcome
     assert len(stamp["fleet_smoke"]["cells"]) == 8
 
 
-@pytest.mark.parametrize("rc,status,expected_code", [(1, "PASS", 6), (2, "PASS", 9), (0, "FAIL", 6), (0, "UNTESTED", 9)])
-def test_command_or_summary_non_success_cannot_become_green(tmp_path, monkeypatch, capsys, rc, status, expected_code):
+@pytest.mark.parametrize("rc,status,expected_outcome", [(1, "PASS", "failed"), (2, "PASS", "untested"), (0, "FAIL", "failed"), (0, "UNTESTED", "untested")])
+def test_command_or_summary_non_success_cannot_become_green(tmp_path, monkeypatch, capsys, rc, status, expected_outcome):
     stamp, schedules = _apply(tmp_path, monkeypatch, {
         "status": status, "cells": _rows("primary") + _rows("satellite"),
     }, rc=rc)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == expected_code and schedules == []
+    assert code == 3 and schedules == []
+    assert stamp["fleet_smoke"]["outcome"] == expected_outcome
+    assert stamp["fleet_smoke"]["outcome"] == expected_outcome
 
 
 def test_missing_machine_configuration_cannot_prove_partial_or_full_pass(tmp_path, monkeypatch, capsys):
     stamp, schedules = _apply(tmp_path, monkeypatch, _partial_payload(), rc=2, machines=[])
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     assert stamp["fleet_smoke"]["issues"]
 
 
@@ -256,7 +228,7 @@ def test_mixed_remote_quota_and_unreachable_remains_untested(tmp_path, monkeypat
     payload["untested"][0]["reset_at"] = "synthetic reset time"
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=2)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     assert stamp["fleet_smoke"]["untested"][0]["reset_at"] == "synthetic reset time"
 
 
@@ -266,7 +238,7 @@ def test_legacy_quota_channel_merges_without_dropping_other_untested_rows(tmp_pa
                                    "class": "quota_exhausted", "reset_at": "synthetic reset time"}]
     stamp, schedules = _apply(tmp_path, monkeypatch, payload, rc=2)
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     cell = next(row for row in stamp["fleet_smoke"]["cells"] if row["host"] == "satellite" and row["provider"] == "codex" and row["prompt_mode"] == "promptless")
     assert cell["outcome"] == "untested" and cell["reset_at"] == "synthetic reset time"
     assert cell["reasons"] == ["host_unavailable", "quota_exhausted"]
@@ -278,7 +250,7 @@ def test_object_machine_schema_and_all_local_markers_are_honored(tmp_path, monke
         {"name": "primary", "ssh_target": None}, {"name": "satellite", "ssh_target": None},
     ]})
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     assert stamp["fleet_smoke"]["local_hosts"] == ["primary", "satellite"]
 
 
@@ -300,11 +272,10 @@ def test_relative_installed_machine_file_uses_smoke_cwd_for_local_identity(tmp_p
     ]))
     monkeypatch.chdir(caller)
     monkeypatch.setattr(deploy_mod, "_launchd_environment", lambda _: {"PENTACLE_MACHINES_FILE": name})
-    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {})
+    monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_, **_kwargs: {"outcome": "passed"})
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda *_: None)
     schedules = []
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (2, json.dumps(_partial_payload()), "")})
+    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (2, json.dumps(_partial_payload()), ""), "release_fd_check.py": (0, '{"outcome":"passed"}', "")})
     stamp = {"sha": TARGET_SHA}
     deploy_mod._apply_post_activation(
         V2_SERVICE, release, TARGET_SHA, stamp,
@@ -319,7 +290,7 @@ def test_relative_installed_machine_file_uses_smoke_cwd_for_local_identity(tmp_p
     assert f"PENTACLE_MACHINES_FILE={(release / name).resolve()}" in smoke_calls[0]
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 10 and schedules == []
+    assert code == 3 and schedules == []
 
 
 @pytest.mark.parametrize("state", ["green", "missing", "duplicate", "failure", "quota", "excluded_observation", "offline"])
@@ -373,7 +344,7 @@ def test_real_runner_optional_offline_payload_cannot_install_schedule(tmp_path, 
         {"name": "satellite", "ssh_target": "peer.example.invalid", "smoke_optional": True},
     ])
     code, _out, _err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == 9 and schedules == []
+    assert code == 3 and schedules == []
     assert stamp["fleet_smoke"]["full_fleet_acceptance"] is False
     assert len(stamp["fleet_smoke"]["skipped"]) == 4
 

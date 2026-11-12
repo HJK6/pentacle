@@ -113,7 +113,14 @@ def test_boot_failed_candidate_can_activate_stamped_prior(rollback_release, monk
     assert result['restart_guard']['launchd_answered'] is answered
     assert result['restart_guard']['down_basis'] == ('launchd_answered_no_pid' if answered else 'boot_failed_stamp')
     assert any(c[:2] == ('launchctl', 'kickstart') for c in calls)
-    assert not any(c[0] == 'agent-orch' for c in calls)
+    assert not any(c[:2] == ('agent-orch', 'list') for c in calls)
+    notifications = [i for i, c in enumerate(calls) if c[0] == 'agent-orch']
+    assert all(calls[i][1] == 'notify' for i in notifications)
+    assert len(notifications) == 1
+    restart = next(i for i, c in enumerate(calls) if c[:2] == ('launchctl', 'kickstart'))
+    assert restart < notifications[0]
+    assert result['serving'] is True and result['restoration']['outcome'] == 'failed'
+    assert result['disposition'] == 'active with failed checks'
 
 
 @pytest.mark.parametrize("rollback,state", [(False, (True, None)), (True, (True, 111)), (True, (False, None, False))])
@@ -235,11 +242,11 @@ def test_down_basis_records_admission_without_changing_it(guard_case, monkeypatc
 
 
 @pytest.mark.parametrize('case,expected_exit', [
-    ('answered', 0), ('smoke_partial', 10), ('smoke_untested', 9), ('smoke_failed', 6),
-    ('stamp_only', 8), ('guard_unanswered', 8), ('guard_final_unanswered', 8),
-    ('activation_unanswered', 8), ('forward', 8), ('serving_unproven', 8),
-    ('identity_changed', 8), ('identity_changed_during_scan', 8),
-    ('missing_marker', 8), ('failure', 8), ('old_failure', 0),
+    ('answered', 0), ('smoke_partial', 3), ('smoke_untested', 3), ('smoke_failed', 3),
+    ('stamp_only', 3), ('guard_unanswered', 3), ('guard_final_unanswered', 3),
+    ('activation_unanswered', 3), ('forward', 3), ('serving_unproven', 3),
+    ('identity_changed', 3), ('identity_changed_during_scan', 3),
+    ('missing_marker', 3), ('failure', 3), ('old_failure', 0),
 ])
 def test_down_rollback_post_boot_attribution(tmp_path, monkeypatch, capsys, case, expected_exit):
     from . import test_deploy_script as fixtures
@@ -268,11 +275,12 @@ def test_down_rollback_post_boot_attribution(tmp_path, monkeypatch, capsys, case
         guard = dict(pre_restart_pid=111)
         activation = dict(pre_restart_pid=111)
     smoke = case.removeprefix('smoke_') if case.startswith('smoke_') else 'passed'
-    monkeypatch.setattr(module, '_fleet_smoke_verdict', lambda *_: {'outcome': smoke})
-    monkeypatch.setattr(module, '_install_fleet_smoke_schedule', lambda *_: None)
+    monkeypatch.setattr(module, '_fleet_smoke_verdict', lambda *_, **__: {'outcome': smoke})
     calls, active_samples = [], []
     def runner(argv, cwd):
         calls.append(tuple(argv))
+        if any('release_fd_check.py' in part for part in argv):
+            return subprocess.CompletedProcess(argv, 0, '{"outcome":"passed"}', '')
         if '-p' in argv:
             pid = argv[argv.index('-p') + 1]
             if pid == '111':
