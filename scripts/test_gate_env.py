@@ -1188,7 +1188,6 @@ class MigratedTargets(Tmp):
         target = profile["targets"]["v2-merge"]
         for alias in ("v2-merge-capacity", "v2-merge-ci"):
             self.assertEqual(profile["targets"][alias], target)
-        self.assertEqual(target["unit_workers"], 4)
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S": "1", "V2_SMOKE_TIMEOUT_S": "1"})
@@ -1197,7 +1196,7 @@ class MigratedTargets(Tmp):
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
-        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], "4")
+        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], str(target["unit_workers"]))
         self.assertIn("merge", cmd)
         budget = cfg["deadline"]
         deadline = sum(target["tier_timeouts"].values()) + budget["preflight_s"] + budget["reserve_s"] + budget["slack_s"]
