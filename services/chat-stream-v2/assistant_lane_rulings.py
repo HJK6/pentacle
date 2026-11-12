@@ -145,18 +145,38 @@ def _work_item(spec_id: str) -> tuple[dict[str, Any], str | None]:
         goal = re.search(r"(?ims)^## Goal\s*\n(.*?)(?=^## |\Z)", text)
         if goal:
             item["agent_authored_goal"] = scrub(goal.group(1), 600) or ""
-        tracking = re.search(r"(?ims)^## Tracking\s*\n(.*?)(?=^## |\Z)", text)
-        if tracking:
-            pattern = r'(?im)^- Operator request(?: \([^\n)]*\))?: ["“]([^"”\n]*)["”]'
-            origin = re.search(pattern, tracking.group(1))
-            if origin:
-                item.update(origin=scrub(origin.group(1), 600) or "", origin_missing=False,
-                            origin_line=scrub(origin.group(0), 600) or "")
-            for line in re.finditer(r"(?m)^- Operator request[^\n]*", tracking.group(1)):
-                if not re.match(pattern, line.group(0)):
-                    item.update(origin_malformed=True,
-                                origin_location=f"## Tracking, line {text.count(chr(10), 0, tracking.start(1) + line.start()) + 1}")
-                    break
+        # Locate the operator request by content in any Tracking section.
+        tracking_level = None
+        fence = None
+        for line in text.splitlines():
+            fence_marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if fence_marker:
+                marker = fence_marker.group(1)
+                if fence is None:
+                    fence = marker
+                elif marker[0] == fence[0] and len(marker) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+            heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", line)
+            if heading:
+                level, title = len(heading.group(1)), heading.group(2)
+                if re.match(r"(?i)^tracking\b", title):
+                    tracking_level = level
+                elif tracking_level is not None and level <= tracking_level:
+                    tracking_level = None
+                continue
+            if tracking_level is not None:
+                origin = re.search(r"(?i)\boperator[\s_-]+request\b(.*)", line)
+                if origin:
+                    value = origin.group(1).strip().lstrip("*_ ")
+                    value = re.sub(r"^\([^)]*\)\s*", "", value).lstrip("*_ :—–-\t")
+                    value = value.strip().strip('"“”')
+                    if value:
+                        item.update(origin=scrub(value, 600) or "", origin_missing=False,
+                                    origin_line=scrub(line, 600) or "")
+                        break
         return item, None
     except Exception as exc:
         return item, "spec_unresolved" if isinstance(exc, ValueError) and str(exc) == "spec_unresolved" else "spec_unavailable"
@@ -546,6 +566,12 @@ class AssistantLaneRulings:
                 errors.append({"code": code, "field": field, "correction": scrub(text, 500) or ""})
 
         brief = ""
+        if str(message.get("objective") or "").strip():
+            message.pop("objective_source", None)
+            if known:
+                objective, _, _ = resolve_objective(message["objective"], objective_supported=True,
+                                                     parent_stream_id=message.get("parent_stream_id"))
+                message["objective"] = objective
         if known and not str(message.get("objective") or "").strip():
             # A legacy producer's derived objective belongs to the frozen
             # intent too; replay must not depend on a mutable blob/spec read.
@@ -635,9 +661,6 @@ class AssistantLaneRulings:
                 if item_error:
                     correction(item_error, "spec_id", "Restore readable canonical spec content before resubmitting."
                                if item_error == "spec_unavailable" else "Supply a uniquely resolvable canonical --spec-id.")
-                elif item.get("origin_malformed"):
-                    correction("origin_malformed", "work_item.origin",
-                        f'{item["origin_location"]}: expected - Operator request (source): "exact operator text"; preserve the existing source and quote.')
                 if hasattr(self.store, "open_lanes_for_spec"):
                     item["lane_ids"] = [lane["lane_id"] for lane in await self.store.open_lanes_for_spec(spec_id)]
             if errors:
@@ -779,32 +802,28 @@ class AssistantLaneRulings:
                 # already bound a generation. Normalize only for comparison;
                 # never rewrite the durable intent or its digest on replay.
                 prior_safe.setdefault("expected_generation", prior["target_generation"])
-            report = await self.store.find_report(target_stream_id, statuses=("done", "error", "aborted"),
-                                                  session_generation=target_generation)
-            replay_waiver = isinstance(prior_intent.get("_ruling_report_waiver"), dict)
-            if replay_waiver:
+            if prior:
                 if (prior["requester_stream_id"] != requester or prior["requester_generation"] != generation
                         or prior["target_stream_id"] != target_stream_id or prior["target_generation"] != target_generation
                         or prior_safe != message):
                     raise ValueError("assistant_ruling_request_key_conflict")
                 message = prior_intent
-            if report is None or replay_waiver:
-                if not await policy.manager_holds(auth):
-                    raise ValueError("assistant_lane_close_report_required")
-                if code := policy.manager_request_code(msg):
-                    raise ValueError(code)
-                message["_ruling_report_waiver"] = {
-                    "manager_stream_id": requester, "manager_generation": generation,
-                    "target_generation": target_generation, "reason": scrub(msg["reason"], MAX_REASON),
-                }
             else:
-                message["_ruling_report"] = {
-                    "report_id": report.get("report_id"), "summary": str(report.get("summary") or "")[:1200],
-                    "qa_verdict": report.get("qa_verdict"), "residuals": report.get("next_action"),
-                    "digest": _digest(report),
-                }
-                if prior and "expected_generation" not in prior_intent and expected is None:
-                    message.pop("expected_generation")
+                try:
+                    report = await asyncio.wait_for(self.store.find_report(
+                        target_stream_id, statuses=("done", "error", "aborted"),
+                        session_generation=target_generation), timeout=5)
+                    report_status = "missing"
+                except Exception:
+                    report, report_status = None, "unknown"
+                if report is None:
+                    message["_ruling_report"] = {"status": report_status}
+                else:
+                    message["_ruling_report"] = {
+                        "report_id": report.get("report_id"), "summary": str(report.get("summary") or "")[:1200],
+                        "qa_verdict": report.get("qa_verdict"), "residuals": report.get("next_action"),
+                        "digest": _digest(report),
+                    }
             request = await self._create(
                 action="session_close", key="session_close:" + key, intent=message,
                 requester=requester, requester_generation=generation, binding=binding,
@@ -972,9 +991,6 @@ class AssistantLaneRulings:
                     conn.execute("UPDATE v2_assistant_lane_rulings SET reason='bypassed' WHERE ruling_request_id=?", (request_id,))
                     self._audit_conn(conn, request_id, "bypassed", requester, requester_generation)
                 self._audit_conn(conn, request_id, "request", requester, requester_generation, action)
-                if isinstance(intent.get("_ruling_report_waiver"), dict):
-                    self._audit_conn(conn, request_id, "report_prerequisite_waived", requester,
-                                     requester_generation, scrub(intent.get("reason"), 500) or "")
                 return dict(conn.execute(
                     "SELECT * FROM v2_assistant_lane_rulings WHERE ruling_request_id=?", (request_id,)
                 ).fetchone())
@@ -1068,7 +1084,7 @@ class AssistantLaneRulings:
                 ("assistant-lane-ruling:" + rid,)).fetchone() is not None):
             return
         intent = json.loads(request["intent_json"])
-        fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report", "_ruling_report_waiver")
+        fields = {key: intent.get(key) for key in ("objective", "provider", "model", "effort", "spec_id", "role", "budget", "eta", "_ruling_report")
                   if intent.get(key) is not None}
         if request["action"] == "spawn":
             fields["acceptance"] = _acceptance_brief(intent)
@@ -1483,6 +1499,9 @@ class AssistantLaneRulings:
                         await self._mark(rid, "release_blocked", result)
                         return
                 elif current["action"] == "spawn":
+                    if intent.get("objective_source") == "derived":
+                        intent = {**intent}
+                        intent.pop("objective", None)
                     result = await self.server.spawnctl.spawn(intent, self.server.local_host)
                     if result.get("type") != "spawn.ok":
                         await self._mark(rid, "release_blocked", result)
@@ -1541,20 +1560,6 @@ class AssistantLaneRulings:
                             or target.get("session_generation") != expected):
                         await self._mark(rid, "approved_but_not_closed", {"error": "target_generation_changed"})
                         return
-                    if isinstance(intent.get("_ruling_report_waiver"), dict):
-                        policy = self.server.sessions.assistant
-                        if (not await policy.manager_holds(intent["_auth_context"])
-                                or policy.manager_request_code(intent)):
-                            await self._mark(rid, "approved_but_not_closed", {"error": "manager_waiver_authority_lost"})
-                            return
-                    else:
-                        report = await self.store.find_report(
-                            admitted['stream_id'], statuses=("done", "error", "aborted"),
-                            session_generation=admitted['generation'],
-                        )
-                        if report is None or report.get("report_id") != intent.get("_ruling_report", {}).get("report_id"):
-                            await self._mark(rid, "approved_but_not_closed", {"error": "report_fence_moved"})
-                            return
                     # Project only this release invocation. Keep the durable
                     # original intent, digest and report provenance unchanged.
                     intent.update(host=target_host, session_name=target_name, expected_generation=expected)

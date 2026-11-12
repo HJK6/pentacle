@@ -291,7 +291,7 @@ def test_busy_or_unknown_capture_stays_actionable_without_killing(capture_ok, te
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("change", ["generation", "reopened", "missing_report", "changed_report",
+@pytest.mark.parametrize("change", ["generation", "reopened",
                                   "requester_generation", "unauthorized", "protected", "live_children"])
 def test_deferred_retry_preserves_definitive_close_fences(change, tmp_path):
     async def go():
@@ -309,12 +309,6 @@ def test_deferred_retry_preserves_definitive_close_fences(change, tmp_path):
                                             pane_status="pane_dead")
                 await env.store.open_session(HOST, "lane", parent_stream_id=ROOT, pane_status="pane_alive")
                 expected_error = "target_generation_changed"
-            elif change == "missing_report":
-                await env.store.submit(lambda conn: conn.execute("DELETE FROM v2_reports"))
-                expected_error = "report_fence_moved"
-            elif change == "changed_report":
-                await env.report("replacement-report")
-                expected_error = "report_fence_moved"
             elif change == "requester_generation":
                 await env.store.open_session(HOST, "primary", session_generation="replacement")
                 expected_state, expected_error = "release_blocked", "requester_generation_changed"
@@ -351,17 +345,12 @@ def test_deferred_retry_preserves_definitive_close_fences(change, tmp_path):
     asyncio.run(go())
 
 
-def test_missing_report_or_unauthorized_requester_cannot_request_close():
+def test_unauthorized_requester_cannot_request_close():
     async def go():
         async with journey() as env:
             with pytest.raises(VerbError, match="close requires"):
                 await env.server._on_close({"host": HOST, "session_name": "lane", "request_id": "forged"})
-            await env.store.submit(lambda conn: conn.execute("DELETE FROM v2_reports"))
-            with pytest.raises(VerbError, match="assistant_lane_close_report_required"):
-                await env.request()
             assert env.tmux.kills == 0
-            assert await env.store.submit(lambda conn: conn.execute(
-                "SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
     asyncio.run(go())
 
 

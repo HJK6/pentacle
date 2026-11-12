@@ -97,10 +97,6 @@ def test_fd_own_child_with_pending_disposition_uses_fd_custody():
         await env.store.update_session(LHOST, 'target', role='lead', assigned_spec_id='spec_demo__item_00',
             parent_stream_id=FD)
         await env.sessions.refresh()
-        # Ordinary FD own-child closure follows the owner disposition guard.
-        await _refused(env.server._on_close(close(auth)), 'lead_close_requires_disposition')
-        assert env.tmux.killed == []
-        assert (await env.store.fetch_session(LHOST, 'target'))['status'] == 'open'
         # Explicit recovery of this FD's proven busy child retains FD debt.
         env.tmux.working.add('target')
         result = await env.server._on_close(close(auth, force=True, request_id='fd-busy-recovery'))

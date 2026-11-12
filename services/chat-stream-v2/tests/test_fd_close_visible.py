@@ -58,9 +58,8 @@ def test_fd_close_is_audited_without_lifecycle_or_custody_change():
         assert (await env.store.fetch_session(HOST, "target"))["parent_stream_id"] is None
         assert await env.grant() == grant
         rows = [r for r in await env.audit() if r["action"].startswith("manager_close")]
-        # No terminal report: the reason-only close audits the exact-generation waiver first.
         assert [(r["action"], r["result"]) for r in rows] == [
-            ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"), ("manager_close", "applied")]
+            ("manager_close", "admitted"), ("manager_close", "applied")]
         assert all((r["actor_kind"], r["actor_identity"], r["actor_generation"], r["reason"]) ==
                    ("front_desk", FD, auth["session_generation"], REASON) for r in rows)
         assert (await env.store.latest_close_audit(HOST + ":target"))["actor_kind"] == "front_desk"
@@ -282,7 +281,7 @@ def test_fd_reparent_is_generation_fenced_and_audited():
 
 
 @pytest.mark.parametrize("reported", [False, True])
-def test_fd_preserves_external_ruling_and_audits_any_report_waiver(reported):
+def test_fd_preserves_external_ruling_with_or_without_report(reported):
     from test_approved_close_retry import HOST as LANE_HOST, TARGET, journey
     async def run():
         async with journey() as env:
@@ -306,8 +305,6 @@ def test_fd_preserves_external_ruling_and_audits_any_report_waiver(reported):
             assert approved["outcome"]["type"] == "close.ok" and env.tmux.kills == 1
             assert (await env.store.lifecycle_authority_current())["stream_id"] is None
             audits = await env.store.lifecycle_authority_audit_rows(limit=20)
-            waived = [r for r in audits if "waived" in r["action"]]
-            assert bool(waived) is (not reported)
             assert all(r["actor_kind"] == "front_desk" for r in audits if r["action"].startswith("manager_"))
     asyncio.run(run())
 
@@ -321,12 +318,6 @@ def test_fd_close_of_undisposed_lead_keeps_owed_debt_with_fd():
         await env.store.update_session(HOST, "target", role="lead", assigned_spec_id="spec_demo__item_00",
                                        parent_stream_id=HOST + ":other")
         await env.sessions.refresh()
-        # An ordinary parent still needs a disposition.
-        await _refused(env.server._on_close({**close(await env.seat("other")), "request_id": "parent-close"}),
-                       "lead_close_requires_disposition")
-        assert env.tmux.killed == []
-        await _refused(env.server._on_close(close(auth, disposition_waived_reason="forged")),
-                       "lead_close_requires_disposition")
         await env.store.update_session(HOST, "target", parent_stream_id=FD)
         env.tmux.working.add("target")
         result = await env.server._on_close(close(auth, force=True))

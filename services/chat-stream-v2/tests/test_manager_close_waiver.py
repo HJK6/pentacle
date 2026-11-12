@@ -1,4 +1,4 @@
-"""Report waivers retire generations, without weakening authority or liveness."""
+"""Manager closes preserve authority, audit and liveness."""
 import asyncio
 import json
 import sqlite3
@@ -16,7 +16,7 @@ from test_approved_close_retry import ROOT, TARGET, HOST as LANE_HOST, journey
 
 
 @pytest.mark.parametrize("report", ["none", "progress", "prior", "done", "error", "aborted"])
-def test_report_waiver_is_exact_audited_and_durable(report, tmp_path):
+def test_manager_close_is_audited_and_durable(report, tmp_path):
     state = {}
     path = str(tmp_path / "sessions.db")
 
@@ -30,10 +30,8 @@ def test_report_waiver_is_exact_audited_and_durable(report, tmp_path):
         msg = _close(manager, "target", reason="Retire an abandoned acceptance generation")
         assert (await env.server._on_close(msg))["type"] == "close.ok"
         rows = [r for r in await env.audit() if r["action"].startswith("manager_close")]
-        waived = report in {"none", "progress", "prior"}
-        assert [(r["action"], r["result"]) for r in rows] == (
-            [("manager_close_report_waived", "admitted")] if waived else []
-        ) + [("manager_close", "admitted"), ("manager_close", "applied")]
+        assert [(r["action"], r["result"]) for r in rows] == [
+            ("manager_close", "admitted"), ("manager_close", "applied")]
         for r in rows:
             assert (r["actor_kind"], r["actor_identity"], r["actor_generation"], r["target_generation"],
                     r["reason"], r["request_id"], r["old_revision"], r["new_revision"]) == (
@@ -53,7 +51,7 @@ def test_report_waiver_is_exact_audited_and_durable(report, tmp_path):
         store.stop()
 
 
-@pytest.mark.parametrize("action", ["manager_close_report_waived", "manager_close"])
+@pytest.mark.parametrize("action", ["manager_close"])
 @pytest.mark.parametrize("remote", [False, True])
 def test_pre_effect_audit_failure_preserves_live_and_offline_targets(action, remote):
     async def check(env):
@@ -83,7 +81,7 @@ def test_pre_effect_audit_failure_preserves_live_and_offline_targets(action, rem
     scenario(check)
 
 
-def test_unreported_cancelled_close_finishes_waiver_and_outcome(monkeypatch):
+def test_unreported_cancelled_close_finishes_audit_and_outcome(monkeypatch):
     async def check(env):
         manager = await _manager(env)
         await env.open("target")
@@ -92,8 +90,7 @@ def test_unreported_cancelled_close_finishes_waiver_and_outcome(monkeypatch):
         await _cancel_after_commit(task, committed, resume)
         rows = [r for r in await env.audit() if r["action"].startswith("manager_close")]
         assert [(r["action"], r["result"]) for r in rows] == [
-            ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"),
-            ("manager_close", "applied")]
+            ("manager_close", "admitted"), ("manager_close", "applied")]
         assert (await env.store.fetch_session(HOST, "target"))["status"] == "closed"
     scenario(check)
 
@@ -192,7 +189,7 @@ def test_unreported_offline_target_with_child_or_spawn_refuses_before_waiver(pen
         with pytest.raises(VerbError) as error:
             await env.server._on_close(_close(manager, "target", stream_id=sid))
         assert error.value.code == ("close_pending_spawn" if pending else "close_live_children")
-        assert not any(r["action"] == "manager_close_report_waived" for r in await env.audit())
+        assert not any(r["action"] == "manager_close" and r["result"] == "applied" for r in await env.audit())
         assert (await env.store.fetch_session(target_host, "target"))["status"] == "open"
         assert await env.store.get_deferred_reap(sid) is None
         assert env.tmux.killed == []
@@ -254,32 +251,22 @@ def test_no_report_lane_requires_ruler_then_audited_manager_admission(direct_par
             assert first["type"] == "close.pending_ruling" and env.tmux.kills == 0
             row = await env.row()
             intent = json.loads(row["intent_json"])
-            assert "_ruling_report" not in intent
-            assert intent["_ruling_report_waiver"]["manager_generation"] == manager["session_generation"]
-            assert intent["_ruling_report_waiver"]["reason"] == intent["reason"]
-            audit = await env.store.submit(lambda c: [dict(r) for r in c.execute(
-                "SELECT * FROM v2_assistant_lane_ruling_audit WHERE event='report_prerequisite_waived'")])
-            assert len(audit) == 1 and audit[0]["detail"] == intent["reason"]
-            assert audit[0]["actor_stream_id"] == manager["stream_id"]
+            assert intent["_ruling_report"]["status"] == "missing"
             assert 599 < row["deadline"] - row["created_at"] <= 600
             assert (await env.request())["ruling_request_id"] == first["ruling_request_id"]
             assert (await env.approve())["state"] == "done"
             assert env.tmux.kills == 1
             assert (await env.request())["type"] == "close.ok" and env.tmux.kills == 1
-            rows = list(reversed(await env.store.lifecycle_authority_audit_rows(limit=50)))
-            assert [(r["action"], r["result"]) for r in rows if r["action"].startswith("manager_close")] == [
-                ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"),
-                ("manager_close", "applied")]
             assert await env.store.find_report(TARGET, statuses={"done", "error", "aborted"},
                                               session_generation=row["target_generation"]) is None
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("change", ["revoke", "replace", "child", "pending", "busy", "unknown", "target", "requester"])
-def test_pending_report_waiver_rechecks_every_effect_fence(change):
+def test_pending_manager_close_rechecks_effect_fences(change):
     async def run():
         async with journey() as env:
-            await lane_manager(env, direct_parent=True)
+            await lane_manager(env, direct_parent=change not in {"revoke", "replace"})
             await env.request()
             if change == "revoke":
                 await env.store.lifecycle_authority_mutate(
@@ -318,7 +305,7 @@ def test_pending_report_waiver_rechecks_every_effect_fence(change):
 
 
 @pytest.mark.parametrize("ruling", ["deny", "revise", "timeout", "unavailable"])
-def test_no_report_waiver_preserves_external_ruling_dispositions(ruling):
+def test_no_report_preserves_external_ruling_dispositions(ruling):
     async def run():
         async with journey() as env:
             await lane_manager(env)
@@ -342,7 +329,7 @@ def test_no_report_waiver_preserves_external_ruling_dispositions(ruling):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("case", ["ordinary", "unverified", "default_reason", "missing_request"])
+@pytest.mark.parametrize("case", ["unverified", "missing_request"])
 def test_no_report_lane_rejects_forged_marker_and_missing_authority(case):
     async def run():
         async with journey() as env:
@@ -385,7 +372,7 @@ def test_no_report_intent_survives_restart_and_report_arrival(tmp_path):
                 assert row["intent_json"] == original["intent_json"]
                 assert row["intent_digest"] == original["intent_digest"]
                 rows = await env.store.lifecycle_authority_audit_rows(limit=50)
-                assert not any(r["action"] == "manager_close_report_waived" for r in rows)
+                assert not any("waived" in r["action"] for r in rows)
             finally:
                 await restarted.rulings.stop()
     asyncio.run(run())

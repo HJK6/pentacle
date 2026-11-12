@@ -5711,20 +5711,7 @@ class Server:
         close_kind = "session_close"
         coordinator_authorized = False
         manager_generation: str | None = None
-        ruling_manager_close = (
-            self.lane_rulings is not None
-            and msg.get("_ruling_release") is self.lane_rulings
-            and isinstance(msg.get("_ruling_report_waiver"), dict)
-        )
-        if ruling_manager_close:
-            # A derived no-report ruling intent must still enter manager
-            # admission when its requester is also the target's direct parent.
-            if not await self.sessions.assistant.manager_holds(auth):
-                raise VerbError("authority_holder_required", "manager ruling release lost its grant")
-            target = await self.store.fetch_session(host, name)
-            manager_generation = expected_generation or self._manager_target_generation(target)
-            close_kind = "manager_close"
-        elif caller_stream_id != target_stream_id:
+        if caller_stream_id != target_stream_id:
             target = await self.store.fetch_session(host, name) if self.store is not None else None
             if not (
                 caller_stream_id
@@ -5888,6 +5875,7 @@ class Server:
             "type": kind, "ok": True, "host": host, "session_name": name,
             "already_closed": result["already_closed"], "session": result.get("session"),
             "reap_status": result.get("reap_status", "unknown"),
+            "warnings": result.get("warnings", []),
             **_claim_wire_fields(claim_verified, claim_mismatch),
         }
 
@@ -5947,13 +5935,8 @@ class Server:
     async def _manager_lifecycle_fences(
         self, action: str, msg: dict[str, Any], host: str, name: str,
         target: dict[str, Any] | None, auth: dict[str, Any], expected_generation: str,
-    ) -> bool:
-        """Refuse (auditing the verified manager) unless every fence passes.
-
-        Requires the caller to still hold the grant, an explicit reason and
-        request id, no live children or pending spawns, and a non-protected
-        target. Return whether CLOSE needs an exact-generation report waiver.
-        """
+    ) -> None:
+        """Check manager authority, target generation and child preservation."""
         sid = f"{host}:{name}"
         generation = str((target or {}).get("session_generation") or "") or None
         code = None
@@ -5964,7 +5947,7 @@ class Server:
         elif generation != expected_generation:
             code = "lifecycle_generation_mismatch"
         elif action == "close" and target.get("status") == "closed":
-            return False  # Receipt only; Sessions keeps generation-fenced repeat semantics.
+            return  # Receipt only; Sessions keeps generation-fenced repeat semantics.
         if code is None:
             children = await self.sessions._live_children(sid)
             pending = await self.sessions._pending_child_spawns(sid)
@@ -5979,8 +5962,6 @@ class Server:
         if code is not None:
             await self._manager_audit(action, msg, auth, sid, generation, result="refused", refusal_code=code)
             raise VerbError(code, f"manager {action} refused: {code}")
-        return await self.store.find_report(
-            sid, statuses=INSPECT_TERMINAL_STATUSES, session_generation=generation) is None
 
     async def _operator_lane_protects(self, sid: str) -> bool:
         return any(lane.get("owner_kind") == "operator" and sid in {
@@ -5991,16 +5972,13 @@ class Server:
         self, msg: dict[str, Any], host: str, name: str, row: dict[str, Any] | None,
         expected_generation: str, auth: dict[str, Any], *, busy_override: bool = False,
     ) -> None:
-        waived = await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
+        await self._manager_lifecycle_fences("close", msg, host, name, row, auth, expected_generation)
         if (row or {}).get("status") == "closed":
             return
         if busy_override and (row or {}).get("parent_stream_id") != auth.get("stream_id"):
             await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation,
                                       result="refused", refusal_code="close_unauthorized")
             raise VerbError("close_unauthorized", "FD busy override requires its own child")
-        if waived:
-            await self._manager_audit("close_report_waived", msg, auth, f"{host}:{name}",
-                                      expected_generation, result="admitted")
         # Durable attribution precedes the effect: an audit failure refuses the close.
         await self._manager_audit("close", msg, auth, f"{host}:{name}", expected_generation, result="admitted")
         if self.sessions.assistant.front_desk_mode and (row or {}).get("status") == "open":

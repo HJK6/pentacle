@@ -33,7 +33,7 @@ def test_preflight_aggregates_before_any_advisor_or_provider_effect(tmp_path):
                 "objective_supported": True, "parent_stream_id": DESK}, "desk")
             assert result["type"] == "spawn.error"
             assert result["error_code"] == "spawn_preflight_failed", result
-            assert {e["field"] for e in result["errors"]} == {"objective", "model", "work_item.origin"}
+            assert {e["field"] for e in result["errors"]} == {"model"}
             assert all(set(e) == {"code", "field", "correction"} for e in result["errors"])
             assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_assistant_lane_rulings").fetchone()[0]) == 0
             assert await h["store"].submit(lambda c: c.execute("SELECT count(*) FROM v2_outbound_notices WHERE kind='assistant_lane_ruling_request'").fetchone()[0]) == 0

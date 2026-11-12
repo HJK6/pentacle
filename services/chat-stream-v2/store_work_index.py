@@ -327,6 +327,11 @@ class WorkIndexStoreMixin:
         return await self.submit(lambda conn: lead_close_context_conn(conn, stream, generation, pending_only=pending_only,
                                                                      observation_available=observation_available))
 
+    async def lead_close_contexts(self, stream, generation, *, observation_available=True):
+        from work_owed import lead_close_contexts_conn
+        return await self.submit(lambda conn: lead_close_contexts_conn(
+            conn, stream, generation, observation_available=observation_available))
+
     async def front_desk_disposition_custody(self, stream, generation):
         from work_owed import front_desk_custody_conn
         def write(conn):

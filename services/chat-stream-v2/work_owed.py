@@ -237,6 +237,10 @@ def lead_close_context_conn(conn, stream, generation, *, pending_only=True, obse
                                   observation_available=observation_available), None)
 
 
+def lead_close_contexts_conn(conn, stream, generation, *, observation_available=True):
+    return list(_close_obligations(conn, stream, generation, observation_available=observation_available))
+
+
 def disposition_commands(context):
     """Recovery uses the observed two-document revisions, never a move override."""
     import shlex
@@ -256,9 +260,5 @@ def disposition_commands(context):
                         for name in ("spec.md", "summary.md"))
     if len(expected) == 2:
         commands.append(f"python3 {shlex.quote(client)} move <<'JSON'\n" + json.dumps(move) + "\nJSON")
-    commands.extend([
-        f"agent-orch spec assign <successor> {context['spec_id']}",
-        "After an accepted disposition or live successor: agent-orch close --expected-generation "
-        + shlex.quote(context["session_generation"]) + " " + shlex.quote(context["stream_id"]),
-    ])
+    commands.append(f"agent-orch spec assign <successor> {context['spec_id']}")
     return commands

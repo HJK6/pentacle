@@ -4710,7 +4710,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             outcome = _row(conn.execute(
                 f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
                 f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) "
-                "WHERE host=? AND idempotency_key=? ORDER BY updated_at DESC LIMIT 1",
+                "WHERE host=? AND idempotency_key=? AND state != 'failed' ORDER BY updated_at DESC LIMIT 1",
                 (host, idempotency_key),
             ).fetchone())
             if outcome is not None:
@@ -4753,7 +4753,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 outcome = _row(conn.execute(
                     f"SELECT * FROM (SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_outcomes UNION ALL "
                     f"SELECT {_SPAWN_OUTCOME_COLUMNS} FROM v2_spawn_cancellations) "
-                    "WHERE host=? AND idempotency_key=? ORDER BY updated_at DESC LIMIT 1",
+                    "WHERE host=? AND idempotency_key=? AND state != 'failed' ORDER BY updated_at DESC LIMIT 1",
                     (host, idempotency_key),
                 ).fetchone())
                 existing = outcome

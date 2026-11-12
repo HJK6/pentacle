@@ -122,10 +122,15 @@ async def inspect_case(root, variant):
             outcome = await store.get_spawn_outcome(HOST, NAME)
             status = await ctl.spawn_status({"target": KEY}, HOST)
             awaited = await ctl.await_spawn({"spawn_request_id": REQUEST})
-            try:
-                retry = await ctl.spawn({**MSG, "request_id": "request-retry"}, HOST)
-            except VerbError as exc:
-                retry = {"error_code": exc.code, "error": str(exc)}
+            if outcome and outcome.get("state") == "failed":
+                # Failed outcomes now admit a new operation; this restart fixture
+                # has no provider boot harness. The retry path is tested separately.
+                retry = {"not_exercised": "new spawn requires a provider harness"}
+            else:
+                try:
+                    retry = await ctl.spawn({**MSG, "request_id": "request-retry"}, HOST)
+                except VerbError as exc:
+                    retry = {"error_code": exc.code, "error": str(exc)}
             cancel = await ctl.spawn_cancel({"target": KEY}, HOST)
             second = await ctl.reconcile_spawn_intents()
             record = {"variant": variant, "before": before, "before_row": before_row,

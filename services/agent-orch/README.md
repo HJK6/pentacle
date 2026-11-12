@@ -23,9 +23,8 @@ whereas `spec_unresolved` means the supplied identity could not resolve.
 
 The advisor still reviews a valid packet substantively. Its display starts with
 the objective, acceptance and separately attributed work-item origin; missing
-origin stays `origin_missing: true`. An existing Tracking `- Operator request`
-line with malformed quote syntax returns `origin_malformed`, its location and
-the expected shape. This does not require inventing an operator request.
+origin stays `origin_missing: true`. The operator-request line is found by
+content in a Tracking section; its quote format is not an admission condition.
 The packet records `spec_content_sha256` from the exact resolved text and an
 `excerpt_rule`: `composer_boundary` when this CLI composed a role baseline,
 otherwise `last_top_level_heading`, then `first_1600`. The excerpt is bounded,
@@ -141,15 +140,13 @@ binding, otherwise the operator-designated manager) may close an unrelated seat
 without a terminal report by supplying an explicit `--reason`; the CLI supplies
 a request id. Use `--expected-generation <saved-generation>` when closing a
 previously prepared target; a replacement generation is refused. The daemon
-records `manager_close_report_waived` before admission,
-with the verified principal and target generations, policy revision and reason, then
-records the close outcome separately. Protected seats, open direct children and
+audits admission with the verified principal and target generations, policy revision
+and reason, then records the close outcome separately. Protected seats, open direct children and
 pending child spawns still refuse; live panes require fresh idle capture.
 A local missing pane requires positive `gone` evidence. An initially unreachable
 peer records retirement intent and a generation-fenced deferred reap, with process
-death unverified. For a seat subject to external lane rulings, only the report
-prerequisite is waived: approval and the existing timeout/release behavior remain,
-and release rechecks the current principal. Manager reparent behavior is unchanged.
+death unverified. For a seat subject to external lane rulings, approval and the
+existing timeout/release behavior remain; release rechecks authorization. Manager reparent behavior is unchanged.
 
 For a lost close response, preserve the original complete invocation, including
 `--expected-generation`, reason, caller, flags, progeny and any waiver. The CLI

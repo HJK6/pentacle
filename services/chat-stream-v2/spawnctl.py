@@ -42,7 +42,7 @@ SERVICES_ROOT = str(Path(__file__).resolve().parents[1])
 if SERVICES_ROOT not in sys.path:  # `_shared` is the fleet-wide module, never a v2 copy
     sys.path.insert(0, SERVICES_ROOT)
 
-from _shared.spawn_objective import objective_error, objective_required_for, resolve_objective
+from _shared.spawn_objective import resolve_objective
 from _shared.wip_cap import check_lead_spawn
 from _shared.specs_service import spec_resolution_view, SpecResolutionUnavailable  # noqa: E402
 
@@ -1633,7 +1633,7 @@ class SpawnCtl:
         # a top-level/handoff spawn derives one, and the brief is read only then.
         supported, parent = msg.get("objective_supported"), msg.get("parent_stream_id")
         obj = msg.get("objective")
-        will_derive = not objective_required_for(supported, parent) and (
+        will_derive = (
             obj is None or (isinstance(obj, str) and not obj.strip())
         )
         brief = await self._brief_from_message(msg) if will_derive else ""
@@ -1643,6 +1643,10 @@ class SpawnCtl:
         )
         if error:
             raise VerbError(error, error)
+        auth = msg.get("_auth_context") or {}
+        if (auth.get("service_authenticated") and auth.get("service_actor") == "daemon:scheduler"
+                and msg.get("objective_source") == "derived"):
+            objective_source = "derived"
         # Caller-supplied provenance cannot relabel a resolved objective.
         msg = {**deepcopy(msg), "objective": objective, "objective_source": objective_source}
         if "no_watch" in msg and not isinstance(msg["no_watch"], bool):
@@ -1780,10 +1784,6 @@ class SpawnCtl:
         Scheduling freezes this measured result; it must not reserve a stream,
         stage a token, create a pane, or otherwise begin dispatch.
         """
-        # The insert path resolves the objective (parented required, top-level
-        # derived) before this runs, so presence re-validation is sufficient.
-        if error := objective_error(msg.get("objective")):
-            raise VerbError(error, error)
         host = str(msg.get("host") or local_host).strip()
         if host != local_host:
             if self.hosts is None:
@@ -1970,9 +1970,8 @@ class SpawnCtl:
                 )
                 reply.update(admitted)
                 return reply
-            # A terminal FAILED (or other non-delivered terminal) outcome replays
-            # the stored FAILURE truthfully (Outcome Matrix class B) — NOT as
-            # pending. Same key = same operation; to re-attempt, use a new key.
+            # Cancellation or unresolved non-delivered outcomes retain their
+            # existing result. Failed outcomes are eligible for a new claim.
             recorded_reason = str(row.get("reason") or "spawn_failed")
             code = recorded_reason.split(":", 1)[0].strip() or "spawn_failed"
             raise VerbError(
@@ -4361,8 +4360,7 @@ class SpawnCtl:
                 reason=(
                     "spawn_interrupted: daemon restarted before spawn intent was persisted"
                     if res.get("payload") is None else
-                    objective_error((intent.get("open_fields") or {}).get("objective"))
-                    or "spawn_interrupted: daemon restarted before the session row was persisted"
+                    "spawn_interrupted: daemon restarted before the session row was persisted"
                 ),
                 **outcome_identity,
             )
@@ -4459,9 +4457,14 @@ class SpawnCtl:
                         f"persisted spawn intent for {host}:{name} could not be read; "
                         "refusing to admit a defaulted registration",
                     )
-                if error := objective_error((intent.get("open_fields") or {}).get("objective")):
-                    raise VerbError(error, error)
                 adopted_fields = dict(intent["open_fields"])
+                objective, source, error = resolve_objective(
+                    adopted_fields.get("objective"), objective_supported=False,
+                    parent_stream_id=adopted_fields.get("parent_stream_id"),
+                    brief=str(intent.get("brief") or ""), title=adopted_fields.get("title"))
+                if error:
+                    raise VerbError(error, error)
+                adopted_fields.update(objective=objective, objective_source=source)
                 adopted_fields["visibility"] = tmux_transport.open_fields(adopted_fields)["visibility"]
                 await self.sessions.open(
                     host, name, **adopted_fields,
@@ -4509,10 +4512,6 @@ class SpawnCtl:
                 except Exception:  # noqa: BLE001 - pane rollback already confirmed
                     log.exception("could not persist registration-failure outcome for %s:%s", host, name)
                 return "released"
-        if objective_error((intent.get("open_fields") or {}).get("objective")):
-            # Preserve the already-running legacy generation, retire its unproven intent, and never replay its brief.
-            await self.store.set_spawn_outcome(host, name, "failed", request_id=request_id, reason="objective_required")
-            return "adopted"
         # `await_spawn` must never pend forever on a spawn nobody will finish.
         # `_settle_adoption` reconciles the live pane to a definite outcome:
         # delivered, failed, or indeterminate. Only a dead pane is failed by

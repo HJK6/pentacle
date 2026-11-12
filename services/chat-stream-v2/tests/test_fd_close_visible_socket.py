@@ -110,7 +110,7 @@ def test_fd_closes_visible_seat_without_lifecycle_grant(tmp_path, isolated_tmux_
             rows = [r for r in await store.lifecycle_authority_audit_rows(limit=20)
                     if r["action"].startswith("manager_close")]
             assert {(r["action"], r["result"]) for r in rows} == {
-                ("manager_close_report_waived", "admitted"), ("manager_close", "admitted"), ("manager_close", "applied")}
+                ("manager_close", "admitted"), ("manager_close", "applied")}
             assert all(r["actor_kind"] == "front_desk" and r["actor_identity"] == FD
                        and r["actor_generation"] == fd["session_generation"]
                        and r["target_generation"] == target["session_generation"]
