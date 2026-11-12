@@ -64,8 +64,8 @@ absolute interpreter/tool/config/log paths. Retain prior plist/config and hashes
 install the tool from accepted public source at an immutable path, and use
 `launchctl bootstrap gui/<uid> <plist>`. `RunAtLoad` and `StartInterval=300` wake a
 short process; the process applies Chicago time, DST, the activation date and the
-08:00–11:59 delivery window. No daemon deployment is needed to run this tool with
-the existing CLI/API protocol.
+08:00–11:59 delivery window. Install a CLI and daemon that support the proactive
+note type and reference fields before running this version of the tool.
 
 Start with `enabled: false`. Rehearse live reads and one real FD-only delivery:
 

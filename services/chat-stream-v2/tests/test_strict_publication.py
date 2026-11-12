@@ -102,6 +102,22 @@ def test_turn_end_notifies_once_and_copied_ack_is_accepted():
     run(body, strict=True)
 
 
+def test_legacy_assistant_boundary_does_not_attach_old_dispatch_to_notice():
+    async def body(h):
+        route = await h.route('legacy-boundary')
+        await h.dispatch_user(route, 'legacy-user')
+        await h.store.append_session_events_lifecycle_cas([{
+            'stream_id': ROOT, 'identity': 'legacy-assistant',
+            'event': {'stream_id': ROOT, 'kind': 'ASSIST_TEXT', 'text': 'old row',
+                      'raw': {'source_session_identity': 'fixture-session', 'jsonl_record_uuid': 'legacy'}},
+            'lifecycle': await h.store.fetch_open_session_lifecycle(ROOT, pane_pid='4242')}], limit=100)
+        await h.ingest('ASSIST_TEXT', 'done', 'new-final', final=True)
+        count = await h.store.submit(lambda conn: conn.execute(
+            "SELECT count(*) FROM v2_outbound_notices WHERE kind='dispatch_no_reply'").fetchone()[0])
+        assert count == 0
+    run(body, strict=True)
+
+
 @pytest.mark.parametrize("state,kind,suffix", [("acknowledged", "status", ":ack"), ("final", "prose", "")])
 def test_published_reply_prevents_notice_and_marker(state, kind, suffix):
     async def body(h):

@@ -2462,6 +2462,22 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return key
         return None
 
+    @staticmethod
+    def _assistant_turn_boundary_conn(conn, source_stream_id, created_at, event_id, transcript, record):
+        """Fence unclassified prior assistant rows and exclude this provider record."""
+        return conn.execute(
+            "SELECT event_id FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
+            "AND event_id<? AND json_extract(event_json,'$.raw.source_session_identity')=? "
+            "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
+            "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
+            "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
+            "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
+            "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
+            "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
+            "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
+            "ORDER BY event_id DESC LIMIT 1",
+            (source_stream_id, created_at, event_id, transcript, record)).fetchone()
+
     def _notice_unanswered_turn_conn(self, conn, composite_stream_id, source_stream_id,
                                      generation, event, event_id):
         """Persist a missing-reply notice atomically with the structured turn end."""
@@ -2481,9 +2497,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             (host, name, generation)).fetchone()
         if source is None:
             return
+        # Preserve the mirror's conservative legacy/commentary boundary: an
+        # unclassified older assistant row must not lend its input to this turn.
+        boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                      event_id, transcript, record)
         from tell_proof import delivery_wire, input_origin, operator_dispatch
         for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, source["created_at"],
-                                                          event_id, transcript):
+                                                          event_id, transcript,
+                                                          boundary["event_id"] if boundary else 0):
             item = json.loads(candidate["event_json"])
             wire = delivery_wire(item)
             if not str(wire or "").strip():
@@ -2599,20 +2620,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             # can precede even its USER row. A sibling block in this same provider
             # record is not a previous turn. Unknown legacy assistant rows fence
             # the search too, preventing old dispatches crossing a metadata upgrade.
-            boundary = conn.execute(
-                "SELECT event_id FROM session_event_tail WHERE stream_id=? "
-                "AND session_created_at=? AND event_id<? "
-                "AND json_extract(event_json,'$.raw.source_session_identity')=? "
-                "AND COALESCE(json_extract(event_json,'$.raw.jsonl_record_uuid'),'')<>? "
-                "AND json_extract(event_json,'$.kind')='ASSIST_TEXT' "
-                "AND COALESCE(json_extract(event_json,'$.raw.is_sidechain'),0)=0 "
-                "AND NOT ((COALESCE(json_extract(event_json,'$.raw.transport'),'')='claude-jsonl' "
-                "AND COALESCE(json_extract(event_json,'$.raw.stop_reason'),'')='tool_use') "
-                "OR (COALESCE(json_extract(event_json,'$.raw.transport'),'')='codex-rollout' "
-                "AND COALESCE(json_extract(event_json,'$.raw.phase'),'')='commentary')) "
-                "ORDER BY event_id DESC LIMIT 1",
-                (source_stream_id, source["created_at"], source_event_id, transcript, record),
-            ).fetchone()
+            boundary = self._assistant_turn_boundary_conn(conn, source_stream_id, source["created_at"],
+                                                          source_event_id, transcript, record)
             if self._project_dispatch_turn_final_conn(
                 conn, binding[0], composite_created_at=composite["created_at"],
                 source_stream_id=source_stream_id, source_generation=source_generation,
