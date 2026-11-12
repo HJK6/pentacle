@@ -39,28 +39,38 @@ class TellDeliveryParseCache:
     `ProjectionDeliveries` rebuilds per request (and per write on the
     connection), re-decoding every delivery reply; that strict parse is the
     remaining store-thread cost after the round-1 instance reuse. Keyed
-    tell_id -> (reply_text, parsed): a changed reply (text differs) or a new
-    tell_id misses and reparses with the identical strict hooks, and tell_ids
-    absent from a completed scan are pruned. A failed strict parse is never
-    stored, so it keeps raising exactly as the uncached path does. Parsed
-    payloads are consumed read-only by the delivery/origin readers, so the
-    pristine parse is shared without a copy. Store-owned connection state,
-    never touched from the asyncio thread; a fresh connection gets a fresh
-    cache.
+    tell_id -> [reply_text, parsed, text_digest]: a changed reply (text
+    differs) or a new tell_id misses and reparses with the identical strict
+    hooks (dropping the digest with it), and tell_ids absent from a completed
+    scan are pruned. A failed strict parse is never stored, so it keeps raising
+    exactly as the uncached path does. Parsed payloads are consumed read-only by
+    the delivery/origin readers, so the pristine parse is shared without a
+    copy. `text_digest` is the per-ROW `provider_text_digest(delivery.text)`,
+    filled on first use after the row passed validation and valid only for the
+    reply it was computed from; it is distinct from the per-CALL input digests
+    `retained_proof` computes. Store-owned connection state, never touched from
+    the asyncio thread; a fresh connection gets a fresh cache.
     """
     __slots__ = ("_entries",)
 
     def __init__(self) -> None:
-        self._entries: dict[str, tuple[str, dict]] = {}
+        self._entries: dict[str, list] = {}
 
     def decode(self, tell_id: str, reply_text: str):
         entry = self._entries.get(tell_id)
         if entry is None or entry[0] != reply_text:
             parsed = json.loads(reply_text, object_pairs_hook=_unique_object,
                                 parse_constant=_nonfinite_constant)
-            entry = (reply_text, parsed)
+            entry = [reply_text, parsed, None]
             self._entries[tell_id] = entry
         return entry[1]
+
+    def text_digest(self, tell_id: str, text):
+        """Row digest for the reply `decode` last returned for `tell_id`."""
+        entry = self._entries[tell_id]
+        if entry[2] is None:
+            entry[2] = provider_text_digest(text)
+        return entry[2]
 
     def prune(self, live_tell_ids) -> None:
         # A completed scan leaves `_entries` a superset of the live ids, so an
@@ -119,7 +129,9 @@ class ProjectionDeliveries:
                         if type(extracted) is not type(value) or extracted != value:
                             raise ValueError("SQLite/Python delivery lookup disagreement")
                     item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery,
-                            "text_digest": provider_text_digest(delivery.get("text"))}
+                            "text_digest": (cache.text_digest(row["tell_id"], delivery.get("text"))
+                                            if cache is not None
+                                            else provider_text_digest(delivery.get("text")))}
                     by_target.setdefault(delivery.get("to_stream_id"), []).append(item)
                     by_input.setdefault((delivery.get("to_stream_id"), delivery.get("text")), []).append(payload)
             except (sqlite3.Error, TypeError, ValueError, AttributeError, RecursionError):
@@ -189,6 +201,21 @@ def retained_proof(conn, payload, *, deliveries=None):
     if current is None or (current["created_at"], current["generation"]) != (birth, generation):
         return None
     matches = []
+    # Per-CALL input digests: each distinct representation of `text` is hashed at
+    # most once, and only if a comparison below actually needs it.
+    memo = {}
+
+    def raw_input_digest():
+        if "raw" not in memo:
+            memo["raw"] = provider_text_digest(text)
+        return memo["raw"]
+
+    def accepted_input_digests():
+        if "stripped" not in memo:
+            stripped = strip_peer_delivery(text)
+            memo["stripped"] = raw_input_digest() if stripped == text else provider_text_digest(stripped)
+        return {raw_input_digest(), memo["stripped"]}
+
     # The retained history may be older than the current 500-event live tail.
     for row in conn.execute(
             "SELECT event_id,event_json FROM session_event_tail "
@@ -205,8 +232,7 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and (event.get("kind") == "USER" or (event.get("kind") == "TELL"
                          and isinstance((event.get("raw") or {}).get("peer_wire_text"), str)))
                     and delivery_wire(event) == text
-                    and ("provider_text_digest" not in event or event["provider_text_digest"] in {
-                        provider_text_digest(text), provider_text_digest(strip_peer_delivery(text))})
+                    and ("provider_text_digest" not in event or event["provider_text_digest"] in accepted_input_digests())
                     and not operator_dispatch(conn, target, text, generation)
                     and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == row["event_id"])):
                 matches.append((row["event_id"], event.get("timestamp")))
@@ -230,7 +256,7 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and type(lower) is int and lower < event_id
                     and not (type(upper) is int and upper <= watermark)
                     and (row["text_digest"] if rows is not None else provider_text_digest(other.get("text")))
-                    == provider_text_digest(text)):
+                    == raw_input_digest()):
                 return None
         except (TypeError, ValueError, AttributeError):
             return None  # Unverifiable ownership never establishes delivery.
