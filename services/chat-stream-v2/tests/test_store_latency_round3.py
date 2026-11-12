@@ -1327,8 +1327,7 @@ def test_item4_only_lane_named_identities_are_decoded(monkeypatch):
         await env.store.submit(_set_members(b["lane_id"], ["spec_b__y", "spec_c__z"]))
         counting = _CountingJson()
         monkeypatch.setattr(store_work_index, "json", counting)
-        await env.store.submit(lambda c: (setattr(c, "work_decode_cache", None),
-                                          work_lane_rows_conn(c, include_done=True)))
+        await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True))
         assert counting.record_parses == 3
         counting.record_parses = 0
         await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True, lane_id=a["lane_id"]))
@@ -1347,7 +1346,6 @@ def test_item4_empty_selection_decodes_nothing(monkeypatch):
         await env.store.submit(_set_members(b["lane_id"], []))
         counting = _CountingJson()
         monkeypatch.setattr(store_work_index, "json", counting)
-        await env.store.submit(lambda c: setattr(c, "work_decode_cache", None))
         rows = await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True))
         assert [r["_members"] for r in rows] == [[], []]
         assert counting.record_parses == 0
@@ -1363,7 +1361,6 @@ def test_item4_ids_only_callers_decode_nothing(monkeypatch):
         a, _ = await _seed_two_lanes(env)
         counting = _CountingJson()
         monkeypatch.setattr(store_work_index, "json", counting)
-        await env.store.submit(lambda c: setattr(c, "work_decode_cache", None))
         conflicts = await env.store.submit(lambda c: store_work_lanes.member_conflicts_conn(
             c, "assistant:primary", ["spec_a__x"], a["lane_id"]))
         opened = await env.store.open_lanes_for_spec("spec_a__x")
@@ -1504,3 +1501,10 @@ def test_item4_mutants_are_detected(monkeypatch, kind):
     monkeypatch.setattr(store_work_index, "_decode_observations", _decode_mutant(kind))
     with pytest.raises(AssertionError):
         lanes_run(lambda env: _mutant_scenario(env, kind))
+
+
+def test_item4_full_table_decode_and_round2_cache_are_deleted():
+    assert not hasattr(store_work_index, "WorkObservationDecodeCache")
+    assert not hasattr(store_work_index, "_independent")
+    import retention
+    assert "work_decode_cache" not in vars(retention.HistoryConnection)
