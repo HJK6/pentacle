@@ -523,7 +523,7 @@ def delivery_wire(event):
     return raw.get('peer_wire_text') if isinstance(raw.get('peer_wire_text'), str) else event.get('text')
 
 
-def split_native_input(conn, event, *, lookup_deadline=None):
+def split_native_input(conn, event, *, lookup_deadline=None, deliveries=None):
     """Locate only unique, unconsumed exact delivery spans in an admitted input.
 
     The original record and full text remain in raw. Textual headers are never
@@ -549,9 +549,12 @@ def split_native_input(conn, event, *, lookup_deadline=None):
     retained_cuts = (json.loads(prior[0]).get("raw") or {}).get("native_segment_spans") if prior else None
     spans = []
     ambiguous = False
-    payloads = [json.loads(row["reply"]) for row in conn.execute(
-        "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
-        "AND instr(?,json_extract(reply,'$.delivery.text'))>0", (target, text))]
+    retained = deliveries.rows_for(conn, target, text) if deliveries is not None else None
+    payloads = ([row["payload"] for row in retained
+                 if isinstance(row["delivery"].get("text"), str) and row["delivery"]["text"] in text]
+                if retained is not None else [json.loads(row["reply"]) for row in conn.execute(
+                    "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
+                    "AND instr(?,json_extract(reply,'$.delivery.text'))>0", (target, text))])
     payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
     for payload in payloads:
         d = payload.get('delivery') or {}

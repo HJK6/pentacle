@@ -5728,14 +5728,35 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return True
         return False
 
-    async def prepare_native_input_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def prepare_native_input_events(self, events: list[dict[str, Any]], *, replay=False) -> list[dict[str, Any]]:
         from tell_proof import split_native_input
         from native_input_lookup import PREPARE_SECONDS
         def prepare(conn):
             deadline = time.monotonic() + PREPARE_SECONDS
-            return [segment for event in events
-                    for segment in split_native_input(conn, event, lookup_deadline=deadline)]
+            if not replay:
+                return [segment for event in events
+                        for segment in split_native_input(conn, event, lookup_deadline=deadline)]
+            result = []
+            for event in events:
+                shared = not conn.in_transaction
+                conn.execute("SAVEPOINT replay_split")
+                try:
+                    deliveries = self._history_deliveries(conn, shared=shared)
+                    result.extend(split_native_input(
+                        conn, event, lookup_deadline=deadline, deliveries=deliveries))
+                    conn.execute("RELEASE replay_split")
+                except BaseException:
+                    conn.execute("ROLLBACK TO replay_split")
+                    conn.execute("RELEASE replay_split")
+                    raise
+            return result
         return await self.submit(prepare)
+
+    async def skip_stored_replay(self, events, lifecycle, *, prepared=False, identity=None) -> int:
+        """Prove a write-free retained prefix during first transcript replay."""
+        from replay_noop import stored_prefix
+        return await self.submit(lambda conn: stored_prefix(
+            conn, events, lifecycle, prepared=prepared, identity=identity))
 
     @staticmethod
     def _insert_session_event_conn(conn, stream_id, session_created_at, event, identity):

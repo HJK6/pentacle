@@ -143,6 +143,9 @@ class _StreamIngest:
     identity_grace: _IdentityGrace | None = None
     # Coalesce entry/late refusals; eligibility advances only at attempt completion.
     identity_refusal: tuple[dict, dict] | None = None
+    replay_boundary: int | None = None
+    replay_complete: bool = False
+    replay_pending: bool = False
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -253,15 +256,16 @@ async def append_ingested_event(
     lifecycle: dict[str, Any] | None = None,
     sessions: Any = None,
     _segments_prepared: bool = False,
+    _replay: bool = False,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
     if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
-        segments = await store.prepare_native_input_events([payload])
+        segments = await store.prepare_native_input_events([payload], **({"replay": True} if _replay else {}))
         last = None
         for segment in segments:
             seq = await append_ingested_event(store, broadcast, segment, recent_limit=recent_limit,
                 routing_integrity=routing_integrity, lifecycle=lifecycle, sessions=sessions,
-                _segments_prepared=True)
+                _segments_prepared=True, _replay=_replay)
             if seq is not None:
                 last = seq
         return last
@@ -270,7 +274,11 @@ async def append_ingested_event(
     corrected = annotate_message_envelope(
         await store.stamp_event_with_send_receipt(payload),
     )
-    if lifecycle is None:
+    skipped = (_replay and lifecycle is not None and await store.skip_stored_replay(
+        [corrected], lifecycle, prepared=True, identity=raw_identity))
+    if skipped:
+        seq = None
+    elif lifecycle is None:
         seq = await store.append_session_event(
             stream_id, corrected, identity=raw_identity, limit=recent_limit,
         )
@@ -317,6 +325,7 @@ class Ingest:
         inventory_emitter: Any = None,
         provenance: Any = None,
         alerts: Any = None,
+        started_monotonic: float | None = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
@@ -333,6 +342,34 @@ class Ingest:
         self._streams: dict[str, _StreamIngest] = {}
         self._last_visited_sid: str | None = None
         self._previous_inventory: tuple[str, ...] = ()
+        self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
+
+    def _replay_backlog(self) -> bool:
+        now = monotonic()
+        return any(st.replay_pending and not st.replay_complete and st.replay_boundary is not None
+                   and st.offset < st.replay_boundary and now >= st.next_attempt_monotonic
+                   for st in self._streams.values())
+
+    def _complete_replay(self, sid, st, *, disposition="consumed") -> None:
+        if st.replay_complete or st.replay_boundary is None:
+            return
+        st.replay_complete = True
+        log.info("ingest_replay_complete %s", json.dumps({
+            "stream_id": sid, "generation": st.generation,
+            "elapsed_s": round(monotonic() - self._started_monotonic, 6),
+            "boundary": st.replay_boundary, "offset": st.offset,
+            "disposition": disposition,
+        }, separators=(",", ":")))
+
+    async def _skip_replay(self, events, lifecycle, st) -> int:
+        if not events or events[0].get("provider") not in {"claude", "codex"}:
+            return 0
+        if st.replay_complete or st.replay_boundary is None or st.offset >= st.replay_boundary:
+            return 0
+        skip = getattr(self.store, "skip_stored_replay", None)
+        if not callable(skip):
+            return 0
+        return await skip(events, lifecycle)
 
     async def _record_provenance(self, sid: str, provider: str, records: list[dict], st: _StreamIngest) -> None:
         """Thoth-local provenance through the same sink as satellites; best effort."""
@@ -374,7 +411,8 @@ class Ingest:
             try:
                 await self.run_pass()
                 failures = 0
-                delay = cfg.interval_s
+                # sleep(0) still yields between bounded round-robin passes.
+                delay = 0 if self._replay_backlog() else cfg.interval_s
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad pass never kills the pump
@@ -456,7 +494,10 @@ class Ingest:
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
         st.identity_refusal = None
+        previous_offset = st.offset
+        st.replay_pending = False
         appended = await self._ingest_stream_events(row, st, budget)
+        st.replay_pending = st.offset > previous_offset
         # A strict discovery/pre-append check can fail after entry was proven.
         # Surface that refusal at this pass's end, without consuming any bytes
         # after a late recovery; ordinary replay resumes on the next pass.
@@ -487,6 +528,8 @@ class Ingest:
             await self._record_identity_blocked(failed_row, st, observation, completed_attempt=True)
         else:
             st.identity_grace = None
+        if st.replay_boundary is not None and st.offset >= st.replay_boundary:
+            self._complete_replay(row["stream_id"], st)
         return appended
 
     async def _ingest_stream_events(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
@@ -579,6 +622,7 @@ class Ingest:
         if st.file_id is None:
             st.file_id = file_id
         elif st.file_id != file_id:
+            self._complete_replay(sid, st, disposition="rotated")
             # The bound path now names a DIFFERENT file. A size check alone
             # misses this whenever the replacement is larger: the stale offset
             # would land mid-file, the span would carry no session header, and
@@ -662,6 +706,9 @@ class Ingest:
             # Rotation/truncation in place: replay from the start; dedup keeps
             # it exact.
             st.offset = 0
+            self._complete_replay(sid, st, disposition="rotated")
+        if st.replay_boundary is None:
+            st.replay_boundary = await asyncio.to_thread(_complete_record_boundary, st.fd, size)
         if size == st.offset:
             if provider == "codex" and st.session_id:
                 current_session_id = await asyncio.to_thread(
@@ -676,6 +723,8 @@ class Ingest:
             return 0
 
         read_to = min(size, st.offset + self.config.max_read_bytes)
+        if not st.replay_complete and st.replay_boundary is not None and st.offset < st.replay_boundary:
+            read_to = min(read_to, st.replay_boundary)
         read = await asyncio.to_thread(
             _read_bound_span, st.path, st.fd, st.offset, read_to
         )
@@ -804,6 +853,12 @@ class Ingest:
             source_pid = codex_source_pane_pid(row.get("pane_pid"))
             if source_pid is None:
                 return 0
+            replay_lifecycle = None
+            if not st.replay_complete and st.replay_boundary is not None and st.offset < st.replay_boundary:
+                replay_lifecycle = await self.store.fetch_open_session_lifecycle(sid, pane_pid=source_pid)
+                if (replay_lifecycle is None or (row.get("session_generation")
+                        and replay_lifecycle["generation"] != row["session_generation"])):
+                    return 0
             # Per-pass cap, mirroring the Claude path below: build at most
             # `budget` entries, then advance the offset PAST the records that
             # produced them. Counting built entries (not genuine inserts) is safe
@@ -819,7 +874,26 @@ class Ingest:
                 payloads = normalize_codex_rollout_record(
                     record, host=host, session_name=name, session_id=st.session_id,
                 )
-                payloads = await self.store.prepare_native_input_events(payloads)
+                if not payloads and replay_lifecycle is not None and not entries:
+                    consumed_to = end_offset
+                    continue
+                if payloads and replay_lifecycle is not None:
+                    # Do not move a skip decision across a pending batch write.
+                    # The original path owns this and every later record once
+                    # the batch contains an event that requires processing.
+                    if not entries and all(validate_event_payload(
+                            {**payload, "source_pane_pid": source_pid}, host) is None
+                            for payload in payloads):
+                        skipped = await self._skip_replay(payloads, replay_lifecycle, st)
+                        if skipped == len(payloads):
+                            for payload in payloads:
+                                if self.routing_integrity is not None:
+                                    await self.routing_integrity.observe_claude_event(
+                                        annotate_message_envelope(payload))
+                            consumed_to = end_offset
+                            continue
+                payloads = await self.store.prepare_native_input_events(
+                    payloads, **({"replay": True} if replay_lifecycle is not None else {}))
                 if payloads and len(entries) + len(payloads) > budget:
                     # Leave this record and the rest of the span for next pass.
                     capped = True
@@ -843,6 +917,9 @@ class Ingest:
                 # non-record bytes past the last event.
                 consumed_to = new_offset
             if not entries:
+                if replay_lifecycle is not None:
+                    from store_capacity_retry import refresh_projection
+                    await refresh_projection(self.store, self.sessions, sid)
                 st.offset = consumed_to
                 return 0
             lifecycle = await self.store.fetch_open_session_lifecycle(sid, pane_pid=source_pid)
@@ -920,7 +997,9 @@ class Ingest:
             events = normalize_claude_jsonl_records(records, host=host, session_name=name)
         appended = 0
         capped = False
-        for payload in events:
+        event_index = 0
+        while event_index < len(events):
+            payload = events[event_index]
             if appended >= budget:
                 # Per-pass cap hit mid-batch. Do NOT advance the offset: the whole
                 # chunk is re-read next pass, and the durable identity dedup makes
@@ -929,6 +1008,17 @@ class Ingest:
                 # event (loop rule 2 without data loss).
                 capped = True
                 break
+            skipped = await self._skip_replay(events[event_index:event_index + 128], lifecycle, st)
+            if skipped:
+                for retained in events[event_index:event_index + skipped]:
+                    if self.routing_integrity is not None:
+                        try:
+                            await self.routing_integrity.observe_claude_event(
+                                annotate_message_envelope(retained))
+                        except Exception as exc:  # noqa: BLE001 - same best-effort observer
+                            log.warning("routing-integrity replay observation failed sid=%s: %s", sid, exc)
+                event_index += skipped
+                continue
             seq = await append_ingested_event(
                 self.store,
                 self.broadcast,
@@ -937,9 +1027,13 @@ class Ingest:
                 routing_integrity=self.routing_integrity,
                 lifecycle=lifecycle,
                 sessions=self.sessions,
+                _replay=(not st.replay_complete and st.replay_boundary is not None
+                         and st.offset < st.replay_boundary
+                         and callable(getattr(self.store, "skip_stored_replay", None))),
             )
             if seq is not None:
                 appended += 1
+            event_index += 1
         if not capped:
             st.offset = new_offset
             if provider == "cursor":
@@ -1224,6 +1318,19 @@ def _provider_command_matches(command: str, expected: str, cursor: dict | None =
         return True
     return bool(len(tokens) >= 2 and os.path.basename(tokens[0]).lower() in
                 {"python", "python3", "node", "bash", "sh", "zsh"} and matches(tokens[1]))
+
+
+def _complete_record_boundary(fd: int, size: int) -> int:
+    """Capture the last newline at first bind without consuming a partial line."""
+    end = size
+    while end > 0:
+        start = max(0, end - 65536)
+        chunk = os.pread(fd, end - start, start)
+        newline = chunk.rfind(b"\n")
+        if newline >= 0:
+            return start + newline + 1
+        end = start
+    return 0
 
 
 def _native_session_identity_from_fd(fd: int, provider: str) -> str:
