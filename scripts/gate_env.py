@@ -484,6 +484,21 @@ def validate_selection(target: Dict[str, Any], select: List[str], checkout: Path
     out = []
     root = checkout / spec.get("root", "")
     for item in [*select, *target.get("required_select", [])]:
+        original = item
+        file_part, separator, node = item.partition("::")
+        file_path = Path(file_part)
+        if file_path.is_absolute():
+            try:
+                file_part = str(file_path.resolve().relative_to(root.resolve()))
+            except ValueError:
+                pass
+        elif spec.get("root") and file_part.startswith(spec["root"] + "/"):
+            file_part = file_part[len(spec["root"]) + 1:]
+        elif not file_part.startswith("tests/") and (root / "tests" / file_part).is_file():
+            file_part = "tests/" + file_part
+        item = file_part + (separator + node if separator else "")
+        if item != original:
+            print("[gate-env] selector normalized: %s" % item, flush=True)
         if item.startswith("-") or ".." in Path(item).parts or item.startswith("/") or not pattern.match(item):
             raise SetupFailure([fail("selection", "selector %r does not match the target's declared pattern" % item, "")])
         file_part = item.split("::", 1)[0]
@@ -730,7 +745,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     workspace = args.workspace.resolve()
     checkout = args.checkout.resolve()
     attempt_id = ga.new_attempt_id()
+    tmp_root = (args.tmp_root or Path("/tmp/ge-%d" % os.getuid())).resolve()
     evidence = (args.evidence_dir or workspace / "evidence" / attempt_id).resolve()
+    try:
+        max_tmp = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["max_tmpdir_bytes"]
+        if type(max_tmp) is not int or max_tmp <= 0:
+            max_tmp = 48
+    except (OSError, ValueError, KeyError, TypeError):
+        max_tmp = 48  # load_config reports a malformed configuration below.
+    home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
+    if check_layout(checkout, workspace, evidence, home, tmp, basetemp, max_tmp):
+        short = attempt_id[:8]
+        workspace = Path("/tmp/gw-%d-%s" % (os.getuid(), short)).resolve()
+        tmp_root = Path("/tmp/ge-%d" % os.getuid()).resolve()
+        evidence = Path("/tmp/gv-%d-%s" % (os.getuid(), short)).resolve()
+        home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
+        print("[gate-env] using owned temporary workspace and evidence: %s %s" % (workspace, evidence), flush=True)
+    if args.attempt_manifest and _inside(args.attempt_manifest.resolve(), checkout):
+        args.attempt_manifest = evidence / "attempt-manifest.json"
+        print("[gate-env] using temporary attempt manifest: %s" % args.attempt_manifest, flush=True)
     evidence.mkdir(parents=True, exist_ok=True)
 
     missing_identity = [n for n, v in (("spec", args.spec), ("series", args.series), ("purpose", args.purpose)) if not v]
@@ -752,8 +785,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state: Dict[str, Any] = {"outcome": "harness_failure", "first_failure": {"stage": "setup", "code": "crash"}, "secondary": {}, "evidence": [], "extra": {}}
     cancelled = {"hit": False}
-    tmp_root = (args.tmp_root or Path("/tmp/ge-%d" % os.getuid())).resolve()
-    home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
     run_dir = home.parent
 
     def on_signal(_n, _f):
@@ -796,9 +827,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "npm_ci": any(t.get("npm_ci") for t in profile["targets"].values()), "timeout_s": 600, "max_timeout_s": 600}
         identity["identities"]["config"] = ga.digest_of(config)
         identity["identities"]["profile"] = ga.digest_of(profile)
-        timeout_s = args.timeout_seconds or target["timeout_s"]
-        if timeout_s > target["max_timeout_s"]:
-            raise SetupFailure([fail("selection", "--timeout-seconds %d exceeds the target maximum %d" % (timeout_s, target["max_timeout_s"]))])
+        timeout_s = args.timeout_seconds if args.timeout_seconds is not None else target["timeout_s"]
+        if timeout_s <= 0:
+            timeout_s = target["timeout_s"]
+            print("[gate-env] using default timeout: %d seconds" % timeout_s, flush=True)
+        elif timeout_s > target["max_timeout_s"]:
+            timeout_s = target["max_timeout_s"]
+            print("[gate-env] timeout clamped to %d seconds" % timeout_s, flush=True)
         selection = validate_selection(target, args.select, checkout) if target["kind"] != "prepare" else []
         resolved_selection = list(selection)  # retained even when setup fails before prepared
         # This explicitly selected integration file boots the same fixture as web-gate.
@@ -878,12 +913,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for item in unavailable:
                         log("capability unavailable: " + item["detail"])
         if target.get("process_listing"):
-            unavailable = check_process_listing(subprocess.run, env)
-            if target.get("strict_capabilities", True):
-                failures += unavailable
-            else:
-                for item in unavailable:
-                    log("capability unavailable: " + item["detail"])
+            # Node's runner currently needs process listing to reap its owned groups.
+            failures += check_process_listing(subprocess.run, env)
         if args.command == "run" and (args.target == "web-gate" or web_selected):
             # Optional npm dependencies can be silently dropped by a successful install.
             # Probe from the exact checkout on both fresh and reused preparations.
