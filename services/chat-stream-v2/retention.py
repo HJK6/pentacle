@@ -87,6 +87,10 @@ class HistoryConnection(sqlite3.Connection):
     history_schema_version: int | None = None
     # Front-desk binding coordinates (store_lifecycle_authority.configured).
     lifecycle_front_desk: dict | None = None
+    # Connection-scoped membership record_json decode memo (store_work_index).
+    work_decode_cache: Any = None
+    # Connection-scoped v2_tell_deliveries reply parse memo (tell_proof).
+    delivery_parse_cache: Any = None
 
 
 def _columns(conn, table, schema="main"):
