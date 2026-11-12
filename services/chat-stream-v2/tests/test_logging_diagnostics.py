@@ -498,6 +498,9 @@ async def test_request_store_diagnostics_do_not_borrow_concurrent_request(tmp_pa
     from types import SimpleNamespace
     from server import Server
     from store import Store
+    import server as server_module
+
+    monkeypatch.setattr(server_module, 'REQUEST_STORE_DIAG_SLOW_SECONDS', 0)
 
     store = Store(str(tmp_path / 'request-timing.db'))
     store.start()
@@ -536,10 +539,39 @@ async def test_request_store_diagnostics_do_not_borrow_concurrent_request(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_request_store_diagnostics_only_log_slow_requests(caplog, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import server as server_module
+
+    clock = [0.0]
+    peer = object()
+    server = server_module.Server(store=None)
+    server._connection_diagnostics = {peer: SimpleNamespace(conn_id='test')}
+    monkeypatch.setattr(server_module, '_monotonic', lambda: clock[0])
+    monkeypatch.setattr(server_module, 'REQUEST_STORE_DIAG_SLOW_SECONDS', 1.0)
+    monkeypatch.setattr(server, '_diag_auth_finish', lambda _: None)
+
+    async def dispatch(raw, *, websocket=None):
+        clock[0] += float(raw)
+        return []
+
+    monkeypatch.setattr(server, '_dispatch_inner', dispatch)
+    caplog.set_level('INFO', logger='chat_streamd_v2.server')
+    for duration in ('0.25', '1.0', '1.25'):
+        await server._dispatch(duration, websocket=peer)
+    rows = [json.loads(record.message.split(' ', 1)[1]) for record in caplog.records
+            if record.message.startswith('request_store_diag ')]
+    assert len(rows) == 1
+    assert rows[0]['conn_id'] == 'test'
+
+
+@pytest.mark.asyncio
 async def test_request_diagnostic_failure_cannot_replace_rpc(monkeypatch):
     from types import SimpleNamespace
     import server as module
     from loop_watchdog import request_timing
+    monkeypatch.setattr(module, 'REQUEST_STORE_DIAG_SLOW_SECONDS', 0)
     daemon = module.Server()
     peer = object()
     daemon._connection_diagnostics = {peer: SimpleNamespace(conn_id='fixture')}

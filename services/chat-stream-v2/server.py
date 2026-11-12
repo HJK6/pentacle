@@ -82,6 +82,8 @@ from v2_runtime import primary_assistant_name
 log = logging.getLogger("chat_streamd_v2.server")
 
 _monotonic = time.monotonic
+# One second leaves diagnostic headroom within the three-second delivery target.
+REQUEST_STORE_DIAG_SLOW_SECONDS = 1.0
 UNSUPPORTED_LOG_INTERVAL_SECONDS = 60.0
 MAX_UNSUPPORTED_LABEL_LENGTH = 128
 MAX_UNSUPPORTED_VERBS = 256
@@ -2373,7 +2375,8 @@ class Server:
             return await self._dispatch_inner(raw, websocket=websocket)
         finally:
             timing.closed = True
-            self._diag_store_request(state, timing)
+            if _monotonic() - decision.started > REQUEST_STORE_DIAG_SLOW_SECONDS:
+                self._diag_store_request(state, timing)
             request_timing.reset(timing_token)
             self._diag_auth_finish(decision)
             _CONN_AUTH.reset(token)
