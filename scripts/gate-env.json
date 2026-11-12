@@ -102,20 +102,6 @@
           ],
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "timeout_s": 1800,
-          "max_timeout_s": 14400,
-          "unit_workers": 4
-        },
-        "v2-merge-capacity": {
-          "kind": "run_gate",
-          "gate": "merge",
-          "needs": [
-            "python",
-            "node",
-            "tmux"
-          ],
-          "capabilities": "v2_host",
-          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
             "unit": 2400,
             "smoke": 900
@@ -123,6 +109,9 @@
           "timeout_s": 3300,
           "max_timeout_s": 3300,
           "unit_workers": 4
+        },
+        "v2-merge-capacity": {
+          "alias": "v2-merge"
         },
         "v2-pytest": {
           "kind": "pytest_files",
@@ -168,22 +157,7 @@
           ]
         },
         "v2-merge-ci": {
-          "kind": "run_gate",
-          "gate": "merge",
-          "needs": [
-            "python",
-            "node",
-            "tmux"
-          ],
-          "capabilities": "v2_host",
-          "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
-          "tier_timeouts": {
-            "unit": 4320,
-            "smoke": 900
-          },
-          "timeout_s": 5220,
-          "max_timeout_s": 5220,
-          "unit_workers": 1
+          "alias": "v2-merge"
         },
         "cli-pytest": {
           "kind": "pytest_files",

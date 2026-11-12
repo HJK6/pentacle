@@ -1,4 +1,4 @@
-"""The inline deploy gate runs with the v2-merge-capacity tier bounds.
+"""The inline deploy gate runs with the v2-merge tier bounds.
 
 `deploy.py` launches `run_gate.py merge` under `env -i`, so a bound it does not
 set explicitly falls back to run_gate's 900 s default.
@@ -117,7 +117,7 @@ def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch:
 
 def test_defaults_match_capacity_profile() -> None:
     profile = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
-    capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge-capacity"]["tier_timeouts"]
+    capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]
 
     assert deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS == {
         f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in capacity.items()

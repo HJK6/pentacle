@@ -103,7 +103,7 @@ def test_predeploy_uses_the_shared_services_import_root(tmp_path):
 def test_ci_unit_budget_and_failure_artifacts_keep_scratch_separate(tmp_path):
     workflow, step = _step()
     assert all(CONFIG['profiles']['pentacle']['targets'][name]['unit_workers'] == 4
-               for name in ('v2-unit', 'v2-merge', 'v2-merge-capacity'))
+               for name in ('v2-unit', 'v2-merge'))
     runner_temp = tmp_path / 'runner-temp'
     root = runner_temp / 'gate-evidence'
     patterns = []

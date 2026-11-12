@@ -83,6 +83,11 @@ def load_config(path: Path = CONFIG_PATH) -> Dict[str, Any]:
             if not _NAME.match(pname) or not isinstance(profile.get("targets"), dict) or not profile["targets"]:
                 problems.append("profile " + pname)
                 continue
+            # Compatibility names share the canonical target's one configuration.
+            for tname, target in list(profile["targets"].items()):
+                if isinstance(target, dict) and set(target) == {"alias"}:
+                    name = target["alias"]
+                    profile["targets"][tname] = profile["targets"].get(name, {}) if isinstance(name, str) else {}
             for tname, target in profile["targets"].items():
                 if not _NAME.match(tname) or target.get("kind") not in ("run_gate", "pytest_files", "npm_test", "web_gate"):
                     problems.append("target " + tname)
