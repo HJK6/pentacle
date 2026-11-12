@@ -10,6 +10,7 @@ in the reply, a WARNING in the log). It never gates, holds, or fails a delivery.
 
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 from pathlib import Path
 
@@ -503,7 +504,7 @@ def test_submission_tail_requires_post_watermark_exact_admitted_event() -> None:
     stream_id = f"{HOST}:{NAME}"
     body = "[public-notice:proof-1]\nexact proof"
 
-    class TailStore:
+    class TailStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
             self.events = [
                 {"daemon_seq": 10, "stream_id": stream_id, "kind": "USER", "text": body},
@@ -513,7 +514,7 @@ def test_submission_tail_requires_post_watermark_exact_admitted_event() -> None:
                 {"daemon_seq": 14, "stream_id": stream_id, "kind": "TELL", "text": "exact proof"},
             ]
 
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             assert limit == 500
             return list(self.events)
 
@@ -544,11 +545,11 @@ def test_final_poll_submission_event_is_confirmed(monkeypatch: pytest.MonkeyPatc
     stream_id = f"{HOST}:{NAME}"
     body = "final poll proof"
 
-    class TailStore:
+    class TailStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
             self.events: list[dict] = []
 
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             return list(self.events)
 
     class EmptyTmux:

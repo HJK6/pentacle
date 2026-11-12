@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import tmux_transport
 
 import asyncio
@@ -55,11 +56,11 @@ class NeverSubmittedTmux:
         self.enter_retries += 1
 
 
-class FirstEventStore:
+class FirstEventStore(SubmissionReadStoreStub):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
         assert limit == 500
         self.calls += 1
         events = [{

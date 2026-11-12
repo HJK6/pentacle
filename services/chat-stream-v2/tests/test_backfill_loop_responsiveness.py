@@ -1,6 +1,7 @@
 """The large backfill must not monopolize the daemon event loop."""
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 import json
 
@@ -39,11 +40,11 @@ class _Sessions:
         return "testhost", "v2-loop"
 
 
-class _Store:
+class _Store(SubmissionReadStoreStub):
     def __init__(self, events: list[dict]) -> None:
         self.events = events
 
-    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
         return self.events[-limit:]
 
     async def fetch_session_event_page(

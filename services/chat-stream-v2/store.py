@@ -6751,12 +6751,15 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         limit: int,
         generation: str | None = None,
         deliveries_cache: dict | None = None,
+        after_daemon_seq: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch one newest-first cursor page, returned oldest-first.
 
         The SQL limit is the page bound, not the requested history length. A
         caller can therefore walk a permanently large tail without loading the
         whole stream into one Python list or frame.
+        ``after_daemon_seq`` filters raw rows before that bound and projection;
+        it preserves filtering the returned newest page by the same watermark.
 
         ``deliveries_cache`` lets a caller that walks several pages of one
         request (``_stream_request_stream_events``) build the delivery table
@@ -6790,6 +6793,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if before_daemon_seq is not None:
                 where += " AND t.event_id < ?"
                 params.append(int(before_daemon_seq))
+            if after_daemon_seq is not None:
+                where += " AND t.event_id > ?"
+                params.append(int(after_daemon_seq))
             params.append(int(limit))
             join = "JOIN sessions s ON s.host=? AND s.session_name=?" if generation is None else ""
             rows = conn.execute(
@@ -6839,10 +6845,38 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
         return await self.submit(snapshot)
 
-    async def fetch_session_event_tail(self, stream_id: str, *, limit: int, generation: str | None = None) -> list[dict[str, Any]]:
-        """The newest `limit` events for a stream, returned oldest-first."""
+    async def fetch_session_event_watermark(self, stream_id: str) -> int:
+        """Newest durable row in the current session, without decode/projection.
+
+        Undecodable rows still fence the next append: all future events receive
+        larger IDs, so they cannot change a post-watermark proof outcome.
+        """
+        host, separator, session_name = str(stream_id or "").partition(":")
+        if not separator or not host or not session_name:
+            return 0
+
+        def _op(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT max(t.event_id) FROM session_event_tail t "
+                "JOIN sessions s ON s.host=? AND s.session_name=? "
+                "WHERE t.stream_id=? AND t.session_created_at=s.created_at",
+                (host, session_name, stream_id),
+            ).fetchone()
+            return int(row[0] or 0)
+
+        return await self.submit(_op)
+
+    async def fetch_session_event_tail(
+        self, stream_id: str, *, limit: int, generation: str | None = None,
+        after_daemon_seq: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Newest `limit` raw rows after an optional watermark, oldest-first.
+
+        The bound applies before decoding, exactly as for an unfiltered tail.
+        """
         return await self.fetch_session_event_page(
             stream_id, before_daemon_seq=None, limit=limit, generation=generation,
+            after_daemon_seq=after_daemon_seq,
         )
 
     async def list_open_usage_fence_rows(self, host: str) -> list[dict[str, Any]]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 
 import pytest
@@ -30,11 +31,11 @@ class _Clock:
         self.now += delay
 
 
-class _MeasuredTail:
+class _MeasuredTail(SubmissionReadStoreStub):
     def __init__(self, clock: _Clock) -> None:
         self.clock = clock
 
-    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
         events = [
             {"daemon_seq": 253987980, "stream_id": STREAM, "kind": "TOOL_RESULT", "text": "pre"},
         ]
@@ -92,8 +93,8 @@ def test_only_post_watermark_exact_user_is_authoritative() -> None:
         {"daemon_seq": 14, "stream_id": STREAM, "kind": "USER", "text": BODY + " changed"},
     ]
 
-    class Tail:
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             return events[-limit:]
 
     async def run() -> tuple[object, object]:
@@ -128,8 +129,8 @@ def test_native_initial_prompt_allows_injected_user_context_but_requires_one_exa
         {"daemon_seq": 3, "stream_id": STREAM, "kind": "USER", "text": "More injected context"},
     ]
 
-    class Tail:
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             return events[-limit:]
 
     proof = DurableUserEventProof(Tail(), local_host="hosta")
@@ -149,10 +150,10 @@ def test_native_initial_prompt_allows_injected_user_context_but_requires_one_exa
 def test_native_initial_prompt_waits_past_early_injected_user_context() -> None:
     events = [{"daemon_seq": 1, "stream_id": STREAM, "kind": "USER", "text": "# AGENTS.md"}]
 
-    class Tail:
+    class Tail(SubmissionReadStoreStub):
         calls = 0
 
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
             if self.calls == 2:
                 events.append({"daemon_seq": 2, "stream_id": STREAM, "kind": "USER", "text": BODY})
@@ -173,8 +174,8 @@ def test_native_initial_prompt_rejects_whitespace_normalized_lookalike() -> None
             "text": "[public-notice:notice-001]   exact\nreport notice",
     }]
 
-    class Tail:
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             return events[-limit:]
 
     proof = DurableUserEventProof(Tail(), local_host="hosta")
@@ -186,10 +187,10 @@ def test_native_initial_prompt_rejects_whitespace_normalized_lookalike() -> None
 
 
 def test_peer_confirmation_uses_an_in_memory_store() -> None:
-    class InMemoryTailStore:
+    class InMemoryTailStore(SubmissionReadStoreStub):
         calls = 0
 
-        async def fetch_session_event_tail(self, stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
             assert stream_id == STREAM
             return [{
@@ -219,11 +220,11 @@ def test_pre_action_watermark_retries_transient_unreachable_with_one_deadline(
     monkeypatch.setattr(proof_module.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(proof_module.asyncio, "sleep", clock.sleep)
 
-    class InMemoryTailStore:
+    class InMemoryTailStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("transient")
@@ -245,11 +246,11 @@ def test_post_submit_lookup_recovers_from_transient_unreachable_without_resettin
     monkeypatch.setattr(proof_module.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(proof_module.asyncio, "sleep", clock.sleep)
 
-    class InMemoryTailStore:
+    class InMemoryTailStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
             if self.calls == 1:
                 return [{"daemon_seq": 10, "stream_id": STREAM, "kind": "TOOL_RESULT"}]

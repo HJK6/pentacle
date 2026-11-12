@@ -1,4 +1,5 @@
 """Injected setup has system provenance; commissioned briefs retain their sender."""
+from submission_store_stub import SubmissionReadStoreStub
 import argparse
 import asyncio
 import hashlib
@@ -82,8 +83,8 @@ def test_cli_composed_prompt_through_actual_spawn_wire(provider, native, large, 
     else:
         assert wire.endswith(composed)
     event.update(stream_id='hosta:v2-child', daemon_seq=1)
-    class Tail:
-        async def fetch_session_event_tail(self, stream_id, *, limit):
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, stream_id, *, limit, after_daemon_seq=None):
             return [event]
     proof = DurableUserEventProof(Tail(), local_host='hosta')
     if native:
@@ -130,9 +131,9 @@ def test_native_receipt_rejects_wrong_wire_sender_anchor_stream_and_duplicates(p
     wire = SpawnCtl._compose_spawn_brief('  Exact bytes\n\n', parent_stream_id=PARENT, spawn_id=SPAWN)
     event = normalize(provider, wire)
     event.update(stream_id='hosta:v2-child', daemon_seq=1)
-    class Tail:
+    class Tail(SubmissionReadStoreStub):
         events = [event]
-        async def fetch_session_event_tail(self, stream_id, *, limit):
+        async def fetch_session_event_tail(self, stream_id, *, limit, after_daemon_seq=None):
             return self.events
     tail = Tail()
     proof = DurableUserEventProof(tail, local_host='hosta')
@@ -154,8 +155,8 @@ def test_system_injection_delivery_receipt_still_settles(provider, body):
     from comms import Comms
     event = normalize(provider, body + '\nContext')
     event.update(stream_id='hosta:v2-child', daemon_seq=10)
-    class Tail:
-        async def fetch_session_event_tail(self, stream_id, *, limit):
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, stream_id, *, limit, after_daemon_seq=None):
             return [event]
     proof = DurableUserEventProof(Tail(), local_host='hosta')
     observed = asyncio.run(proof.lookup('hosta:v2-child', expected_text=body + '\nContext',
@@ -175,8 +176,8 @@ def test_system_receipt_provider_trimmed_baseline(provider):
                  provider_text_digest=provider_text_digest(body.rstrip('\n')))
     assert system_submission_matches(event, body)
     assert Comms._tail_event_matches_submission(event, 'hosta:v2-child', body)
-    class Tail:
-        async def fetch_session_event_tail(self, stream_id, *, limit):
+    class Tail(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, stream_id, *, limit, after_daemon_seq=None):
             return [event]
     proof = DurableUserEventProof(Tail(), local_host='hosta')
     observed = asyncio.run(proof.lookup('hosta:v2-child', expected_text=body,
@@ -194,9 +195,9 @@ def test_system_receipt_negative_controls():
                 dict(event, provider_text_digest='0' * 64), dict(event, kind='USER')]:
         assert not system_submission_matches(bad, body)
     assert dict(event, kind='USER')['kind'] == 'USER'  # proof never reclassifies stored input
-    class Tail:
+    class Tail(SubmissionReadStoreStub):
         events = []
-        async def fetch_session_event_tail(self, stream_id, *, limit):
+        async def fetch_session_event_tail(self, stream_id, *, limit, after_daemon_seq=None):
             return self.events
     tail = Tail()
     proof = DurableUserEventProof(tail, local_host='hosta')
