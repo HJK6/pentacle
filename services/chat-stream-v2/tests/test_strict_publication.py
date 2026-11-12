@@ -106,6 +106,31 @@ def test_turn_end_notifies_once_and_copied_ack_is_accepted():
     run(body, strict=True)
 
 
+def test_old_frozen_dispatch_envelope_still_matches():
+    async def body(h):
+        route = await h.route('old-envelope')
+        payload = json.loads(route['route_json'])
+        added = ("Only a publish reaches the operator; turn text is never delivered. "
+                 f"Use publish:{route['dispatch_id']}:ack for an acknowledgment and "
+                 f"publish:{route['dispatch_id']} for the final. End the turn with the single word done.\n")
+        wire = payload['direct_envelope']['wire_body']
+        assert added in wire
+        payload['direct_envelope']['wire_body'] = wire.replace(added, '')
+        def freeze(conn):
+            conn.execute('UPDATE v2_assistant_composite_routes SET route_json=? WHERE route_id=?',
+                         (json.dumps(payload), route['route_id']))
+            conn.commit()
+        await h.store.submit(freeze)
+        route['route_json'] = json.dumps(payload)
+        await h.dispatch_user(route, 'old-envelope-user')
+        await h.ingest('ASSIST_TEXT', 'done', 'old-envelope-final', final=True)
+        count = await h.store.submit(lambda conn: conn.execute(
+            "SELECT count(*) FROM v2_outbound_notices WHERE notice_id=?",
+            ('dispatch_no_reply:' + route['dispatch_id'],)).fetchone()[0])
+        assert count == 1
+    run(body, strict=True)
+
+
 def test_legacy_assistant_boundary_does_not_attach_old_dispatch_to_notice():
     async def body(h):
         route = await h.route('legacy-boundary')
