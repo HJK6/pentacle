@@ -35,6 +35,24 @@ def _nonempty(value, limit=512):
     return isinstance(value, str) and 0 < len(value) <= limit and value == value.strip() and not any(ord(c) < 32 or ord(c) == 127 for c in value)
 
 
+def publication_metadata(args):
+    """Validate only supplied flag shapes; requiredness belongs to the daemon."""
+    fields = {}
+    note_type = getattr(args, 'note_type', None)
+    ref = getattr(args, 'ref', None)
+    if note_type is not None:
+        if note_type not in ('result', 'problem', 'reminder', 'relay'):
+            raise ValueError('assistant_publish_note_type_required')
+        fields['note_type'] = note_type
+    if ref is not None:
+        kind, separator, record_id = str(ref).partition(':')
+        if (not separator or kind not in ('message', 'lane', 'report', 'wake', 'tell')
+                or not _nonempty(record_id)):
+            raise ValueError('assistant_publish_ref_required')
+        fields['ref'] = ref
+    return fields
+
+
 def _upload_id(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value):
         raise AttachmentError('upload_id_invalid')
@@ -145,6 +163,12 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
         if sum(v is not None for v in sources) != 1:
             raise AttachmentError('file_source_required')
         target = getattr(args, 'to', None)
+        try:
+            metadata = publication_metadata(args)
+        except ValueError as exc:
+            raise AttachmentError(str(exc)) from exc
+        if metadata and not target:
+            raise AttachmentError('publish_target_required')
         proactive = getattr(args, 'proactive', False)
         correlation = {k: getattr(args, k, None) for k in
             ('dispatch_id', 'reply_to_message_id', 'publish_kind', 'request_id')}
@@ -204,7 +228,7 @@ def run(args, *, load_config, upload_blob_once, assistant_once):
             correlation['request_id'] = 'send-file:' + upload_id
         payload = dict(type='assistant.publish', composite_stream_id=target,
             **correlation, message=getattr(args, 'caption', '') or '',
-            attachment_ids=[upload_id])
+            attachment_ids=[upload_id], **metadata)
         for field in ('reply_to_question_id', 'response_state'):
             if getattr(args, field, None):
                 payload[field] = getattr(args, field)

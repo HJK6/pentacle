@@ -4065,7 +4065,8 @@ class Server:
             )
         session = with_bootstrap_state(session, event_seen=bootstrap_event)
         if self._composite_for(stream_id) is not None:
-            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id)}
+            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id),
+                       "assistant_strict_publication": await self.store.strict_publication_state(stream_id)}
         if report_id is not None:
             existing_report = await self.store.get_report(report_id)
             if existing_report is not None and existing_report.get("from_stream_id") != stream_id:
@@ -5007,7 +5008,7 @@ class Server:
                 "assistant_direct_actor_unverified", "assistant_direct_dispatch_unverified",
             }:
                 raise VerbError("publish_not_authorized", "file publication requires an authorized current publisher") from exc
-            raise VerbError(str(exc), str(exc)) from exc
+            raise VerbError(str(exc), getattr(exc, "detail", str(exc))) from exc
 
     async def _assistant_question_operation(self, operation: str, msg: dict[str, Any]) -> dict[str, Any]:
         if self.notify is None:

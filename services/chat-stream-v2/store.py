@@ -1603,6 +1603,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # carries its own mirror; empty keeps every non-direct
         # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
         # source_generation, enabled_default, name).
+        self._assistant_strict_publication: dict[str, bool] = {}
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
 
@@ -2169,10 +2170,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def configure_assistant_mirror(
         self, *, composite_stream_id: str, source_stream_id: str,
         source_generation: str, enabled_default: bool, name: str | None = None,
+        strict_publication_default: bool | None = None,
     ) -> None:
         name = name or primary_assistant_name()
         """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
+            self._assistant_strict_publication[composite_stream_id] = (
+                name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
+            )
             self._assistant_mirror_binding[composite_stream_id] = (
                 composite_stream_id, source_stream_id, source_generation, enabled_default, name,
             )
@@ -2184,6 +2189,23 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # (daff) get their own per-name override key.
         return ("assistant.mirror.enabled" if name == primary_assistant_name()
                 else f"assistant.mirror.{name}.enabled")
+
+    def _strict_publication_state_conn(self, conn, composite_stream_id):
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
+        if binding is None:
+            return {"enabled": False, "source": "unbound"}
+        name = binding[4]
+        key = ("assistant.strict_publication.enabled" if name == primary_assistant_name()
+               else f"assistant.strict_publication.{name}.enabled")
+        override = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+        if override is None:
+            return {"enabled": self._assistant_strict_publication[composite_stream_id], "source": "env"}
+        normalized = str(override[0]).strip().lower()
+        return {"enabled": normalized in {"1", "true", "on"},
+                "source": "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"}
+
+    async def strict_publication_state(self, composite_stream_id):
+        return await self.submit(lambda conn: self._strict_publication_state_conn(conn, composite_stream_id))
 
     def _effective_mirror_source_conn(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
@@ -2329,7 +2351,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return False
             dispatch = operator_dispatch(conn, source_stream_id, delivery_wire(event), source_generation)
             route = conn.execute(
-                "SELECT dispatch_id,input_identity,reply_to_question_id FROM v2_assistant_composite_routes "
+                "SELECT * FROM v2_assistant_composite_routes "
                 "WHERE stream_id=? AND dispatch_id=? AND routing_state='resolved' "
                 "AND route_target=? AND route_target_generation=? AND delivery_state='landed' "
                 "AND json_extract(route_json,'$.admission_mode')='direct_primary'",
@@ -2338,6 +2360,9 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             break
         if route is None:
             return False
+        if self._strict_publication_state_conn(conn, composite_stream_id)["enabled"]:
+            # T5 atomic queue insertion is awaiting the owner API ruling.
+            return True
         dispatch_id = str(route["dispatch_id"])
         if conn.execute(
             "SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
@@ -2442,7 +2467,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         effective_source_stream_id, source_generation, _source_binding = effective
         if source_stream_id != effective_source_stream_id:
             return
-        if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
+        strict = self._strict_publication_state_conn(conn, binding[0])["enabled"]
+        if not strict and not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
             return
         if source_event.get("kind") != "ASSIST_TEXT" or source_event.get("attachments"):
             return
@@ -2519,6 +2545,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 body=body, recorded_at=recorded_at,
             ):
                 return
+        if strict:
+            return
         # A direct intent is durable before any provider input. Suppress through
         # all ambiguous delivery states, including a held receipt, until the
         # matching final publication or a proven no-submit failure. A landed,
@@ -6579,6 +6607,30 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             return _project_session_events_conn(conn, [event])[0]
 
         return await self.submit(_op)
+
+    async def append_unanswered_event(self, route, event, identity):
+        def op(conn):
+            from strict_publication import desk_input, UNANSWERED_AFTER_S
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if not self._strict_publication_state_conn(conn, route['stream_id'])['enabled']:
+                    return None
+                current = conn.execute('SELECT * FROM v2_assistant_composite_routes WHERE dispatch_id=?',
+                                       (route['dispatch_id'],)).fetchone()
+                if current is None or current['delivery_state'] != 'landed' or desk_input(current):
+                    return None
+                landed = json.loads(current['route_json'] or '{}').get('timings', {}).get('delivery_recorded_at')
+                if not landed or (datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')) - datetime.fromisoformat(landed.replace('Z', '+00:00'))).total_seconds() < UNANSWERED_AFTER_S:
+                    return None
+                if conn.execute('SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=?',
+                                (route['stream_id'], route['dispatch_id'])).fetchone():
+                    return None
+                host, name = route['stream_id'].split(':', 1)
+                session = conn.execute('SELECT created_at FROM sessions WHERE host=? AND session_name=?', (host, name)).fetchone()
+                if session is None:
+                    return None
+                return self._insert_session_event_conn(conn, route['stream_id'], session['created_at'], event, identity)
+        return await self.submit(op)
 
     async def append_session_event(
         self, stream_id: str, event: dict[str, Any], *, identity: str | None, limit: int,

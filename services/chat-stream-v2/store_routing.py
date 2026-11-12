@@ -410,7 +410,7 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
                              authority_stream_id=None, direct_target_stream_id=None,
                              direct_target_generation=None, direct_single_final=False,
                              proactive_binding_name=None, proactive_env_binding=None,
-                             reply_to_message_ids=None) -> dict[str, Any]:
+                             reply_to_message_ids=None, strict_publication=False) -> dict[str, Any]:
     """Insert one assistant publication and its receipt on ``conn``.
 
     The caller owns the transaction: it must hold ``BEGIN IMMEDIATE`` and
@@ -481,6 +481,9 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
         saved.update({"event": replay_event, "duplicate": True,
                       "closed_dispatch_ids": _closed_dispatch_ids_conn(conn, int(saved["event_id"]), publication_key)})
         return saved
+    if strict_publication:
+        from strict_publication import validate_publication
+        validate_publication(conn, stream_id, dispatch_id, canonical_payload)
     if actor_generation is not None and proactive_binding_name is None:
         route = (dict(direct_route) if direct_single_final else _assistant_dispatch_conn(
             conn, stream_id, dispatch_id, actor_stream_id, actor_generation,
@@ -563,6 +566,9 @@ def _record_publication_conn(conn: sqlite3.Connection, *, stream_id, publication
             if any(i not in open_inputs for i in others):
                 raise ValueError("assistant_publish_reply_unverified")
             closing = [open_inputs[i] for i in others]
+            if strict_publication:
+                for member in closing:
+                    validate_publication(conn, stream_id, member["dispatch_id"], canonical_payload)
     session = conn.execute(
         "SELECT created_at,status,provider FROM sessions WHERE host=? AND session_name=?",
         (host, session_name),
@@ -1042,6 +1048,9 @@ class _RoutingStoreMixin:
                 and round(float(duration), 3) > 0):
             voice_meta = normalize_send_meta(meta)
         admission_payload = {"admission_mode": "direct_primary"} if direct_primary else {}
+        import desk_stamp
+        principal = str(actor_stream_id or "")
+        admission_payload["desk_input"] = principal.startswith("operator:") and principal[9:] in desk_stamp.load()
         if voice_meta.get("voice", {}).get("context_v1") is not None:
             admission_payload["input_meta"] = voice_meta
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
@@ -1445,7 +1454,7 @@ class _RoutingStoreMixin:
                             if not _route_continuation_conn(conn, origin, binding_guard, transfer_successor=transfer_successor):
                                 raise ValueError("assistant_recovery_successor_unverified")
                         _assistant_actor_conn(conn, binding_guard["stream_id"], binding_guard["generation"])
-                for key in ("direct_binding_origin", "recovery_origin"):
+                for key in ("direct_binding_origin", "recovery_origin", "desk_input"):
                     if key in prior_payload:
                         merged_payload[key] = prior_payload[key]
                 # Admission owns this input; classifier/rebind/retry cannot replace it.
@@ -1554,7 +1563,7 @@ class _RoutingStoreMixin:
                     OR (EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND json_extract(p.canonical_payload_json,'$.response_state')='acknowledged')
                         AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p WHERE p.stream_id=r.stream_id AND p.reply_to_message_id=r.input_identity AND (p.publish_kind='result' OR json_extract(p.canonical_payload_json,'$.response_state')='final'))))"""
                 params.append(stream_id)
-            rows = [dict(r) for r in history_query(conn, "SELECT r.input_identity,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
+            rows = [dict(r) for r in history_query(conn, "SELECT r.input_identity,r.actor_stream_id,r.created_at,r.routing_state,r.delivery_state,r.dispatch_id,r.route_json,r.error_code FROM v2_assistant_composite_routes r WHERE " + where, params)]
             result = {}
             for row in rows:
                 pubs = [dict(p) for p in conn.execute("SELECT publication_key,created_at,canonical_payload_json,publish_kind FROM v2_assistant_composite_publications WHERE stream_id=? AND reply_to_message_id=? ORDER BY created_at,event_id", (stream_id, row["input_identity"]))]
@@ -1565,7 +1574,7 @@ class _RoutingStoreMixin:
                     lane = conn.execute("SELECT lane_id,phase,pending_question_id FROM v2_assistant_composite_lanes WHERE stream_id=? AND lane_id=?", (stream_id, lane_id)).fetchone()
                     if lane is not None:
                         lanes.append(dict(lane))
-                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]))
+                result[row["input_identity"]] = project_input(row, pubs, sorted(lanes, key=lambda lane: lane["lane_id"]), strict=self._strict_publication_state_conn(conn, stream_id)["enabled"])
             return result
         return await self.submit(_op)
 
@@ -1634,6 +1643,7 @@ class _RoutingStoreMixin:
                     proactive_binding_name=proactive_binding_name,
                     proactive_env_binding=proactive_env_binding,
                     reply_to_message_ids=reply_to_message_ids,
+                    strict_publication=self._strict_publication_state_conn(conn, stream_id)["enabled"],
                 )
                 conn.commit()
                 return stored

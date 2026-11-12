@@ -1,4 +1,7 @@
-"""Proven operator prose and explicit publications reach the canonical chat."""
+"""Rollback coverage: with strict publication off, legacy mirrors remain available.
+
+Strict-primary behavior is covered in test_strict_publication.py.
+"""
 
 import asyncio
 import json
@@ -18,6 +21,7 @@ ROOT = "fixture-root:visible"
 def _config(generation: str) -> AssistantCompositeConfig:
     return AssistantCompositeConfig.from_env({
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_STRICT_PUBLICATION": "0",
         "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": ROOT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,
@@ -27,6 +31,7 @@ def _config(generation: str) -> AssistantCompositeConfig:
 def _config_for(stream_id: str, generation: str) -> AssistantCompositeConfig:
     return AssistantCompositeConfig.from_env({
         "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+        "PENTACLE_ASSISTANT_STRICT_PUBLICATION": "0",
         "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": ASSISTANT,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": stream_id,
         "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": generation,

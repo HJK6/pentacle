@@ -19,7 +19,7 @@ def _elapsed(start, end):
         return None
 
 
-def project_input(route, publications, lanes):
+def project_input(route, publications, lanes, *, strict=False):
     accepted = route["created_at"]
     first = publications[0]["created_at"] if publications else None
     final = None
@@ -32,6 +32,8 @@ def project_input(route, publications, lanes):
             final = publication["created_at"]
         acknowledged |= marker == "acknowledged"
         question = publication["publish_kind"] == "question"
+    from strict_publication import desk_input
+    is_desk = strict and desk_input(route)
     pending_question = any(lane.get("pending_question_id") for lane in lanes)
     phases = {lane["phase"] for lane in lanes}
     # Durable delivery uncertainty and explicit cancellation are safety states:
@@ -55,6 +57,8 @@ def project_input(route, publications, lanes):
         state = "acknowledged"
     elif first:
         state = "reply_received"  # Historical prose is not a final-response receipt.
+    elif is_desk:
+        state = "no_reply_required"
     elif route["routing_state"] == "queued":
         state = "queued"
     elif route["routing_state"] == "classifying":

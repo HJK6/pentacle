@@ -1675,6 +1675,8 @@ class AssistantLaneRulings:
         return await self.store.submit(op)
 
     async def tick(self) -> None:
+        from strict_publication import mark_unanswered
+        await mark_unanswered(self.store, self._composite(), self.server.broadcast)
         try:
             await self._check_authority_loss()
         except Exception:

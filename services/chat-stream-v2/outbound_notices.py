@@ -355,6 +355,9 @@ class OutboundNoticeQueue:
             import json
             metadata = row.get('metadata') or '{}'
             metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if kind == "dispatch_no_reply":
+                from front_desk_digest import WAKE_TOKEN
+                message["_front_desk_wake_token"] = WAKE_TOKEN
             if kind in {"account_cap_reminder","account_cap_blocker"}:
                 from account_pool_control import NOTICE_TOKEN
                 message.update(_pool_notice_token=NOTICE_TOKEN,_pool_notice_metadata=metadata,_pool_notice_kind=kind)

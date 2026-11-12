@@ -1798,6 +1798,12 @@ def _assistant_call(args: argparse.Namespace, payload: dict[str, object]) -> int
 
 
 def assistant_publish(args: argparse.Namespace) -> int:
+    from .file_delivery import publication_metadata
+    try:
+        metadata = publication_metadata(args)
+    except ValueError as exc:
+        print(f"agent-orch assistant publish: {exc}", file=sys.stderr)
+        return 2
     attachment_ids: object = []
     evidence_refs: object = []
     if args.attachment_ids_json:
@@ -1842,6 +1848,7 @@ def assistant_publish(args: argparse.Namespace) -> int:
         payload["reply_to_message_ids"] = reply_ids
     if getattr(args, "response_state", None) is not None:
         payload["response_state"] = args.response_state
+    payload.update(metadata)
     return _assistant_call(args, payload)
 
 
@@ -4440,8 +4447,14 @@ def send_image(args: argparse.Namespace) -> int:
     real image in Pentacle chat (mobile + desktop), openable in the viewer.
 
     Exit codes: 0 delivered, 1 send error, 2 bad input, 66 not authorized."""
+    target = getattr(args, "to", None)
+    if not target and (getattr(args, "proactive", False)
+                       or getattr(args, "note_type", None) is not None
+                       or getattr(args, "ref", None) is not None):
+        print("agent-orch send-image: publication flags require --to", file=sys.stderr)
+        return 2
     from_stream_id = getattr(args, "from_stream_id", None) or env_stream_id()
-    if not from_stream_id:
+    if not from_stream_id and not target:
         print(
             "agent-orch send-image: cannot determine your stream id; run inside a "
             "seat (AGENT_ORCH_STREAM_ID) or pass --from-stream-id",
@@ -4450,7 +4463,16 @@ def send_image(args: argparse.Namespace) -> int:
         return 2
     path = Path(args.path).expanduser()
     try:
-        data = path.read_bytes()
+        if target:
+            from .file_delivery import bounded_read
+            from _shared.chat_attachment_types import AttachmentError
+            try:
+                data = bounded_read(args.path, SEND_IMAGE_MAX_BYTES)
+            except AttachmentError as exc:
+                print(f"agent-orch send-image: {exc.code}", file=sys.stderr)
+                return 2
+        else:
+            data = path.read_bytes()
     except FileNotFoundError:
         print(f"agent-orch send-image: file not found: {path}", file=sys.stderr)
         return 2
@@ -4474,6 +4496,10 @@ def send_image(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if target:
+        # The managed-file path owns upload provenance and assistant publication.
+        # Keep the original own-conversation send-image path unchanged by default.
+        return send_file(args)
     source_sha = hashlib.sha256(data).hexdigest()
     caption = (getattr(args, "caption", "") or "").strip()
     timeout = float(args.timeout)
@@ -5697,6 +5723,8 @@ def build_parser() -> argparse.ArgumentParser:
     send_file_parser.add_argument("--to", help="Target assistant composite for authorized publication")
     send_file_parser.add_argument("--proactive", action="store_true",
         help="With --to: publish prose/status without dispatch/reply IDs from the current direct-primary binding; request ID defaults to send-file:<upload-id>")
+    send_file_parser.add_argument("--note-type")
+    send_file_parser.add_argument("--ref")
     send_file_parser.add_argument("--dispatch-id")
     send_file_parser.add_argument("--reply-to-message-id")
     send_file_parser.add_argument("--reply-to-question-id")
@@ -5723,6 +5751,18 @@ def build_parser() -> argparse.ArgumentParser:
     send_image_parser.add_argument("--caption", default="", help="Optional short caption shown with the image.")
     send_image_parser.add_argument("--from-stream-id", dest="from_stream_id", help="Override the caller stream id (defaults to your seat env).")
     send_image_parser.add_argument("--timeout", type=float, default=30.0)
+    send_image_parser.add_argument("--to", help="Publish through the target assistant composite")
+    send_image_parser.add_argument("--proactive", action="store_true")
+    send_image_parser.add_argument("--note-type")
+    send_image_parser.add_argument("--ref")
+    send_image_parser.add_argument("--dispatch-id")
+    send_image_parser.add_argument("--reply-to-message-id")
+    send_image_parser.add_argument("--reply-to-question-id")
+    send_image_parser.add_argument("--publish-kind", choices=("prose", "question", "result", "status"))
+    send_image_parser.add_argument("--request-id")
+    send_image_parser.add_argument("--response-state", choices=("acknowledged", "final"))
+    send_image_parser.add_argument("--evidence-refs-json")
+    send_image_parser.add_argument("--upload-request-id")
     send_image_parser.set_defaults(func=send_image)
 
     send_receipt_parser = subparsers.add_parser(
@@ -5775,6 +5815,8 @@ def build_parser() -> argparse.ArgumentParser:
     assistant_publish_parser.add_argument("--request-id", required=True)
     assistant_publish_parser.add_argument("--composite-stream-id", required=True)
     assistant_publish_parser.add_argument("--proactive", action="store_true", help="publish prose/status, optionally with attachments, from the current direct-primary binding")
+    assistant_publish_parser.add_argument("--note-type")
+    assistant_publish_parser.add_argument("--ref")
     assistant_publish_parser.add_argument("--dispatch-id")
     assistant_publish_parser.add_argument("--reply-to-message-id")
     assistant_publish_parser.add_argument(
