@@ -9,7 +9,7 @@ attestations are unsupported and fail closed, including on recovered rows.
 
 from __future__ import annotations
 
-from _shared.spawn_objective import objective_error, resolve_objective
+from _shared.spawn_objective import resolve_objective
 
 import asyncio
 import base64
@@ -612,9 +612,7 @@ class WindowSchedule:
         parent_stream_id = str(msg.get("parent_stream_id") or "").strip() or None
         if parent_stream_id is not None and await self._session(parent_stream_id) is None:
             raise VerbError("parent_not_found", "scheduled parent must exist at create")
-        # Mirror live-spawn admission: a parented scheduled child requires an
-        # objective; a top-level/handoff scheduled spawn derives one from its
-        # brief so the stored row carries a concrete objective for fire.
+        # Resolve an objective before storing the schedule.
         objective, objective_source, error = resolve_objective(
             msg.get("objective"), objective_supported=msg.get("objective_supported"),
             parent_stream_id=parent_stream_id,
@@ -986,13 +984,6 @@ class WindowSchedule:
                 schedule = _row(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (schedule_id,)).fetchone())
                 if schedule is None:
                     raise VerbError("not_found", "schedule not found")
-                # A properly-inserted schedule always carries a resolved objective
-                # (parented required, top-level derived at insert); a blank one is a
-                # legacy row to retire, so this re-validation stays presence-only.
-                if error := objective_error(schedule.get("objective")):
-                    conn.execute("UPDATE v2_schedules SET state='failed',last_error_code=?,terminal_at=?,updated_at=? WHERE schedule_id=?", (error, timestamp, timestamp, schedule_id))
-                    conn.commit()
-                    raise VerbError(error, error)
                 if schedule["state"] not in {"pending", "retry_pending"}:
                     raise VerbError("invalid_transition", "schedule already claimed")
                 owner_kind = "service" if schedule.get("owner_service_actor") else "seat"
@@ -1234,13 +1225,6 @@ class WindowSchedule:
         return result
 
     async def recover(self) -> None:
-        def retire_legacy(conn):
-            # Post-fix inserts always store a resolved objective (parented required,
-            # top-level derived), so a NULL objective marks a pre-objective legacy
-            # row that must not fire; retire it regardless of lineage.
-            conn.execute("UPDATE v2_schedules SET state='failed',last_error_code='objective_required',terminal_at=?,updated_at=? WHERE objective IS NULL AND state IN ('pending','retry_pending','firing')", (_now(), _now()))
-            conn.commit()
-        await self.store.submit(retire_legacy)
         def scan(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             return [dict(row) for row in conn.execute(
                 "SELECT d.*,s.state AS schedule_state,s.target_host,s.prompt_sha256,"

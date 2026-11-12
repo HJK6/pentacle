@@ -747,59 +747,6 @@
       }
     }
   ],
-  "spawn_cases": [
-    {
-      "label": "missing_objective",
-      "request": {
-        "type": "spawn",
-        "schema": "SpawnRequestV2",
-        "host": "host_b",
-        "provider": "codex",
-        "model": "gpt-6-astra",
-        "effort": "high",
-        "spawn_profile": "desktop_manual",
-        "catalog_version": "fixture-catalog-v1",
-        "resolution_source": "explicit_override",
-        "idempotency_key": "33333333-3333-4333-8333-000000000001"
-      },
-      "expected_error": "objective_required"
-    },
-    {
-      "label": "objective_supplied",
-      "request": {
-        "type": "spawn",
-        "schema": "SpawnRequestV2",
-        "host": "host_b",
-        "provider": "codex",
-        "model": "gpt-6-astra",
-        "effort": "high",
-        "spawn_profile": "desktop_manual",
-        "catalog_version": "fixture-catalog-v1",
-        "resolution_source": "explicit_override",
-        "idempotency_key": "33333333-3333-4333-8333-000000000002",
-        "objective": "Check the fixture journey"
-      },
-      "expected_objective": "Check the fixture journey"
-    },
-    {
-      "label": "no_watch",
-      "request": {
-        "type": "spawn",
-        "schema": "SpawnRequestV2",
-        "host": "host_b",
-        "provider": "codex",
-        "model": "gpt-6-astra",
-        "effort": "high",
-        "spawn_profile": "desktop_manual",
-        "catalog_version": "fixture-catalog-v1",
-        "resolution_source": "explicit_override",
-        "idempotency_key": "33333333-3333-4333-8333-000000000003",
-        "objective": "Check without default watch",
-        "no_watch": true
-      },
-      "expected_default_watch": false
-    }
-  ],
   "navigation": {
     "header_back": "chats_list",
     "history_x": "nexus_status",

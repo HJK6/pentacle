@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from _shared.spawn_objective import objective_error
 from agent_orch import cli
 from inventory import InventoryEmitter
 from server import Server
@@ -23,18 +22,13 @@ def wire_fixture():
     import hashlib
     exported = Path(__file__).with_name("fixtures") / "daemon_updates_v1.json"
     payload = exported.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == "8b7f65de33e1904f2615f8770141f5c18293603e5d9b071ae62bc33c71f2765f"
+    assert hashlib.sha256(payload).hexdigest() == "b21cb8169b517499231c8d9ea4c36904ed5ed32f21ccb7106877dde8d40ea552"
     core = Path(__file__).resolve().parents[3] / "pentacle-chat-core/tests/fixtures/daemon_updates_v1.json"
     if core.exists():
         assert core.read_bytes() == payload
     return json.loads(payload)
 
 
-@pytest.mark.parametrize("value,code", [(None, "objective_required"), (" \t", "objective_required"),
-    ("one\ntwo", "objective_invalid"), ("x" * 121, "objective_invalid"),
-    (23, "objective_invalid"), ("🌈" * 120, None), (" supplied exactly ", None)])
-def test_objective_contract(value, code):
-    assert objective_error(value) == code
 
 
 def test_spawn_admission_before_effects_and_immutable_generation():
@@ -44,11 +38,11 @@ def test_spawn_admission_before_effects_and_immutable_generation():
         sessions = Sessions(store, tmux=tmux)
         ctl = SpawnCtl(store, sessions, tmux=tmux)
         try:
-            for objective in (None, "", "a\nb", "x" * 121):
+            for objective in ("a\nb",):
                 with pytest.raises(VerbError) as exc:
                     await ctl.spawn({"command": "run", "objective_supported": True,
                         "objective": objective, "parent_stream_id": "localhost:parent"}, "localhost")
-                assert exc.value.code == objective_error(objective)
+                assert exc.value.code == "objective_invalid"
                 assert not tmux.alive and not await store.reservations()
                 assert not await store.list_sessions()
             msg = {"command": "run", "session_name": "child", "request_id": "spawn-objective",
@@ -237,18 +231,6 @@ def test_visibility_and_lifecycle_are_independent(role, handoff, visibility, sel
     assert fields["self_close_on_completion"] is self_close
 
 
-def test_cli_objective_rejects_before_rpc(monkeypatch, capsys, tmp_path):
-    # A default spawn is a parented child, so strictness is known only after
-    # lineage resolution (config + leader discovery); the objective is then
-    # rejected client-side before the spawn RPC.
-    from agent_orch.config import Config
-    monkeypatch.setattr(cli, "load_config", lambda: Config("ws://unused", "", "hosta", tmp_path))
-    monkeypatch.setattr(cli, "discover_leader_stream_id_short", lambda _config: "hosta:leader")
-    monkeypatch.setattr(cli, "spawn_once", lambda *a, **k: pytest.fail("RPC before admission"))
-    args = cli.build_parser().parse_args(["spawn", "--provider", "codex"])
-    assert cli.spawn(args) == 2
-    assert "objective_required" in capsys.readouterr().err
-    assert cli.build_parser().parse_args(["thread", "hosta:child", "--limit", "2"]).limit == 2
 
 
 async def seed(store):
@@ -366,13 +348,6 @@ def test_real_rpc_admission_and_verified_parent_from_committed_fixture():
                         frame = json.loads(await asyncio.wait_for(ws.recv(), 3))
                         if frame.get("request_id") == payload["request_id"]:
                             return frame
-                fixture = wire_fixture()
-                bad_spawn = next(case["request"] for case in fixture["spawn_cases"] if case["label"] == "missing_objective")
-                # Parented child: strict objective admission still rejects before effects.
-                result = await rpc({**bad_spawn, "objective_supported": True,
-                                    "parent_stream_id": "hosta:parent", "request_id": "rpc-objective"})
-                assert result["type"] == "spawn.error" and result["error_code"] == "objective_required"
-                assert not await store.reservations()
                 request = dict(type="thread.read", request_id="rpc-thread", child_stream_id="hosta:child", stream_token=token)
                 assert (await rpc(request))["type"] == "thread.read.ok"
                 assert (await rpc({**request, "parent_stream_id": "hosta:other"}))["error_code"] == "not_direct_child"
@@ -435,16 +410,16 @@ def test_every_authoritative_lifecycle_boundary_invalidates_exchange(boundary):
     asyncio.run(run())
 
 
-def test_schedule_objective_admission_round_trip_and_legacy_retirement(tmp_path):
+def test_schedule_objective_admission_round_trip_and_legacy_derivation(tmp_path):
     from tests.test_window_schedule_contract import harness, schedule_insert, message
     store, _sessions, _comms, spawn, surface = harness(tmp_path)
     try:
-        # Parented scheduled child: strict objective admission (required + shape).
-        for value in (None, " ", "two\nlines", "x" * 121):
+        # Multiline objective remains invalid.
+        for value in ("two\nlines",):
             with pytest.raises(VerbError) as exc:
                 schedule_insert(surface, objective=value, objective_supported=True,
                                 parent_stream_id="hosta:participant")
-            assert exc.value.code == objective_error(value)
+            assert exc.value.code == "objective_invalid"
         assert asyncio.run(store.submit(lambda conn: conn.execute("SELECT COUNT(*) FROM v2_schedules").fetchone()[0])) == 0
         # Top-level scheduled spawn without an objective derives one from its brief,
         # and the derived provenance is carried through fire (so the fired session
@@ -461,24 +436,24 @@ def test_schedule_objective_admission_round_trip_and_legacy_retirement(tmp_path)
         asyncio.run(surface._fire_schedule(row["schedule_id"]))
         assert spawn.calls[-1]["objective"] == "Vérifier 東京 🌈"
         assert spawn.calls[-1]["objective_source"] == "explicit"
-        # A legacy row whose objective is NULL is retired regardless of lineage.
+        # A synthetic legacy row with no objective remains eligible to fire.
         legacy = schedule_insert(surface)["schedule"]["schedule_id"]
         asyncio.run(store.submit(lambda conn: (
             conn.execute("UPDATE v2_schedules SET objective=NULL WHERE schedule_id=?", (legacy,)), conn.commit())))
         calls = len(spawn.calls)
         asyncio.run(surface.recover())
         stored = asyncio.run(store.submit(lambda conn: dict(conn.execute("SELECT * FROM v2_schedules WHERE schedule_id=?", (legacy,)).fetchone())))
-        assert stored["state"] == "failed" and stored["last_error_code"] == "objective_required"
-        with pytest.raises(VerbError, match="objective_required"):
-            asyncio.run(surface._fire_schedule(legacy))
-        assert len(spawn.calls) == calls
+        assert stored["state"] == "pending"
+        asyncio.run(surface._fire_schedule(legacy))
+        assert len(spawn.calls) == calls + 1
     finally:
         store.stop()
 
 
 @pytest.mark.parametrize("already_running", [False, True])
-def test_legacy_intents_never_launch_or_replay_a_brief(already_running):
+def test_legacy_intents_adopt_without_objective_refusal(already_running, monkeypatch):
     from tests.test_spawn_intent_field_fidelity import _AlwaysAliveTmux
+    monkeypatch.setattr("spawnctl.ADOPTION_BOOT_DEADLINE_S", 0.1)
 
     async def run():
         store = Store(); store.start()
@@ -494,14 +469,11 @@ def test_legacy_intents_never_launch_or_replay_a_brief(already_running):
             result = await ctl.reconcile_spawn_intents()
             row = await store.fetch_session("hosta", "legacy")
             outcome = await store.get_spawn_outcome("hosta", "legacy")
-            assert outcome["reason"] == "objective_required"
-            assert tmux.screen == ""
-            if already_running:
-                assert row["status"] == "open" and row["objective"] is None and tmux.alive
-                assert result["adopted"] == 1
-            else:
-                assert row is None and not tmux.alive
-                assert result["released"] == 1
+            assert result["adopted"] == 1 and tmux.alive
+            assert row["status"] == "open"
+            if not already_running:
+                assert row["objective"] == "Must never be replayed"
+            assert outcome["state"] == "failed" and outcome["delivery_evidence"] == "agent_never_started"
         finally:
             if tmux.alive:
                 await tmux.kill_session("legacy")

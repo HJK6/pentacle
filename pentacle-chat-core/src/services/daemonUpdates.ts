@@ -46,11 +46,6 @@ export interface DaemonQuestionAnswer {
   selections?: string[]; text?: string;
 }
 
-export function validSpawnObjective(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-    && [...value].length <= 120 && !/[\r\n\v\f\u001c-\u001e\u0085\u2028\u2029]/u.test(value);
-}
-
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const nullableString = (value: unknown) => value === null || typeof value === 'string';

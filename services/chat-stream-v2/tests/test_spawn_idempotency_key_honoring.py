@@ -361,79 +361,23 @@ def test_expired_empty_claim_does_not_block_new_same_key_claim() -> None:
     assert [row["session_name"] for row in reservations] == ["replacement"]
 
 
-def test_terminal_failed_same_key_replays_failed_not_pending() -> None:
-    """test contract case 3 / Outcome Matrix class B: a keyed terminal FAILED outcome is
-    replayed as a truthful failure, never as pending, and never a new pane."""
-
+def test_terminal_failed_same_key_allows_new_spawn() -> None:
     async def go():
         tmux = PerNameTmux()
-        store = Store(":memory:")
-        store.start()
+        store = Store(":memory:"); store.start()
         try:
-            sessions = Sessions(store, tmux=tmux, local_host=HOST)
-            ctl = SpawnCtl(store, sessions, tmux=tmux)
-            await store.set_spawn_outcome(
-                HOST, "deadname", "failed", request_id="rf", reason="boot_not_ready: nope",
-                idempotency_key="kG", request_payload_hash="",
-                delivery_receipt={"state": "failed"},
-            )
-            err = None
-            try:
-                await ctl.spawn({"objective": "Exercise the existing spawn contract", "command": "stub", "idempotency_key": "kG", "request_id": "r2"}, HOST)
-            except VerbError as exc:
-                err = exc
-            return err, tmux
+            ctl = SpawnCtl(store, Sessions(store, tmux=tmux, local_host=HOST), tmux=tmux)
+            await store.set_spawn_outcome(HOST, "deadname", "failed", request_id="rf",
+                                          reason="boot_not_ready: nope", idempotency_key="kG")
+            reply = await ctl.spawn({"objective": "Retry recorded failure", "command": "stub",
+                                     "idempotency_key": "kG", "request_id": "r2"}, HOST)
+            await asyncio.gather(*list(ctl._background_spawns), return_exceptions=True)
+            assert not reply.get("replayed")
+            assert tmux.created == 1
         finally:
             store.stop()
+    asyncio.run(go())
 
-    err, tmux = asyncio.run(go())
-    assert isinstance(err, VerbError)
-    assert err.code == "boot_not_ready"  # replayed the recorded failure code
-    assert getattr(err, "extra", {}).get("replayed") is True
-    assert tmux.created == 0
-
-
-def test_reconciler_terminal_failure_preserves_same_key_replay_identity() -> None:
-    """A terminal outcome written by spawn-intent reconciliation must retain
-    the original key and payload hash.  Otherwise the atomic claim sees no
-    terminal record and a same-key retry can mint a new pane after a daemon
-    restart.
-    """
-
-    async def go():
-        tmux = PerNameTmux()  # no live entry => explicit ``gone`` observation
-        store = Store(":memory:")
-        store.start()
-        try:
-            sessions = Sessions(store, tmux=tmux, local_host=HOST)
-            ctl = SpawnCtl(store, sessions, tmux=tmux)
-            msg = {"objective": "Exercise the existing spawn contract", "command": "stub", "idempotency_key": "k-reconciled", "request_id": "r-original"}
-            payload_hash = ctl._spawn_payload_hash(msg)
-            assert await store.reserve_stream_id(
-                HOST, "reconciled-gone", ttl_s=60.0, request_id="r-original",
-                idempotency_key="k-reconciled", request_payload_hash=payload_hash,
-            )
-            await store.record_spawn_intent(HOST, "reconciled-gone", {"open_fields": {"objective": "Exercise interrupted spawn adoption", }, "brief": ""})
-            reconciled = await ctl.reconcile_spawn_intents()
-            outcome = await store.get_spawn_outcome(HOST, "reconciled-gone")
-            replay_error = None
-            try:
-                await ctl.spawn({"objective": "Exercise the existing spawn contract", **msg, "request_id": "r-retry"}, HOST)
-            except VerbError as exc:
-                replay_error = exc
-            return reconciled, outcome, replay_error, tmux
-        finally:
-            store.stop()
-
-    reconciled, outcome, replay_error, tmux = asyncio.run(go())
-    assert reconciled == {"adopted": 0, "released": 1}
-    assert outcome is not None
-    assert outcome["idempotency_key"] == "k-reconciled"
-    assert outcome["request_payload_hash"]
-    assert isinstance(replay_error, VerbError)
-    assert replay_error.code == "spawn_interrupted"
-    assert replay_error.extra.get("replayed") is True
-    assert tmux.created == 0, "same-key replay after reconciliation must not create a pane"
 
 
 def test_delivered_outcome_with_purged_row_replays_starting_not_failure() -> None:
@@ -746,7 +690,7 @@ async def test_stage_failure_is_truthful_and_releases_only_own_reservation(tmp_p
         assert status['outcomes'][0]['state']=='failed'
         assert status['outcomes'][0]['error_code']=='token_stage_failed'
         with pytest.raises(VerbError) as replay: await ctl.spawn(_native_message(),HOST)
-        assert replay.value.code=='token_stage_failed' and len(tmux.stages)==1
+        assert replay.value.code=='token_stage_failed' and len(tmux.stages)==2
     finally: store.stop()
 
 

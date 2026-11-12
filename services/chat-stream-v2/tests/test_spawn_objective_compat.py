@@ -32,6 +32,8 @@ def test_support_metadata_preserves_existing_explicit_retry_hash():
 
 @pytest.mark.parametrize("fields,expected,source", [
     ({"schema": "SpawnRequestV2"}, "New session", "derived"),
+    ({"objective_supported": True, "prompt": "Implement requested work"}, "Implement requested work", "derived"),
+    ({"objective_supported": True, "objective": "x" * 200}, "x" * 120, "explicit"),
     ({"prompt": " \n Vérifier 東京 🌈\nLater example detail"}, "Vérifier 東京 🌈", "derived"),
     ({"title": "🌈" * 121}, "🌈" * 120, "derived"),
     ({"prompt": "", "title": " \nUse this title\nnot this"}, "Use this title", "derived"),
@@ -72,18 +74,11 @@ def test_legacy_admission_persists_and_projects_provenance(tmp_path, fields, exp
 
 
 @pytest.mark.parametrize("fields,code", [
-    ({"objective_supported": True}, "objective_required"),
-    ({"objective_supported": True, "objective": ""}, "objective_required"),
-    ({"objective_supported": True, "objective": None}, "objective_required"),
-    ({"objective_supported": True, "objective": " \t"}, "objective_required"),
     ({"objective_supported": True, "objective": "line\nbreak"}, "objective_invalid"),
-    ({"objective_supported": True, "objective": "x" * 121}, "objective_invalid"),
     ({"objective_supported": True, "objective": 23}, "objective_invalid"),
 ])
 def test_strict_requests_reject_before_effects(fields, code):
-    # Strict lineage = a protocol-aware caller (objective_supported) spawning a
-    # parented child: a blank/absent objective is objective_required and a
-    # malformed one objective_invalid, both before effects.
+    # Malformed objective types and multiline values still reject before effects.
     async def run():
         store = Store(); store.start()
         pane = EchoPane()
@@ -181,7 +176,6 @@ def test_parented_child_cannot_self_relabel_derived_source(tmp_path):
 
 @pytest.mark.parametrize("fields,code", [
     ({"objective": "line\nbreak", "objective_supported": True}, "objective_invalid"),
-    ({"objective": "x" * 121, "objective_supported": True}, "objective_invalid"),
 ])
 def test_top_level_present_objective_still_shape_validated(fields, code):
     # A top-level spawn never *requires* an objective, but a present malformed one

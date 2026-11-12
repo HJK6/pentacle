@@ -1468,7 +1468,12 @@ class Sessions:
             if not await self.hosts.probe_once(host):
                 return True, True
         stream = f"{host}:{name}"
-        context = await self.store.lead_close_context(stream, generation, pending_only=False)
+        try:
+            context = await asyncio.wait_for(
+                self.store.lead_close_context(stream, generation, pending_only=False),
+                timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
+        except Exception:
+            return False, False
         if context is None:
             return False, True
         if close_kind == "manager_close":
@@ -1491,20 +1496,20 @@ class Sessions:
             try:
                 await asyncio.wait_for(refresh(), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
             except Exception:
-                # An unavailable refresh cannot turn cached progress into a
-                # disposition. The caller retains the operator-close recovery.
+                # An unavailable refresh is reported as unknown.
                 observation_available = False
-        await self._check_lead_disposition(stream, generation, observation_available=observation_available)
         return False, observation_available
 
     async def _check_lead_disposition(self, stream, generation, *, observation_available=True):
-        context = await self.store.lead_close_context(stream, generation, observation_available=observation_available)
-        if context is not None:
+        try:
+            contexts = await asyncio.wait_for(self.store.lead_close_contexts(
+                stream, generation, observation_available=observation_available), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
             from work_owed import disposition_commands
-            raise VerbError("lead_close_requires_disposition", "Task disposition is pending; publish a non-active status or assign a live same-spec owner.",
-                spec_id=context["spec_id"], observed_status=context["status"],
-                observed_at=context["observed_at"], pending=True,
-                next_commands=disposition_commands(context))
+            return [{"kind": "disposition", "spec_id": context["spec_id"],
+                     "status": context["status"], "observed_at": context["observed_at"],
+                     "next_commands": disposition_commands(context)} for context in contexts]
+        except Exception:
+            return [{"kind": "disposition", "status": "unknown"}]
 
     async def close(
         self,
@@ -1554,6 +1559,7 @@ class Sessions:
             if expected_generation is None and row is not None:
                 expected_generation = self._row_generation(row)
             recovery, observation_available = False, True
+            warnings = []
             if row and row.get("status") == "open" and (
                 expected_generation is None or self._row_generation(row) == expected_generation
             ):
@@ -1570,6 +1576,15 @@ class Sessions:
                     recovery, observation_available = await self._guard_lead_disposition(
                         host, session_name, self._row_generation(row), close_kind,
                         operator_confirm=operator_confirm)
+            if row and row.get("status") == "open" and row.get("role") in {"lead", "nexus", "planner"}:
+                try:
+                    report = await asyncio.wait_for(self.store.find_report(
+                        sid, statuses=("done", "error", "aborted"),
+                        session_generation=self._row_generation(row)), timeout=LEAD_CLOSE_REFRESH_TIMEOUT_S)
+                    if report is None:
+                        warnings.append({"kind": "report", "status": "missing"})
+                except Exception:
+                    warnings.append({"kind": "report", "status": "unknown"})
             # Admission and termination share the same graph fence as reparent
             # and child intent recording. Stale/closed targets keep their existing
             # outcomes; a child guard never authorizes killing a newer generation.
@@ -1582,12 +1597,11 @@ class Sessions:
                         return await self._stale_close_result(sid, row)
                     if not recovery:
                         await self.store.guard_lane_departure(sid, self._row_generation(row))
-                    if not recovery:
-                        await self._check_lead_disposition(sid, self._row_generation(row),
-                            observation_available=observation_available)
+                    warnings.extend(await self._check_lead_disposition(sid, self._row_generation(row),
+                        observation_available=observation_available))
                 if row is None or row.get("status") == "open":
                     await self._guard_child_preservation(sid)
-                return await self._close_locked(
+                result = await self._close_locked(
                     host, session_name, reason,
                     expected_generation=expected_generation, close_kind=close_kind,
                     requires_idle=requires_idle, requires_hidden=requires_hidden,
@@ -1595,6 +1609,9 @@ class Sessions:
                     operator_confirm=operator_confirm,
                     defer_if_working=defer_if_working, attribution=attribution,
                 )
+                if warnings:
+                    result["warnings"] = warnings
+                return result
 
     async def reap_idle(
         self,

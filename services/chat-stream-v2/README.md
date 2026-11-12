@@ -8,8 +8,7 @@ creating a ruling, enqueueing its notice or launching/reserving a provider.
 correction}` entries in `errors`; account authorization remains fail-fast.
 The existing spec resolver, work binding and model tuple predicates are reused;
 no routing policy or advisor authority changes. Missing operator origin remains
-honest substantive input; malformed existing Tracking origin syntax is a
-mechanical error. New decision packets retain the exact resolved
+honest substantive input; Tracking text is interpreted by content. New decision packets retain the exact resolved
 `spec_content_sha256` and display-only `excerpt_rule`, with complete immutable
 intent in the existing ruling row. Existing pending requests retain their
 original evidence, and release still rechecks authority and safety.
@@ -229,7 +228,7 @@ release; this daemon release does not claim mobile remote interrupt support.
 
 An approved lane close that returns `close.deferred` stays actionable in the
 existing durable ruling loop. Each retry uses the ordinary close path and its
-generation, report, requester and liveness fences. Once capture proves idle,
+generation, requester and liveness checks. Once capture proves idle,
 the original request closes exactly once, including after a daemon restart.
 Definitive refusals remain terminal. The existing 600-second unruled deadline
 policy is unchanged.
