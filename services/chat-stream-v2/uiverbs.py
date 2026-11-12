@@ -410,8 +410,6 @@ class UIVerbs:
                 raise VerbError("session_not_found", "session does not exist", stream_id=f"{host}:{name}")
             async with self.sessions._graph_lock:
                 source = await self.store.fetch_session(host, name)
-                if source:
-                    await self.store.guard_lane_departure(f"{host}:{name}", source.get("session_generation"), assignment_change=True)
                 updated = await self.store.update_session(
                     host, name, expected_spec_source=spec_binding_source(source),
                     assigned_spec_id=UNASSIGNED,
@@ -474,12 +472,6 @@ class UIVerbs:
 
         assigned = source.get("assigned_spec_id")
         if action == "assign":
-            # The caller is classified from its authenticated context, never a wire field (R5).
-            auth = msg.get("_auth_context") or {}
-            if auth.get("token_verified"):
-                refusal = await self.spawnctl._work_link_refusal(msg, {"assigned_spec_id": spec_id})
-                if refusal is not None:
-                    raise refusal
             assigned = spec_id
         if action in {"attach", "assign"}:
             if not any(same(existing, spec_id) for existing in spec_ids):
@@ -498,12 +490,7 @@ class UIVerbs:
                 assigned = UNASSIGNED
 
         first_spec_id = spec_ids[0] if spec_ids else None
-        proposed_assignment = effective_assignment({**source, "spec_id": first_spec_id,
-                                                    "spec_ids": spec_ids, "assigned_spec_id": assigned})
         async with self.sessions._graph_lock:
-            if effective_assignment(source) != proposed_assignment:
-                await self.store.guard_lane_departure(stream_id, source.get("session_generation"), assignment_change=True)
-                await self.store.require_lane_execution(proposed_assignment, target_stream_id=stream_id)
             updated = await self.store.update_session(
                 host,
                 name,

@@ -22,7 +22,7 @@ NOW = "2026-11-09T10:00:00.000Z"
 @pytest.mark.parametrize("case", ["pending", "proved", "late_pending", "enriched",
                                  "wire_conflict", "receipt_conflict", "meta_conflict",
                                  "unproved", "new_generation", "invalid_birth", "held"])
-def test_receipt_precedence_agrees_with_real_lane_drain(tmp_path, to, archived, case):
+def test_receipt_precedence_survives_lane_display_transition(tmp_path, to, archived, case):
     """Canonical delivery proof settles debt; conflicts and new births retain it."""
     import sqlite3
 
@@ -83,17 +83,12 @@ def test_receipt_precedence_agrees_with_real_lane_drain(tmp_path, to, archived, 
             assert receipt["first_created_at"] == "2030-01-01T00:00:00Z"
         payload = {"to": to, "reason": "Checkpoint settled work", "next_action": "Resume later",
                    "blocker": "keys", "outcome": "Done"}
-        if settled:
-            result = await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
-            assert result["lane"]["work_state"] == to
-        else:
-            with pytest.raises(VerbError) as exc:
-                await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
-            assert exc.value.code == "work_lane_drain_required"
-            assert exc.value.extra["seat_ids"] == []
-            assert exc.value.extra["delivery_ids"] == ["send:receipt-drain-send"]
-            after = (await env.store.get_work_lane(lane_row["lane_id"]))["lane"]
-            assert after["work_state"] == "active" and after["version"] == 1
+        result = await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
+        assert result["lane"]["work_state"] == to
+        # Lane display transitions do not consume or alter send receipt evidence.
+        after_receipt = await env.store.get_send_receipt(worker, "receipt-drain-send",
+                                                        include_submission_identity=True)
+        assert after_receipt == receipt
 
     run(body, path=str(tmp_path / "sessions.db"))
 
@@ -158,7 +153,7 @@ def test_active_lead_binding_cannot_be_cleared():
 
 @pytest.mark.parametrize("state", ["paused", "blocked", "done", "orphan", "offline", "generation"])
 @pytest.mark.asyncio
-async def test_real_spawn_admission_requires_active_owned_lane(env, state):
+async def test_real_spawn_admission_ignores_lane_state_and_owner(env, state):
     target = item(env.root, "demo__target")
     ctl, sessions, tmux = await setup(env.root, env.store, env.monkeypatch)
     await lane(env.store, "wl-a", target, state=state if state in {"paused", "blocked", "done"} else "active")
@@ -172,13 +167,13 @@ async def test_real_spawn_admission_requires_active_owned_lane(env, state):
             conn.execute("UPDATE v2_assistant_composite_lanes SET bound_stream_id=NULL,bound_generation=NULL")
         conn.commit()
     await env.store.submit(bind)
-    await refused(ctl, agent(caller, spec=target, role="worker", initial_prompt="Do the scoped work"))
-    assert tmux.created == 0
+    result = await ctl.spawn(agent(caller, spec=target, role="worker"), HOST)
+    assert result["type"] == "spawn.ok" and tmux.created == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["active", "paused", "blocked", "done", "orphan"])
-async def test_native_resume_rechecks_retained_lane_assignment(env, tmp_path, state):
+async def test_native_resume_keeps_assignment_without_lane_fence(env, tmp_path, state):
     from test_spawn_resume import (_machine, _write_transcript, _closed_prior,
                                    ResumeTmux, _install_successful_spawn, RESUME_ID)
     from spawnctl import SpawnCtl
@@ -201,19 +196,12 @@ async def test_native_resume_rechecks_retained_lane_assignment(env, tmp_path, st
     commands = _install_successful_spawn(ctl, sessions, tmux)
     msg = {"provider": "claude", "model": "claude-fable-5-1", "effort": "high",
            "resume_session_id": RESUME_ID, "request_id": "lane-resume"}
-    if state == "active":
-        assert (await ctl.spawn(msg, "localhost"))["type"] == "spawn.ok"
-        assert len(commands) == 1
-    else:
-        with pytest.raises(VerbError) as exc:
-            await ctl.spawn(msg, "localhost")
-        assert exc.value.code in {"work_lane_not_active", "work_lane_assignment_unlinked", "work_lane_visible_lead_required"}
-        assert commands == []
-        assert (await env.store.fetch_session("localhost", "v2-original-fable"))["session_generation"] == prior["session_generation"]
+    assert (await ctl.spawn(msg, "localhost"))["type"] == "spawn.ok"
+    assert len(commands) == 1
 
 
 @pytest.mark.parametrize("to", ["paused", "blocked", "done"])
-def test_busy_assigned_worker_blocks_deliberate_transition(to):
+def test_busy_assigned_worker_does_not_block_display_transition(to):
     async def body(env):
         owner = await env.seat("drain-lead", role="lead", parent_stream_id=FD)
         lane_row = (await env.adopt(key="stream:drain", lead=owner, members=["spec_demo__drain"]))["lane"]
@@ -222,12 +210,8 @@ def test_busy_assigned_worker_blocks_deliberate_transition(to):
         await sessions.refresh()
         sessions.apply_live(worker[0], working=True, online=True)
         payload = {"to": to, "reason": "Checkpoint before hold", "next_action": "Resume when keys arrive", "blocker": "keys", "outcome": "Done"}
-        with pytest.raises(VerbError) as exc:
-            await env.op("set_state", payload, lane=lane_row["lane_id"], version=1)
-        assert exc.value.code == "work_lane_drain_required"
-        assert exc.value.extra["seat_ids"] == [worker[0]]
-        sessions.apply_live(worker[0], working=False)
         assert (await env.op("set_state", payload, lane=lane_row["lane_id"], version=1))["lane"]["work_state"] == to
+
     run(body)
 
 
@@ -255,12 +239,10 @@ async def test_real_graph_fence_pause_versus_admitted_spawn_preserves_delivery(e
     task = asyncio.create_task(ctl.spawn(agent(caller, spec=target, name="race-child"), HOST))
     try:
         await asyncio.wait_for(entered.wait(), 2)
-        with pytest.raises(VerbError) as exc:
-            await fd.op("set_state", {"to": "paused", "reason": "Checkpoint hold", "next_action": "Resume later"},
-                        lane=lid, version=1)
-        assert exc.value.code == "work_lane_drain_required"
-        assert exc.value.extra["delivery_ids"]
-        assert (await env.store.get_work_lane(lid))["lane"]["work_state"] == "active"
+        result = await fd.op("set_state", {"to": "paused", "reason": "Checkpoint hold", "next_action": "Resume later"},
+                             lane=lid, version=1)
+        assert result["lane"]["work_state"] == "paused"
+
     finally:
         release.set()
         result = await asyncio.wait_for(task, 3)
@@ -270,7 +252,7 @@ async def test_real_graph_fence_pause_versus_admitted_spawn_preserves_delivery(e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["paused", "blocked", "done", "orphan"])
-async def test_ordinary_send_never_executes_after_hold_or_owner_loss(tmp_path, state):
+async def test_ordinary_send_ignores_lane_hold_or_owner_loss(tmp_path, state):
     from test_send_semantics import FakeTmux, _new_comms, _open, HOST as SEND_HOST, NAME
     tmux = FakeTmux()
     comms, store, sessions = _new_comms(tmux, tmp_path)
@@ -280,15 +262,15 @@ async def test_ordinary_send_never_executes_after_hold_or_owner_loss(tmp_path, s
         await store.update_session(SEND_HOST, NAME, assigned_spec_id="spec_demo__send")
         if state == "orphan":
             await store.submit(lambda conn: conn.execute("UPDATE v2_assistant_composite_lanes SET bound_generation='lost'"))
-        with pytest.raises(VerbError):
-            await comms.send({"stream_id": f"{SEND_HOST}:{NAME}", "text": "Resume the assigned work", "request_id": "held"})
-        assert tmux.pastes == []
+        reply = await comms.send({"stream_id": f"{SEND_HOST}:{NAME}", "text": "Resume the assigned work", "request_id": "held"})
+        assert reply["submission_confirmed"] is True and len(tmux.pastes) == 1
+
     finally:
         store.stop()
 
 
 @pytest.mark.asyncio
-async def test_send_rechecks_owner_after_acceptance_before_physical_paste(tmp_path):
+async def test_send_survives_lane_owner_loss_after_acceptance(tmp_path):
     from test_send_semantics import FakeTmux, _new_comms, _open, HOST as SEND_HOST, NAME
     tmux = FakeTmux()
     comms, store, sessions = _new_comms(tmux, tmp_path)
@@ -303,8 +285,7 @@ async def test_send_rechecks_owner_after_acceptance_before_physical_paste(tmp_pa
             return await watermark(target)
         comms._submission_watermark = lose_owner
         reply = await comms.send({"stream_id": f"{SEND_HOST}:{NAME}", "text": "Scoped work", "request_id": "physical-owner-loss"})
-        assert reply["delivery"] == "not_landed" and reply["reason"] == "work_lane_visible_lead_required"
-        assert tmux.pastes == []
+        assert reply["submission_confirmed"] is True and len(tmux.pastes) == 1
     finally:
         store.stop()
 
@@ -382,23 +363,24 @@ async def test_spoofed_provisioning_has_no_pane_or_task(env, role):
 
 
 @pytest.mark.parametrize("operation", ["close", "unassign", "role"])
-def test_active_lead_cannot_exit_through_other_mutations(operation):
+def test_active_lead_can_exit_through_other_mutations(operation):
     async def body(env):
         lead = await env.seat("exit-lead", role="lead", parent_stream_id=FD)
         lid = (await env.adopt(key="stream:exit", lead=lead))["lane"]["lane_id"]
         sessions = Sessions(env.store, tmux=None, local_host="host-a")
         await sessions.refresh()
-        with pytest.raises(VerbError) as exc:
-            if operation == "close":
-                await sessions.close("host-a", "exit-lead")
-            elif operation == "role":
-                await sessions.set_role("host-a", "exit-lead", "worker", auth_context={"operator_authenticated": True})
-            else:
-                from uiverbs import UIVerbs
-                await UIVerbs(env.store, sessions, None).session_spec_update({"host": "host-a", "session_name": "exit-lead", "action": "unassign"})
-        assert exc.value.code == "work_lane_lead_required"
-        successor = await env.seat("exit-successor", role="lead", parent_stream_id=FD, visibility="hidden")
-        await env.op("set_lead", {"lead": {"stream_id": successor[0], "generation": successor[1]}}, lane=lid, version=1)
-        assert (await env.store.get_work_lane(lid))["lane"]["bound_stream_id"] == successor[0]
-        await sessions.set_role("host-a", "exit-lead", "worker", auth_context={"operator_authenticated": True})
+        if operation == "close":
+            await sessions.close("host-a", "exit-lead")
+            assert (await env.store.fetch_session("host-a", "exit-lead"))["status"] == "closed"
+        elif operation == "role":
+            await sessions.set_role("host-a", "exit-lead", "worker", auth_context={"operator_authenticated": True})
+            assert (await env.store.fetch_session("host-a", "exit-lead"))["role"] == "worker"
+        else:
+            from uiverbs import UIVerbs
+            await UIVerbs(env.store, sessions, None).session_spec_update({"host": "host-a", "session_name": "exit-lead", "action": "unassign"})
+            from store import effective_assignment
+            assert effective_assignment(await env.store.fetch_session("host-a", "exit-lead")) is None
+        # Display identity is retained; execution departure does not rewrite the lane.
+        assert (await env.store.get_work_lane(lid))["lane"]["bound_stream_id"] == lead[0]
+
     run(body)

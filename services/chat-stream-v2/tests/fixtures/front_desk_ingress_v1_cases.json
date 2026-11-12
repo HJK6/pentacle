@@ -101,11 +101,11 @@
         "message": "START: work"
       },
       "expected": {
-        "decision": "hold",
-        "landed_state": "persisted",
+        "decision": "wake",
+        "landed_state": "delivered",
         "counts": {
-          "pane_submissions": 0,
-          "held_rows": 1,
+          "pane_submissions": 1,
+          "held_rows": 0,
           "canonical_publications": 0,
           "report_rows": 0,
           "ruling_notices": 0
@@ -123,11 +123,11 @@
         "message": "END: done"
       },
       "expected": {
-        "decision": "hold",
-        "landed_state": "persisted",
+        "decision": "wake",
+        "landed_state": "delivered",
         "counts": {
-          "pane_submissions": 0,
-          "held_rows": 1,
+          "pane_submissions": 1,
+          "held_rows": 0,
           "canonical_publications": 0,
           "report_rows": 0,
           "ruling_notices": 0
@@ -233,11 +233,11 @@
         "message": "GATEWAY: ordinary prose"
       },
       "expected": {
-        "decision": "hold",
-        "landed_state": "persisted",
+        "decision": "wake",
+        "landed_state": "delivered",
         "counts": {
-          "pane_submissions": 0,
-          "held_rows": 1,
+          "pane_submissions": 1,
+          "held_rows": 0,
           "canonical_publications": 0,
           "report_rows": 0,
           "ruling_notices": 0

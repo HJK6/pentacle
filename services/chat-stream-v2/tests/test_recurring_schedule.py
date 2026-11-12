@@ -412,10 +412,9 @@ def test_rule_whose_spec_is_no_longer_lane_linked_still_materialises(tmp_path) -
         force_next(store, rid, OCCURRENCE_ISO)
         pass_at(surface, OCCURRENCE)
         assert len(occurrence_rows(store)) == 1 and len(spawn.checked) == checks
-        with pytest.raises(VerbError) as exc:  # repointing re-runs admission
-            run(surface.recurring_update(message(
-                "schedule.recurring.update", "hosta:requester", recurring_id=rid, spec_ids=[SPEC])))
-        assert exc.value.code == "work_lane_assignment_unlinked"
+        # Repointing still checks assignment, not display-lane membership.
+        run(surface.recurring_update(message(
+            "schedule.recurring.update", "hosta:requester", recurring_id=rid, spec_ids=[SPEC])))
     finally:
         store.stop()
 

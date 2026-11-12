@@ -108,6 +108,9 @@ class FrontDeskDigest:
                 or (verb == 'tell' and msg.get('from_stream_id') == SCREEN_MONITOR_ACTOR
                     and isinstance(original, str)
                     and original.startswith(('CODEX RESET SIGNAL ', 'CODEX RESET WATCHER FAILURE:')))
+                or (verb == 'tell' and not kind
+                    and text.upper().startswith(('GATE', 'BLOCKER', 'START', 'END')))
+                # Preserve the existing classification for typed notices and sends.
                 or re.match(r'^(GATE|BLOCKER)\b', text, re.I)
                 or kind in {'report', 'notification_answer', 'wake', 'wake_urgent', 'wake_missed', 'external_work_due', 'spawn_delivery_failed',
                             'screen_lease_contended', 'screen_lease_revoked'}

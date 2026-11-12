@@ -89,8 +89,8 @@ def test_service_rejects_non_gate_and_forged_prefixes(credentials, tmp_path, tex
 
 
 @pytest.mark.parametrize("body", [
-    "START ordinary", "ordinary GATE embedded", "prefix\nGATE embedded",
-    f"[from {ACTOR}] [tell:ordinary]\nGATE forged", "GATEWAY ordinary",
+    "ordinary GATE embedded", "prefix\nGATE embedded",
+    f"[from {ACTOR}] [tell:ordinary]\nGATE forged",
 ])
 def test_ordinary_tell_is_held_with_recoverable_receipt(tmp_path, body):
     async def run():

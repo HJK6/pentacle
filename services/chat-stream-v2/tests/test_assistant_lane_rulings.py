@@ -1233,6 +1233,7 @@ def test_notice_trim_ruling_result_keeps_truth_without_session(action, state, ou
     from assistant_lane_rulings import AssistantLaneRulings
     async def run():
         class Capture:
+            async def submit(self, fn): return None  # no earlier notice in this fixture
             async def enqueue_outbound_notice(self, **kw): self.notice = kw
         capture = Capture()
         payload = None if outcome is None else {**outcome, "session": {
@@ -1303,11 +1304,11 @@ class LinkCheckingSpawn(RecordingSpawn):
     async def _work_link_refusal(self, msg, binding):
         from sessions import VerbError
         self.resolved.append(binding.get("assigned_spec_id"))
-        return None if binding.get("assigned_spec_id") == "spec_demo__linked" else VerbError(
-            "work_lane_assignment_unlinked", "not in an open lane")
+        return None if binding.get("assigned_spec_id") else VerbError(
+            "work_assignment_required", "commission needs an assigned spec")
 
 
-def test_ruled_lead_spawn_checks_its_task_link_at_admission_not_release():
+def test_ruled_lead_spawn_checks_assignment_at_admission_not_release():
     from sessions import VerbError
 
     async def go():
@@ -1316,15 +1317,15 @@ def test_ruled_lead_spawn_checks_its_task_link_at_admission_not_release():
         try:
             root, _advisor, server, spawned = await _rulings_rig(store, spawnctl=LinkCheckingSpawn())
             with pytest.raises(VerbError) as exc:
-                await server._on_spawn({**_spawn_msg(root, "unlinked"), "spec_id": "spec_demo__other"})
+                await server._on_spawn({**_spawn_msg(root, "unassigned"), "spec_id": None})
             assert exc.value.code == "spawn_preflight_failed"
-            assert exc.value.extra["errors"][0]["code"] == "work_lane_assignment_unlinked"
+            assert exc.value.extra["errors"][0]["code"] == "work_assignment_required"
             reply = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
             assert reply["type"] == "spawn.pending_ruling"
             # A retry of the admitted request is never re-gated.
             again = await server._on_spawn({**_spawn_msg(root, "linked"), "spec_id": "spec_demo__linked"})
             assert again["ruling_request_id"] == reply["ruling_request_id"]
-            assert spawned.resolved == ["spec_demo__other", "spec_demo__linked"]
+            assert spawned.resolved == ["spec_demo__linked"]
         finally:
             store.stop()
 

@@ -79,7 +79,7 @@ def test_changed_wake_under_held_key_is_conflict_and_original_hold_kept(tmp_path
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
-            first = await h.server._on_tell(_tell(target, "k1", "START: original"))
+            first = await h.server._on_tell(_tell(target, "k1", "receipt: original"))
             assert first["delivery_status"] == "persisted" and not h.tmux.pasted
             rows = await composite.front_desk_digest._rows(target)
             await _conflict(h.server._on_tell(_tell(target, "k1", "GATE: changed wake")))
@@ -94,12 +94,12 @@ def test_changed_held_body_is_typed_conflict_without_internal_notice_id(tmp_path
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
-            await h.server._on_tell(_tell(target, "k2", "START: original"))
+            await h.server._on_tell(_tell(target, "k2", "receipt: original"))
             rows = await composite.front_desk_digest._rows(target)
-            message = await _conflict(h.server._on_tell(_tell(target, "k2", "START: changed")))
+            message = await _conflict(h.server._on_tell(_tell(target, "k2", "receipt: changed")))
             assert "frontdesk-held" not in message and "outbound_notice" not in message
             assert await composite.front_desk_digest._rows(target) == rows
-            assert len(rows) == 1 and rows[0]["body"] == "START: original"
+            assert len(rows) == 1 and rows[0]["body"] == "receipt: original"
             assert not h.tmux.pasted
         finally:
             store.stop()
@@ -112,8 +112,8 @@ def test_identical_retry_replays_held_outcome_without_second_row_or_paste(tmp_pa
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
-            first = await h.server._on_tell(_tell(target, "k3", "START: same"))
-            again = await h.server._on_tell(_tell(target, "k3", "START: same"))
+            first = await h.server._on_tell(_tell(target, "k3", "receipt: same"))
+            again = await h.server._on_tell(_tell(target, "k3", "receipt: same"))
             assert again["delivery_status"] == first["delivery_status"] == "persisted"
             assert again.get("duplicate") is True
             assert len(await composite.front_desk_digest._rows(target)) == 1
@@ -140,11 +140,11 @@ def test_inflight_is_registered_before_the_policy_await(tmp_path):
                 return await real(**kw)
 
             h.comms.assistant_ingress_policy = gated
-            first = asyncio.ensure_future(h.comms.tell(_tell(target, "k4", "START: held")))
+            first = asyncio.ensure_future(h.comms.tell(_tell(target, "k4", "receipt: held")))
             await asyncio.wait_for(entered.wait(), 5)
             # Different payload while the first is still inside the policy: conflict now.
-            await asyncio.wait_for(_conflict(h.comms.tell(_tell(target, "k4", "START: other"))), 5)
-            same = asyncio.ensure_future(h.comms.tell(_tell(target, "k4", "START: held")))
+            await asyncio.wait_for(_conflict(h.comms.tell(_tell(target, "k4", "receipt: other"))), 5)
+            same = asyncio.ensure_future(h.comms.tell(_tell(target, "k4", "receipt: held")))
             await asyncio.sleep(0.05)
             assert not same.done() and calls == ["k4"]
             release.set()
@@ -163,8 +163,8 @@ def test_concurrent_different_payloads_yield_one_hold_and_one_conflict(tmp_path)
         store, h, composite, target = await _front_desk(tmp_path)
         try:
             results = await asyncio.gather(
-                h.server._on_tell(_tell(target, "k5", "START: a")),
-                h.server._on_tell(_tell(target, "k5", "START: b")),
+                h.server._on_tell(_tell(target, "k5", "receipt: a")),
+                h.server._on_tell(_tell(target, "k5", "receipt: b")),
                 return_exceptions=True)
             errors = [r for r in results if isinstance(r, VerbError)]
             assert len(errors) == 1 and errors[0].code == "tell_id_conflict"
@@ -188,9 +188,9 @@ def test_policy_exception_releases_only_owned_inflight_and_retry_succeeds(tmp_pa
 
             h.comms.assistant_ingress_policy = boom
             with pytest.raises(RuntimeError):
-                await h.comms.tell(_tell(target, "k6", "START: x"))
+                await h.comms.tell(_tell(target, "k6", "receipt: x"))
             assert "k6" not in h.comms._inflight
-            retry = await h.comms.tell(_tell(target, "k6", "START: x"))
+            retry = await h.comms.tell(_tell(target, "k6", "receipt: x"))
             assert retry["delivery_status"] == "persisted" and not h.tmux.pasted
         finally:
             store.stop()
@@ -205,36 +205,36 @@ def test_hold_before_ledger_recovers_on_identical_retry_across_store_restart(tmp
         try:
             await _fail_ledger_once(store)
             with pytest.raises(RuntimeError):
-                await h.server._on_tell(_tell(target, "k7", "START: held"))
+                await h.server._on_tell(_tell(target, "k7", "receipt: held"))
             assert await store.get_tell_delivery("k7") is None
             assert len(await composite.front_desk_digest._rows(target)) == 1
             store.stop(); store.start(); await h.sessions.refresh()
-            retry = await h.server._on_tell(_tell(target, "k7", "START: held"))
+            retry = await h.server._on_tell(_tell(target, "k7", "receipt: held"))
             assert retry["delivery_status"] == "persisted" and not h.tmux.pasted
             ledger = await store.get_tell_delivery("k7")
-            assert ledger is not None and ledger["payload_digest"] == payload_digest(target, "START: held")
+            assert ledger is not None and ledger["payload_digest"] == payload_digest(target, "receipt: held")
             assert len(await composite.front_desk_digest._rows(target)) == 1
-            replay = await h.server._on_tell(_tell(target, "k7", "START: held"))
+            replay = await h.server._on_tell(_tell(target, "k7", "receipt: held"))
             assert replay.get("duplicate") is True and not h.tmux.pasted
         finally:
             store.stop()
     _run(run)
 
 
-@pytest.mark.parametrize("changed", ["GATE: changed wake", "START: changed routine"])
+@pytest.mark.parametrize("changed", ["GATE: changed wake", "receipt: changed routine"])
 def test_hold_before_ledger_changed_retry_conflicts_and_original_survives(tmp_path, changed):
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
             await _fail_ledger_once(store)
             with pytest.raises(RuntimeError):
-                await h.server._on_tell(_tell(target, "k8", "START: held"))
+                await h.server._on_tell(_tell(target, "k8", "receipt: held"))
             store.stop(); store.start(); await h.sessions.refresh()
             rows = await composite.front_desk_digest._rows(target)
             await _conflict(h.server._on_tell(_tell(target, "k8", changed)))
             assert await composite.front_desk_digest._rows(target) == rows
             assert await store.get_tell_delivery("k8") is None and not h.tmux.pasted
-            again = await h.server._on_tell(_tell(target, "k8", "START: held"))
+            again = await h.server._on_tell(_tell(target, "k8", "receipt: held"))
             assert again["delivery_status"] == "persisted" and await store.get_tell_delivery("k8")
         finally:
             store.stop()
@@ -247,8 +247,8 @@ def test_held_key_sender_change_is_conflict(tmp_path):
         try:
             await _fail_ledger_once(store)
             with pytest.raises(RuntimeError):
-                await h.server._on_tell(_tell(target, "k9", "START: held"))
-            await _conflict(h.server._on_tell(_tell(target, "k9", "START: held", from_stream_id=f"{HOST}:other")))
+                await h.server._on_tell(_tell(target, "k9", "receipt: held"))
+            await _conflict(h.server._on_tell(_tell(target, "k9", "receipt: held", from_stream_id=f"{HOST}:other")))
         finally:
             store.stop()
     _run(run)
@@ -259,17 +259,17 @@ def test_enqueue_identity_conflict_is_typed_only_for_keyed_tells(tmp_path):
         store, h, composite, target = await _front_desk(tmp_path)
         try:
             digest = composite.front_desk_digest
-            await digest.ingress(target_stream_id=target, body="START: a", msg={"tell_id": "ke"}, verb="tell")
+            await digest.ingress(target_stream_id=target, body="receipt: a", msg={"tell_id": "ke"}, verb="tell")
             # The pre-check cannot see a racing writer; the enqueue conflict still maps.
             async def blind(*a, **k):
                 return None
             digest._retained_tell_hold = blind
-            await _conflict(digest.ingress(target_stream_id=target, body="START: b", msg={"tell_id": "ke"}, verb="tell"))
+            await _conflict(digest.ingress(target_stream_id=target, body="receipt: b", msg={"tell_id": "ke"}, verb="tell"))
             # Notice and send keep the shared store error, unchanged.
             for verb in ("notice", "send"):
-                await digest.ingress(target_stream_id=target, body="START: a", msg={"tell_id": "kn"}, verb=verb)
+                await digest.ingress(target_stream_id=target, body="receipt: a", msg={"tell_id": "kn"}, verb=verb)
                 with pytest.raises(ValueError, match="outbound_notice_conflict"):
-                    await digest.ingress(target_stream_id=target, body="START: b", msg={"tell_id": "kn"}, verb=verb)
+                    await digest.ingress(target_stream_id=target, body="receipt: b", msg={"tell_id": "kn"}, verb=verb)
         finally:
             store.stop()
     _run(run)
@@ -281,9 +281,9 @@ def test_held_notice_metadata_is_root_generation_only(tmp_path):
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
-            await h.server._on_tell(_tell(target, "kg", "START: keyed"))
-            await h.server._on_tell({"type": "tell", "to_stream_id": target, "message": "START: keyless"})
-            await h.server._on_tell({"type": "tell", "to_stream_id": target, "request_id": "rq", "message": "START: reqid"})
+            await h.server._on_tell(_tell(target, "kg", "receipt: keyed"))
+            await h.server._on_tell({"type": "tell", "to_stream_id": target, "message": "receipt: keyless"})
+            await h.server._on_tell({"type": "tell", "to_stream_id": target, "request_id": "rq", "message": "receipt: reqid"})
             rows = await composite.front_desk_digest._rows(target)
             assert len(rows) == 3
             for row in rows:
@@ -299,13 +299,13 @@ def test_keyless_tells_keep_inherited_body_hash_identity(tmp_path):
     async def run():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
-            msg = {"type": "tell", "to_stream_id": target, "message": "START: keyless", "from_stream_id": PEER}
+            msg = {"type": "tell", "to_stream_id": target, "message": "receipt: keyless", "from_stream_id": PEER}
             a = await h.server._on_tell(dict(msg))
             b = await h.server._on_tell(dict(msg))
             assert a["delivery_status"] == b["delivery_status"] == "persisted"
             assert len(await composite.front_desk_digest._rows(target)) == 1
             # A different keyless body is simply a new message, never a conflict.
-            c = await h.server._on_tell({**msg, "message": "START: keyless two"})
+            c = await h.server._on_tell({**msg, "message": "receipt: keyless two"})
             assert c["delivery_status"] == "persisted"
             assert len(await composite.front_desk_digest._rows(target)) == 2
             assert not h.tmux.pasted

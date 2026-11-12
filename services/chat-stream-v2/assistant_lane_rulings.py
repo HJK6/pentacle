@@ -645,8 +645,7 @@ class AssistantLaneRulings:
                         raise VerbError("work_assignment_required", "Supply this commission's assigned spec with --spec-id.")
                     refusal = await spawnctl._work_link_refusal(authenticated, spec_binding)
                     if refusal is not None:
-                        # The resolved spec is still independently readable even
-                        # when its product-lane link needs repair.
+                        # The resolved spec is still independently readable.
                         correction(refusal.code, "spec_id", str(refusal))
                 elif not spec_id:
                     raise VerbError("work_assignment_required", f"{auth['stream_id']} requires an assigned spec")
@@ -654,7 +653,7 @@ class AssistantLaneRulings:
                 code = ("spec_unavailable" if exc.code == "spec_unresolved" and "spec_resolution" in exc.extra
                         and exc.extra["spec_resolution"] is None else exc.code)
                 correction(code, "spec_id", "Restore fresh spec resolution before resubmitting." if code == "spec_unavailable"
-                           else "Supply a resolvable assigned --spec-id linked to this commission's open product lane.")
+                           else "Supply a resolvable assigned --spec-id for this commission.")
                 spec_id = ""  # Origin and link depend on this prerequisite.
             if spec_id:
                 item, item_error = _work_item(spec_id)
@@ -671,6 +670,10 @@ class AssistantLaneRulings:
             binding=binding, target=target, target_generation="", covered=True,
             work_item=item, brief_text=brief,
         )
+        if (known and request["state"] == "release_blocked"
+                and request.get("ruling") == "approve"):
+            await self._release(request, retry_spawn=True)
+            request = await self._fetch(request["ruling_request_id"])
         if request["state"] == "bypassed":
             return None
         if request["state"] == "done" and request.get("outcome_json"):
@@ -1185,20 +1188,24 @@ class AssistantLaneRulings:
                 and not request.get("conditions")):
             return
         rid = request["ruling_request_id"]
-        await self.store.enqueue_outbound_notice(
-            notice_id="assistant-lane-ruling-result:" + rid,
-            kind="assistant_lane_ruling_result", dedupe_key="assistant-lane-ruling-result:" + rid,
-            recipient_stream_id=request["requester_stream_id"],
-            tell_id="assistant-lane-ruling-result:" + rid,
-            source_stream_id=request["authority_stream_id"],
-            body="[Assistant lane ruling] " + _canonical({
+        body = "[Assistant lane ruling] " + _canonical({
                 "ruling_request_id": rid, "action": request["action"],
                 "target": request["target_stream_id"], "ruling": request["ruling"],
                 "state": request["state"], "reason": request["reason"],
                 "conditions": request["conditions"],
                 "outcome": _compact_outcome(json.loads(request["outcome_json"])) if request.get("outcome_json") else None,
                 "detail_ref": {"table": "v2_assistant_lane_rulings", "ruling_request_id": rid},
-            }),
+            })
+        notice_id = "assistant-lane-ruling-result:" + rid
+        if request["action"] == "spawn" and request.get("ruling") == "approve":
+            previous = await self.store.submit(lambda conn: conn.execute(
+                "SELECT body FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone())
+            if previous is not None and previous[0] != body:
+                notice_id += ":" + hashlib.sha256(body.encode()).hexdigest()
+        await self.store.enqueue_outbound_notice(
+            notice_id=notice_id, kind="assistant_lane_ruling_result", dedupe_key=notice_id,
+            recipient_stream_id=request["requester_stream_id"], tell_id=notice_id,
+            source_stream_id=request["authority_stream_id"], body=body,
             metadata={"authority_generation": request["requester_generation"]},
         )
 
@@ -1438,7 +1445,8 @@ class AssistantLaneRulings:
                 conn.execute("UPDATE v2_assistant_lane_rulings SET mirror_sent=1 WHERE ruling_request_id=?", (rid,))
         await self.store.submit(mark)
 
-    async def _release(self, request: dict[str, Any], *, lifecycle_locked: bool = False) -> None:
+    async def _release(self, request: dict[str, Any], *, lifecycle_locked: bool = False,
+                       retry_spawn: bool = False) -> None:
         # A question must be published while its producer is still the current
         # open generation. Handoff/close hold this same lock across question
         # transfer and retirement. Take it before the release lock: an immediate
@@ -1456,13 +1464,27 @@ class AssistantLaneRulings:
         fd_fence = self.server.sessions.assistant.front_desk_mode and not lifecycle_locked
         gate = self.store.front_desk_fence() if fd_fence else nullcontext()
         async with gate, lifecycle:
-            await self._release_serial(request, fd_fence=fd_fence)
+            await self._release_serial(request, fd_fence=fd_fence, retry_spawn=retry_spawn)
 
-    async def _release_serial(self, request: dict[str, Any], *, fd_fence: bool = False) -> None:
+    async def _release_serial(self, request: dict[str, Any], *, fd_fence: bool = False,
+                              retry_spawn: bool = False) -> None:
         rid = request["ruling_request_id"]
         lock = self._release_locks.setdefault(rid, asyncio.Lock())
         async with lock:
             current = await self._fetch(rid)
+            if (retry_spawn and current and current["action"] == "spawn"
+                    and current["state"] == "release_blocked" and current.get("ruling") == "approve"):
+                # Only an authenticated same-intent request may re-arm a blocked
+                # approved spawn. Keep the original ruling/conditions and intent.
+                # Serializing re-arm with release avoids a stale retry overwriting
+                # done and retains SpawnCtl's durable successful-spawn protection.
+                def rearm(conn):
+                    with conn:
+                        conn.execute("UPDATE v2_assistant_lane_rulings SET state='approved' "
+                                     "WHERE ruling_request_id=? AND action='spawn' "
+                                     "AND state='release_blocked' AND ruling='approve'", (rid,))
+                await self.store.submit(rearm)
+                current = await self._fetch(rid)
             if current is None or current["state"] not in {"approved", "unruled", "unruled_disabled", "bypassed"}:
                 return
             if current.get("covered") and current["state"] == "unruled":
@@ -1477,7 +1499,7 @@ class AssistantLaneRulings:
             intent["_auth_context"] = {
                 "token_verified": True, "stream_id": current["requester_stream_id"],
                 "session_generation": current["requester_generation"],
-                # The task link was checked when this request was admitted (R4).
+                # The assignment was checked when this request was admitted.
                 "ruled_release": True,
             }
             # Under fd_fence no binding change commits between this check and

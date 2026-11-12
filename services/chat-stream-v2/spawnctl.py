@@ -633,13 +633,7 @@ class SpawnCtl:
         return binding
 
     async def _work_link_refusal(self, msg: dict[str, Any], binding: dict[str, Any]) -> VerbError | None:
-        """Item (1): name one assigned spec that belongs to an open product lane."""
-        auth = msg.get("_auth_context") or {}
-        caller_id = str(auth.get("stream_id") or "")
-        caller = None
-        if ":" in caller_id:
-            caller = await self.store.fetch_session(*caller_id.split(":", 1))
-        policy = getattr(self.sessions, "assistant", None)
+        """Retain assignment validation without requiring lane membership."""
         spec_id = binding.get("assigned_spec_id")
         if not spec_id:
             source_id = str(msg.get("parent_stream_id") or "")
@@ -649,18 +643,7 @@ class SpawnCtl:
                 "work_assignment_required",
                 "a managed commission needs one assigned spec: pass --spec-id naming this commission's spec"
                 + (f"; {source_id} carries {carried} specs and no assignment" if source_id else ""))
-        if await self.store.open_lanes_for_spec(spec_id):
-            return None
-        home = await self.store.open_lanes_for_spec(effective_assignment(caller)) if effective_assignment(caller) else []
-        if len(home) == 1:
-            lane = home[0]
-            repair = f"agent-orch work-lane add-member {lane['lane_id']} {spec_id}"
-        else:
-            repair = ("agent-orch work-lane list; then "
-                      f"agent-orch work-lane add-member <lane_id> {spec_id}")
-        return VerbError("work_lane_assignment_unlinked",
-                         f"{spec_id} is not a member of any open product lane; the FD adds it first: {repair}",
-                         spec_id=spec_id)
+        return None
 
     async def _lane_admission(self, msg, binding, role):
         """The same guard covers new work, supporting work, resume and scheduled fire."""
@@ -676,8 +659,6 @@ class SpawnCtl:
                      and await self.store.lane_provisioning_allowed(msg.get("_auth_context") or {}))
         if msg.get("provision_only") and not provision:
             raise VerbError("work_lane_provisioning_forbidden", "Only the authenticated current FD may provision a promptless dedicated lead")
-        await self.store.require_lane_execution(spec, lane_id=msg.get("lane_id"), provisioning=provision,
-                                                linked_only=not msg.get("provision_only"))
         return provision
 
     async def work_checkpoint_warning(self, msg: dict[str, Any], stream_id: str) -> dict[str, Any] | None:
@@ -2398,8 +2379,7 @@ class SpawnCtl:
                         *((((f"{host}:{name}", spec_binding_source(resume_prior_row)),)) if resume_prior_row is not None else ()),
                     ),
                     prepared_qa=prepared_qa,
-                    lane_admission={"spec_id": effective_assignment(execution_binding), "lane_id": msg.get("lane_id"),
-                                    "provisioning": bool(lane_provisioning), "linked_only": not msg.get("provision_only"),
+                    lane_admission={"provisioning": bool(lane_provisioning),
                                     "provisioning_auth": msg.get("_auth_context") or {}},
                 )
             if not recorded:

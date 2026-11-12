@@ -318,8 +318,8 @@ def test_lease_notices_bypass_configured_desk_digest_but_wire_markers_do_not(kin
         await r.h.comms.tell(
             {
                 "stream_id": DESK,
-                "message": "START: routine",
-                "tell_id": "screen-held-start",
+                "message": "Routine screen update",
+                "tell_id": "screen-held-routine",
             }
         )
         assert not r.h.tmux.pasted

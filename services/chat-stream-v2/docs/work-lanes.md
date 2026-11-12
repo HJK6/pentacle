@@ -57,9 +57,17 @@ Updates arrive both live (as a `chat.event` broadcast) and through history (`req
 
 Lane state is explicit: member attendance/activity never resumes a paused lane or hides ownership loss. The existing display-only `lead.presence.working` ORs actual working/background activity across every effectively assigned member seat, before member/seat/page caps, plus the bound lead's existing busy descendants. Lead identity, generation, qualification, status, online and card still describe the bound lead. Historical bindings remain available for fault display. Terminal/unresolved residual execution remains observable and grants no new execution. Existing client paused/blocked/done/needs-you motion gates remain; when all question-bearing members are beyond the eight-row preview, its final row is replaced with one such member.
 
-The shared execution guard runs on linked spawn/supporting work, resume, commissioned/ordinary work send, scheduled fire and effective assignment. It rechecks lane state and lead identity at the existing atomic commit/input fence. A queued commission cannot run after pause or owner loss. Existing read/control/report/tell/question/stop/repair paths stay available. Accepted idempotent replays return their existing outcome without new execution.
+Lanes are display and grouping state, not execution admission. Spawn, send,
+close and assignment changes do not depend on lane state or lead presence.
+Accepted idempotent replays retain their existing outcome without new execution.
+Authentication, routing integrity, receipts, readiness and advisor judgments remain.
 
-Pause, block and DONE use one drain check over effectively assigned/bound seats and pending spawn/send/schedule/native-queue deliveries. A refusal names `seat_ids` and `delivery_ids` with `work_lane_drain_required`; stop/checkpoint work and cancel or hold pending delivery first. Pause/block require `reason` and `next_action`; block also requires `blocker`. Resuming a blocked lane requires its `resolution`. Active binding clear, owner unassignment/role loss and normal close cannot release accountability: bind a qualifying successor first, or complete a drained hold/DONE transition. Sole-spec-owner disposition and recovery debt guards remain.
+Pause, block and DONE no longer drain assigned seats or pending deliveries first.
+Pause/block still require `reason` and `next_action`; block requires `blocker`,
+and resuming a blocked lane requires `resolution`. Explicit activation/adoption
+still requires a qualifying lead for the display binding. Departing a seat does
+not rewrite that historical binding. Member replacement retains its explicit
+in-use reason and source-epic checks, but does not stop work.
 
 - Lead loss: a coalesced refresh runs on every session-inventory recompute and every 60 s. Passes start at least `WORK_LANES_REFRESH_MIN_S` apart (default 2 seconds; `0` disables the spacing). The first refresh after a quiet interval runs at once; a request during the wait is served by the next pass, which reads current state. A pushed `work_lanes.inventory` frame therefore lags a change by at most the interval plus one pass while a pass is shorter than the interval (in general, the larger of the two plus one pass). Direct reads are not delayed. It never changes lane state or version, and lead loss never posts an update; it opens the `lead_lost` episode below. A handoff moves the lead (and a visible chat that pointed at the predecessor) to the successor before the predecessor closes, with one `lead_handoff` event and no state change.
 - Recovery of a lost binding is explicit; see [Owner loss](#owner-loss-lead_lost-fault). No migration silently rewrites legacy ownership/state.
@@ -144,8 +152,8 @@ No completion is inferred from report prose.
 Use `work-lane set-members <lane> --member spec_demo__bridge [--member ...]
 --expected-version N --request-id ID` for ordered full replacement. Only the
 authenticated current FD binding can write it. IDs are canonical, unique
-`spec_...` values; the legacy explicit subset permits 1–32 members. Source-derived
-membership is uncapped and moves only through the spec/summary epic reference;
+`spec_...` values; explicit and source-derived membership are uncapped. Source-derived
+membership moves only through the spec/summary epic reference;
 contradictory manual mutations fail with `work_lane_members_source_epic_required`. Empty membership requires
 `--no-spec-reason` (at most 280 characters). The daemon refuses newly added
 unresolved IDs with `work_lane_member_unresolved`; existing members are not
@@ -567,11 +575,11 @@ DB. Review the concrete rollback artifact before activation.
   - Store startup backfills open single-spec rows idempotently.
 - **New commissions.** A spawn from a token-verified agent stream that is not a handoff, resume, daemon fire or ruled release is a new commission. Seat operator elevation does not exempt it. Message text is never inspected.
   - It resolves its assignment from the first `--spec-id`, else from the source seat's effective assignment. Otherwise it is refused with `work_assignment_required`.
-  - The assignment must be a member of a non-done product lane. Otherwise it is refused with `work_lane_assignment_unlinked`, before any reservation or pane. The refusal prints the `agent-orch work-lane add-member <lane_id> <spec_id>` repair, with the lane filled in when the caller's own assignment has exactly one lane.
+  - Lane membership and state are not execution permission.
   - An admitted idempotent retry replays.
   - Operator-authenticated callers without a seat token are exempt, as are anonymous loopback spawns (a known local bypass), daemon fires, host transfer and recovery.
   - `schedule.insert` checks a non-handoff seat schedule at insert and stores its assignment first among the spec ids. A lane-ruling spawn is checked when its ruling request is admitted, not at release.
-- **Existing seats.** `agent-orch spec assign <stream> <spec>` attaches the spec when it is absent and sets the assignment. An agent caller is lane-checked. `spec unassign <stream>` clears it and keeps tags. Detaching the assigned spec clears it. Both store an explicit unassignment, which a handoff successor inherits; the single-spec fallback never reassigns that seat. The FD's own direct work is `spec assign` on the FD seat.
+- **Existing seats.** `agent-orch spec assign <stream> <spec>` attaches the spec when it is absent and sets the assignment. Assignment changes do not require an active lane. `spec unassign <stream>` clears it and keeps tags. Detaching the assigned spec clears it. Both store an explicit unassignment, which a handoff successor inherits; the single-spec fallback never reassigns that seat. The FD's own direct work is `spec assign` on the FD seat.
 - **Member removal.** `set-members` that removes a spec an open seat is assigned to is refused with `work_lane_member_in_use`, naming the seats. `--reason` proceeds and records the reason and seats on the event.
 - **Checkpoint.** `_shared/work_checkpoint.py` reads the current spec/summary with the existing parser.
   - Unrelated spec body publication is allowed only when a fresh seal proves the same declared identity. Board membership, aliases and uniqueness remain checked; the reported spec and summary are bound to their captured bytes. Membership changes and writes during a bounded read still return unverifiable. Other identity and WIP consumers keep the full byte seal.
@@ -712,8 +720,6 @@ A NEW open assigned execution lead's `implementation_ready` assertion requires a
 ### Lead provisioning and rollout
 
 The authenticated current FD can use `agent-orch spawn --role lead --spec-id SPEC --provision-only [--lane-id LANE]` to create an ordinary promptless lead. The CLI sends neither task nor baseline input. The daemon verifies FD identity and role/input constraints again at commit. Explicit lane targeting resolves ambiguous membership. Then use existing `work-lane set-lead`, explicit `set-state --to active` (including blocked resolution), and ordinary admitted `send`. Binding alone never activates; a failed/spoofed provision delivers no task. Provisioning is control work; ordinary execution still follows existing commissioning rules.
-
-Before enforcement activation, the release owner inventories open lanes and pending work, binds legitimate non-FD leads or deliberately drains/holds them, removes FD execution assignments, and retains per-lane before/after evidence. Unresolved legacy ACTIVE ownership stops rollout. Preserve runtime artifacts and ownership/input history for rollback; no automatic state migration, new timer or forced kill is introduced.
 
 ## Derived lane progress
 
