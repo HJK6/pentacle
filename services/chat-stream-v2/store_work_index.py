@@ -79,11 +79,13 @@ class WorkObservationDecodeCache:
     remaining store-thread cost after the round-1 fixes. Keyed spec_id ->
     (raw_text, parsed): a changed row (text differs) or a new row misses and
     reparses, and rows absent from the live scan are pruned. The parse is kept
-    pristine and never mutated -- callers receive an independent per-call shell
-    so the only in-place write in the path (`_observed_record` setting
-    observed_at) lands on a fresh copy, keeping results identical to the
-    uncached path. Store-owned connection state, never touched from the asyncio
-    thread; a fresh connection gets a fresh cache.
+    pristine and never mutated -- each call rebuilds the whole member sub-tree as
+    an independent copy (`_independent`), so every in-place write a caller can
+    make, from `_observed_record` setting observed_at to a client mutating a
+    nested `estimate`/`goal_source` field on the public `get_work_lane`
+    projection, lands on the fresh copy and never reaches the cache. Results stay
+    identical to the uncached path. Store-owned connection state, never touched
+    from the asyncio thread; a fresh connection gets a fresh cache.
     """
     __slots__ = ("_entries",)
 
@@ -105,6 +107,22 @@ class WorkObservationDecodeCache:
             self._entries = {spec: entry for spec, entry in self._entries.items() if spec in live}
 
 
+def _independent(value):
+    """A fresh JSON-shaped copy whose every nested container is new.
+
+    Callers (and the public `get_work_lane` projection) mutate member sub-dicts
+    in place, so a cached parse must hand out a member tree that shares no
+    mutable container with the stored parse. Cheaper than re-parsing the whole
+    record_json: only the small member sub-tree is rebuilt; the large read-only
+    record fields stay shared.
+    """
+    if type(value) is dict:
+        return {key: _independent(item) for key, item in value.items()}
+    if type(value) is list:
+        return [_independent(item) for item in value]
+    return value
+
+
 def effective_membership_conn(conn, decode_cache: "WorkObservationDecodeCache | None" = None) -> dict:
     """Enrich the canonical identity resolver for member/goal projection; no I/O."""
     snapshot = effective_membership_ids_conn(conn)
@@ -118,8 +136,7 @@ def effective_membership_conn(conn, decode_cache: "WorkObservationDecodeCache | 
             records[spec_id] = _observed_record(json.loads(record_json), state)
         else:
             parsed = cache.decode(spec_id, record_json)
-            member = parsed["member"]
-            shell = {**parsed, "member": {**member, "observation": dict(member["observation"])}}
+            shell = {**parsed, "member": _independent(parsed["member"])}
             records[spec_id] = _observed_record(shell, state)
     if cache is not None:
         cache.prune(records.keys())

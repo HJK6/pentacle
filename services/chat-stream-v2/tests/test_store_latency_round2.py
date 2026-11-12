@@ -181,6 +181,30 @@ def test_membership_decode_cache_survives_caller_mutation():
     asyncio.run(run())
 
 
+def test_membership_decode_cache_survives_nested_member_mutation():
+    # A caller mutating a NESTED returned member sub-dict (estimate, and likewise
+    # goal_source) must not poison the pristine cache. The observation-only shell
+    # left estimate/goal_source aliased (Codex final-QA major finding 97b431bb);
+    # the independent member copy closes it. Uses an in_progress member so
+    # `estimate` is a real dict (a completed member has estimate=None).
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await seed_observations(store, [_obs("spec_a__x", "in_progress")])
+            counting = CountingDecodeCache()
+            first = await _membership(store, cache=counting)
+            assert first["spec_a__x"]["estimate"]["median"] == 3
+            first["spec_a__x"]["estimate"]["median"] = 999       # mutate nested in place
+            second = await _membership(store, cache=counting)
+            assert counting.parses == 1                          # never reparsed
+            assert second["spec_a__x"]["estimate"]["median"] == 3  # cache not poisoned
+            assert second == await _membership(store, cache=None)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_membership_decode_cache_threads_through_work_lane_rows():
     # The real hot caller (work_lane_rows_conn -> effective_membership_conn) picks
     # up the connection-bound cache: a second pass reparses nothing, same rows.
