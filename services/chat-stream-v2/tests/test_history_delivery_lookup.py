@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import sqlite3
@@ -13,6 +14,40 @@ from store import Store
 from test_read_projection_deliveries import corpus
 
 STREAM = "host-a:proof"
+
+
+@pytest.mark.parametrize("case", ["unrelated_write", "delivery_write", "no_writes"])
+def test_benchmark_walk_matches_history_and_writes_between_calls(case):
+    from benchmark_history_lookup import TimedStore, walk
+    from test_store_latency_round3 import _seed_stream, PAGE_STREAM
+
+    async def run():
+        store = TimedStore()
+        store.start()
+        try:
+            def seed(conn):
+                _seed_stream(conn, n=25)
+                conn.execute("CREATE TABLE history_benchmark_writes(value INTEGER)")
+                conn.execute("INSERT INTO history_benchmark_writes VALUES(0)")
+                conn.execute("INSERT INTO v2_tell_deliveries VALUES('unrelated','{}',1)")
+                conn.commit()
+            await store.submit(seed)
+            expected = await store.fetch_session_event_page(PAGE_STREAM, before_daemon_seq=None, limit=17)
+            result = await walk(store, PAGE_STREAM, case, limit=17)
+            assert result["events"] == 17
+            assert result["calls"] == 3
+            assert len(result["calls_ms"]) == 3
+            assert result["output_sha256"] == hashlib.sha256(
+                json.dumps(expected, sort_keys=True).encode()).hexdigest()
+            assert await store.submit(lambda c: c.execute(
+                "SELECT value FROM history_benchmark_writes").fetchone()[0]) == (
+                    2 if case == "unrelated_write" else 0)
+            assert await store.submit(lambda c: c.execute(
+                "SELECT created_at FROM v2_tell_deliveries WHERE tell_id='unrelated'").fetchone()[0]) == (
+                    3 if case == "delivery_write" else 1)
+        finally:
+            store.stop()
+    asyncio.run(run())
 
 
 async def outcome(store, inventory):
@@ -109,8 +144,7 @@ async def scenario(store, monkeypatch, path, *, mutant=None):
         await equal_to_fresh(store, monkeypatch, not inventory)
 
 
-@pytest.mark.parametrize("mutant", [None, "trigger", "version"])
-def test_randomized_equality_and_disabled_invalidators(tmp_path, monkeypatch, mutant):
+def run_scenario(tmp_path, monkeypatch, mutant=None):
     async def run():
         path = str(tmp_path / "owned.db")
         store = Store(path)
@@ -124,6 +158,15 @@ def test_randomized_equality_and_disabled_invalidators(tmp_path, monkeypatch, mu
         finally:
             store.stop()
     asyncio.run(run())
+
+
+def test_randomized_equality(tmp_path, monkeypatch):
+    run_scenario(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("mutant", ["trigger", "version"])
+def test_disabled_invalidators_are_detected(tmp_path, monkeypatch, mutant):
+    run_scenario(tmp_path, monkeypatch, mutant)
 
 
 def test_one_delivery_scan_across_local_unrelated_write():
