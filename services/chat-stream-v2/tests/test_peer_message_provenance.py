@@ -18,6 +18,7 @@ stores only the header-stripped payload as the event text.
 
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 
 import pytest
@@ -371,8 +372,8 @@ def test_codex_delivery_proof_matches_stamped_body_against_stripped_payload() ->
     stamped = f"[from {PEER}] [tell:t-1]\nread the current scope and report it"
     payload = "read the current scope and report it"
 
-    class TailStore:
-        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int) -> list[dict]:
+    class TailStore(SubmissionReadStoreStub):
+        async def fetch_session_event_tail(self, _stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             return [
                 {"daemon_seq": 20, "stream_id": STREAM_ID, "kind": "TELL", "text": payload},
                 {"daemon_seq": 21, "stream_id": STREAM_ID, "kind": "TELL", "text": "a different body"},

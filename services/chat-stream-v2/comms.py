@@ -1616,8 +1616,7 @@ class Comms:
 
     async def _submission_watermark(self, stream_id: str) -> int:
         """Snapshot the highest durable event sequence visible before one paste."""
-        tail = await self.store.fetch_session_event_tail(stream_id, limit=500)
-        return max((self._daemon_seq(event) for event in tail), default=0)
+        return await self.store.fetch_session_event_watermark(stream_id)
 
     @staticmethod
     def _claude_commit_mode(pane: str, mode: str | None) -> str | None:
@@ -1662,7 +1661,9 @@ class Comms:
         """Preserved non-item4 general send/tell event receipt seam."""
         if not stream_id:
             return False
-        tail = await self.store.fetch_session_event_tail(stream_id, limit=500)
+        tail = await self.store.fetch_session_event_tail(
+            stream_id, limit=500, after_daemon_seq=watermark,
+        )
         matches = [event for event in tail
             if self._daemon_seq(event) > watermark
             and self._tail_event_matches_submission(event, stream_id, body)]

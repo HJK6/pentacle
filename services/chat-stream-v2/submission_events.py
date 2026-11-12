@@ -129,21 +129,26 @@ class DurableUserEventProof:
         except (TypeError, ValueError):
             return 0
 
-    async def _events(
-        self, stream_id: str, *, after: int, timeout_s: float | None = None,
-    ) -> tuple[str, list[dict], str]:
+    async def _read(
+        self, stream_id: str, *, after: int | None, timeout_s: float | None = None,
+    ) -> tuple[str, Any, str]:
         if timeout_s is not None and float(timeout_s) <= 0:
             return "unreachable", [], "event_store_deadline_expired"
         host, separator, _name = str(stream_id or "").partition(":")
         if not separator or not host:
             return "unreachable", [], "invalid_stream_id"
         # The satellites do not run a Store.  Their normalized provider events
-        # are pushed to coordinator, where `fetch_session_event_tail` joins each row to
+        # are pushed to coordinator, where both reads join each row to
         # the current `sessions.created_at` generation.  That deployed Store is
         # the sole confirmation authority for local *and* remote stream IDs.
         try:
-            read = self.store.fetch_session_event_tail(stream_id, limit=500)
-            events = await (
+            read = (
+                self.store.fetch_session_event_watermark(stream_id)
+                if after is None else self.store.fetch_session_event_tail(
+                    stream_id, limit=500, after_daemon_seq=after,
+                )
+            )
+            result = await (
                 asyncio.wait_for(read, timeout=max(0.001, float(timeout_s)))
                 if timeout_s is not None else read
             )
@@ -153,6 +158,14 @@ class DurableUserEventProof:
             return "unreachable", [], str(exc)
         except Exception as exc:  # noqa: BLE001 - proof failure remains pending
             return "unreachable", [], f"event_store_error:{exc}"
+        return "reachable", result, ""
+
+    async def _events(
+        self, stream_id: str, *, after: int, timeout_s: float | None = None,
+    ) -> tuple[str, list[dict], str]:
+        state, events, reason = await self._read(stream_id, after=after, timeout_s=timeout_s)
+        if state != "reachable":
+            return state, [], reason
         # UI projection can expose an unproven native TELL as literal USER.
         # That display choice must not promote its transport proof eligibility.
         return "reachable", (
@@ -173,14 +186,13 @@ class DurableUserEventProof:
         single pre-action read is the contract.  Retry-capable action paths use
         :meth:`wait_for_watermark` below.
         """
-        state, events, reason = await self._events(stream_id, after=0)
+        return await self._watermark(stream_id)
+
+    async def _watermark(self, stream_id: str, *, timeout_s: float | None = None) -> EventWatermark:
+        state, sequence, reason = await self._read(stream_id, after=None, timeout_s=timeout_s)
         if state != "reachable":
             return EventWatermark(stream_id, 0, "unreachable", reason)
-        return EventWatermark(
-            stream_id,
-            max((self._seq(event) for event in events), default=0),
-            "reachable",
-        )
+        return EventWatermark(stream_id, sequence, "reachable")
 
     async def wait_for_watermark(
         self,
@@ -205,16 +217,9 @@ class DurableUserEventProof:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return last
-            state, events, reason = await self._events(
-                stream_id, after=0, timeout_s=remaining,
-            )
-            if state == "reachable":
-                return EventWatermark(
-                    stream_id,
-                    max((self._seq(event) for event in events), default=0),
-                    "reachable",
-                )
-            last = EventWatermark(stream_id, 0, "unreachable", reason)
+            last = await self._watermark(stream_id, timeout_s=remaining)
+            if last.state == "reachable":
+                return last
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return last

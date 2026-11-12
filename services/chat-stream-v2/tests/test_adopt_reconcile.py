@@ -10,6 +10,7 @@ defers to the existing scheduled reconciliation:
 
 from __future__ import annotations
 
+from submission_store_stub import SubmissionReadStoreStub
 import asyncio
 import json
 import os
@@ -291,12 +292,12 @@ def test_event_store_user_arriving_during_slow_transcript_probe_wins_final_looku
     monkeypatch.setattr(spawnctl_mod, "ADOPTION_BOOT_DEADLINE_S", 0.03)
     brief = "[example-service-notice:late-event]\narrived during transcript probe"
 
-    class LateHostStore:
+    class LateHostStore(SubmissionReadStoreStub):
         def __init__(self) -> None:
             self.event_ready = False
             self.calls = 0
 
-        async def fetch_session_event_tail(self, stream_id: str, *, limit: int) -> list[dict]:
+        async def fetch_session_event_tail(self, stream_id: str, *, limit: int, after_daemon_seq: int | None = None) -> list[dict]:
             self.calls += 1
             if not self.event_ready:
                 return []
