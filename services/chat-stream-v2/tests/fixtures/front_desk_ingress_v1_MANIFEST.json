@@ -5,7 +5,7 @@
       "path": "tests/fixtures/front_desk_ingress_v1_cases.json",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "4d66df698c489ebfb82b76c8dc1e82d1d00eac918e0ea4334111402e69fdafd4"
+      "sha256": "d86614aad7342da82c485ea979415608721e1c5e087bcb5adfd58249d6ae9e49"
     },
     {
       "path": "tests/front_desk_ingress_replay.py",
@@ -23,7 +23,7 @@
       "path": "tests/test_front_desk_ingress_replay_findings.py",
       "synthetic": true,
       "contains_real_traffic": false,
-      "sha256": "b6e650ef64525ffcb7121c321a1abd8edbea7e5776a09c3da204864f7c75be49"
+      "sha256": "05723bb20b5b3b8333961df8ee36ee028435ad73491966b4d0acdc991201f4c1"
     }
   ]
 }

@@ -15,7 +15,7 @@ def test_held_tell_identity_cannot_be_reused_to_publish_changed_wake_body(tmp_pa
     async def run():
         async with harness(tmp_path) as h:
             original={"type":"tell","to_stream_id":DESK,"tell_id":"synthetic-held-replay",
-                      "message":"START: synthetic held work"}
+                      "message":"Routine synthetic held work"}
             first=await h["dispatch"](original,"peer")
             assert first["delivery_status"]=="persisted"
             before=await h["counts"]()
