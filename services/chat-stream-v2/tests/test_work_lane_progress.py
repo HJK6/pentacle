@@ -480,3 +480,17 @@ def test_additive_estimate_metadata_persists_projection_restart_last_good(tmp_pa
         finally:
             store.stop()
     asyncio.run(restart())
+
+
+def test_synthetic_manual_membership_over_32_is_persisted():
+    """Synthetic reconstruction of removed cap; no historical IDs were supplied."""
+    async def body(env):
+        members = [f"spec_demo__uncapped_{i}" for i in range(40)]
+        lane = (await env.adopt(state="paused", lead=False, owner="operator",
+                                members=members))["lane"]
+        assert lane["members"] == members
+        replacement = members + ["spec_demo__uncapped_40"]
+        updated = await env.op("set_members", {"members": replacement},
+                               lane=lane["lane_id"], version=lane["version"])
+        assert updated["lane"]["members"] == replacement
+    run(body)
