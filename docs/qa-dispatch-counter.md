@@ -1,34 +1,22 @@
 # QA dispatch reject counter
 
-The v2 daemon tracks coordinator-adjudicated QA rejects by canonical spec, stable
-acceptance surface, and cycle. Two valid rejects from different commissions stop
-new QA commissions on that surface until an authorized coordinator records a diagnosis and
-pivot. Candidate SHA changes do not reset the count. The adjudication requirement
-and valid-reject limit apply to every commission carrying all three QA fields in
-both modes. `PENTACLE_QA_DISPATCH_MODE=enforce` additionally makes those fields
-mandatory on every QA commission (`qa_scope_required`).
+The daemon counts adjudicated valid QA rejects by spec, reviewed surface and
+cycle. Two distinct valid rejects stop another commission on that surface until
+an authorized adjudicator records a diagnosis and pivot. Changing a candidate
+SHA does not reset the count. Unadjudicated reports do not stop a commission.
 
 ## Commission a review
 
-Choose a stable lowercase surface slug (letters, digits, `.`, `_`, `-`, maximum
-80 characters). Keep it for the same acceptance surface across candidate SHAs.
-Renaming a surface is an explicit coordinator scope decision, not a reset shortcut.
-Read the current cycle with:
+A QA spawn creates a commission without requiring caller role, spec matching,
+cycle or QA form fields. Supply a named surface when it is known. Otherwise the
+daemon derives a `<spec_id>:<phase>` surface from the reviewer's or parent's
+unambiguous spec and phase. That fallback has its own counter: omitting a locked
+named surface can permit up to two more reviews before the fallback also locks.
+If neither a surface nor a spec can be derived, the spawn is admitted with an
+unknown-scope warning. QA handoffs continue the original commission.
 
-```sh
-agent-orch spec-issue show --spec-id spec_pentacle__example --surface admission
-agent-orch spawn --provider codex --model gpt-6-sol --effort xhigh \
-  --role qa --objective 'Review admission' --spec-id spec_pentacle__example \
-  --qa-spec-id spec_pentacle__example --qa-surface admission --qa-cycle 1
-agent-orch send HOST:QA_STREAM 7 'Review the repaired admission surface' \
-  --qa-spec-id spec_pentacle__example --qa-surface admission --qa-cycle 1
-```
-
-`role=qa` or `phase=qa` is recognized case-insensitively. A send to a durable QA
-seat is a QA commission; explicit QA fields also mark sends to other roles.
-Enforcement requires all three QA fields. There is no prose classification.
-Ordinary workers and immediate or scheduled handoffs remain exempt. Use a worker
-for repair execution; a review remains QA even if its prompt calls it a repair.
+A send is a commission when it carries explicit QA metadata; untagged sends are
+ordinary messages. The daemon does not infer commissions from prose.
 
 A commission binds the reviewer stream, its daemon generation, and message id
 (spawn starts with message id 0), plus the coordinator generation and the
@@ -39,13 +27,9 @@ Send admission reads the open reviewer generation and canonical spec in the
 commission transaction. Delivery checks that generation under the target lifecycle
 lock; a subsequent reopen returns `qa_reviewer_generation_conflict` before input.
 
-Scheduled QA with `--at` or `--delay` persists the same fields and owner generation.
-Insertion linearizes eligibility at its check before writing the schedule row;
-it reserves no future review. Fire checks
-current count/cycle again before creating a pane. A diagnosis in between makes the
-scheduled cycle stale; create a new schedule with the new expected cycle. Same
-schedule-generation retries replay the existing dispatch; rescheduling to a new
-generation is a new admission. A reopened/closed owner cannot authorize that fire.
+Scheduled QA retains its owner generation and is checked against the current
+counter when it fires. Same-generation retries reuse the dispatch. A closed or
+reopened owner cannot authorize that fire.
 
 ## Adjudicate and diagnose
 
@@ -58,6 +42,9 @@ a report `--void` removes its commission from the pending count; marking both
 `qa_dispatch_reject_limit` until `spec-issue diagnose` records a diagnosis and
 pivot. `diagnose` itself is never blocked by either limit and still requires two
 valid rejects before advancing the cycle.
+
+Only adjudicated valid rejects count toward the limit. Diagnosis still requires
+two valid rejects and advances that surface's cycle after recording a pivot.
 
 A QA report must be a durable `done` row with top-level `qa_verdict: "reject"`, a
 full `target_sha`, and typed evidence in its existing extras object:
@@ -108,12 +95,8 @@ the spawn commission). An explicit binding has no fallback: an absent, malformed
 wrong-generation or wrong-scope commission cannot consume another review.
 Keep this identity in prebuilt `qa_review` JSON when not using the flags.
 
-`--qa-cycle` names the current diagnosis epoch, not a review pass number.
-Repairing the same acceptance surface and commissioning another review after
-one valid reject stays in cycle 1. Only a recorded `spec-issue diagnose` after
-two valid rejects and a pivot advances that surface to cycle 2; the next
-commission then uses cycle 2. A new candidate SHA by itself does not advance
-the cycle.
+The daemon selects the current cycle for each new commission. A diagnosis after
+two valid rejects advances the surface's cycle; changing a candidate SHA does not.
 
 A verdict report without an explicit commission id filed at a different message id binds at adjudication to the
 commission already holding its report id, else the exact-key commission, else
@@ -136,10 +119,9 @@ agent-orch spec-issue diagnose --spec-id spec_pentacle__example \
 
 Lead/Nexus mutations require an open verified caller with the canonical spec
 binding and commission ownership: the original coordinator generation, its current
-ancestor, or an explicit handoff successor chain. A planner additionally needs that
-spec as its current assignment and may commission only `--phase spec` QA. Use
-`--role qa --phase spec` at spawn; sends use the reviewer's current persisted phase,
-not a phase override in the send request. Surface slugs remain descriptive.
+ancestor, or an explicit handoff successor chain. If the coordinator is unknown,
+an otherwise authorized adjudicator may act. A planner additionally needs the spec
+as its current assignment and may adjudicate only a `spec` phase commission.
 
 The normalized phase is saved on each commission. Planner adjudication requires a
 saved `spec` phase; diagnosis requires every counted reject to be `spec` phase and
@@ -164,18 +146,3 @@ valid rejects and nonempty diagnosis/pivot, records the historical ids, and
 atomically advances the cycle. Identical diagnosis-id retries replay; changed
 payloads conflict. Late adjudication in an old cycle never affects the new cycle.
 `spec-issue show` exposes history; legacy `list`/`clear` do not clear this ledger.
-
-## Activation and rollback
-
-`PENTACLE_QA_DISPATCH_MODE=off` is the default and permits legacy QA without
-metadata. Explicit metadata still validates, records commissions and applies both
-reject limits; spec-issue history remains available. Set
-`enforce` only in the coordinated daemon release after callers carry the new
-fields. Legacy unscoped immediate/scheduled QA then returns `qa_scope_required`.
-An invalid mode returns `qa_dispatch_mode_invalid` for QA; it does not freeze
-unrelated workers. No daemon restart or deployment is performed by this feature.
-
-The integration owner records each installed artifact, live PID, activation
-readback, and rollback preimage. Source tests establish counter/admission behavior;
-they do not establish fleet activation. The new `v2_qa_*` tables and nullable
-schedule fields are additive and survive restart or switching enforcement off.

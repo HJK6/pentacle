@@ -1688,6 +1688,19 @@ class SpawnCtl:
             host = str(msg.get("host") or local_host).strip()
             reply.update(await self._admitted_for_key(host, idempotency_key))
         if isinstance(reply, dict) and reply.get("type") == "spawn.ok":
+            session = reply.get("session") or {}
+            if not msg.get("handoff") and qa_dispatch.classified(msg, session):
+                stream = str(reply.get("stream_id") or "")
+                generation = session.get("session_generation")
+                if not generation and ":" in stream:
+                    try:
+                        current = await self.store.fetch_session(*stream.split(":", 1))
+                        generation = (current or {}).get("session_generation")
+                    except Exception:
+                        pass
+                warning = await qa_dispatch.scope_warning(self.store, stream, generation)
+                if warning:
+                    reply.setdefault("warnings", []).append(warning)
             checkpoint = await self.work_checkpoint_warning(msg, str(reply.get("stream_id") or ""))
             if checkpoint is not None:
                 reply["work_checkpoint"] = checkpoint

@@ -9,7 +9,6 @@ from test_qa_dispatch_counter import LEAD, SPEC, state, send_msg, report_msg, is
 
 def test_send_commission_binds_generation_current_at_commission(monkeypatch):
     """A lifecycle change before qa_admit must not persist the stale generation."""
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()
@@ -61,7 +60,6 @@ def test_send_commission_binds_generation_current_at_commission(monkeypatch):
 
 @pytest.mark.parametrize("change", ["closed", "spec"])
 def test_send_revalidates_target_in_commission_transaction(monkeypatch, change):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, tmux, comms, _, server = await state()
@@ -78,10 +76,16 @@ def test_send_revalidates_target_in_commission_transaction(monkeypatch, change):
 
         monkeypatch.setattr(qa_dispatch, "admit", change_before_admit)
         try:
-            with pytest.raises(VerbError):
-                await comms.send(send_msg("qa1"))
-            assert not tmux.pastes
-            assert not (await issue(server, "show"))["commissions"]
+            if change == "closed":
+                with pytest.raises(VerbError):
+                    await comms.send(send_msg("qa1"))
+                assert not tmux.pastes
+                assert not (await issue(server, "show"))["commissions"]
+            else:
+                assert (await comms.send(send_msg("qa1")))["delivery"] == "landed"
+                row = await store.submit(lambda conn: conn.execute(
+                    "SELECT spec_id FROM v2_qa_commissions WHERE reviewer=?", ("localhost:qa1",)).fetchone())
+                assert row[0] == ""  # An unresolved replacement is not the old spec.
         finally:
             store.stop()
 
@@ -89,7 +93,6 @@ def test_send_revalidates_target_in_commission_transaction(monkeypatch, change):
 
 
 def test_send_reopened_after_admission_refuses_before_input(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, tmux, comms, _, _ = await state()

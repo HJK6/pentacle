@@ -75,7 +75,6 @@ async def two_rejects(comms, ledger, server):
 
 
 def test_third_same_surface_send_is_refused_before_paste(monkeypatch):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
 
     async def run():
         store, _, tmux, comms, ledger, server = await state()
@@ -99,7 +98,6 @@ def test_third_same_surface_send_is_refused_before_paste(monkeypatch):
 
 def test_third_same_surface_spawn_is_refused_before_pane(monkeypatch):
     from test_spec_binding_provenance import SpawnTmux
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
 
     class Catalog:
         def resolution_for(self, value):
@@ -135,8 +133,7 @@ def test_third_same_surface_spawn_is_refused_before_pane(monkeypatch):
     asyncio.run(run())
 
 
-def test_third_send_requires_adjudication_mode_off(monkeypatch):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'off')
+def test_third_send_requires_adjudication(monkeypatch):
 
     async def run():
         store, _, tmux, comms, ledger, server = await state()
@@ -163,9 +160,8 @@ def test_third_send_requires_adjudication_mode_off(monkeypatch):
     asyncio.run(run())
 
 
-def test_third_spawn_requires_adjudication_mode_off(monkeypatch):
+def test_third_spawn_requires_adjudication(monkeypatch):
     from test_spec_binding_provenance import SpawnTmux
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'off')
 
     class Catalog:
         def resolution_for(self, value):
