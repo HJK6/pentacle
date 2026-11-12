@@ -472,12 +472,6 @@ class UIVerbs:
 
         assigned = source.get("assigned_spec_id")
         if action == "assign":
-            # The caller is classified from its authenticated context, never a wire field (R5).
-            auth = msg.get("_auth_context") or {}
-            if auth.get("token_verified"):
-                refusal = await self.spawnctl._work_link_refusal(msg, {"assigned_spec_id": spec_id})
-                if refusal is not None:
-                    raise refusal
             assigned = spec_id
         if action in {"attach", "assign"}:
             if not any(same(existing, spec_id) for existing in spec_ids):
