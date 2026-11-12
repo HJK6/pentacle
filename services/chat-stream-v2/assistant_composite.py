@@ -680,6 +680,8 @@ class AssistantComposite:
         row = await self.store.ensure_assistant_composite_projection(
             stream_id=self.config.stream_id, title=self.config.title,
         )
+        await self.store.configure_strict_publication(
+            self.config.stream_id, self.config.name, self.config.strict_publication_default)
         if self.config.direct_primary:
             await self.store.configure_assistant_mirror(
                 composite_stream_id=self.config.stream_id,

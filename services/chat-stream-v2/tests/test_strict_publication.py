@@ -50,7 +50,7 @@ def test_unanswered_marker_299_300_and_once(monkeypatch):
     from strict_publication import mark_unanswered
     async def body(h):
         route = await h.route('unanswered')
-        landed = datetime.fromisoformat(json.loads(route['route_json'])['timings']['delivery_recorded_at'].replace('Z','+00:00')).timestamp()
+        landed = datetime.fromisoformat(json.loads(route['route_json'])['timings']['landed_at'].replace('Z','+00:00')).timestamp()
         await mark_unanswered(h.store, h.composite, h.broadcast, now=landed+299)
         assert await h.answers() == []
         await mark_unanswered(h.store, h.composite, h.broadcast, now=landed+300)
@@ -152,4 +152,146 @@ def test_setting_defaults_sources_and_rollback():
         assert [r['text'] for r in await h.answers()] == ['Legacy turn text']
         await h.store.put('assistant.strict_publication.enabled','invalid')
         assert (await h.store.strict_publication_state(h.composite.config.stream_id)) == {'enabled':False,'source':'kv_invalid'}
+    run(body)
+
+
+def test_existing_reconciler_marks_landed_unanswered():
+    from assistant_lane_rulings import AssistantLaneRulings
+    from types import SimpleNamespace
+    import json
+    async def body(h):
+        route = await h.route('existing-pass')
+        def old_landing(conn):
+            payload = json.loads(route['route_json'])
+            payload['timings']['landed_at'] = '2000-01-01T00:00:00Z'
+            conn.execute('UPDATE v2_assistant_composite_routes SET route_json=? WHERE route_id=?',
+                         (json.dumps(payload),route['route_id']))
+            conn.commit()
+        await h.store.submit(old_landing)
+        manager = AssistantLaneRulings(SimpleNamespace(store=h.store,assistant_composite=h.composite,broadcast=h.broadcast))
+        await manager.tick()
+        assert [r.get('publish_kind') for r in await h.answers()] == ['unanswered']
+        await manager.tick()
+        assert len(await h.answers()) == 1
+    run(body)
+
+
+@pytest.mark.parametrize('note_type,kind', [('result',k) for k in ['message','lane','report','wake','tell']] + [('problem','message'),('reminder','wake'),('relay','tell')])
+def test_reference_kinds_roundtrip(note_type,kind):
+    import json
+    from test_assistant_duplicate_reply_sources import _proactive
+    async def body(h):
+        await h.route('record')
+        def fixtures(c):
+            c.execute("INSERT INTO v2_assistant_composite_lanes(lane_id,stream_id,phase,created_at,updated_at) VALUES('record',?,'discussion','now','now')",(h.composite.config.stream_id,))
+            c.execute("INSERT INTO v2_reports(report_id,from_stream_id,status,ingested_at,created_at) VALUES('record','fixture-root:visible','done','now',0)")
+            c.execute("INSERT INTO v2_watch_wake(id,kind,owner,owner_generation,request_id,fingerprint,state,data) VALUES('record','test','fixture-root:visible','g','r','f','pending','{}')")
+            c.execute("INSERT INTO v2_tell_deliveries(tell_id,reply,created_at) VALUES('record','{}',0)")
+            c.commit()
+        await h.store.submit(fixtures)
+        msg = _proactive(h.generation,'note','A deliberate note')
+        msg.update(note_type=note_type,ref=kind+':record')
+        await h.composite.publish(msg,actor_stream_id='fixture-root:visible')
+        row = (await h.answers())[0]
+        assert (row['note_type'],row['ref']) == (note_type,kind+':record')
+        pub = await h.store.submit(lambda c:c.execute("SELECT canonical_payload_json FROM v2_assistant_composite_publications WHERE publication_key='note'").fetchone()[0])
+        assert json.loads(pub)['note_type'] == note_type
+        assert json.loads(pub)['ref'] == kind+':record'
+    run(body)
+
+
+@pytest.mark.parametrize('kind',['prose','status'])
+def test_duplicate_time_boundaries(kind,monkeypatch):
+    import strict_publication
+    from datetime import datetime,timezone
+    from test_assistant_duplicate_reply_sources import _proactive
+    async def body(h):
+        await h.route('record')
+        first = _proactive(h.generation,'first','**ＦＯＯ**   _bar_')
+        first.update(note_type='result',ref='message:record',publish_kind=kind)
+        await h.composite.publish(first,actor_stream_id='fixture-root:visible')
+        stamp = await h.store.submit(lambda c:c.execute("SELECT created_at FROM v2_assistant_composite_publications WHERE publication_key='first'").fetchone()[0])
+        now = datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()
+        next_msg = dict(first,request_id='second',message='foo BAR')
+        monkeypatch.setattr(strict_publication.time,'time',lambda:now+3599)
+        with pytest.raises(ValueError,match='assistant_publish_duplicate_text'):
+            await h.composite.publish(next_msg,actor_stream_id='fixture-root:visible')
+        monkeypatch.setattr(strict_publication.time,'time',lambda:now+3660)
+        await h.composite.publish(next_msg,actor_stream_id='fixture-root:visible')
+    run(body)
+
+
+def test_batch_closing_receipt_does_not_invent_empty_publication_text():
+    """Attachment-only proactive notes must not match a textless batch receipt."""
+    from test_assistant_duplicate_reply_sources import _final
+    from strict_publication import validate_publication
+
+    async def body(h):
+        head = await h.route('batch-head')
+        await h.route('batch-member')
+        result = await h.composite.publish(
+            _final(head['dispatch_id'], 'batch-head', 'Nonempty batch answer',
+                   reply_to_message_ids=['batch-head', 'batch-member']),
+            actor_stream_id='fixture-root:visible')
+        assert len(result['closed_dispatch_ids']) == 1
+        assert [row['text'] for row in await h.answers()] == ['Nonempty batch answer']
+        # This is the transactional validator used for a proactive file with an
+        # empty caption; attachments are validated separately before this point.
+        payload = dict(note_type='result', ref='message:batch-head', message='')
+        await h.store.submit(lambda conn: validate_publication(
+            conn, h.composite.config.stream_id, '', payload))
+        with pytest.raises(ValueError, match='assistant_publish_duplicate_text'):
+            await h.store.submit(lambda conn: validate_publication(
+                conn, h.composite.config.stream_id, '',
+                dict(payload, message='Nonempty batch answer')))
+    run(body)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_periodic_reconciliation_covers_nonprimary_strict_composite(enabled):
+    import asyncio
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from assistant_composite import AssistantComposite
+    from strict_publication import reconcile_unanswered
+
+    async def body(h):
+        async def dispatch(route):
+            return {'delivery': 'landed'}
+        daff = AssistantComposite(h.store, config=replace(
+            h.composite.config, name='daff', stream_id='daff:assistant',
+            strict_publication_default=False), dispatch=dispatch)
+        try:
+            await daff.ensure_projection()
+            await h.store.put('assistant.strict_publication.daff.enabled', 'on' if enabled else 'off')
+            await daff.accept_input({'message': 'Question', 'msg_id': 'daff-unanswered',
+                                     'request_id': 'daff-unanswered'},
+                                    operator_principal='operator:fixture')
+            for _ in range(200):
+                route = await h.store.get_assistant_composite_route(
+                    stream_id='daff:assistant', input_identity='daff-unanswered')
+                if route and route['delivery_state'] == 'landed':
+                    break
+                await asyncio.sleep(.01)
+            assert route['delivery_state'] == 'landed'
+            def age(conn):
+                payload = json.loads(route['route_json'])
+                payload['timings']['landed_at'] = '2000-01-01T00:00:00Z'
+                conn.execute('UPDATE v2_assistant_composite_routes SET route_json=? WHERE route_id=?',
+                             (json.dumps(payload), route['route_id']))
+                conn.commit()
+            await h.store.submit(age)
+            server = SimpleNamespace(store=h.store, assistant_composite=h.composite,
+                assistant_composites={h.composite.config.name: h.composite, 'daff': daff},
+                broadcast=h.broadcast)
+            await reconcile_unanswered(server)
+            await reconcile_unanswered(server)
+            rows = await h.store.fetch_session_event_tail('daff:assistant', limit=100)
+            markers = [row for row in rows if row.get('publish_kind') == 'unanswered']
+            assert len(markers) == int(enabled)
+            if enabled:
+                assert markers[0]['reply_to_message_id'] == 'daff-unanswered'
+        finally:
+            await daff.stop()
     run(body)

@@ -1603,7 +1603,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # carries its own mirror; empty keeps every non-direct
         # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
         # source_generation, enabled_default, name).
-        self._assistant_strict_publication: dict[str, bool] = {}
+        self._assistant_strict_publication: dict[str, tuple[str, bool]] = {}
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
 
@@ -1863,6 +1863,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_assistant_publications_created ON v2_assistant_composite_publications(stream_id,created_at)")
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
             conn.execute(ASSISTANT_COMPOSITE_OPERATIONS_DDL)
             conn.execute(ASSISTANT_COMPOSITE_TERMINAL_REPORTS_DDL)
@@ -2176,7 +2177,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
             self._assistant_strict_publication[composite_stream_id] = (
-                name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
+                name, name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
             )
             self._assistant_mirror_binding[composite_stream_id] = (
                 composite_stream_id, source_stream_id, source_generation, enabled_default, name,
@@ -2190,16 +2191,22 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         return ("assistant.mirror.enabled" if name == primary_assistant_name()
                 else f"assistant.mirror.{name}.enabled")
 
+    async def configure_strict_publication(self, stream_id, name, default):
+        def op(conn):
+            self._assistant_strict_publication[stream_id] = (
+                name, name == primary_assistant_name() if default is None else default)
+        await self.submit(op)
+
     def _strict_publication_state_conn(self, conn, composite_stream_id):
-        binding = self._assistant_mirror_binding.get(composite_stream_id)
-        if binding is None:
+        configured = self._assistant_strict_publication.get(composite_stream_id)
+        if configured is None:
             return {"enabled": False, "source": "unbound"}
-        name = binding[4]
+        name, default = configured
         key = ("assistant.strict_publication.enabled" if name == primary_assistant_name()
                else f"assistant.strict_publication.{name}.enabled")
         override = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
         if override is None:
-            return {"enabled": self._assistant_strict_publication[composite_stream_id], "source": "env"}
+            return {"enabled": default, "source": "env"}
         normalized = str(override[0]).strip().lower()
         return {"enabled": normalized in {"1", "true", "on"},
                 "source": "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"}
@@ -6619,7 +6626,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                                        (route['dispatch_id'],)).fetchone()
                 if current is None or current['delivery_state'] != 'landed' or desk_input(current):
                     return None
-                landed = json.loads(current['route_json'] or '{}').get('timings', {}).get('delivery_recorded_at')
+                landed = json.loads(current['route_json'] or '{}').get('timings', {}).get('landed_at') or current['updated_at']
                 if not landed or (datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')) - datetime.fromisoformat(landed.replace('Z', '+00:00'))).total_seconds() < UNANSWERED_AFTER_S:
                     return None
                 if conn.execute('SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=?',

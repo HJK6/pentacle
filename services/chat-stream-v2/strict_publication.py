@@ -1,6 +1,7 @@
 """Strict composite publication checks and existing-pass no-reply reconciliation."""
 from datetime import datetime, timezone
 import json
+import logging
 import re
 import shlex
 import time
@@ -64,9 +65,12 @@ def validate_publication(conn, stream_id, dispatch_id, payload):
         raise ValueError('assistant_publish_ref_not_found')
     cutoff = datetime.fromtimestamp(time.time() - 3600, timezone.utc).isoformat().replace('+00:00', 'Z')
     text = normalized_text(payload.get('message', ''))
-    for earlier in conn.execute('SELECT event_id,canonical_payload_json FROM v2_assistant_composite_publications '
-                                'WHERE stream_id=? AND created_at>=? ORDER BY event_id', (stream_id, cutoff)):
-        if text == normalized_text(json.loads(earlier['canonical_payload_json']).get('message', '')):
+    for earlier in conn.execute('SELECT p.event_id,p.canonical_payload_json,e.event_json FROM v2_assistant_composite_publications p '
+                                'LEFT JOIN session_event_tail e ON e.event_id=p.event_id '
+                                'WHERE p.stream_id=? AND p.created_at>=? AND p.merged_into_event_id IS NULL ORDER BY p.event_id', (stream_id, cutoff)):
+        prior_text = (json.loads(earlier['event_json']).get('text') if earlier['event_json']
+                      else json.loads(earlier['canonical_payload_json']).get('message'))
+        if prior_text is not None and text == normalized_text(prior_text):
             raise PublicationRefusal('assistant_publish_duplicate_text', f"Duplicate of event {earlier['event_id']}")
 
 
@@ -89,8 +93,8 @@ async def mark_unanswered(store, composite, broadcast, now=None):
     def insert(conn):
         if not store._strict_publication_state_conn(conn, composite.config.stream_id)['enabled']:
             return []
-        # Hold the store worker transaction over eligibility and append so a
-        # concurrent explicit publication cannot race an unanswered marker.
+        # Read candidates; append_unanswered_event rechecks eligibility in
+        # its write transaction so a publication cannot race the marker.
         result = []
         rows = conn.execute("SELECT * FROM v2_assistant_composite_routes r WHERE stream_id=? "
             "AND delivery_state='landed' AND dispatch_id IS NOT NULL "
@@ -101,7 +105,7 @@ async def mark_unanswered(store, composite, broadcast, now=None):
             if desk_input(route):
                 continue
             timings = json.loads(route['route_json'] or '{}').get('timings', {})
-            landed = timings.get('delivery_recorded_at')
+            landed = timings.get('landed_at') or route['updated_at']
             if not landed:
                 continue
             try:
@@ -129,3 +133,16 @@ async def mark_unanswered(store, composite, broadcast, now=None):
             composite._advance_summary(event)
             if broadcast is not None:
                 await broadcast({'type': 'chat.event', 'event': event})
+
+
+async def reconcile_unanswered(server):
+    composites = list(getattr(server, 'assistant_composites', {}).values())
+    primary = getattr(server, 'assistant_composite', None)
+    if primary is not None and primary not in composites:
+        composites.append(primary)
+    for composite in composites:
+        try:
+            await mark_unanswered(server.store, composite, server.broadcast)
+        except Exception:
+            # A failed marker pass must not block existing ruling releases.
+            logging.getLogger(__name__).exception("unanswered reconciliation failed; will retry")

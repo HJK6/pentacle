@@ -111,6 +111,57 @@ against the composite's now-live `last_text`; the `summary-fallback-formatting` 
 also records DOM mutations across idle/working inventory updates, checking both
 Markdown structure and the absence of a transient duplicate bubble.
 
+## Assistant publication policy
+
+The one-door candidate adds a per-composite strict-publication policy. This
+section describes its protocol contract, not deployment or live-proof status.
+The primary defaults on; `daff` defaults off. `inspect_stream` reports
+`assistant_strict_publication` with `enabled` and `source` beside
+`assistant_mirror`. Env names are `PENTACLE_ASSISTANT_STRICT_PUBLICATION` and
+`PENTACLE_ASSISTANT_<PREFIX>STRICT_PUBLICATION`; KV overrides are
+`assistant.strict_publication.enabled` and
+`assistant.strict_publication.<name>.enabled`. Setting the relevant KV to `off`
+rolls back strict behavior on the next event, without restart; the independent
+mirror setting still governs legacy projection.
+
+With strict publication on, no source turn text creates `assistant-mirror:*`
+rows, including turn-final acknowledgments. Explicit `assistant.publish`
+remains the reply path. A dispatch's final key is `publish:<dispatch>`; its
+acknowledgment key is `publish:<dispatch>:ack` (kind `status`, state
+`acknowledged`). The dispatch envelope says only publication is delivered and
+the seat ends with `done`.
+
+Proactive prose/status requests add `note_type` (`result`, `problem`, `reminder`,
+`relay`) and `ref` (`message:<id>`, `lane:<id>`, `report:<id>`, `wake:<id>` or
+`tell:<id>`). The daemon verifies record existence; message references belong to
+the same composite. Reminder permits wake/message; relay permits tell/message.
+Both fields are retained in canonical publication JSON and the chat event.
+Omitted fields remain legal on non-strict composites. Same-key replay returns
+the original event; a changed payload, including either field, conflicts.
+
+Stable refusal codes are `assistant_publish_note_type_required`,
+`assistant_publish_ref_required` (also malformed refs),
+`assistant_publish_ref_not_found`, `assistant_publish_ref_kind_not_allowed`,
+`assistant_publish_duplicate_text` and `assistant_publish_desk_dispatch`.
+Duplicate text means a proactive prose/status message matches any same-chat
+publication in the previous 60 minutes after NFKC, lowercase, Markdown-emphasis
+removal and whitespace collapse. The error identifies the earlier event.
+Dispatch replies are exempt from text comparison. Authenticated desk inputs
+cannot receive dispatch replies; the error directs the publisher to a relay
+note referencing the message. Body text cannot designate an input as a desk.
+
+An unpublished landed operator dispatch produces one immediate
+`dispatch_no_reply` notice to its bound seat when that turn ends, with copyable
+publish commands. At 300 seconds after landing, if still unpublished, the
+existing periodic pass appends one `ASSIST_TEXT` event, identity
+`dispatch-unanswered:<dispatch_id>`, `publish_kind: "unanswered"`,
+`reply_to_message_id` naming the operator input, and text
+`No reply from Bart yet to this message.` No notice or marker is produced for
+desk dispatches. Neither is produced after any publication, including an
+acknowledgment. Clients should render additive unknown publication kinds as
+ordinary assistant prose, not discard them. Existing historical rows are not
+rewritten.
+
 ## Authentication boundaries
 
 Authentication is optional for a loopback fixture daemon. A deployment that enables operator proof supplies a challenge nonce and expects an HMAC proof bound to that nonce, the credential id, and the client kind. Use placeholders in tests; never commit a proof key or an enrollment value.

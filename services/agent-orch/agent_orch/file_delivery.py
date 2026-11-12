@@ -47,7 +47,7 @@ def publication_metadata(args):
     if ref is not None:
         kind, separator, record_id = str(ref).partition(':')
         if (not separator or kind not in ('message', 'lane', 'report', 'wake', 'tell')
-                or not _nonempty(record_id)):
+                or not _nonempty(record_id) or any(c.isspace() for c in record_id)):
             raise ValueError('assistant_publish_ref_required')
         fields['ref'] = ref
     return fields

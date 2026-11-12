@@ -48,6 +48,9 @@ async def disposable_composite(*, operator_composite: str, target: str | None = 
             await store.grant_stream_token("smoke-fixture", "fd", hashlib.sha256(token.encode()).hexdigest(), STREAM_TOKEN_HASH_VERSION)
             config = AssistantCompositeConfig.from_env({
                 "PENTACLE_ASSISTANT_COMPOSITE_ENABLED": "1",
+                # This throwaway status-card fixture has no real daemon-record
+                # reference; it exercises legacy publication, never the operator.
+                "PENTACLE_ASSISTANT_STRICT_PUBLICATION": "0",
                 "PENTACLE_ASSISTANT_COMPOSITE_STREAM_ID": target,
                 "PENTACLE_ASSISTANT_DIRECT_PRIMARY_STREAM_ID": actor,
                 "PENTACLE_ASSISTANT_DIRECT_PRIMARY_GENERATION": row["session_generation"],

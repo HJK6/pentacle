@@ -73,6 +73,7 @@ def test_requiredness_and_type_ref_relationship_belong_to_daemon(command, flags,
 @pytest.mark.parametrize('flags', [
     ['--note-type', 'invalid'], ['--ref', 'lane:'], ['--ref', 'unknown:id'],
     ['--ref', 'message'], ['--ref', 'tell: bad'], ['--ref', 'tell:x\ny'],
+    ['--ref', 'message:two words'],
 ])
 def test_bad_supplied_shape_refused_before_transport(command, flags, tmp_path, wire):
     args = arguments(command, tmp_path, *flags)

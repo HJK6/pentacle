@@ -3,7 +3,8 @@
 This is the chat-daemon foundation for a second always-on assistant (**Daff**,
 the operator's) living beside the **primary assistant** on the same host, plus a restricted phone client
 (**Cosmo**) that can use only Daff's chat. It is deliberately a *fixed two-assistant*
-design — not a multi-user platform. The primary assistant's behaviour is unchanged throughout.
+design — not a multi-user platform. Identity, scope and recovery remain separate
+from the per-composite publication policy described below.
 
 ## A. Named assistants
 
@@ -34,6 +35,47 @@ is per-role (the two assistants never block each other), and `self.role` stays t
 primary slug that still backs operator-credential and consent protection.
 **Daff gets no fleet/lane authority** — that is governed solely by
 `store_lifecycle_authority`, independent of role.
+
+### Per-composite strict publication
+
+The one-door candidate defaults strict publication on for the primary and off
+for Daff. This is a code contract, not evidence of deployment or live validation.
+The primary reads `PENTACLE_ASSISTANT_STRICT_PUBLICATION`; Daff reads
+`PENTACLE_ASSISTANT_DAFF_STRICT_PUBLICATION`. Effective KV overrides are
+`assistant.strict_publication.enabled` and
+`assistant.strict_publication.daff.enabled`. `inspect_stream` returns
+`assistant_strict_publication` (`enabled`, `source`) next to its mirror state;
+source is `env`, `kv` or `kv_invalid`.
+
+Strict mode suppresses all mirror and turn-final chat projections, but preserves
+source transcripts, explicit publications, lane updates and question cards.
+Proactive prose/status requires a note type (`result`, `problem`, `reminder`,
+`relay`) and an existing record reference (`message`, `lane`, `report`, `wake`,
+`tell`). Message references are composite-scoped; reminder accepts wake/message
+and relay accepts tell/message. Both fields are stored on the publication and
+chat event. A proactive note matching any same-chat publication within 60
+minutes after NFKC, lowercase, emphasis removal and whitespace collapse is
+refused; exact request-key replay still returns its existing receipt.
+
+A dispatch identified as desk input by its authenticated credential gets no
+dispatch reply and is not awaiting one; publish a relay referencing the message
+instead. For a landed operator dispatch with no publication, turn end queues one
+immediate `dispatch_no_reply` notice containing copyable publish commands. The
+existing periodic pass adds one `unanswered` chat marker at 300 seconds if no
+publication has appeared, even if the seat is dead or busy. These mechanisms do
+not apply to desk inputs. An acknowledgment counts as a publication.
+
+The dispatch envelope states that only publication reaches the operator, names
+`publish:<dispatch>:ack` for acknowledgment and `publish:<dispatch>` for final,
+and asks the seat to end with `done`. CLI `--note-type`/`--ref` flags perform only
+supplied-shape checks, including managed file/image publication; omitted fields
+remain omitted so Daff's default behavior is unchanged.
+
+Rollback sets the primary strict-publication KV to `off`, effective on the next
+event without restart. Strict checks and no-reply actions stop; the retained
+legacy projections again follow the independent mirror setting. No credential,
+Cosmo audience, recovery or lane authority changes are implied. Fleet deployment
+and the 24-hour live readback remain separate acceptance work.
 
 ## B. Composite tell routing
 

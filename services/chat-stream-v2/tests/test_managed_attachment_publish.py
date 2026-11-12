@@ -236,6 +236,7 @@ def test_publisher_generation_must_be_verified_not_inferred(tmp_path):
 def proactive_msg(msg, upload_id, **extra):
     return dict(type='assistant.publish', request_id='proactive-file', composite_stream_id=ASSISTANT,
         publish_kind='status', message='', attachment_ids=[upload_id],
+        note_type='result', ref='message:input-1',
         _auth_context=dict(msg['_auth_context']), **extra)
 
 

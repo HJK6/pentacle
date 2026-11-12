@@ -377,14 +377,99 @@ progress should remain in the owner's visible chat unless a supported
 composite publication binding exists. No duplicate owner or reparenting is
 needed solely for presentation.
 
-## Direct reply mirroring
+## Strict publication (one door)
+
+The strict-publication contract below is the one-door candidate behavior, not a
+claim of deployment or completed live validation. Strict publication defaults
+on for the primary composite and off for `daff`. With it on, front-desk turn
+text never creates an `assistant-mirror:*` chat row or a turn-final
+acknowledgment, regardless of whether an operator, desk, peer or notice started
+the turn. The source transcript is retained. Explicit publications, question
+cards, `lane_update` cards and daemon-authored notices remain available.
 
 A direct-primary dispatch publishes its final answer through `assistant publish`
-with the dispatch's fixed request key and `response_state=final`. Publish the
-exact answer, preserving Markdown and whitespace. The canonical prose event is
-the authoritative reply; the shared transcript renderer handles its Markdown.
-If the seat ends that dispatch's turn with prose and no publication, the daemon
-shows that prose as an acknowledgment (see the turn-final exception below).
+with request key `publish:<dispatch>` and `response_state=final`. Its one
+acknowledgment uses `publish:<dispatch>:ack`, kind `status` and state
+`acknowledged`. Only a publish reaches the operator; turn text is not delivery.
+The dispatch envelope gives both keys and tells the seat to end its turn with
+the single word `done`. Existing routes retain their original stored wire body
+for exact dispatch matching.
+
+### Proactive notes
+
+Under strict publication, proactive `prose` and `status` publications require
+`--note-type result|problem|reminder|relay` and `--ref <kind>:<id>`:
+
+- `message`: a dispatch or operator-message id belonging to this composite;
+- `lane`: a work-lane id; `report`: a report id;
+- `wake`: a watch-wake or schedule id; `tell`: a tell id.
+
+The daemon checks that the referenced record exists. A reminder must reference
+`wake` or `message`; a relay must reference `tell` or `message`. Accepted
+`note_type` and `ref` appear in the publication's canonical payload and chat
+event. The CLI checks only supplied flag shapes: omission is forwarded unchanged
+so non-strict composites and rollback keep working. These flags also apply to
+`send-file` and `send-image` when publishing with `--to ... --proactive`.
+
+```sh
+agent-orch assistant publish --proactive --request-id <stable-id> \
+  --composite-stream-id <assistant-stream> --publish-kind status \
+  --note-type result --ref report:<report-id> --message <text>
+```
+
+A proactive note is refused when its text equals any publication in the same
+chat in the preceding 60 minutes after Unicode NFKC normalization, lowercasing,
+removal of Markdown emphasis markers and whitespace collapse. This applies to
+both prose and status. The error identifies the earlier event. Dispatch replies
+and acknowledgments are not text-checked. Identical request-key replays return
+the saved event; changing the type, reference or other payload conflicts.
+
+### Desk inputs and unanswered operator messages
+
+Desk classification comes from the authenticated route actor credential and the
+daemon's desk map, not a user-typed `[from ...]` prefix. New routes retain their
+classification. A desk dispatch cannot receive a final, acknowledgment or status
+reply; use a proactive relay referencing its message instead. It never counts as
+awaiting a reply and does not cause either missing-reply action below.
+
+When the bound seat ends an operator-dispatch turn with delivery state `landed`
+and no publication of any kind, the daemon queues one `dispatch_no_reply`
+notice. It wakes the front desk immediately, includes the dispatch id and the
+first 80 message characters, and supplies copyable acknowledgment and final
+commands. Its deterministic notice identity prevents a second notice on retries
+or restart. Detection does not depend on the mirror switch.
+
+The existing periodic reconciliation pass marks an operator dispatch still
+without any publication 300 seconds after landing. It appends one daemon-authored
+chat row with identity `dispatch-unanswered:<dispatch_id>`, `publish_kind`
+`unanswered`, the operator message as `reply_to_message_id`, and text
+`No reply from Bart yet to this message.` This does not require the seat to be
+alive or idle. An acknowledgment prevents the marker; this feature does not
+monitor whether an acknowledged dispatch later receives its final answer.
+
+### Setting and rollback
+
+The primary env setting is `PENTACLE_ASSISTANT_STRICT_PUBLICATION`; other
+composites use `PENTACLE_ASSISTANT_<PREFIX>STRICT_PUBLICATION`, for example
+`PENTACLE_ASSISTANT_DAFF_STRICT_PUBLICATION`. The primary KV override is
+`assistant.strict_publication.enabled`; others use
+`assistant.strict_publication.<name>.enabled`. `inspect_stream` exposes the
+effective `assistant_strict_publication` value and source (`env`, `kv` or
+`kv_invalid`) beside the mirror state.
+
+Set the primary KV override to `off` for rollback. It takes effect on the next
+event without restarting: strict refusals and missing-reply actions stop, and
+the existing mirror/turn-final behavior is available again subject to its own
+mirror setting. The CLI flags remain accepted. Daff's default non-strict
+behavior is unchanged. Deployment and the 24-hour live readback are separate
+fleet acceptance steps, not established by this document.
+
+### Legacy direct reply mirroring (strict publication off only)
+
+The rest of this subsection describes the retained non-strict path, including
+Daff's default. With strict publication on, none of these turn-text projections
+run. In the non-strict path, a seat ending a landed dispatch turn without a
+publication can have its prose projected as an acknowledgment.
 
 A structured final (Claude `end_turn`, Codex `final_answer`) is not mirrored
 when its own turn made a proactive publication (`assistant publish --proactive`)
@@ -440,6 +525,8 @@ to that seat. A closed seat's questions expire as usual. A failed binding read
 omits the stamp and the wider scope; it never fails hello or a list. Lane
 `question.open` is not used in this mode.
 
+### Legacy mirror trigger and turn-final rules (strict publication off only)
+
 Automatic mirroring requires a proven operator trigger in the same session
 lifecycle and source transcript. A USER matching this binding's resolved
 direct-primary wire envelope is an operator trigger, including queued-command
@@ -460,6 +547,9 @@ milestone after an excluded trigger:
 agent-orch assistant publish --proactive --request-id <stable-id> \
   --composite-stream-id <assistant-stream> --publish-kind status --message <text>
 ```
+
+This metadata-free form is for strict publication off; use the typed note
+example above when strict publication is on.
 
 Proactive publication accepts `prose` and `status` only. `question`, `result` and
 `reply_to_*` IDs are refused (`assistant_publish_payload_invalid`).
