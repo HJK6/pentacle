@@ -372,7 +372,7 @@ def run(bindings, controller):
                 adapter.fail_prior_proof = prior_report_failure
                 result = transaction.apply(intent, receipt)
                 if inject:
-                    if result["phase"] != "rolled_back" or result["exit_code"] != 12:
+                    if result["phase"] != "rolled_back" or result["outcome"] != "failed":
                         raise c.Invalid("disposable automatic recovery did not preserve forward failure")
                 elif result["phase"] != "committed" or transaction.rollback(receipt)["phase"] != "rolled_back":
                     raise c.Invalid("disposable forward/explicit rollback did not complete")

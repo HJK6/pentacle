@@ -150,12 +150,12 @@ def test_prepare_apply_and_explicit_committed_rollback(transaction):
     assert (adapter.source, adapter.policy, adapter.pid) == ("prior", "prior", 111)
     sealed = path.read_bytes()
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 11 and result["full_fleet_acceptance"] is False
+    assert result["disposition"] == "active and checks passed" and result["full_fleet_acceptance"] is False
     assert result["phase"] == "committed"
     assert path.read_bytes() == sealed
     assert adapter.calls.index("stop") < adapter.calls.index("switch_target") < adapter.calls.index("bootstrap_target")
     restored = tx.rollback(path)
-    assert restored["phase"] == "rolled_back" and restored["exit_code"] == 11
+    assert restored["phase"] == "rolled_back" and restored["disposition"] == "active and checks passed"
     assert (adapter.source, adapter.policy) == ("prior", "prior")
     assert tx.rollback(path) == restored
     assert path.read_bytes() == sealed
@@ -168,7 +168,6 @@ def test_every_post_stop_failure_is_durable_and_failure_dominant(transaction, fa
     tx.prepare(intent, path)
     adapter.failures.add(failure)
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 12
     assert result["outcome"] == "failed"
     assert result["forward_failure"]["reason"] == failure
     assert result["phase"] in {"rolled_back", "recovery_required"}
@@ -188,7 +187,7 @@ def test_failed_recovery_retries_idempotently_without_rpc(transaction):
     result = tx.rollback(path)
     assert result["phase"] == "rolled_back"
     assert result["forward_failure"]["reason"] == "readback_target"
-    assert result["exit_code"] == 11
+    assert result["disposition"] == "active and checks passed"
 
 
 @pytest.mark.parametrize("phase", ["stopping", "stopped", "switching", "verifying", "committed", "rolling_back"])
@@ -248,7 +247,7 @@ def test_prepared_rollback_discards_without_runtime_effects_and_allows_reprepare
     adapter.calls.clear()
     result = tx.rollback(path)
     assert result["phase"] == "discarded" and result["outcome"] == "discarded"
-    assert result["exit_code"] == 0 and result["full_fleet_acceptance"] is False
+    assert result["full_fleet_acceptance"] is False
     assert result["runtime_mutated"] is False
     assert adapter.calls == [] and (adapter.current(None), adapter.pid) == before
     assert path.read_bytes() == sealed and tx.rollback(path) == result
@@ -383,7 +382,7 @@ def test_journal_write_failure_after_stop_is_never_a_refusal(transaction, monkey
         return real(destination, value)
     monkeypatch.setattr(c, "atomic_json", fail_after_stopped)
     result = tx.apply(intent, path)
-    assert result["exit_code"] == 12 and result["journal_failure"] == "OSError"
+    assert result["outcome"] == "failed" and result["journal_failure"] == "OSError"
     assert result["phase"] == "recovery_required" and adapter.pid is None
 
 
@@ -435,7 +434,7 @@ def test_prior_proof_failure_after_verified_boot_leaves_prior_running(transactio
     adapter.failures.update({"readback_target", failure})
     result = tx.apply(intent, path)
     journal = _journal(tx, path)
-    assert result["phase"] == "recovery_required" and result["exit_code"] == 12 and result["outcome"] == "failed"
+    assert result["phase"] == "recovery_required" and result["outcome"] == "failed"
     assert adapter.pid == 222 and "keep_stopped" not in adapter.calls
     assert adapter.calls.index("confirm_prior") > adapter.calls.index("bootstrap_prior")
     assert journal["rollback_result"]["outcome"] == "failed"
@@ -600,7 +599,7 @@ def test_real_disposable_process_prior_proof_failure_leaves_prior_serving(tmp_pa
             adapter.fail_forward = adapter.fail_prior_proof = True
             result = tx.apply(intent, receipt)
             serving = adapter.process
-            assert result["phase"] == "rolled_back" and result["exit_code"] == 12
+            assert result["phase"] == "rolled_back" and result["outcome"] == "failed"
             assert serving is not None and serving.poll() is None
             assert tx.load(receipt)[1]["rollback_result"]["restoration"]["outcome"] == "failed"
             assert adapter.git("rev-parse", "HEAD") == adapter.prior
@@ -896,7 +895,7 @@ def test_concrete_prior_proof_failure_after_verified_boot_leaves_prior_running(r
         tx.prepare(plan, receipt_path)
         result = tx.apply(plan, receipt_path)
         journal = tx.load(receipt_path)[1]
-    assert result["phase"] == "rolled_back" and result["exit_code"] == 12
+    assert result["phase"] == "rolled_back" and result["outcome"] == "failed"
     assert lifecycle == ["stop", "bootstrap", "stop", "bootstrap"] and running["pid"] == 223
     assert fixture.git("rev-parse", "HEAD") == fixture.prior
     assert journal["rollback_result"]["restoration"]["outcome"] == "failed"
@@ -1197,7 +1196,7 @@ def test_helper_child_post_stop_failure_keeps_diagnostic_in_recovery_journal(tra
     monkeypatch.setattr(adapter, 'start_verify', verify)
     result = tx.apply(intent, path)
     _, journal = tx.load(path)
-    assert result['exit_code'] == 12 and journal['phase'] == 'rolled_back'
+    assert result['outcome'] == 'failed' and journal['phase'] == 'rolled_back'
     assert 'account_busy' in journal['forward_failure']['reason']
     assert (adapter.source, adapter.policy) == ('prior', 'prior')
 

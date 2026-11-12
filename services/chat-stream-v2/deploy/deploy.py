@@ -197,7 +197,9 @@ def _write_stamp(repo: Path, service: ServiceConfig, stamp: dict[str, object]) -
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary_path.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(stamp, indent=2, sort_keys=True) + "\n")
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -951,10 +953,17 @@ def _reload_launchd(
     # past the bound the bootstrap below still runs and reports its own failure.
     _wait_launchd_unloaded(label, runner, timeout_s=RELOAD_UNLOAD_WAIT_S,
                           sleep=sleep, monotonic=monotonic)
+    _bootstrap_launchd(label, runner, sleep=sleep)
+
+
+def _bootstrap_launchd(label: str, runner: Runner, *, cwd: Path | None = None,
+                       sleep: Callable[[float], None] = time.sleep) -> None:
+    target = _launchctl_target(label)
+    domain = target.rsplit("/", 1)[0]
     command = ("launchctl", "bootstrap", domain, str(_launchd_plist_path(label)))
     result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(3):
-        result = runner(command, Path.cwd())
+        result = runner(command, cwd if cwd is not None else Path.cwd())
         if result.returncode == 0:
             return
         if result.returncode != 5 or attempt == 2:
@@ -1862,6 +1871,12 @@ def _apply_post_activation(
                         stamp["restoration"] = _verify_direct_restoration(service, repo, stamp, boot, runner, restoration_runtime)
                     except Exception as exc:
                         stamp["restoration"] = {"outcome": "failed", "detail": str(exc)}
+                    if stamp["restoration"].get("outcome") != "passed":
+                        stamp["disposition"] = "active with failed checks"
+                        try:
+                            _notify_failed_checks(repo, service, sha, {"restoration": stamp["restoration"]}, runner)
+                        except Exception as exc:
+                            stamp["blocker_notify_error"] = str(exc)
                 else:
                     # Mark the serving state before entering any fallible late checker.
                     stamp["disposition"] = "active with failed checks"
@@ -1900,10 +1915,14 @@ def _restore_prior(service, repo, stamp, transaction, runtime, *, runner,
         failures = transaction._restore()
         if failures:
             raise DeployError("; ".join(failures))
+        prior_stamp = _read_stamp(repo, service)
+        if stamp.get("requirements_hash") != prior_stamp.get("requirements_hash"):
+            # Compare restored requirements with the installed target's hash;
+            # passing the restored stamp here would incorrectly skip pip.
+            verify_venv(repo, service, stamp, runner)
         report["restoration_complete"] = True
         offsets = _capture_log_offsets(_daemon_log_paths(service))
-        target = _launchctl_target(service.launchd_label)
-        _checked(("launchctl", "bootstrap", target.rsplit("/", 1)[0], str(_launchd_plist_path(service.launchd_label))), repo, runner)
+        _bootstrap_launchd(service.launchd_label, runner, cwd=repo)
         report["left_loaded"] = True
         boot = verify_boot(service, previous_size=offsets, prior_pid=None,
                            wait_seconds=boot_wait_seconds, runner=runner)
@@ -2484,7 +2503,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"deploy refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     print(json.dumps(stamp, sort_keys=True))
-    if stamp.get("prepared_only"):
+    if stamp.get("prepared_only") or stamp.get("phase") == "discarded":
         return EXIT_OK
     disposition = stamp.get("disposition")
     if disposition is None:

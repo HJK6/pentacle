@@ -234,7 +234,7 @@ def test_old_receipt_cannot_be_reinterpreted_under_new_policy(tmp_path):
 def test_full_scope_restoration_is_not_fresh_full_fleet_model_acceptance():
     receipt={'receipt_path':'/private/receipt','receipt_sha256':'a'*64,'intent':{'excluded_hosts':[]}}
     result=c.Transaction.result(receipt,{'phase':'rolled_back','rollback_result':{'restoration':{'outcome':'passed'}}},explicit_rollback=True)
-    assert result['exit_code']==0 and result['outcome']=='passed'
+    assert result['disposition']=='active and checks passed' and result['outcome']=='passed'
     assert result['verification_kind']=='restoration' and result['full_fleet_acceptance'] is False
 
 

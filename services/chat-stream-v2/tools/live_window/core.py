@@ -311,6 +311,7 @@ def operator_hello(token_path: Path, welcome: dict[str, Any]) -> dict[str, objec
     return {
         "type": "hello",
         "client": "pentacle",
+        "capabilities": {"assistant_composite_v1": True},
         "subscribe": {"include_subagents": True, "events_mode": "summary"},
         "auth_v2": {
             "scheme": operator_auth.AUTH_SCHEME,

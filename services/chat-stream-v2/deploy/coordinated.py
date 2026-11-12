@@ -479,7 +479,7 @@ class Transaction:
                 self.phase(journal, "discarded")
             return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
                     "phase": "discarded", "outcome": "discarded", "scope": "preparation_only",
-                    "full_fleet_acceptance": False, "runtime_mutated": False, "exit_code": 0}
+                    "full_fleet_acceptance": False, "runtime_mutated": False}
         if journal["phase"] == "rolled_back":
             self.adapter.validate_restored(receipt, journal)
             return self.result(receipt, journal, explicit_rollback=True)
@@ -555,6 +555,8 @@ class Transaction:
         success = (journal["phase"] == "rolled_back" if explicit_rollback else active and checks_passed)
         disposition = ("active and checks passed" if checks_passed else "active with failed checks") if active else (
             "target not active, prior restored" if journal["phase"] == "rolled_back" else "target not active, restore unproven")
+        if explicit_rollback and success:
+            disposition = "active and checks passed"
         return {"coordinated_receipt": receipt["receipt_path"], "receipt_sha256": receipt["receipt_sha256"],
                 "phase": journal["phase"], "outcome": "passed" if success else "failed", "disposition": disposition,
                 "scope": "declared_optional_exclusions" if scoped else "full_matrix",
@@ -562,5 +564,4 @@ class Transaction:
                 "verification_kind": "restoration" if explicit_rollback else "model_canary",
                 "forward_failure": journal.get("forward_failure"), "rollback_failure": journal.get("rollback_failure"),
                 "journal_failure": journal.get("journal_failure"),
-                "verification": journal.get("rollback_result" if explicit_rollback else "result"),
-                "exit_code": (11 if scoped else 0) if success else 12}
+                "verification": journal.get("rollback_result" if explicit_rollback else "result")}

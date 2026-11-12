@@ -42,12 +42,16 @@ def test_late_check_failure_keeps_serving_candidate(tmp_path, monkeypatch, raise
 @pytest.fixture
 def restore_case(tmp_path, monkeypatch):
     repo=tmp_path/'repo'; repo.mkdir()
-    def run(argv,cwd):return subprocess.run(argv,cwd=cwd,text=True,capture_output=True)
+    def run(argv,cwd):
+        if argv[0] != 'git':
+            events.append(tuple(argv))
+            return subprocess.CompletedProcess(argv,0,'','')
+        return subprocess.run(argv,cwd=cwd,text=True,capture_output=True)
     def git(*args):return d._git(repo,*args,runner=run)
     git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid')
     (repo/'code').write_text('prior');git('add','.');git('commit','-qm','prior'); prior=git('rev-parse','HEAD')
     (repo/'code').write_text('candidate');git('commit','-qam','candidate')
-    stamp_path=tmp_path/'stamp';stamp_path.write_bytes(b'prior stamp');stamp_path.chmod(0o640)
+    stamp_path=tmp_path/'stamp';stamp_path.write_bytes(b'{}');stamp_path.chmod(0o640)
     plist=tmp_path/'plist';plist.write_bytes(b'prior plist');plist.chmod(0o600)
     policy=tmp_path/'policy'
     tx=d._PreActivationTransaction(repo,prior,stamp_path,stamp_path.read_bytes(),run)
@@ -56,6 +60,7 @@ def restore_case(tmp_path, monkeypatch):
     events=[]
     runtime=SimpleNamespace(stop=lambda *a:events.append('stop'))
     monkeypatch.setattr(d,'_daemon_log_paths',lambda *a:())
+    monkeypatch.setattr(d,'_stamp_path',lambda *a:stamp_path)
     monkeypatch.setattr(d,'_launchd_plist_path',lambda *a:plist)
     monkeypatch.setattr(d,'_checked',lambda argv,cwd,runner: (events.append(tuple(argv)) or run(argv,cwd)) if argv[0]=='git' else (events.append(tuple(argv)) or subprocess.CompletedProcess(argv,0,'','')))
     return repo,prior,stamp_path,plist,policy,tx,runtime,events,run
@@ -69,7 +74,7 @@ def test_restore_preserves_source_file_bytes_modes_and_absence(restore_case,prio
         verify_boot=lambda *a,**k:d.BootReadback(d.BOOT_OBSERVED if prior_serves else d.BOOT_NOT_OBSERVED,'prior',0,33,None),
         verify_runtime=lambda *a:(prior_serves,{'sha':prior}),boot_wait_seconds=0)
     assert (repo/'code').read_text()=='prior'
-    assert stamp_path.read_bytes()==b'prior stamp' and stamp_path.stat().st_mode&0o777==0o640
+    assert stamp_path.read_bytes()==b'{}' and stamp_path.stat().st_mode&0o777==0o640
     assert plist.read_bytes()==b'prior plist' and plist.stat().st_mode&0o777==0o600
     assert not policy.exists()
     assert events[0]=='stop'

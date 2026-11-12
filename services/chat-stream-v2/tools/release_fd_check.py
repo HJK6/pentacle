@@ -14,7 +14,7 @@ if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
 
 from tools.spawn_fleet_smoke import (  # noqa: E402
-    DEFAULT_TIMEOUT, DEFAULT_URL, DEFAULT_TOKEN_PATH, EVENT_SETTLE_INTERVAL_S, _operator_connection,
+    DEFAULT_TIMEOUT, DEFAULT_URL, DEFAULT_TOKEN_PATH, _operator_connection,
 )
 
 
@@ -42,7 +42,7 @@ def run_check(url: str, token_path: Path, target_sha: str,
             result['message_id'] = message_id
             while time.monotonic() < deadline:
                 history = rpc({'type': 'request_stream_events', 'stream_id': target,
-                               'limit': 500}, 'request_stream_events', deadline=deadline)
+                               'limit': 10}, 'request_stream_events', deadline=deadline)
                 for event in history.get('events', []):
                     raw = event.get('raw') or {}
                     if (event.get('stream_id') == target
@@ -54,7 +54,7 @@ def run_check(url: str, token_path: Path, target_sha: str,
                             and event.get('text') == f'PONG {nonce}'):
                         return {'outcome': 'passed', 'message_id': message_id,
                                 'reply_message_id': event['message_id']}
-                time.sleep(min(EVENT_SETTLE_INTERVAL_S, max(0, deadline - time.monotonic())))
+                time.sleep(min(2.0, max(0, deadline - time.monotonic())))
     except Exception as exc:
         # Do not include arbitrary transport text, tokens or unrelated replies.
         result['reason'] = ('fd_execution_forbidden' if 'fd_execution_forbidden' in str(exc)
