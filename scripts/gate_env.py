@@ -249,7 +249,7 @@ def build_env(config: Dict[str, Any], profile: Dict[str, Any], target: Dict[str,
         "PATH": os.pathsep.join(dict.fromkeys(dirs)),
         "HOME": str(home), "TMPDIR": str(tmp), "TMP": str(tmp), "TEMP": str(tmp),
         "LANG": locale_name, "LC_ALL": locale_name,
-        "SHELL": "/bin/sh", "TERM": "dumb", "PYTHONNOUSERSITE": "1",
+        "SHELL": "/bin/sh", "TERM": "dumb", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
         "PENTACLE_TEST_STRICT_CAPABILITIES": "1" if target.get("strict_capabilities", True) else "0",
         "PENTACLE_GATE_ATTEMPT_ID": attempt_id,
         "PENTACLE_GATE_EVIDENCE_DIR": str(evidence),
@@ -888,6 +888,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         env = build_env(config, profile, target, checkout=checkout, toolchain=toolchain, venv=None, home=home, tmp=tmp, locale_name=locale_name,
                         evidence=evidence, attempt_id=attempt_id, pass_env=pass_env, ambient=dict(os.environ))
         log = lambda m: print("[gate-env] " + m, flush=True)  # noqa: E731
+        log("Python bytecode writes disabled for disposable fixtures")
         venv = None
         dep_info: Dict[str, Any] = {}
         if "python" in target.get("needs", []):
