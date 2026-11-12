@@ -113,7 +113,14 @@ def test_boot_failed_candidate_can_activate_stamped_prior(rollback_release, monk
     assert result['restart_guard']['launchd_answered'] is answered
     assert result['restart_guard']['down_basis'] == ('launchd_answered_no_pid' if answered else 'boot_failed_stamp')
     assert any(c[:2] == ('launchctl', 'kickstart') for c in calls)
-    assert not any(c[0] == 'agent-orch' for c in calls)
+    assert not any(c[:2] == ('agent-orch', 'list') for c in calls)
+    notifications = [i for i, c in enumerate(calls) if c[0] == 'agent-orch']
+    assert all(calls[i][1] == 'notify' for i in notifications)
+    assert len(notifications) == 1
+    restart = next(i for i, c in enumerate(calls) if c[:2] == ('launchctl', 'kickstart'))
+    assert restart < notifications[0]
+    assert result['serving'] is True and result['restoration']['outcome'] == 'failed'
+    assert result['disposition'] == 'active with failed checks'
 
 
 @pytest.mark.parametrize("rollback,state", [(False, (True, None)), (True, (True, 111)), (True, (False, None, False))])
