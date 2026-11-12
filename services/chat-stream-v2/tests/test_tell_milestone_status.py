@@ -76,15 +76,15 @@ def test_ineligible_tells_leave_card_untouched(role, body, status):
     asyncio.run(go())
 
 
-def test_front_desk_held_milestone_stamps_card_after_persistence(tmp_path):
+def test_front_desk_milestone_stamps_card_after_delivery(tmp_path):
     async def go():
         store, h, composite, target = await _front_desk(tmp_path)
         try:
             await h.open("peer", role="lead", status_card=OLD_CARD)
             reply = await h.server._on_tell(_tell(target, "held-milestone", "START held work"))
-            assert reply["delivery_status"] == "persisted"
-            assert len(await composite.front_desk_digest._rows(target)) == 1
-            assert not h.tmux.pasted
+            assert reply["delivery_status"] == "delivered"
+            assert len(await composite.front_desk_digest._rows(target)) == 0
+            assert h.tmux.pasted
             card = (await store.fetch_session(HOST, "peer"))["status_card"]
             assert card["update"] == "START held work"
             assert card["updated_at"] > OLD_CARD["updated_at"]

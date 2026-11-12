@@ -186,7 +186,7 @@ def test_rebind_then_fd_close_stale_tell_and_held_digest_follow_binding(tmp_path
                     raise
                 assert stdout, stderr.decode()
                 return proc.returncode, json.loads(stdout.decode().strip().splitlines()[-1])
-            code, held = await cli("worker", "tell", FD, "END: synthetic routine before swap")
+            code, held = await cli("worker", "tell", FD, "Routine synthetic message before swap")
             assert code == 0 and held["delivery_status"] == "persisted", held
             code, rebound = await cli("front-desk", "assistant", "rebind", "--target", HOST + ":desk-b",
                                       "--request-id", "socket-a-to-b", "--expected-revision", "0")
@@ -195,7 +195,7 @@ def test_rebind_then_fd_close_stale_tell_and_held_digest_follow_binding(tmp_path
                                      "--expected-generation", rows["target"]["session_generation"])
             assert code == 0 and closed["type"] == "close.ok", closed
             assert not await tmux.has_session("target")
-            code, stale = await cli("worker", "tell", FD, "END: synthetic routine after swap")
+            code, stale = await cli("worker", "tell", FD, "Routine synthetic message after swap")
             assert code == 0 and stale["delivery_status"] == "persisted", stale
             await composite.front_desk_digest.tick()
             digests = await store.submit(lambda c: [dict(r) for r in c.execute(
