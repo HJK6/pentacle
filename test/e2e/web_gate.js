@@ -491,11 +491,10 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
   const removeHandlers = () => { for (const [signal, handler] of handlers) process.removeListener(signal, handler); };
 
   try {
-    hostPort = await freePort();
     let profile = args.profile;
     if (!profile && !args.servedUrl) {
       runtime.fakeCosmo = await startFakeCosmo();
-      runtime.modelerFixture = await startHostedModelerFixture(scratch, hostPort);
+      runtime.modelerFixture = await startHostedModelerFixture(scratch, () => hostPort);
       daemon = await startDaemon(args, scratch, runtime);
       if (!args.scenarios.length || args.scenarios.includes('design-gallery')) await require('./lib/design_gallery_fixture.cjs').buildDesignGalleryFixture(scratch);
       runtime.fixtureDaemonPort = daemon.port;
@@ -506,10 +505,11 @@ async function runIsolated(args, runtimeDir, cleanupRuntime) {
         : `external daemon via profile ${profile} (observational: sidebar/transcript non-fatal)`);
     }
 
-    // A FIXED port (not 0), so a restart rebinds the same address and the
-    // already-loaded page reconnects to a fresh host process — the scenario the
-    // host-restart walk needs (see restartHost below).
-    if (!args.servedUrl) host = await startHostKeepingSignals(['--profile', profile, '--port', String(hostPort)]);
+    // Bind the initial host atomically; retain its assigned port for restart.
+    if (!args.servedUrl) {
+      host = await startHostKeepingSignals(['--profile', profile, '--port', '0']);
+      hostPort = host.port;
+    }
     const url = args.servedUrl || `http://127.0.0.1:${host.port}/`;
     report.note(`web host ${url}`);
 
