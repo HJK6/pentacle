@@ -74,21 +74,9 @@ class AssistantGuidelines:
             return {}
 
     async def _write_record(self, seat, record):
-        current_key = 'assistant.guidelines.' + seat
-        payload = json.dumps(record, sort_keys=True)
-        receipt_key = 'assistant.guidelines.delivery.' + str(record.get('tell_id') or '')
-        submit = getattr(self.store, 'submit', None)
-        if callable(submit):
-            def write(conn):
-                with conn:
-                    conn.execute('INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)', (current_key, payload))
-                    if record.get('tell_id'):
-                        conn.execute('INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)', (receipt_key, payload))
-            await submit(write)
-        else:
-            await self.store.put(current_key, payload)
-            if record.get('tell_id'):
-                await self.store.put(receipt_key, payload)
+        # The current record retains the pending tell ID and the previous
+        # confirmed delivery. The tell ledger owns delivery history.
+        await self.store.put('assistant.guidelines.' + seat, json.dumps(record, sort_keys=True))
 
     async def _record(self, seat, stream, generation, identity, *, tell_id, status):
         prior = await self._read_record(seat)

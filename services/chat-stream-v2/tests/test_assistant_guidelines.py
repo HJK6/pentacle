@@ -90,7 +90,7 @@ def test_front_desk_triggers_rate_limit_missing_and_switch(tmp_path, monkeypatch
         now[0] += 600
         await service.front_desk(stream='host:desk', generation='g1', previous=59000, current=58000)
         assert len(comms.sent) == 3 and 'new content' in comms.sent[-1]['text']
-        assert len([key for key in store.kv if key.startswith('assistant.guidelines.delivery.')]) == 3
+        assert not [key for key in store.kv if key.startswith('assistant.guidelines.delivery.')]
         (tmp_path / 'agents/assistant_baseline.md').unlink()
         comp.current = {'stream_id': 'host:desk2', 'generation': 'g2'}
         await service.front_desk()
@@ -337,4 +337,72 @@ def test_guidelines_delivery_refuses_stale_binding(tmp_path, monkeypatch):
             assert tmux.pastes == []
         finally:
             store.stop()
+    asyncio.run(go())
+
+
+def test_off_inspect_json_matches_base_82dc9599():
+    from unittest.mock import AsyncMock
+    from server import Server, SEND_FRAMES_NOT_IMPLEMENTED
+    async def go():
+        server = object.__new__(Server)
+        session = {'status': 'closed', 'role': 'worker', 'session_generation': 'generation'}
+        server.sessions = SimpleNamespace(resolve=AsyncMock(return_value=('host', 'seat')),
+                                          get=lambda _stream: dict(session))
+        server.store = SimpleNamespace(fetch_session_event_tail=AsyncMock(return_value=[]),
+            find_report=AsyncMock(return_value=None), fetch_role_source=AsyncMock(return_value=None),
+            latest_close_audit=AsyncMock(return_value=None), get_deferred_reap=AsyncMock(return_value=None),
+            usage_provenance_summary=AsyncMock(return_value=None))
+        server._composite_for = lambda _stream: None
+        server.lane_rulings = None
+        server.authority_restore = None
+        server.assistant_composite = None
+        baseline = {'type': 'inspect_stream.ok', 'stream_id': 'host:seat',
+            'session': {**session, 'role_source': 'spawn'}, 'recent_events': [],
+            'send_frames': dict(SEND_FRAMES_NOT_IMPLEMENTED), 'existing_report': None,
+            'close_audit': None, 'lane_ruling': None, 'restore': None,
+            'deferred_reap': None, 'usage_provenance': None}
+        for enabled in (None, False):
+            if enabled is None:
+                if hasattr(server, 'guidelines'):
+                    del server.guidelines
+            else:
+                server.guidelines = SimpleNamespace(enabled=False, inspect=AsyncMock())
+            actual = await server._on_inspect_stream({'stream_id': 'host:seat', 'event_tail': 0})
+            assert json.dumps(actual, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+        server.guidelines = SimpleNamespace(enabled=True, inspect=AsyncMock(return_value={'seat': 'advisor'}))
+        enabled = await server._on_inspect_stream({'stream_id': 'host:seat', 'event_tail': 0})
+        assert enabled['assistant_guidelines'] == {'seat': 'advisor'}
+        assert {k: v for k, v in enabled.items() if k != 'assistant_guidelines'} == baseline
+    asyncio.run(go())
+
+
+def test_delivery_bookkeeping_stays_bounded_for_many_advisor_requests():
+    async def go():
+        store = Store()
+        service = ag.AssistantGuidelines(store, Composite(), Rulings(), RecordingComms(),
+            env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED': 'on'})
+        for index in range(1000):
+            await service.advisor_record('host:advisor', 'a1', f'{index:064x}', f'tell-{index}', 'delivered')
+        keys = {key for key in store.kv if key.startswith('assistant.guidelines.')}
+        assert keys == {'assistant.guidelines.advisor'}
+        record = json.loads(store.kv['assistant.guidelines.advisor'])
+        assert record['tell_id'] == 'tell-999' and record['identity'] == f'{999:064x}'
+        await service.advisor_record('host:advisor', 'a1', 'pending-hash', 'pending-tell', 'committed_pending_proof')
+        record = json.loads(store.kv['assistant.guidelines.advisor'])
+        assert record['tell_id'] == 'pending-tell' and record['previous_delivery']['identity'] == f'{999:064x}'
+        assert {key for key in store.kv if key.startswith('assistant.guidelines.')} == keys
+        from store import Store as SQLiteStore
+        sqlite_store = SQLiteStore(':memory:')
+        sqlite_store.start()
+        try:
+            real = ag.AssistantGuidelines(sqlite_store, Composite(), Rulings(), RecordingComms(),
+                env={'PENTACLE_ASSISTANT_GUIDELINES_ENABLED': 'on'})
+            for index in range(100):
+                await real.advisor_record('host:advisor', 'a1', str(index), f'sqlite-{index}', 'delivered')
+            stored_keys = await sqlite_store.submit(lambda conn: [r[0] for r in conn.execute(
+                "SELECT k FROM kv WHERE k LIKE 'assistant.guidelines.%'")])
+            assert stored_keys == ['assistant.guidelines.advisor']
+            assert json.loads(await sqlite_store.get('assistant.guidelines.advisor'))['tell_id'] == 'sqlite-99'
+        finally:
+            sqlite_store.stop()
     asyncio.run(go())
