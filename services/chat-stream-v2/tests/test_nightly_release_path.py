@@ -83,6 +83,7 @@ def test_nightly_calls_shared_checks_on_deployed_stamp(tmp_path, monkeypatch, ou
     service = SimpleNamespace(name='v2')
     monkeypatch.setattr(d, 'SERVICES', {'v2': service}, raising=False)
     monkeypatch.setattr(d, '_read_stamp', lambda repo, svc: stamp)
+    monkeypatch.setattr(d, 'release_exclusions', lambda repo, svc: [])
     monkeypatch.setattr(d, '_git_head', lambda repo, runner: 'a'*40, raising=False)
     seen = []
     def checks(svc, repo, sha, value, **kwargs):
@@ -91,7 +92,8 @@ def test_nightly_calls_shared_checks_on_deployed_stamp(tmp_path, monkeypatch, ou
     monkeypatch.setattr(d, 'run_post_release_checks', checks, raising=False)
     args = SimpleNamespace(checkout=str(tmp_path), evidence=str(tmp_path/'evidence'), service='v2')
     assert nj.check_release(args, deploy_module=d) == rc
-    assert seen == [(service, tmp_path, 'a'*40, stamp)]
+    assert seen == [(service, tmp_path, 'a'*40, {**stamp, 'release_exclusions': []})]
+    assert stamp == {'sha': 'a'*40}
     record = json.loads((tmp_path/'evidence/receipt.json').read_text())
     assert record['source_sha'] == 'a'*40
     assert record['result'] == result
