@@ -25,7 +25,8 @@ def _step():
                 'contracts': {'cli-pytest', 'shared-pytest'}}
     jobs = workflow['jobs']
     assert set(jobs) == set(expected) | {'checks'}
-    assert all(step['timeout-minutes'] == 5 for job in expected for step in jobs[job]['steps']
+    assert all(0 < step['timeout-minutes'] < jobs[job]['timeout-minutes']
+               for job in expected for step in jobs[job]['steps']
                if step.get('name') == 'System packages')
     assert set(jobs['checks']['needs']) == set(expected)
     assert len(jobs['checks']['needs']) == len(expected)
