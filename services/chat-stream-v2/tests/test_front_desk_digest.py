@@ -428,7 +428,7 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
 
 
 @pytest.mark.parametrize('body,msg', [
-    ('receipt: work', {}), ('receipt: done', {}),
+    ('START: work', {}), ('END: done', {}),
     ('tree idle', {'_outbound_notice_kind':'tree_idle'}),
     ('context_advisory: h:child high', {}),
     ('[Assistant lane ruling] '+json.dumps({'state':'done','action':'spawn'}),
@@ -638,6 +638,27 @@ def test_typed_error_alert_prefix_classification_is_unchanged(body, wakes):
                 msg={'tell_id': 'fresh-alert', '_outbound_notice_kind': 'error_alert'}, verb='tell')
             assert (reply is None) is wakes
             assert len(await desk._rows('h:desk')) == (0 if wakes else 1)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_retained_prefix_hold_is_not_promoted_on_retry():
+    """A pre-upgrade hold keeps its durable identity despite the relaxed prefix rule."""
+    async def run():
+        store = Store(':memory:'); store.start()
+        try:
+            desk = _desk(store, 'h:desk', 'g').front_desk_digest
+            body = 'START: retained before upgrade'
+            nid = desk._held_id('h:desk', 'tell', 'old-start')
+            await store.enqueue_outbound_notice(notice_id=nid, tell_id=nid,
+                kind=HELD_KIND, dedupe_key=nid, recipient_stream_id='h:desk',
+                body=body, metadata={'root_generation': 'g'})
+            reply = await desk.ingress(target_stream_id='h:desk', body=body,
+                msg={'tell_id': 'old-start'}, verb='tell')
+            assert reply['delivery_status'] == 'persisted'
+            assert reply['front_desk_hold_id'] == nid
+            assert len(await desk._rows('h:desk')) == 1
         finally:
             store.stop()
     asyncio.run(run())

@@ -2,7 +2,7 @@
 
 The FD's own assigned spec can be a member of an active lane (close custody). Physical
 input admission (linked_only) to the authenticated FD is operator traffic, while
-assigning lane execution to the FD stays refused.
+lane state and FD role do not fence execution.
 """
 from __future__ import annotations
 
@@ -47,21 +47,17 @@ async def test_send_to_fd_with_assigned_lane_member_is_claimed(store, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_assigning_lane_execution_to_fd_stays_forbidden(store, tmp_path):
+async def test_assigning_lane_execution_to_fd_is_admitted(store, tmp_path):
     target, fd = await fd_holding_lane_member(store, tmp_path)
-    with pytest.raises(VerbError) as exc:
-        await store.require_lane_execution(target, target_stream_id=fd[0])
-    assert exc.value.code == "work_lane_fd_execution_forbidden"
+    assert await store.require_lane_execution(target, target_stream_id=fd[0]) is None
 
 
 @pytest.mark.asyncio
-async def test_input_to_non_fd_seat_in_paused_lane_still_refused(store, tmp_path):
+async def test_input_to_non_fd_seat_in_paused_lane_is_admitted(store, tmp_path):
     target = item(tmp_path / "memory", "demo__paused")
     await lane(store, "wl-paused", target, state="paused")
     worker = await seat(store, "worker", target, assigned=target, role="worker")
-    with pytest.raises(VerbError) as exc:
-        await store.require_lane_execution(target, target_stream_id=worker[0], linked_only=True, fd_input=True)
-    assert exc.value.code == "work_lane_not_active"
+    assert await store.require_lane_execution(target, target_stream_id=worker[0], linked_only=True, fd_input=True) is None
 
 
 class _Sessions:
@@ -99,33 +95,27 @@ async def test_physical_input_to_fd_admitted_even_when_lane_paused(store, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_physical_input_to_former_fd_is_gated_again(store, tmp_path):
+async def test_physical_input_to_former_fd_is_admitted(store, tmp_path):
     _target, fd = await fd_holding_lane_member(store, tmp_path, state="paused")
     other = await seat(store, "new-fd")
     await store.submit(lambda conn: (conn.execute(
         "UPDATE v2_assistant_direct_binding SET stream_id=?, generation=? WHERE name='assistant'", other), conn.commit()))
-    with pytest.raises(VerbError) as exc:
-        await _physical_input(store, fd[0])
-    assert exc.value.code == "work_lane_not_active"
+    assert await _physical_input(store, fd[0]) == "submitted"
 
 
 @pytest.mark.asyncio
-async def test_role_or_title_only_fd_gets_no_exemption(store, tmp_path):
+async def test_role_or_title_only_fd_is_admitted_without_exemption(store, tmp_path):
     target = item(tmp_path / "memory", "demo__fake")
     await lane(store, "wl-fake", target, state="paused")
     fake = await seat(store, "front-desk", target, assigned=target, role="front_desk", visibility="visible")
-    with pytest.raises(VerbError) as exc:
-        await _physical_input(store, fake[0])
-    assert exc.value.code == "work_lane_not_active"
+    assert await _physical_input(store, fake[0]) == "submitted"
 
 
 @pytest.mark.asyncio
-async def test_spawn_or_assignment_admission_for_fd_stays_forbidden(store, tmp_path):
+async def test_spawn_or_assignment_admission_for_fd_is_admitted(store, tmp_path):
     target, fd = await fd_holding_lane_member(store, tmp_path)
     for kwargs in ({"target_stream_id": fd[0]}, {"target_stream_id": fd[0], "linked_only": True}):
-        with pytest.raises(VerbError) as exc:
-            await store.require_lane_execution(target, **kwargs)
-        assert exc.value.code == "work_lane_fd_execution_forbidden"
+        assert await store.require_lane_execution(target, **kwargs) is None
 
 
 @pytest.mark.asyncio

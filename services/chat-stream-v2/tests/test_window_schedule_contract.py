@@ -1550,7 +1550,7 @@ def test_schedule_fire_preserves_service_and_qa_owner_authority(tmp_path, owner_
 
 
 class LinkCheckingSpawn(FakeSpawn):
-    """The production gate's shape: refuse unless the resolved assignment is lane-linked."""
+    """The retained assignment requirement, independent of lane membership."""
     def __init__(self, linked: set[str]) -> None:
         super().__init__()
         self.linked, self.checked = linked, []
@@ -1560,8 +1560,6 @@ class LinkCheckingSpawn(FakeSpawn):
         self.checked.append(binding.get("assigned_spec_id"))
         if not binding.get("assigned_spec_id"):
             return VerbError("work_assignment_required", "pass --spec-id")
-        if binding["assigned_spec_id"] not in self.linked:
-            return VerbError("work_lane_assignment_unlinked", "not in an open lane")
         return None
 
 
@@ -1572,9 +1570,8 @@ def test_scheduled_commission_checks_its_link_at_insert_and_orders_the_assignmen
     surface.mark_store_ready()
     try:
         sessions.rows["hosta:requester"]["qualified_spec_ids"] = ["spec_example__other", SPEC]
-        with pytest.raises(VerbError) as exc:
-            schedule_insert(surface, spec_ids=["spec_example__other"])
-        assert exc.value.code == "work_lane_assignment_unlinked"
+        unlinked = schedule_insert(surface, spec_ids=["spec_example__other"])
+        assert unlinked["schedule"]["owner_spec_ids"] == ["spec_example__other"]
         sessions.rows["hosta:requester"]["assigned_spec_id"] = SPEC
         inserted = schedule_insert(surface, spec_ids=[])  # portfolio owner: its assignment, not a tag
         assert spawn.checked[-1] == SPEC
