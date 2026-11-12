@@ -452,7 +452,7 @@ class PreflightFaults(Tmp):
         (co / "services/chat-stream-v2/tests/test_a.py").write_text("")
         guards = ["tests/test_capabilities.py::" + name for name in (
             "test_changed_test_skip_calls_are_confined_to_requires",
-            "test_original_assertions_and_tracked_skip_are_unchanged",
+            "test_sigkill_reaping_remains_tracked_without_skip",
             "test_fixture_manifest_is_explicitly_synthetic_and_hash_pinned",
             "test_scope_manifest_covers_all_new_portability_tests")]
         (co / "services/chat-stream-v2/tests/test_capabilities.py").write_text("")

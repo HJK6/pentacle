@@ -151,7 +151,7 @@ def test_changed_test_skip_calls_are_confined_to_requires():
                 pytest.fail(f"changed test bypasses requires: {key}")
 
 
-def test_original_assertions_and_tracked_skip_are_unchanged():
+def test_sigkill_reaping_remains_tracked_without_skip():
     import ast
     root = Path(__file__).parent
     key = "test_harness_reaping.py::test_sigkill_then_reap_manifest_cleans"
