@@ -13,6 +13,12 @@ from assistant_lane_rulings import AssistantLaneRulings
 from assistant_composite import AssistantCompositeConfig
 
 
+async def mirror_count(store):
+    return await store.submit(lambda conn: conn.execute(
+        "SELECT count(*) FROM session_event_tail WHERE stream_id=? AND identity LIKE 'assistant-mirror:%'",
+        (ASSISTANT,)).fetchone()[0])
+
+
 def test_environment_defaults_are_primary_on_and_daff_off():
     assert AssistantCompositeConfig.from_env({}).strict_publication_default is True
     assert AssistantCompositeConfig.from_env({}, name='daff', env_prefix='DAFF_').strict_publication_default is False
@@ -26,6 +32,7 @@ def test_primary_turn_final_never_publishes_implicitly():
         await h.dispatch_user(route, "one-door-user")
         await h.ingest("ASSIST_TEXT", "Unpublished turn prose", "one-door-final", final=True)
         assert await h.answers() == []
+        assert await mirror_count(h.store) == 0
         assert await h.publications(route["dispatch_id"]) == []
     run(body, strict=True)
 
@@ -74,10 +81,7 @@ def test_peer_and_notice_turn_text_is_not_mirrored(sender_kind, wire):
         assert receipt['reply']['delivery_status'] == 'delivered'
         await h.ingest('ASSIST_TEXT', 'unpublished prose', 'trigger-final', final=True)
         assert await h.answers() == []
-        rows = await h.store.submit(lambda conn: conn.execute(
-            "SELECT count(*) FROM session_event_tail WHERE stream_id=? AND identity LIKE 'assistant-mirror:%'",
-            (ASSISTANT,)).fetchone()[0])
-        assert rows == 0
+        assert await mirror_count(h.store) == 0
     run(body, strict=True)
 
 
@@ -198,8 +202,16 @@ def test_unanswered_marker_is_not_recreated_after_store_restart(tmp_path):
             landed = datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
             service = AssistantLaneRulings(SimpleNamespace(store=store, assistant_composite=composite, broadcast=None))
             await service._mark_unanswered(landed + 300)
+            await composite.stop()
+            composite = None
             store.stop()
+            store = Store(str(tmp_path / 'sessions.db'))
             store.start()
+            composite = AssistantComposite(store, config=replace(_config(root['session_generation']),
+                                           strict_publication_default=True), dispatch=dispatch)
+            await composite.ensure_projection()
+            harness = Harness(store, composite, root['session_generation'])
+            service = AssistantLaneRulings(SimpleNamespace(store=store, assistant_composite=composite, broadcast=None))
             await service._mark_unanswered(landed + 301)
             assert [event['publish_kind'] for event in await harness.answers()] == ['unanswered']
         finally:
@@ -368,11 +380,35 @@ def test_desk_credential_is_persisted_and_dispatch_replies_are_refused(monkeypat
         service = AssistantLaneRulings(SimpleNamespace(store=h.store, assistant_composite=h.composite, broadcast=None))
         await service._mark_unanswered(landed + 301)
         assert await h.answers() == []
+        assert await mirror_count(h.store) == 0
         reply = await h.composite.publish({"request_id": "relay-desk", "composite_stream_id": ASSISTANT,
             "publish_kind": "prose", "message": "Relayed desk message", "note_type": "relay",
             "ref": "message:desk-1", "_auth_context": {"token_verified": True, "stream_id": ROOT,
             "session_generation": h.generation}}, actor_stream_id=ROOT)
         assert not reply["duplicate"]
+    run(body, strict=True)
+
+
+def test_batch_cannot_answer_a_desk_dispatch(monkeypatch):
+    credential = '6a54b9a1-406f-4d5f-8ffb-818b703e6a56'
+    monkeypatch.setattr(desk_stamp, 'load', lambda: {credential: 'test-desk'})
+    async def body(h):
+        await h.composite.accept_input({'message': 'desk relay', 'msg_id': 'batch-desk'},
+                                       operator_principal='operator:' + credential)
+        for _ in range(200):
+            desk = await h.store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity='batch-desk')
+            if desk and desk['delivery_state'] == 'landed':
+                break
+            await asyncio.sleep(.01)
+        assert json.loads(desk['route_json'])['desk_dispatch'] is True
+        operator = await h.route('batch-operator')
+        assert 'batch-desk' in json.loads(operator['route_json'])['direct_envelope']['wire_body']
+        with pytest.raises(ValueError, match='assistant_publish_desk_dispatch'):
+            await h.composite.publish({'request_id': 'publish:' + operator['dispatch_id'],
+                'composite_stream_id': ASSISTANT, 'dispatch_id': operator['dispatch_id'],
+                'reply_to_message_id': 'batch-operator', 'reply_to_message_ids': ['batch-operator', 'batch-desk'],
+                'publish_kind': 'prose', 'response_state': 'final', 'message': 'Combined answer'}, actor_stream_id=ROOT)
+        assert not await h.answers()
     run(body, strict=True)
 
 
