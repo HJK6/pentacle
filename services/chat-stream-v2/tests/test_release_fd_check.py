@@ -45,8 +45,39 @@ def test_linked_published_reply_passes(monkeypatch):
     assert result['reply_message_id'] == 'publication:answer'
     assert calls[0] == {'type': 'assistant.binding'}
     assert calls[1] == {'type': 'send', 'to_stream_id': 'fixture-composite:assistant',
-                        'message': '[release-check aaaaaaaa probe-nonce] Release check. Reply with exactly: PONG probe-nonce'}
+                        'message': '[release-check aaaaaaaa probe-nonce] Release check. Reply with exactly: PONG probe-nonce',
+                        'optimistic_id': 'probe-nonce'}
     assert calls[2]['stream_id'] == 'fixture-composite:assistant'
+
+
+def test_probe_satisfies_real_composite_input_identity(monkeypatch):
+    from types import SimpleNamespace
+    from assistant_composite import AssistantComposite
+    install(monkeypatch, [event()])
+    original = check._operator_connection
+    class ReachedStore(Exception):
+        pass
+    async def get_route(**kwargs):
+        assert kwargs['input_identity']
+        raise ReachedStore()
+    composite = SimpleNamespace(enabled=True,
+        config=SimpleNamespace(stream_id='fixture-composite:assistant'),
+        store=SimpleNamespace(get_assistant_composite_route=get_route))
+    @contextmanager
+    def connection(*args):
+        with original(*args) as (rpc, *rest):
+            def validate(payload, prefix, **kwargs):
+                if prefix == 'send':
+                    pending = AssistantComposite._accept_input_locked(composite, payload)
+                    try:
+                        with pytest.raises(ReachedStore):
+                            pending.send(None)
+                    finally:
+                        pending.close()
+                return rpc(payload, prefix, **kwargs)
+            yield validate, *rest
+    monkeypatch.setattr(check, '_operator_connection', connection)
+    assert check.run_check('ws://owned.invalid', Path('/owned-token'), 'a' * 40)['outcome'] == 'passed'
 
 
 @pytest.mark.parametrize('rows', [[], [event(text='PONG old-nonce')],

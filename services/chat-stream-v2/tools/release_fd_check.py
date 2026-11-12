@@ -33,7 +33,8 @@ def run_check(url: str, token_path: Path, target_sha: str,
             target = binding.get('composite_stream_id')
             if not isinstance(target, str) or not target:
                 return {**result, 'reason': 'input_identity_missing'}
-            sent = rpc({'type': 'send', 'to_stream_id': target, 'message': message},
+            sent = rpc({'type': 'send', 'to_stream_id': target, 'message': message,
+                        'optimistic_id': nonce},
                        'send', deadline=deadline)
             accepted = sent.get('assistant_composite') or {}
             message_id = accepted.get('message_id')
