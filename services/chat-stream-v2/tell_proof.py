@@ -523,7 +523,7 @@ def delivery_wire(event):
     return raw.get('peer_wire_text') if isinstance(raw.get('peer_wire_text'), str) else event.get('text')
 
 
-def split_native_input(conn, event):
+def split_native_input(conn, event, *, lookup_deadline=None):
     """Locate only unique, unconsumed exact delivery spans in an admitted input.
 
     The original record and full text remain in raw. Textual headers are never
@@ -544,12 +544,8 @@ def split_native_input(conn, event):
         return [event]
     from ingest import _identity_key
     identity = _identity_key(event)
-    prior = conn.execute(
-        "SELECT event_json FROM session_event_tail WHERE stream_id=? AND session_created_at=? "
-        "AND json_extract(event_json,'$.raw.native_input_identity')=? "
-        "AND json_extract(event_json,'$.raw.native_input_text')=? LIMIT 1",
-        (target, seat["created_at"], identity, text),
-    ).fetchone()
+    from native_input_lookup import prior_input
+    prior = prior_input(conn, target, seat["created_at"], identity, text, deadline=lookup_deadline)
     retained_cuts = (json.loads(prior[0]).get("raw") or {}).get("native_segment_spans") if prior else None
     spans = []
     ambiguous = False

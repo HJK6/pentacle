@@ -1970,6 +1970,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(SESSION_EVENT_TAIL_INDEX_DDL)
             conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
             conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
+            from native_input_lookup import ensure_schema as ensure_native_input_schema
+            ensure_native_input_schema(conn)
             conn.execute(SEND_RECEIPT_DDL)
             # Additive migration: an older receipts table gains meta_json (carries
             # meta.voice={duration_s} for the voice-input lane); a fresh DDL has it.
@@ -5728,8 +5730,12 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
 
     async def prepare_native_input_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         from tell_proof import split_native_input
-        return await self.submit(lambda conn: [segment for event in events
-                                                for segment in split_native_input(conn, event)])
+        from native_input_lookup import PREPARE_SECONDS
+        def prepare(conn):
+            deadline = time.monotonic() + PREPARE_SECONDS
+            return [segment for event in events
+                    for segment in split_native_input(conn, event, lookup_deadline=deadline)]
+        return await self.submit(prepare)
 
     @staticmethod
     def _insert_session_event_conn(conn, stream_id, session_created_at, event, identity):
