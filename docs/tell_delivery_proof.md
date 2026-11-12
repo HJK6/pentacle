@@ -11,6 +11,15 @@ custody, with zero confirmed attempts. This is an unknown outcome, not a claim
 that input happened. The result can replace that prepared row only through an
 exact payload-and-anchor comparison in the existing promotion transaction.
 
+Send and tell capture their pre-input watermark with a current-session durable
+row-ID lookup, without decoding or projecting history. Proof polls select only
+rows above that watermark, newest 500 raw rows first, then decode, project and
+return them oldest-first. This preserves the former projected-tail result after
+watermark filtering, including undecodable rows consuming the raw-row limit.
+An undecodable newest row can raise the numeric watermark without changing
+proof eligibility: subsequent events receive larger IDs. Both reads retain the
+current `sessions.created_at` fence; proof rules and deadlines are unchanged.
+
 A caller cancellation, proof-reader failure, or daemon restart between
 persistence and paste cannot authorize a second paste. Definite input-admission
 refusals occur before this receipt is prepared. Pending custody is already
