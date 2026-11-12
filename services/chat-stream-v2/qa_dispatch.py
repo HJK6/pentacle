@@ -40,7 +40,7 @@ async def actor(store, msg):
             else None
         )
     claims = [msg.get(k) for k in ("from_stream_id", "caller_stream_id") if msg.get(k)]
-    if not owner and not claims and "stream_token" not in msg and not (isinstance(auth, dict) and auth.get("stream_id")):
+    if not owner and not claims and msg.get("stream_token") is None and not (isinstance(auth, dict) and auth.get("stream_id")):
         return "", ""
     if not owner or any(value != owner for value in claims):
         raise VerbError(

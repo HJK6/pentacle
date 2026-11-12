@@ -110,6 +110,9 @@ def test_unknown_coordinator_is_recorded_but_forged_claim_is_refused():
                 'select coordinator,coordinator_generation from v2_qa_commissions where reviewer=?',
                 ('localhost:reviewer',)).fetchone())
             assert tuple(stored) == ('', '')
+            null_token = await qa_dispatch.admit(store, {'stream_token': None, 'initial_prompt': 'Review'}, row=row,
+                reviewer='localhost:null-token', generation='null-generation', msg_id=0)
+            assert null_token['coordinator_generation'] == ''
             with pytest.raises(VerbError) as exc:
                 await qa_dispatch.admit(store, {'from_stream_id': LEAD, 'initial_prompt': 'Review'},
                     row=row, reviewer='localhost:other-reviewer', generation='other-generation', msg_id=0)
