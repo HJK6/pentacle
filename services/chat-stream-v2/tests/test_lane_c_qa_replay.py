@@ -44,6 +44,15 @@ def test_missing_surface_uses_own_spec_phase_counter():
                                                  generation=target['session_generation'], msg_id=0)
                 assert result['surface'] == fallback
                 await ledger.ingest(report_msg(name))
+            target = await store.fetch_session('localhost', 'qa5')
+            with pytest.raises(VerbError) as pending:
+                await qa_dispatch.admit(store, msg, row=row, reviewer='localhost:qa5',
+                                        generation=target['session_generation'], msg_id=0)
+            assert pending.value.code == 'qa_adjudication_required'
+            assert pending.value.extra['surface'] == fallback
+            assert pending.value.extra['cycle'] == 1
+            assert pending.value.extra['report_ids'] == ['reject-qa3', 'reject-qa4']
+            for name in ('qa3', 'qa4'):
                 adjudicated = await issue(server, 'adjudicate', surface=fallback,
                     report_id=f'reject-{name}', adjudicated_valid=True, reason='Valid synthetic reject')
                 assert adjudicated['type'] == 'coordination.spec_issue.adjudicate.ok'
@@ -172,21 +181,6 @@ def test_surface_text_is_not_a_form_refusal():
                 'qa_surface': 'Review (client flow): long description', 'initial_prompt': 'Review'},
                 row=row, reviewer='localhost:reviewer', generation='reviewer-generation', msg_id=0)
             assert result['surface'] == 'Review (client flow): long description'
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
-def test_unadjudicated_rejects_do_not_block_another_review():
-    from test_qa_dispatch_counter import send_msg
-    async def run():
-        store, _, _, comms, ledger, server = await state()
-        try:
-            for name in ('qa1', 'qa2'):
-                assert (await comms.send(send_msg(name)))['delivery'] == 'landed'
-                await ledger.ingest(report_msg(name))
-            assert (await comms.send(send_msg('qa3')))['delivery'] == 'landed'
-            assert (await issue(server, 'show'))['report_ids'] == []
         finally:
             store.stop()
     asyncio.run(run())

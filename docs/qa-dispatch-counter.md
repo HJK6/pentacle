@@ -33,6 +33,16 @@ reopened owner cannot authorize that fire.
 
 ## Adjudicate and diagnose
 
+Two open commissions with adjudicatable reject reports in the same
+spec/surface/cycle refuse another commission with `qa_adjudication_required`,
+listing the report ids and exact adjudication commands. Only reject reports with
+the required typed evidence and an unambiguous commission binding count. Marking
+a report `--void` removes its commission from the pending count; marking both
+`--valid` moves them into the valid-reject count, producing
+`qa_dispatch_reject_limit` until `spec-issue diagnose` records a diagnosis and
+pivot. `diagnose` itself is never blocked by either limit and still requires two
+valid rejects before advancing the cycle.
+
 Only adjudicated valid rejects count toward the limit. Diagnosis still requires
 two valid rejects and advances that surface's cycle after recording a pivot.
 

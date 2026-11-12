@@ -202,11 +202,19 @@ def test_schedule_persists_scope_and_checks_at_fire(monkeypatch, tmp_path, case)
                     conn.commit()
                 await store.submit(lose_lane)
             run_msg = message("schedule.run", schedule_id=sid)
-            if case in ("rejects", "rearm", "owner_generation") or case.startswith("lane_"):
+            if case in ("rejects", "rearm", "owner_generation", "scheduled_fire_refuses_pending") or case.startswith("lane_"):
                 with pytest.raises(VerbError) as exc:
                     await schedule._fire_schedule(sid)
                 result = exc.value.extra.get("spawn", {})
                 expected = "qa_unauthorized" if case == "owner_generation" else "qa_dispatch_reject_limit"
+                if case == "scheduled_fire_refuses_pending":
+                    expected = "qa_adjudication_required"
+                    assert result["report_ids"] == ["reject-qa1", "reject-qa2"]
+                    assert len(result["commands"]) == 2
+                    persisted = (await schedule.schedule_get(message("schedule.get", schedule_id=sid)))["schedule"]
+                    assert persisted["state"] == "indeterminate"
+                    assert persisted["last_error_code"] == expected
+                    assert len((await issue(server, "show"))["commissions"]) == 2
                 if case.startswith("lane_"):
                     expected = "work_lane_not_active" if case == "lane_paused_at_fire" else "work_lane_visible_lead_required"
                 assert result.get("error_code") == expected, (

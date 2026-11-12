@@ -179,6 +179,33 @@ def _rejects(conn, spec, surface, cycle):
     ]
 
 
+def _pending_rejects(conn, spec, surface, cycle):
+    """Select one adjudicatable pending reject per open commission."""
+    pending = {}
+    commissions = conn.execute(
+        "SELECT * FROM v2_qa_commissions WHERE spec_id=? AND surface=? "
+        "AND cycle=? AND report_id IS NULL",
+        (spec, surface, cycle),
+    ).fetchall()
+    for commission in commissions:
+        key = tuple(commission[k] for k in ("reviewer", "generation", "msg_id"))
+        reports = conn.execute(
+            "SELECT * FROM v2_reports WHERE from_stream_id=? AND session_generation=? "
+            "AND status='done' AND qa_verdict='reject' ORDER BY created_at",
+            (commission["reviewer"], commission["generation"]),
+        )
+        for report in reports:
+            if not _adjudicatable(report):
+                continue
+            resolved, _ = _commission_for_report(conn, report)
+            if resolved is not None and tuple(
+                resolved[k] for k in ("reviewer", "generation", "msg_id")
+            ) == key:
+                pending[key] = report["report_id"]
+                break
+    return pending
+
+
 def _check_cycle(conn, spec, surface, cycle, limits=True):
     current = _current(conn, spec, surface)
     if cycle != current:
@@ -190,6 +217,22 @@ def _check_cycle(conn, spec, surface, cycle, limits=True):
             surface=surface,
         )
     if limits:
+        pending = _pending_rejects(conn, spec, surface, cycle)
+        if len(pending) >= 2:
+            report_ids = sorted(pending.values())
+            raise QaError(
+                "qa_adjudication_required",
+                "adjudicate these reject reports (--valid or --void) before another QA commission",
+                spec_id=spec,
+                surface=surface,
+                cycle=cycle,
+                report_ids=report_ids,
+                commands=[
+                    f"agent-orch spec-issue adjudicate {rid} --spec-id {spec} "
+                    f"--surface {surface} --cycle {cycle} --valid|--void --reason '<reason>'"
+                    for rid in report_ids
+                ],
+            )
         reports = _rejects(conn, spec, surface, cycle)
         if len(reports) >= 2:
             raise QaError(
