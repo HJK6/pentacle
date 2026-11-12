@@ -364,6 +364,9 @@ class OutboundNoticeQueue:
             if kind == NOTICE_KIND_LANE_DIGEST or metadata.get('front_desk_digest'):
                 from front_desk_digest import DIGEST_TOKEN
                 message['_front_desk_digest_token'] = DIGEST_TOKEN
+            if kind == "dispatch_no_reply":
+                from front_desk_digest import WAKE_TOKEN
+                message["_front_desk_wake_token"] = WAKE_TOKEN
             if kind == "spawn_delivery_failed" and metadata.get("parent_generation"):
                 message["_notification_answer_generation"] = metadata["parent_generation"]
             if kind == "error_alert":

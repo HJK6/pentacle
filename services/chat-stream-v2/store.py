@@ -2458,6 +2458,73 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 return key
         return None
 
+    def _notice_unanswered_turn_conn(self, conn, composite_stream_id, source_stream_id,
+                                     generation, event, event_id):
+        """Persist a missing-reply notice atomically with the structured turn end."""
+        raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+        transcript, record = raw.get("source_session_identity"), raw.get("jsonl_record_uuid")
+        if (event.get("kind") != "ASSIST_TEXT" or raw.get("is_sidechain")
+                or not isinstance(transcript, str) or not transcript
+                or not isinstance(record, str) or not record
+                or not (raw.get("transport") == "claude-jsonl" and raw.get("stop_reason") == "end_turn"
+                        or raw.get("transport") == "codex-rollout" and raw.get("phase") == "final_answer")):
+            return
+        host, _, name = source_stream_id.partition(":")
+        source = conn.execute(
+            "SELECT s.created_at FROM sessions s JOIN v2_session_generations g "
+            "ON g.host=s.host AND g.session_name=s.session_name "
+            "WHERE s.host=? AND s.session_name=? AND s.status='open' AND g.generation=?",
+            (host, name, generation)).fetchone()
+        if source is None:
+            return
+        from tell_proof import delivery_wire, input_origin, operator_dispatch
+        for candidate in self._assistant_turn_inputs_conn(conn, source_stream_id, source["created_at"],
+                                                          event_id, transcript):
+            item = json.loads(candidate["event_json"])
+            wire = delivery_wire(item)
+            if not str(wire or "").strip():
+                continue
+            origin = input_origin(conn, item, candidate["event_id"])
+            if origin["kind"] in {"peer", "service"} and origin["verified"]:
+                continue
+            if origin["kind"] != "operator":
+                return
+            dispatch = operator_dispatch(conn, source_stream_id, wire, generation)
+            if dispatch is None:
+                return
+            route = conn.execute(
+                "SELECT * FROM v2_assistant_composite_routes WHERE stream_id=? AND dispatch_id=? "
+                "AND routing_state='resolved' AND delivery_state='landed'",
+                (composite_stream_id, dispatch["dispatch_id"])).fetchone()
+            if route is None or json.loads(route["route_json"] or "{}").get("desk_dispatch"):
+                return
+            dispatch_id = route["dispatch_id"]
+            notice_id = "dispatch_no_reply:" + dispatch_id
+            if conn.execute("SELECT 1 FROM v2_outbound_notices WHERE notice_id=?", (notice_id,)).fetchone():
+                return
+            if conn.execute("SELECT 1 FROM v2_assistant_composite_publications WHERE stream_id=? AND dispatch_id=? LIMIT 1",
+                            (composite_stream_id, dispatch_id)).fetchone():
+                return
+            import shlex
+            from outbound_notices import ensure_notice_marker
+            from store_routing import _insert_outbound_notice_conn
+            args = (f"--composite-stream-id {shlex.quote(composite_stream_id)} "
+                    f"--dispatch-id {shlex.quote(dispatch_id)} "
+                    f"--reply-to-message-id {shlex.quote(route['input_identity'])} ")
+            question = route["reply_to_question_id"]
+            if question:
+                args += f"--reply-to-question-id {shlex.quote(question)} "
+            ack = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id + ':ack')} "
+                   f"{args}--publish-kind status --response-state acknowledged --message 'I received your message.'")
+            final = (f"agent-orch assistant publish --request-id {shlex.quote('publish:' + dispatch_id)} "
+                     f"{args}--publish-kind prose --response-state final --message '<final answer>'")
+            body = (f"No reply was published for dispatch {dispatch_id}.\n"
+                    f"Message: {str(route['body'] or '')[:80]}\nAcknowledgment: {ack}\nFinal: {final}")
+            _insert_outbound_notice_conn(conn, notice_id=notice_id, kind="dispatch_no_reply",
+                                         dedupe_key=notice_id, recipient_stream_id=source_stream_id,
+                                         tell_id=notice_id, body=ensure_notice_marker(notice_id, body))
+            return
+
     def _mirror_source_event_for_binding(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str], *,
         source_stream_id: str, source_event: dict[str, Any], source_event_id: int,
@@ -2471,6 +2538,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         if source_stream_id != effective_source_stream_id:
             return
         if self._strict_publication_state_conn(conn, binding[0])["enabled"]:
+            self._notice_unanswered_turn_conn(conn, binding[0], source_stream_id,
+                                               source_generation, source_event, source_event_id)
             return
         if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
             return

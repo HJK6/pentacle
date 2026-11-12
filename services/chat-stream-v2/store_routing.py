@@ -1008,6 +1008,7 @@ class _RoutingStoreMixin:
         reply_to_message_id: str | None,
         reply_to_question_id: str | None,
         actor_stream_id: str | None,
+        desk_dispatch: bool = False,
         scoped_credential_id: str | None = None,
         meta: object = None,
         direct_primary: bool = False,
@@ -1042,6 +1043,8 @@ class _RoutingStoreMixin:
                 and round(float(duration), 3) > 0):
             voice_meta = normalize_send_meta(meta)
         admission_payload = {"admission_mode": "direct_primary"} if direct_primary else {}
+        if desk_dispatch:
+            admission_payload["desk_dispatch"] = True
         if voice_meta.get("voice", {}).get("context_v1") is not None:
             admission_payload["input_meta"] = voice_meta
         canonical_attachments = json.dumps(attachments, sort_keys=True, separators=(",", ":"))
@@ -1445,7 +1448,7 @@ class _RoutingStoreMixin:
                             if not _route_continuation_conn(conn, origin, binding_guard, transfer_successor=transfer_successor):
                                 raise ValueError("assistant_recovery_successor_unverified")
                         _assistant_actor_conn(conn, binding_guard["stream_id"], binding_guard["generation"])
-                for key in ("direct_binding_origin", "recovery_origin"):
+                for key in ("direct_binding_origin", "recovery_origin", "desk_dispatch"):
                     if key in prior_payload:
                         merged_payload[key] = prior_payload[key]
                 # Admission owns this input; classifier/rebind/retry cannot replace it.

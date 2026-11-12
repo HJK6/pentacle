@@ -12,11 +12,17 @@ Two operator-visible duplicate sources on the canonical assistant chat:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 
 from assistant_composite import AssistantComposite, direct_dispatch_envelope
 from store import Store
-from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config, _normalized_turn_event, _operator_trigger
+from test_assistant_prose_mirror import ASSISTANT, ROOT, _answer_rows, _config as _mirror_config, _normalized_turn_event, _operator_trigger
+
+
+def _config(generation):
+    # These tests exercise the retained mirror in rollback mode.
+    return replace(_mirror_config(generation), strict_publication_default=False)
 
 
 def _proactive(generation: str, key: str, text: str) -> dict:
@@ -95,6 +101,10 @@ def test_direct_dispatch_envelope_carries_the_batched_dispatch_rule():
     wire = envelope["wire_body"]
     assert "Several inputs in one batch" in wire and "--reply-to-message-ids" in wire
     assert "never publish the same body twice" in wire
+    assert "Only a publish reaches the operator; turn text is never delivered." in wire
+    assert "publish:assistant-direct-1:ack" in wire
+    assert "publish:assistant-direct-1 for the final" in wire
+    assert "End the turn with the single word done." in wire
     # The rule is part of the trusted root instruction, above the untrusted input.
     assert wire.index("never publish the same body twice") < wire.index("<assistant-original-input-json>")
 

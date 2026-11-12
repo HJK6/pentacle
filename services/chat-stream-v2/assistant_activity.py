@@ -63,6 +63,8 @@ def project_input(route, publications, lanes):
         state = "waiting_for_dependency"
     else:
         state = "awaiting_reply"
+    if json.loads(route["route_json"] or "{}").get("desk_dispatch") and state == "awaiting_reply":
+        state = "reply_not_required"
     # Response completion is independent of project completion. No lane means
     # unknown global work, including coordination through existing owners.
     if not phases:
