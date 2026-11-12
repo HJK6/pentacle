@@ -1461,6 +1461,8 @@ class _RoutingStoreMixin:
                     timings.setdefault("routed_at", stamp)
                 if delivery_state in {"landed", "failed", "uncertain", "committed_pending"}:
                     timings.setdefault("delivery_recorded_at", stamp)
+                if delivery_state == "landed":
+                    timings.setdefault("landed_at", stamp)
                 merged_payload["timings"] = timings
                 persisted_route_json = json.dumps(merged_payload, sort_keys=True, separators=(",", ":"))
                 conn.execute(

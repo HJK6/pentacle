@@ -6,6 +6,9 @@ from test_assistant_prose_mirror import ASSISTANT, ROOT
 import asyncio
 import json
 import shlex
+from datetime import datetime
+from types import SimpleNamespace
+from assistant_lane_rulings import AssistantLaneRulings
 
 
 def test_primary_turn_final_never_publishes_implicitly():
@@ -36,6 +39,25 @@ def test_turn_end_notifies_once_and_copied_ack_is_accepted():
         await h.dispatch_user(route, "unanswered-user-again")
         await h.ingest("ASSIST_TEXT", "done", "unanswered-final-again", final=True)
         assert len(await h.store.submit(notices)) == 1
+    run(body)
+
+
+def test_unanswered_marker_at_300_seconds_once():
+    async def body(h):
+        route = await h.route("marker-input")
+        stamp = json.loads(route["route_json"])["timings"]["landed_at"]
+        landed = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        service = AssistantLaneRulings(SimpleNamespace(store=h.store, assistant_composite=h.composite,
+                                                       broadcast=None))
+        await service._mark_unanswered(landed + 299)
+        assert await h.answers() == []
+        await service._mark_unanswered(landed + 300)
+        await service._mark_unanswered(landed + 301)
+        answers = await h.answers()
+        assert len(answers) == 1
+        assert answers[0]["publish_kind"] == "unanswered"
+        assert answers[0]["reply_to_message_id"] == "marker-input"
+        assert answers[0]["text"] == "No reply from Bart yet to this message."
     run(body)
 
 

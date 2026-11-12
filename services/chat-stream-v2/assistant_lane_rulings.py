@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from store_host_transfer import effective_ruling
 import asyncio
+from datetime import datetime, timezone
 from contextlib import nullcontext
 import hashlib
 import json
@@ -17,6 +18,8 @@ import re
 import sqlite3
 import time
 import uuid
+
+UNANSWERED_AFTER_SECONDS = 300
 from pathlib import Path
 from typing import Any
 
@@ -1674,7 +1677,60 @@ class AssistantLaneRulings:
                     "SELECT * FROM v2_assistant_lane_rulings WHERE state='unruled_disabled'")]
         return await self.store.submit(op)
 
+    async def _mark_unanswered(self, now: float | None = None) -> None:
+        composite = self._composite()
+        if composite is None or not composite.enabled:
+            return
+        now = time.time() if now is None else now
+        stream_id = composite.config.stream_id
+        def write(conn):
+            with conn:
+                if not self.store._strict_publication_state_conn(conn, stream_id)["enabled"]:
+                    return []
+                host, _, name = stream_id.partition(":")
+                session = conn.execute("SELECT created_at FROM sessions WHERE host=? AND session_name=? "
+                                       "AND status='open' AND provider='composite'", (host, name)).fetchone()
+                if session is None:
+                    return []
+                rows = conn.execute(
+                    "SELECT r.* FROM v2_assistant_composite_routes r WHERE r.stream_id=? "
+                    "AND r.routing_state='resolved' AND r.delivery_state='landed' "
+                    "AND json_extract(r.route_json,'$.admission_mode')='direct_primary' "
+                    "AND COALESCE(json_extract(r.route_json,'$.desk_dispatch'),0)=0 "
+                    "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
+                    "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id) "
+                    "AND NOT EXISTS (SELECT 1 FROM session_event_tail e "
+                    "WHERE e.stream_id=r.stream_id AND e.identity='dispatch-unanswered:' || r.dispatch_id)",
+                    (stream_id,)).fetchall()
+                inserted = []
+                for row in rows:
+                    payload = json.loads(row["route_json"] or "{}")
+                    timings = payload.get("timings", {})
+                    stamp = timings.get("landed_at") or timings.get("delivery_recorded_at")
+                    try:
+                        landed = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                    if now - landed < UNANSWERED_AFTER_SECONDS:
+                        continue
+                    timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
+                    event = {"stream_id": stream_id, "provider": "composite", "kind": "ASSIST_TEXT",
+                             "text": "No reply from Bart yet to this message.", "publish_kind": "unanswered",
+                             "reply_to_message_id": row["input_identity"], "timestamp": timestamp,
+                             "attachments": [], "raw": {"assistant_composite": True,
+                             "dispatch_id": row["dispatch_id"], "publish_kind": "unanswered"}}
+                    event_id = self.store._insert_session_event_conn(
+                        conn, stream_id, session["created_at"], event, "dispatch-unanswered:" + row["dispatch_id"])
+                    if event_id is not None:
+                        inserted.append({**event, "daemon_seq": event_id})
+                return inserted
+        for event in await self.store.submit(write):
+            composite._advance_summary(event)
+            if self.server.broadcast is not None:
+                await self.server.broadcast({"type": "chat.event", "event": event})
+
     async def tick(self) -> None:
+        await self._mark_unanswered()
         try:
             await self._check_authority_loss()
         except Exception:
