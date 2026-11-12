@@ -484,7 +484,8 @@ def _fleet_smoke_verdict(
                 seen_pass_rows.add(key)
             if key not in expected:
                 issues.append(f"unconfigured_or_invalid_cell:{'/'.join(key)}")
-            if choices and key in expected:
+            if choices and key in expected and (row.get('account_binding') is not None or
+                                               (source != 'failures' and str(row.get('outcome', '')).lower() in {'pass', 'passed'})):
                 actual = row.get('account_binding') or {}
                 alias = choices[(key[0], key[1])]
                 if (row.get('account') != alias or actual.get('alias') != alias
