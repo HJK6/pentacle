@@ -294,6 +294,7 @@ jobs:
         for package in tmux; do
           command -v "$package" >/dev/null || missing+=("$package")
         done
+        command -v ffprobe >/dev/null || missing+=(ffmpeg)
         if ((${#missing[@]})); then
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${missing[@]}"
