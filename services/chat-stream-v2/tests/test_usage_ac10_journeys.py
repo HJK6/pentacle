@@ -13,9 +13,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from event_push import EventPush
 from sessions import Sessions
 from store import Store
+
+pytestmark = pytest.mark.usefixtures("fixed_satellite_stats")
 
 HOST = "worker-one"
 HOST_SECRET = "worker-one-host-secret"

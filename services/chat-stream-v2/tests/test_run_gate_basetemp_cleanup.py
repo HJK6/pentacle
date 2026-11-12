@@ -15,7 +15,7 @@ def test_gate_removes_tier_basetemps_and_keeps_evidence(tmp_path: Path, monkeypa
     evidence, basetemp = tmp_path / "evidence", tmp_path / "base"
     seen: list[str] = []
 
-    def fake_tier(tier, evidence_dir, _limit, *, basetemp, manifest):
+    def fake_tier(tier, evidence_dir, _limit, *, basetemp, manifest, unit_workers=1):
         (basetemp / tier / "test_x0").mkdir(parents=True)
         (basetemp / tier / "test_x0" / "state.db").write_text("x", encoding="utf-8")
         (evidence_dir / f"{tier}.junit.xml").write_text("<testsuite/>", encoding="utf-8")
@@ -38,7 +38,7 @@ def test_gate_removes_tier_basetemps_and_keeps_evidence(tmp_path: Path, monkeypa
 def test_gate_retains_unresolved_cleanup_and_original_failure(tmp_path, monkeypatch, reap_raises):
     import json
     evidence, basetemp = tmp_path / "evidence", tmp_path / "base"
-    def tier(name, evidence_dir, limit, *, basetemp, manifest):
+    def tier(name, evidence_dir, limit, *, basetemp, manifest, unit_workers=1):
         (basetemp / name).mkdir()
         (basetemp / name / "original.log").write_text("first failure evidence")
         return run_gate._result(name, code=1, passed=False, reason="original_assertion")

@@ -162,9 +162,21 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
 the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
 every requested selection; it does not substitute for the full merge gate.
-`v2-merge-capacity` retains unit 1800s / smoke 900s; CI uses its separately
-declared `v2-merge-ci` profile. The shell smoke/soak wrappers call the same
+`v2-merge` uses the configured measured bounds and four unit workers. Public CI runs six serial
+`v2-unit-ci-shard` cells followed by one `v2-smoke` invocation.
+The shell smoke/soak wrappers call the same
 `run_gate.py`; their existence does not add tests to merge.
+
+Gate calibration on the frozen `cca674eb` base measured a serial macOS unit
+tier of 1553.424s. The candidate at `3945cf1e` measured 648.759s with two
+workers and the same executable pass-set, a 58.2% reduction. These are
+calibration measurements, not the final three-run acceptance series. Local
+unit and merge profiles use four workers with worker restarts disabled; the
+each hosted partition stays serial. An earlier
+serial calibration measured 1830.653s; it does not measure the new partitions.
+Smoke and the standalone unit cap remain 900s. The capacity budget remains
+unchanged until the new candidate meets its timing acceptance.
+
 
 [`gate_web.py`](../scripts/gate_web.py) invokes
 [`web_gate.js`](../test/e2e/web_gate.js) and the separate interrupt test.
@@ -427,18 +439,9 @@ No runtime tests, full suites, daemon processes or closing gate were run for
 this docs-only change. Existing full acceptance requirements are unchanged;
 this section neither certifies runtime deployment nor commissions extra work.
 
-### Hosted daemon CI budget
+### Hosted daemon CI
 
-The serial hosted unit tier uses 4320s, with the existing 900s smoke tier,
-for a 5220s merge target and maximum. Successful hosted unit logs measured
-2059.04s and 2071.48s. Another run exhausted its former 2100s unit limit
-after 13010 of 13285 nodes; average-throughput extrapolation gives about
-2144s, an estimate rather than a completed measurement. Twice the larger
-observed or projected cost, rounded up to a minute, gives the new unit
-envelope. Individual test timers and assertions remain unchanged.
-
-The existing runner allowances produce a 5340s deadline and 5370s outer
-gate limit. The daemon job allows 110 minutes, leaving 630s after that
-outer limit and the existing 600s package step for other setup and artifact
-retention. This changes the suite and job envelopes; it does not enable
-parallel hosted workers or alter local gate budgets.
+Pushes and pull requests run six serial unit partitions, assigned by a stable
+hash of the test file path. The aggregate requires every partition and the
+smoke job to pass. Local merge gates use four file-grouped pytest workers.
+The serial and parallel test sets are compared once for this change.

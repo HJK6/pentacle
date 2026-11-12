@@ -298,9 +298,9 @@ GATE_REQUIRED_TIER = "merge"
 GATE_REQUIRED_EXECUTABLES = ("git", "tmux")
 GATE_SYSTEM_PATHS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 # The inline gate runs under `env -i`, so run_gate.py would fall back to 900 s per
-# tier. Use the qualified v2-merge-capacity tier bounds (scripts/gate-env.json);
+# tier. Use the qualified v2-merge tier bounds (scripts/gate-env.json);
 # a caller's own V2_<TIER>_TIMEOUT_S still wins.
-DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "2400", "V2_SMOKE_TIMEOUT_S": "900"}
+DEPLOY_GATE_TIER_TIMEOUTS = {"V2_UNIT_TIMEOUT_S": "699", "V2_SMOKE_TIMEOUT_S": "900"}
 
 
 def _effective_home() -> Path:
@@ -614,6 +614,8 @@ def run_gate_and_write_evidence(
         str(_venv_python(repo, service)),
         str(repo / V2_SERVICE_PATH / "tools" / "run_gate.py"),
         GATE_REQUIRED_TIER,
+        "--unit-workers",
+        "4",
         "--evidence-out",
         str(out_path),
         service=service,

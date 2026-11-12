@@ -1,7 +1,7 @@
-"""The inline deploy gate runs with the v2-merge-capacity tier bounds.
+"""The inline deploy gate runs with the v2-merge tier bounds.
 
 `deploy.py` launches `run_gate.py merge` under `env -i`, so a bound it does not
-set explicitly falls back to run_gate's 900 s default.
+set explicitly falls back to the canonical merge target.
 """
 from __future__ import annotations
 
@@ -68,6 +68,8 @@ def _captured_bounds(tmp_path: Path) -> dict[str, str]:
     deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, runner)
     (command,) = calls
     assert command[:2] == ("/usr/bin/env", "-i")
+    worker_arg = command.index("--unit-workers")
+    assert command[worker_arg + 1] == "4"
     assignments = dict(part.split("=", 1) for part in command[2:] if "=" in part and not part.startswith("/"))
     return {name: assignments.get(name) for name in BOUND_NAMES}
 
@@ -76,14 +78,14 @@ def test_inline_gate_uses_capacity_bounds(tmp_path: Path, monkeypatch: pytest.Mo
     for name in BOUND_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    assert _captured_bounds(tmp_path) == {"V2_UNIT_TIMEOUT_S": "2400", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert _captured_bounds(tmp_path) == deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS
 
 
 def test_inline_gate_forwards_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("V2_UNIT_TIMEOUT_S", "1500")
     monkeypatch.delenv("V2_SMOKE_TIMEOUT_S", raising=False)
 
-    assert _captured_bounds(tmp_path) == {"V2_UNIT_TIMEOUT_S": "1500", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert _captured_bounds(tmp_path) == {**deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS, "V2_UNIT_TIMEOUT_S": "1500"}
 
 
 @pytest.mark.parametrize("value", ["abc", "", "0", "-5", "inf", "nan"])
@@ -110,12 +112,12 @@ def test_inline_gate_bound_reaches_run_gate_process(tmp_path: Path, monkeypatch:
         repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, deploy_mod._run
     )
 
-    assert evidence["observed_env"] == {"V2_UNIT_TIMEOUT_S": "2400", "V2_SMOKE_TIMEOUT_S": "900"}
+    assert evidence["observed_env"] == deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS
 
 
 def test_defaults_match_capacity_profile() -> None:
     profile = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
-    capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge-capacity"]["tier_timeouts"]
+    capacity = profile["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]
 
     assert deploy_mod.DEPLOY_GATE_TIER_TIMEOUTS == {
         f"V2_{tier.upper()}_TIMEOUT_S": str(bound) for tier, bound in capacity.items()

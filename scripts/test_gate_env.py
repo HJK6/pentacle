@@ -148,7 +148,31 @@ class ConfigFailsClosed(Tmp):
         return path
 
     def test_checked_in_config_loads(self):
-        self.assertEqual(ge.load_config(HERE / "gate-env.json")["schema"], "pentacle.gate-env.v1")
+        config = ge.load_config(HERE / "gate-env.json")
+        self.assertEqual(config["schema"], "pentacle.gate-env.v1")
+        workers = {name: target["unit_workers"] for name, target in config["profiles"]["pentacle"]["targets"].items()
+                   if "unit_workers" in target}
+        self.assertEqual(workers, {"v2-unit": 4, "v2-merge": 4, "v2-merge-capacity": 4, "v2-merge-ci": 4})
+        shard = config["profiles"]["pentacle"]["targets"]["v2-unit-ci-shard"]
+        self.assertEqual((shard['gate'], shard['shardable'], shard.get('unit_workers', 1)), ('unit', True, 1))
+        self.assertEqual(shard['timeout_s'], shard['max_timeout_s'])
+        self.assertLessEqual(shard['timeout_s'], 1200)
+
+    def test_shard_arguments_require_a_shardable_target_and_valid_pair(self):
+        cases = [
+            ("v2-merge", ["--shard-index", "0", "--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "0"]),
+            ("v2-unit-ci-shard", ["--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "-1", "--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "6", "--shard-count", "6"]),
+        ]
+        for index, (target, shard_args) in enumerate(cases):
+            with self.subTest(target=target, shard_args=shard_args):
+                evidence = self.tmp / ("ev-%d" % index)
+                code = ge.main(["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"),
+                                "--evidence-dir", str(evidence), "--target", target, *shard_args])
+                self.assertNotEqual(code, 0)
+                self.assertEqual(ga.build_index(evidence)["attempts"][0]["primary_outcome"], "setup_failure")
 
     def test_malformed_variants_are_refused(self):
         bad = {
@@ -244,7 +268,7 @@ class CLIInstructionInput(Tmp):
 
 class ToolchainResolution(Tmp):
     def config(self):
-        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg = ge.load_config()
         cfg["search_path"] = {"darwin": [], "linux": []}
         cfg["system_path"] = []
         return cfg
@@ -561,6 +585,8 @@ class DeadlineEnvelope(Tmp):
         (service / "tools").mkdir(parents=True, exist_ok=True)
         (service / "tools" / "run_gate.py").write_text(runner_text)
         target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
+        target.pop("unit_workers", None)  # existing serial/deadline and legacy controls
+        target.pop("tier_timeouts", None)  # exercise the legacy equal-tier path
         command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
         return command, results
 
@@ -571,10 +597,27 @@ class DeadlineEnvelope(Tmp):
         self.assertEqual(results["wall_s"], 900 * 2 + 30 + 60 + 30 + 30)
         unit, results = self.command("unit", "--deadline-seconds")
         self.assertEqual(unit[unit.index("--deadline-seconds") + 1], str(900 + 60 + 30))  # unit has no smoke preflight
+        service = self.tmp / "svc"
+        for gate in ("unit", "merge"):
+            target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], unit_workers=2)
+            command, _ = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service,
+                                           self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], {})
+            self.assertEqual(command[command.index("--unit-workers") + 1], "2")
+        target = dict(REAL_CONFIG['profiles']['pentacle']['targets']['v2-unit-ci-shard'])
+        unsharded, _ = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                        self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {})
+        self.assertNotIn('--shard-index', unsharded)
+        sharded, result = ge.build_command(REAL_CONFIG, target, self.tmp / 'venv', self.tmp, service,
+                                           self.tmp / 'ev', self.tmp / 't/b', [], target['timeout_s'], {},
+                                           shard_index=0, shard_count=6)
+        self.assertEqual(sharded[-4:], ['--shard-index', '0', '--shard-count', '6'])
+        self.assertEqual(sharded[:-4], unsharded)
+        self.assertEqual(sharded[sharded.index('--deadline-seconds') + 1], str(target['timeout_s'] + 90))
 
     def test_older_runner_without_the_flag_keeps_the_wall_bound(self):
         command, results = self.command("unit", "parser.add_argument('--timeout-seconds')")
         self.assertNotIn("--deadline-seconds", command)
+        self.assertNotIn("--unit-workers", command)
         self.assertEqual(results["wall_s"], 900 + REAL_CONFIG["reserve_s"])
 
 
@@ -1134,43 +1177,23 @@ class ScratchRetention(Tmp):
 
 
 class MigratedTargets(Tmp):
-    def test_capacity_merge_preserves_union_and_bounds_only_the_unit_extension(self):
+    def test_merge_compatibility_names_share_the_canonical_target(self):
         cfg = ge.load_config()
         profile = cfg["profiles"]["pentacle"]
-        target = profile["targets"]["v2-merge-capacity"]
-        standard = profile["targets"]["v2-merge"]
-        for key in ("kind", "gate", "needs", "capabilities", "preflight_script"):
-            self.assertEqual(target[key], standard[key])
-        self.assertEqual(target["timeout_s"], 3300)
-        self.assertEqual(target["max_timeout_s"], 3300)
-        self.assertEqual(profile["targets"]["v2-unit"]["timeout_s"], 900)
-        self.assertEqual(standard["timeout_s"], 1800)
-        self.assertEqual(profile["targets"]["v2-merge-ci"]["tier_timeouts"], {"unit": 4320, "smoke": 900})
+        target = profile["targets"]["v2-merge"]
+        for alias in ("v2-merge-capacity", "v2-merge-ci"):
+            self.assertEqual(profile["targets"][alias], target)
+        self.assertEqual(target["unit_workers"], 4)
         env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
                            home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
                            attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S": "1", "V2_SMOKE_TIMEOUT_S": "1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"], env["V2_SMOKE_TIMEOUT_S"]), ("2400", "900"))
+        for tier, limit in target["tier_timeouts"].items():
+            self.assertEqual(env["V2_%s_TIMEOUT_S" % tier.upper()], str(limit))
         cmd, result = ge.build_command(cfg, target, self.tmp / "v", HERE.parent, HERE.parent / profile["service_dir"],
                                        self.tmp / "ev", self.tmp / "t/b", [], target["timeout_s"], env)
         self.assertNotIn("--timeout-seconds", cmd)
+        self.assertEqual(cmd[cmd.index("--unit-workers") + 1], "4")
         self.assertIn("merge", cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds") + 1]), 3420)
-        self.assertEqual(result["wall_s"], 3450)
-
-    def test_ci_merge_uses_reviewed_distinct_tier_limits_and_deadline(self):
-        cfg = ge.load_config()
-        profile = cfg["profiles"]["pentacle"]
-        target = profile["targets"]["v2-merge-ci"]
-        env = ge.build_env(cfg, profile, target, checkout=HERE.parent, toolchain={}, venv=self.tmp / "v",
-                           home=self.tmp / "h", tmp=self.tmp / "t", locale_name="C.UTF-8", evidence=self.tmp / "ev",
-                           attempt_id="a", pass_env={}, ambient={"V2_UNIT_TIMEOUT_S":"1"})
-        self.assertEqual((env["V2_UNIT_TIMEOUT_S"],env["V2_SMOKE_TIMEOUT_S"]),("4320","900"))
-        cmd, result = ge.build_command(cfg,target,self.tmp / "v",HERE.parent,HERE.parent / profile["service_dir"],
-                                       self.tmp / "ev",self.tmp / "t/b",[],target["timeout_s"],env)
-        self.assertNotIn("--timeout-seconds",cmd)  # runner reads the reviewed per-tier limits
-        self.assertIn("merge",cmd)
-        self.assertEqual(float(cmd[cmd.index("--deadline-seconds")+1]),5340)
-        self.assertEqual(result["wall_s"],5370)  # existing outer startup/teardown slack
 
     def test_cli_and_shared_targets_use_their_own_roots_without_foreign_plugin(self):
         cfg = ge.load_config(); profile = cfg["profiles"]["pentacle"]

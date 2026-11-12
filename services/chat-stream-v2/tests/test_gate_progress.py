@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -64,11 +65,47 @@ def _run_suite(tmp_path: Path, source: str, *extra: str) -> tuple[subprocess.Com
 
 
 def test_journal_records_outcomes_and_completes(tmp_path: Path) -> None:
-    proc, journal = _run_suite(tmp_path, SUITE)
+    for workers in (1, 2):
+        case = tmp_path / str(workers)
+        case.mkdir()
+        _check_journal_outcomes(case, *([] if workers == 1 else ["-n", str(workers), "--dist", "loadfile"]))
+    mismatch = tmp_path / "mismatch"
+    mismatch.mkdir()
+    source = SUITE + '\nif os.environ.get("PYTEST_XDIST_WORKER") == "gw1":\n    def test_extra(): pass\n'
+    proc, journal = _run_suite(mismatch, source, "-n", "2", "--dist", "loadfile")
+    summary = gate_progress.summarize(journal)
+    assert proc.returncode != 0
+    _check_serial_shards(tmp_path / "shards")
+
+
+def _check_serial_shards(root: Path) -> None:
+    suite = root / "suite"
+    suite.mkdir(parents=True)
+    (suite / "pytest.ini").write_text("[pytest]\nmarkers = soak: excluded tier\n")
+    (suite / "test_alpha.py").write_text("def test_a(): pass\n")
+    (suite / "test_beta.py").write_text("import pytest\n@pytest.mark.parametrize('payload', ['x' * 400])\ndef test_b(payload): pass\n")
+    (suite / "test_gamma.py").write_text("import pytest\ndef test_c(): pass\n@pytest.mark.soak\ndef test_not_unit(): assert False\n")
+    (suite / "test_skipped.py").write_text("import pytest\npytest.skip('synthetic collection skip', allow_module_level=True)\n")
+    env = {**os.environ, "PYTHONPATH": str(SERVICE_DIR)}
+    command = [sys.executable, "-m", "pytest", "-q", "-m", "not soak", "-p", "no:cacheprovider",
+               "-p", "tools.gate_progress", "-p", "tools.gate_shard"]
+    for index, expected in enumerate((1, 2)):
+        journal = root / f"{index}.jsonl"
+        done = subprocess.run([*command, f"--gate-progress-journal={journal}", f"--gate-shard-index={index}",
+                               "--gate-shard-count=2"],
+                              cwd=suite, env=env, capture_output=True, text=True, timeout=20)
+        assert done.returncode == 0, done.stdout + done.stderr
+        summary = gate_progress.summarize(journal)
+        assert summary["complete"] and summary["collected"] == summary["completed_nodes"] == expected
+
+
+def _check_journal_outcomes(tmp_path: Path, *extra: str) -> None:
+    proc, journal = _run_suite(tmp_path, SUITE, *extra)
     assert proc.returncode == 1, proc.stdout
     summary = gate_progress.summarize(journal)
     assert summary["complete"] is True and summary["run_id"] == "run-1:unit"
     assert summary["collected"] == 5 and summary["completed_nodes"] == 5 and summary["active_nodes"] == []
+    assert summary["started_nodes"] == 5
     assert {"node": "test_synthetic.py::test_fail", "phase": "call"} in summary["failed"]
     assert {"node": "test_synthetic.py::test_setup_error", "phase": "setup"} in summary["failed"]
     assert summary["exitstatus"] == 1
@@ -84,6 +121,13 @@ def test_per_test_timeout_hard_exit_keeps_last_started_node(tmp_path: Path) -> N
     assert summary["last_completed"] == "test_synthetic.py::test_first"
     assert summary["active_nodes"] == ["test_synthetic.py::test_hangs"]
     assert summary["truncated_tail"] is False and summary["malformed_lines"] == 0
+    parallel = tmp_path / "parallel"
+    parallel.mkdir()
+    proc, journal = _run_suite(parallel, HANG, "-n", "2", "--dist", "loadfile", "--max-worker-restart=0")
+    summary = gate_progress.summarize(journal)
+    assert proc.returncode != 0 and summary["complete"] is False
+    assert summary["last_started"] == "test_synthetic.py::test_hangs"
+    assert summary["malformed_lines"] == 0 and summary["truncated_tail"] is False
 
 
 def test_journal_budget_exhaustion_is_explicit(tmp_path: Path) -> None:
