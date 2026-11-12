@@ -415,7 +415,7 @@ def main() -> int:
     parser.add_argument("--evidence-out", type=Path)
     parser.add_argument("--basetemp", type=Path, help="gate base temp directory and owner-manifest home")
     parser.add_argument("--timeout-seconds", type=float)
-    parser.add_argument("--unit-workers", type=int, default=1, help="fixed unit-tier workers; 1 keeps serial execution")
+    parser.add_argument("--unit-workers", type=int, help="fixed unit-tier workers; 1 keeps serial execution")
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
     parser.add_argument("--deadline-seconds", type=_positive_finite,
@@ -430,6 +430,8 @@ def main() -> int:
     parser.add_argument("--usage-deployment-contract", type=Path,
                         help="external expected owner and host inventory for the usage manifest")
     args = parser.parse_args()
+    if args.unit_workers is None:
+        args.unit_workers = 4 if args.gate == "merge" else 1
     if bool(args.usage_manifest) != bool(args.usage_deployment_contract):
         parser.error("--usage-manifest and --usage-deployment-contract must be supplied together")
     if args.usage_manifest and args.gate != "merge":

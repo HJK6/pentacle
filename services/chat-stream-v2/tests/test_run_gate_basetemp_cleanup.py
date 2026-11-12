@@ -14,12 +14,14 @@ from tools import run_gate
 def test_gate_removes_tier_basetemps_and_keeps_evidence(tmp_path: Path, monkeypatch, passed: bool) -> None:
     evidence, basetemp = tmp_path / "evidence", tmp_path / "base"
     seen: list[str] = []
+    workers_seen: list[int] = []
 
     def fake_tier(tier, evidence_dir, _limit, *, basetemp, manifest, unit_workers=1):
         (basetemp / tier / "test_x0").mkdir(parents=True)
         (basetemp / tier / "test_x0" / "state.db").write_text("x", encoding="utf-8")
         (evidence_dir / f"{tier}.junit.xml").write_text("<testsuite/>", encoding="utf-8")
         seen.append(tier)
+        workers_seen.append(unit_workers)
         return run_gate._result(tier, code=0 if passed else 1, passed=passed)
 
     monkeypatch.setattr(run_gate, "_run_tier", fake_tier)
@@ -30,6 +32,7 @@ def test_gate_removes_tier_basetemps_and_keeps_evidence(tmp_path: Path, monkeypa
                                       "--basetemp", str(basetemp)])
     assert run_gate.main() == (0 if passed else 1)
     assert seen == ["unit", "smoke"]
+    assert workers_seen == [4, 4]
     assert not (basetemp / "unit").exists() and not (basetemp / "smoke").exists()
     assert (evidence / "unit.junit.xml").exists() and (evidence / "v2-merge-evidence.json").exists()
 

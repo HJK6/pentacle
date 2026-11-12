@@ -68,6 +68,8 @@ def _captured_bounds(tmp_path: Path) -> dict[str, str]:
     deploy_mod.run_gate_and_write_evidence(repo, V2_SERVICE, ("merge",), tmp_path / "gate.json", SHA, runner)
     (command,) = calls
     assert command[:2] == ("/usr/bin/env", "-i")
+    worker_arg = command.index("--unit-workers")
+    assert command[worker_arg + 1] == "4"
     assignments = dict(part.split("=", 1) for part in command[2:] if "=" in part and not part.startswith("/"))
     return {name: assignments.get(name) for name in BOUND_NAMES}
 

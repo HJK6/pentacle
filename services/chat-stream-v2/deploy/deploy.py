@@ -614,6 +614,8 @@ def run_gate_and_write_evidence(
         str(_venv_python(repo, service)),
         str(repo / V2_SERVICE_PATH / "tools" / "run_gate.py"),
         GATE_REQUIRED_TIER,
+        "--unit-workers",
+        "4",
         "--evidence-out",
         str(out_path),
         service=service,
