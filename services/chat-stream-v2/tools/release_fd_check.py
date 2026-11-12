@@ -55,7 +55,7 @@ def run_check(url: str, token_path: Path, target_sha: str,
                             and event.get('text') == f'PONG {nonce}'):
                         return {'outcome': 'passed', 'message_id': message_id,
                                 'reply_message_id': event['message_id']}
-                time.sleep(min(2.0, max(0, deadline - time.monotonic())))
+                time.sleep(min(5.0, max(0, deadline - time.monotonic())))
     except Exception as exc:
         # Do not include arbitrary transport text, tokens or unrelated replies.
         result['reason'] = ('fd_execution_forbidden' if 'fd_execution_forbidden' in str(exc)
