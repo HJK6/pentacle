@@ -293,6 +293,38 @@ def test_preparation_does_not_commit_caller_transaction_and_rolls_back():
     with_store(check)
 
 
+def test_schema_repair_and_coverage_reset_are_one_transaction(monkeypatch):
+    def check(conn):
+        seat(conn)
+        lookup._prepare(conn, TARGET, BIRTH, float('inf'))
+        conn.commit()
+        conn.execute('DROP TRIGGER v2_native_input_insert')
+        # Inject failure after recreation but before coverage reset. A later
+        # startup must still see the missing trigger and discard old coverage.
+        broken = dict(lookup.SCHEMA)
+        broken['invalid'] = 'this is not SQL'
+        with monkeypatch.context() as patch:
+            patch.setattr(lookup, 'SCHEMA', broken)
+            with pytest.raises(sqlite3.OperationalError):
+                lookup.ensure_schema(conn)
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='v2_native_input_insert'").fetchone()
+        lookup.ensure_schema(conn)
+        assert conn.execute('SELECT count(*) FROM v2_native_input_coverage').fetchone()[0] == 0
+    with_store(check)
+
+
+@pytest.mark.parametrize('identity', [None, 42, False, {}, []])
+def test_nonstring_native_identities_do_not_enter_index(identity):
+    def check(conn):
+        seat(conn)
+        event = source('ordinary')
+        event['raw']['native_input_identity'] = identity
+        put(conn, event)
+        assert tell_proof.split_native_input(conn, event) == legacy.split_native_input(conn, event)
+        assert conn.execute('SELECT count(*) FROM v2_native_input_lookup').fetchone()[0] == 0
+    with_store(check)
+
+
 def test_preparation_and_index_survive_store_restart(tmp_path):
     async def run():
         store = Store(str(tmp_path / 'restart.db'))

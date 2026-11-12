@@ -9,11 +9,10 @@ PAGE_ROWS = 128
 
 
 def _has_identity(value):
-    # Most events have no native identity. Escaped JSON keys remain eligible.
     # CASE guarantees malformed JSON cannot reach json_type/json_extract.
-    return f"""CASE WHEN instr({value}, 'native_input_identity') = 0
-                        AND instr({value}, '\\u') = 0 THEN 0
-                   WHEN json_valid({value})
+    # SQLite reuses the parse for the typed read. A string prefilter scans large
+    # rows more slowly and must also account for escaped keys.
+    return f"""CASE WHEN json_valid({value})
                    THEN json_type({value}, '$.raw.native_input_identity') = 'text'
                    ELSE 0 END"""
 
@@ -48,13 +47,20 @@ SCHEMA = {
 
 def ensure_schema(conn):
     """No event scan at startup; missing maintenance invalidates all coverage."""
-    existing = {row[0] for row in conn.execute(
-        'SELECT name FROM sqlite_master WHERE name IN (' + ','.join('?' for _ in SCHEMA) + ')',
-        tuple(SCHEMA))}
-    for ddl in SCHEMA.values():
-        conn.execute(ddl)
-    if existing != SCHEMA.keys():
-        conn.execute('DELETE FROM v2_native_input_coverage')
+    conn.execute('SAVEPOINT native_input_schema')
+    try:
+        existing = {row[0] for row in conn.execute(
+            'SELECT name FROM sqlite_master WHERE name IN (' + ','.join('?' for _ in SCHEMA) + ')',
+            tuple(SCHEMA))}
+        for ddl in SCHEMA.values():
+            conn.execute(ddl)
+        if existing != SCHEMA.keys():
+            conn.execute('DELETE FROM v2_native_input_coverage')
+        conn.execute('RELEASE native_input_schema')
+    except BaseException:
+        conn.execute('ROLLBACK TO native_input_schema')
+        conn.execute('RELEASE native_input_schema')
+        raise
 
 
 def _prepare(conn, target, birth, deadline):
