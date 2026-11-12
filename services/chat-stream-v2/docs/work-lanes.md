@@ -575,11 +575,7 @@ DB. Review the concrete rollback artifact before activation.
   - Store startup backfills open single-spec rows idempotently.
 - **New commissions.** A spawn from a token-verified agent stream that is not a handoff, resume, daemon fire or ruled release is a new commission. Seat operator elevation does not exempt it. Message text is never inspected.
   - It resolves its assignment from the first `--spec-id`, else from the source seat's effective assignment. Otherwise it is refused with `work_assignment_required`.
-  - Lane membership and state are not execution permission. The remaining legacy
-    commission membership check in `spawnctl.py` is an off-limit integration
-    dependency for the lane C handoff; until the fleet applies its supplied hunk,
-    an unlinked new agent commission can still be refused. Do not treat this
-    draft branch alone as the complete lane C rollout.
+  - Lane membership and state are not execution permission.
   - An admitted idempotent retry replays.
   - Operator-authenticated callers without a seat token are exempt, as are anonymous loopback spawns (a known local bypass), daemon fires, host transfer and recovery.
   - `schedule.insert` checks a non-handoff seat schedule at insert and stores its assignment first among the spec ids. A lane-ruling spawn is checked when its ruling request is admitted, not at release.
