@@ -955,6 +955,7 @@ def run_matrix(
     provider_probe=None,
     accounts=None,
     test_profile_snapshot=None,
+    report_only=False,
 ) -> list[dict[str, object]]:
     if cells is None:
         cells = smoke_plan()["cells"]
@@ -1018,6 +1019,8 @@ def run_matrix(
                     failures.append(row)
                     if evidence is not None:
                         evidence.append({"outcome": "UNTESTED", **row})
+                    if report_only:
+                        continue
                     try:
                         reset = f"; try again at {exc.reset_at}" if exc.reset_at else ""
                         row["smoke_card"] = publish_smoke_card({
@@ -1043,6 +1046,8 @@ def run_matrix(
                     failures.append(row)
                     if evidence is not None and classification["class"] == "untested":
                         evidence.append({"outcome": "UNTESTED", **row})
+                    if report_only:
+                        continue
                     if classification["class"] == "untested":
                         try:
                             row["smoke_card"] = publish_smoke_card({
@@ -1074,7 +1079,7 @@ def run_matrix(
             failures.append(row)
             if evidence is not None and classification["class"] == "untested":
                 evidence.append({"outcome": "UNTESTED", **row})
-            if classification["class"] == "failure":
+            if classification["class"] == "failure" and not report_only:
                 _notify_failure(row, _failure_card(host, provider, prompt_mode, row["stage"], exc, account))
     return failures
 
@@ -1103,6 +1108,8 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="print the resolved full matrix without opening a connection or spawning",
     )
+    parser.add_argument("--report-only", action="store_true",
+                        help="retain reports without per-cell cards or notifications; caller aggregates failures")
     parser.add_argument("--token-path", type=Path, default=None,
                         help="operator credential for the explicitly selected endpoint")
     parser.add_argument("--provider-tuple", type=Path, default=None,
@@ -1175,6 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
         url, args.token_path or DEFAULT_TOKEN_PATH, DEFAULT_TIMEOUT, cells, evidence=evidence,
         test_profile_snapshot=profile,
         allow_legacy_close=args.allow_legacy_close,
+        **({"report_only": True} if args.report_only else {}),
         **({"accounts": accounts} if accounts else {}),
         **({"provider_probe": provider_probe} if provider_probe is not None else {}),
     )

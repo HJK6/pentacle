@@ -86,10 +86,6 @@ def isolated_release(tmp_path, monkeypatch, request):
     for name in ("spawn_profiles.py", "spawn_defaults.json"):
         shutil.copy2(source.parent / "_shared" / name, shared / name)
     shutil.copy2(source.parent / "_shared/provider_cli_release.py", shared / "provider_cli_release.py")
-    selection_fixture = getattr(request, "param", None) == "selection"
-    if selection_fixture:
-        from .test_release_selection import _seed_selector_files
-        _seed_selector_files(repo)
     # Only an external provider counterpart: records the real child argv/env.
     smoke = repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"
     smoke.parent.mkdir(parents=True, exist_ok=True)
@@ -112,11 +108,6 @@ sys.exit(payload['returncode'])
     git("commit", "-qm", "prior")
     prior = git("rev-parse", "HEAD")
     main.write_text("version = 2\n")
-    if selection_fixture:
-        main.write_text("version = 1\n")
-        (repo / "renderer").mkdir(exist_ok=True)
-        (repo / "renderer/fixture.js").write_text("// isolated client change\n")
-        git("add", "renderer/fixture.js")
     git("commit", "-qam", "target")
     target = git("rev-parse", "HEAD")
     git("init", "--bare", "-q", str(origin))
@@ -135,8 +126,7 @@ sys.exit(payload['returncode'])
         "StandardOutPath": str(guard / "launchd.log"),
         "EnvironmentVariables": {"HOME": str(tmp_path / "home")},
     }))
-    monkeypatch.setattr(module, "_launchd_plist_path", lambda label:
-                        tmp_path / "collector.plist" if selection_fixture and label == module.USAGE_COLLECTOR_LABEL else plist)
+    monkeypatch.setattr(module, "_launchd_plist_path", lambda label: plist)
     # A stale stamp must not replace the checkout's actual pre-activation identity. The managed
     # digest is stamped to match the on-disk plist, so an unchanged definition still kickstarts
     # (no spurious reload); out-of-band drift is covered by its own test below.
@@ -154,8 +144,7 @@ sys.exit(payload['returncode'])
     before = module._stamp_path(repo, service).read_bytes()
     monkeypatch.setattr(module, "verify_deploy_guard", lambda *_a, **_k: {"sole_deployer": True})
     monkeypatch.setattr(module, "_ensure_v2_usage_probe_launchd", lambda *_a: False)
-    if not selection_fixture:
-        monkeypatch.setattr(module, "_v2_usage_probe_rollback", lambda *_a: lambda: None)
+    monkeypatch.setattr(module, "_v2_usage_probe_rollback", lambda *_a: lambda: None)
     calls = []
     # The job is loaded (pid 111) until a bootout, and gone after it, as launchd reports it.
     monkeypatch.setattr(module, "_launchd_state", lambda *_a: (
@@ -165,8 +154,9 @@ sys.exit(payload['returncode'])
     monkeypatch.setattr(module, "_apply_post_activation", partial(
         module._apply_post_activation,
         verify_boot=lambda *_a, **_k: module.BootReadback(
-            module.BOOT_NOT_OBSERVED, "isolated probe", 0, 222, 111
+            module.BOOT_OBSERVED, "isolated probe", 0, 222, 111
         ),
+        verify_runtime=lambda sha, *_a, **_k: (True, {"sha": sha}),
     ))
     evidence = tmp_path / "gate.json"
     evidence.write_text(json.dumps({
@@ -197,11 +187,9 @@ sys.exit(payload['returncode'])
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
             if tuple(command[:4]) == ("env", "TZ=UTC0", "LC_ALL=C", "ps"):
                 return subprocess.CompletedProcess(command, 0, "Mon Jan 1 11:00:00 2024", "")
-            if command[0] == str(python) or (selection_fixture and command[0] == "/usr/bin/env"):
+            if command[0] == str(python) or command[0] == "/usr/bin/env":
                 return subprocess.run(command, cwd=cwd, text=True, capture_output=True)
             assert command[0] == "launchctl", command
-            if selection_fixture and command[1] == "bootout" and command[2].endswith("/" + module.USAGE_COLLECTOR_LABEL):
-                return subprocess.CompletedProcess(command, 0, "", "")
             # Inspect actual disk bytes at the moment activation is attempted.
             stamp = module._read_stamp(repo, service)
             assert stamp["prior_sha"] == actual_prior
@@ -255,11 +243,14 @@ def test_out_of_band_plist_change_forces_rebootstrap(isolated_release):
     assert [call[1] for call in calls if call[0] == "launchctl"] == ["bootout", "bootstrap"]
 
 
-def test_unobserved_rebootstrap_is_retried_on_the_next_deploy(isolated_release):
+def test_unobserved_rebootstrap_is_retried_on_the_next_deploy(isolated_release, monkeypatch):
     """End-to-end scope 1 failure semantics: the fixture never observes boot, so a reload that
     completes but is not confirmed must NOT advance the stamped digest; a follow-on deploy with the
     same on-disk plist therefore still diverges and re-attempts the reload."""
     module, service, repo, prior, _target, _before, calls, activate = isolated_release
+    monkeypatch.setattr(module, "_apply_post_activation", partial(
+        module._apply_post_activation.func, verify_boot=lambda *_a, **_k: module.BootReadback(
+            module.BOOT_NOT_OBSERVED, "isolated probe", 0, 222, 111)))
     _make_stamp_stale(module, repo, service)
     activate(reload=False)  # diverge -> reload (bootout+bootstrap); boot NOT observed
     assert module._read_stamp(repo, service)["launchd_plist_digest"] == "stale" + "0" * 59
@@ -285,12 +276,14 @@ def test_failed_rebootstrap_is_retried_on_the_next_deploy(isolated_release):
 
 
 @pytest.mark.parametrize("reload", [False, True])
-def test_restart_failure_retains_applied_stamp(isolated_release, reload):
+def test_restart_failure_with_unknown_exit_refuses_source_restore(isolated_release, reload):
     module, service, repo, prior, target, _before, _calls, activate = isolated_release
     stamp = activate(reload=reload, fail=True)
     assert "post_activation_error" in stamp
     assert (stamp["sha"], stamp["prior_sha"]) == (target, prior)
-    assert module._read_stamp(repo, service) == stamp
+    assert stamp["disposition"] == "target not active, restore unproven"
+    assert not stamp["automatic_restore"].get("restoration_complete")
+    assert module._read_stamp(repo, service)["serving"] is False
     assert module._git(repo, "rev-parse", "HEAD", runner=module._run) == target
 
 
@@ -522,11 +515,12 @@ async def test_plain_start_failure_is_fatal():
 def test_ambiguous_cli_failure_names_provenance(tmp_path, monkeypatch, capsys):
     module = _load_deploy(tmp_path, monkeypatch)
     monkeypatch.setattr(module, 'deploy', lambda *_a, **_kw: {
+        'disposition': 'active with failed checks',
         'slow_consumer': {'outcome': 'failed', 'attribution': {
             'outcome': 'attribution_ambiguous', 'reasons': ['missing paired marker']},
             'failures': [{'client': 'unattributed', 'kind': '1011_close'}]}})
-    assert module.main(['chat-streamd-v2']) == module.EXIT_SLOW_CONSUMER_FAILED
-    assert 'attribution_ambiguous' in capsys.readouterr().err
+    assert module.main(['chat-streamd-v2']) == module.EXIT_ACTIVE_FAILED_CHECKS
+    assert 'attribution_ambiguous' in capsys.readouterr().out
 
 
 def test_unanswered_old_writer_query_cannot_prove_exit(tmp_path, monkeypatch):
@@ -578,3 +572,32 @@ def test_rollback_restoration_needs_no_read_timing_receipt(isolated_release):
     stamp = activate(rollback=True)
     assert stamp["sha"] == target
     assert [call[1] for call in calls if call[0] == "launchctl"] == ["kickstart"]
+
+
+def test_exact_gate_refusal_precedes_source_mutation(isolated_release, monkeypatch):
+    module, service, repo, prior, target, before, calls, activate = isolated_release
+    def refuse(*args):
+        assert module._git(repo, 'rev-parse', 'HEAD', runner=module._run) == prior
+        raise module.DeployError('wrong exact commit evidence')
+    monkeypatch.setattr(module, '_load_gate_evidence', refuse)
+    with pytest.raises(module.DeployError, match='wrong exact'):
+        activate()
+    assert module._stamp_path(repo, service).read_bytes() == before
+    assert not any(c[:2] == ('git', 'checkout') or c[0] == 'launchctl' for c in calls)
+
+
+def test_missing_target_is_fetched_before_gate_and_checkout(isolated_release, monkeypatch):
+    module, service, repo, prior, target, before, calls, activate = isolated_release
+    real = module._resolve_sha
+    attempts = []
+    def resolve(repo, ref, runner):
+        attempts.append(ref)
+        if len(attempts) == 1:
+            raise module.DeployError('missing local object')
+        return real(repo, ref, runner)
+    monkeypatch.setattr(module, '_resolve_sha', resolve)
+    activate()
+    fetch = calls.index(('git', 'fetch', 'origin', 'main'))
+    checkout = next(i for i,c in enumerate(calls) if c[:2] == ('git','checkout'))
+    assert fetch < checkout
+    assert attempts == ['origin/main', 'origin/main']

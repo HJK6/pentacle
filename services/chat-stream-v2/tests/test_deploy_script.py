@@ -53,7 +53,9 @@ class _ScriptedRunner:
     """A deploy Runner whose result is chosen by matching a substring against the command."""
 
     def __init__(self, rules: dict[str, tuple[int, str, str]] | None = None) -> None:
-        self.rules = rules or {}
+        # This fixture supplies a qualified FD response; probe linkage is tested
+        # independently in test_release_fd_check.py.
+        self.rules = {"release_fd_check.py": (0, '{"outcome":"passed","message_id":"fixture-input","reply_message_id":"fixture-reply"}', ""), **(rules or {})}
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, cmd, cwd) -> subprocess.CompletedProcess:
@@ -174,70 +176,12 @@ def _run_main(monkeypatch, capsys, stamp: dict | None = None, error: Exception |
     return code, captured.out, captured.err
 
 
-def test_main_runtime_sha_not_confirmed_maps_to_exit_5(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED, "detail": "boot line observed"},
-        "daemon_runtime_readback": {
-            "target_sha": TARGET_SHA,
-            "outcome": deploy_mod.RUNTIME_SHA_NOT_CONFIRMED,
-            "sha": None,
-            "process_state": "running_unreachable",
-        },
-    }
-    code, out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_RUNTIME_SHA_NOT_CONFIRMED == 5
-    assert code != deploy_mod.EXIT_REFUSED
-    assert "deploy refused" not in err  # an applied bounce is never reported as refused
-    assert "runtime SHA not confirmed" in err
-    assert "Do NOT retry" in err
-    assert json.loads(out)["daemon_runtime_readback"]["outcome"] == deploy_mod.RUNTIME_SHA_NOT_CONFIRMED
 
 
-def test_main_fleet_smoke_failure_maps_to_exit_6(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED},
-        "daemon_runtime_readback": {"outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "fleet_smoke": {"outcome": deploy_mod.FLEET_SMOKE_FAILED, "detail": '{"host": "hostb", "ok": false}'},
-    }
-    code, out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
-    assert code != deploy_mod.EXIT_REFUSED
-    assert "deploy refused" not in err
-    assert "fleet smoke failed" in err
-    assert "hostb" in err
-    assert json.loads(out)["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_FAILED
 
 
-def test_main_fleet_smoke_untested_is_distinct_from_pass_and_regression(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED},
-        "daemon_runtime_readback": {"outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "fleet_smoke": {
-            "outcome": deploy_mod.FLEET_SMOKE_UNTESTED,
-            "untested": [{"host": "hostb", "reason": "quota_exhausted"}],
-        },
-    }
-    code, _out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_UNTESTED
-    assert code != deploy_mod.EXIT_OK
-    assert code != deploy_mod.EXIT_FLEET_SMOKE_FAILED
-    assert "UNTESTED" in err
-    assert "neither a pass nor a daemon regression" in err
 
 
-def test_main_clean_bounce_maps_to_exit_0(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED},
-        "daemon_runtime_readback": {"outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "fleet_smoke": {"outcome": deploy_mod.FLEET_SMOKE_PASSED},
-    }
-    code, _out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_OK
-    assert err == ""
 
 
 def test_main_pre_activation_refusal_stays_exit_2(monkeypatch, capsys) -> None:
@@ -248,35 +192,8 @@ def test_main_pre_activation_refusal_stays_exit_2(monkeypatch, capsys) -> None:
     assert "deploy refused: release checkout is dirty" in err
 
 
-def test_main_post_activation_error_maps_to_exit_7(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED},
-        "daemon_runtime_readback": {"outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "fleet_smoke": {"outcome": deploy_mod.FLEET_SMOKE_PASSED},
-        "post_activation_error": "DeployError: command failed rc=5: launchctl bootstrap",
-    }
-    code, out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_POST_ACTIVATION_ERROR == 7
-    assert code != deploy_mod.EXIT_REFUSED
-    assert "deploy refused" not in err
-    assert "error after the restart was attempted" in err
-    assert "--rollback" in err
-    assert json.loads(out)["post_activation_error"].startswith("DeployError")
 
 
-def test_exit_codes_are_the_documented_distinct_values() -> None:
-    assert (
-        deploy_mod.EXIT_OK,
-        deploy_mod.EXIT_REFUSED,
-        deploy_mod.EXIT_BOOT_LINE_NOT_OBSERVED,
-        deploy_mod.EXIT_DAEMON_BOOT_FAILED,
-        deploy_mod.EXIT_RUNTIME_SHA_NOT_CONFIRMED,
-        deploy_mod.EXIT_FLEET_SMOKE_FAILED,
-        deploy_mod.EXIT_POST_ACTIVATION_ERROR,
-        deploy_mod.EXIT_SLOW_CONSUMER_FAILED,
-        deploy_mod.EXIT_FLEET_SMOKE_UNTESTED,
-    ) == (0, 2, 3, 4, 5, 6, 7, 8, 9)
 
 
 def test_slow_consumer_scan_fails_only_on_post_boot_overflow_and_counts_warnings() -> None:
@@ -324,23 +241,6 @@ def test_slow_consumer_scan_catches_ws_1011_and_4000_closes() -> None:
     ]
 
 
-def test_main_slow_consumer_failure_maps_to_exit_8_and_names_clients(monkeypatch, capsys) -> None:
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED},
-        "daemon_runtime_readback": {"outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "slow_consumer": {
-            "outcome": deploy_mod.SLOW_CONSUMER_FAILED,
-            "failures": [{"kind": "overflow", "client": "desktop-main", "line": "fixture"}],
-        },
-        "fleet_smoke": {"outcome": deploy_mod.FLEET_SMOKE_PASSED},
-    }
-
-    code, _out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-
-    assert code == deploy_mod.EXIT_SLOW_CONSUMER_FAILED == 8
-    assert "slow_consumer" in err
-    assert "desktop-main" in err
 
 
 def test_apply_post_activation_records_fleet_smoke_failure_without_raising(tmp_path, monkeypatch) -> None:
@@ -372,7 +272,6 @@ def test_apply_post_activation_treats_quota_exhausted_smoke_as_untested(tmp_path
     """Quota-only smoke is explicitly UNTESTED, never a deploy PASS."""
     _synthetic_boot_log(tmp_path, monkeypatch)
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, _stamp: None)
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
     quota_stdout = json.dumps({
         "ok": True, "failures": [],
         "quota_exhausted": [{"host": "hostb", "provider": "codex",
@@ -392,18 +291,6 @@ def test_apply_post_activation_treats_quota_exhausted_smoke_as_untested(tmp_path
     assert "post_activation_error" not in stamp
 
 
-def test_main_quota_exhausted_smoke_is_untested_with_operator_line(monkeypatch, capsys) -> None:
-    """Quota-only smoke maps to the distinct UNTESTED exit."""
-    stamp = {
-        "sha": TARGET_SHA,
-        "daemon_boot_readback": {"outcome": deploy_mod.BOOT_OBSERVED, "detail": "boot"},
-        "daemon_runtime_readback": {"target_sha": TARGET_SHA, "outcome": deploy_mod.RUNTIME_SHA_OBSERVED, "sha": TARGET_SHA},
-        "fleet_smoke": {"outcome": deploy_mod.FLEET_SMOKE_UNTESTED,
-                        "untested": [{"host": "hostb", "reset_at": "Jan 1st, 2030 12:00 PM"}]},
-    }
-    code, _out, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_FLEET_SMOKE_UNTESTED
-    assert "hostb" in err and "UNTESTED" in err
 
 
 @pytest.fixture
@@ -421,36 +308,11 @@ def synthetic_smoke_pass(tmp_path, monkeypatch) -> str:
     ]})
 
 
-def test_apply_post_activation_captures_schedule_install_error_without_raising(monkeypatch, synthetic_smoke_pass) -> None:
-    """A raise from the recurring-smoke schedule install (post-activation) is captured, not
-    propagated: it would otherwise reach main() as EXIT_REFUSED with the stamp already lost."""
-    def boom(_repo, _runner):
-        raise deploy_mod.DeployError("command failed rc=5: launchctl bootstrap")
-
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", boom)
-    monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, _stamp: None)
-    runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, synthetic_smoke_pass, "")})
-    stamp: dict = {"sha": TARGET_SHA}
-    deploy_mod._apply_post_activation(
-        V2_SERVICE,
-        Path("/release"),
-        TARGET_SHA,
-        stamp,
-        prior_log_size=0,
-        prior_pid=111,
-        reload_launchd=False,
-        runner=runner,
-        verify_boot=_boot_observed,
-        verify_runtime=lambda _sha, _pid: (True, {"sha": TARGET_SHA, "process_state": "running", "pid": 999}),
-    )
-    assert stamp["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_PASSED
-    assert stamp["post_activation_error"].startswith("DeployError")
 
 
 def test_apply_post_activation_persists_the_classified_stamp(monkeypatch, synthetic_smoke_pass) -> None:
     writes: list[dict] = []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(dict(stamp)))
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
     runner = _ScriptedRunner({"spawn_fleet_smoke.py": (0, synthetic_smoke_pass, "")})
     stamp: dict = {"sha": TARGET_SHA}
     deploy_mod._apply_post_activation(
@@ -466,7 +328,6 @@ def test_apply_post_activation_persists_the_classified_stamp(monkeypatch, synthe
 def test_apply_post_activation_survives_stamp_write_failure(monkeypatch, synthetic_smoke_pass) -> None:
     """A post-commit stamp-write failure must not escape deploy() (main catches only DeployError)
     nor lose the in-memory record — this was the r2 REJECT boundary."""
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda _repo, _runner: None)
 
     def raising_write(_repo, _svc, _stamp):
         raise OSError("disk full")
@@ -480,7 +341,7 @@ def test_apply_post_activation_survives_stamp_write_failure(monkeypatch, synthet
         verify_boot=_boot_observed,
         verify_runtime=lambda _s, _p: (True, {"sha": TARGET_SHA, "process_state": "running", "pid": 999}),
     )
-    assert "OSError" in stamp["post_activation_error"]
+    assert "disk full" in stamp["post_activation_error"]
     # the classified record survives on the returned/in-memory stamp for main() to print
     assert stamp["fleet_smoke"]["outcome"] == deploy_mod.FLEET_SMOKE_PASSED
     assert stamp["daemon_runtime_readback"]["outcome"] == deploy_mod.RUNTIME_SHA_OBSERVED
@@ -535,7 +396,6 @@ def test_post_activation_smoke_uses_installed_machine_file(
     installed_plist.write_bytes(plistlib.dumps({"EnvironmentVariables": environment}))
     monkeypatch.setattr(deploy_mod, "_launchd_plist_path", lambda _label: installed_plist)
     monkeypatch.setattr(deploy_mod, "_venv_python", lambda *_args: Path(sys.executable))
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_args: None)
     monkeypatch.setattr(deploy_mod, "_scan_slow_consumer_window", lambda *_args, **_kwargs: {"outcome": deploy_mod.SLOW_CONSUMER_PASSED})
     writes = []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _repo, _svc, stamp: writes.append(dict(stamp)))
@@ -566,6 +426,8 @@ def test_post_activation_smoke_uses_installed_machine_file(
                 ]}
                 return subprocess.CompletedProcess(result.args, 0, json.dumps(payload), result.stderr)
             return result
+        if any(str(part).endswith("release_fd_check.py") for part in parts):
+            return subprocess.CompletedProcess(parts, 0, '{"outcome":"passed","message_id":"fixture-input","reply_message_id":"fixture-reply"}', "")
         return subprocess.CompletedProcess(parts, 0, "", "")
 
     stamp = {"sha": TARGET_SHA}
@@ -596,8 +458,8 @@ def test_post_activation_smoke_uses_installed_machine_file(
         errors = {"missing-setting": "PENTACLE_MACHINES_FILE is required", "missing-file": "machine file does not exist", "invalid-json": "JSONDecodeError"}
         assert errors[configuration] in stamp["fleet_smoke"]["detail"]
         code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
-        assert code == deploy_mod.EXIT_FLEET_SMOKE_FAILED == 6
-        assert "do NOT retry the deploy" in error
+        assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
+        assert "active with failed checks" in error
         assert json.loads(output)["daemon_runtime_readback"]["pid"] == 999
 
 
@@ -1042,7 +904,7 @@ def test_u2_each_sink_keeps_its_own_first_marker_selection(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("fleet_state,expected_exit", [
-    ("passed", 0), ("partial", 10), ("untested", 9), ("failed", 6),
+    ("passed", 0), ("partial", 3), ("untested", 3), ("failed", 3),
 ])
 @pytest.mark.parametrize("with_failure", [False, True])
 def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
@@ -1083,7 +945,6 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     monkeypatch.setattr(deploy_mod, '_process_start', process_start)
     monkeypatch.setattr(deploy_mod, '_prior_writer_exited', lambda *_a: True)
     schedules = []
-    monkeypatch.setattr(deploy_mod, "_install_fleet_smoke_schedule", lambda *_: schedules.append(True))
     if fleet_state == "passed":
         payload = {"ok": True, "status": "PASS", "cells": _rows("primary") + _rows("satellite"),
                    "failures": [], "untested": []}
@@ -1112,7 +973,6 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     persisted = json.loads(deploy_mod._stamp_path(release, V2_SERVICE).read_text())
     assert persisted == stamp
     assert stamp["fleet_smoke"]["outcome"] == fleet_state
-    assert schedules == ([True] if fleet_state == "passed" else [])
     scan = persisted["slow_consumer"]
     assert scan["peer_4000_other"] == scan["unparsed_conn_diag"] == 1
     assert scan["overflow_drops"] == int(with_failure)
@@ -1123,10 +983,10 @@ def test_u2_real_scan_stamp_stdout_preserves_fleet_verdicts(
     assert scan["log_paths"] == [str(stdout), str(stderr)]
     code, output, error = _run_main(monkeypatch, capsys, stamp=stamp)
     assert json.loads(output) == persisted
-    assert code == (deploy_mod.EXIT_SLOW_CONSUMER_FAILED if with_failure else expected_exit)
+    assert code == (deploy_mod.EXIT_ACTIVE_FAILED_CHECKS if with_failure else expected_exit)
     if with_failure:
-        assert code == 8
-        assert _U2_CONN_B in error
+        assert code == 3
+        assert _U2_CONN_B in output
     assert len([call for call in runner.calls if "kickstart" in call]) == 1
     assert len([call for call in runner.calls if any("spawn_fleet_smoke.py" in part for part in call)]) == 1
 
@@ -1202,7 +1062,7 @@ def test_ensure_launchd_standard_error_path_repoints_and_is_idempotent(monkeypat
     assert runner2.calls == []
 
 
-def test_apply_post_activation_advances_digest_only_on_boot_observed(monkeypatch) -> None:
+def test_apply_post_activation_advances_digest_only_on_serving_proof(monkeypatch) -> None:
     writes: list[dict] = []
     monkeypatch.setattr(deploy_mod, "_write_stamp", lambda _r, _s, stamp: writes.append(dict(stamp)))
     runner = _ScriptedRunner()  # kickstart succeeds (rc 0)
@@ -1211,7 +1071,7 @@ def test_apply_post_activation_advances_digest_only_on_boot_observed(monkeypatch
         V2_SERVICE, Path("/release"), TARGET_SHA, stamp,
         prior_log_size=0, prior_pid=111, reload_launchd=False, runner=runner,
         verify_boot=_boot_observed,
-        verify_runtime=lambda _s, _p: (False, {"sha": TARGET_SHA}),  # skip fleet smoke
+        verify_runtime=lambda _s, _p: (True, {"sha": TARGET_SHA}),
         activated_plist_digest="DNOW",
     )
     assert stamp["launchd_plist_digest"] == "DNOW"
@@ -1310,10 +1170,12 @@ def test_keepalive_kind_receipt_and_exit_stay_failed(kind, monkeypatch, capsys):
     stamp = dict(sha=TARGET_SHA,
                  daemon_boot_readback={'outcome': deploy_mod.BOOT_OBSERVED},
                  daemon_runtime_readback={'outcome': deploy_mod.RUNTIME_SHA_OBSERVED, 'sha': TARGET_SHA},
-                 slow_consumer=scan, fleet_smoke={'outcome': deploy_mod.FLEET_SMOKE_PASSED})
-    code, _, err = _run_main(monkeypatch, capsys, stamp=stamp)
-    assert code == deploy_mod.EXIT_SLOW_CONSUMER_FAILED == 8
-    assert kind in err and 'kinds=' in err
+                 slow_consumer=scan, fleet_smoke={'outcome': deploy_mod.FLEET_SMOKE_PASSED},
+                 disposition='active with failed checks')
+    code, output, err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
+    assert kind in json.loads(output)['slow_consumer']['kinds']
+    assert 'active with failed checks' in err
 
 
 @pytest.mark.parametrize('field', ['close_reason', 'close_sent_reason'])
@@ -1571,3 +1433,26 @@ def test_stage_d_explicit_zero_needs_no_legacy_counter_proxy():
                     auth_state='failed', non_handshake_tx=0)]
     scan = deploy_mod.classify_slow_consumer_lines('conn_diag ' + json.dumps(r) for r in records)
     assert scan['outcome'] == 'passed' and scan['excluded_auth_failure_count'] == 1
+
+
+@pytest.mark.parametrize("disposition,code", [
+    ("active and checks passed", 0), ("active with failed checks", 3),
+    ("target not active, prior restored", 4), ("target not active, restore unproven", 5),
+    ("refused before change", 2),
+])
+def test_main_five_release_dispositions(monkeypatch, capsys, disposition, code):
+    stamp = {"sha": TARGET_SHA, "disposition": disposition}
+    actual, out, err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert actual == code
+    assert json.loads(out) == stamp
+    assert err.strip() == disposition
+
+
+@pytest.mark.parametrize("outcome", ["failed", "blocked", "skipped", "untested"])
+def test_main_preserves_failed_check_report_without_claiming_pass(monkeypatch, capsys, outcome):
+    stamp = {"sha": TARGET_SHA, "disposition": "active with failed checks",
+             "post_release_checks": {"fleet_smoke": {"outcome": outcome}}}
+    code, out, err = _run_main(monkeypatch, capsys, stamp=stamp)
+    assert code == deploy_mod.EXIT_ACTIVE_FAILED_CHECKS == 3
+    assert json.loads(out)["post_release_checks"]["fleet_smoke"]["outcome"] == outcome
+    assert "active with failed checks" in err

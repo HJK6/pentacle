@@ -259,7 +259,10 @@ Apply rechecks sealed inputs, sole-deployer/schedule/account quiescence and
 staged proofs. It unloads the old job and proves daemon/local helper exit before
 switching the checkout and included executor script fields. Other policy fields
 and excluded executors stay intact. It bootstraps and verifies the target,
-dispatched identities, included canaries, cleanup and slow-consumer evidence.
+the boot line and exact served SHA plus dispatched helper identity. Only those
+serving checks decide restoration. Smoke, slow-consumer logs and the authenticated
+Front Desk reply run after commit, as reports; a failure leaves the serving target
+active and emits one aggregate BLOCKER.
 No coordinated invocation accepts `--release-inputs` or `--skip-kickstart`.
 
 The immutable receipt links the intent digest to preimages, staged source,
@@ -270,8 +273,9 @@ A separate owner-only journal lives beside the runtime checkout in
 effects: prepared, stopping, stopped, switching, verifying, committed,
 rolling_back, rolled_back, discarded or recovery_required. An unfinished journal blocks a
 new forward deploy. Recover explicitly with the same receipt after interruption.
-Plain `--rollback` refuses coordinated ancestry and prints that receipt path;
-unchanged-identity releases retain the ancestry in their stamps.
+Plain `--rollback` is allowed with coordinated ancestry when current and prior
+helper identity are equal. Identity-changing recovery still requires the receipt;
+unfinished transactions remain protected. Unchanged-identity releases retain ancestry.
 
 If apply has never begun, the same receipt-based `--rollback` command discards
 the preparation without stopping a daemon, restoring files, probing helpers or
@@ -283,45 +287,35 @@ again with fresh inputs, a new transaction ID and a new receipt path. Discard
 is idempotent until a new preparation supersedes the active receipt; it does
 not bypass any older coordinated ancestry in the live deployment stamp.
 
-Exit **11** means committed scoped success (or successful explicit restoration)
-with declared optional exclusions and `full_fleet_acceptance=false`. It requires
-every included forward model cell or rollback no-input binding cell to pass.
-Forward smoke preserves four `SKIPPED_DECLARED` rows per excluded host;
-rollback records the same excluded scope without inventing model-cell passes. Only a coordinated consumer that validates receipt digest,
-committed phase, admitted exclusions and complete included evidence may accept
-11; generic release gates continue to require 0. Scoped deployment never changes
-the recurring smoke schedule or satellite admission/pins.
+The public disposition, rather than individual report classifiers, determines exit:
 
-Exit **12** is an applied/recovered or recovery-required coordinated failure.
-Automatic rollback retains the original forward failure and never converts it
-to success. Inspect the journal and returned receipt, and GATE the owner when
-recovery is required. A stale receipt or post-commit source/policy/plist drift
-refuses before stop; prepare a new transaction rather than overwriting later
-work. Explicit rollback restores original source/policy/plist/stamp bytes and
-verifies fresh prior health/PID/birth/served SHA, restored bindings/catalog and
-one zero-input launch/readiness/owned-close for every included selected
-host/provider/account binding. Fresh strict native/helper dispatch proof and
-attributed slow-consumer/cleanup checks remain required. Raw RPC sends no
-prompt, brief, role baseline or subsequent input; the existing `promptless`
-smoke does send a marker and is not used for rollback.
+| Disposition | Exit |
+|---|---|
+| active and checks passed | 0 |
+| refused before change | 2 |
+| active with failed checks | 3 |
+| target not active, prior restored | 4 |
+| target not active, restore unproven | 5 |
 
-A failed forward health result is journaled as `result` (boot, runtime, fleet
-smoke, slow consumer and helper dispatch kept separate) before
-`candidate health failed` is raised. A verifier that raises journals the
-sub-results completed before it as `partial_result`; a journal write failure
-keeps the original failure and records `journal_failure`.
+Ordinary deployment fetches the exact target and verifies exact gate evidence
+before source mutation. It retains prior source and stamp/plist/policy bytes,
+modes and absence. When target boot or runtime SHA is not proved, automatic
+restoration first unloads the job and proves the process and owned children exited.
+It restores the entire prior source and saved files before bootstrap. An incomplete
+restore or unknown exit never starts the prior. A complete restore whose subsequent
+boot/SHA readback is unproven remains loaded and reports restore unproven.
+The restored prior stamp is not rewritten with the failed attempt report.
 
-Recovery never stops a prior that has proved its identity. When the exact prior
-source, policy and plist are restored, a fresh launchd boot with a new PID is
-observed and its loaded runtime SHA equals the receipt's prior SHA, a later
-restoration-proof, helper-dispatch or slow-consumer failure, or a journal write
-failure after a passed proof, leaves that daemon serving. The journal records
-`prior_running` {pid, birth, sha} and a failed `rollback_result` with
-`prior_identity`; the phase stays `recovery_required` (exit 12, not qualified).
-Launchd PID, process start and checkout SHA are re-read at that decision point;
-on any mismatch nothing is signalled and `prior_identity_mismatch` is recorded.
-A failure before that identity is proven still stops only the owned process,
-and a refusal before admission touches nothing.
+Coordinated apply retains sealed scope, preimages, authority, account/quiescence
+checks and helper identity proof. After serving success, canary/log/FD failures do
+not trigger recovery or stop that target. Restoration proofs, cleanup and dispatch
+reports after prior restoration do not veto a complete prior boot attempt or stop
+a fully restored prior. Restoration uses no provider prompts. Excluded scope remains
+explicit and does not imply fleet acceptance. Receipt preparation stays inert.
+
+The recurring deploy-time smoke installer is retired. Nightly checks report against
+the already deployed stamp and never deploy or select a target. The detailed smoke
+and log classifier reports remain available alongside the public disposition.
 
 A sealed receipt pins its controller SHA. To recover it from a repaired
 controller, the FD places an owner-only authorization file in the transaction

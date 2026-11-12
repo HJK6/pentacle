@@ -73,3 +73,14 @@ def test_nightly_calls_shared_checks_on_deployed_stamp(tmp_path, monkeypatch, ou
     assert record['source_sha'] == 'a'*40
     assert record['result'] == result
     assert set(record['checks']) == {'fleet_smoke', 'slow_consumer', 'front_desk'}
+
+
+def test_wrapper_uses_deployed_checkout_and_existing_schedule():
+    service = Path(__file__).resolve().parents[1]
+    wrapper = (service / 'deploy/nightly-soak/run-nightly-soak.sh').read_text()
+    assert 'PY=$CHECKOUT/services/chat-stream-v2/.venv/bin/python' in wrapper
+    assert 'TOOLS=$CHECKOUT/services/chat-stream-v2/tools' in wrapper
+    assert 'check-release --checkout "$CHECKOUT"' in wrapper
+    assert '--wait-within-window' in wrapper
+    assert 'TOOLS_ROOT' not in wrapper and 'soak_gate.py' not in wrapper
+    assert not (service / 'deploy/com.pentacle.spawn-fleet-smoke.plist').exists()

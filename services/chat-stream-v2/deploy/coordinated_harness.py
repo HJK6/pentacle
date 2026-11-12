@@ -181,8 +181,7 @@ class Rehearsal:
                          "pentacle-chat-core/tests/fixtures/summary_prose_cases.json",
                          "services/_shared/spawn_defaults.json", "services/chat-stream-v2/requirements.txt", "services/agent-orch/pyproject.toml",
                          "services/agent-orch/deploy/runtime_python.py",
-                         "services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist",
-                         "services/chat-stream-v2/deploy/com.pentacle.spawn-fleet-smoke.plist"):
+                         "services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist"):
             destination = self.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.controller / relative, destination)
@@ -332,13 +331,18 @@ class Rehearsal:
         if self.fail_forward and not rollback: raise c.Invalid("controlled post-switch failure")
         if rollback:
             self.verified_prior = {"pid": self.process.pid, "birth": str(self.started_ns), "sha": expected}
-            if self.fail_prior_proof: raise c.Invalid("controlled prior proof failure")
+
         result = {"outcome": "passed", "runtime": ready, "native_boundary": "mocked", "fleet_readiness": "not_tested"}
         if rollback:
             # The disposable adapter proves ordering only; native input is mocked.
-            result.update(restoration={"outcome":"passed", "scope":"disposable_ordering"},
+            result.update(restoration={"outcome":"failed" if self.fail_prior_proof else "passed", "scope":"disposable_ordering"},
                           model_canary={"outcome":"not_run_by_design"})
         return result
+
+    def post_checks(self, receipt, serving):
+        if getattr(self, "fail_late", False):
+            return {"outcome": "failed", "fleet_smoke": {"outcome": "failed", "scope": "disposable"}}
+        return {"outcome": "passed", "fleet_smoke": {"outcome": "passed", "scope": "disposable"}}
 
     def close(self):
         self.stop(None)
@@ -351,7 +355,7 @@ def run(bindings, controller):
         adapter.start()
         machines = bindings.root / "machines.json"
         c.atomic_json(machines, [{"name": "fixture", "ssh_target": None}])
-        for index, inject in enumerate((True, False)):
+        for index, (inject, late, prior_report_failure) in enumerate(((True, False, False), (False, False, False), (False, True, False), (True, False, True))):
             intent = bindings.root / (f"intent-{index}.json")
             receipt = bindings.root / (f"receipt-{index}.json")
             c.atomic_json(intent, {"schema": c.INTENT_SCHEMA, "transaction_id": f"disposable-transaction-{index}",
@@ -364,12 +368,16 @@ def run(bindings, controller):
                 transaction = c.Transaction(adapter, root)
                 transaction.prepare(intent, receipt)
                 adapter.fail_forward = inject
+                adapter.fail_late = late
+                adapter.fail_prior_proof = prior_report_failure
                 result = transaction.apply(intent, receipt)
                 if inject:
                     if result["phase"] != "rolled_back" or result["exit_code"] != 12:
                         raise c.Invalid("disposable automatic recovery did not preserve forward failure")
                 elif result["phase"] != "committed" or transaction.rollback(receipt)["phase"] != "rolled_back":
                     raise c.Invalid("disposable forward/explicit rollback did not complete")
+                if late and result["disposition"] != "active with failed checks":
+                    raise c.Invalid("late disposable check rolled back serving target")
                 results.append(result)
         return {"outcome": "passed", "transactions": results, "events": adapter.events,
                 "fleet_readiness": "not_tested", "native_boundary": "mocked"}

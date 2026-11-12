@@ -60,8 +60,6 @@ def admit(window_path, job, envelope_s, now_utc):
         return "BLOCKED:invalid"
     if expiry <= now:
         return "BLOCKED:expired"
-    if held is not None and held > now:
-        return "BLOCKED:held"
     start = datetime.combine(now.date(), fire)
     if start > now:
         start -= timedelta(days=1)
@@ -71,6 +69,8 @@ def admit(window_path, job, envelope_s, now_utc):
     # A window must also fit before its authorization expires at UTC midnight.
     if (min(end, expiry) - now).total_seconds() < envelope_s + RESERVE_S:
         return "BLOCKED:insufficient_remaining"
+    if held is not None and held > now:
+        return "BLOCKED:held"
     return "ADMIT"
 
 

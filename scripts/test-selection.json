@@ -246,7 +246,10 @@
         "services/chat-stream-v2/deploy/*",
         "services/chat-stream-v2/tests/test_deploy*.py",
         "services/chat-stream-v2/tests/test_usage*deploy*.py",
-        "services/chat-stream-v2/tests/test_usage*install*.py"
+        "services/chat-stream-v2/tests/test_usage*install*.py",
+        "services/chat-stream-v2/tools/nightly_journey.py",
+        "services/chat-stream-v2/tools/scheduled_admission.py",
+        "services/chat-stream-v2/tools/release_fd_check.py"
       ],
       "targets": [
         {
@@ -255,26 +258,30 @@
             "tests/test_deploy_gate_bounds.py",
             "tests/test_deploy_gate_evidence.py",
             "tests/test_deploy_direct_script.py",
-            "tests/test_deploy_release_selection.py",
             "tests/test_deploy_log_guard.py",
             "tests/test_deploy_fleet_verdict.py",
-            "tests/test_release_selection.py"
+            "tests/test_nightly_release_path.py",
+            "tests/test_deploy_ordinary_path.py",
+            "tests/test_deploy_release_checks.py",
+            "tests/test_release_fd_check.py"
           ],
           "files": [
             "services/chat-stream-v2/tests/test_deploy_gate_bounds.py",
             "services/chat-stream-v2/tests/test_deploy_gate_evidence.py",
             "services/chat-stream-v2/tests/test_deploy_direct_script.py",
-            "services/chat-stream-v2/tests/test_deploy_release_selection.py",
             "services/chat-stream-v2/tests/test_deploy_log_guard.py",
             "services/chat-stream-v2/tests/test_deploy_fleet_verdict.py",
-            "services/chat-stream-v2/tests/test_release_selection.py"
+            "services/chat-stream-v2/tests/test_nightly_release_path.py",
+            "services/chat-stream-v2/tests/test_deploy_ordinary_path.py",
+            "services/chat-stream-v2/tests/test_deploy_release_checks.py",
+            "services/chat-stream-v2/tests/test_release_fd_check.py"
           ]
         }
       ],
       "covered_behavior": [
         "Gate-bound tests verify deploy invocation/environment forwarding, timeouts and failure refusal, including a real subprocess.",
         "Evidence tests accept valid saved gate metadata and refuse contradictory/malformed evidence; direct-script tests verify the existing invocation entry.",
-        "Isolated real admission, source/config union, input revalidation, transaction/preimage restoration and rollback; real provider-counterpart child argv/environment and affected-cell verdict. Installed receipts, qualification, launchd and product probes are explicitly synthetic counterparts, not production proof."
+        "Isolated transaction/preimage restoration and rollback, shared post-release checks and nightly retry inside the existing window. Launchd and product probes use synthetic counterparts, not production proof."
       ],
       "missing_coverage": [
         "No production deployment, service restart, host rollout or installed artifact readback is performed.",

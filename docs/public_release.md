@@ -66,16 +66,13 @@ retired and refuses before any external command; merging a PR does not deploy. F
 Smoke account selection uses the [named-account declarations](provider_accounts.md#controls).
 An optional coordinated intent `smoke_accounts` array is sealed with the transaction
 and applies to both forward and rollback checks. Preparation refuses a prior or target
-runner that cannot honor it. Full-scope scheduled configuration carries the reviewed
-map; rollback restores the job preimage. Qualified canaries use release-input
-`activation.accounts`, included in their qualification identity. Legacy full-matrix
-activation accepts repeatable `--account` declarations; it cannot override a sealed
-coordinated intent or qualification input. Omitted maps preserve legacy defaults.
-For a new forward legacy deployment, omitted `--account` resets selection to those
-defaults and replaces the scheduled map; it does not inherit a prior stamped map.
-The legacy configuration may supply `PENTACLE_SMOKE_ACCOUNTS` through the daemon environment.
-Repeat the declarations when the next deployment should retain explicit selection.
-Rollback uses the map recorded in its stamp.
+runner that cannot honor it. Ordinary full-matrix activation accepts repeatable
+`--account` declarations; it cannot override a sealed coordinated intent.
+Omitted maps preserve legacy defaults. A new forward ordinary deployment does
+not inherit a prior stamped map; repeat explicit declarations when needed.
+Rollback uses the map recorded in its stamp. The retired 12-hourly smoke job is
+not installed by deployment. Nightly checks use the deployed release and its
+stamped account selection.
 
 Coordinated prepare qualifies a prior through its own sealed receipt, or through
 its own forward fleet smoke when a plain deployment inherited an ancestor receipt
@@ -96,12 +93,12 @@ unchanged using the release packet and actual readbacks. A matching SHA label or
 successful CI alone is insufficient. If any input is unknown or changed, omit
 `--gate-evidence` and run the inline gate in the authorized serialized window.
 The inline gate runs with the qualified `v2-merge-capacity` tier bounds (unit
-1,800 s, smoke 900 s); a `V2_UNIT_TIMEOUT_S` or `V2_SMOKE_TIMEOUT_S` set in the
+2,400 s serial, smoke 900 s); a `V2_UNIT_TIMEOUT_S` or `V2_SMOKE_TIMEOUT_S` set in the
 `deploy.py` environment replaces that bound and must be a finite positive number.
 Reusing evidence grants no restart authority and preserves the deploy transaction,
 rollback, and runtime readback requirements above.
 
-Every forward daemon deploy also takes `--read-timing-receipt` from
+A forward daemon deploy may optionally take `--read-timing-receipt` from
 `services/chat-stream-v2/tools/read_timing.py`, run on a clean checkout of the
 exact candidate; see
 [Read-timing receipt](../services/chat-stream-v2/deploy/daemon/README.md#read-timing-receipt).

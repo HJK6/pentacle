@@ -14,7 +14,6 @@ from .test_deploy_script import deploy_mod
 from .test_deploy_fleet_verdict import _rows
 from .test_deploy_coordinated_helpers import transaction
 from .test_deploy_account_admission import history
-from .test_release_selection import release, instruction_input
 from deploy import coordinated
 
 
@@ -84,13 +83,6 @@ def test_explicit_helper_proof_selection_is_independent_of_defaults(history):
     assert {r[2] for r in snapshot['defaults']} == {'primary'}
 
 
-def test_qualification_identity_captures_selected_account(release):
-    _, inputs, prepare, *_ = release
-    inputs['activation']['accounts'] = ['codex=spare']
-    plan = prepare()
-    assert plan['identity']['activation']['accounts'] == ['codex=spare']
-
-
 @pytest.mark.parametrize('actual', ['spare', 'primary', None])
 def test_deploy_verdict_checks_selected_binding(tmp_path, actual):
     machines = tmp_path/'machines.json'
@@ -106,34 +98,16 @@ def test_deploy_verdict_checks_selected_binding(tmp_path, actual):
     assert (verdict['outcome'] == 'passed') == (actual == 'spare')
 
 
-def test_scheduled_smoke_retains_reviewed_account_map(tmp_path):
-    import shutil
-    target = tmp_path/deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE
-    target.parent.mkdir(parents=True)
-    shutil.copyfile(Path(__file__).resolve().parents[3]/deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE, target)
-    plist = plistlib.loads(deploy_mod._render_v2_spawn_fleet_smoke_plist(tmp_path,
-        accounts=['codex=spare', 'claude=primary']))
-    assert plist['EnvironmentVariables']['PENTACLE_SMOKE_ACCOUNTS'] == 'codex=spare,claude=primary'
-
-
 def test_coordinated_schedule_switch_and_rollback_restore_owned_preimage(tmp_path):
-    import shutil
     runtime = Runtime.__new__(Runtime)
     runtime.repo = tmp_path/'release'
-    snapshot = tmp_path/'target-source'
-    template = snapshot/deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE
-    template.parent.mkdir(parents=True)
-    shutil.copyfile(Path(__file__).resolve().parents[3]/deploy_mod.SPAWN_FLEET_SMOKE_TEMPLATE, template)
     runtime.d = deploy_mod
     runtime.stopped = True
     calls = []
     runtime.checked = lambda args: calls.append(args)
-    source = {'snapshot': str(snapshot), 'sha': 'b'*40}
+    source = {'snapshot': str(tmp_path/'target-source'), 'sha': 'b'*40}
     after = tmp_path/'schedule.after'
-    after.write_bytes(runtime.schedule_definition(source, ['codex=spare', 'claude=primary'], tmp_path/'machines.json'))
-    value = plistlib.loads(after.read_bytes())
-    assert value['EnvironmentVariables']['PENTACLE_SMOKE_ACCOUNTS'] == 'codex=spare,claude=primary'
-    assert str(snapshot) not in value['ProgramArguments'][-1]
+    after.write_bytes(b'old sealed schedule')
     preimages = {}
     for key in ('policy', 'plist', 'collector', 'stamp', 'schedule', 'test_settings'):
         before = tmp_path/(key+'.before'); before.write_bytes(b'original '+key.encode())
@@ -143,7 +117,7 @@ def test_coordinated_schedule_switch_and_rollback_restore_owned_preimage(tmp_pat
         'post_policy': {'path': str(after)}, 'post_plist': {'path': str(after)},
         'post_schedule': {'path': str(after)}}
     runtime.switch(receipt, rollback=False)
-    assert Path(preimages['schedule']['path']).read_bytes() == after.read_bytes()
+    assert not Path(preimages['schedule']['path']).exists()  # no automatic reinstall
     runtime.switch(receipt, rollback=True)
     assert Path(preimages['schedule']['path']).read_bytes() == b'original schedule'
     assert Path(preimages['test_settings']['path']).read_bytes() == b'original test_settings'

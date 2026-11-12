@@ -30,7 +30,6 @@ _SERVICE_DIR = str(Path(__file__).resolve().parent.parent)
 if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 from deploy.packet.log_scan import AttributionAmbiguous, freeze, generation_ranges, lines_many
-from deploy import release_selection
 from deploy import coordinated
 from managed_logs import Config, retained_paths
 
@@ -44,7 +43,6 @@ V2_DAEMON_LABEL = "com.pentacle.chat-streamd-v2"
 V2_SERVICE_PATH = "services/chat-stream-v2"
 USAGE_COLLECTOR_LABEL = "com.pentacle.usage-state-collector"
 USAGE_COLLECTOR_TEMPLATE = Path("services/chat-stream-v2/deploy/com.pentacle.usage-state-collector.plist")
-SPAWN_FLEET_SMOKE_TEMPLATE = Path("services/chat-stream-v2/deploy/com.pentacle.spawn-fleet-smoke.plist")
 RELEASE_CHECKOUT_TOKEN = b"__PENTACLE_RELEASE_CHECKOUT__"
 
 
@@ -215,6 +213,12 @@ class _PreActivationTransaction:
         self.runner = runner
         self.committed = False
         self._rollback_actions: list[Callable[[], None]] = []
+        self._files: dict[Path, tuple[bytes | None, int | None]] = {}
+        self.remember_file(stamp_path)
+
+    def remember_file(self, path: Path) -> None:
+        if path not in self._files:
+            self._files[path] = (path.read_bytes(), path.stat().st_mode & 0o7777) if path.exists() else (None, None)
 
     def commit(self) -> None:
         self.committed = True
@@ -229,25 +233,28 @@ class _PreActivationTransaction:
             restored_sha = _git(self.repo, "rev-parse", "--verify", "HEAD", runner=self.runner)
             if restored_sha != self.prior_sha:
                 raise DeployError(f"restored HEAD is {restored_sha}, expected {self.prior_sha}")
+            _checked(("git", "diff", "--exit-code", "HEAD", "--"), self.repo, self.runner)
         except Exception as exc:
             failures.append(f"checkout restoration failed: {exc}")
-        try:
-            if self.prior_stamp_bytes is None:
-                self.stamp_path.unlink(missing_ok=True)
-                if self.stamp_path.exists():
-                    raise DeployError(f"stamp remains at {self.stamp_path}")
-            else:
-                self.stamp_path.parent.mkdir(parents=True, exist_ok=True)
-                self.stamp_path.write_bytes(self.prior_stamp_bytes)
-                if self.stamp_path.read_bytes() != self.prior_stamp_bytes:
-                    raise DeployError(f"stamp bytes differ at {self.stamp_path}")
-        except Exception as exc:
-            failures.append(f"stamp restoration failed: {exc}")
         for action in reversed(self._rollback_actions):
             try:
                 action()
             except Exception as exc:
                 failures.append(f"launchd restoration failed: {exc}")
+        for path, (contents, mode) in self._files.items():
+            try:
+                if contents is None:
+                    path.unlink(missing_ok=True)
+                    if path.exists():
+                        raise DeployError(f"file remains at {path}")
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    _write_bytes(path, contents)
+                    path.chmod(mode)
+                    if path.read_bytes() != contents or path.stat().st_mode & 0o7777 != mode:
+                        raise DeployError(f"file restoration differs at {path}")
+            except Exception as exc:
+                failures.append(f"file restoration failed: {path}: {exc}")
         return failures
 
     def __enter__(self) -> "_PreActivationTransaction":
@@ -573,31 +580,6 @@ def _fleet_smoke_verdict(
     }
 
 
-def _validate_selected_activation(plan: dict, repo: Path, service: ServiceConfig) -> None:
-    identity = plan["identity"]
-    activation = identity["activation"]
-    # The deploy readback itself is for this local endpoint. A successful canary
-    # against another daemon cannot establish the newly activated source.
-    if activation["url"] != "ws://127.0.0.1:7791":
-        raise DeployError("release selection: activation endpoint does not match runtime readback")
-    configured = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = repo / path
-    try:
-        hosts, local_hosts, _ = _fleet_smoke_hosts(str(path))
-        if activation["host"] not in local_hosts:
-            raise ValueError("affected canary is not an installed local host")
-        supplied_satellites = {row["component"] for row in identity["installed"] if row["role"] == "satellite"}
-        if supplied_satellites != set(hosts) - set(local_hosts):
-            raise ValueError("missing or extra configured satellite baseline")
-        bindings = identity["external_inputs"]["deploy_config"]["candidate"]["files"]
-        if not any(Path(b["path"]).resolve() == path.resolve() and b["sha256"] == _sha256(path) for b in bindings):
-            raise ValueError("installed machine configuration is not bound to selected inputs")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise DeployError(f"release selection: invalid activation configuration: {exc}") from exc
-
-
 def run_gate_and_write_evidence(
     repo: Path,
     service: ServiceConfig,
@@ -848,12 +830,6 @@ def _render_release_checkout_plist(repo: Path, template_path: Path, description:
 
 def _render_v2_usage_collector_plist(repo: Path) -> bytes:
     return _render_release_checkout_plist(repo, USAGE_COLLECTOR_TEMPLATE, "usage collector")
-
-
-def _render_v2_spawn_fleet_smoke_plist(repo: Path, *, accounts: Sequence[str] = ()) -> bytes:
-    value = plistlib.loads(_render_release_checkout_plist(repo, SPAWN_FLEET_SMOKE_TEMPLATE, "fleet smoke"))
-    value.setdefault('EnvironmentVariables', {})['PENTACLE_SMOKE_ACCOUNTS'] = ','.join(accounts)
-    return plistlib.dumps(value)
 
 
 def _validate_v2_launchd_program(repo: Path, arguments: Sequence[str]) -> Path:
@@ -1756,15 +1732,6 @@ def _verify_runtime_sha(
         sleep(min(RUNTIME_READBACK_INTERVAL_SECONDS, remaining))
 
 
-def _install_fleet_smoke_schedule(repo: Path, runner: Runner, accounts: Sequence[str] = ()) -> None:
-    schedule = Path.home() / "Library/LaunchAgents/com.pentacle.spawn-fleet-smoke.plist"
-    schedule.parent.mkdir(parents=True, exist_ok=True)
-    _write_bytes(schedule, _render_v2_spawn_fleet_smoke_plist(repo, accounts=accounts))
-    domain = f"gui/{os.getuid()}"
-    runner(("launchctl", "bootout", f"{domain}/com.pentacle.spawn-fleet-smoke"), repo)
-    _checked(("launchctl", "bootstrap", domain, str(schedule)), repo, runner)
-
-
 def _verify_direct_restoration(service, repo, stamp, boot, runner, runtime=None):
     """Use the coordinated controller's exact no-input/dispatch proof policy."""
     from deploy.coordinated_runtime import Runtime, code_identity_at
@@ -1792,145 +1759,177 @@ def _verify_direct_restoration(service, repo, stamp, boot, runner, runtime=None)
     return result
 
 
+def _notify_failed_checks(repo, service, sha, checks, runner):
+    """One aggregate BLOCKER; never part of the serving/rollback decision."""
+    failed = {name: result for name, result in checks.items() if result.get("outcome") != "passed"}
+    if not failed:
+        return
+    _checked((_resolve_agent_orch(repo, service), "notify", "--producer", "release-check",
+        "--severity", "critical", "--title", "BLOCKER: active release has failed checks",
+        "--message", json.dumps({"sha": sha, "checks": failed}, sort_keys=True),
+        "--dedup-key", f"release-check:{sha}"), repo, runner)
+
+
+def run_post_release_checks(service, repo, sha, stamp, *, runner,
+                            prior_log_size=None, prior_pid=None, prior_start=None, boot=None,
+                            fleet_smoke_check=None, no_outgoing_writer=None):
+    """Shared ordinary/coordinated/nightly reports. Never restarts a service."""
+    if boot is None:
+        state = _launchd_state(service.launchd_label, runner)
+        boot = BootReadback(BOOT_OBSERVED, "existing deployed process", 0, state.pid, prior_pid)
+    checks = {}
+    try:
+        if fleet_smoke_check is not None:
+            checks["fleet_smoke"] = fleet_smoke_check()
+        else:
+            configured = _launchd_environment(service.launchd_label)
+            machines_file = configured.get("PENTACLE_MACHINES_FILE", "").strip()
+            if machines_file:
+                path = Path(machines_file).expanduser()
+                machines_file = str((path if path.is_absolute() else repo / path).resolve())
+            accounts = stamp.get("smoke_accounts", [])
+            args = tuple(arg for entry in accounts for arg in ("--account", entry))
+            if "test_profile" in stamp:
+                frozen = _write_test_profile(repo, service, stamp["test_profile"])
+                if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
+                    raise DeployError("test profile/settings drift before canary")
+                args += ("--test-profile-snapshot", str(frozen))
+            smoke = runner(("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
+                "-u", "PENTACLE_SMOKE_ACCOUNTS", f"PENTACLE_MACHINES_FILE={machines_file}",
+                str(_venv_python(repo, service)), str(repo / V2_SERVICE_PATH / "tools/spawn_fleet_smoke.py"), "--report-only", *args), repo)
+            checks["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file,
+                accounts=accounts, test_profile=stamp.get("test_profile"))
+    except Exception as exc:
+        checks["fleet_smoke"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    try:
+        if prior_log_size is None:
+            prior_log_size = _capture_log_offsets(_daemon_log_paths(service))
+        active_start = _process_start(boot.pid, runner)
+        guard = stamp.get("restart_guard") or {}
+        activation = stamp.get("restart_activation") or {}
+        if no_outgoing_writer is None:
+            no_outgoing_writer = (guard.get("daemon_state") == activation.get("daemon_state") == "down"
+                and guard.get("down_basis") == "launchd_answered_no_pid"
+                and guard.get("launchd_answered") is True and guard.get("pre_restart_pid") is None
+                and guard.get("pre_restart_launchd_answered") is True
+                and activation.get("pre_restart_launchd_answered") is True
+                and activation.get("pre_restart_pid") is None and prior_pid is None)
+        checks["slow_consumer"] = _scan_slow_consumer_window(service, prior_log_size,
+            expected_pid=boot.pid, expected_start=active_start, prior_pid=prior_pid,
+            prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner)
+    except Exception as exc:
+        checks["slow_consumer"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    try:
+        probe = runner((str(_venv_python(repo, service)),
+            str(repo / V2_SERVICE_PATH / "tools/release_fd_check.py"),
+            "--url", os.environ.get("AGENT_ORCH_WS_URL", "ws://127.0.0.1:7791"), "--token-path",
+            os.environ.get("PENTACLE_OPERATOR_TOKEN_PATH", str(Path.home() / ".config/pentacle-stream/token")),
+            "--target-sha", sha), repo)
+        report = _smoke_payload(probe)
+        if probe.returncode != 0 or report.get("outcome") != "passed":
+            report = {**report, "outcome": "failed", "detail": _terminal_command_detail(probe)}
+        checks["front_desk"] = report
+    except Exception as exc:
+        checks["front_desk"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+    stamp.update(checks)
+    stamp["disposition"] = ("active and checks passed" if all(r.get("outcome") == "passed" for r in checks.values())
+                            else "active with failed checks")
+    try:
+        _notify_failed_checks(repo, service, sha, checks, runner)
+    except Exception as exc:
+        stamp["blocker_notify_error"] = f"{type(exc).__name__}: {exc}"
+    return checks
+
+
 def _apply_post_activation(
-    service: ServiceConfig,
-    repo: Path,
-    sha: str,
-    stamp: dict[str, object],
-    *,
-    prior_log_size: LogOffsets | None,
-    prior_pid: int | None,
-    reload_launchd: bool,
-    boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
-    runner: Runner,
+    service: ServiceConfig, repo: Path, sha: str, stamp: dict[str, object], *,
+    prior_log_size: LogOffsets | None, prior_pid: int | None, reload_launchd: bool,
+    boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS, runner: Runner,
     verify_boot: Callable[..., BootReadback] = verify_fresh_daemon_log_line,
     verify_runtime: Callable[..., tuple[bool, dict[str, object]]] = _verify_runtime_sha,
-    activated_plist_digest: str | None = None,
-    restoration_runtime=None,
+    activated_plist_digest: str | None = None, restoration_runtime=None,
 ) -> None:
-    """Restart the daemon and classify the result onto `stamp`. NEVER raises.
-
-    Once the kickstart/reload below fires, the bounce has been applied: the checkout and stamp
-    are already committed. Every subsequent failure — the restart itself, either readback, the
-    fleet smoke, or the recurring-smoke schedule install — is recorded on the stamp and mapped
-    by main() to a distinct do-NOT-retry exit code, never EXIT_REFUSED (which promises "nothing
-    was kickstarted") and never a lost stamp. The caller writes the stamp unconditionally after
-    this returns. Boot/runtime readbacks are injectable so the classification is unit-testable
-    without a real daemon or socket."""
+    """Only boot and target-commit readbacks decide whether to restore."""
+    stamp["serving"] = False
     try:
         prior_start = _process_start(prior_pid, runner)
         if reload_launchd:
             _reload_launchd(service.launchd_label, runner)
         else:
             _kickstart(service.launchd_label, runner)
-        readback = verify_boot(
-            service,
-            previous_size=prior_log_size,
-            prior_pid=prior_pid,
-            wait_seconds=boot_wait_seconds,
-            runner=runner,
-        )
-        stamp["daemon_boot_readback"] = readback.as_stamp()
-        stamp["daemon_log_post_restart_verified"] = readback.outcome == BOOT_OBSERVED
-        # Advance the managed-definition digest only once the new definition is proven live
-        # (BOOT_OBSERVED). On a failed bootstrap (which raises before here) or any non-observed
-        # boot, the stamp keeps the prior digest, so the next deploy re-attempts the reload
-        # instead of kickstarting a stale job.
-        if activated_plist_digest is not None and readback.outcome == BOOT_OBSERVED:
-            stamp["launchd_plist_digest"] = activated_plist_digest
-        if service.name == "chat-streamd-v2" and readback.outcome == BOOT_OBSERVED:
-            runtime_confirmed, last_observed = verify_runtime(sha, readback.pid)
-            stamp["daemon_runtime_readback"] = {
-                "target_sha": sha,
-                "outcome": RUNTIME_SHA_OBSERVED if runtime_confirmed else RUNTIME_SHA_NOT_CONFIRMED,
-                **last_observed,
-            }
-            if runtime_confirmed:
-                active_start = _process_start(readback.pid, runner)
-                # Invocation and verdict share the same admitted affected scope.
-                machines_file = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
-                if machines_file:
-                    # The child runs in repo, not the caller's working directory. Resolve
-                    # once so execution and verdict cannot read different relative files.
-                    machines_path = Path(machines_file).expanduser()
-                    if not machines_path.is_absolute():
-                        machines_path = repo / machines_path
-                    machines_file = str(machines_path.resolve())
+        boot = verify_boot(service, previous_size=prior_log_size, prior_pid=prior_pid,
+                           wait_seconds=boot_wait_seconds, runner=runner)
+        stamp["daemon_boot_readback"] = boot.as_stamp()
+        stamp["daemon_log_post_restart_verified"] = boot.outcome == BOOT_OBSERVED
+        if boot.outcome == BOOT_OBSERVED:
+            confirmed, observed = verify_runtime(sha, boot.pid)
+            stamp["daemon_runtime_readback"] = {"target_sha": sha,
+                "outcome": RUNTIME_SHA_OBSERVED if confirmed else RUNTIME_SHA_NOT_CONFIRMED, **observed}
+            stamp["serving"] = confirmed
+            if confirmed:
+                if activated_plist_digest is not None:
+                    stamp["launchd_plist_digest"] = activated_plist_digest
                 if stamp.get("verification_kind") == "restoration":
-                    stamp["restoration"] = _verify_direct_restoration(service, repo, stamp, readback, runner, restoration_runtime)
-                    stamp["model_canary"] = {"outcome":"not_run_by_design"}
+                    stamp["disposition"] = "active and checks passed"
+                    stamp["model_canary"] = {"outcome": "not_run_by_design"}
                     stamp["full_fleet_acceptance"] = False
+                    try:
+                        stamp["restoration"] = _verify_direct_restoration(service, repo, stamp, boot, runner, restoration_runtime)
+                    except Exception as exc:
+                        stamp["restoration"] = {"outcome": "failed", "detail": str(exc)}
                 else:
-                    selection = stamp.get("release_selection")
-                    required_cells = None
-                    smoke_args = ()
-                    if selection is not None:
-                        identity = selection["identity"]
-                        activation = identity["activation"]
-                        required_cells = identity["required_cells"]
-                        smoke_args = (activation["url"], activation["host"])
-                    smoke_accounts = (selection['identity']['activation'].get('accounts', [])
-                                      if selection is not None else stamp.get('smoke_accounts', []))
-                    smoke_args += tuple(arg for entry in smoke_accounts for arg in ('--account', entry))
-                    if "test_profile" in stamp:
-                        frozen_profile = _write_test_profile(repo, service, stamp["test_profile"])
-                        if _release_test_profile(repo, service, runner) != stamp["test_profile"]:
-                            raise DeployError("test profile/settings drift before canary")
-                        smoke_args += ("--test-profile-snapshot", str(frozen_profile))
-                    smoke = runner(
-                        (
-                            "/usr/bin/env",
-                            "-u", "PENTACLE_MACHINES_JSON",
-                            "-u", "PENTACLE_SMOKE_HOSTS",
-                            "-u", "PENTACLE_SMOKE_ACCOUNTS",
-                            f"PENTACLE_MACHINES_FILE={machines_file}",
-                            str(_venv_python(repo, service)),
-                            str(repo / "services/chat-stream-v2/tools/spawn_fleet_smoke.py"),
-                            *smoke_args,
-                        ),
-                        repo,
-                    )
-                guard = stamp.get("restart_guard") or {}
-                activation = stamp.get("restart_activation") or {}
-                no_outgoing_writer = (
-                    guard.get("daemon_state") == activation.get("daemon_state") == "down"
-                    and guard.get("down_basis") == "launchd_answered_no_pid"
-                    and guard.get("launchd_answered") is True
-                    and guard.get("pre_restart_pid") is None
-                    and guard.get("pre_restart_launchd_answered") is True
-                    and activation.get("pre_restart_launchd_answered") is True
-                    and activation.get("pre_restart_pid") is None
-                    and prior_pid is None
-                )
-                stamp["slow_consumer"] = _scan_slow_consumer_window(
-                    service, prior_log_size, expected_pid=readback.pid,
-                    expected_start=active_start, prior_pid=prior_pid,
-                    prior_start=prior_start, no_outgoing_writer=no_outgoing_writer, runner=runner,
-                )
-                if stamp.get("verification_kind") != "restoration":
-                    verdict_options = {}
-                    if smoke_accounts:
-                        verdict_options["accounts"] = smoke_accounts
-                    if "test_profile" in stamp:
-                        verdict_options["test_profile"] = stamp["test_profile"]
-                    stamp["fleet_smoke"] = _fleet_smoke_verdict(
-                        smoke, machines_file, required_cells, **verdict_options)
-                    if stamp["fleet_smoke"]["outcome"] == FLEET_SMOKE_PASSED and required_cells is None:
-                        if smoke_accounts:
-                            _install_fleet_smoke_schedule(repo, runner, smoke_accounts)
-                        else:
-                            _install_fleet_smoke_schedule(repo, runner)
-        # Persist the classified record inside the same never-raising boundary. A stamp-write
-        # failure after activation must not escape as a refusal either — record it and make one
-        # best-effort retry so the error itself is captured; main() still prints the returned
-        # stamp to stdout, so the record survives even if the disk write cannot.
-        _write_stamp(repo, service, stamp)
-    except Exception as exc:  # noqa: BLE001 - post-activation must never surface as a refusal
+                    # Mark the serving state before entering any fallible late checker.
+                    stamp["disposition"] = "active with failed checks"
+                    run_post_release_checks(service, repo, sha, stamp, runner=runner,
+                        prior_log_size=prior_log_size, prior_pid=prior_pid, prior_start=prior_start, boot=boot)
+    except Exception as exc:
         stamp["post_activation_error"] = f"{type(exc).__name__}: {exc}"
-        try:
-            _write_stamp(repo, service, stamp)
-        except Exception:  # noqa: BLE001 - already degraded; the returned stamp carries the record
-            pass
+        if stamp["serving"]:
+            stamp["disposition"] = "active with failed checks"
+            try:
+                _notify_failed_checks(repo, service, sha, {"post_checks": {"outcome": "failed", "detail": str(exc)}}, runner)
+            except Exception as notify_exc:
+                stamp["blocker_notify_error"] = str(notify_exc)
+    try:
+        _write_stamp(repo, service, stamp)
+    except Exception as exc:
+        stamp["post_activation_error"] = f"stamp write: {exc}"
+        if stamp["serving"]:
+            stamp["disposition"] = "active with failed checks"
+
+
+def _restore_prior(service, repo, stamp, transaction, runtime, *, runner,
+                   boot_wait_seconds=DEFAULT_BOOT_WAIT_SECONDS,
+                   verify_boot=verify_fresh_daemon_log_line, verify_runtime=_verify_runtime_sha):
+    """Stop and prove exit before changing source; never start a partial restore.
+
+    A complete restore remains loaded even if its readback fails. The returned
+    attempt report does not overwrite the byte-exact restored prior stamp.
+    """
+    stamp["disposition"] = "target not active, restore unproven"
+    report = {}
+    stamp["automatic_restore"] = report
+    try:
+        runtime.stop({})
+        report["old_process_exit_proven"] = True
+        failures = transaction._restore()
+        if failures:
+            raise DeployError("; ".join(failures))
+        report["restoration_complete"] = True
+        offsets = _capture_log_offsets(_daemon_log_paths(service))
+        target = _launchctl_target(service.launchd_label)
+        _checked(("launchctl", "bootstrap", target.rsplit("/", 1)[0], str(_launchd_plist_path(service.launchd_label))), repo, runner)
+        report["left_loaded"] = True
+        boot = verify_boot(service, previous_size=offsets, prior_pid=None,
+                           wait_seconds=boot_wait_seconds, runner=runner)
+        report["boot"] = boot.as_stamp()
+        if boot.outcome == BOOT_OBSERVED:
+            confirmed, observed = verify_runtime(transaction.prior_sha, boot.pid)
+            report["runtime"] = {"confirmed": confirmed, **observed}
+            if confirmed:
+                stamp["disposition"] = "target not active, prior restored"
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
 
 
 def _coordination_resource(service: ServiceConfig) -> str:
@@ -2113,7 +2112,7 @@ def _code_identity_at(repo: Path, sha: str, runner: Runner) -> str:
 
 def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
            rollback: bool = False, gate_evidence: Path | None = None,
-           release_inputs: Path | None = None, deployer_stream_id: str | None = None,
+           deployer_stream_id: str | None = None,
            skip_kickstart: bool = False, log_guard_dir: str | Path | None = None,
            boot_wait_seconds: float = DEFAULT_BOOT_WAIT_SECONDS,
            coordinated_plan: Path | None = None, coordinated_receipt: Path | None = None,
@@ -2125,10 +2124,10 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
             or recovery_authorization is None or not recovery_go_tell_id):
         raise DeployError("recovery controller authorization requires --rollback --coordinated-receipt and --recovery-go-tell-id")
     coordinated_mode = coordinated_plan is not None or coordinated_receipt is not None or prepare_only
-    if smoke_accounts is not None and (coordinated_mode or release_inputs is not None):
-        raise DeployError('account mapping belongs in coordinated intent or release-input activation')
-    if coordinated_mode and (service.name != "chat-streamd-v2" or release_inputs is not None or skip_kickstart):
-        raise DeployError("coordinated deployment cannot combine with release-inputs/skip-kickstart or another service")
+    if smoke_accounts is not None and coordinated_mode:
+        raise DeployError('account mapping belongs in coordinated intent')
+    if coordinated_mode and (service.name != "chat-streamd-v2" or skip_kickstart):
+        raise DeployError("coordinated deployment cannot combine with skip-kickstart or another service")
     if coordinated_mode and (coordinated_receipt is None or (not rollback and coordinated_plan is None)
                              or (rollback and (coordinated_plan is not None or prepare_only))):
         raise DeployError("coordinated prepare/apply requires intent and receipt; rollback requires receipt only")
@@ -2148,9 +2147,8 @@ def deploy(service: ServiceConfig, *, release_checkout: Path, ref: str,
                 if prepare_only:
                     return transaction.prepare(coordinated_plan, coordinated_receipt)
                 return transaction.apply(coordinated_plan, coordinated_receipt)
-            coordinated.legacy_guard(repo, _read_stamp(repo, service), rollback=rollback)
-            return _deploy_legacy(service, release_checkout=repo, ref=ref, rollback=rollback,
-                gate_evidence=gate_evidence, release_inputs=release_inputs, deployer_stream_id=deployer_stream_id,
+            return _deploy_ordinary(service, release_checkout=repo, ref=ref, rollback=rollback,
+                gate_evidence=gate_evidence, deployer_stream_id=deployer_stream_id,
                 skip_kickstart=skip_kickstart, log_guard_dir=log_guard_dir,
                 boot_wait_seconds=boot_wait_seconds, smoke_accounts=smoke_accounts,
                 read_timing_receipt=read_timing_receipt, runner=runner)
@@ -2187,14 +2185,13 @@ def _write_test_profile(repo, service, profile):
     return path
 
 
-def _deploy_legacy(
+def _deploy_ordinary(
     service: ServiceConfig,
     *,
     release_checkout: Path,
     ref: str,
     rollback: bool = False,
     gate_evidence: Path | None = None,
-    release_inputs: Path | None = None,
     deployer_stream_id: str | None = None,
     skip_kickstart: bool = False,
     log_guard_dir: str | Path | None = None,
@@ -2218,59 +2215,63 @@ def _deploy_legacy(
         if not prior:
             raise DeployError("rollback requested but prior_sha is not stamped")
         deploy_ref = prior
-    sha = _resolve_sha(repo, deploy_ref, runner)
+    try:
+        sha = _resolve_sha(repo, deploy_ref, runner)
+    except DeployError:
+        fetch_ref = deploy_ref.removeprefix("origin/")
+        _checked(("git", "fetch", "origin", fetch_ref), repo, runner)
+        sha = _resolve_sha(repo, deploy_ref, runner)
     _verify_origin_reachable(repo, sha, runner)
-    if not rollback and _code_identity_at(repo, prior_sha, runner) != _code_identity_at(repo, sha, runner):
+    helper_identity_equal = _code_identity_at(repo, prior_sha, runner) == _code_identity_at(repo, sha, runner)
+    ancestry = coordinated.ordinary_guard(repo, prior_stamp, rollback=rollback, helper_identity_equal=helper_identity_equal)
+    if not helper_identity_equal:
         raise DeployError("code identity changes require an admitted coordinated plan before checkout mutation")
 
     restoration_runtime = None
     if service.name == "chat-streamd-v2":
         from deploy.restoration import qualified_prior, qualification_stamp
-    if rollback and service.name == "chat-streamd-v2":
+    if service.name == "chat-streamd-v2":
         # Bind the controller and all no-input proof imports before checkout;
         # the restored prior may predate these modules and APIs.
         from deploy.coordinated_runtime import Runtime
         restoration_runtime = Runtime(sys.modules[__name__], service, repo, runner,
             stream=deployer_stream_id or "", boot_wait_seconds=boot_wait_seconds)
+    verify_log_guard(log_guard_dir if log_guard_dir is not None else service.log_guard_dir)
+    if gate_evidence is not None:
+        evidence = _load_gate_evidence(gate_evidence, sha)
+        evidence_source = "file"
+    else:
+        # Run the existing exact-commit gate in a disposable source checkout,
+        # not over the source tree of the currently serving process.
+        with tempfile.TemporaryDirectory(prefix="pentacle-release-gate-") as folder:
+            snapshot = Path(folder) / "source"
+            _checked(("git", "worktree", "add", "--detach", str(snapshot), sha), repo, runner)
+            try:
+                verify_venv(snapshot, service, {}, runner)
+                evidence = run_gate_and_write_evidence(snapshot, service, (GATE_REQUIRED_TIER,),
+                    Path(folder) / "gate.json", sha, runner)
+            finally:
+                _checked(("git", "worktree", "remove", "--force", str(snapshot)), repo, runner)
+        evidence_source = "inline"
+    if service.name == "chat-streamd-v2" and not rollback:
+        _load_read_timing_receipt(read_timing_receipt, sha)
     with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
+        if not skip_kickstart:
+            transaction.remember_file(_launchd_plist_path(service.launchd_label))
+            policy_path = _launchd_environment(service.launchd_label).get("PENTACLE_PROVIDER_ACCOUNT_POLICY")
+            if policy_path:
+                transaction.remember_file(Path(policy_path).expanduser())
         _checked(("git", "checkout", "--detach", sha), repo, runner)
-        verify_log_guard(log_guard_dir if log_guard_dir is not None else service.log_guard_dir)
         requirements_hash = verify_venv(repo, service, prior_stamp, runner)
-        if gate_evidence is not None:
-            evidence = _load_gate_evidence(gate_evidence, sha)
-            evidence_source = "file"
-        else:
-            evidence = run_gate_and_write_evidence(
-                repo, service, (GATE_REQUIRED_TIER,), repo / DEFAULT_STAMP_DIR / f"{service.name}.gate.json", sha, runner
-            )
-            evidence = _load_gate_evidence(
-                repo / DEFAULT_STAMP_DIR / f"{service.name}.gate.json", sha
-            )
-            evidence_source = "inline"
-        if service.name == "chat-streamd-v2" and not rollback:
-            _load_read_timing_receipt(read_timing_receipt, sha)
         gates = {
             "gate": evidence.get("gate"),
             "tiers": list(evidence.get("tiers") or []),
             "generated_at": evidence.get("generated_at"),
             "evidence_source": evidence_source,
         }
-        selection = None
-        if release_inputs is not None:
-            try:
-                selection = release_selection.admit(repo, sha, release_inputs, evidence,
-                                                     str(_venv_python(repo, service)), runner)
-                _validate_selected_activation(selection, repo, service)
-            except (release_selection.Invalid, OSError, ValueError, TypeError, KeyError) as exc:
-                raise DeployError(str(exc)) from exc
-        elif "seam_results" in evidence:
-            raise DeployError("release selection: seam evidence requires actual release inputs")
-
         profile = None
         if service.name == "chat-streamd-v2" and not rollback:
             profile = _release_test_profile(repo, service, runner)
-            if selection is not None and profile != selection["identity"]["test_profile"]:
-                raise DeployError("release selection test profile/settings drift")
         log_paths = _daemon_log_paths(service)
         log_path = log_paths[0] if log_paths else None
         if log_path is None and not skip_kickstart:
@@ -2288,19 +2289,14 @@ def _deploy_legacy(
             "requirements_hash": requirements_hash,
             "asset_store": _asset_store_identity(service),
             "gates": gates,
-            "selective_qualification": "admitted" if selection is not None else "not_enabled",
         }
         if profile is not None:
             stamp.update(test_profile=profile)
         if rollback and service.name == "chat-streamd-v2":
             stamp["verification_kind"] = "restoration"
-        ancestry = coordinated.legacy_guard(repo, prior_stamp, rollback=rollback)
         if ancestry:
             stamp["coordinated_receipt"] = ancestry
-        if selection is not None:
-            stamp["release_selection"] = selection
-            stamp["gates"]["seam_results"] = evidence["seam_results"]
-        elif service.name == 'chat-streamd-v2':
+        if service.name == 'chat-streamd-v2':
             configured = _launchd_environment(service.launchd_label)
             entries = (list(smoke_accounts) if smoke_accounts is not None else
                 prior_stamp.get('smoke_accounts', []) if rollback else
@@ -2319,10 +2315,8 @@ def _deploy_legacy(
         if service.name == "chat-streamd-v2":
             if rollback:
                 qualification = prior_stamp.get("prior_qualification")
-                if not isinstance(qualification, dict) or qualification.get("sha") != sha:
-                    raise DeployError("rollback lacks prior production qualification")
-                qualified_prior(qualification.get("stamp", {}), sha, [])
-                stamp["restored_qualification"] = qualification
+                if isinstance(qualification, dict) and qualification.get("sha") == sha:
+                    stamp["restored_qualification"] = qualification
             else:
                 stamp["prior_qualification"] = {"sha": prior_sha, "stamp": qualification_stamp(prior_stamp)}
         activation_runtime_manifest = runtime_manifest(repo, service, runner)
@@ -2401,14 +2395,6 @@ def _deploy_legacy(
             if down:
                 stamp["restart_activation"]["daemon_state"] = "down"
                 stamp["restart_activation"]["pre_restart_launchd_answered"] = pre_restart_state.answered
-        if selection is not None:
-            try:
-                release_selection.revalidate(selection, release_inputs)
-                if _dirty_entries(repo, runner) or _git(repo, "rev-parse", "HEAD", runner=runner) != sha:
-                    raise DeployError("release selection: changed candidate source before activation")
-                _validate_selected_activation(selection, repo, service)
-            except (release_selection.Invalid, OSError, ValueError, KeyError, TypeError) as exc:
-                raise DeployError(str(exc)) from exc
         if profile is not None:
             if _release_test_profile(repo, service, runner) != profile:
                 raise DeployError("test profile/settings drift before activation")
@@ -2436,6 +2422,11 @@ def _deploy_legacy(
             activated_plist_digest=activated_plist_digest,
             **({"restoration_runtime":restoration_runtime} if restoration_runtime is not None else {}),
         )
+        if not stamp.get("serving"):
+            _restore_prior(service, repo, stamp, transaction, restoration_runtime,
+                runner=runner, boot_wait_seconds=boot_wait_seconds)
+    else:
+        stamp["prepared_only"] = True
     return stamp
 
 
@@ -2454,8 +2445,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recovery-controller-authorization", type=Path,
                         help="Private FD authorization for recovering the receipt from a replacement controller (rollback only).")
     parser.add_argument("--recovery-go-tell-id", help="Ledger id of the FD GO tell quoting the authorization digest.")
-    parser.add_argument("--release-inputs", type=Path, help="Observed installed baselines and external tuples for qualified seam admission.")
-    parser.add_argument('--account', action='append', default=None, help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS for legacy full-matrix smoke')
+    parser.add_argument('--account', action='append', default=None, help='PROVIDER=ALIAS or HOST/PROVIDER=ALIAS for ordinary full-matrix smoke')
     parser.add_argument("--deployer-stream-id", default=None)
     parser.add_argument("--log-guard-dir", default=None, help="Override the service log guard directory checked before deploy.")
     parser.add_argument("--skip-kickstart", action="store_true", help="Test/dev only: do not kick launchd after stamping.")
@@ -2468,28 +2458,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Exit codes. EXIT_REFUSED (2) means the deploy was refused BEFORE the kickstart — nothing was
-# restarted, so a retry is safe. Every code >2 means the bounce was APPLIED and then a
-# post-activation check did not confirm health: 3/4 for the boot-line readback ("not shown up
-# yet" vs "daemon is down" — opposite operator responses, collapsing them into 2 invited a
-# retry/force double-restart of a healthy fabric, 2026-07-26 windows 9127fa2, fe7e7e7), 5 for a
-# runtime-SHA readback that never confirmed the target, 6 for a post-boot fleet-smoke miss (the
-# 2026-09-05 laneM/laneN bounces, a workstation peer), 7 for any other post-activation error (the
-# restart or schedule install itself raised), 8 for slow consumers, 9 for untested smoke,
-# and 10 for complete local pass with unreachable satellites. Partial (10) is NOT full-fleet
-# success and cannot satisfy a release gate. None of 3-10 is a refusal: do NOT retry/force.
+# Five public dispositions. Prepare-only is inert and exits zero.
 EXIT_OK = 0
 EXIT_REFUSED = 2
-EXIT_BOOT_LINE_NOT_OBSERVED = 3
-EXIT_DAEMON_BOOT_FAILED = 4
-EXIT_RUNTIME_SHA_NOT_CONFIRMED = 5
-EXIT_FLEET_SMOKE_FAILED = 6
-EXIT_POST_ACTIVATION_ERROR = 7
-EXIT_SLOW_CONSUMER_FAILED = 8
-EXIT_FLEET_SMOKE_UNTESTED = 9
-EXIT_FLEET_SMOKE_PARTIAL = 10
-EXIT_SCOPED_OK = 11
-EXIT_COORDINATED_FAILED = 12
+EXIT_ACTIVE_FAILED_CHECKS = 3
+EXIT_PRIOR_RESTORED = 4
+EXIT_RESTORE_UNPROVEN = 5
+DISPOSITION_EXIT = {
+    "active and checks passed": EXIT_OK,
+    "active with failed checks": EXIT_ACTIVE_FAILED_CHECKS,
+    "target not active, prior restored": EXIT_PRIOR_RESTORED,
+    "target not active, restore unproven": EXIT_RESTORE_UNPROVEN,
+    "refused before change": EXIT_REFUSED,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2501,7 +2482,6 @@ def main(argv: list[str] | None = None) -> int:
             ref=args.ref,
             rollback=args.rollback,
             gate_evidence=args.gate_evidence,
-            release_inputs=args.release_inputs,
             deployer_stream_id=args.deployer_stream_id,
             skip_kickstart=args.skip_kickstart,
             log_guard_dir=args.log_guard_dir,
@@ -2518,100 +2498,15 @@ def main(argv: list[str] | None = None) -> int:
     except DeployError as exc:
         print(f"deploy refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    # Print the stamp on every post-kickstart outcome: the deploy record is what an operator
-    # needs most in exactly the cases that are not a clean success.
     print(json.dumps(stamp, sort_keys=True))
-    if "exit_code" in stamp:
-        return int(stamp["exit_code"])
     if stamp.get("prepared_only"):
         return EXIT_OK
-    readback = stamp.get("daemon_boot_readback") or {}
-    outcome = readback.get("outcome")
-    detail = readback.get("detail") or ""
-    if outcome == BOOT_FAILED:
-        print(f"daemon failed to boot after deploy: {detail}", file=sys.stderr)
-        print("The stamp landed but the service is NOT healthy: investigate, or redeploy with --rollback.", file=sys.stderr)
-        return EXIT_DAEMON_BOOT_FAILED
-    if outcome == BOOT_NOT_OBSERVED:
-        print(f"deploy applied; boot-line readback inconclusive: {detail}", file=sys.stderr)
-        print("This is NOT a failed deploy. Do NOT retry or force - that double-restarts a live daemon.", file=sys.stderr)
-        print(f"Confirm with: launchctl print gui/$(id -u)/{V2_DAEMON_LABEL} | grep -E 'pid|state'", file=sys.stderr)
-        return EXIT_BOOT_LINE_NOT_OBSERVED
-    post_activation_error = stamp.get("post_activation_error")
-    if post_activation_error:
-        print(f"deploy applied; error after the restart was attempted: {post_activation_error}", file=sys.stderr)
-        print("This is NOT a refused deploy - the checkout and stamp were committed and the daemon may have restarted.", file=sys.stderr)
-        print(f"Verify health, roll back with --rollback if it is down: launchctl print gui/$(id -u)/{V2_DAEMON_LABEL} | grep -E 'pid|state'", file=sys.stderr)
-        return EXIT_POST_ACTIVATION_ERROR
-    runtime = stamp.get("daemon_runtime_readback") or {}
-    if runtime.get("outcome") == RUNTIME_SHA_NOT_CONFIRMED:
-        print(
-            f"deploy applied; daemon runtime SHA not confirmed within "
-            f"{RUNTIME_READBACK_DEADLINE_SECONDS:.0f}s: {json.dumps(runtime, sort_keys=True)}",
-            file=sys.stderr,
-        )
-        print("This is NOT a refused deploy. Do NOT retry or force - the daemon was already restarted.", file=sys.stderr)
-        print(f"Confirm with: launchctl print gui/$(id -u)/{V2_DAEMON_LABEL} | grep -E 'pid|state'", file=sys.stderr)
-        return EXIT_RUNTIME_SHA_NOT_CONFIRMED
-    slow_consumer = stamp.get("slow_consumer") or {}
-    if slow_consumer.get("outcome") == SLOW_CONSUMER_FAILED:
-        attribution = slow_consumer.get("attribution") or {}
-        if attribution.get("outcome") == "attribution_ambiguous":
-            print("deploy applied; slow_consumer attribution_ambiguous: " +
-                  json.dumps(attribution.get("reasons") or [], sort_keys=True), file=sys.stderr)
-            print("Generation provenance is unproven; investigate the retained ranges and do NOT retry the deploy.",
-                  file=sys.stderr)
-            return EXIT_SLOW_CONSUMER_FAILED
-        failures = slow_consumer.get("failures") or []
-        clients = sorted({
-            str(row.get("client") or "unknown")
-            for row in failures
-            if isinstance(row, dict)
-        })
-        client_detail = ", ".join(clients) if clients else "unknown"
-        print(
-            f"deploy applied; post-boot {slow_consumer.get('class', 'slow_consumer')} failure: client={client_detail}; "
-            f"kinds={json.dumps(slow_consumer.get('kinds') or {}, sort_keys=True)}; "
-            f"{json.dumps(failures, sort_keys=True)}",
-            file=sys.stderr,
-        )
-        print("The daemon is on the target SHA; investigate the reported connection failure kinds and do NOT retry the deploy.", file=sys.stderr)
-        return EXIT_SLOW_CONSUMER_FAILED
-    if slow_consumer:
-        print(
-            "deploy OK; post-boot slow-consumer scan: "
-            f"{slow_consumer.get('overflow_drops', 0)} overflow drops; "
-            f"{slow_consumer.get('queue_depth_warnings', 0)} queue-depth warnings.",
-            file=sys.stderr,
-        )
-    if stamp.get("verification_kind") == "restoration":
-        restoration = stamp.get("restoration") or {}
-        if restoration.get("outcome") != "passed":
-            print("rollback applied; no-input restoration proof failed or missing; model canaries were not run", file=sys.stderr)
-            return EXIT_FLEET_SMOKE_FAILED
-        return EXIT_OK
-    smoke = stamp.get("fleet_smoke") or {}
-    if smoke.get("outcome") == FLEET_SMOKE_PARTIAL:
-        print(
-            "deploy applied; post-boot fleet smoke is PARTIAL: local cells passed; "
-            f"unreachable satellites: {', '.join(smoke.get('unreachable_hosts') or [])}. "
-            "This is not full-fleet release acceptance; do NOT retry the deploy.",
-            file=sys.stderr,
-        )
-        return EXIT_FLEET_SMOKE_PARTIAL
-    if smoke.get("outcome") == FLEET_SMOKE_UNTESTED:
-        print(
-            "deploy applied; post-boot fleet smoke is UNTESTED: "
-            f"{json.dumps(smoke.get('untested') or [], sort_keys=True)}; "
-            "quota/unavailable cells are neither a pass nor a daemon regression.",
-            file=sys.stderr,
-        )
-        return EXIT_FLEET_SMOKE_UNTESTED
-    if smoke.get("outcome") == FLEET_SMOKE_FAILED:
-        print(f"deploy applied; post-boot fleet smoke failed: {smoke.get('detail') or ''}", file=sys.stderr)
-        print("This is NOT a refused deploy. The daemon is on the target SHA; investigate the failing host(s), do NOT retry the deploy.", file=sys.stderr)
-        return EXIT_FLEET_SMOKE_FAILED
-    return EXIT_OK
+    disposition = stamp.get("disposition")
+    if disposition is None:
+        # Coordinated adapters supply the same public disposition.
+        disposition = "target not active, restore unproven"
+    print(disposition, file=sys.stderr)
+    return DISPOSITION_EXIT.get(disposition, EXIT_RESTORE_UNPROVEN)
 
 
 if __name__ == "__main__":

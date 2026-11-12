@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Shared scheduled-job admission and reporting. Journey execution is phase 2."""
+"""Standing-window admission, deployed release checks and nightly reporting."""
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -183,9 +183,64 @@ def report(args):
     return 1 if errors else 0
 
 
+def wait_for_admission(window, job, *, now=None, sleep=time.sleep):
+    """Wait only for host contention while this standing window still fits."""
+    now = now or (lambda: datetime.now(timezone.utc))
+    occurrence_end = None
+    while True:
+        instant = now().astimezone(timezone.utc)
+        if occurrence_end is not None and instant >= occurrence_end:
+            return "BLOCKED:outside_window"
+        decision = admit(window, job, ENVELOPES[job], instant)
+        if decision == "ADMIT":
+            decision = fire_guard()
+        if decision not in {"BLOCKED:held", "BLOCKED:active_gate_or_deploy"}:
+            return decision
+        if occurrence_end is None:
+            value = json.loads(Path(window).read_text())
+            hour, minute = map(int, value["start_utc"].split(":"))
+            start = instant.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if start > instant:
+                start -= timedelta(days=1)
+            occurrence_end = start + timedelta(seconds=value["duration_s"])
+        sleep(min(60, max(0, (occurrence_end - instant).total_seconds())))
+
+
+def check_release(args, *, deploy_module=None):
+    """Exercise the same release checks without installing or restarting anything."""
+    if deploy_module is None:
+        if str(SERVICE) not in sys.path:
+            sys.path.insert(0, str(SERVICE))
+        from deploy import deploy as deploy_module
+    d = deploy_module
+    repo = Path(args.checkout).resolve()
+    record = {"checkout": str(repo)}
+    try:
+        service = d.SERVICES[args.service]
+        stamp = d._read_stamp(repo, service)
+        sha = stamp["sha"]
+        record["source_sha"] = sha
+        record["identity_basis"] = "deployment stamp target; not independent loaded-runtime proof"
+        checks = d.run_post_release_checks(service, repo, sha, stamp, runner=d._run)
+        passed = bool(checks) and all(row.get("outcome") == "passed" for row in checks.values())
+        record.update(checks=checks, result="PASS" if passed else "FAIL",
+                      primary_error="" if passed else "post-release checks failed")
+    except Exception as exc:
+        record.update(result="FAIL", primary_error=f"post-release checks: {type(exc).__name__}: {exc}")
+    path = Path(args.evidence) / "receipt.json"
+    prior = json.loads(path.read_text()) if path.exists() else {}
+    atomic(path, {**prior, **record})
+    print(json.dumps(record, sort_keys=True))
+    return 0 if record["result"] == "PASS" else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="subcommand", required=True)
+    check = subs.add_parser("check-release")
+    check.add_argument("--checkout", required=True, help="deployed runtime checkout")
+    check.add_argument("--evidence", required=True)
+    check.add_argument("--service", default="chat-streamd-v2")
     for name in ("admit", "report"):
         sub = subs.add_parser(name)
         sub.add_argument("--job", required=True, choices=ENVELOPES)
@@ -195,6 +250,7 @@ def main(argv=None):
         if name == "admit":
             sub.add_argument("--window", required=True)
             sub.add_argument("--now-utc")
+            sub.add_argument("--wait-within-window", action="store_true")
         else:
             sub.add_argument("--result", choices=("PASS", "FAIL", "BLOCKED"), required=True)
             sub.add_argument("--evidence", required=True)
@@ -206,7 +262,15 @@ def main(argv=None):
             sub.add_argument("--notice-wait-s", type=float, default=30)
     args = parser.parse_args(argv)
     try:
+        if args.subcommand == "check-release":
+            return check_release(args)
         if args.subcommand == "admit":
+            if args.wait_within_window:
+                if args.now_utc:
+                    parser.error("--now-utc cannot be combined with waiting")
+                decision = wait_for_admission(args.window, args.job)
+                print(decision)
+                return 0 if decision == "ADMIT" else 2
             decision = admit(args.window, args.job, ENVELOPES[args.job], args.now_utc or datetime.now(timezone.utc))
             if decision == "ADMIT":
                 decision = fire_guard()

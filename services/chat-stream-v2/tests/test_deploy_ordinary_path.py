@@ -95,3 +95,38 @@ def test_partial_restoration_never_bootstraps(restore_case,monkeypatch):
     d._restore_prior(V2_SERVICE,repo,stamp,tx,runtime,runner=run,boot_wait_seconds=0)
     assert not any(isinstance(e,tuple) and e[:2]==('launchctl','bootstrap') for e in events)
     assert stamp['disposition']=='target not active, restore unproven'
+
+
+@pytest.mark.parametrize('connected', [True, False])
+def test_report_only_smoke_suppresses_cell_notifications(monkeypatch, connected):
+    from contextlib import contextmanager
+    from tools import spawn_fleet_smoke as smoke
+    @contextmanager
+    def connection(*args):
+        if not connected:
+            raise RuntimeError('connection failure')
+        yield (None,) * 5
+    def failed_cell(*args, **kwargs):
+        raise RuntimeError('cell failure')
+    monkeypatch.setattr(smoke, '_operator_connection', connection)
+    monkeypatch.setattr(smoke, 'run_cell', failed_cell)
+    monkeypatch.setattr(smoke, 'publish_smoke_card', lambda *a: pytest.fail('per-cell card'))
+    monkeypatch.setattr(smoke, 'notify_operator_failure', lambda *a: pytest.fail('per-cell notification'))
+    rows = smoke.run_matrix('ws://fixture.invalid', Path('unused'), 1,
+        (('fixture','codex','promptless'),), report_only=True)
+    assert len(rows) == 1 and rows[0]['class'] == 'failure'
+
+
+def test_one_aggregate_blocker_for_multiple_failed_reports(tmp_path, monkeypatch):
+    calls=[]
+    monkeypatch.setattr(d, '_resolve_agent_orch', lambda *a: 'fixture-agent-orch')
+    def runner(command, cwd):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, '{}', '')
+    checks={name:{'outcome':state} for name,state in (
+        ('fleet_smoke','failed'),('slow_consumer','passed'),('front_desk','untested'))}
+    d._notify_failed_checks(tmp_path,V2_SERVICE,TARGET_SHA,checks,runner)
+    assert len(calls)==1
+    assert 'BLOCKER' in calls[0][calls[0].index('--title')+1]
+    body=json.loads(calls[0][calls[0].index('--message')+1])
+    assert set(body['checks'])=={'fleet_smoke','front_desk'}

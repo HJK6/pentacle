@@ -66,6 +66,7 @@ def test_rollback_start_verify_never_invokes_model_smoke(runtime_preparation, mo
         observed.append('zero-input')
         return {'outcome': 'passed', 'mode': 'zero_input', 'cells': [{'outcome':'passed'}]}
     monkeypatch.setattr(runtime, 'restoration_proof', restore, raising=False)
+    monkeypatch.setattr(runtime, 'prior_still_running', lambda *a: True)
     monkeypatch.setattr(runtime, 'dispatched_proofs', lambda *a: [{'fresh':True}])
     actual_runner = runtime.runner
     def runner(argv, cwd):
@@ -131,14 +132,14 @@ def test_zero_input_verifier_raw_rpc_and_owned_close(tmp_path, monkeypatch, bind
     assert prepared and closed == owned and len(closed) == binding_count
     assert [p['type'] for p in wire].count('spawn') == binding_count
 
-def test_coordinated_recovery_rejects_missing_typed_restoration(transaction, monkeypatch):
+def test_coordinated_recovery_accepts_serving_prior_without_optional_report(transaction, monkeypatch):
     tx, adapter, intent, receipt = transaction
     tx.prepare(intent, receipt)
     tx.apply(intent, receipt)
     monkeypatch.setattr(adapter, 'start_verify', lambda *a, **k:{'outcome':'passed'})
     result = tx.rollback(receipt)
-    assert result['phase'] == 'recovery_required'
-    assert result['outcome'] == 'failed'
+    assert result['phase'] == 'rolled_back'
+    assert result['outcome'] == 'passed'
 
 
 @pytest.mark.parametrize('failure', ['account','readiness','binding','cleanup'])
@@ -238,12 +239,12 @@ def test_full_scope_restoration_is_not_fresh_full_fleet_model_acceptance():
 
 
 @pytest.mark.parametrize('restoration_result',[None,{'outcome':'failed'},{'outcome':'passed'}])
-def test_direct_rollback_exit_requires_explicit_restoration(monkeypatch,restoration_result):
-    stamp={'verification_kind':'restoration','sha':'a'*40,'model_canary':{'outcome':'not_run_by_design'}}
+def test_direct_rollback_exit_uses_serving_disposition_not_restoration_report(monkeypatch,restoration_result):
+    stamp={'verification_kind':'restoration','sha':'a'*40,'model_canary':{'outcome':'not_run_by_design'}, 'disposition':'active and checks passed'}
     if restoration_result is not None: stamp['restoration']=restoration_result
     monkeypatch.setattr(deploy_mod,'deploy',lambda *a,**k:stamp)
     code=deploy_mod.main(['chat-streamd-v2','--release-checkout','/unused','--rollback'])
-    assert code==(0 if restoration_result=={'outcome':'passed'} else deploy_mod.EXIT_FLEET_SMOKE_FAILED)
+    assert code == 0
 
 
 def test_direct_post_activation_uses_no_input_proof_only(tmp_path,monkeypatch):
