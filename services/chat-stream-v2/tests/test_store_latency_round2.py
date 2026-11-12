@@ -205,32 +205,6 @@ def test_membership_decode_cache_survives_nested_member_mutation():
     asyncio.run(run())
 
 
-def test_membership_decode_cache_threads_through_work_lane_rows():
-    # The real hot caller (work_lane_rows_conn -> effective_membership_conn) picks
-    # up the connection-bound cache: a second pass reparses nothing, same rows.
-    from test_work_lanes import run as lanes_run
-
-    async def go(env):
-        await env.adopt(key="stream:a", state="paused", lead=False, owner="operator",
-                        members=["spec_a__x"])
-        await seed_observations(env.store, [_obs("spec_a__x")])
-
-        def passes(conn):
-            counting = CountingDecodeCache()
-            conn.work_decode_cache = counting
-            first = work_lane_rows_conn(conn, include_done=True)
-            after_first = counting.parses
-            second = work_lane_rows_conn(conn, include_done=True)
-            return first, second, after_first, counting.parses
-
-        first, second, after_first, after_second = await env.store.submit(passes)
-        assert after_first >= 1           # cold pass parsed the member
-        assert after_second == after_first  # warm pass reused every parse
-        assert first == second
-
-    lanes_run(go)
-
-
 # --- Fix 2: v2_tell_deliveries reply parse cache ------------------------------
 
 class CountingParseCache(TellDeliveryParseCache):

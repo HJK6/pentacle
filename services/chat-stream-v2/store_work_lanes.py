@@ -21,7 +21,8 @@ from work_lane_members import validate_members, validate_title
 from _shared.lane_icons import validate_icon
 from work_lane_progress import lane_lead_lost, members_working, seat_live, seat_working
 from store_work_index import (ensure_work_index_schema, member_ids, members_conn, _state_conn,
-                              effective_membership_conn, effective_member_ids, enrich_goals_conn)
+                              effective_membership_conn, effective_membership_ids_conn,
+                              effective_member_ids, enrich_goals_conn)
 from store_work_lane_episodes import (ensure_work_lane_episodes_schema, lead_reported_done_conn,
                                        resolved_route_dispatch_map)
 from work_lane_migration import upgrade_events
@@ -117,7 +118,7 @@ def member_conflicts_conn(conn, composite_stream_id: str, members: list[str],
                           target_lane_id: str | None = None, *, refuse: bool = False) -> list[dict[str, str]]:
     """One deterministic check, reused inside the writer transaction and previews."""
     wanted = set(members)
-    snapshot = effective_membership_conn(conn)
+    snapshot = effective_membership_ids_conn(conn)
     conflicts = []
     for identity in sorted(wanted):
         target = snapshot["assigned"].get(identity)
@@ -151,7 +152,7 @@ def _guard_open_members_conn(conn, lane, operation, payload, confirmation, actor
         if operation == "set_members" and lane["work_state"] != "done":
             if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 return
-            snapshot = effective_membership_conn(conn)
+            snapshot = effective_membership_ids_conn(conn)
             derived = any(target == lane["lane_id"] for target in snapshot["assigned"].values())
             members, _ = validate_members(payload["members"], payload.get("no_spec_reason"), derived=derived)
         elif operation == "set_state" and lane["work_state"] == "done" and payload.get("to") in OPEN_WORK_STATES:
@@ -487,13 +488,18 @@ def record_routing_confirmation_conn(conn, *, lane_id: str, stream_id: str, oper
 
 def work_lane_rows_conn(conn, *, include_done: bool = False, lane_id: str | None = None) -> list[dict[str, Any]]:
     states = WORK_STATES if include_done else OPEN_WORK_STATES
-    snapshot = effective_membership_conn(conn)
-    index_available = bool(snapshot["state"]["available"])
+    ids_snapshot = effective_membership_ids_conn(conn)
+    index_available = bool(ids_snapshot["state"]["available"])
     marks = ",".join("?" for _ in states)
     condition = f"work_state IN ({marks})" + (" AND lane_id=?" if lane_id is not None else "")
     parameters = (*states, lane_id) if lane_id is not None else states
     lanes = [dict(r) for r in conn.execute(
         f"SELECT * FROM v2_assistant_composite_lanes WHERE {condition}", parameters)]
+    # Decode observations on demand: only the identities the selected lanes name.
+    # This runs on the caller's connection and transaction (BEGIN IMMEDIATE in the
+    # reconcile pass), so the rows it reads are the ones that transaction sees.
+    named = [identity for lane in lanes for identity in effective_member_ids(conn, lane, ids_snapshot)]
+    snapshot = effective_membership_conn(conn, spec_ids=named, snapshot=ids_snapshot)
     route_dispatch_map = resolved_route_dispatch_map(conn)
     for lane in lanes:
         lane["_members"] = members_conn(conn, lane, snapshot)
@@ -606,7 +612,7 @@ class _WorkLanesStoreMixin:
     async def open_lanes_for_spec(self, spec_id: str) -> list[dict[str, Any]]:
         """Non-done product lanes whose membership names this canonical spec."""
         def _op(conn):
-            snapshot = effective_membership_conn(conn)
+            snapshot = effective_membership_ids_conn(conn)
             result = []
             for row in conn.execute(
                     "SELECT * FROM v2_assistant_composite_lanes WHERE work_state IN ('active','paused','blocked') ORDER BY lane_id"):
@@ -923,7 +929,7 @@ def _apply_conn(conn, *, stream_id, request_id, operation, lane_id, expected, pa
         elif operation == "set_members":
             if set(payload) - {"members", "no_spec_reason", "reason"} or "members" not in payload:
                 raise ValueError("work_lane_payload_invalid")
-            snapshot = effective_membership_conn(conn)
+            snapshot = effective_membership_ids_conn(conn)
             prior_members = effective_member_ids(conn, lane, snapshot)
             derived = {identity for identity, target in snapshot["assigned"].items() if target == lane["lane_id"]}
             members, reason = validate_members(payload["members"], payload.get("no_spec_reason"), derived=bool(derived))

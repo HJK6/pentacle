@@ -123,23 +123,56 @@ def _independent(value):
     return value
 
 
-def effective_membership_conn(conn, decode_cache: "WorkObservationDecodeCache | None" = None) -> dict:
-    """Enrich the canonical identity resolver for member/goal projection; no I/O."""
-    snapshot = effective_membership_ids_conn(conn)
-    state, scoped = snapshot["state"], snapshot["goals"]
-    # The hot writer path supplies a connection-scoped cache (or one is bound to
-    # the Store connection); other callers keep the uncached decode unchanged.
-    cache = decode_cache if decode_cache is not None else getattr(conn, "work_decode_cache", None)
+_SPEC_ID_CHUNK = 500
+
+
+def _decode_observations(conn, spec_ids, state: dict) -> dict:
+    """Decode only the named observation rows, each a fresh independent tree.
+
+    A fresh `json.loads` per identity is the independent per-identity copy: the
+    scan-clock overlay (`_observed_record`) and any later caller mutation land on
+    that copy and nowhere else. A named id with no row is simply absent, and
+    duplicate ids decode once. Runs on the caller's connection and transaction.
+    """
+    ids = list(dict.fromkeys(spec_ids))
     records = {}
-    for spec_id, record_json in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations"):
-        if cache is None:
+    for start in range(0, len(ids), _SPEC_ID_CHUNK):
+        chunk = ids[start:start + _SPEC_ID_CHUNK]
+        marks = ",".join("?" for _ in chunk)
+        for spec_id, record_json in conn.execute(
+                f"SELECT spec_id,record_json FROM v2_work_item_observations WHERE spec_id IN ({marks})", chunk):
             records[spec_id] = _observed_record(json.loads(record_json), state)
-        else:
-            parsed = cache.decode(spec_id, record_json)
-            shell = {**parsed, "member": _independent(parsed["member"])}
-            records[spec_id] = _observed_record(shell, state)
-    if cache is not None:
-        cache.prune(records.keys())
+    return records
+
+
+def effective_membership_conn(conn, decode_cache: "WorkObservationDecodeCache | None" = None, *,
+                              spec_ids=None, snapshot: dict | None = None) -> dict:
+    """Enrich the canonical identity resolver for member/goal projection; no I/O.
+
+    `spec_ids` names the identities whose observations are decoded (the union of
+    `effective_member_ids` over the lanes a caller renders); the maps then hold
+    exactly those that have a row. `None` decodes every row -- the decode-all
+    mode kept for the test oracle. `snapshot` is an ids-level snapshot already
+    read in the same transaction.
+    """
+    snapshot = snapshot if snapshot is not None else effective_membership_ids_conn(conn)
+    state, scoped = snapshot["state"], snapshot["goals"]
+    if spec_ids is not None:
+        records = _decode_observations(conn, spec_ids, state)
+    else:
+        # The hot writer path supplies a connection-scoped cache (or one is bound to
+        # the Store connection); other callers keep the uncached decode unchanged.
+        cache = decode_cache if decode_cache is not None else getattr(conn, "work_decode_cache", None)
+        records = {}
+        for spec_id, record_json in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations"):
+            if cache is None:
+                records[spec_id] = _observed_record(json.loads(record_json), state)
+            else:
+                parsed = cache.decode(spec_id, record_json)
+                shell = {**parsed, "member": _independent(parsed["member"])}
+                records[spec_id] = _observed_record(shell, state)
+        if cache is not None:
+            cache.prune(records.keys())
     members = {}
     for identity, record in records.items():
         member = dict(record["member"])
@@ -169,14 +202,23 @@ def effective_member_ids(conn, lane: dict, snapshot: dict | None = None) -> list
     return snapshot["membership"].get(lane["lane_id"], [])
 
 
+def _decoded_snapshot(conn, lane: dict, snapshot: dict | None) -> dict:
+    """A snapshot carrying the lane's decoded members, decoding only what is missing."""
+    if snapshot is not None and "members" in snapshot:
+        return snapshot
+    ids_snapshot = snapshot if snapshot is not None else effective_membership_ids_conn(conn)
+    return effective_membership_conn(conn, spec_ids=effective_member_ids(conn, lane, ids_snapshot),
+                                     snapshot=ids_snapshot)
+
+
 def members_conn(conn, lane: dict, snapshot: dict | None = None) -> list[dict]:
-    snapshot = snapshot if snapshot is not None else effective_membership_conn(conn)
+    snapshot = _decoded_snapshot(conn, lane, snapshot)
     return [snapshot["members"].get(identity) or unresolved_member(identity)
             for identity in effective_member_ids(conn, lane, snapshot)]
 
 
 def enrich_goals_conn(conn, lane: dict, snapshot: dict | None = None) -> None:
-    snapshot = snapshot if snapshot is not None else effective_membership_conn(conn)
+    snapshot = _decoded_snapshot(conn, lane, snapshot)
     lane_id = lane["lane_id"]
     goals = {identity: record for identity, record in snapshot["goals"].items()
              if record["facts"]["lane_id"] == lane_id}

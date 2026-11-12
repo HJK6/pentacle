@@ -1082,3 +1082,425 @@ def test_item3_byte_bound_disables_reuse_and_matches_oracle(monkeypatch):
         finally:
             store.stop()
     asyncio.run(run())
+
+
+# --- Item 4: membership decode on demand by spec_id ---------------------------
+#
+# Oracle: the pre-change membership functions, copied VERBATIM from the base
+# (725e0e0e store_work_index.py: effective_membership_conn without a cache,
+# members_conn, enrich_goals_conn) so a frozen database is read by the old
+# full-table decode. `_baseline_membership()` swaps them into store_work_lanes,
+# so the SAME work_lane_rows_conn body runs once on the old path and once on the
+# candidate. The scan clock is frozen by pinning v2_work_index_state.snapshot_at.
+
+import contextlib
+
+import store_work_index
+import store_work_lanes
+from _shared.work_goals import detail_revision, goal_id
+from _shared.work_observations import unresolved_member
+from store_work_index import (_observed_record, effective_member_ids, effective_membership_conn,
+                              effective_membership_ids_conn)
+from store_work_lanes import work_lane_rows_conn
+
+from test_work_lanes import run as lanes_run
+from test_work_lane_episodes import member, seed_observations, NOW, OLD, episodes
+
+
+def _oracle_effective_membership(conn, decode_cache=None, **_ignored):
+    snapshot = effective_membership_ids_conn(conn)
+    state, scoped = snapshot["state"], snapshot["goals"]
+    records = {}
+    for spec_id, record_json in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations"):
+        records[spec_id] = _observed_record(json.loads(record_json), state)
+    members = {}
+    for identity, record in records.items():
+        member_ = dict(record["member"])
+        last_good = record.get("last_good") or {}
+        epic = last_good.get("_epic")
+        if last_good.get("status") is not None:
+            member_["_goal_status"] = last_good["status"]
+        goal = scoped.get(epic)
+        if goal is not None:
+            member_["goal_id"] = goal_id(epic)
+            if goal["quality"] != "fresh" and member_["observation"]["quality"] == "fresh":
+                member_["observation"] = {**member_["observation"], "quality": "stale",
+                                          "error": goal.get("error") or "work_goal_source_uncertain"}
+        if record.get("progress_changed_at"):
+            member_["_progress_changed_at"] = record["progress_changed_at"]
+        member_["_progress_at"] = record.get("progress_at")
+        members[identity] = member_
+    return {**snapshot, "records": records, "members": members}
+
+
+def _oracle_members_conn(conn, lane, snapshot=None):
+    snapshot = snapshot if snapshot is not None else _oracle_effective_membership(conn)
+    return [snapshot["members"].get(identity) or unresolved_member(identity)
+            for identity in effective_member_ids(conn, lane, snapshot)]
+
+
+def _oracle_enrich_goals_conn(conn, lane, snapshot=None):
+    snapshot = snapshot if snapshot is not None else _oracle_effective_membership(conn)
+    lane_id = lane["lane_id"]
+    goals = {identity: record for identity, record in snapshot["goals"].items()
+             if record["facts"]["lane_id"] == lane_id}
+    members = []
+    for identity in effective_member_ids(conn, lane, snapshot):
+        record = snapshot["records"].get(identity) or {}
+        member_ = snapshot["members"].get(identity) or unresolved_member(identity)
+        observation = member_.get("observation") or {}
+        members.append((identity, (record.get("last_good") or {}).get("_epic"), member_.get("goal_id"),
+                        record.get("source_hash"), observation.get("quality"), observation.get("error"),
+                        member_.get("checkpoint_revision"), member_.get("checkpoint_policy_revision")))
+    goal_inputs = [(identity, record.get("source_hash"), record["quality"], record.get("error"))
+                   for identity, record in goals.items()]
+    lane["_goals"] = goals
+    lane["_detail_revision"] = detail_revision(members, goal_inputs, snapshot["state"])
+
+
+@contextlib.contextmanager
+def _baseline_membership():
+    names = ("effective_membership_conn", "members_conn", "enrich_goals_conn")
+    saved = {name: getattr(store_work_lanes, name) for name in names}
+    store_work_lanes.effective_membership_conn = _oracle_effective_membership
+    store_work_lanes.members_conn = _oracle_members_conn
+    store_work_lanes.enrich_goals_conn = _oracle_enrich_goals_conn
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(store_work_lanes, name, value)
+
+
+def _obs(spec_id, status="completed", quality="fresh"):
+    item = member(status=status, quality=quality)
+    item["spec_id"] = spec_id
+    return item
+
+
+def _rows_pair(conn, **options):
+    """(candidate rows, baseline-oracle rows) for the same frozen database."""
+    candidate = work_lane_rows_conn(conn, include_done=True, **options)
+    with _baseline_membership():
+        oracle = work_lane_rows_conn(conn, include_done=True, **options)
+    return candidate, oracle
+
+
+async def _assert_rows_equal(store, **options):
+    candidate, oracle = await store.submit(lambda conn: _rows_pair(conn, **options))
+    assert candidate == oracle
+    return candidate
+
+
+async def _set_snapshot(store, snapshot_at):
+    await store.submit(lambda c: (c.execute(
+        "UPDATE v2_work_index_state SET state_json=? WHERE singleton=1",
+        (json.dumps({"available": True, "root_configured": True, "snapshot_at": snapshot_at,
+                     "last_sweep_at": snapshot_at, "error": None}),)), c.commit()))
+
+
+async def _seed_two_lanes(env, *, extra=20):
+    """Lane A names a,b; lane B names c plus a multi-lane/duplicate/missing mix."""
+    a = (await env.adopt(key="stream:a", state="paused", lead=False, owner="operator",
+                         members=["spec_a__x", "spec_b__y"]))["lane"]
+    b = (await env.adopt(key="stream:b", state="paused", lead=False, owner="operator",
+                          members=["spec_c__z"]))["lane"]
+    rows = [_obs("spec_a__x"), _obs("spec_b__y", "in_progress"), _obs("spec_c__z", "missing", "missing")]
+    rows += [_obs(f"spec_u{i}__x") for i in range(extra)]           # never named by a lane
+    await seed_observations(env.store, rows)
+    return a, b
+
+
+def _set_members(lane_id, members):
+    def op(conn):
+        conn.execute("UPDATE v2_assistant_composite_lanes SET members_json=? WHERE lane_id=?",
+                     (json.dumps(members), lane_id))
+        conn.commit()
+    return op
+
+
+def test_item4_work_lane_rows_equal_baseline_across_states():
+    # GREEN on baseline and candidate: unchanged, changed record, snapshot_at-only
+    # change, deleted row, duplicate ids, an identity in two lanes, a lane filter.
+    async def body(env):
+        a, b = await _seed_two_lanes(env)
+        store = env.store
+        rows = await _assert_rows_equal(store)
+        assert len(rows) == 2 and [len(r["_members"]) for r in rows] == [2, 1]
+        await _assert_rows_equal(store)                                   # repeated call
+        await store.submit(lambda c: (c.execute(                          # changed record
+            "INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+            ("spec_b__y", json.dumps({"member": _obs("spec_b__y", "completed")}))), c.commit()))
+        await _assert_rows_equal(store)
+        await _set_snapshot(store, NOW)                                   # snapshot_at only
+        await _assert_rows_equal(store)
+        await store.submit(lambda c: (c.execute(                          # deleted row
+            "DELETE FROM v2_work_item_observations WHERE spec_id='spec_a__x'"), c.commit()))
+        rows = await _assert_rows_equal(store)
+        assert rows[0]["_members"][0]["observation"]["quality"] == "missing"   # unresolved_member
+        await store.submit(_set_members(a["lane_id"], ["spec_b__y", "spec_b__y", "spec_c__z"]))   # dup + shared
+        await _assert_rows_equal(store)
+        await _assert_rows_equal(store, lane_id=a["lane_id"])
+        await _assert_rows_equal(store, lane_id=b["lane_id"])
+        await store.submit(_set_members(b["lane_id"], []))                # empty selection
+        await _assert_rows_equal(store, lane_id=b["lane_id"])
+    lanes_run(body)
+
+
+def test_item4_goal_derived_members_equal_baseline():
+    async def body(env):
+        lane = (await env.adopt(key="stream:g", state="paused", lead=False, owner="operator",
+                                members=["spec_a__x"]))["lane"]
+        record = {"member": _obs("spec_g__goal", "in_progress"), "last_good": {"_epic": "epic_x", "status": "in_progress"},
+                  "progress_at": OLD, "progress_changed_at": OLD, "source_hash": "h1"}
+
+        def seed(conn):
+            conn.execute("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+                         ("spec_a__x", json.dumps({"member": _obs("spec_a__x")})))
+            conn.execute("INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+                         ("spec_g__goal", json.dumps(record)))
+            conn.execute("INSERT OR REPLACE INTO v2_work_index_state VALUES (1,?)", (json.dumps({
+                "available": True, "root_configured": True, "snapshot_at": OLD, "last_sweep_at": OLD, "error": None,
+                "goal_observations": {"epic_x": {"facts": {"lane_id": lane["lane_id"]}, "quality": "stale",
+                                                 "error": "work_goal_source_uncertain", "source_hash": "g1"}}}),))
+            conn.commit()
+
+        await env.store.submit(seed)
+        rows = await _assert_rows_equal(env.store)
+        goal_member = next(m for m in rows[0]["_members"] if m["spec_id"] == "spec_g__goal")
+        assert goal_member["goal_id"] and goal_member["observation"]["quality"] == "stale"
+    lanes_run(body)
+
+
+def test_item4_get_work_lane_and_snapshot_equal_baseline():
+    async def body(env):
+        a, _ = await _seed_two_lanes(env)
+        got = await env.store.get_work_lane(a["lane_id"])
+        snap = await env.store.work_lane_snapshot(include_done=True)
+        with _baseline_membership():
+            want = await env.store.get_work_lane(a["lane_id"])
+            want_snap = await env.store.work_lane_snapshot(include_done=True)
+        assert got == want
+        assert snap == want_snap
+    lanes_run(body)
+
+
+def test_item4_caller_mutation_does_not_reach_the_next_read():
+    async def body(env):
+        await _seed_two_lanes(env)
+
+        def mutate_then_read(conn):
+            first = work_lane_rows_conn(conn, include_done=True)
+            for lane in first:
+                for item in lane["_members"]:
+                    item["observation"]["quality"] = "CORRUPT"
+                    item["goal_id"] = "injected"
+                    if isinstance(item.get("estimate"), dict):
+                        item["estimate"]["median"] = 999
+            second, oracle = _rows_pair(conn)
+            assert second == oracle
+
+        await env.store.submit(mutate_then_read)
+    lanes_run(body)
+
+
+class _CountingJson:
+    """store_work_index.json stand-in counting record_json parses."""
+
+    def __init__(self):
+        self.record_parses = 0
+
+    def loads(self, text, *args, **kwargs):
+        if isinstance(text, str) and text.startswith('{"member"'):
+            self.record_parses += 1
+        return json.loads(text, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+
+def test_item4_only_lane_named_identities_are_decoded(monkeypatch):
+    # RED on baseline: the full-table decode parses all 23 rows. Lanes name a,b | b,c
+    # (b in two lanes) -> three distinct identities, each decoded exactly once.
+    async def body(env):
+        a, b = await _seed_two_lanes(env, extra=20)
+        await env.store.submit(_set_members(b["lane_id"], ["spec_b__y", "spec_c__z"]))
+        counting = _CountingJson()
+        monkeypatch.setattr(store_work_index, "json", counting)
+        await env.store.submit(lambda c: (setattr(c, "work_decode_cache", None),
+                                          work_lane_rows_conn(c, include_done=True)))
+        assert counting.record_parses == 3
+        counting.record_parses = 0
+        await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True, lane_id=a["lane_id"]))
+        assert counting.record_parses == 2                # lane filter narrows the selection
+        counting.record_parses = 0
+        await env.store.submit(_set_members(a["lane_id"], ["spec_a__x", "spec_a__x", "spec_a__x"]))
+        await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True, lane_id=a["lane_id"]))
+        assert counting.record_parses == 1                # duplicate ids decode once
+    lanes_run(body)
+
+
+def test_item4_empty_selection_decodes_nothing(monkeypatch):
+    async def body(env):
+        a, b = await _seed_two_lanes(env)
+        await env.store.submit(_set_members(a["lane_id"], []))
+        await env.store.submit(_set_members(b["lane_id"], []))
+        counting = _CountingJson()
+        monkeypatch.setattr(store_work_index, "json", counting)
+        await env.store.submit(lambda c: setattr(c, "work_decode_cache", None))
+        rows = await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True))
+        assert [r["_members"] for r in rows] == [[], []]
+        assert counting.record_parses == 0
+        snapshot = await env.store.submit(lambda c: effective_membership_conn(c, spec_ids=[]))
+        assert snapshot["records"] == {} and snapshot["members"] == {}
+        assert counting.record_parses == 0
+    lanes_run(body)
+
+
+def test_item4_ids_only_callers_decode_nothing(monkeypatch):
+    # RED on baseline: every ids-level caller used to pay the full-table decode.
+    async def body(env):
+        a, _ = await _seed_two_lanes(env)
+        counting = _CountingJson()
+        monkeypatch.setattr(store_work_index, "json", counting)
+        await env.store.submit(lambda c: setattr(c, "work_decode_cache", None))
+        conflicts = await env.store.submit(lambda c: store_work_lanes.member_conflicts_conn(
+            c, "assistant:primary", ["spec_a__x"], a["lane_id"]))
+        opened = await env.store.open_lanes_for_spec("spec_a__x")
+        assert opened and [lane["lane_id"] for lane in opened] == [a["lane_id"]]
+        assert isinstance(conflicts, list)
+        assert counting.record_parses == 0
+    lanes_run(body)
+
+
+def test_item4_on_demand_matches_full_decode_for_named_ids():
+    # New-API equality (the old signature has no spec_ids): records/members for the
+    # named ids equal the verbatim pre-change full-table result, for hits and a miss.
+    async def body(env):
+        await _seed_two_lanes(env)
+
+        def check(conn):
+            full = _oracle_effective_membership(conn)
+            wanted = ["spec_b__y", "spec_a__x", "spec_b__y", "spec_nope__q"]
+            partial = effective_membership_conn(conn, spec_ids=wanted)
+            for key in ("state", "goals", "assigned", "membership"):
+                assert partial[key] == full[key]
+            assert set(partial["records"]) == {"spec_a__x", "spec_b__y"}
+            assert {k: partial["records"][k] for k in partial["records"]} == {
+                k: full["records"][k] for k in partial["records"]}
+            assert {k: partial["members"][k] for k in partial["members"]} == {
+                k: full["members"][k] for k in partial["members"]}
+            default = effective_membership_conn(conn)                        # decode-all mode (oracle use)
+            assert default["records"] == full["records"] and default["members"] == full["members"]
+
+        await env.store.submit(check)
+    lanes_run(body)
+
+
+def test_item4_reconcile_rereads_inside_begin_immediate():
+    # Every observation read of a reconcile pass sits between BEGIN IMMEDIATE and
+    # COMMIT, and a change that landed after an earlier (preliminary) read still
+    # decides the episode.
+    async def body(env):
+        lane = (await env.adopt(state="paused", lead=False, owner="operator", members=["spec_demo__span"]))["lane"]
+        await seed_observations(env.store, [member("in_progress")])
+        await env.store.submit(lambda c: work_lane_rows_conn(c, include_done=True))     # preliminary read
+        await seed_observations(env.store, [member()])                                  # lands before the txn
+        seen: list[str] = []
+        await env.store.submit(lambda c: c.set_trace_callback(seen.append))
+        await env.store.reconcile_work_lane_episodes(None, now_iso=NOW)
+        await env.store.submit(lambda c: c.set_trace_callback(None))
+        assert _reads_inside_transaction(seen)
+        assert [(r["kind"], r["lane_id"]) for r in await episodes(env.store)] == [("completed", lane["lane_id"])]
+    lanes_run(body)
+
+
+def _reads_inside_transaction(statements):
+    """True when every v2_work_item_observations read follows BEGIN IMMEDIATE, before COMMIT."""
+    inside, saw_read = False, False
+    for sql in statements:
+        text = sql.lstrip().upper()
+        if text.startswith("BEGIN IMMEDIATE"):
+            inside = True
+        elif text.startswith("COMMIT") or text.startswith("ROLLBACK"):
+            inside = False
+        elif "FROM V2_WORK_ITEM_OBSERVATIONS" in text:
+            saw_read = True
+            if not inside:
+                return False
+    return saw_read
+
+
+def test_item4_transaction_checker_flags_a_read_outside_begin_immediate():
+    # Mutant: the targeted read moved ahead of BEGIN IMMEDIATE.
+    outside = ["SELECT spec_id,record_json FROM v2_work_item_observations WHERE spec_id IN ('a')",
+               "BEGIN IMMEDIATE", "UPDATE v2_assistant_composite_lanes SET x=1", "COMMIT"]
+    inside = ["BEGIN IMMEDIATE", "SELECT spec_id,record_json FROM v2_work_item_observations WHERE spec_id IN ('a')",
+              "COMMIT"]
+    assert not _reads_inside_transaction(outside)
+    assert _reads_inside_transaction(inside)
+
+
+def _decode_mutant(kind):
+    """Broken variants of the on-demand decode helper (the real one is replaced)."""
+    real = store_work_index._decode_observations
+    memo: dict = {}
+
+    def memoised(conn, spec_ids, state):
+        out = {}
+        for identity in dict.fromkeys(spec_ids):
+            if kind == "no_prune" and identity in memo:
+                out[identity] = memo[identity]          # survives a deleted row
+                continue
+            got = real(conn, [identity], state)
+            if kind == "stale_after_write" and identity in memo:
+                out[identity] = copy.deepcopy(memo[identity])   # ignores a changed record_json
+                continue
+            if identity in got:
+                if kind == "post_overlay":
+                    memo.setdefault(identity, copy.deepcopy(got[identity]))
+                    out[identity] = copy.deepcopy(memo[identity])   # frozen observed_at
+                elif kind == "aliasing":
+                    shared = memo.setdefault(identity, got[identity])
+                    _observed_record(shared, state)
+                    out[identity] = shared                           # caller shares the cached tree
+                else:
+                    memo[identity] = copy.deepcopy(got[identity])
+                    out[identity] = got[identity]
+        return out
+
+    return memoised
+
+
+async def _mutant_scenario(env, kind):
+    a, _ = await _seed_two_lanes(env)
+    store = env.store
+    await _assert_rows_equal(store)                                    # primes any memo
+    if kind == "post_overlay":
+        await _set_snapshot(store, NOW)
+    elif kind == "stale_after_write":
+        await store.submit(lambda c: (c.execute(
+            "INSERT OR REPLACE INTO v2_work_item_observations VALUES (?,?)",
+            ("spec_b__y", json.dumps({"member": _obs("spec_b__y", "completed")}))), c.commit()))
+    elif kind == "no_prune":
+        await store.submit(lambda c: (c.execute(
+            "DELETE FROM v2_work_item_observations WHERE spec_id='spec_a__x'"), c.commit()))
+    elif kind == "aliasing":
+        def corrupt(conn):
+            for lane in work_lane_rows_conn(conn, include_done=True):
+                for item in lane["_members"]:
+                    item["observation"]["quality"] = "CORRUPT"
+        await store.submit(corrupt)
+    await _assert_rows_equal(store)
+
+
+@pytest.mark.parametrize("kind", ["post_overlay", "stale_after_write", "no_prune", "aliasing"])
+def test_item4_real_decode_passes_every_mutant_scenario(kind):
+    lanes_run(lambda env: _mutant_scenario(env, kind))
+
+
+@pytest.mark.parametrize("kind", ["post_overlay", "stale_after_write", "no_prune", "aliasing"])
+def test_item4_mutants_are_detected(monkeypatch, kind):
+    monkeypatch.setattr(store_work_index, "_decode_observations", _decode_mutant(kind))
+    with pytest.raises(AssertionError):
+        lanes_run(lambda env: _mutant_scenario(env, kind))
