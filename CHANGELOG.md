@@ -13,6 +13,7 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- Use ordinary daemon releases with automatic restoration on failed serving proof, report later check failures without rollback, and run the deployed release checks nightly.
 - Require a dedicated live non-FD lane lead for active work, safe drained holds and succession, and show actual work by any assigned agent beyond preview caps.
 - Add source-backed checkpoint detail, full-membership visibility counts, goal prose and current-checkpoint validation for new implementation readiness reports.
 

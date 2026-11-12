@@ -1754,6 +1754,15 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
     if boot is None:
         state = _launchd_state(service.launchd_label, runner)
         boot = BootReadback(BOOT_OBSERVED, "existing deployed process", 0, state.pid, prior_pid)
+        # Nightly has no outgoing writer. Retained logs supply the current
+        # generation markers; an offset captured now would exclude those proofs.
+        if no_outgoing_writer is None and prior_pid is None:
+            no_outgoing_writer = True
+        if prior_log_size is None:
+            prior_log_size = _capture_log_offsets(_daemon_log_paths(service))
+            for captured in (prior_log_size or {}).values():
+                if isinstance(captured, dict):
+                    captured["size"] = 0
     checks = {}
     try:
         if fleet_smoke_check is not None:
@@ -1779,8 +1788,6 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
     except Exception as exc:
         checks["fleet_smoke"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
     try:
-        if prior_log_size is None:
-            prior_log_size = _capture_log_offsets(_daemon_log_paths(service))
         active_start = _process_start(boot.pid, runner)
         guard = stamp.get("restart_guard") or {}
         activation = stamp.get("restart_activation") or {}

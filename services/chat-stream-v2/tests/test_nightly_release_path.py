@@ -1,12 +1,35 @@
 """Nightly uses the deployed release checks and only its standing window."""
 from datetime import datetime, timedelta, timezone
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import nightly_journey as nj
 import scheduled_admission as sa
+
+
+@pytest.mark.parametrize('diagnostic', ['', 'INFO ws client=reader close code=1011\n'])
+def test_nightly_scans_the_existing_process_generation(tmp_path, monkeypatch, diagnostic):
+    from managed_logs import Config
+    from .test_deploy_script import deploy_mod as d
+    from .test_deploy_log_guard import _boot, _ACTIVE_START
+
+    config = Config(tmp_path / 'daemon.out', tmp_path / 'daemon.err')
+    config.stdout.write_text(_boot())
+    config.stderr.write_text(_boot() + diagnostic)
+    monkeypatch.setattr(d, '_daemon_log_paths', lambda _: (config.stdout, config.stderr))
+    monkeypatch.setattr(d, '_managed_log_config', lambda _: config)
+    monkeypatch.setattr(d, '_launchd_state', lambda *_: d.LaunchdState(loaded=True, pid=222))
+    monkeypatch.setattr(d, '_process_start', lambda *_: _ACTIVE_START)
+    monkeypatch.setattr(d, '_notify_failed_checks', lambda *a: None)
+    runner = lambda argv, cwd: subprocess.CompletedProcess(argv, 0, '{"outcome":"passed"}', '')
+    checks = d.run_post_release_checks(d.SERVICES['chat-streamd-v2'], tmp_path, 'a' * 40, {},
+        runner=runner, fleet_smoke_check=lambda: {'outcome': 'passed'})
+
+    assert checks['slow_consumer']['attribution']['outcome'] == 'no_outgoing_writer', checks['slow_consumer']
+    assert checks['slow_consumer']['outcome'] == ('failed' if diagnostic else 'passed')
 
 
 def test_held_admission_retries_inside_same_window(tmp_path, monkeypatch):

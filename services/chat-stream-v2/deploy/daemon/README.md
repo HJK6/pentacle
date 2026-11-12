@@ -263,7 +263,7 @@ the boot line and exact served SHA plus dispatched helper identity. Only those
 serving checks decide restoration. Smoke, slow-consumer logs and the authenticated
 Front Desk reply run after commit, as reports; a failure leaves the serving target
 active and emits one aggregate BLOCKER.
-No coordinated invocation accepts `--release-inputs` or `--skip-kickstart`.
+No coordinated invocation accepts `--skip-kickstart`.
 
 The immutable receipt links the intent digest to preimages, staged source,
 interpreter/dependency evidence, catalog/policy/pin digests and exact scope.
