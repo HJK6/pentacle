@@ -27,7 +27,13 @@ def run_check(url: str, token_path: Path, target_sha: str,
     deadline = time.monotonic() + timeout
     try:
         with _operator_connection(url, token_path, timeout) as (rpc, *_):
-            sent = rpc({'type': 'send', 'to_stream_id': 'bart:assistant', 'message': message},
+            # Resolve the operator chat, not the peer-only assistant alias or
+            # its current physical backend, so ordinary operator intake runs.
+            binding = rpc({'type': 'assistant.binding'}, 'assistant.binding', deadline=deadline)
+            target = binding.get('composite_stream_id')
+            if not isinstance(target, str) or not target:
+                return {**result, 'reason': 'input_identity_missing'}
+            sent = rpc({'type': 'send', 'to_stream_id': target, 'message': message},
                        'send', deadline=deadline)
             accepted = sent.get('assistant_composite') or {}
             message_id = accepted.get('message_id')
@@ -35,11 +41,11 @@ def run_check(url: str, token_path: Path, target_sha: str,
                 return {**result, 'reason': 'input_identity_missing'}
             result['message_id'] = message_id
             while time.monotonic() < deadline:
-                history = rpc({'type': 'request_stream_events', 'stream_id': 'bart:assistant',
+                history = rpc({'type': 'request_stream_events', 'stream_id': target,
                                'limit': 500}, 'request_stream_events', deadline=deadline)
                 for event in history.get('events', []):
                     raw = event.get('raw') or {}
-                    if (event.get('stream_id') == 'bart:assistant'
+                    if (event.get('stream_id') == target
                             and event.get('kind') == 'ASSIST_TEXT'
                             and raw.get('assistant_composite') is True
                             and event.get('message_id')

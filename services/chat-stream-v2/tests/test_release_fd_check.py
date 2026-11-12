@@ -8,7 +8,7 @@ from tools import release_fd_check as check
 
 
 def event(text='PONG probe-nonce', **changes):
-    row = {'stream_id': 'bart:assistant', 'kind': 'ASSIST_TEXT', 'text': text,
+    row = {'stream_id': 'fixture-composite:assistant', 'kind': 'ASSIST_TEXT', 'text': text,
            'message_id': 'publication:answer', 'reply_to_message_id': 'input-1',
            'raw': {'assistant_composite': True, 'reply_to_message_id': 'input-1'}}
     return {**row, **changes}
@@ -20,6 +20,9 @@ def install(monkeypatch, rows, admission=None, error=None):
     def connection(url, token_path, timeout):
         def rpc(payload, prefix, **kwargs):
             calls.append(payload)
+            if prefix == 'assistant.binding':
+                return {'type': 'assistant.binding.ok', 'composite_stream_id': 'fixture-composite:assistant',
+                        'stream_id': 'fixture-backend:fd'}
             if prefix == 'send':
                 if error:
                     raise RuntimeError(error)
@@ -40,9 +43,10 @@ def test_linked_published_reply_passes(monkeypatch):
     assert result['outcome'] == 'passed'
     assert result['message_id'] == 'input-1'
     assert result['reply_message_id'] == 'publication:answer'
-    assert calls[0] == {'type': 'send', 'to_stream_id': 'bart:assistant',
+    assert calls[0] == {'type': 'assistant.binding'}
+    assert calls[1] == {'type': 'send', 'to_stream_id': 'fixture-composite:assistant',
                         'message': '[release-check aaaaaaaa probe-nonce] Release check. Reply with exactly: PONG probe-nonce'}
-    assert calls[1]['stream_id'] == 'bart:assistant'
+    assert calls[2]['stream_id'] == 'fixture-composite:assistant'
 
 
 @pytest.mark.parametrize('rows', [[], [event(text='PONG old-nonce')],
@@ -78,7 +82,10 @@ def test_existing_operator_rpc_collects_chunked_normal_publication(monkeypatch):
         def send(self, encoded):
             payload = json.loads(encoded)
             request_id = payload['request_id']
-            if payload['type'] == 'send':
+            if payload['type'] == 'assistant.binding':
+                queue.append({'type': 'assistant.binding.ok', 'request_id': request_id,
+                              'composite_stream_id': 'fixture-composite:assistant', 'stream_id': 'fixture-backend:fd'})
+            elif payload['type'] == 'send':
                 nonce = payload['message'].split('PONG ')[1]
                 self.answer = event(text='PONG ' + nonce)
                 queue.extend([
