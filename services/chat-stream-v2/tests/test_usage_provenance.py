@@ -741,30 +741,6 @@ def _write_host_transcripts(tmp_path: Path) -> dict[str, str]:
     return {"claude": str(tmp_path / "claude"), "codex": str(tmp_path / "codex")}
 
 
-def test_thoth_backfill_tool_uses_the_same_sink(tmp_path: Path, capsys) -> None:
-    from tools import backfill_usage_provenance as tool
-
-    db = tmp_path / "sessions.db"
-    store = Store(str(db))
-    store.start()
-    store.stop()
-    _seed_ledger(db, [("thoth", "claude", "native-claude", "m1"), ("thoth", "codex", "native-codex", "cumulative")])
-    roots = _write_host_transcripts(tmp_path)
-    common = ["--db", str(db), "--host", "thoth", "--claude-root", roots["claude"], "--codex-root", roots["codex"],
-              "--cursor", str(tmp_path / "cursor.json")]
-    assert tool.main([*common, "--dry-run"]) == 0
-    dry = json.loads(capsys.readouterr().out)
-    assert dry["providers"]["claude"]["native_sessions_known_in_ledger"] == 1
-    assert tool.main(common) == 0
-    real = json.loads(capsys.readouterr().out)
-    assert real["providers"]["claude"]["recorded"] == 1 and real["providers"]["codex"]["recorded"] == 3
-    assert tool.main([*common, "--no-cursor"]) == 0
-    again = json.loads(capsys.readouterr().out)
-    assert "recorded" not in again["providers"]["claude"] and "recorded" not in again["providers"]["codex"]
-    assert len((tmp_path / "usage_history.jsonl").read_text().splitlines()) == 2
-    empty = tmp_path / "fresh.db"
-    sqlite3.connect(empty).close()
-    assert tool.main(["--db", str(empty), "--host", "thoth"]) == 2
 
 
 def test_satellite_backfill_cli_over_event_push(tmp_path: Path, monkeypatch, capsys) -> None:

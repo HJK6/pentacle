@@ -49,17 +49,6 @@ They must preserve the state checkpoint and bind receipts with candidate SHA,
 runtime PID, helper hash, evidence paths, close-capability state, and the
 durable closed-row/physical-tmux predicates through `write_receipt`.
 
-The supported D2 acceptance caller is `tools/d2_live_delivery.py`. It requires
-explicit release SHA, live PID, gate provenance and an external artifact directory;
-it uses generation-CAS mode only and preserves at least 60 seconds of delivery
-proof backoff. Run it once within the authorized release window. All independent
-observations collect failures, including runtime-after, terminal episode stability,
-4/4 durable cleanup, capability and foreign inventory, before the final verdict.
-Mutating RPC errors stop the journey; library cleanup still runs in its context
-manager. Foreign inventory is hashed before/after; equality is diagnostic only.
-Acceptance requires no foreign target in the ownership-guarded helper mutation
-audit or library cleanup receipts. Concurrent foreign inventory changes are allowed.
-
 Satellite discovery is a required boundary for remote seats. Its default
 `v2-*` admission covers `v2-fleet-smoke-{provider}-{uuid_prefix}` while its
 legacy smoke exception permits only eight hexadecimal characters. Keep the

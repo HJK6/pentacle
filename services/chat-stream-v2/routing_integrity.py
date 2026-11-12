@@ -424,11 +424,6 @@ class RoutingIntegrity:
             expected_generation=generation,
         )
 
-    async def _notify_episode(self, episode: dict[str, Any], *, reason: str) -> None:
-        """Deliver one episode while serialized against its close/reopen."""
-        stream_id = str(episode.get("stream_id") or "")
-        async with self.store.routing_integrity_lifecycle_lock(stream_id):
-            await self._notify_episode_locked(episode, reason=reason)
 
     async def _notify_episode_locked(self, episode: dict[str, Any], *, reason: str) -> None:
         stream_id = str(episode.get("stream_id") or "")

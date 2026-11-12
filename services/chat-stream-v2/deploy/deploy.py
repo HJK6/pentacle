@@ -1002,31 +1002,6 @@ def _wait_launchd_unloaded(
     return state
 
 
-def reload_web(
-    label: str, plist: Path, runner: Runner, *, timeout_s: float = 10.0,
-    sleep: Callable[[float], None] = time.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> dict[str, object]:
-    """Reload only the caller's descriptor, after positively observing unload.
-
-    The web owner retains its artifact/config preimages, descriptor transaction,
-    PID/listener/served-build readback and exact rollback. This replaces only its
-    copied bootout/print/bootstrap block; it neither stages nor certifies a release.
-    Unlike daemon reload, web activation must refuse an unknown or stuck label.
-    """
-    plist = Path(plist)
-    if plistlib.loads(plist.read_bytes()).get("Label") != label:
-        raise DeployError("web descriptor Label does not match the requested label")
-    if not math.isfinite(timeout_s) or timeout_s <= 0:
-        raise DeployError("web unload timeout must be positive and finite")
-    target = _launchctl_target(label)
-    _checked(("launchctl", "bootout", target), Path.cwd(), runner)
-    state = _wait_launchd_unloaded(label, runner, timeout_s=timeout_s,
-                                  sleep=sleep, monotonic=monotonic)
-    if not state.answered or state.loaded:
-        raise DeployError(f"web label not positively unloaded within {timeout_s:g}s: {target}; {state.detail}")
-    _checked(("launchctl", "bootstrap", target.rsplit("/", 1)[0], str(plist)), Path.cwd(), runner)
-    return {"target": target, "unloaded": True, "plist": str(plist)}
 
 
 def _asset_store_identity(service: ServiceConfig) -> dict[str, object]:

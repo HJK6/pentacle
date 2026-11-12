@@ -279,20 +279,6 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             os.unlink(temporary)
 
 
-def migrate_owned_secret_file_permissions(path: Path) -> None:
-    """One-time control-plane migration for a legacy owner-only secret store."""
-    try:
-        parent_info = path.parent.lstat()
-        if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid():
-            raise OperatorRegistryUnavailable("legacy secret directory ownership invalid")
-        if path.exists():
-            file_info = path.lstat()
-            if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.getuid():
-                raise OperatorRegistryUnavailable("legacy secret file ownership invalid")
-            os.chmod(path, REGISTRY_FILE_MODE)
-        os.chmod(path.parent, REGISTRY_DIR_MODE)
-    except OSError as exc:
-        raise OperatorRegistryUnavailable("legacy secret permission migration failed") from exc
 
 
 class OperatorCredentialRegistry:

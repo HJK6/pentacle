@@ -61,7 +61,7 @@ def test_collection_ignores_operator_machine_config():
     service_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-         "tests/test_orphan_reaper.py", "tests/test_d2_live_delivery.py"],
+         "tests/test_orphan_reaper.py"],
         cwd=service_dir, env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
 

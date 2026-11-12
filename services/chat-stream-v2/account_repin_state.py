@@ -144,9 +144,6 @@ def healthy_origin(value):
     return binding
 
 
-def immutable_origin(value):
-    # Health/default/policy are separately CASed metadata, never binding lineage.
-    return value["binding"]
 
 
 def resolved(a,key):

@@ -1528,19 +1528,6 @@ class NotificationStore(ErrorNotificationMixin):
             self._conn.commit()
             return self._get_agent_question_locked(str(question["question_id"]))
 
-    def list_answered_agent_questions(self, *, limit: int) -> list[dict]:
-        """Return a bounded recovery page of delivery-pending answers."""
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-            raise ValueError("limit must be a nonnegative integer")
-        with self._lock:
-            self._require_open()
-            rows = self._conn.execute(
-                f"SELECT {', '.join(AGENT_QUESTION_COLUMNS)} "
-                "FROM agent_questions WHERE state = ? "
-                "ORDER BY answered_at ASC, question_id ASC LIMIT ?",
-                (QUESTION_STATE_ANSWERED, limit),
-            ).fetchall()
-        return [_question_row_to_dict(row) for row in rows]
 
     def _terminalize_agent_question_for_notification_locked(
         self,
@@ -2370,61 +2357,6 @@ class NotificationStore(ErrorNotificationMixin):
             self._conn.commit()
             return {"state": "claimed", "record": self._get_locked(notification_id)}
 
-    def finish_external_resolution(
-        self,
-        notification_id: str,
-        *,
-        canonical_intent: dict[str, Any],
-        terminal_state: str,
-        outcome: dict[str, Any],
-        by: str,
-        now: str | None = None,
-    ) -> dict:
-        if terminal_state not in {STATE_SPAWNED, STATE_DONE, STATE_FAILED}:
-            raise InvalidNotification("invalid external resolution terminal state")
-        ts = now or _iso_now()
-        with self._lock:
-            self._require_open()
-            record = self._get_locked(notification_id)
-            if record is None:
-                raise NotificationNotFound(notification_id)
-            existing = record.get("resolution") if isinstance(record.get("resolution"), dict) else {}
-            if _intent_from_resolution(notification_id, existing) != canonical_intent:
-                raise NotificationResolutionConflict(notification_id)
-            if record["state"] != STATE_RUNNING:
-                if record["state"] == terminal_state:
-                    return record
-                raise NotificationTerminalState(record["state"])
-            resolution = dict(existing)
-            resolution.update(outcome)
-            resolution.update(
-                {
-                    "by": by,
-                    "at": ts,
-                    "resolution_status": "completed",
-                    "canonical_intent": canonical_intent,
-                }
-            )
-            cursor = self._conn.execute(
-                """
-                UPDATE notifications
-                SET state = ?, resolution = ?, resolved_at = ?, updated_at = ?
-                WHERE notification_id = ? AND state = ?
-                """,
-                (
-                    terminal_state,
-                    json.dumps(resolution),
-                    ts,
-                    ts,
-                    notification_id,
-                    STATE_RUNNING,
-                ),
-            )
-            if cursor.rowcount != 1:
-                self._conn.rollback()
-                raise NotificationResolutionInProgress(notification_id)
-            self._conn.commit()
-            return self._get_locked(notification_id)
 
     def recover_claimed_external_resolutions(
         self,
@@ -2488,52 +2420,6 @@ class NotificationStore(ErrorNotificationMixin):
             self._conn.commit()
             return len(stale_rows)
 
-    def mark_external_resolution_indeterminate(
-        self,
-        notification_id: str,
-        *,
-        canonical_intent: dict[str, Any],
-        reason: str,
-        now: str | None = None,
-    ) -> dict:
-        ts = now or _iso_now()
-        with self._lock:
-            self._require_open()
-            record = self._get_locked(notification_id)
-            if record is None:
-                raise NotificationNotFound(notification_id)
-            resolution = record.get("resolution") if isinstance(record.get("resolution"), dict) else {}
-            if _intent_from_resolution(notification_id, resolution) != canonical_intent:
-                raise NotificationResolutionConflict(notification_id)
-            if record["state"] == STATE_INDETERMINATE:
-                return record
-            if record["state"] != STATE_RUNNING:
-                raise NotificationTerminalState(record["state"])
-            resolution = dict(resolution)
-            resolution.update(
-                {
-                    "resolution_status": "indeterminate",
-                    "indeterminate_at": ts,
-                    "indeterminate_reason": reason,
-                }
-            )
-            self._conn.execute(
-                """
-                UPDATE notifications
-                SET state = ?, resolution = ?, resolved_at = ?, updated_at = ?
-                WHERE notification_id = ? AND state = ?
-                """,
-                (
-                    STATE_INDETERMINATE,
-                    json.dumps(resolution),
-                    ts,
-                    ts,
-                    notification_id,
-                    STATE_RUNNING,
-                ),
-            )
-            self._conn.commit()
-            return self._get_locked(notification_id)
 
     def update_delivery_status(
         self,

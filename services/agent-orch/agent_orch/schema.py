@@ -40,14 +40,8 @@ class InboxPayload:
     extras: dict[str, Any]
 
 
-def _require_type(field: str, value: Any, expected_type: type | tuple[type, ...]) -> None:
-    if not isinstance(value, expected_type):
-        raise InboxValidationError("wrong_type", f"{field} has wrong type")
 
 
-def _require_optional_string(field: str, value: Any) -> None:
-    if value is not None and not isinstance(value, str):
-        raise InboxValidationError("wrong_type", f"{field} has wrong type")
 
 
 def _violation(code: str, field: str, detail: str) -> dict[str, str]:
@@ -148,9 +142,6 @@ def inline_inbox_json(payload: dict[str, Any]) -> str:
     return data
 
 
-def inline_inbox_block(payload: dict[str, Any]) -> str:
-    inbox = validate_inbox(payload)
-    return f'<INBOX_V1 msg_id="{inbox.msg_id}">\n{inline_inbox_json(payload)}\n</INBOX_V1>\n\n'
 
 
 def json_dumps_compact(payload: dict[str, Any]) -> str:

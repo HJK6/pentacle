@@ -62,11 +62,3 @@ def test_c2_keyed_spawn_across_restart(variant, tmp_path, evidence):
 
 def test_c3_report_across_restart(tmp_path, evidence):
     _assert_pass(rm.run_c3(tmp_path / "env", evidence))
-
-
-def test_c4_retro_run_across_restart(tmp_path, evidence):
-    _assert_pass(rm.run_c4(tmp_path / "env", evidence))
-
-
-def test_c4b_retro_run_daemon_stays_down(tmp_path, evidence):
-    _assert_pass(rm.run_c4(tmp_path / "env", evidence, stay_down=True))

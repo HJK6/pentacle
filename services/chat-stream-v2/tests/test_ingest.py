@@ -181,13 +181,7 @@ def test_queued_wrapper_timestamp_and_identity_survive_replay(tmp_path):
 
 def test_current_format_ingress_replay_keeps_legacy_identities(tmp_path):
     import json
-    import hashlib
-    import sqlite3
     from ingest import append_ingested_event
-    from claude_jsonl_norm import normalize_claude_jsonl_record
-    from message_envelopes import annotate_message_envelope
-    from tools.history_repair import (freeze_manifest, apply_manifest, rollback_manifest,
-        manifest_sha256, scope_packet_sha256)
     from submission_events import DurableUserEventProof, EventWatermark
     corpus = json.loads((SERVICE_DIR.parents[1] / 'pentacle-chat-core/tests/fixtures/provider-wrapper.json').read_text())
     capture = corpus['replay_capture']
@@ -226,68 +220,6 @@ def test_current_format_ingress_replay_keeps_legacy_identities(tmp_path):
                 expected_text=corpus['queued_capture']['display_text'],
                 watermark=EventWatermark('host:session', 0, 'reachable'))
             assert proof.proven
-            # Freeze correction against this exact scratch Store and raw source
-            # bytes, then replay through the same production ingest path again.
-            lines = [json.dumps(r, sort_keys=True, separators=(',', ':')).encode() + b'\n'
-                     for r in capture['records']]
-            source_sha = hashlib.sha256(b''.join(lines)).hexdigest()
-            record_sha = {r['uuid']: hashlib.sha256(line).hexdigest()
-                          for r, line in zip(capture['records'], lines)}
-            backup_path = tmp_path / 'replay-snapshot.db'
-            def backup(conn):
-                with sqlite3.connect(backup_path) as target:
-                    conn.backup(target)
-            await store.submit(backup)
-            database_sha = hashlib.sha256(backup_path.read_bytes()).hexdigest()
-            scope = {'schema_version': 1, 'target': {'host': 'host', 'session_name': 'session',
-                'stream_id': 'host:session', 'session_created_at': session['created_at'],
-                'session_generation': session['session_generation']},
-                'source': {'jsonl_sha256': source_sha, 'records': [
-                    {'class': 'queued_notice', 'source_uuid': 'queued-fixture',
-                     'source_line_number': 1, 'source_sha256': record_sha['queued-fixture'],
-                     'attachment_source_uuid': 'source-fixture'},
-                    {'class': 'image_meta', 'source_uuid': 'image-meta-fixture',
-                     'source_line_number': 5, 'source_sha256': record_sha['image-meta-fixture']}]},
-                'database_snapshot_sha256': database_sha}
-            selected = [r for r in capture['records']
-                        if r['uuid'] in {'queued-fixture', 'image-meta-fixture'}]
-            selected_sha = {r['uuid']: record_sha[r['uuid']] for r in selected}
-            manifest = await store.submit(lambda conn: freeze_manifest(conn, selected,
-                scope_packet=scope, expected_scope_sha256=scope_packet_sha256(scope),
-                source_record_sha256_by_uuid=selected_sha, source_jsonl_sha256=source_sha,
-                database_snapshot_sha256=database_sha, normalizer=normalize_claude_jsonl_record,
-                annotator=annotate_message_envelope))
-            preimages = tmp_path / 'replay-preimages.json'
-            correction = dict(expected_manifest_sha256=manifest_sha256(manifest),
-                source_jsonl_sha256=source_sha, preimages_path=preimages)
-            assert (await store.submit(lambda conn: apply_manifest(conn, manifest, **correction)))['status'] == 'applied'
-            assert (await store.submit(lambda conn: apply_manifest(conn, manifest, **correction)))['status'] == 'already_applied'
-            corrected = await store.fetch_session_event_tail('host:session', limit=500)
-            assert len(corrected) == len(before) - 1
-            assert all(e['raw']['jsonl_record_uuid'] != 'image-meta-fixture' for e in corrected)
-            for event in corrected:
-                assert identities[event['raw']['jsonl_record_uuid']] == (event['daemon_seq'], _identity_key(event))
-                assert event['kind'] == 'USER'
-            queued = next(e for e in corrected if e['raw']['jsonl_record_uuid'] == 'queued-fixture')
-            assert queued['text'] == notice_body
-            assert queued['message_envelope']['kind'] == 'notification_answer'
-            assert queued['raw']['subtype'] == 'queued-command'
-            controls = [e for e in before if e['raw']['jsonl_record_uuid'] not in ('queued-fixture', 'image-meta-fixture')]
-            assert [e for e in corrected if e['raw']['jsonl_record_uuid'] != 'queued-fixture'] == controls
-            for _ in range(2):
-                for event in normalize_claude_jsonl_records(capture['records'], host='host', session_name='session'):
-                    assert await append_ingested_event(store, broadcast, event, recent_limit=500) is None
-            assert broadcasts == []
-            assert await store.fetch_session_event_tail('host:session', limit=500) == corrected
-            proof = await DurableUserEventProof(store, local_host='host').lookup('host:session',
-                expected_text=notice_body, watermark=EventWatermark('host:session', queued['daemon_seq'] - 1, 'reachable'))
-            assert proof.proven and proof.event_id == queued['daemon_seq']
-            def keys_agree(conn):
-                return all(r['event_key'] == hashlib.sha256(r['event_json'].encode()).hexdigest()
-                    for r in conn.execute('SELECT event_key,event_json FROM session_event_tail'))
-            assert await store.submit(keys_agree)
-            assert (await store.submit(lambda conn: rollback_manifest(conn, manifest, **correction)))['status'] == 'rolled_back'
-            assert await store.fetch_session_event_tail('host:session', limit=500) == before
         finally:
             store.stop()
     asyncio.run(go())

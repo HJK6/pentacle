@@ -348,9 +348,6 @@ class SpecsSubsystem:
                 self._statuses_fingerprint = token
             return self._statuses, self._status_order
 
-    def _status_names(self) -> set[str]:
-        statuses, _ = self._load_statuses()
-        return {s["name"] for s in statuses}
 
     def _work_dirs(self, *, statuses=None) -> list[Path]:
         """All folders under `work/` that look like status buckets.
@@ -942,13 +939,6 @@ class SpecsSubsystem:
                 if owner:
                     self._capture_future = None
 
-    def equivalent_spec_id_family(self, spec_id: str | None) -> tuple[str, ...]:
-        """Return legacy persisted spellings for coordination family operations."""
-        aliases = self._spec_id_aliases(spec_id)
-        if not aliases:
-            return ()
-        canonical = aliases[-1]
-        return tuple(sorted({canonical, *(f"{prefix}{canonical}" for prefix in SPEC_DOCUMENT_PREFIXES)}))
 
     def _matches_for_spec_id(self, spec_id: str | None) -> list[tuple[str, Path]]:
         return self._matches_from_index(self._folders_by_id(), spec_id)
@@ -1363,12 +1353,6 @@ class SpecsSubsystem:
         }
         return {"parsed": dict(metadata)}
 
-    def changed_payload(self, spec_ids: list[str]) -> dict[str, Any]:
-        return {
-            "spec_ids": list(spec_ids),
-            "sync_conflict_count": self._sync_conflict_count(),
-            "subsystem_state": self.state_payload(),
-        }
 
     def statuses_payload(self) -> list[dict[str, Any]]:
         """Public statuses array for inclusion in specs.capabilities.

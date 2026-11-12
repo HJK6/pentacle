@@ -148,40 +148,6 @@ def finite_job_path(command: str) -> str:
     return argv[1]
 
 
-def assert_operator_controls(events: list[dict], records: list[dict], *, stream: str,
-                             literal: str, caption: str) -> list[dict]:
-    """L4 positive controls need native operator source, including real image blocks."""
-    proofs = []
-    for body in (literal, caption):
-        matches = [event for event in events if event.get('stream_id') == stream
-                   and event.get('kind') == 'USER' and event.get('provider') == 'claude'
-                   and event.get('text') == body]
-        assert len(matches) == 1, 'expected exactly one owned operator control'
-        event = matches[0]
-        sources = [record for record in records if record.get('uuid') ==
-                   (event.get('raw') or {}).get('jsonl_record_uuid')]
-        assert len(sources) == 1, 'operator control source UUID missing or ambiguous'
-        record = sources[0]
-        assert record.get('type') == 'user' and (record.get('message') or {}).get('role') == 'user', 'control is not native operator USER'
-        proof = assert_provider_source(event, body=body, record=record)
-        content = record['message']['content']
-        image_blocks = [block for block in content if isinstance(block, dict) and block.get('type') == 'image'] if isinstance(content, list) else []
-        if body == caption:
-            assert event.get('attachments') and image_blocks, 'real PNG attachment absent from daemon/provider control'
-            hashes = []
-            for block in image_blocks:
-                source = block.get('source') or {}
-                assert source.get('type') == 'base64' and source.get('media_type') == 'image/png', 'provider control image is not a base64 PNG'
-                try:
-                    image = base64.b64decode(source.get('data', ''), validate=True)
-                except (binascii.Error, ValueError, TypeError) as exc:
-                    raise AssertionError('malformed provider PNG control') from exc
-                assert image.startswith(b'\x89PNG\r\n\x1a\n'), 'provider control bytes are not PNG'
-                hashes.append(hashlib.sha256(image).hexdigest())
-            proof['provider_png_sha256'] = hashes
-        proofs.append({**proof, 'daemon_event_id': event['daemon_seq'], 'native_operator_user': True,
-                       'image_blocks': len(image_blocks)})
-    return proofs
 
 
 def _host_command(host: str, *argv: str) -> str:
