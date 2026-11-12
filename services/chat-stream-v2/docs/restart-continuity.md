@@ -130,8 +130,7 @@ Recovery reads after any doubt: `agent-orch spawn-status <key|request_id>`,
 ## Verification
 
 The restart matrix runs real daemon processes: SIGTERM and SIGKILL at each stage,
-plus client journeys for `await`, keyed `spawn`, `report` and the daily retro `run`
-path. It is explicitly run and is not part of the unit gate:
+plus client journeys for `await`, keyed `spawn` and `report`. It is explicitly run and is not part of the unit gate:
 
 ```bash
 cd services/chat-stream-v2

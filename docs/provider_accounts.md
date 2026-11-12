@@ -57,12 +57,11 @@ from the daemon environment, when set); it does not inherit the previous stamped
 The installed scheduled smoke map is replaced accordingly. Repeat the declarations
 to keep an explicit map across forward deployments. Rollback uses its recorded map.
 Startup tuple probes select the tuple's alias explicitly. Wrapper/delivery probes
-and event-push canaries accept the same map. Daily-retro settings accept optional
-`account` and retain it in the original idempotent intent.
+and event-push canaries accept the same map.
 Assistant bootstrap and the busy-seat probe accept scalar `--account`. The
 commissioned recovery manifest accepts `target.account`; omitted selection retains
 the bound predecessor alias. These tools verify the admitted binding, and retained
-retro/recovery admissions are checked again before consuming work on replay.
+recovery admissions are checked again before consuming work on replay.
 
 Bound handoff, recovery and host transfer preserve the source alias when omitted,
 and fail if that target account is unavailable. Same-native-session resume and
