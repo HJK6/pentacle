@@ -33,6 +33,43 @@ def _nonfinite_constant(value):
     raise ValueError("nonstandard JSON constant")
 
 
+class TellDeliveryParseCache:
+    """Connection-scoped memo of v2_tell_deliveries reply parses.
+
+    `ProjectionDeliveries` rebuilds per request (and per write on the
+    connection), re-decoding every delivery reply; that strict parse is the
+    remaining store-thread cost after the round-1 instance reuse. Keyed
+    tell_id -> (reply_text, parsed): a changed reply (text differs) or a new
+    tell_id misses and reparses with the identical strict hooks, and tell_ids
+    absent from a completed scan are pruned. A failed strict parse is never
+    stored, so it keeps raising exactly as the uncached path does. Parsed
+    payloads are consumed read-only by the delivery/origin readers, so the
+    pristine parse is shared without a copy. Store-owned connection state,
+    never touched from the asyncio thread; a fresh connection gets a fresh
+    cache.
+    """
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[str, dict]] = {}
+
+    def decode(self, tell_id: str, reply_text: str):
+        entry = self._entries.get(tell_id)
+        if entry is None or entry[0] != reply_text:
+            parsed = json.loads(reply_text, object_pairs_hook=_unique_object,
+                                parse_constant=_nonfinite_constant)
+            entry = (reply_text, parsed)
+            self._entries[tell_id] = entry
+        return entry[1]
+
+    def prune(self, live_tell_ids) -> None:
+        # A completed scan leaves `_entries` a superset of the live ids, so an
+        # unequal count is exactly a stale (since-deleted) tell_id.
+        if len(self._entries) != len(live_tell_ids):
+            live = set(live_tell_ids)
+            self._entries = {tell: entry for tell, entry in self._entries.items() if tell in live}
+
+
 class ProjectionDeliveries:
     """Lazy delivery snapshot owned and passed by one savepoint-held read.
 
@@ -52,6 +89,8 @@ class ProjectionDeliveries:
             return None
         if self._by_target is None:
             by_target, by_input = {}, {}
+            cache = getattr(conn, "delivery_parse_cache", None)
+            live_tell_ids = [] if cache is not None else None
             cursor = None
             try:
                 cursor = conn.execute(
@@ -60,8 +99,12 @@ class ProjectionDeliveries:
                 for row in cursor:
                     if not isinstance(row["reply"], str):
                         raise ValueError("non-text JSON")
-                    payload = json.loads(row["reply"], object_pairs_hook=_unique_object,
-                                         parse_constant=_nonfinite_constant)
+                    if cache is not None:
+                        live_tell_ids.append(row["tell_id"])
+                        payload = cache.decode(row["tell_id"], row["reply"])
+                    else:
+                        payload = json.loads(row["reply"], object_pairs_hook=_unique_object,
+                                             parse_constant=_nonfinite_constant)
                     if not isinstance(payload, dict):
                         raise ValueError("non-object JSON root")
                     delivery = payload.get("delivery")
@@ -85,6 +128,8 @@ class ProjectionDeliveries:
             finally:
                 if cursor is not None:
                     cursor.close()
+            if cache is not None:
+                cache.prune(live_tell_ids)
             self._by_target, self._by_input = by_target, by_input
         return self._by_target.get(target, [])
 

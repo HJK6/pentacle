@@ -71,12 +71,58 @@ def effective_membership_ids_conn(conn) -> dict:
     return {"state": state, "goals": scoped, "assigned": assigned, "membership": membership}
 
 
-def effective_membership_conn(conn) -> dict:
+class WorkObservationDecodeCache:
+    """Connection-scoped memo of observation record_json parses.
+
+    The membership read path (`effective_membership_conn`) is the hot writer
+    call; decoding every `v2_work_item_observations.record_json` per call is the
+    remaining store-thread cost after the round-1 fixes. Keyed spec_id ->
+    (raw_text, parsed): a changed row (text differs) or a new row misses and
+    reparses, and rows absent from the live scan are pruned. The parse is kept
+    pristine and never mutated -- callers receive an independent per-call shell
+    so the only in-place write in the path (`_observed_record` setting
+    observed_at) lands on a fresh copy, keeping results identical to the
+    uncached path. Store-owned connection state, never touched from the asyncio
+    thread; a fresh connection gets a fresh cache.
+    """
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[str, dict]] = {}
+
+    def decode(self, spec_id: str, record_json: str) -> dict:
+        entry = self._entries.get(spec_id)
+        if entry is None or entry[0] != record_json:
+            entry = (record_json, json.loads(record_json))
+            self._entries[spec_id] = entry
+        return entry[1]
+
+    def prune(self, live_spec_ids) -> None:
+        # After a decode pass `_entries` is a superset of the live ids, so an
+        # unequal count is exactly the presence of a stale (since-deleted) entry.
+        if len(self._entries) != len(live_spec_ids):
+            live = set(live_spec_ids)
+            self._entries = {spec: entry for spec, entry in self._entries.items() if spec in live}
+
+
+def effective_membership_conn(conn, decode_cache: "WorkObservationDecodeCache | None" = None) -> dict:
     """Enrich the canonical identity resolver for member/goal projection; no I/O."""
     snapshot = effective_membership_ids_conn(conn)
     state, scoped = snapshot["state"], snapshot["goals"]
-    records = {row[0]: _observed_record(json.loads(row[1]), state) for row in conn.execute(
-        "SELECT spec_id,record_json FROM v2_work_item_observations")}
+    # The hot writer path supplies a connection-scoped cache (or one is bound to
+    # the Store connection); other callers keep the uncached decode unchanged.
+    cache = decode_cache if decode_cache is not None else getattr(conn, "work_decode_cache", None)
+    records = {}
+    for spec_id, record_json in conn.execute("SELECT spec_id,record_json FROM v2_work_item_observations"):
+        if cache is None:
+            records[spec_id] = _observed_record(json.loads(record_json), state)
+        else:
+            parsed = cache.decode(spec_id, record_json)
+            member = parsed["member"]
+            shell = {**parsed, "member": {**member, "observation": dict(member["observation"])}}
+            records[spec_id] = _observed_record(shell, state)
+    if cache is not None:
+        cache.prune(records.keys())
     members = {}
     for identity, record in records.items():
         member = dict(record["member"])
