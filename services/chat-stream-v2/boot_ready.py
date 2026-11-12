@@ -738,58 +738,6 @@ def _codex_draft_chrome_line(line: str) -> bool:
     return not any(character.isalnum() for character in stripped)
 
 
-def codex_prompt_exactly_in_active_draft(pane_text: str, prompt: str) -> bool:
-    """Prove that the complete prompt is the current unsubmitted draft.
-
-    ``codex_prompt_in_active_draft(..., exact=True)`` intentionally accepts a
-    prompt substring because it is the legacy ordinary-send recovery seam.  An
-    initial staged pointer needs a stricter predicate: a later tell appended to
-    the pointer must *not* look like the pointer alone.  Compare the entire
-    editable composer, tolerating only terminal wrapping and known footer
-    chrome.  Collapsed-paste placeholders are rejected because their contents
-    are not visibly exact.
-    """
-    if codex_reset_interstitial_visible(pane_text):
-        return False
-    expected = re.sub(r"\s+", " ", str(prompt or "")).strip()
-    if not expected:
-        return False
-    lines = pane_text.splitlines()
-    input_start = _last_codex_input_start(lines)
-    if input_start is None:
-        return False
-    composer_lines = _codex_composer_lines(lines, input_start)
-    if any(_codex_active_draft_has_collapsed_paste([line], 0) for line in composer_lines):
-        return False
-
-    content: list[str] = []
-    for index, line in enumerate(composer_lines):
-        stripped = line.strip()
-        if _CODEX_NATIVE_QUEUE_HEADER_RE.match(stripped):
-            break
-        if index == 0:
-            part = _strip_codex_input_marker(line)
-            if not part:
-                return False
-            content.append(part)
-            continue
-        if _codex_non_draft_line_after_input(line):
-            return False
-        if _codex_draft_chrome_line(line):
-            break
-        part = _strip_codex_input_marker(line)
-        if part:
-            content.append(part)
-    actual = re.sub(r"\s+", " ", " ".join(content)).strip()
-    if not actual:
-        return False
-    # A terminal may insert a space at a hard wrap (including immediately after
-    # a hyphen) but it may not delete a source boundary or append a follow-up.
-    layout_pattern = "".join(
-        r"\s+" if character.isspace() else rf"{re.escape(character)}\s*"
-        for character in expected
-    )
-    return re.fullmatch(layout_pattern, actual) is not None
 
 
 #: Submission proof (`spawn.ok` requires it for a real provider TUI) and its
@@ -819,9 +767,6 @@ SUBMIT_PREDICATES = {
 _CLAUDE_SUBMISSION_MARKERS = ("✻ ", "✶ ", "✳ ", "⏺ ", "⎿ ", "● ")
 
 
-def submission_marker_count(pane_text: str, provider: str) -> int:
-    """Count provider output markers for the pinned post-paste boundary."""
-    return len(_submission_marker_snapshot(pane_text, provider))
 
 
 def _submission_marker_snapshot(pane_text: str, provider: str) -> tuple[str, ...]:

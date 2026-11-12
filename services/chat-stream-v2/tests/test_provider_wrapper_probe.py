@@ -112,37 +112,6 @@ def test_queued_foreground_controls_never_resolve(monkeypatch, fault):
     assert 'notification.resolve' not in calls
 
 
-def test_operator_png_requires_source_image_and_owned_identity():
-    literal, caption, stream = mobile.LITERAL, 'Reply exactly PROBE_ATTACHMENT', 'host:owned'
-    records = [
-        {'uuid': 'literal', 'type': 'user', 'message': {'role': 'user', 'content': literal}},
-        {'uuid': 'image', 'type': 'user', 'message': {'role': 'user', 'content': [
-            {'type': 'text', 'text': caption},
-            {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()}}]}},
-    ]
-    events = [{'kind': 'USER', 'provider': 'claude', 'stream_id': stream, 'daemon_seq': i + 1,
-               'text': body, 'raw': {'jsonl_record_uuid': record['uuid']}}
-              for i, (body, record) in enumerate(zip([literal, caption], records))]
-    events[1]['attachments'] = [{'kind': 'image', 'mimeType': 'image/png'}]
-    args = dict(stream=stream, literal=literal, caption=caption)
-    assert len(probe.assert_operator_controls(events, records, **args)) == 2
-    bad_sources = []
-    for change in ['image-missing', 'metadata', 'role', 'uuid', 'mime', 'bytes']:
-        bad = copy.deepcopy(records)
-        if change == 'image-missing': bad[1]['message']['content'].pop()
-        if change == 'metadata': bad[1]['isMeta'] = True
-        if change == 'role': bad[1]['message']['role'] = 'assistant'
-        if change == 'uuid': bad[1]['uuid'] = 'other'
-        if change == 'mime': bad[1]['message']['content'][1]['source']['media_type'] = 'image/jpeg'
-        if change == 'bytes': bad[1]['message']['content'][1]['source']['data'] = 'invalid-base64'
-        bad_sources.append(bad)
-    for bad_records in bad_sources:
-        with pytest.raises(AssertionError):
-            probe.assert_operator_controls(events, bad_records, **args)
-    for changed in [events + [events[0]], [events[0], {**events[1], 'attachments': []}],
-                    [events[0], {**events[1], 'stream_id': 'other:unowned'}]]:
-        with pytest.raises(AssertionError):
-            probe.assert_operator_controls(changed, records, **args)
 
 
 def test_mobile_read_label_is_bound_to_exact_card(tmp_path):

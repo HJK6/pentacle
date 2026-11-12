@@ -146,7 +146,7 @@ def zero_last_rollout(native: str, *, k: int = 4, skipped: tuple = (3,)) -> Roll
 
 
 class Lab(Fx):
-    """A disposable ledger-host data dir: real Store schema, the ledger-host backfill tool and the real rollup."""
+    """A disposable ledger-host data dir: real Store schema, the production provenance reader/sink and real rollup."""
 
     def __init__(self, tmp: Path):
         super().__init__(tmp)
@@ -178,15 +178,19 @@ class Lab(Fx):
         path.write_text(rollout.text())
 
     def backfill(self, capsys=None) -> int:
-        """One ledger-host backfill pass (tools/backfill_usage_provenance.py), no cursor."""
-        from tools import backfill_usage_provenance as tool
-
+        """Feed synthetic transcripts through the production reader and sink."""
+        from usage_provenance import BackfillCursor, run_backfill
+        from store_usage import record_provenance_conn
         self.conn.commit()
-        code = tool.main(['--db', str(self.db), '--host', HOST, '--provider', 'codex',
-                          '--codex-root', str(self.root), '--no-cursor'])
-        if capsys is not None:
-            capsys.readouterr()
-        return code
+        async def record(host, items, *, dry_run=False, version=1):
+            with sqlite3.connect(self.db) as conn:
+                conn.row_factory = sqlite3.Row
+                return record_provenance_conn(conn, host, items, dry_run=dry_run, version=version)
+        sink = ProvenanceSink(record, None)
+        async def push(items, dry_run):
+            return await sink.admit(HOST, {'version': PAYLOAD_VERSION, 'items': items, 'dry_run': dry_run})
+        result = asyncio.run(run_backfill(push, roots={'codex': str(self.root)}, cursor=BackfillCursor(None), dry_run=False))
+        return 1 if any(p.get('batches_failed') for p in result['providers'].values()) else 0
 
     def admit(self, items: list[dict], *, version: int = PAYLOAD_VERSION, host: str = HOST) -> dict:
         self.conn.commit()

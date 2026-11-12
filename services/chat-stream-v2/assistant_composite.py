@@ -188,10 +188,6 @@ class AssistantCompositeConfig:
             title=str(values.get(_k("COMPOSITE_TITLE")) or "Zephyr").strip()[:120] or "Zephyr",
         )
 
-    @staticmethod
-    def assistant_names() -> tuple[str, ...]:
-        """The fixed set of assistants this daemon supports."""
-        return (primary_assistant_name(), "daff")
 
     @classmethod
     def all_from_env(cls, env: dict[str, str] | None = None) -> "dict[str, AssistantCompositeConfig]":

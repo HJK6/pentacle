@@ -515,14 +515,6 @@ slots first. `--disable-nudges` disables the combined job. Tagged logs use
 `subsystem=context_nudge bug_ref=context_notifications_handoff_proof` and retain
 source, kind, epoch, target, outcome and tell ID.
 
-The installed handoff verifier runs without daemon mutation:
-`python3 services/chat-stream-v2/tools/context_handoff_proof.py <evidence-directory>`.
-It checks delivered successor evidence, source/witness generations, inherited
-Fable 5.1/high tuple, predecessor closure and witness parentage. The evidence
-producer owns the three disposable seats and must verify all three are closed
-and their panes absent after capture. A successful spawn reply alone is
-insufficient: existing handoff post-steps are best-effort on reparent failure.
-
 ### QA dispatch containment
 
 The optional [QA dispatch reject counter](../../docs/qa-dispatch-counter.md) adds

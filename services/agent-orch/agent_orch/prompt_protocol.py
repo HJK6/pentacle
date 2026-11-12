@@ -293,17 +293,6 @@ def fallback_response(envelope: dict[str, Any], *, error_code: str, message: str
     }
 
 
-def unsupported_response(command: str) -> dict[str, Any]:
-    return {
-        "type": f"prompt.{command}.unsupported",
-        "ok": False,
-        "error_code": SERVER_HELD_ERROR,
-        "error": SERVER_HELD_ERROR,
-        "message": (
-            "Durable prompt server RPCs are held until Lane E report-core merges "
-            "and chat_streamd file boundaries are agreed."
-        ),
-    }
 
 
 def inline_prompt_block(envelope: dict[str, Any]) -> str:

@@ -4759,25 +4759,6 @@ class SpawnCtl:
         except asyncio.TimeoutError:
             return "no_transcript"
 
-    async def _mark_reset_blocked_session(self, host: str, name: str) -> None:
-        """Persist a reset interstitial discovered during live-pane adoption."""
-        row = await self.store.fetch_session(host, name)
-        if not isinstance(row, dict):
-            return
-        created_at = str(row.get("created_at") or "")
-        updated = await self.store.update_session(
-            host,
-            name,
-            expected_generation=created_at,
-            bootstrap_state=CODEX_RESET_BLOCKED,
-            pane_status="pane_alive",
-        )
-        if updated is not None:
-            self.sessions.apply_durable(
-                f"{host}:{name}",
-                bootstrap_state=CODEX_RESET_BLOCKED,
-                pane_status="pane_alive",
-            )
 
     async def _settle_adoption(
         self, host: str, name: str, brief: str, tmux: tmux_transport.Tmux,

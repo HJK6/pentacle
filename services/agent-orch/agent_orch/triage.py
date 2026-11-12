@@ -376,11 +376,6 @@ def notification_payload(
     return payload
 
 
-def _find_item_by_spec_id(memory_root: Path, spec_id: str) -> WorkItem:
-    for item in discover_items(memory_root, statuses=ACTIVE_STATUS_DIRS):
-        if item.spec_id == spec_id:
-            return item
-    raise TriageError(f"triage item not found: {spec_id}")
 
 
 def _find_any_spec(memory_root: Path, spec_id: str, *, statuses: tuple[str, ...] = ACTIVE_STATUS_DIRS) -> WorkItem:

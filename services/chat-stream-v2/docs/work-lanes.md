@@ -186,20 +186,10 @@ nothing. Item changes remain lane history and never publish chat updates.
 
 Migration extends the event CHECK with `set_members` and `item_change`,
 preserving rows, request receipts, indexes and publication references. The
-rollback tool runs against the current owned database in a stopped-daemon
-window: archive the two new event kinds, then restore the previous CHECK while
-preserving all other current rows and indexes. Additive member/snapshot data
-remain for a later upgrade. Never restore an old whole-database image over
-concurrent data. The FD retains an independent SQLite preimage and previous
-source/config/PID receipt before deployment.
-
-Forward migration runs through the existing Store schema initialization; no
-numbered migration or second database owner is introduced. Rehearse the
-read-only reverse plan with `python3 services/chat-stream-v2/tools/rollback_work_lane_progress.py
---db /path/to/owned-copy.db`. In the approved stopped-daemon window, add
-`--apply --confirm-offline` against the current database after retaining its
-backup. Re-upgrade restores archived membership/item receipts and refuses a
-conflicting receipt rather than overwriting it.
+one-off rollback utility is retired; git history retains its implementation.
+Forward migration still runs through the existing Store schema initialization.
+Any future reverse migration needs a separately reviewed stopped-writer plan;
+never restore an old whole-database image over concurrent data.
 
 At release the FD refreshes the census, reviews the title/member/estimate
 manifest, applies CAS mutations and reads each open lane back. Source validation

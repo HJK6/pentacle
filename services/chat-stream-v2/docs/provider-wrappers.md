@@ -84,26 +84,3 @@ Read an oversized owned PNG, captures the actual source metadata companion,
 and checks the Read event survives with no phantom USER. The owned PNG and
 generation-bound seats are cleaned up on failure. This probe runs only in a
 coordinator-granted runtime window; source tests do not establish live proof.
-
-For `spec_pentacle__claude_queued_notice_and_image_meta_2026_09` only,
-`tools/history_repair.py` rehearses a bounded historical correction. An external,
-reviewed scope packet selects one stream and generation, one source-proven
-queued notification answer, and exact image metadata source UUIDs. It permits
-only a queued USER text/raw/wrapper/tag rewrite and metadata-row deletion;
-notice resolution and delivery state remain unchanged. This is a one-off tool,
-not a migration registry. Real identifiers, source JSONL, database backups,
-manifests and rollback preimages stay outside the repository.
-
-`census` reads the database through SQLite read-only mode and its backup API.
-`freeze` verifies the source bytes, backup digest and required
-`--expected-scope-sha256`, then writes the fixed manifest externally.
-`apply` and `rollback` require `--expected-manifest-sha256`, the frozen source
-copy, external `--preimages`, and a coordinator-owned `--writer-quiescent`
-window. Row identity, generation, content/key hashes, operator send bindings
-and deletion references must match; writes recompute `event_key` in the same
-CAS transaction. Rehearsal applies twice, verifies the second is a no-op,
-then restores exact preimages and verifies row bytes. A scratch rehearsal is
-not permission to write a running daemon's database. The coordinator receives
-the exact hash-bound runtime commands with the external evidence packet.
-If rollback commits before its external receipt is written, a retry reconciles
-that receipt only after verifying every original row and all live bindings.

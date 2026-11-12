@@ -157,12 +157,6 @@ class Hosts:
     def known(self, host: str) -> bool:
         return host == self.local_host or host in self.peers
 
-    def known_offline(self, host: str) -> bool:
-        """Return a cached positive-offline hint without probing."""
-        st = self._state.get(host)
-        if st is None:
-            return False
-        return st.breaker_open or st.online is False
 
     def is_online(self, host: str) -> bool:
         """Return true only for current positive reachability evidence."""
