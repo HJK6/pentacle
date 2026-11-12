@@ -19,8 +19,12 @@ function downsampleLevels(levels) {
   });
 }
 function failureMessage(error) {
-  const code = error?.error_code || error?.error || error?.code || error?.message;
+  const detail = error?.error_code || error?.error || error;
+  const code = typeof detail === 'string' ? detail : detail?.error_code || detail?.code || detail?.message;
   if (error?.name === 'NotAllowedError') return 'Microphone permission denied. Allow microphone access and Retry.';
+  if (error?.name === 'NotFoundError') return 'Microphone not found. Connect a microphone and Retry.';
+  if (error?.name === 'OverconstrainedError') return 'Selected microphone is unavailable. Reconnect it or choose another input and Retry.';
+  if (error?.name === 'NotReadableError') return 'Microphone could not be opened. Check its connection and whether another app is using it, then Retry.';
   if (code === 'backend_unavailable') return 'Transcription is unavailable right now.';
   if (code === 'upload_failed' || code === 'upload') return 'Audio upload failed.';
   if (code === 'too_long') return 'That recording is too long to transcribe.';
@@ -28,7 +32,11 @@ function failureMessage(error) {
   if (code === 'transcribe_unavailable') return 'Transcription is unavailable right now.';
   if (code === 'no_speech') return 'Nothing was recognized.';
   if (code === 'origin_unavailable') return 'Originating chat is unavailable.';
-  return String(code || 'Voice recording failed.');
+  // Refusal envelopes may nest an object in error or error_code. Only text
+  // belongs in the UI; an unknown envelope gets a useful generic failure.
+  const message = [detail?.message, error?.message, code]
+    .find(value => typeof value === 'string' && value.trim() && value !== '[object Object]');
+  return message || 'Voice recording failed.';
 }
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;

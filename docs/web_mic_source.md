@@ -49,6 +49,21 @@ Selecting **This device** or an input clears the note. A permission or busy erro
 trigger fallback. An enumeration without ids (before permission) never counts
 as loss, so a stored choice survives a reload.
 
+## Capture errors and room status
+
+The composer reports missing, disconnected, busy and permission-denied inputs
+with readable messages and Retry/Cancel controls. After reconnecting or choosing
+an available input, Retry starts capture again. Nested transcription errors are
+rendered as text; unknown error objects use a generic recording failure message.
+
+The MIC panel's wake-word hint describes the shared room service. It is not an
+instruction required by the click-to-record composer. A missing or unhealthy
+room input displays its health message, including the interval before the
+service sets `last_error`. Asynchronous wake lookups use the latest panel status
+and cannot replace that error with a ready-to-speak hint. The normal hint returns
+after health recovers. An unavailable room input does not by itself disable a
+working browser input on another device.
+
 ## Implementation map
 
 - `renderer/mic-state.js`: `computeMicSourceState`, `micSourceStorage`
@@ -62,7 +77,8 @@ as loss, so a stored choice survives a reload.
 - `renderer/index.html` (`#mic-source`, `#mic-source-note`,
   `#mic-local-section`) and `renderer/styles.css`
 
-Tests: `test/mic_source.test.js`. The browser scenario is
+Tests: `test/mic_source.test.js`, `test/mic_health_render.test.js` and
+`test/web_voice.test.js`. The browser scenario is
 `test/e2e/lib/mic_source_scenario.js`, registered as `mic-source-selector` in
 `test/e2e/lib/web_scenarios.js`. `web_gate.js` gives that one scenario a
 service-less mic profile through `configureMic`: `features.mic` on, an unused
