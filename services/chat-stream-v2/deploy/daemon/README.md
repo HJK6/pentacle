@@ -317,6 +317,16 @@ The recurring deploy-time smoke installer is retired. Nightly checks report agai
 the already deployed stamp and never deploy or select a target. The detailed smoke
 and log classifier reports remain available alongside the public disposition.
 
+Ordinary releases and nightly checks share the optional `release_exclusions`
+array in the installed machines JSON (`PENTACLE_MACHINES_FILE`). Each entry names
+an optional remote `host`, a nonempty `reason`, and an open `readiness_item`.
+For example: `{"host":"optional-host","reason":"CLI pin mismatch",
+"readiness_item":"provider-readiness-repair"}`. The front desk removes the entry
+when its readiness item closes. Declared hosts are not spawned and appear as
+`SKIPPED_DECLARED`; all included hosts must pass. Releases snapshot declarations
+on their stamp. Nightly reads the same home afresh and records its scope without
+rewriting the deployed stamp. Invocation environment overrides do not alter scope.
+
 A sealed receipt pins its controller SHA. To recover it from a repaired
 controller, the FD places an owner-only authorization file in the transaction
 directory and sends a GO tell quoting the file's sha256 and the replacement SHA:

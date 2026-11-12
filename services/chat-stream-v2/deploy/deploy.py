@@ -1757,6 +1757,40 @@ def _notify_failed_checks(repo, service, sha, checks, runner):
         "--dedup-key", f"release-check:{sha}"), repo, runner)
 
 
+def _release_machines_file(service, repo):
+    value = _launchd_environment(service.launchd_label).get("PENTACLE_MACHINES_FILE", "").strip()
+    path = Path(value).expanduser()
+    return str((path if path.is_absolute() else repo / path).resolve()) if value else ""
+
+
+def _declared_release_scope(declarations):
+    return [{"host": row["host"], "reason": row["reason"],
+             "authority": row["readiness_item"]} for row in declarations]
+
+
+def release_exclusions(service, repo):
+    """Read the one installed declaration home; FD removes closed readiness items."""
+    machines = _release_machines_file(service, repo)
+    try:
+        value = json.loads(Path(machines).read_text()) if machines else {}
+    except (OSError, ValueError):
+        # The existing fleet report records a missing or malformed catalog.
+        # Do not add a pre-activation refusal or exclude any host for it.
+        return []
+    rows = value.get("release_exclusions", []) if isinstance(value, dict) else []
+    if not isinstance(rows, list) or any(not isinstance(row, dict)
+            or set(row) != {"host", "reason", "readiness_item"}
+            or any(not isinstance(row[k], str) or not row[k].strip() for k in row)
+            for row in rows):
+        raise DeployError("release exclusions require host, reason and readiness_item")
+    if rows:
+        try:
+            coordinated.host_scope(machines, _declared_release_scope(rows))
+        except coordinated.Invalid as exc:
+            raise DeployError(str(exc)) from exc
+    return rows
+
+
 def run_post_release_checks(service, repo, sha, stamp, *, runner,
                             prior_log_size=None, prior_pid=None, prior_start=None, boot=None,
                             fleet_smoke_check=None, no_outgoing_writer=None):
@@ -1778,11 +1812,8 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
         if fleet_smoke_check is not None:
             checks["fleet_smoke"] = fleet_smoke_check()
         else:
-            configured = _launchd_environment(service.launchd_label)
-            machines_file = configured.get("PENTACLE_MACHINES_FILE", "").strip()
-            if machines_file:
-                path = Path(machines_file).expanduser()
-                machines_file = str((path if path.is_absolute() else repo / path).resolve())
+            machines_file = _release_machines_file(service, repo)
+            declarations = _declared_release_scope(stamp.get("release_exclusions", []))
             accounts = stamp.get("smoke_accounts", [])
             args = tuple(arg for entry in accounts for arg in ("--account", entry))
             if "test_profile" in stamp:
@@ -1791,10 +1822,13 @@ def run_post_release_checks(service, repo, sha, stamp, *, runner,
                     raise DeployError("test profile/settings drift before canary")
                 args += ("--test-profile-snapshot", str(frozen))
             smoke = runner(("/usr/bin/env", "-u", "PENTACLE_MACHINES_JSON", "-u", "PENTACLE_SMOKE_HOSTS",
-                "-u", "PENTACLE_SMOKE_ACCOUNTS", f"PENTACLE_MACHINES_FILE={machines_file}",
+                "-u", "PENTACLE_SMOKE_ACCOUNTS", "-u", "PENTACLE_SMOKE_EXCLUDED_HOSTS",
+                f"PENTACLE_MACHINES_FILE={machines_file}",
+                "PENTACLE_SMOKE_EXCLUDED_HOSTS=" + ",".join(row["host"] for row in declarations),
                 str(_venv_python(repo, service)), str(repo / V2_SERVICE_PATH / "tools/spawn_fleet_smoke.py"), "--report-only", *args), repo)
             checks["fleet_smoke"] = _fleet_smoke_verdict(smoke, machines_file,
-                accounts=accounts, test_profile=stamp.get("test_profile"))
+                accounts=accounts, test_profile=stamp.get("test_profile"),
+                declared_exclusions=declarations or None)
     except Exception as exc:
         checks["fleet_smoke"] = {"outcome": "failed", "detail": f"{type(exc).__name__}: {exc}"}
     try:
@@ -2259,6 +2293,7 @@ def _deploy_ordinary(
         evidence_source = "inline"
     if service.name == "chat-streamd-v2" and not rollback:
         _load_read_timing_receipt(read_timing_receipt, sha)
+    declarations = release_exclusions(service, repo) if service.name == "chat-streamd-v2" else []
     with _PreActivationTransaction(repo, prior_sha, stamp_path, prior_stamp_bytes, runner) as transaction:
         if not skip_kickstart:
             transaction.remember_file(_launchd_plist_path(service.launchd_label))
@@ -2293,6 +2328,7 @@ def _deploy_ordinary(
             "requirements_hash": requirements_hash,
             "asset_store": _asset_store_identity(service),
             "gates": gates,
+            "release_exclusions": declarations,
         }
         if profile is not None:
             stamp.update(test_profile=profile)
@@ -2311,6 +2347,7 @@ def _deploy_ordinary(
                     if not all(isinstance(v, str) for v in entries):
                         raise ValueError('accounts must be declarations')
                     hosts, _, _ = _fleet_smoke_hosts(configured.get('PENTACLE_MACHINES_FILE', ''))
+                    hosts = [host for host in hosts if host not in {row['host'] for row in declarations}]
                     account_map(entries, tuple((h, p, m) for h in hosts
                         for p in ('claude', 'codex') for m in ('prompted', 'promptless')))
                 except (ValueError, OSError) as exc:

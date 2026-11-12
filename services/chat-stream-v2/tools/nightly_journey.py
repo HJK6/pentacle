@@ -217,7 +217,9 @@ def check_release(args, *, deploy_module=None):
     record = {"checkout": str(repo)}
     try:
         service = d.SERVICES[args.service]
-        stamp = d._read_stamp(repo, service)
+        stamp = dict(d._read_stamp(repo, service))
+        stamp["release_exclusions"] = d.release_exclusions(service, repo)
+        record["release_exclusions"] = stamp["release_exclusions"]
         sha = stamp["sha"]
         record["source_sha"] = sha
         record["identity_basis"] = "deployment stamp target; not independent loaded-runtime proof"
