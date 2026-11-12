@@ -471,3 +471,28 @@ These are the conventions we use to keep an assistant-run workspace calm and pro
 Commission a conversation the operator requested with explicit `--visibility default`, including when its parent is another agent. Commission managed work with `--visibility hidden` and its existing completion policy. Omitted fresh parented work is hidden for every role, including Nexus and QA; fresh top-level creation remains visible. Omitted handoff and native Claude resume inherit stored predecessor visibility; an explicit `default`, `hidden` or `nested` overrides ordinary inheritance. Genuine FD and protected Daff seats remain hidden. Launch instructions and the first durable open use the same effective value. Visibility does not grant lifecycle, prompt or rebind authority.
 
 Inspect the returned stream and its effective visibility before reporting a conversation available. Same-key replay retains the admitted stream, initial presentation decision and delivery receipt; it does not reinterpret a changed predecessor. Legacy cached requests and schedules with explicit `default` retain that choice.
+
+### Supplying assistant guidelines
+
+Guideline delivery is disabled by default. Set
+`PENTACLE_ASSISTANT_GUIDELINES_ENABLED=1` in the daemon environment and restart the daemon to enable it;
+set it to `0` and restart the daemon to stop delivery. The seats do not need
+to be restarted. The daemon resolves the memory repository through
+agent-orch's existing `AGENT_ORCH_MEMORY_REPO` or `memory_repo_path` configuration.
+`PENTACLE_ASSISTANT_GUIDELINES_FRONT_DESK_FILES` and
+`PENTACLE_ASSISTANT_GUIDELINES_ADVISOR_FILES` optionally override the ordered,
+colon-separated paths relative to that repository. The defaults are
+`agents/assistant_baseline.md:docs/reference/assistant_bart_context.md` for the
+front desk and `agents/assistant_authority_baseline.md` for the advisor. Paths
+outside the repository are refused. Front matter is stripped before the text is
+hashed and delivered; the stamp includes the first 12 characters of the hash.
+
+The bound front desk receives a stamped tell on a new binding, after a context
+reading drops below half its previous reading, and at the next reading after the
+file contents change. Deliveries are at least ten minutes apart; a suppressed
+refresh is retried on a later context reading. The tell wakes the front desk
+without waiting for the digest. Before each ruling request or peer tell to the
+bound advisor, the daemon sends its current guidelines in a stamped tell. A
+missing or unreadable file is logged and retried; it does not block an advisor
+request. `inspect` includes `assistant_guidelines`, with the seat, last delivered
+identity and time, and whether the identity matches the current files.

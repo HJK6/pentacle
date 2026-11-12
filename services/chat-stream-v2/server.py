@@ -4111,6 +4111,7 @@ class Server:
                 stream_id == self.assistant_composite.config.direct_primary_stream_id) else None,
             "deferred_reap": await self.store.get_deferred_reap(stream_id),
             "usage_provenance": usage_provenance,
+            "assistant_guidelines": await self.guidelines.inspect(stream_id) if getattr(self, "guidelines", None) else None,
         }
 
     async def _on_rename(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -4483,6 +4484,13 @@ class Server:
         """
         delivered = 0
         for row in await self.store.claim_composite_tells(name=composite.config.name):
+            if row['from_stream_id'] == 'daemon:guidelines' and row['body'] == 'guidelines:refresh':
+                guidelines = getattr(self, 'guidelines', None)
+                if guidelines is not None and guidelines.enabled:
+                    await guidelines.front_desk()
+                await self.store.delete_composite_tell(seq=row['seq'])
+                delivered += 1
+                continue
             try:
                 result = await self._deliver_composite_tell(
                     composite, composite.config.stream_id, row["from_stream_id"],

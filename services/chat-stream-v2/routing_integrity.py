@@ -54,6 +54,7 @@ class RoutingIntegrity:
         broadcast: Any = None,
         inventory_emitter: InventoryEmitter | None = None,
         assistant_backend_binding: Any = None,
+        guidelines: Any = None,
     ) -> None:
         self.store = store
         self.sessions = sessions
@@ -68,6 +69,7 @@ class RoutingIntegrity:
         # A callable keeps the exception tied to the configured composite
         # backend IDs/generations, rather than changing Codex policy globally.
         self.assistant_backend_binding = assistant_backend_binding
+        self.guidelines = guidelines
         self._claude_tuples: dict[str, tuple[str, tuple[str, str]]] = {}
 
     @asynccontextmanager
@@ -167,6 +169,9 @@ class RoutingIntegrity:
             )
             if persisted is not None:
                 stream_id = f"{host}:{session_name}"
+                if self.guidelines is not None:
+                    await self.guidelines.front_desk(stream=stream_id, generation=row.get("session_generation"),
+                                                     previous=row.get("context_tokens"), current=tokens)
                 before = self.sessions.get(stream_id)
                 self.sessions.apply_durable(
                     stream_id,

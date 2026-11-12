@@ -439,6 +439,11 @@ class AssistantComposite:
             env_binding=self._env_binding(), name=self.env_config.name,
         )
         self._apply_binding(binding)
+        guidelines = getattr(self, "guidelines", None)
+        guideline_binding = (binding.get("stream_id"), binding.get("generation"))
+        if guidelines is not None and getattr(self, "_guidelines_binding_seen", None) != guideline_binding:
+            self._guidelines_binding_seen = guideline_binding
+            await guidelines.front_desk()
         helpers = await self.store.get('assistant.transfer.helpers.' + self.env_config.name)
         if helpers:
             self.config = replace(self.config, **json.loads(helpers))
@@ -478,6 +483,11 @@ class AssistantComposite:
             )
             if not receipt.get("duplicate"):
                 self._apply_binding(receipt["new_binding"])
+                guidelines = getattr(self, "guidelines", None)
+                if guidelines is not None:
+                    new_binding = receipt["new_binding"]
+                    self._guidelines_binding_seen = (new_binding.get("stream_id"), new_binding.get("generation"))
+                    await guidelines.front_desk()
                 log.info("assistant direct rebind actor=%s request=%s old=%s new=%s",
                          actor, request_id, receipt["old_binding"], receipt["new_binding"])
                 if self.broadcast is not None:

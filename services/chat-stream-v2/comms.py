@@ -395,6 +395,7 @@ class Comms:
         # narrow target filter; ordinary Comms users remain unchanged.
         self.assistant_ingress_policy: Any = None
         self.front_desk_digest: Any = None
+        self.guidelines: Any = None
         self.capacity_retry: Any = None
         # The observer seam is attached after bind-first construction. A single
         # queue/drain serializes buffered replays with live arrivals even while
@@ -661,6 +662,28 @@ class Comms:
             msg={**msg,"tell_id":tell_id}
             async with self._pane_input_lock(str(route["final_target"])):
                 await self._validate_assistant_request_target(msg, route)
+                # The pane lock keeps the advisor's baseline immediately before
+                # its request, even when several peers send concurrently.
+                advisor_input = (msg.get('_outbound_notice_kind') == 'assistant_lane_ruling_request'
+                                 or bool((msg.get('_auth_context') or {}).get('token_verified')))
+                if advisor_input and self.guidelines is not None:
+                    supplied = await self.guidelines.advisor_for_target(str(route['final_target']))
+                    if supplied is not None:
+                        generation, identity, baseline = supplied
+                        baseline_id = 'guidelines:' + uuid.uuid4().hex
+                        from assistant_guidelines import DELIVERY_TOKEN
+                        baseline_msg = {'to_stream_id': str(route['final_target']), 'from_stream_id': 'daemon:guidelines',
+                                        'tell_id': baseline_id, 'sanitize': True, '_guidelines_token': DELIVERY_TOKEN,
+                                        '_guidelines_role': 'advisor', '_guidelines_generation': generation}
+                        baseline = sanitize_injectable(baseline)
+                        baseline_reply = await self._deliver_tell(baseline_msg, baseline_id, route, baseline,
+                            payload_digest(str(route['final_target']), baseline))
+                        status = baseline_reply.get('delivery_status')
+                        if status in {'delivered', 'committed_pending_proof', 'pasted_unsubmitted', 'proof_unavailable'}:
+                            await self.guidelines.advisor_record(str(route['final_target']), generation, identity,
+                                                                 baseline_id, status)
+                        if status not in {'delivered', 'committed_pending_proof'}:
+                            raise VerbError('guidelines_delivery_unconfirmed', 'advisor guidelines delivery is unconfirmed')
                 reply = await self._deliver_tell(msg, tell_id, route, wire, digest)
             if reply.get("delivery_status") == "delivered":
                 await self._stamp_milestone_status(msg, body)
@@ -1390,6 +1413,17 @@ class Comms:
             except Exception:  # noqa: BLE001 - preserve the typed rejection
                 log.exception("could not append blocked send receipt target=%s", target)
     async def _validate_assistant_request_target(self, msg, route):
+        from assistant_guidelines import DELIVERY_TOKEN
+        if msg.get('_guidelines_token') is DELIVERY_TOKEN:
+            target = str(route['final_target'])
+            host, name = self.sessions.split(target)
+            current = await self.store.fetch_session(host, name)
+            generation = msg.get('_guidelines_generation')
+            role = msg.get('_guidelines_role')
+            if (role not in {'front_desk', 'advisor'} or not generation or current is None
+                    or current.get('status') != 'open' or current.get('session_generation') != generation
+                    or self.guidelines is None or not await self.guidelines.is_current(role, target, generation)):
+                raise VerbError('guidelines_binding_changed', 'guidelines target binding changed')
         from outbound_notices import ASSISTANT_AUTHORITY_REQUEST_TOKEN
         if msg.get("_assistant_authority_request_token") is not ASSISTANT_AUTHORITY_REQUEST_TOKEN:
             return
@@ -1434,7 +1468,7 @@ class Comms:
             if msg.get("_notification_answer_generation"):
                 await self._prepare_answer_input(msg, route, body, watermark)
             else:
-                if msg.get("_assistant_authority_request_generation"):
+                if msg.get("_assistant_authority_request_generation") or msg.get("_guidelines_token"):
                     await self._validate_assistant_request_target(msg, route)
                 if before_paste is not None:
                     await before_paste(watermark)

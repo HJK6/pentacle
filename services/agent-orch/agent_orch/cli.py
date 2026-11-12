@@ -5080,6 +5080,11 @@ def _print_inspect_pretty(response: dict[str, object], *, max_text: int | None =
         ):
             if key in close_audit:
                 print(f"  {key}: {close_audit.get(key)}")
+    guidelines = inspect.get("assistant_guidelines")
+    if isinstance(guidelines, dict):
+        print("assistant_guidelines:")
+        for key in ("seat", "identity", "delivered_at", "delivery_status", "matches_current"):
+            print(f"  {key}: {guidelines.get(key)}")
     deferred = inspect.get("deferred_reap")
     if isinstance(deferred, dict):
         print("deferred_reap:")

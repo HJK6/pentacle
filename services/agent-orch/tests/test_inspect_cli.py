@@ -187,3 +187,13 @@ def test_inspect_max_text_honors_exact_cap(limit, expected):
 
     assert rendered == expected
     assert len(rendered) == limit
+
+
+def test_inspect_pretty_shows_guideline_delivery(capsys):
+    cli._print_inspect_pretty({"stream_id": "host:seat", "session": {},
+        "assistant_guidelines": {"seat": "advisor", "identity": "a" * 64,
+            "delivered_at": 123.0, "delivery_status": "delivered", "matches_current": True}})
+    output = capsys.readouterr().out
+    assert "assistant_guidelines:" in output
+    assert "seat: advisor" in output and "identity: " + "a" * 64 in output
+    assert "delivered_at: 123.0" in output and "matches_current: True" in output
