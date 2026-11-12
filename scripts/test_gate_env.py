@@ -648,6 +648,11 @@ class ProcessStartIdentity(unittest.TestCase):
 class EntrypointReceipts(Tmp):
     """End-to-end through main(): the started receipt precedes everything."""
 
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory(prefix="ge-t-", dir="/tmp")
+        self.tmp = Path(os.path.realpath(self._t.name))
+        self.addCleanup(self._t.cleanup)
+
     def run_main(self, *extra, patch_load=None):
         argv = ["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"), "--evidence-dir", str(self.tmp / "ev"), "--checkout", str(self.tmp / "co"),
                 "--tmp-root", str(self.tmp / "tr"), *extra]
