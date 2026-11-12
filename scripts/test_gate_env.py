@@ -252,7 +252,7 @@ class CLIInstructionInput(Tmp):
 
 class ToolchainResolution(Tmp):
     def config(self):
-        cfg = json.loads(json.dumps(REAL_CONFIG))
+        cfg = ge.load_config()
         cfg["search_path"] = {"darwin": [], "linux": []}
         cfg["system_path"] = []
         return cfg
@@ -570,6 +570,7 @@ class DeadlineEnvelope(Tmp):
         (service / "tools" / "run_gate.py").write_text(runner_text)
         target = dict(REAL_CONFIG["profiles"]["pentacle"]["targets"]["v2-" + gate], timeout_s=900 if gate != "merge" else 1800)
         target.pop("unit_workers", None)  # existing serial/deadline and legacy controls
+        target.pop("tier_timeouts", None)  # exercise the legacy equal-tier path
         command, results = ge.build_command(REAL_CONFIG, target, self.tmp / "venv", self.tmp, service, self.tmp / "ev", self.tmp / "t" / "b", [], target["timeout_s"], {})
         return command, results
 
