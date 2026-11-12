@@ -446,3 +446,76 @@ def test_operator_body_cannot_spoof_desk_classification(monkeypatch, client):
         route = await h.store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity=client)
         assert not json.loads(route["route_json"] or "{}").get("desk_dispatch")
     run(body, strict=True)
+
+
+def test_strict_proactive_replay_survives_rollback_and_rejects_conflict():
+    async def body(h):
+        await h.route('rollback-reference')
+        msg = {'request_id': 'rollback-replay', 'composite_stream_id': ASSISTANT,
+               'publish_kind': 'status', 'message': 'Hello', 'note_type': 'result',
+               'ref': 'message:rollback-reference', '_auth_context': {'token_verified': True,
+               'stream_id': ROOT, 'session_generation': h.generation}}
+        first = await h.composite.publish(msg, actor_stream_id=ROOT)
+        def rollback(conn):
+            conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('assistant.strict_publication.enabled','off')")
+            conn.commit()
+        await h.store.submit(rollback)
+        replay = await h.composite.publish(msg, actor_stream_id=ROOT)
+        assert replay['duplicate'] and replay['event_id'] == first['event_id']
+        with pytest.raises(ValueError, match='assistant_publish_conflict'):
+            await h.composite.publish(dict(msg, note_type='problem'), actor_stream_id=ROOT)
+    run(body, strict=True)
+
+
+def test_marker_lookup_index_and_cross_generation_deduplication():
+    async def body(h):
+        route = await h.route('cross-generation')
+        stamp = json.loads(route['route_json'])['timings']['landed_at']
+        landed = datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+        def seed(conn):
+            conn.execute("INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,recorded_at,identity) VALUES(?,?,?,?,?,?)",
+                         (ASSISTANT, 'prior-generation', 'marker', '{}', 0, 'dispatch-unanswered:' + route['dispatch_id']))
+            conn.commit()
+            return [r[3] for r in conn.execute('EXPLAIN QUERY PLAN SELECT 1 FROM session_event_tail WHERE stream_id=? AND identity=?', (ASSISTANT, 'x'))]
+        plan = await h.store.submit(seed)
+        assert any('idx_session_event_tail_stream_identity' in line and 'identity=?' in line for line in plan)
+        service = AssistantLaneRulings(SimpleNamespace(store=h.store, assistant_composite=h.composite, broadcast=None))
+        await service._mark_unanswered(landed + 300)
+        count = await h.store.submit(lambda c: c.execute("SELECT count(*) FROM session_event_tail WHERE stream_id=? AND identity=?", (ASSISTANT, 'dispatch-unanswered:' + route['dispatch_id'])).fetchone()[0])
+        assert count == 1
+    run(body, strict=True)
+
+
+def test_rollback_dispatch_uses_legacy_packet():
+    async def body(h):
+        def rollback(conn):
+            conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('assistant.strict_publication.enabled','off')")
+            conn.commit()
+        await h.store.submit(rollback)
+        route = await h.route('legacy-packet')
+        wire = json.loads(route['route_json'])['direct_envelope']['wire_body']
+        assert 'Only a publish reaches the operator' not in wire
+        assert 'End the turn with the single word done.' not in wire
+    run(body, strict=True)
+
+
+def test_daff_packet_matches_pre_strict_packet():
+    from assistant_composite import direct_dispatch_envelope
+    config = AssistantCompositeConfig.from_env({}, name='daff', env_prefix='DAFF_')
+    route = {'input_identity': 'operator-input', 'body': 'Hello', 'attachments_json': '[]'}
+    args = {'dispatch_id': 'dispatch-1', 'target': 'daff:seat', 'generation': 'g'}
+    wire = direct_dispatch_envelope(config, route, **args)['wire_body']
+    strict = direct_dispatch_envelope(config, route, strict_publication=True, **args)['wire_body']
+    added = ('Only a publish reaches the operator; turn text is never delivered. '
+             'Use publish:dispatch-1:ack for an acknowledgment and publish:dispatch-1 for the final. '
+             'End the turn with the single word done.\n')
+    assert wire.encode() == strict.replace(added, '').encode()
+    assert added in strict
+
+
+def test_publication_dispatch_index_reuses_history_index():
+    async def body(h):
+        indexes = await h.store.submit(lambda c: {r[1] for r in c.execute('PRAGMA index_list(v2_assistant_composite_publications)')})
+        assert 'idx_history_publication_dispatch' in indexes
+        assert 'idx_v2_assistant_publications_dispatch' not in indexes
+    run(body, strict=True)

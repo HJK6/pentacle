@@ -1632,7 +1632,11 @@ class _RoutingStoreMixin:
             try:
                 strict = self._strict_publication_state_conn(conn, stream_id)["enabled"]
                 saved_payload, saved_event = canonical_payload, event
-                if proactive_binding_name is not None and not strict:
+                prior = conn.execute("SELECT canonical_payload_json FROM v2_assistant_composite_publications "
+                                     "WHERE publication_key=?", (publication_key,)).fetchone()
+                prior_payload = json.loads(prior[0]) if prior else None
+                strip_fields = (prior_payload is not None and not ({"note_type", "ref"} & prior_payload.keys())) if prior else not strict
+                if proactive_binding_name is not None and strip_fields:
                     saved_payload = {k: v for k, v in canonical_payload.items() if k not in {"note_type", "ref"}}
                     saved_event = {k: v for k, v in event.items() if k not in {"note_type", "ref"}}
                     saved_event["raw"] = {k: v for k, v in event["raw"].items() if k not in {"note_type", "ref"}}

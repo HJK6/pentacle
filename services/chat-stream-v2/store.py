@@ -1865,8 +1865,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(RULING_AUDIT_DDL)
             conn.execute(ASSISTANT_COMPOSITE_ROUTES_DUE_INDEX_DDL)
             conn.execute(ASSISTANT_COMPOSITE_PUBLICATIONS_DDL)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_dispatch "
-                         "ON v2_assistant_composite_publications(stream_id,dispatch_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_assistant_publications_event "
                          "ON v2_assistant_composite_publications(event_id)")
             conn.execute(ASSISTANT_COMPOSITE_LANES_DDL)
@@ -1974,6 +1972,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(SESSION_EVENT_TAIL_DDL)
             conn.execute(SESSION_EVENT_TAIL_INDEX_DDL)
             conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_event_tail_stream_identity "
+                         "ON session_event_tail(stream_id,identity)")
             conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
             from native_input_lookup import ensure_schema as ensure_native_input_schema
             ensure_native_input_schema(conn)

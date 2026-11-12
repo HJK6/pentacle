@@ -97,7 +97,7 @@ def test_direct_dispatch_envelope_carries_the_batched_dispatch_rule():
     route = {"input_identity": "optimistic-1", "reply_to_question_id": None,
              "body": "pause wmi runs", "attachments_json": "[]"}
     envelope = direct_dispatch_envelope(config, route, dispatch_id="assistant-direct-1",
-                                        target=ROOT, generation="generation-1")
+                                        target=ROOT, generation="generation-1", strict_publication=True)
     wire = envelope["wire_body"]
     assert "Several inputs in one batch" in wire and "--reply-to-message-ids" in wire
     assert "never publish the same body twice" in wire
