@@ -54,15 +54,17 @@ def test_proof_query_uses_hot_and_archive_index(tmp_path, monkeypatch, upgrade):
         store.start()
         try:
             await receipt(store, "hot")
+            await receipt(store, "malformed", "{")
             archive_path = await store.submit(lambda c: c.history_archive_path)
             def move(conn):
                 retention.initialize_history_pair(conn)
                 names = ["receipt_rowid" if col[1] == "rowid" else col[1]
                          for col in conn.execute("PRAGMA table_info(v2_send_receipts)")]
-                row = conn.execute("SELECT rowid,* FROM v2_send_receipts").fetchone()
+                rows = conn.execute("SELECT rowid,* FROM v2_send_receipts").fetchall()
                 with sqlite3.connect(archive_path) as archive:
-                    archive.execute("INSERT INTO v2_send_receipts(receipt_rowid," +
-                        ",".join(names) + ") VALUES(" + ",".join("?" for _ in row) + ")", tuple(row))
+                    archive.executemany("INSERT INTO v2_send_receipts(receipt_rowid," +
+                        ",".join(names) + ") VALUES(" + ",".join("?" for _ in rows[0]) + ")",
+                        [tuple(row) for row in rows])
                 conn.execute("DELETE FROM v2_send_receipts")
                 conn.commit()
             await store.submit(move)
