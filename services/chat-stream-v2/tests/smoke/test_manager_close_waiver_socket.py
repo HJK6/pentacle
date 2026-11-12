@@ -83,7 +83,7 @@ async def daemon(tmp_path, *, lane_owned=False):
 
 
 @pytest.mark.parametrize("orphan", [False, True], ids=["idle-unreported", "offline-orphan"])
-def test_manager_closes_unreported_generation_with_waiver_audit(tmp_path, orphan):
+def test_manager_closes_unreported_generation_with_audit(tmp_path, orphan):
     async def run():
         async with daemon(tmp_path) as (store, sessions, tmux, close):
             if not orphan:
@@ -97,10 +97,10 @@ def test_manager_closes_unreported_generation_with_waiver_audit(tmp_path, orphan
             if orphan:
                 assert reply["reap_status"] == "unknown", reply
             audit = await store.lifecycle_authority_audit_rows(limit=20)
-            waiver = next(row for row in audit if row["action"] == "manager_close_report_waived")
-            assert waiver["reason"] == REASON and waiver["request_id"] == "close-target"
-            assert waiver["actor_identity"] == MANAGER and waiver["old_revision"] == 1
-            assert waiver["target_generation"] == target["session_generation"]
+            admitted = next(row for row in audit if row["action"] == "manager_close" and row["result"] == "admitted")
+            assert admitted["reason"] == REASON and admitted["request_id"] == "close-target"
+            assert admitted["actor_identity"] == MANAGER and admitted["old_revision"] == 1
+            assert admitted["target_generation"] == target["session_generation"]
             assert await store.find_report(HOST + ":target", statuses={"done"},
                                            session_generation=target["session_generation"]) is None
     asyncio.run(run())

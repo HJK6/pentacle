@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { applyPentacleSessionInventory, initialPentacleStreamState,
-  decodeChildAgents, decodeThreadRead, validSpawnObjective,
+  decodeChildAgents, decodeThreadRead,
   type PentacleSessionSummary } from '../src/index.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/daemon_updates_v1.json', import.meta.url), 'utf8'));
@@ -38,15 +38,5 @@ test('successful thread fixture cursors bind the same parent and child as their 
       assert.equal(cursor.v, 1);
       assert.ok(Number.isInteger(cursor.before_seq) && cursor.before_seq > 0);
     }
-  }
-});
-
-test('objective producer fixture and Unicode boundaries share daemon admission semantics', () => {
-  for (const item of fixture.spawn_cases) {
-    assert.equal(validSpawnObjective(item.request.objective), item.expected_error !== 'objective_required');
-  }
-  assert.equal(validSpawnObjective('🌈'.repeat(120)), true);
-  for (const value of ['', '  ', 'x\ny', 'x\u2028y', '🌈'.repeat(121), null]) {
-    assert.equal(validSpawnObjective(value), false);
   }
 });

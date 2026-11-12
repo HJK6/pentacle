@@ -1,42 +1,15 @@
 # Lead disposition and close
 
 An effective assigned lead, nexus or planner owns its task, including hidden
-seats. Voluntary close of a sole owner requires a fresh accepted non-active
-spec status or another live same-spec owner. `analysis` and `in_progress` are
-active; `backlog`, `ready_for_dev`, `blocked`, `needs_qa`, `completed` and
-`deprecated` are dispositions. No additional move is required for work already
-settled in one of those statuses.
-
-The existing close guard waits for one work-index refresh, bounded to thirty
-seconds, then returns `lead_close_requires_disposition` while active or unknown
-work remains. Missing, stale, ambiguous, unavailable or pending observations
-refuse before termination. The reply names the spec, observed status/time and
-publisher commands with the observed document revisions. A publisher timeout or
-uncertain same-ID request grants no close. The target generation is pinned
-before the wait. The graph lock is released during refresh and held for the
-final ownership/successor check through termination; assignment and role changes
-use the same fence.
+seats. A voluntary close succeeds with warnings for active or unknown work and
+missing reports. The disposition warning includes observed status and suggested
+publisher commands. The existing advisor ruling still applies; identity,
+generation, child-preservation and process checks remain in force.
 
 Publish a legitimate disposition with reason, next action and requesting-stream
-attribution, or use `agent-orch spec assign <successor> <spec>`. The daemon must
-observe the result. It never moves a spec automatically. A successor is an open,
-non-presumed-dead, non-protected, non-composite lead/nexus/planner effectively
-assigned to the same spec. Authority tags, QA/worker roles, reports and prose
-custody do not qualify. Closing one parallel owner leaves the others tracked.
-
-Ordinary parent/FD `--operator-confirm`, approved close rulings and done or
-aborted reports do not waive disposition. The configured FD uses this guard
-even for its own children. An explicit FD `--force` request with a reason and
-request id may recover its own freshly proven busy child, preserving disposition
-debt with FD custody. It cannot recover another parent's child this way; idle or
-unknown capture does not waive disposition. The current FD binding, target
-generation, parentage and absence of live children/pending spawns are rechecked
-at final admission. Elevated seat credentials remain seat
-credentials even when marked `operator_authenticated`. Genuine connection-bound
-operator recovery, confirmed gone manager panes, existing offline/deferred
-retirement and failed-spawn cleanup keep their recovery paths and durable owed
-custody. Uncertain liveness does not prove death. Existing assistant protection,
-generation, child-preservation and local/remote checks still apply.
+attribution, or assign a live same-spec successor. The daemon never moves a spec
+automatically. Explicit front-desk recovery and offline retirement preserve owed
+custody.
 
 Each assignment starts an episode in the existing work-index state JSON.
 Unassignment, detachment, reassignment or a role change retains unresolved debt

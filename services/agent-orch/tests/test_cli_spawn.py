@@ -74,8 +74,7 @@ def _config(tmp_path: Path, memory_repo_path: Path | None = None) -> Config:
 
 
 def test_spawn_prints_authoritative_preflight_corrections(monkeypatch, tmp_path, capsys):
-    errors = [{"code": "origin_malformed", "field": "work_item.origin", "correction": "Repair the existing Tracking line."},
-              {"code": "spec_unavailable", "field": "spec_id", "correction": "Restore readable source."}]
+    errors = [{"code": "spec_unavailable", "field": "spec_id", "correction": "Restore readable source."}]
     response = {"type": "spawn.error", "error_code": "spawn_preflight_failed", "errors": errors}
     monkeypatch.setattr(cli, "load_config", lambda: _config(tmp_path))
     async def spawn(*args, **kwargs):
@@ -176,8 +175,7 @@ def test_spawn_and_handoff_without_manifest_need_no_target_sha(
         cli.build_parser().parse_args(["spawn", "--objective", "Exercise the existing spawn contract", "--provider", "codex", "--target-sha", "f" * 40])
 
 
-def test_parented_spawn_without_objective_returns_two(monkeypatch, tmp_path: Path, capsys) -> None:
-    # Objectives are required for parented child spawns (they feed the parent roster).
+def test_parented_spawn_without_objective_is_admitted(monkeypatch, tmp_path: Path, capsys) -> None:
     sent: list[dict[str, object]] = []
 
     async def fake_spawn_once(_config, payload, timeout):
@@ -189,9 +187,8 @@ def test_parented_spawn_without_objective_returns_two(monkeypatch, tmp_path: Pat
     args = _spawn_args(tmp_path)
     args.objective = None
 
-    assert cli.spawn(args) == 2
-    assert sent == []  # rejected client-side before any RPC
-    assert "objective_required" in capsys.readouterr().err
+    assert cli.spawn(args) == 0
+    assert len(sent) == 1 and sent[0].get("objective") is None
 
 
 def test_top_level_spawn_without_objective_succeeds(monkeypatch, tmp_path: Path, capsys) -> None:

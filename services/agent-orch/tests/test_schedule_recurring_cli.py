@@ -62,12 +62,13 @@ def test_add_sends_the_resolved_template_with_default_parent_and_no_tz(calls, ca
     assert json.loads(capsys.readouterr().out)["recurring"]["recurring_id"] == RULE["recurring_id"]
 
 
-def test_add_parent_none_needs_no_objective_and_weekly_needs_days(calls, capsys):
+def test_add_without_objective_and_weekly_needs_days(calls, capsys):
     at = ADD.index("--objective")
     argv = ADD[:at] + ADD[at + 2:]
     assert run([*argv, "--parent", "none"]) == 0
     assert calls[-1]["parent"] == "none" and "self_close_on_completion" not in calls[-1]
-    assert run([*argv, "--parent", "assistant"]) == 2  # parented children need an objective
+    assert run([*argv, "--parent", "assistant"]) == 0
+    assert calls[-1]["parent"] == "assistant" and calls[-1]["objective"] is None
     weekly = [("weekly" if value == "daily" else value) for value in ADD]
     assert run(weekly) == 2
     assert run([*weekly, "--days", "mon,wed", "--tz", "UTC"]) == 0
