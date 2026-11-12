@@ -8,7 +8,15 @@ function micAssistantName(status) {
 // supplies an opaque caller id; this module never invents or persists identity.
 function computeBusyBannerState({ status, localHostId } = {}) {
   const source = status && typeof status === 'object' ? status : {};
-  const lastError = source.last_error || null;
+  // Health becomes unhealthy before the service's delayed last_error is set.
+  // Keep that interval honest, including a missing selected input after restart.
+  const audio = source.audio;
+  const unhealthy = source.mode !== 'off' && source.mode !== 'offline'
+    && typeof audio?.health_state === 'string' && !['ok', 'idle'].includes(audio.health_state);
+  const error = unhealthy ? audio : source.last_error;
+  const lastError = error ? [error?.health_message, error?.message, error?.error?.message, error?.error, error]
+    .find(value => typeof value === 'string' && value.trim() && value !== '[object Object]')
+    || 'Microphone error. Check the microphone connection and try again.' : null;
   const mode = source.mode || null;
   const caller = Object.prototype.hasOwnProperty.call(source, 'caller') ? source.caller : null;
   const pausedMode = source.paused_mode || null;

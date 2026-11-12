@@ -229,3 +229,42 @@ test('cancel while recorder stop is pending prevents upload and dispatch', async
   resolve({ blob: new Blob(['late'], { type: 'audio/wav' }), durationS: 1 }); await flush();
   assert.equal(deps.calls.length, 0); assert.equal(panel.hidden, true);
 });
+
+for (const [failure, expected] of [
+  [{ error: { code: 'backend_unavailable', message: 'backend detail' } }, 'Transcription is unavailable right now.'],
+  [{ error_code: { code: 'server_overloaded' } }, 'Server is busy. Retry when ready.'],
+  [{ error: { message: 'Audio decoder rejected the recording.' } }, 'Audio decoder rejected the recording.'],
+  [{ error: { unexpected: true } }, 'Voice recording failed.'],
+  [{ error_code: { unexpected: true }, message: 'Transcription connection lost.' }, 'Transcription connection lost.'],
+]) test(`structured transcription failure is readable: ${expected}`, async () => {
+  const deps = io({ transcribe: async () => ({ ok: false, ...failure }) });
+  const take = createVoiceTake({ streamId: 'local:seat', blob: new Blob(['x']), durationS: 1, id: 'failure' }, deps);
+  await take.run(); assert.equal(take.snapshot().status, 'failed'); assert.equal(take.snapshot().error, expected);
+  assert.equal(deps.calls.some(c => c[0] === 'send'), false);
+});
+for (const name of ['NotFoundError', 'OverconstrainedError', 'NotReadableError']) test(`${name} explains capture failure and Retry records once after device returns`, async () => {
+  let attempts = 0; let stopped = 0; let closed = 0; let processor; const constraints = []; const failedDevices = [];
+  class AudioContext {
+    sampleRate = 16000; destination = {};
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { getFloatTimeDomainData(samples) { samples.fill(0); }, disconnect() {} }; }
+    createScriptProcessor() { return processor = { connect() {}, disconnect() {} }; }
+    async resume() {} async close() { closed++; }
+  }
+  const env = { isSecureContext: true, AudioContext, MediaRecorder: { isTypeSupported: () => false }, navigator: { mediaDevices: {
+    getUserMedia: async value => { constraints.push(value); if (++attempts === 1) throw Object.assign(new Error('opaque platform detail'), { name });
+      return { getTracks: () => [{ stop: () => stopped++, addEventListener() {}, removeEventListener() {} }] }; },
+  } } };
+  const recorder = createBrowserRecorder(env, { getDeviceId: () => 'chosen-input', onDeviceFailure: id => failedDevices.push(id) });
+  const u = ui(true, recorder, env);
+  u.button.click(); await flush();
+  assert.match(u.panel.textContent, /microphone.*Retry/i); assert.doesNotMatch(u.panel.textContent, /object Object|opaque platform detail/);
+  assert.equal(u.deps.calls.length, 0); assert.equal(stopped, 0); assert.equal(closed, 0);
+  u.panel.querySelector('button').click(); await flush(); assert.match(u.panel.textContent, /Recording/);
+  processor.onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array([.2, -.2, .3]) } });
+  u.button.click(); await flush(); await flush();
+  assert.deepEqual(constraints, [{ audio: { deviceId: { exact: 'chosen-input' } } }, { audio: { deviceId: { exact: 'chosen-input' } } }]);
+  assert.deepEqual(failedDevices, name === 'NotReadableError' ? [] : ['chosen-input']);
+  assert.equal(stopped, 1); assert.equal(closed, 1); assert.equal(u.deps.calls.filter(c => c[0] === 'send').length, 1);
+  u.dom.window.close();
+});

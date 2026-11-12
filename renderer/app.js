@@ -8853,6 +8853,7 @@ const micState = {
 };
 
 function updateMicUI(data) {
+  micState.status = data;
   const dot = document.getElementById('mic-status-dot');
   const info = document.getElementById('mic-info');
   const btn = document.getElementById('mic-btn-toggle');
@@ -9016,7 +9017,7 @@ function updateMicUI(data) {
     }
     info.innerHTML = html;
   } else if (busy.lastError) {
-    const text = String(busy.lastError);
+    const text = busy.lastError;
     info.innerHTML = text.startsWith('always_on_resume_failed')
       ? '<span style="color:var(--yellow)">always-on did not resume - see logs</span>'
       : `<span style="color:var(--yellow)">${esc(text)}</span>`;
@@ -9569,8 +9570,10 @@ CFG_READY.then((cfg) => {
         const send = window.PentacleChatStore.getState().optimisticSends?.[turn.optimisticId];
         roomMicTurns.register({...turn,requestId:send?.request_id});
       },
-      onStatus: (text) => {
-        if (text && micState.mode === 'on') document.getElementById('mic-info').textContent = text;
+      onStatus: () => {
+        // A wake lookup can finish after a newer health/offline response.
+        // Render its updated note with the same latest-status precedence as polling.
+        updateMicUI(micState.status);
       },
     });
     fetchMicStatus();
