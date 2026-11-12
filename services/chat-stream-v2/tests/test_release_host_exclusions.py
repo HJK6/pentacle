@@ -99,3 +99,36 @@ def test_nightly_reads_same_home_afresh_without_mutating_runtime_stamp(tmp_path,
     machines(tmp_path,[])
     assert nj.check_release(args,deploy_module=d)==0
     assert seen[-1]['release_exclusions']==[] and stamp==original
+
+
+def test_explicit_rollback_qualifies_only_declared_included_bindings(tmp_path, monkeypatch):
+    from deploy import coordinated_runtime
+    path = machines(tmp_path, [DECLARATION])
+    policy = tmp_path / 'policy.json'
+    policy.write_text('{}')
+    policy.chmod(0o600)
+    monkeypatch.setattr(d, '_launchd_plist', lambda _: {'EnvironmentVariables': {
+        'PENTACLE_MACHINES_FILE': str(path), 'PENTACLE_PROVIDER_ACCOUNT_POLICY': str(policy)}})
+    monkeypatch.setattr(coordinated_runtime, 'code_identity_at', lambda *a: 'fixture-identity')
+    bindings = [{'host': host, 'provider': 'claude', 'alias': 'primary',
+        'generation': 'one', 'executable_sha256': '1' * 64, 'version': '1.0'}
+        for host in ('primary', 'optional')]
+    witness = {'sha': TARGET_SHA, 'daemon_runtime_readback': {'sha': TARGET_SHA},
+        'daemon_boot_readback': {'outcome': 'observed'},
+        'fleet_smoke': {'outcome': 'passed', 'cells': [
+            {'host': b['host'], 'provider': b['provider'], 'prompt_mode': mode,
+             'outcome': 'passed' if b['host'] == 'primary' else 'SKIPPED_DECLARED',
+             'account_binding': dict(b)}
+            for b in bindings for mode in ('prompted', 'promptless')]}}
+    seen = []
+    def proof(receipt, source, boot):
+        seen.append(receipt['scope'])
+        return {'outcome': 'passed'}
+    runtime = SimpleNamespace(database=lambda _: 'fixture-db',
+        account_snapshot=lambda *a, **k: {'selected_bindings': bindings},
+        restoration_proof=proof)
+    stamp = {'sha': TARGET_SHA, 'release_exclusions': [DECLARATION],
+             'restored_qualification': {'stamp': witness}}
+    assert d._verify_direct_restoration(V2_SERVICE, tmp_path, stamp, None,
+        lambda *a: None, runtime=runtime)['outcome'] == 'passed'
+    assert seen[0]['included_hosts'] == ['primary']
