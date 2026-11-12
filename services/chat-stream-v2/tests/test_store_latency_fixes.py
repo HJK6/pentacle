@@ -182,17 +182,24 @@ def test_reconcile_skips_done_lanes_keeps_clears_and_always_drains():
 
 # --- Fix 2: one delivery table per request, rebuilt only on an intervening write
 
-async def _page(store, cursor, cache, *, limit=1, stream="host-a:proof"):
-    return await store.fetch_session_event_page(
-        stream, before_daemon_seq=cursor, limit=limit, deliveries_cache=cache)
+async def _page(store, cursor, *, limit=1, stream="host-a:proof", fresh=False):
+    async def read():
+        return await store.fetch_session_event_page(
+            stream, before_daemon_seq=cursor, limit=limit)
+    if fresh:
+        from unittest.mock import patch
+        from tell_proof import ProjectionDeliveries
+        with patch.object(store, "_history_deliveries", lambda conn, shared: ProjectionDeliveries()):
+            return await read()
+    return await read()
 
 
-async def _walk(store, cache, *, limit=3, stream="host-a:proof"):
-    """Mirror the server's page walk, returning events oldest-first."""
+async def _walk(store, *, limit=3, stream="host-a:proof", fresh=False):
+    """Mirror the server's page walk, optionally constructing fresh lookups."""
     out: list = []
     cursor = None
     while True:
-        page = await _page(store, cursor, cache, limit=limit, stream=stream)
+        page = await _page(store, cursor, limit=limit, stream=stream, fresh=fresh)
         if not page:
             break
         out = page + out
@@ -213,12 +220,12 @@ def test_history_delivery_table_built_once_for_an_unchanged_request():
         try:
             await corpus(store)
             # Fresh-per-page is the oracle.
-            fresh = await _walk(store, None)
+            fresh = await _walk(store, fresh=True)
             # One shared cache across the whole request: identical events, and the
             # delivery table is built exactly once for the unchanged request.
             statements: list[str] = []
             await store.submit(lambda c: c.set_trace_callback(statements.append))
-            reused = await _walk(store, {})
+            reused = await _walk(store)
             await store.submit(lambda c: c.set_trace_callback(None))
             assert reused == fresh
             assert _delivery_builds(statements) == 1
@@ -272,13 +279,13 @@ def test_history_reflects_a_between_page_delivery_write_not_a_stale_table():
                 return seq
             peer_seq = await store.submit(seed)
 
-            cache: dict = {}
             statements: list[str] = []
             await store.submit(lambda c: c.set_trace_callback(statements.append))
             # Page 1 (newest fillers) builds the delivery table while D is present.
-            page1 = await _page(store, None, cache, limit=2, stream="host-a:px")
+            page1 = await _page(store, None, limit=2, stream="host-a:px")
             builds_before = _delivery_builds(statements)
-            assert builds_before == 1 and cache.get("deliveries") is not None
+            assert builds_before == 1
+            assert await store.submit(lambda c: c.delivery_lookup.table is not None)
 
             # A delivery write (delete D) lands between pages.
             await store.submit(lambda c: (c.execute("DELETE FROM v2_tell_deliveries WHERE tell_id='peer'"), c.commit()))
@@ -287,11 +294,11 @@ def test_history_reflects_a_between_page_delivery_write_not_a_stale_table():
             # Reused read on the SAME cache after the delete: trace it alone to
             # prove the table was rebuilt (one build on this page).
             statements.clear()
-            reused_page = await _page(store, cursor, cache, limit=3, stream="host-a:px")
+            reused_page = await _page(store, cursor, limit=3, stream="host-a:px")
             await store.submit(lambda c: c.set_trace_callback(None))
             assert _delivery_builds(statements) == 1
             # Fresh-per-page oracle under the same post-delete state.
-            fresh_page = await _page(store, cursor, None, limit=3, stream="host-a:px")
+            fresh_page = await _page(store, cursor, fresh=True, limit=3, stream="host-a:px")
 
             # The peer event is in this page; its projection must match the oracle
             # (origin no longer a verified peer, since D was deleted). A stale table
@@ -319,12 +326,11 @@ def test_history_reuse_after_legacy_fallback_is_identical():
                 "INSERT INTO v2_tell_deliveries VALUES('dup',?,1)",
                 ('{"delivery":{"to_stream_id":"host-b:other","text":"a","text":"b"}}',)), c.commit()))
             cursor = None
-            cache: dict = {}
             fresh: list = []
             reused: list = []
             while True:
-                pf = await _page(store, cursor, None, limit=3)
-                pr = await _page(store, cursor, cache, limit=3)
+                pf = await _page(store, cursor, fresh=True, limit=3)
+                pr = await _page(store, cursor, limit=3)
                 assert pf == pr
                 if not pr:
                     break

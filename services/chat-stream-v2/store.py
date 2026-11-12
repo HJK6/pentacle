@@ -1812,6 +1812,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(ROUTING_INTEGRITY_DDL)
             conn.execute(ROUTING_INTEGRITY_AUDIT_DDL)
             conn.execute(OUTBOUND_NOTICE_DDL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_v2_outbound_notices_recipient "
+                         "ON v2_outbound_notices(recipient_stream_id)")
             # Measured error-alert dependency lookups. Partial indexes exclude
             # unrelated notice families without imposing a second notice store.
             conn.execute("CREATE INDEX IF NOT EXISTS ix_v2_error_notification ON v2_outbound_notices "
@@ -2031,6 +2033,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if self._configured_archive_path is not None:
                 bind_history_archive(conn, Path(self._configured_archive_path))
             self._columns = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+            from tell_proof import DeliveryLookup
+            conn.delivery_lookup = DeliveryLookup(conn)
         except BaseException as exc:
             # Callers may have queued work while initialization ran; it will
             # never run, so close admission and fail it before reporting.
@@ -6743,6 +6747,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             "AND c.generation=? LIMIT 1", (host, name, generation),
         ).fetchone() is not None)
 
+    def _history_deliveries(self, conn, shared):
+        """Called only on the Store thread, inside the reader's savepoint."""
+        return conn.delivery_lookup.get(conn, shared=shared)
+
     async def fetch_session_event_page(
         self,
         stream_id: str,
@@ -6750,7 +6758,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         before_daemon_seq: int | None,
         limit: int,
         generation: str | None = None,
-        deliveries_cache: dict | None = None,
         after_daemon_seq: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch one newest-first cursor page, returned oldest-first.
@@ -6761,13 +6768,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         ``after_daemon_seq`` filters raw rows before that bound and projection;
         it preserves filtering the returned newest page by the same watermark.
 
-        ``deliveries_cache`` lets a caller that walks several pages of one
-        request (``_stream_request_stream_events``) build the delivery table
-        once instead of once per page. It is reused only while the Store
-        connection's cumulative change counter is unchanged since the table was
-        built; any intervening write (a delivery insert/update/delete among
-        them) rebuilds it on the Store thread before the next page, so the
-        answer always equals a fresh-per-page projection.
+        The connection keeps its delivery lookup across unrelated local writes.
+        A caller's outer transaction always gets a private lookup instead.
         """
         if not stream_id or limit <= 0:
             return []
@@ -6776,7 +6778,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         if not separator or not host or not session_name:
             return []
 
-        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
             where = "t.stream_id = ? AND t.session_created_at = s.created_at"
             params: list[Any] = [host, session_name, stream_id]
             if generation is not None:
@@ -6821,25 +6823,18 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                     # value here as on its live broadcast (append_session_event).
                     event["daemon_seq"] = int(row["event_id"])
                     newest_first.append(event)
-            from tell_proof import ProjectionDeliveries
-            if deliveries_cache is None:
-                deliveries = ProjectionDeliveries()
-            else:
-                # One table per request: reuse only while no write has landed on
-                # this connection since it was built (total_changes is a superset
-                # of delivery mutations), otherwise rebuild for this page.
-                changes = conn.total_changes
-                if deliveries_cache.get("deliveries") is None or deliveries_cache.get("total_changes") != changes:
-                    deliveries_cache["deliveries"] = ProjectionDeliveries()
-                    deliveries_cache["total_changes"] = changes
-                deliveries = deliveries_cache["deliveries"]
-            return list(reversed(_project_session_events_conn(
-                conn, newest_first, deliveries=deliveries)))
+            deliveries = self._history_deliveries(conn, shared)
+            try:
+                return list(reversed(_project_session_events_conn(
+                    conn, newest_first, deliveries=deliveries)))
+            finally:
+                deliveries.reuse = None
 
         def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            shared = not conn.in_transaction
             conn.execute("SAVEPOINT session_history_snapshot")
             try:
-                return _op(conn)
+                return _op(conn, shared)
             finally:
                 conn.execute("RELEASE session_history_snapshot")
 
@@ -6903,7 +6898,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def list_open_sessions_with_event_summary(self) -> list[dict[str, Any]]:
         """Open rows plus lifecycle-matched event state from one DB snapshot."""
 
-        def _op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        def _op(conn: sqlite3.Connection, shared: bool) -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
                 SELECT s.*,
@@ -6925,16 +6920,19 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 """
             ).fetchall()
             result = [_session_row(conn, row) for row in rows]
-            from tell_proof import ProjectionDeliveries
-            deliveries = ProjectionDeliveries()
-            for session in result:
-                _restore_message_summary_conn(conn, session, deliveries=deliveries)
-            return result
+            deliveries = self._history_deliveries(conn, shared)
+            try:
+                for session in result:
+                    _restore_message_summary_conn(conn, session, deliveries=deliveries)
+                return result
+            finally:
+                deliveries.reuse = None
 
         def snapshot(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            shared = not conn.in_transaction
             conn.execute("SAVEPOINT session_inventory_snapshot")
             try:
-                return _op(conn)
+                return _op(conn, shared)
             finally:
                 conn.execute("RELEASE session_inventory_snapshot")
 

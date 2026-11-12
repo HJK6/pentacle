@@ -53,7 +53,6 @@ class _Store(SubmissionReadStoreStub):
         *,
         before_daemon_seq: int | None,
         limit: int,
-        deliveries_cache: dict | None = None,
     ) -> list[dict]:
         eligible = [
             event for event in self.events

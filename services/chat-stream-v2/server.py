@@ -5520,9 +5520,6 @@ class Server:
         cursor = before_daemon_seq
         sent_frame = False
         sent_chunks = False
-        # One delivery table for this whole request; the Store rebuilds it if a
-        # write lands between these paged reads (see fetch_session_event_page).
-        deliveries_cache: dict = {}
         try:
             while remaining > 0 and page_size > 0:
                 quota = min(page_size, remaining)
@@ -5531,7 +5528,6 @@ class Server:
                     stream_id,
                     before_daemon_seq=cursor,
                     limit=query_limit,
-                    deliveries_cache=deliveries_cache,
                     **({"generation": generation} if generation is not None else {}),
                 )
                 has_more = remaining > quota and len(rows) > quota

@@ -210,6 +210,60 @@ def test_reuse_across_unrelated_writes_and_inventory(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_external_commit_during_read_does_not_publish_a_stale_version(tmp_path, monkeypatch):
+    async def run():
+        path = str(tmp_path / "owned.db")
+        store = Store(path)
+        store.start()
+        try:
+            await corpus(store)
+            before = await outcome(store, False)
+            get = store._history_deliveries
+            def commit_after_snapshot(conn, shared):
+                # The history row SELECT has already established this read's snapshot.
+                with sqlite3.connect(path) as writer:
+                    writer.execute("DELETE FROM v2_tell_deliveries WHERE tell_id='peer'")
+                return get(conn, shared)
+            with monkeypatch.context() as midread:
+                midread.setattr(store, "_history_deliveries", commit_after_snapshot)
+                assert await outcome(store, False) == before
+            after = await equal_to_fresh(store, monkeypatch, False)
+            assert after != before
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_outer_transaction_uses_private_table_and_triggers_are_connection_local(tmp_path, monkeypatch):
+    async def run():
+        store = Store(str(tmp_path / "owned.db"))
+        store.start()
+        try:
+            await corpus(store)
+            await outcome(store, False)
+            table = await store.submit(lambda c: c.delivery_lookup.table)
+            await store.submit(lambda c: c.execute("PRAGMA trusted_schema=OFF"))
+            await store.submit(lambda c: c.execute("BEGIN"))
+            await store.submit(lambda c: c.execute("DELETE FROM v2_tell_deliveries WHERE tell_id='peer'"))
+            await equal_to_fresh(store, monkeypatch, False)
+            assert await store.submit(lambda c: c.delivery_lookup.table) is table
+            assert await store.submit(lambda c: c.delivery_lookup.dirty)
+            await store.submit(lambda c: c.commit())
+            await equal_to_fresh(store, monkeypatch, False)
+            assert await store.submit(lambda c: c.delivery_lookup.table) is not table
+            assert not await store.submit(lambda c: c.execute(
+                "SELECT name FROM main.sqlite_master WHERE name LIKE 'delivery_lookup_%'").fetchall())
+            old = await store.submit(lambda c: c.delivery_lookup)
+            store.stop()
+            store.start()
+            assert await store.submit(lambda c: c.delivery_lookup) is not old
+            await equal_to_fresh(store, monkeypatch, True)
+            assert await store.submit(lambda c: c.delivery_lookup.table.reuse) is None
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
 def test_unclean_lookup_is_sticky_but_equal(monkeypatch):
     async def run():
         store = Store()

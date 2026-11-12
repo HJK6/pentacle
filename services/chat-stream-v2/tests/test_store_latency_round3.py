@@ -508,10 +508,6 @@ def _statements(store):
     return seen, start, stop
 
 
-def _receipt_scans(statements):
-    return sum(1 for s in statements if "v2_send_receipts" in s and "$._input_proof')='object'" in s)
-
-
 def _tail_reads(statements):
     """(lo, hi) bounds of every retained_proof tail read; hi is None when unbounded."""
     reads = []
@@ -528,7 +524,7 @@ def _origins(events):
     return [(e["daemon_seq"], e["raw"]["input_provenance"]["kind"]) for e in events]
 
 
-# --- Item 2: send receipts once per history request ---------------------------
+# --- Item 2: original per-input receipt query -------------------------------
 
 @pytest.mark.parametrize("ladder", [False, True])
 @pytest.mark.parametrize("limit", [1, 3, 50])
@@ -540,7 +536,7 @@ def test_item2_page_walk_equals_legacy_oracle(ladder, limit):
         try:
             await store.submit(lambda c: _seed_stream(c, ladder=ladder))
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
-            walked = await _walk(store, {}, limit=limit, stream=PAGE_STREAM)
+            walked = await _walk(store, limit=limit, stream=PAGE_STREAM)
             assert walked == oracle
             assert {kind for _, kind in _origins(walked)} == {"operator"}   # path really exercised
         finally:
@@ -558,25 +554,7 @@ def test_item2_two_streams_stay_isolated():
             await store.submit(lambda c: _seed_stream(c, "host-a:other", 5, receipts=False))
             for stream in (PAGE_STREAM, "host-a:other"):
                 oracle = await store.submit(lambda c, s=stream: _legacy_projection(c, s))
-                assert await _walk(store, {}, limit=2, stream=stream) == oracle
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
-def test_item2_receipts_read_once_per_unchanged_request():
-    # RED on baseline: send_proofs scans the stream's receipts once per input event.
-    async def run():
-        store = Store()
-        store.start()
-        try:
-            await store.submit(lambda c: _seed_stream(c, n=8))
-            statements, start, stop = _statements(store)
-            await start()
-            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
-            await stop()
-            assert len(walked) == 8
-            assert _receipt_scans(statements) == 1
+                assert await _walk(store, limit=2, stream=stream) == oracle
         finally:
             store.stop()
     asyncio.run(run())
@@ -600,8 +578,7 @@ def test_item2_between_pages_write_invalidates_and_matches_fresh_projection():
                 return ids
 
             ids = await store.submit(seed)
-            cache: dict = {}
-            first = await _page(store, None, cache, limit=3, stream=PAGE_STREAM)       # events 3..5
+            first = await _page(store, None, limit=3, stream=PAGE_STREAM)       # events 3..5
             before = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
             assert first == before[3:]
             assert _origins(before)[0] == (ids[0], "unknown")
@@ -614,7 +591,7 @@ def test_item2_between_pages_write_invalidates_and_matches_fresh_projection():
                 conn.commit()
 
             await store.submit(late_receipt)
-            second = await _page(store, first[0]["daemon_seq"], cache, limit=3, stream=PAGE_STREAM)
+            second = await _page(store, first[0]["daemon_seq"], limit=3, stream=PAGE_STREAM)
             after = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
             assert second == after[:3]
             assert _origins(after)[0] == (ids[0], "operator")   # the new receipt is seen
@@ -623,31 +600,9 @@ def test_item2_between_pages_write_invalidates_and_matches_fresh_projection():
     asyncio.run(run())
 
 
-def test_item2_write_between_pages_costs_exactly_one_rescan():
-    # RED on baseline (one scan per event); candidate: one scan per unchanged generation.
-    async def run():
-        store = Store()
-        store.start()
-        try:
-            await store.submit(lambda c: _seed_stream(c, n=6))
-            statements, start, stop = _statements(store)
-            cache: dict = {}
-            await start()
-            first = await _page(store, None, cache, limit=3, stream=PAGE_STREAM)
-            await store.submit(lambda c: (c.execute("INSERT INTO v2_tell_deliveries VALUES('w',?,1)",
-                                                    ('{"delivery":{"to_stream_id":"host-z:q","text":"z"}}',)), c.commit()))
-            await _page(store, first[0]["daemon_seq"], cache, limit=3, stream=PAGE_STREAM)
-            await stop()
-            assert _receipt_scans(statements) == 2     # once before the write, once after
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("wire", [5, 1.5, True, "bad\u0000nul"])
-def test_item2_uncertain_receipt_disables_reuse_and_matches_oracle(wire):
-    # A receipt whose wire_text is not a clean string makes SQLite's instr coercion
-    # the authority: reuse is off (one scan per event, as before) and output equal.
+def test_item2_uncertain_receipt_matches_oracle(wire):
+    # Non-string and NUL-containing receipt wires retain SQLite's instr semantics.
     async def run():
         store = Store()
         store.start()
@@ -657,12 +612,8 @@ def test_item2_uncertain_receipt_disables_reuse_and_matches_oracle(wire):
                 _add_receipt(conn, PAGE_STREAM, 99, "odd", 0, wire_text=wire)
             await store.submit(seed)
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
-            statements, start, stop = _statements(store)
-            await start()
-            walked = await _walk(store, {}, limit=2, stream=PAGE_STREAM)
-            await stop()
+            walked = await _walk(store, limit=2, stream=PAGE_STREAM)
             assert walked == oracle
-            assert _receipt_scans(statements) >= 4     # reuse disabled: per-event scans
         finally:
             store.stop()
     asyncio.run(run())
@@ -677,23 +628,17 @@ def test_item2_send_proofs_equals_legacy_oracle_per_input():
             await store.submit(lambda c: _seed_stream(c, n=5))
 
             def check(conn):
-                reuse = tell_proof.ProjectionReuse()
                 for i in range(5):
                     text = f"prefix {i} msg {i} for {PAGE_STREAM} suffix"
-                    # Full-row equality, no column excluded: the reuse path's
-                    # receipt rows must match the frozen oracle's schema exactly
-                    # (keys, values and order) -- the lookup wire is private to
-                    # the cache and never surfaces as a `sql_wire` column.
+                    # Full-row equality, including keys, values and order,
+                    # against the original filtered receipt query.
                     mine = [(p, {k: r[k] for k in r.keys()})
-                            for p, r in tell_proof.send_proofs(conn, PAGE_STREAM, text, reuse=reuse)]
+                            for p, r in tell_proof.send_proofs(conn, PAGE_STREAM, text)]
                     theirs = [(p, {k: r[k] for k in r.keys()})
                               for p, r in legacy.send_proofs(conn, PAGE_STREAM, text)]
                     assert mine == theirs
-                    assert all("sql_wire" not in r for _, r in (
-                        (p, {k: r[k] for k in r.keys()})
-                        for p, r in tell_proof.send_proofs(conn, PAGE_STREAM, text, reuse=reuse)))
                     assert len(mine) == 1
-                other = list(tell_proof.send_proofs(conn, "host-a:other", f"msg 1 for {PAGE_STREAM}", reuse=reuse))
+                other = list(tell_proof.send_proofs(conn, "host-a:other", f"msg 1 for {PAGE_STREAM}"))
                 assert other == []
 
             await store.submit(check)
@@ -715,7 +660,7 @@ def _one_table_write_between_projections(conn):
 
 
 def test_item2_one_table_write_between_projections_matches_oracle():
-    # GREEN on baseline and candidate; the mutant below must fail this same check.
+    # A retained delivery table must not hide changed receipt evidence.
     async def run():
         store = Store()
         store.start()
@@ -725,88 +670,6 @@ def test_item2_one_table_write_between_projections_matches_oracle():
         finally:
             store.stop()
     asyncio.run(run())
-
-
-def _mutant_reuse(kind):
-    base = tell_proof.ProjectionReuse
-
-    class NoGuard(base):                 # reuse-not-invalidated-on-write / stale-after-write
-        def _fresh(self, conn):
-            return None
-
-    class Leaky(base):                   # stream-isolation leak: one slot for every stream
-        def receipt_rows(self, conn, target, text):
-            first = next(iter(self._receipts), None) if self._receipts else None
-            return super().receipt_rows(conn, first if first is not None else target, text)
-
-    return {"no_guard": NoGuard, "leaky": Leaky}[kind]
-
-
-@pytest.mark.parametrize("mutant", ["no_guard", "leaky"])
-def test_item2_mutants_are_detected(monkeypatch, mutant):
-    async def run():
-        store = Store()
-        store.start()
-        try:
-            monkeypatch.setattr(tell_proof, "ProjectionReuse", _mutant_reuse(mutant))
-            if mutant == "no_guard":
-                await store.submit(lambda c: _seed_stream(c, n=6))
-
-                await store.submit(_one_table_write_between_projections)
-            else:
-                await store.submit(lambda c: _seed_stream(c, PAGE_STREAM, 4))
-                await store.submit(lambda c: _seed_stream(c, "host-a:other", 4))
-
-                def mixed(conn):         # one table across two streams, as the inventory does
-                    table = tell_proof.ProjectionDeliveries()
-                    rows = conn.execute("SELECT event_id,event_json FROM session_event_tail ORDER BY event_id").fetchall()
-                    events = [{**json.loads(r["event_json"]), "daemon_seq": r["event_id"]} for r in rows]
-                    got = _project_session_events_conn(conn, copy.deepcopy(events), deliveries=table)
-                    original = tell_proof.input_origin
-                    tell_proof.input_origin = lambda c, e, i, **kw: legacy.input_origin(c, e, i)
-                    try:
-                        want = _project_session_events_conn(conn, copy.deepcopy(events))
-                    finally:
-                        tell_proof.input_origin = original
-                    assert got == want
-
-                await store.submit(mixed)
-        finally:
-            store.stop()
-
-    # The real class passes the same check (see the equality tests above); the
-    # mutant must fail it.
-    with pytest.raises(AssertionError):
-        asyncio.run(run())
-
-
-def test_item2_single_writer_assumption_total_changes(tmp_path):
-    # The reuse guard is conn.total_changes. It sees every write made on the Store
-    # connection (the only writer in the daemon) and, by design, none made by a
-    # different connection -- which is why the single-writer assumption is stated.
-    import sqlite3
-    path = str(tmp_path / "store.db")
-    store = Store(path)
-    store.start()
-    try:
-        asyncio.run(_single_writer(store, path, sqlite3))
-    finally:
-        store.stop()
-
-
-async def _single_writer(store, path, sqlite3):
-    await store.submit(lambda c: _seed_stream(c, n=2))
-    before = await store.submit(lambda c: c.total_changes)
-    await store.submit(lambda c: _add_receipt(c, PAGE_STREAM, 50, "x", 0))
-    assert await store.submit(lambda c: c.total_changes) > before        # same-connection write seen
-    mid = await store.submit(lambda c: c.total_changes)
-    external = sqlite3.connect(path)
-    try:
-        external.execute("INSERT INTO v2_tell_deliveries VALUES('ext','{}',1)")
-        external.commit()
-    finally:
-        external.close()
-    assert await store.submit(lambda c: c.total_changes) == mid         # external writer invisible
 
 
 def test_item2_named_receipt_projection_is_independently_pinned():
@@ -825,7 +688,7 @@ def test_item2_named_receipt_projection_is_independently_pinned():
         store.start()
         try:
             await store.submit(lambda c: _seed_stream(c, ladder=True))
-            golden = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            golden = await _walk(store, limit=3, stream=PAGE_STREAM)
             # Guard against a no-op fixture: every input is a receipt-backed USER
             # row, so the receipt projection really runs on this page.
             assert {kind for _, kind in _origins(golden)} == {"operator"}
@@ -840,7 +703,7 @@ def test_item2_named_receipt_projection_is_independently_pinned():
 
             store_mod._project_send_receipt_row = forced_voice
             try:
-                mutated = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+                mutated = await _walk(store, limit=3, stream=PAGE_STREAM)
             finally:
                 store_mod._project_send_receipt_row = original
             # The named oracle's output reaches the page: the mutant changes it.
@@ -848,13 +711,13 @@ def test_item2_named_receipt_projection_is_independently_pinned():
             assert any((e.get("meta") or {}).get("voice", {}).get("duration_s") == 999.0
                        for e in mutated)
             # Restored: no leak of the mutation; the walk re-equals the golden.
-            assert await _walk(store, {}, limit=3, stream=PAGE_STREAM) == golden
+            assert await _walk(store, limit=3, stream=PAGE_STREAM) == golden
         finally:
             store.stop()
     asyncio.run(run())
 
 
-# --- Item 3: tail events once per request -------------------------------------
+# --- Item 3: tail events once per projection call ---------------------------
 
 def _disjoint(reads):
     """True when no two (lo, hi) tail reads cover the same event_id."""
@@ -874,13 +737,13 @@ def test_item3_tail_read_once_for_equal_watermarks_and_without_overlap_for_lower
             await store.submit(lambda c: _seed_stream(c, n=8, ladder=ladder))
             statements, start, stop = _statements(store)
             await start()
-            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            walked = await _page(store, None, limit=8, stream=PAGE_STREAM)
             await stop()
             reads = _tail_reads(statements)
             assert len(walked) == 8
             assert _disjoint(reads)
             if not ladder:
-                assert len(reads) == 1       # all watermarks equal: one read for the request
+                assert len(reads) == 1       # all watermarks equal: one read for the call
         finally:
             store.stop()
     asyncio.run(run())
@@ -895,7 +758,7 @@ def test_item3_lower_watermark_lowers_the_window_and_events_match_oracle():
         try:
             await store.submit(lambda c: _seed_stream(c, n=8, ladder=True))
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
-            walked = await _walk(store, {}, limit=2, stream=PAGE_STREAM)
+            walked = await _walk(store, limit=2, stream=PAGE_STREAM)
             assert walked == oracle
             assert {kind for _, kind in _origins(walked)} == {"operator"}
         finally:
@@ -911,15 +774,14 @@ def test_item3_between_pages_tail_write_invalidates():
         store.start()
         try:
             await store.submit(lambda c: _seed_stream(c, n=6))
-            cache: dict = {}
-            first = await _page(store, None, cache, limit=3, stream=PAGE_STREAM)
+            first = await _page(store, None, limit=3, stream=PAGE_STREAM)
 
             def duplicate(conn):
                 _add_event(conn, PAGE_STREAM, 90, f"msg 1 for {PAGE_STREAM}", request=False)
                 conn.commit()
 
             await store.submit(duplicate)
-            second = await _page(store, first[0]["daemon_seq"], cache, limit=3, stream=PAGE_STREAM)
+            second = await _page(store, first[0]["daemon_seq"], limit=3, stream=PAGE_STREAM)
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
             assert second == oracle[:3]
             assert dict(_origins(second))[second[1]["daemon_seq"]] != "operator"   # ambiguity seen
@@ -993,7 +855,7 @@ def test_item3_oversized_window_disables_reuse_and_matches_oracle(monkeypatch):
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
             statements, start, stop = _statements(store)
             await start()
-            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            walked = await _walk(store, limit=3, stream=PAGE_STREAM)
             await stop()
             assert walked == oracle
             assert len(_tail_reads(statements)) >= 8
@@ -1068,7 +930,7 @@ async def _tail_scenario(store, kind):
     if kind == "never_lowers":
         await store.submit(lambda c: _seed_stream(c, n=8, ladder=True))
         oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
-        assert await _walk(store, {}, limit=2, stream=PAGE_STREAM) == oracle
+        assert await _walk(store, limit=2, stream=PAGE_STREAM) == oracle
     elif kind == "no_guard":
         await store.submit(lambda c: _seed_stream(c, n=6))
         await store.submit(_tail_write_between_projections)
@@ -1127,7 +989,7 @@ def test_item3_byte_bound_disables_reuse_and_matches_oracle(monkeypatch):
             oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
             statements, start, stop = _statements(store)
             await start()
-            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            walked = await _walk(store, limit=3, stream=PAGE_STREAM)
             await stop()
             assert walked == oracle
             assert len(_tail_reads(statements)) >= 8
