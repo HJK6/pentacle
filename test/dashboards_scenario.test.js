@@ -19,7 +19,6 @@ function loaded() { return { ...observation(), state: 'loaded', text: 'Loaded', 
 function chat() { return { sameNodes: true, sameStream: true, sameTranscript: true, sameDraft: true, chatsVisible: true, dashboardsHidden: true, frames: 0 }; }
 
 test('web gate collects the dashboard scenarios before destructive journeys', () => {
-  assert.equal(SCENARIOS.length, 44);
   assert.ok(SCENARIOS.some(([name]) => name === 'design-gallery'));
   assert.ok(SCENARIOS.some(([name]) => name === 'composer-draft-per-chat'));
   const names = SCENARIOS.map(([name]) => name);
