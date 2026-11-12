@@ -162,7 +162,7 @@ and `test/e2e/web_chat_width_gate.cjs`. Neither changes the reference flow.
 [`gate_env.py`](../scripts/gate_env.py) maps the closed target list and provisions
 the declared dependencies. Daemon `v2-pytest` adds four capability invariants to
 every requested selection; it does not substitute for the full merge gate.
-`v2-merge-capacity` uses unit 1800s / smoke 900s until the new measurements set the budget. Public CI runs six serial
+`v2-merge-capacity` uses unit 2400s / smoke 900s until the new measurements set the budget. Public CI runs six serial
 `v2-unit-ci-shard` cells followed by one `v2-smoke` invocation.
 The shell smoke/soak wrappers call the same
 `run_gate.py`; their existence does not add tests to merge.
