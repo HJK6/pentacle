@@ -3956,8 +3956,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         """Persist what it would take to finish this spawn's row, BEFORE the
         pane exists. Written to the reservation the spawn already holds."""
 
-        reader = getattr(self, "lane_presence_reader", None)
-        lane_live = reader() if reader else ()
         def _op(conn: sqlite3.Connection) -> bool:
             host_transfer.preparation_may_open(conn, f'{host}:{session_name}')
             for stream_id, expected in expected_spec_sources:
@@ -3980,7 +3978,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if res.get("payload") is None and float(res.get("expires_at") or 0.0) < time.time():
                 return False
             if lane_admission:
-                from store_work_lanes import require_lane_execution_conn, fd_backend_conn, _session_conn
+                from store_work_lanes import fd_backend_conn, _session_conn
                 from work_lane_progress import seat_live
                 context = dict(lane_admission)
                 auth = context.pop("provisioning_auth", None)
@@ -3991,7 +3989,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                             or not fd_backend_conn(conn, auth["stream_id"])):
                         from sessions import VerbError
                         raise VerbError("work_lane_provisioning_forbidden", "The current FD binding changed before provisioning")
-                require_lane_execution_conn(conn, live_sessions=lane_live, **context)
             existing = json.loads(res.get("payload") or "{}")
             prior_intent = dict(payload)
             for key in ("exchange_binding", spawn_creation.KEY):
@@ -6211,8 +6208,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         )
         timestamp = created_at or iso_now()
 
-        reader = getattr(self, "lane_presence_reader", None)
-        lane_live = reader() if reader else ()
         def _op(conn: sqlite3.Connection) -> dict[str, Any]:
             # Select the NEWEST receipt for this send's identity regardless of
             # state, so the latest outcome is authoritative: a later not_landed
@@ -6249,10 +6244,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 and str(latest["delivery"]) != "not_landed"
             ):
                 return {"coalesced": True, "winner": _send_receipt_row(latest, include_rowid=True)}
-            from store_work_lanes import require_lane_execution_conn
-            destination = _session_for_stream_conn(conn, target)
-            require_lane_execution_conn(conn, effective_assignment(destination), target_stream_id=target,
-                                        linked_only=True, live_sessions=lane_live, fd_input=True)
             row = _insert_send_receipt_row(
                 conn, to_stream_id=target, request_id=request, receipt_id=receipt,
                 state="accepted", optimistic_id=opt or None, wire_digest=wire_digest,

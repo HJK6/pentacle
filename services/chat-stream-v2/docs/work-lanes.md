@@ -725,8 +725,6 @@ A NEW open assigned execution lead's `implementation_ready` assertion requires a
 
 The authenticated current FD can use `agent-orch spawn --role lead --spec-id SPEC --provision-only [--lane-id LANE]` to create an ordinary promptless lead. The CLI sends neither task nor baseline input. The daemon verifies FD identity and role/input constraints again at commit. Explicit lane targeting resolves ambiguous membership. Then use existing `work-lane set-lead`, explicit `set-state --to active` (including blocked resolution), and ordinary admitted `send`. Binding alone never activates; a failed/spoofed provision delivers no task. Provisioning is control work; ordinary execution still follows existing commissioning rules.
 
-Before enforcement activation, the release owner inventories open lanes and pending work, binds legitimate non-FD leads or deliberately drains/holds them, removes FD execution assignments, and retains per-lane before/after evidence. Unresolved legacy ACTIVE ownership stops rollout. Preserve runtime artifacts and ownership/input history for rollback; no automatic state migration, new timer or forced kill is introduced.
-
 ## Derived lane progress
 
 The daemon derives these facts from observations it already keeps; nothing is

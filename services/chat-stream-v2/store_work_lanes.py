@@ -319,10 +319,6 @@ def fd_backend_conn(conn, stream_id, front_desk=None):
     return False
 
 
-def require_lane_execution_conn(conn, spec_id, *, lane_id=None, front_desk=None, target_stream_id=None,
-                                provisioning=False, linked_only=False, live_sessions=(), fd_input=False):
-    """Compatibility entry point for off-limit callers; lanes do not admit execution."""
-    return None
 
 
 def _chat_available(conn: sqlite3.Connection, lane: dict[str, Any]) -> tuple[str, str]:
@@ -570,9 +566,6 @@ class _WorkLanesStoreMixin:
             live_sessions = reader() if reader else ()
             return await self.submit(_op)
 
-    async def require_lane_execution(self, spec_id, **kwargs):
-        # Off-limit spawn/store callers still use this API until fleet integration.
-        return None
 
     async def lane_provisioning_allowed(self, auth):
         def check(conn):
@@ -583,9 +576,6 @@ class _WorkLanesStoreMixin:
                         and fd_backend_conn(conn, sid, getattr(self, "lifecycle_front_desk", None)))
         return await self.submit(check)
 
-    async def guard_lane_departure(self, stream_id, generation, *, assignment_change=False):
-        """Compatibility for off-limit close callers; lane ownership is display-only."""
-        return None
 
     async def get_work_lane(self, lane_id: str) -> dict[str, Any] | None:
         def _op(conn):

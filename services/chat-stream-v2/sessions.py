@@ -1159,8 +1159,6 @@ class Sessions:
                     "setting role=nexus requires the operator-facing seat or the session's parent",
                 )
 
-        if role not in {"lead", "nexus"}:
-            await self.store.guard_lane_departure(stream_id, target.get("session_generation"))
         try:
             updated = await self.store.update_session(
                 host, session_name, role=role,
@@ -1595,8 +1593,6 @@ class Sessions:
                 if row and row.get("status") == "open":
                     if expected_generation is not None and self._row_generation(row) != expected_generation:
                         return await self._stale_close_result(sid, row)
-                    if not recovery:
-                        await self.store.guard_lane_departure(sid, self._row_generation(row))
                     warnings.extend(await self._check_lead_disposition(sid, self._row_generation(row),
                         observation_available=observation_available))
                 if row is None or row.get("status") == "open":

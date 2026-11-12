@@ -1,8 +1,7 @@
 """D4 regression: pane input and sends to the FD must not be refused as lane execution.
 
-The FD's own assigned spec can be a member of an active lane (close custody). Physical
-input admission (linked_only) to the authenticated FD is operator traffic, while
-lane state and FD role do not fence execution.
+The FD's assigned spec can be a lane member. Lane state and FD role do not
+fence physical input or send receipt admission.
 """
 from __future__ import annotations
 
@@ -32,32 +31,12 @@ async def fd_holding_lane_member(store, tmp_path, state="active"):
 
 
 @pytest.mark.asyncio
-async def test_input_to_fd_with_assigned_lane_member_is_admitted(store, tmp_path):
-    target, fd = await fd_holding_lane_member(store, tmp_path)
-    assert await store.require_lane_execution(target, target_stream_id=fd[0], linked_only=True, fd_input=True) is None
-
-
-@pytest.mark.asyncio
 async def test_send_to_fd_with_assigned_lane_member_is_claimed(store, tmp_path):
     _target, fd = await fd_holding_lane_member(store, tmp_path)
     claim = await store.claim_or_coalesce_send(
         to_stream_id=fd[0], request_id="req-fd-1", receipt_id="rcpt-fd-1", wire_text="operator dispatch",
         display_text="operator dispatch", attachments=[], optimistic_id=None, window_floor="2026-11-10T00:00:00Z")
     assert claim["coalesced"] is False and claim["receipt"]["state"] == "accepted"
-
-
-@pytest.mark.asyncio
-async def test_assigning_lane_execution_to_fd_is_admitted(store, tmp_path):
-    target, fd = await fd_holding_lane_member(store, tmp_path)
-    assert await store.require_lane_execution(target, target_stream_id=fd[0]) is None
-
-
-@pytest.mark.asyncio
-async def test_input_to_non_fd_seat_in_paused_lane_is_admitted(store, tmp_path):
-    target = item(tmp_path / "memory", "demo__paused")
-    await lane(store, "wl-paused", target, state="paused")
-    worker = await seat(store, "worker", target, assigned=target, role="worker")
-    assert await store.require_lane_execution(target, target_stream_id=worker[0], linked_only=True, fd_input=True) is None
 
 
 class _Sessions:
@@ -109,13 +88,6 @@ async def test_role_or_title_only_fd_is_admitted_without_exemption(store, tmp_pa
     await lane(store, "wl-fake", target, state="paused")
     fake = await seat(store, "front-desk", target, assigned=target, role="front_desk", visibility="visible")
     assert await _physical_input(store, fake[0]) == "submitted"
-
-
-@pytest.mark.asyncio
-async def test_spawn_or_assignment_admission_for_fd_is_admitted(store, tmp_path):
-    target, fd = await fd_holding_lane_member(store, tmp_path)
-    for kwargs in ({"target_stream_id": fd[0]}, {"target_stream_id": fd[0], "linked_only": True}):
-        assert await store.require_lane_execution(target, **kwargs) is None
 
 
 @pytest.mark.asyncio

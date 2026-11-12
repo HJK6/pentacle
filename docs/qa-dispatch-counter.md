@@ -3,7 +3,7 @@
 The daemon counts adjudicated valid QA rejects by spec, reviewed surface and
 cycle. Two distinct valid rejects stop another commission on that surface until
 an authorized adjudicator records a diagnosis and pivot. Changing a candidate
-SHA does not reset the count. Unadjudicated reports do not stop a commission.
+SHA does not reset the count. Two pending rejects require adjudication before another commission.
 
 ## Commission a review
 
