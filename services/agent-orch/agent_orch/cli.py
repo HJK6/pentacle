@@ -1154,8 +1154,7 @@ def spawn(args: argparse.Namespace) -> int:
     parent = args.parent if args.parent is not None else (
         None if (handoff or top_level) else caller_stream_id
     )
-    # Objectives are required only for parented child spawns; the daemon derives
-    # one for a top-level/handoff seat. A present objective is still shape-checked.
+    # The daemon derives a missing objective; a present value is shape-checked.
     _, _, objective_error_code = resolve_objective(
         objective, objective_supported=True, parent_stream_id=parent,
     )
