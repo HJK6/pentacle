@@ -304,6 +304,38 @@ def test_first_replay_boundary_log_and_steady_state(tmp_path, caplog):
     asyncio.run(run())
 
 
+def test_replay_completion_when_read_passes_captured_boundary(tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="chat_streamd_v2.ingest")
+    async def run():
+        path = tmp_path / "growing.jsonl"
+        items = records("claude", 3)
+        write(path, items[:2])
+        captured = path.stat().st_size
+        store, sessions = await fixture(path, "claude")
+        frames = []
+        pump = pump_for(store, sessions, frames)
+        pump.config.max_read_bytes = len((json.dumps(items[0]) + "\n").encode())
+        try:
+            await pump.run_pass()
+            assert pump._streams["fixture:replay"].offset < captured
+            write(path, items)
+            pump.config.max_read_bytes = 4 * 1024 * 1024
+            await pump.run_pass()
+            state = pump._streams["fixture:replay"]
+            assert state.replay_complete and state.offset == path.stat().st_size > captured
+            logs = [json.loads(record.message.split("ingest_replay_complete ", 1)[1])
+                    for record in caplog.records if record.message.startswith("ingest_replay_complete ")]
+            assert len(logs) == 1
+            assert logs[0]["boundary"] == captured < logs[0]["offset"]
+            assert logs[0]["disposition"] == "consumed"
+            assert len([frame for frame in frames if frame["type"] == "chat.event"]) == 3
+        finally:
+            close_pump(pump)
+            store.stop()
+    asyncio.run(run())
+
+
 def test_stored_send_repairs_unbound_receipt_after_crash(tmp_path):
     from ingest import _identity_key, append_ingested_event
     from test_send_semantics import FakeTmux, _new_comms, _open, HOST, NAME

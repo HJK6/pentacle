@@ -708,8 +708,6 @@ class Ingest:
             return 0
 
         read_to = min(size, st.offset + self.config.max_read_bytes)
-        if not st.replay_complete and st.replay_boundary is not None and st.offset < st.replay_boundary:
-            read_to = min(read_to, st.replay_boundary)
         read = await asyncio.to_thread(
             _read_bound_span, st.path, st.fd, st.offset, read_to
         )
