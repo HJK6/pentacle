@@ -158,6 +158,22 @@ class ConfigFailsClosed(Tmp):
         self.assertEqual(shard['timeout_s'], shard['max_timeout_s'])
         self.assertLessEqual(shard['timeout_s'], 1200)
 
+    def test_shard_arguments_require_a_shardable_target_and_valid_pair(self):
+        cases = [
+            ("v2-merge", ["--shard-index", "0", "--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "0"]),
+            ("v2-unit-ci-shard", ["--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "-1", "--shard-count", "6"]),
+            ("v2-unit-ci-shard", ["--shard-index", "6", "--shard-count", "6"]),
+        ]
+        for index, (target, shard_args) in enumerate(cases):
+            with self.subTest(target=target, shard_args=shard_args):
+                evidence = self.tmp / ("ev-%d" % index)
+                code = ge.main(["run", "--profile", "pentacle", "--workspace", str(self.tmp / "ws"),
+                                "--evidence-dir", str(evidence), "--target", target, *shard_args])
+                self.assertNotEqual(code, 0)
+                self.assertEqual(ga.build_index(evidence)["attempts"][0]["primary_outcome"], "setup_failure")
+
     def test_malformed_variants_are_refused(self):
         bad = {
             "schema": lambda c: c.update(schema="other"),

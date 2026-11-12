@@ -432,6 +432,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.unit_workers is None:
         args.unit_workers = 4 if args.gate == "merge" else 1
+    if args.shard_index is not None or args.shard_count is not None:
+        if (args.gate != "unit" or args.shard_index is None or args.shard_count is None
+                or not 0 <= args.shard_index < args.shard_count):
+            parser.error("sharding requires the unit gate and 0 <= index < count")
     if bool(args.usage_manifest) != bool(args.usage_deployment_contract):
         parser.error("--usage-manifest and --usage-deployment-contract must be supplied together")
     if args.usage_manifest and args.gate != "merge":

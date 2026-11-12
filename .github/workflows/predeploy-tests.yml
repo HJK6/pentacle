@@ -20,6 +20,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
+      timeout-minutes: 5
       run: |
         missing=()
         for package in tmux; do
@@ -84,6 +85,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
+      timeout-minutes: 5
       run: |
         missing=()
         for package in tmux lsof ffmpeg; do
@@ -138,6 +140,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
+      timeout-minutes: 5
       run: |
         missing=()
         for package in tmux lsof zsh ffmpeg; do
@@ -214,6 +217,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
+      timeout-minutes: 5
       run: |
         missing=()
         for package in tmux lsof; do
@@ -289,6 +293,7 @@ jobs:
       with:
         python-version: '3.13'
     - name: System packages
+      timeout-minutes: 5
       run: |
         missing=()
         for package in tmux; do

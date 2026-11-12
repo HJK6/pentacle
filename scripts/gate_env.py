@@ -780,6 +780,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             target = profile["targets"].get(args.target)
             if target is None:
                 raise SetupFailure([fail("config", "unknown target %r" % args.target, "choose one of %s" % sorted(profile["targets"]))])
+        if args.shard_index is not None or args.shard_count is not None:
+            if (args.command != "run" or not target or not target.get("shardable")
+                    or args.shard_index is None or args.shard_count is None
+                    or not 0 <= args.shard_index < args.shard_count):
+                raise SetupFailure([fail("selection", "sharding requires a shardable target and 0 <= index < count")])
         if args.command == "prepare":
             # prepare never launches a subject: it provisions and preflights --target's needs (or every target's when none is named).
             if args.select:

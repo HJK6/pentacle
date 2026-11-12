@@ -307,6 +307,23 @@ def test_invalid_deadline_rejected_before_launch(tmp_path: Path, value: str) -> 
     assert not evidence.exists()
 
 
+def test_sharding_requires_unit_gate_and_valid_pair(tmp_path: Path) -> None:
+    cases = [
+        ["merge", "--shard-index", "0", "--shard-count", "6"],
+        ["unit", "--shard-index", "0"],
+        ["unit", "--shard-count", "6"],
+        ["unit", "--shard-index", "-1", "--shard-count", "6"],
+        ["unit", "--shard-index", "6", "--shard-count", "6"],
+    ]
+    for index, argv in enumerate(cases):
+        case = tmp_path / str(index)
+        case.mkdir()
+        command, evidence, env = _prepare(case, PASSING, argv=argv)
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2 and "sharding requires" in proc.stderr
+        assert not evidence.exists()
+
+
 def test_deadline_refuses_between_tiers(tmp_path: Path, monkeypatch) -> None:
     clock = [1000.0]
     seen: list[str] = []
