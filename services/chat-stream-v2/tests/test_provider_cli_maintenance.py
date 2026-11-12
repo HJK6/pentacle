@@ -427,7 +427,7 @@ def test_expired_slot_can_acquire_a_fresh_real_hold_for_unresolved_B_recovery(tm
             assert (await runtime.operation(repin))["result"]["outcome"]=="no_op"
             clear=clear_request(request,frozen,expected_hold_digest=renewed["hold_digest"])
             cleared=await rpc(daemon,"spawn_unfreeze",**clear)
-            assert cleared["type"]=="spawn_freeze.ok"
+            assert cleared["type"]=="spawn_freeze.ok", cleared
             # Clearing the old slot never clears this newer actual hold.
             assert (await store.get_spawn_admission_hold(selected.host))["reason"]=="fresh actual B recovery hold"
             assert (await rpc(daemon,"spawn_unfreeze",host=selected.host,local_admin_token=request["local_admin_token"]))["type"]=="spawn_freeze.ok"

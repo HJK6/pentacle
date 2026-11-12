@@ -1732,7 +1732,10 @@ class AssistantLaneRulings:
                 await self.server.broadcast({"type": "chat.event", "event": event})
 
     async def tick(self) -> None:
-        await self._mark_unanswered()
+        try:
+            await self._mark_unanswered()
+        except Exception:
+            log.exception("assistant unanswered-marker check failed; will retry")
         try:
             await self._check_authority_loss()
         except Exception:

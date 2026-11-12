@@ -525,3 +525,19 @@ def test_publication_dispatch_index_reuses_history_index():
         assert 'idx_history_publication_dispatch' in indexes
         assert 'idx_v2_assistant_publications_dispatch' not in indexes
     run(body, strict=True)
+
+
+def test_marker_sweep_failure_does_not_block_ruling_reconciliation(caplog):
+    async def body(h):
+        service = AssistantLaneRulings(SimpleNamespace(store=h.store, assistant_composite=h.composite, broadcast=None))
+        checked = []
+        async def failed_sweep():
+            raise RuntimeError('synthetic marker read failure')
+        async def authority_check():
+            checked.append(True)
+        service._mark_unanswered = failed_sweep
+        service._check_authority_loss = authority_check
+        await service.tick()
+        assert checked == [True]
+        assert 'assistant unanswered-marker check failed; will retry' in caplog.text
+    run(body, strict=True)

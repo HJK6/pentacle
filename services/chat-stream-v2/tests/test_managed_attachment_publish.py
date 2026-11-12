@@ -235,7 +235,7 @@ def test_publisher_generation_must_be_verified_not_inferred(tmp_path):
 
 def proactive_msg(msg, upload_id, **extra):
     return dict(type='assistant.publish', request_id='proactive-file', composite_stream_id=ASSISTANT,
-        publish_kind='status', message='', attachment_ids=[upload_id],
+        publish_kind='status', message='', note_type='result', ref='message:input-1', attachment_ids=[upload_id],
         _auth_context=dict(msg['_auth_context']), **extra)
 
 
@@ -261,6 +261,7 @@ def test_proactive_publish_carries_managed_attachment(tmp_path):
             refs, events = await committed(store)
             assert refs == 1 and len(events) == 1
             event = events[0]
+            assert event['note_type'] == 'result' and event['ref'] == 'message:input-1'
             assert event['raw']['dispatch_id'] == ''
             assert event['raw']['published_by'] == {'stream_id': ROOT, 'generation': msg['_auth_context']['session_generation']}
             a = event['attachments'][0]
