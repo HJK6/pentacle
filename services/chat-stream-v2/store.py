@@ -1972,8 +1972,6 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             conn.execute(SESSION_EVENT_TAIL_DDL)
             conn.execute(SESSION_EVENT_TAIL_INDEX_DDL)
             conn.execute(SESSION_EVENT_TAIL_IDENTITY_DDL)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_event_tail_stream_identity "
-                         "ON session_event_tail(stream_id,identity)")
             conn.execute(SESSION_EVENT_TAIL_RECORDED_DDL)
             from native_input_lookup import ensure_schema as ensure_native_input_schema
             ensure_native_input_schema(conn)

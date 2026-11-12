@@ -1699,8 +1699,7 @@ class AssistantLaneRulings:
                     "AND COALESCE(json_extract(r.route_json,'$.desk_dispatch'),0)=0 "
                     "AND NOT EXISTS (SELECT 1 FROM v2_assistant_composite_publications p "
                     "WHERE p.stream_id=r.stream_id AND p.dispatch_id=r.dispatch_id) "
-                    "AND NOT EXISTS (SELECT 1 FROM session_event_tail e "
-                    "WHERE e.stream_id=r.stream_id AND e.identity='dispatch-unanswered:' || r.dispatch_id)",
+                    "AND json_extract(r.route_json,'$.unanswered_marker_recorded') IS NULL",
                     (stream_id,)).fetchall()
                 inserted = []
                 for row in rows:
@@ -1721,6 +1720,9 @@ class AssistantLaneRulings:
                              "dispatch_id": row["dispatch_id"], "publish_kind": "unanswered"}}
                     event_id = self.store._insert_session_event_conn(
                         conn, stream_id, session["created_at"], event, "dispatch-unanswered:" + row["dispatch_id"])
+                    conn.execute("UPDATE v2_assistant_composite_routes SET route_json=json_set("
+                                 "COALESCE(route_json,'{}'),'$.unanswered_marker_recorded',1) WHERE route_id=?",
+                                 (row["route_id"],))
                     if event_id is not None:
                         inserted.append({**event, "daemon_seq": event_id})
                 return inserted

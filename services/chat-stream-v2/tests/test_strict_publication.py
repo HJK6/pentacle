@@ -467,20 +467,26 @@ def test_strict_proactive_replay_survives_rollback_and_rejects_conflict():
     run(body, strict=True)
 
 
-def test_marker_lookup_index_and_cross_generation_deduplication():
+def test_marker_route_receipt_survives_generation_change_without_new_index():
     async def body(h):
         route = await h.route('cross-generation')
         stamp = json.loads(route['route_json'])['timings']['landed_at']
         landed = datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
-        def seed(conn):
-            conn.execute("INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,recorded_at,identity) VALUES(?,?,?,?,?,?)",
-                         (ASSISTANT, 'prior-generation', 'marker', '{}', 0, 'dispatch-unanswered:' + route['dispatch_id']))
-            conn.commit()
-            return [r[3] for r in conn.execute('EXPLAIN QUERY PLAN SELECT 1 FROM session_event_tail WHERE stream_id=? AND identity=?', (ASSISTANT, 'x'))]
-        plan = await h.store.submit(seed)
-        assert any('idx_session_event_tail_stream_identity' in line and 'identity=?' in line for line in plan)
         service = AssistantLaneRulings(SimpleNamespace(store=h.store, assistant_composite=h.composite, broadcast=None))
         await service._mark_unanswered(landed + 300)
+        def move_marker(conn):
+            conn.execute("UPDATE session_event_tail SET session_created_at='prior-generation' WHERE stream_id=? AND identity=?",
+                         (ASSISTANT, 'dispatch-unanswered:' + route['dispatch_id']))
+            conn.commit()
+            return {r[1] for r in conn.execute('PRAGMA index_list(session_event_tail)')}
+        indexes = await h.store.submit(move_marker)
+        assert 'idx_session_event_tail_stream_identity' not in indexes
+        stored = await h.store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity='cross-generation')
+        assert json.loads(stored['route_json'])['unanswered_marker_recorded'] == 1
+        await h.composite._update_route(route['route_id'], routing_state='resolved', route_payload={'admission_mode': 'direct_primary'})
+        stored = await h.store.get_assistant_composite_route(stream_id=ASSISTANT, input_identity='cross-generation')
+        assert json.loads(stored['route_json'])['unanswered_marker_recorded'] == 1
+        await service._mark_unanswered(landed + 301)
         count = await h.store.submit(lambda c: c.execute("SELECT count(*) FROM session_event_tail WHERE stream_id=? AND identity=?", (ASSISTANT, 'dispatch-unanswered:' + route['dispatch_id'])).fetchone()[0])
         assert count == 1
     run(body, strict=True)
