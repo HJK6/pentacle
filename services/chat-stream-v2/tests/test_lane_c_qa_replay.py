@@ -118,6 +118,10 @@ def test_unknown_coordinator_is_recorded_but_forged_claim_is_refused():
                 await qa_dispatch.admit(store, {'stream_token': 'invalid', 'initial_prompt': 'Review'},
                     row=row, reviewer='localhost:other-reviewer', generation='other-generation', msg_id=0)
             assert bad_token.value.code == 'qa_unauthorized'
+            with pytest.raises(VerbError) as unverified:
+                await qa_dispatch.admit(store, {'_auth_context': {'stream_id': LEAD, 'token_verified': False}},
+                    row=row, reviewer='localhost:other-reviewer', generation='other-generation', msg_id=0)
+            assert unverified.value.code == 'qa_unauthorized'
         finally:
             store.stop()
     asyncio.run(run())
