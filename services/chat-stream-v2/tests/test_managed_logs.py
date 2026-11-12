@@ -365,6 +365,10 @@ raise SystemExit(main.main(args+['--disable-'+flag for flag in flags]))
                             return welcome, reply
             welcome, initial = rpc('daemon.stats')
             assert initial['type'] == 'daemon.stats.ok', initial
+            # Binding the RPC listener and the watchdog's first publication are
+            # independent startup events; share the existing startup deadline.
+            while not (root / 'progress.json').exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
             assert (root / 'progress.json').exists()
             first = json.loads((root / 'progress.json').read_text())
             (root / 'flood').touch()

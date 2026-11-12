@@ -55,7 +55,7 @@ Parameterized cases inherit their function's classification. tests/fixtures/h2_c
 | test_capabilities.py::test_lsof_probe_matches_existing_standard_path_fallback | Fixture-backed; no optional host capability required |
 | test_capabilities.py::test_missing_binary_is_absent_but_timeout_and_malformed_output_are_errors | Fixture-backed; no optional host capability required |
 | test_capabilities.py::test_missing_declared_timeout_plugin_is_an_environment_error | Fixture-backed; no optional host capability required |
-| test_capabilities.py::test_original_assertions_and_tracked_skip_are_unchanged | Fixture-backed; no optional host capability required |
+| test_capabilities.py::test_sigkill_reaping_remains_tracked_without_skip | Fixture-backed; no optional host capability required |
 | test_capabilities.py::test_parallel_workers_return_capability_receipts | Fixture-backed; no optional host capability required |
 | test_capabilities.py::test_probe_registry_caches_true_false_and_error | Fixture-backed; no optional host capability required |
 | test_capabilities.py::test_scope_manifest_covers_all_new_portability_tests | Fixture-backed; no optional host capability required |

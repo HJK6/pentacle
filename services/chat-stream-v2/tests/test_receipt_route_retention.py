@@ -508,6 +508,17 @@ def test_incident_fixture_bounded_batches_and_twenty_interleaved_reads(tmp_path,
                 return {table: c.execute('SELECT SUM(' + '+'.join('COALESCE(octet_length("'+column+'"),0)' for column in r._columns(c,table)) + '+8) FROM '+table).fetchone()[0] for table in r.HISTORY_TABLES}
             family_bytes=await store.submit(total_bytes)
             job = r.RetentionJob(store)
+            submit_batch = job._submit
+            read_between_batches = False
+            async def submit_with_read(fn):
+                nonlocal read_between_batches
+                result = await submit_batch(fn)
+                if len(batches) == 1 and not read_between_batches:
+                    read_between_batches = True
+                    assert await store.submit(lambda c: c.execute("SELECT 1").fetchone()[0]) == 1
+                    order.append(dict(event="boundary_read_complete"))
+                return result
+            monkeypatch.setattr(job, "_submit", submit_with_read)
             async def loop_probe():
                 while active:
                     start=time.perf_counter(); await asyncio.sleep(.001)
@@ -546,6 +557,11 @@ def test_incident_fixture_bounded_batches_and_twenty_interleaved_reads(tmp_path,
         assert 0 < result.receipts_moved + result.routes_moved <= 2000
         assert all(b['examined']<=500 and b['materialized_bytes']<=1024*1024 for b in result.history_batches)
         assert len(delays)==20
+        events = [item['event'] for item in order]
+        first_end = events.index('batch_end')
+        boundary_read = events.index('boundary_read_complete')
+        second_start = events.index('batch_start', first_end + 1)
+        assert first_end < boundary_read < second_start
     asyncio.run(run())
 
 

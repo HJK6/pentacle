@@ -120,15 +120,22 @@ def test_admission_failures(tmp_path, fake_agent, monkeypatch, mode, code):
 def test_admission_timeouts_are_bounded(tmp_path, fake_agent, monkeypatch):
     machine = launch.local_machine('local', cwd=str(tmp_path), cursor_agent_bin=str(fake_agent))
     real = cursor_admission.subprocess.run
-    def short(*args, **kwargs):
-        kwargs['timeout'] = .15
-        return real(*args, **kwargs)
-    monkeypatch.setattr(cursor_admission.subprocess,'run',short)
-    monkeypatch.setenv('CURSOR_FAKE_MODE','status_timeout')
-    with pytest.raises(ValueError, match='cursor_status_unreadable'):plan(machine)
-    monkeypatch.setenv('CURSOR_FAKE_MODE','create_timeout')
+
+    def status_timeout(args, **kwargs):
+        if args[1] == 'status':
+            raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(cursor_admission.subprocess, 'run', status_timeout)
+    with pytest.raises(ValueError, match='cursor_status_unreadable'):
+        plan(machine)
+
+    # The child is owned; advance only the admission clock past its deadline.
+    from types import SimpleNamespace
+    ticks = iter((0.0, 21.0, 21.0))
+    monkeypatch.setattr(cursor_admission, 'time', SimpleNamespace(monotonic=lambda: next(ticks)))
     with pytest.raises(ValueError, match='cursor_chat_create_failed'):
-        cursor_admission._create_chat(str(fake_agent),str(tmp_path),timeout=.15)
+        cursor_admission._create_chat(str(fake_agent), str(tmp_path))
 
 
 def test_excluded_launches_and_bad_paths(tmp_path, fake_agent):

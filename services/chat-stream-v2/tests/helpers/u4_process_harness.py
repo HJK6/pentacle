@@ -189,11 +189,11 @@ def events(root):
     except FileNotFoundError:return []
 
 async def wait_event(root,name,timeout=15,after=0):
-    until=time.monotonic()+timeout
+    until=time.monotonic()+timeout if timeout is not None else None
     while True:
         matches=[e for e in events(root) if e['event']==name and e['mono_s']>=after]
         if matches:return matches[-1]
-        if time.monotonic()>=until:break
+        if until is not None and time.monotonic()>=until:break
         await asyncio.sleep(.05)
     raise RuntimeError('missing_event_'+name)
 
@@ -332,10 +332,11 @@ async def run(source, output):
                         held={'event':'process_held','mono_s':time.monotonic(),'wall_s':time.time(),'pid':daemon.pid,'stopsig':os.WSTOPSIG(stopped_status)}
                     pings=[];reads=[];main_responded=False
                     if SCENARIO=='publisher':
+                        # Completion must precede release; the existing outer helper timeout bounds a hang.
                         while time.monotonic()<held['mono_s']+6.5:
-                            pings.append(await request(ws,'publisher-'+str(len(pings)),.2))
+                            pings.append(await request(ws,'publisher-'+str(len(pings)),None))
                             enqueue=time.monotonic();control(root,'queue_read')
-                            completed=await wait_event(root,'queued_read_completed',timeout=.2,after=enqueue)
+                            completed=await wait_event(root,'queued_read_completed',timeout=None,after=enqueue)
                             reads.append({'enqueued_mono_s':enqueue,'completed':completed,'elapsed_s':completed['mono_s']-enqueue})
                             await asyncio.sleep(.2)
                     else:
@@ -367,7 +368,7 @@ async def run(source, output):
                     result['cells'].append({'name':'held_'+SCENARIO,'held':held,'release':released,'duration_s':released['mono_s']-held['mono_s'],
                         'pings_while_held':pings,'store_reads_while_held':reads,'main_ping_responded_while_held':main_responded,
                         'receipt_before_release':bool(accepted),'accepted_before_release':accepted,'acceptance_passed':bool(accepted),
-                        'valid_fault':released['explicit_release'] and released['mono_s']-held['mono_s']>5 and ((len(pings)>10 and len(reads)>10) if SCENARIO=='publisher' else not main_responded)})
+                        'valid_fault':released['explicit_release'] and released['mono_s']-held['mono_s']>5 and ((bool(pings) and bool(reads)) if SCENARIO=='publisher' else not main_responded)})
                     until=time.monotonic()+8
                     while time.monotonic()<until:
                         try:

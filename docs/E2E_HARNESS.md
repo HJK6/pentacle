@@ -21,6 +21,8 @@ browser state and bridges around isolated cases. Inspect the actual failed
 assertion before classifying a product or harness failure; a process or build
 readback alone is not functional proof.
 
+A test that fails twice without a code cause leaves the every-change tier that day and is fixed or deleted; read both failure logs to establish the cause, because a green rerun alone is not evidence of a fix.
+
 Use the default owned gate for automation. External `--profile` configurations
 are operator-provided live inputs and need separate resource authority. Keep raw
 receipts outside shared memory and retain only location/hash metadata there.

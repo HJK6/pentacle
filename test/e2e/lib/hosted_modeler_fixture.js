@@ -28,7 +28,7 @@ async function startHostedModelerFixture(scratch, upstreamPort) {
   const headers = request => ({ ...request.headers, 'tailscale-user-login': 'tester@example.test',
     'x-forwarded-proto': 'https', 'x-forwarded-for': [100, 64, 0, 10].join('.') });
   const proxy = https.createServer(tls, (request, response) => {
-    const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort,
+    const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort(),
       method: request.method, path: request.url, headers: headers(request) }, reply => {
       response.writeHead(reply.statusCode, reply.headers); reply.pipe(response);
     });
@@ -37,7 +37,7 @@ async function startHostedModelerFixture(scratch, upstreamPort) {
   const sockets = new Set();
   proxy.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   proxy.on('upgrade', (request, socket, head) => {
-    const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort,
+    const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort(),
       path: request.url, headers: headers(request) });
     upstream.on('upgrade', (reply, remote, remoteHead) => {
       sockets.add(remote); remote.on('close', () => sockets.delete(remote));
