@@ -75,8 +75,8 @@
             "tmux"
           ],
           "capabilities": "v2_host",
-          "timeout_s": 900,
-          "max_timeout_s": 7200,
+          "timeout_s": 699,
+          "max_timeout_s": 699,
           "unit_workers": 4
         },
         "v2-smoke": {
@@ -103,11 +103,11 @@
           "capabilities": "v2_host",
           "preflight_script": "services/chat-stream-v2/tools/gate_preflight.sh",
           "tier_timeouts": {
-            "unit": 2400,
+            "unit": 699,
             "smoke": 900
           },
-          "timeout_s": 3300,
-          "max_timeout_s": 3300,
+          "timeout_s": 1599,
+          "max_timeout_s": 1599,
           "unit_workers": 4
         },
         "v2-merge-capacity": {
@@ -229,8 +229,8 @@
             "tmux"
           ],
           "capabilities": "v2_host",
-          "timeout_s": 1200,
-          "max_timeout_s": 1200,
+          "timeout_s": 699,
+          "max_timeout_s": 699,
           "shardable": true
         }
       }

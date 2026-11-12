@@ -451,7 +451,11 @@ def main() -> int:
         basetemp = args.basetemp or evidence / f"pytest-{args.gate}-{os.getpid()}-{uuid.uuid4().hex[:10]}"
         basetemp.mkdir(parents=True, exist_ok=True)
         manifest = basetemp / ".owned.json"
-        limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", DEFAULT_TIMEOUTS[tier]))) for tier in tiers]
+        defaults = DEFAULT_TIMEOUTS
+        if args.gate == "merge":
+            config = json.loads((REPO_ROOT / "scripts" / "gate-env.json").read_text(encoding="utf-8"))
+            defaults = {**DEFAULT_TIMEOUTS, **config["profiles"]["pentacle"]["targets"]["v2-merge"]["tier_timeouts"]}
+        limits = [(tier, args.timeout_seconds if args.timeout_seconds is not None else float(os.environ.get(f"V2_{tier.upper()}_TIMEOUT_S", defaults[tier]))) for tier in tiers]
         reap_manifest(manifest)
         _ACTIVE_RUN_ID = initialize_manifest(manifest)
         _ACTIVE_MANIFEST_PATH, ready = manifest, True
