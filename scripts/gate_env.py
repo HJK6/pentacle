@@ -426,10 +426,10 @@ def check_process_listing(run, env: Dict[str, str]) -> List[Dict[str, str]]:
     try:
         out = run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
-        return [fail("capability", "ps cannot be executed from the child environment (%s)" % type(exc).__name__, "the node runner needs ps on the owned PATH")]
+        return [fail("capability", "process identity cannot be verified without ps (%s)" % type(exc).__name__, "rerun outside the sandbox")]
     rows = [l.split() for l in out.stdout.splitlines() if l.strip()]
     if out.returncode or not any(len(r) == 3 and r[0] == str(os.getpid()) or (len(r) == 3 and r[0].isdigit()) for r in rows):
-        return [fail("capability", "ps returned no process rows (rc=%s)" % out.returncode, "run where ps can list processes")]
+        return [fail("capability", "process identity cannot be verified without ps (rc=%s)" % out.returncode, "rerun outside the sandbox")]
     return []
 
 
