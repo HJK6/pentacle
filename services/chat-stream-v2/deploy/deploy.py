@@ -1731,7 +1731,7 @@ def _verify_direct_restoration(service, repo, stamp, boot, runner, runtime=None)
     env = plist.get("EnvironmentVariables", {})
     machines = env.get("PENTACLE_MACHINES_FILE", "")
     policy = coordinated.read_json(env.get("PENTACLE_PROVIDER_ACCOUNT_POLICY", ""))
-    scope = coordinated.host_scope(machines, [])
+    scope = coordinated.host_scope(machines, _declared_release_scope(stamp.get("release_exclusions", [])))
     accounts = runtime.account_snapshot(policy, runtime.database(plist),
         accounts=stamp.get("smoke_accounts"), scope=scope)
     bindings = [b for b in accounts["selected_bindings"] if b["host"] in scope["included_hosts"]]
