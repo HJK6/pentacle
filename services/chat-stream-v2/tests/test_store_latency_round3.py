@@ -800,3 +800,285 @@ async def _single_writer(store, path, sqlite3):
     finally:
         external.close()
     assert await store.submit(lambda c: c.total_changes) == mid         # external writer invisible
+
+
+# --- Item 3: tail events once per request -------------------------------------
+
+def _disjoint(reads):
+    """True when no two (lo, hi) tail reads cover the same event_id."""
+    spans = sorted((lo, float("inf") if hi is None else hi) for lo, hi in reads)
+    return all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+
+
+@pytest.mark.parametrize("ladder", [False, True])
+def test_item3_tail_read_once_for_equal_watermarks_and_without_overlap_for_lower_ones(ladder):
+    # RED on baseline: retained_proof re-reads the events after each candidate's
+    # watermark, so n candidates = n overlapping reads. Candidate: each event row is
+    # read at most once (a lower watermark reads only the gap below the window).
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=8, ladder=ladder))
+            statements, start, stop = _statements(store)
+            await start()
+            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            await stop()
+            reads = _tail_reads(statements)
+            assert len(walked) == 8
+            assert _disjoint(reads)
+            if not ladder:
+                assert len(reads) == 1       # all watermarks equal: one read for the request
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_item3_lower_watermark_lowers_the_window_and_events_match_oracle():
+    # GREEN on baseline and candidate. Watermarks fall as the walk reaches older
+    # inputs, so every page needs events earlier than the window it already holds.
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=8, ladder=True))
+            oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
+            walked = await _walk(store, {}, limit=2, stream=PAGE_STREAM)
+            assert walked == oracle
+            assert {kind for _, kind in _origins(walked)} == {"operator"}
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_item3_between_pages_tail_write_invalidates():
+    # GREEN on baseline: a duplicate input lands between pages, making an older
+    # input's occurrence ambiguous. The second page must see the new tail row.
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=6))
+            cache: dict = {}
+            first = await _page(store, None, cache, limit=3, stream=PAGE_STREAM)
+
+            def duplicate(conn):
+                _add_event(conn, PAGE_STREAM, 90, f"msg 1 for {PAGE_STREAM}", request=False)
+                conn.commit()
+
+            await store.submit(duplicate)
+            second = await _page(store, first[0]["daemon_seq"], cache, limit=3, stream=PAGE_STREAM)
+            oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
+            assert second == oracle[:3]
+            assert dict(_origins(second))[second[1]["daemon_seq"]] != "operator"   # ambiguity seen
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_item3_unparseable_tail_event_is_skipped_exactly_as_before():
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            def seed(conn):
+                _seed_stream(conn, n=4)
+                conn.execute("INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+                             "event_ts,recorded_at) VALUES(?,?,?,?,?,?)",
+                             (PAGE_STREAM, BIRTH, "junk", "not json {", BIRTH, 1.0))
+                conn.execute("INSERT INTO session_event_tail(stream_id,session_created_at,event_key,event_json,"
+                             "event_ts,recorded_at) VALUES(?,?,?,?,?,?)",
+                             (PAGE_STREAM, BIRTH, "list", "[1,2]", BIRTH, 1.0))
+                conn.commit()
+
+            await store.submit(seed)
+            oracle = await store.submit(lambda c: [
+                e for e in _legacy_projection_all(c) if e.get("stream_id") == PAGE_STREAM])
+            got = await store.submit(lambda c: _project_all(c))
+            assert got == oracle
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def _stream_events(conn, stream=PAGE_STREAM):
+    rows = conn.execute("SELECT event_id,event_json FROM session_event_tail WHERE stream_id=? "
+                        "ORDER BY event_id", (stream,)).fetchall()
+    events = []
+    for row in rows:
+        try:
+            event = json.loads(row["event_json"])
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append({**event, "daemon_seq": row["event_id"]})
+    return events
+
+
+def _legacy_projection_all(conn):
+    original = tell_proof.input_origin
+    tell_proof.input_origin = lambda c, e, i, **kwargs: legacy.input_origin(c, e, i)
+    try:
+        return _project_session_events_conn(conn, copy.deepcopy(_stream_events(conn)))
+    finally:
+        tell_proof.input_origin = original
+
+
+def _project_all(conn):
+    return _project_session_events_conn(conn, copy.deepcopy(_stream_events(conn)),
+                                        deliveries=tell_proof.ProjectionDeliveries())
+
+
+def test_item3_oversized_window_disables_reuse_and_matches_oracle(monkeypatch):
+    # Uncertainty/bound: a window past the row bound is never held; every candidate
+    # reads its own tail, exactly as before, and the answer is unchanged.
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=8))
+            monkeypatch.setattr(tell_proof, "_TAIL_REUSE_MAX_ROWS", 3)
+            oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
+            statements, start, stop = _statements(store)
+            await start()
+            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            await stop()
+            assert walked == oracle
+            assert len(_tail_reads(statements)) >= 8
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def test_item3_second_stream_does_not_reuse_first_streams_window():
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, PAGE_STREAM, 4))
+            await store.submit(lambda c: _seed_stream(c, "host-a:other", 4))
+
+            def mixed(conn):
+                events = []
+                for stream in (PAGE_STREAM, "host-a:other"):
+                    events.extend(_stream_events(conn, stream))
+                table = tell_proof.ProjectionDeliveries()
+                got = _project_session_events_conn(conn, copy.deepcopy(events), deliveries=table)
+                original = tell_proof.input_origin
+                tell_proof.input_origin = lambda c, e, i, **kwargs: legacy.input_origin(c, e, i)
+                try:
+                    want = _project_session_events_conn(conn, copy.deepcopy(events))
+                finally:
+                    tell_proof.input_origin = original
+                assert got == want
+                assert {e["raw"]["input_provenance"]["kind"] for e in got} == {"operator"}
+
+            await store.submit(mixed)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+def _tail_mutant(kind):
+    base = tell_proof.ProjectionReuse
+
+    class NeverLowers(base):             # decreasing watermark not re-read
+        def tail_after(self, conn, target, birth, watermark):
+            window = super().tail_after(conn, target, birth, max(watermark, self._highest(target, birth, watermark)))
+            return window
+
+        def _highest(self, target, birth, watermark):
+            held = self._tail.get((target, birth))
+            return held.floor if held is not None else watermark
+
+    class NoGuard(base):                 # stale-after-write
+        def _fresh(self, conn):
+            return None
+
+    class Leaky(base):                   # stream-isolation leak: key ignores the stream
+        def tail_after(self, conn, target, birth, watermark):
+            first = next(iter(self._tail), None) if self._tail else None
+            return super().tail_after(conn, first[0] if first is not None else target, birth, watermark)
+
+    return {"never_lowers": NeverLowers, "no_guard": NoGuard, "leaky": Leaky}[kind]
+
+
+def _tail_write_between_projections(conn):
+    table = tell_proof.ProjectionDeliveries()
+    _project_session_events_conn(conn, copy.deepcopy(_stream_events(conn)), deliveries=table)
+    _add_event(conn, PAGE_STREAM, 91, f"msg 1 for {PAGE_STREAM}", request=False)   # makes msg 1 ambiguous
+    conn.commit()
+    got = _project_session_events_conn(conn, copy.deepcopy(_stream_events(conn)), deliveries=table)
+    assert got == _legacy_projection_all(conn)
+
+
+async def _tail_scenario(store, kind):
+    if kind == "never_lowers":
+        await store.submit(lambda c: _seed_stream(c, n=8, ladder=True))
+        oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
+        assert await _walk(store, {}, limit=2, stream=PAGE_STREAM) == oracle
+    elif kind == "no_guard":
+        await store.submit(lambda c: _seed_stream(c, n=6))
+        await store.submit(_tail_write_between_projections)
+    else:
+        await store.submit(lambda c: _seed_stream(c, PAGE_STREAM, 4))
+        await store.submit(lambda c: _seed_stream(c, "host-a:other", 4))
+
+        def mixed(conn):
+            events = _stream_events(conn, PAGE_STREAM) + _stream_events(conn, "host-a:other")
+            got = _project_session_events_conn(conn, copy.deepcopy(events),
+                                               deliveries=tell_proof.ProjectionDeliveries())
+            original = tell_proof.input_origin
+            tell_proof.input_origin = lambda c, e, i, **kwargs: legacy.input_origin(c, e, i)
+            try:
+                assert got == _project_session_events_conn(conn, copy.deepcopy(events))
+            finally:
+                tell_proof.input_origin = original
+
+        await store.submit(mixed)
+
+
+def test_item3_one_table_tail_write_between_projections_matches_oracle():
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=6))
+            await store.submit(_tail_write_between_projections)
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutant", ["never_lowers", "no_guard", "leaky"])
+def test_item3_mutants_are_detected(monkeypatch, mutant):
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            monkeypatch.setattr(tell_proof, "ProjectionReuse", _tail_mutant(mutant))
+            await _tail_scenario(store, mutant)
+        finally:
+            store.stop()
+
+    with pytest.raises(AssertionError):
+        asyncio.run(run())
+
+
+def test_item3_byte_bound_disables_reuse_and_matches_oracle(monkeypatch):
+    async def run():
+        store = Store()
+        store.start()
+        try:
+            await store.submit(lambda c: _seed_stream(c, n=8))
+            monkeypatch.setattr(tell_proof, "_TAIL_REUSE_MAX_BYTES", 10)
+            oracle = await store.submit(lambda c: _legacy_projection(c, PAGE_STREAM))
+            statements, start, stop = _statements(store)
+            await start()
+            walked = await _walk(store, {}, limit=3, stream=PAGE_STREAM)
+            await stop()
+            assert walked == oracle
+            assert len(_tail_reads(statements)) >= 8
+        finally:
+            store.stop()
+    asyncio.run(run())

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+from bisect import bisect_right
 
 from submission_events import EventProof, provider_text_digest
 from retention import history_query
@@ -82,6 +83,49 @@ class TellDeliveryParseCache:
 
 # Reuse bounds: a stream larger than these is read per call exactly as before.
 _RECEIPT_REUSE_MAX_ROWS = 2048
+_TAIL_REUSE_MAX_ROWS = 4096
+_TAIL_REUSE_MAX_BYTES = 8 * 1024 * 1024
+
+_UNPARSED, _UNPARSEABLE = object(), object()
+
+
+class _TailEvent:
+    """One retained tail row; the parse is memoised for the life of a window.
+
+    `retained_proof` only reads the parsed event, so sharing it between
+    candidates is safe; an unparseable row stays unparseable (the failure is
+    memoised and re-raised as the ValueError the loop already skips).
+    """
+    __slots__ = ("event_id", "event_json", "_event")
+
+    def __init__(self, event_id, event_json):
+        self.event_id = event_id
+        self.event_json = event_json
+        self._event = _UNPARSED
+
+    def event(self):
+        cached = self._event
+        if cached is _UNPARSEABLE:
+            raise ValueError("unparseable tail event")
+        if cached is _UNPARSED:
+            try:
+                cached = json.loads(self.event_json)
+            except (TypeError, ValueError):
+                self._event = _UNPARSEABLE
+                raise
+            self._event = cached
+        return cached
+
+
+class _TailWindow:
+    """Every tail event of one (stream, lifecycle) after `floor`, ascending."""
+    __slots__ = ("floor", "events", "ids", "size")
+
+    def __init__(self, floor):
+        self.floor = floor
+        self.events = []
+        self.ids = []
+        self.size = 0
 
 
 class ProjectionReuse:
@@ -102,11 +146,13 @@ class ProjectionReuse:
     def __init__(self):
         self._changes = None
         self._receipts = {}
+        self._tail = {}
 
     def _fresh(self, conn):
         changes = conn.total_changes
         if changes != self._changes:
             self._receipts = {}
+            self._tail = {}
             self._changes = changes
 
     def receipt_rows(self, conn, target, text):
@@ -120,6 +166,57 @@ class ProjectionReuse:
         if loaded is None:
             return None
         return [row for row, wire in loaded if wire in text][:513]
+
+    def tail_after(self, conn, target, birth, watermark):
+        """The `_TailEvent`s with event_id > `watermark`, ascending, or None.
+
+        One window per (stream, lifecycle) holds every event after the lowest
+        watermark asked for so far; a candidate that needs earlier events reads
+        only the gap below the window and lowers its floor, so no row is read
+        twice in a generation.
+        """
+        if not _lookup_string(target) or not _lookup_string(birth):
+            return None
+        self._fresh(conn)
+        key = (target, birth)
+        window = self._tail.get(key, _UNPARSED)
+        if window is None:
+            return None
+        if window is _UNPARSED or watermark < window.floor:
+            # The byte bound spans every window this generation holds.
+            held = sum(other.size for name, other in self._tail.items() if other is not None and name != key)
+            if window is _UNPARSED:
+                window = self._tail[key] = self._read_tail(conn, key, _TailWindow(watermark), None, held)
+            else:
+                window = self._tail[key] = self._read_tail(conn, key, window, watermark, held)
+        if window is None:
+            return None
+        return window.events[bisect_right(window.ids, watermark):]
+
+    @staticmethod
+    def _read_tail(conn, key, window, lower, held):
+        """Extend `window` down to `lower` (or fill a new one); None past the bounds."""
+        target, birth = key
+        floor = window.floor if lower is None else lower
+        sql = ("SELECT event_id,event_json FROM session_event_tail "
+               "WHERE stream_id=? AND session_created_at=? AND event_id>?")
+        params = [target, birth, floor]
+        if lower is not None:
+            sql += " AND event_id<=?"
+            params.append(window.floor)
+        try:
+            rows = conn.execute(sql + " ORDER BY event_id LIMIT ?",
+                                (*params, _TAIL_REUSE_MAX_ROWS + 1 - len(window.events))).fetchall()
+        except sqlite3.Error:
+            return None
+        size = window.size + sum(len(row["event_json"] or "") for row in rows)
+        if len(window.events) + len(rows) > _TAIL_REUSE_MAX_ROWS or held + size > _TAIL_REUSE_MAX_BYTES:
+            return None
+        window.events = [_TailEvent(row["event_id"], row["event_json"]) for row in rows] + window.events
+        window.ids = [event.event_id for event in window.events]
+        window.size = size
+        window.floor = floor
+        return window
 
     @staticmethod
     def _load_receipts(conn, target):
@@ -246,6 +343,19 @@ def finalize_prepared(conn, original, result):
     return result
 
 
+def _tail_events(conn, target, birth, watermark, reuse):
+    """Tail events after `watermark`: the request's shared window, else its own read."""
+    window = reuse.tail_after(conn, target, birth, watermark) if reuse is not None else None
+    if window is not None:
+        yield from window
+        return
+    for row in conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail "
+            "WHERE stream_id=? AND session_created_at=? AND event_id>? ORDER BY event_id",
+            (target, birth, watermark)):
+        yield _TailEvent(row["event_id"], row["event_json"])
+
+
 def retained_proof(conn, payload, *, deliveries=None):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}
@@ -284,12 +394,10 @@ def retained_proof(conn, payload, *, deliveries=None):
         return {raw_input_digest(), memo["stripped"]}
 
     # The retained history may be older than the current 500-event live tail.
-    for row in conn.execute(
-            "SELECT event_id,event_json FROM session_event_tail "
-            "WHERE stream_id=? AND session_created_at=? AND event_id>? ORDER BY event_id",
-            (target, birth, watermark)):
+    for tail in _tail_events(conn, target, birth, watermark,
+                             deliveries.reuse if deliveries is not None else None):
         try:
-            event = json.loads(row["event_json"])
+            event = tail.event()
             candidate_wire = delivery_wire(event)
             if (delivery.get("proof_event_id") is None and event.get("kind") in {"USER", "TELL"}
                     and isinstance(candidate_wire, str) and candidate_wire != text and text in candidate_wire
@@ -301,8 +409,8 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and delivery_wire(event) == text
                     and ("provider_text_digest" not in event or event["provider_text_digest"] in accepted_input_digests())
                     and not operator_dispatch(conn, target, text, generation)
-                    and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == row["event_id"])):
-                matches.append((row["event_id"], event.get("timestamp")))
+                    and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == tail.event_id)):
+                matches.append((tail.event_id, event.get("timestamp")))
         except (TypeError, ValueError, AttributeError):
             continue
     if len(matches) != 1:
