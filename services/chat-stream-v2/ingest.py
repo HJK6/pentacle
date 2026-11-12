@@ -256,16 +256,15 @@ async def append_ingested_event(
     lifecycle: dict[str, Any] | None = None,
     sessions: Any = None,
     _segments_prepared: bool = False,
-    _replay: bool = False,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
     if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
-        segments = await store.prepare_native_input_events([payload], **({"replay": True} if _replay else {}))
+        segments = await store.prepare_native_input_events([payload])
         last = None
         for segment in segments:
             seq = await append_ingested_event(store, broadcast, segment, recent_limit=recent_limit,
                 routing_integrity=routing_integrity, lifecycle=lifecycle, sessions=sessions,
-                _segments_prepared=True, _replay=_replay)
+                _segments_prepared=True)
             if seq is not None:
                 last = seq
         return last
@@ -274,11 +273,7 @@ async def append_ingested_event(
     corrected = annotate_message_envelope(
         await store.stamp_event_with_send_receipt(payload),
     )
-    skipped = (_replay and lifecycle is not None and await store.skip_stored_replay(
-        [corrected], lifecycle, prepared=True, identity=raw_identity))
-    if skipped:
-        seq = None
-    elif lifecycle is None:
+    if lifecycle is None:
         seq = await store.append_session_event(
             stream_id, corrected, identity=raw_identity, limit=recent_limit,
         )
@@ -360,16 +355,6 @@ class Ingest:
             "boundary": st.replay_boundary, "offset": st.offset,
             "disposition": disposition,
         }, separators=(",", ":")))
-
-    async def _skip_replay(self, events, lifecycle, st) -> int:
-        if not events or events[0].get("provider") not in {"claude", "codex"}:
-            return 0
-        if st.replay_complete or st.replay_boundary is None or st.offset >= st.replay_boundary:
-            return 0
-        skip = getattr(self.store, "skip_stored_replay", None)
-        if not callable(skip):
-            return 0
-        return await skip(events, lifecycle)
 
     async def _record_provenance(self, sid: str, provider: str, records: list[dict], st: _StreamIngest) -> None:
         """Thoth-local provenance through the same sink as satellites; best effort."""
@@ -853,12 +838,6 @@ class Ingest:
             source_pid = codex_source_pane_pid(row.get("pane_pid"))
             if source_pid is None:
                 return 0
-            replay_lifecycle = None
-            if not st.replay_complete and st.replay_boundary is not None and st.offset < st.replay_boundary:
-                replay_lifecycle = await self.store.fetch_open_session_lifecycle(sid, pane_pid=source_pid)
-                if (replay_lifecycle is None or (row.get("session_generation")
-                        and replay_lifecycle["generation"] != row["session_generation"])):
-                    return 0
             # Per-pass cap, mirroring the Claude path below: build at most
             # `budget` entries, then advance the offset PAST the records that
             # produced them. Counting built entries (not genuine inserts) is safe
@@ -874,26 +853,7 @@ class Ingest:
                 payloads = normalize_codex_rollout_record(
                     record, host=host, session_name=name, session_id=st.session_id,
                 )
-                if not payloads and replay_lifecycle is not None and not entries:
-                    consumed_to = end_offset
-                    continue
-                if payloads and replay_lifecycle is not None:
-                    # Do not move a skip decision across a pending batch write.
-                    # The original path owns this and every later record once
-                    # the batch contains an event that requires processing.
-                    if not entries and all(validate_event_payload(
-                            {**payload, "source_pane_pid": source_pid}, host) is None
-                            for payload in payloads):
-                        skipped = await self._skip_replay(payloads, replay_lifecycle, st)
-                        if skipped == len(payloads):
-                            for payload in payloads:
-                                if self.routing_integrity is not None:
-                                    await self.routing_integrity.observe_claude_event(
-                                        annotate_message_envelope(payload))
-                            consumed_to = end_offset
-                            continue
-                payloads = await self.store.prepare_native_input_events(
-                    payloads, **({"replay": True} if replay_lifecycle is not None else {}))
+                payloads = await self.store.prepare_native_input_events(payloads)
                 if payloads and len(entries) + len(payloads) > budget:
                     # Leave this record and the rest of the span for next pass.
                     capped = True
@@ -917,9 +877,6 @@ class Ingest:
                 # non-record bytes past the last event.
                 consumed_to = new_offset
             if not entries:
-                if replay_lifecycle is not None:
-                    from store_capacity_retry import refresh_projection
-                    await refresh_projection(self.store, self.sessions, sid)
                 st.offset = consumed_to
                 return 0
             lifecycle = await self.store.fetch_open_session_lifecycle(sid, pane_pid=source_pid)
@@ -997,9 +954,7 @@ class Ingest:
             events = normalize_claude_jsonl_records(records, host=host, session_name=name)
         appended = 0
         capped = False
-        event_index = 0
-        while event_index < len(events):
-            payload = events[event_index]
+        for payload in events:
             if appended >= budget:
                 # Per-pass cap hit mid-batch. Do NOT advance the offset: the whole
                 # chunk is re-read next pass, and the durable identity dedup makes
@@ -1008,17 +963,6 @@ class Ingest:
                 # event (loop rule 2 without data loss).
                 capped = True
                 break
-            skipped = await self._skip_replay(events[event_index:event_index + 128], lifecycle, st)
-            if skipped:
-                for retained in events[event_index:event_index + skipped]:
-                    if self.routing_integrity is not None:
-                        try:
-                            await self.routing_integrity.observe_claude_event(
-                                annotate_message_envelope(retained))
-                        except Exception as exc:  # noqa: BLE001 - same best-effort observer
-                            log.warning("routing-integrity replay observation failed sid=%s: %s", sid, exc)
-                event_index += skipped
-                continue
             seq = await append_ingested_event(
                 self.store,
                 self.broadcast,
@@ -1027,13 +971,9 @@ class Ingest:
                 routing_integrity=self.routing_integrity,
                 lifecycle=lifecycle,
                 sessions=self.sessions,
-                _replay=(not st.replay_complete and st.replay_boundary is not None
-                         and st.offset < st.replay_boundary
-                         and callable(getattr(self.store, "skip_stored_replay", None))),
             )
             if seq is not None:
                 appended += 1
-            event_index += 1
         if not capped:
             st.offset = new_offset
             if provider == "cursor":

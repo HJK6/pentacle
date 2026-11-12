@@ -1,4 +1,4 @@
-"""Restart no-op work must preserve the original intake path's results."""
+"""Receipt indexing and replay pacing preserve original intake effects."""
 import asyncio
 from copy import deepcopy
 import json
@@ -42,16 +42,14 @@ async def fixture(path, provider):
     return store, sessions
 
 
-def pump_for(store, sessions, frames, *, baseline=False, limit=500):
+async def drop_proof_index(store):
+    # Compare identical effects and ordering through the original table scan.
+    await store.submit(lambda c: (c.execute("DROP INDEX idx_history_receipt_proof_wire"), c.commit()))
+
+
+def pump_for(store, sessions, frames, *, limit=500):
     async def broadcast(frame):
         frames.append(deepcopy(frame))
-    if baseline:
-        # The unchanged effect-producing path is the differential reference.
-        # This seam is absent before the optimization; the baseline RED still
-        # runs through the exact original Ingest implementation.
-        async def no_skip(*args, **kwargs):
-            return 0
-        store.skip_stored_replay = no_skip
     routing = RoutingIntegrity(store, sessions, broadcast=broadcast)
     return Ingest(store, sessions, None, broadcast, local_host="fixture",
                   recent_limit=500, config=IngestConfig(max_events_per_pass=limit),
@@ -78,7 +76,7 @@ def write(path, items):
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_stored_replay_avoids_per_event_store_work(tmp_path, provider):
+def test_stored_replay_preserves_per_event_store_work(tmp_path, provider):
     async def run():
         path = tmp_path / "transcript.jsonl"
         write(path, records(provider, 30))
@@ -98,8 +96,8 @@ def test_stored_replay_avoids_per_event_store_work(tmp_path, provider):
             after = await store.fetch_session_event_tail("fixture:replay", limit=500)
             assert before == after
             assert not [f for f in frames if f["type"] == "chat.event"]
-            assert not [name for name in calls if "prepare_native_input_events" in name]
-            assert not [name for name in calls if "bind_send_occurrence" in name]
+            assert any("prepare_native_input_events" in name for name in calls)
+            assert any("bind_send_occurrence" in name for name in calls)
         finally:
             close_pump(first)
             if replay is not None:
@@ -121,6 +119,8 @@ def test_mixed_replay_matches_original_rows_messages_and_state(tmp_path, monkeyp
         path = tmp_path / "transcript.jsonl"
         write(path, records(provider))
         store, sessions = await fixture(path, provider)
+        if baseline:
+            await drop_proof_index(store)
         frames = []
         seed = pump_for(store, sessions, frames)
         replay = None
@@ -137,7 +137,7 @@ def test_mixed_replay_matches_original_rows_messages_and_state(tmp_path, monkeyp
                 return maximum
             maximum = await store.submit(remove)
             frames.clear()
-            replay = pump_for(store, sessions, frames, baseline=baseline, limit=2)
+            replay = pump_for(store, sessions, frames, limit=2)
             await drain(replay, path)
             rows = await store.fetch_session_event_tail("fixture:replay", limit=500)
             new_ids = [r["daemon_seq"] for r in rows if r["daemon_seq"] > maximum]
@@ -177,6 +177,8 @@ def test_partial_segments_and_changed_delivery_use_original_split(stored, change
     async def run(baseline):
         store = Store(":memory:")
         store.start()
+        if baseline:
+            await drop_proof_index(store)
         frames = []
         event = source("operator\n" + WIRE_A + "\n" + WIRE_B)
         async def broadcast(frame):
@@ -193,8 +195,6 @@ def test_partial_segments_and_changed_delivery_use_original_split(stored, change
                 # ambiguity even though retained cuts existed before the crash.
                 await store.submit(lambda c: (proof(c, "operator\n" + WIRE_A, "changed"), c.commit()))
             lifecycle = await store.fetch_open_session_lifecycle(TARGET, pane_pid="4321")
-            if not baseline:
-                assert await store.skip_stored_replay([event], lifecycle) == 0
             await append_ingested_event(store, broadcast, event, recent_limit=500, lifecycle=lifecycle)
             rows = await store.fetch_session_event_tail(TARGET, limit=500)
             return rows, frames
@@ -217,7 +217,6 @@ def test_plain_stored_input_becomes_ambiguous_after_delivery_change():
             lifecycle = await store.fetch_open_session_lifecycle(TARGET, pane_pid="4321")
             await append_ingested_event(store, broadcast, event, recent_limit=500, lifecycle=lifecycle)
             await store.submit(lambda c: (proof(c, WIRE_A, "new-proof"), c.commit()))
-            assert await store.skip_stored_replay([event], lifecycle) == 0
             prepared = await store.prepare_native_input_events([event])
             assert prepared[0]["raw"]["bug_ref"] == "ambiguous_delivery_span"
         finally:
@@ -257,7 +256,6 @@ def test_stored_tell_repairs_promotion_after_crash(monkeypatch):
             await store.submit(lambda c: (c.execute("UPDATE sessions SET pane_pid='4321' "
                 "WHERE host='localhost' AND session_name='v2-late-proof'"), c.commit()))
             lifecycle = await store.fetch_open_session_lifecycle(request["stream_id"], pane_pid="4321")
-            assert await store.skip_stored_replay([event], lifecycle) == 0
             frames = []
             async def broadcast(frame):
                 frames.append(frame)
@@ -329,7 +327,6 @@ def test_stored_send_repairs_unbound_receipt_after_crash(tmp_path):
             await store.submit(lambda c: (c.execute("UPDATE sessions SET pane_pid='4321' "
                 "WHERE host=? AND session_name=?", (HOST, NAME)), c.commit()))
             lifecycle = await store.fetch_open_session_lifecycle(target, pane_pid="4321")
-            assert await store.skip_stored_replay([event], lifecycle) == 0
             frames = []
             async def broadcast(frame):
                 frames.append(frame)
@@ -355,6 +352,8 @@ def test_recreated_or_replaced_transcript_matches_original(tmp_path, monkeypatch
         items = records("claude")
         write(path, items)
         store, sessions = await fixture(path, "claude")
+        if baseline:
+            await drop_proof_index(store)
         frames = []
         seed = pump_for(store, sessions, frames)
         replay = None
@@ -362,7 +361,7 @@ def test_recreated_or_replaced_transcript_matches_original(tmp_path, monkeypatch
             await drain(seed, path)
             close_pump(seed)
             frames.clear()
-            replay = pump_for(store, sessions, frames, baseline=baseline)
+            replay = pump_for(store, sessions, frames)
             replay.config.max_read_bytes = len((json.dumps(items[0]) + "\n").encode())
             await replay.run_pass()
             if mutation == "generation":
@@ -394,55 +393,3 @@ def test_recreated_or_replaced_transcript_matches_original(tmp_path, monkeypatch
                 close_pump(replay)
             store.stop()
     assert asyncio.run(run(True)) == asyncio.run(run(False))
-
-
-@pytest.mark.parametrize("settlement", ["same-receipt", "other-receipt", "changed-wire", "duplicate-key"])
-def test_receipt_noop_requires_same_settled_receipt(settlement):
-    from ingest import _identity_key
-    async def run():
-        store = Store(":memory:")
-        store.start()
-        try:
-            await store.open_session("fixture", "replay", provider="claude", pane_pid="4321")
-            lifecycle = await store.fetch_open_session_lifecycle("fixture:replay", pane_pid="4321")
-            event = {"stream_id": "fixture:replay", "provider": "claude", "kind": "ASSIST_TEXT",
-                     "text": "quotes pending wire", "timestamp": STAMP,
-                     "raw": {"jsonl_record_uuid": "quoted", "jsonl_event_index": 0}}
-            await store.append_session_event("fixture:replay", event, identity=_identity_key(event), limit=500)
-            async def receipt(key, wire, bound):
-                proof = {"wire_text": wire, "proof_event_id": bound}
-                meta = json.dumps({"_input_proof": proof})
-                if settlement == "duplicate-key" and bound is not None:
-                    meta = '{"_input_proof":{"wire_text":"pending wire","proof_event_id":7,"proof_event_id":null}}'
-                await store.append_send_receipt(to_stream_id="fixture:replay", request_id="send-quote",
-                    receipt_id=key, state="landed", wire_text=wire, display_text=wire, attachments=[],
-                    delivery="landed", submission_confirmed=True, meta_json=meta)
-            await receipt("receipt-a", "pending wire", None)
-            assert await store.skip_stored_replay([event], lifecycle) == 0
-            await receipt("receipt-b" if settlement == "other-receipt" else "receipt-a",
-                          "different wire" if settlement == "changed-wire" else "pending wire", 7)
-            assert await store.skip_stored_replay([event], lifecycle) == (1 if settlement == "same-receipt" else 0)
-        finally:
-            store.stop()
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("unclean", [False, True])
-def test_replay_split_reuses_existing_lookup_without_changing_output(unclean):
-    from test_native_input_lookup import seat, source, proof, TARGET, WIRE_A, WIRE_B
-    async def run():
-        store = Store(":memory:")
-        store.start()
-        try:
-            await store.submit(lambda c: (seat(c), proof(c, WIRE_A, "a"), proof(c, WIRE_B, "b"), c.commit()))
-            event = source("operator\n" + WIRE_A + "\n" + WIRE_B)
-            for step in range(3):
-                if step:
-                    wire = (WIRE_A + "\x00") if unclean else ("operator\n" + WIRE_A)
-                    await store.submit(lambda c: (proof(c, wire, f"change-{step}"), c.commit()))
-                expected = await store.prepare_native_input_events([event])
-                actual = await store.prepare_native_input_events([event], replay=True)
-                assert actual == expected
-        finally:
-            store.stop()
-    asyncio.run(run())
