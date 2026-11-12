@@ -51,7 +51,6 @@ def test_batch_identities_match_single_resolver(tmp_path) -> None:
 
 
 def test_qa_admission_never_walks_the_tree_on_the_store_thread(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
     _spec(tmp_path, "in_progress", SPEC.removeprefix("spec_"), SPEC)
     for i in range(4000):
         _spec(tmp_path, ("in_progress", "ready_for_dev", "completed")[i % 3],

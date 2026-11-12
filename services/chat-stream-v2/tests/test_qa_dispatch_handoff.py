@@ -14,7 +14,6 @@ from test_qa_dispatch_counter import LEAD, SPEC, TOKEN, state, two_rejects, issu
 
 @pytest.mark.parametrize("kind", ["worker", "handoff", "scheduled_handoff"])
 def test_real_spawn_exemptions(monkeypatch, tmp_path, kind):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()

@@ -34,7 +34,7 @@ async def count(store, table):
 
 @pytest.mark.parametrize('mode', ['missing', 'exception'])
 @pytest.mark.asyncio
-async def test_constant_failed_batch_refuses_twice_without_single_fallback(mode):
+async def test_failed_batch_admits_unknown_spec_without_single_fallback(mode):
     store = Store(':memory:'); store.start()
     seen, singles = [], []
     def single(value):
@@ -47,34 +47,10 @@ async def test_constant_failed_batch_refuses_twice_without_single_fallback(mode)
     store.set_spec_identity_resolver(single, batch)
     try:
         row = await owner(store)
-        with pytest.raises(QaError) as error:
-            await store.qa_admit(**admission(row))
-        assert error.value.code == 'qa_spec_unavailable'
-        assert len(seen) == 2 and all(thread is not store._thread and thread is not threading.main_thread() for thread in seen)
+        result = await store.qa_admit(**admission(row))
+        assert result['spec_id'] == '' and result['surface'] == 'implementation'
+        assert len(seen) == 1 and all(thread is not store._thread and thread is not threading.main_thread() for thread in seen)
         assert singles == []
-        assert await count(store, 'v2_qa_commissions') == await count(store, 'v2_qa_surfaces') == 0
-    finally:
-        store.stop()
-
-
-@pytest.mark.asyncio
-async def test_missing_first_batch_has_exactly_one_fresh_uncached_offthread_retry(tmp_path):
-    path = tmp_path / 'work/in_progress/fixture__work/spec.md'; path.parent.mkdir(parents=True)
-    path.write_text(f'---\nid: {SPEC}\n---\n')
-    store = Store(':memory:'); store.start()
-    calls = []
-    def batch(ids):
-        calls.append(threading.current_thread())
-        if len(calls) == 1:
-            return {}
-        # The retry uses a cold resolver, independent of any retained cache.
-        fresh = SpecsSubsystem(memory_root=tmp_path.resolve(), session_summaries=lambda: [], changed_callback=lambda ids: None)
-        return fresh.canonical_spec_identities(ids)
-    store.set_spec_identity_resolver(lambda value: pytest.fail('single fallback'), batch)
-    try:
-        row = await owner(store)
-        assert (await store.qa_admit(**admission(row)))['spec_id'] == SPEC
-        assert len(calls) == 2 and all(thread is not store._thread and thread is not threading.main_thread() for thread in calls)
         assert await count(store, 'v2_qa_commissions') == 1
     finally:
         store.stop()
@@ -82,7 +58,7 @@ async def test_missing_first_batch_has_exactly_one_fresh_uncached_offthread_retr
 
 @pytest.mark.parametrize('field,value', [('role', 'worker'), ('status', 'closed'), ('spec_id', 'spec_fixture__other'), ('generation', 'replacement')])
 @pytest.mark.asyncio
-async def test_changed_actor_cannot_authorize_old_capture(field, value):
+async def test_actor_lifecycle_is_rechecked_without_role_or_spec_matching(field, value):
     store = Store(':memory:'); store.start()
     entered, release = threading.Event(), threading.Event()
     calls = []
@@ -103,10 +79,14 @@ async def test_changed_actor_cannot_authorize_old_capture(field, value):
         else:
             await store.update_session('fixture', 'lead', **{field: value})
         release.set()
-        with pytest.raises(QaError):
-            await task
-        assert len(calls) == 2
-        assert await count(store, 'v2_qa_commissions') == 0
+        if field in ('status', 'generation'):
+            with pytest.raises(QaError):
+                await task
+            assert await count(store, 'v2_qa_commissions') == 0
+        else:
+            assert (await task)['spec_id'] == SPEC
+            assert await count(store, 'v2_qa_commissions') == 1
+        assert len(calls) == 1
     finally:
         release.set(); store.stop()
 
@@ -316,33 +296,6 @@ async def test_attach_retries_provenance_mutation_and_keeps_concurrent_binding(t
         assert result['session']['spec_ids'] == ['spec_fixture__one', 'spec_fixture__three', 'spec_fixture__two']
     finally:
         release.set(); store.stop()
-
-
-@pytest.mark.asyncio
-async def test_two_binding_mutations_refuse_without_commission():
-    store = Store(':memory:'); store.start()
-    entered = [threading.Event(), threading.Event()]
-    release = [threading.Event(), threading.Event()]
-    calls = []
-    def batch(ids):
-        index = len(calls); calls.append(1)
-        entered[index].set(); assert release[index].wait(5)
-        return {value: value for value in ids}
-    store.set_spec_identity_resolver(lambda value: value, batch)
-    try:
-        row = await owner(store)
-        task = asyncio.create_task(store.qa_admit(**admission(row)))
-        for index in range(2):
-            await asyncio.to_thread(entered[index].wait, 2)
-            # Same canonical ID, different consumed provenance grants.
-            await store.update_session('fixture', 'lead', spec_id=SPEC, spec_ids=[SPEC], spec_binding_provenance=[{'spec_id':SPEC, 'provenance':'operator_v2', 'granting_principal':f'operator-{index}', 'granted_at':f'2026-01-0{index+1}T00:00:00Z'}])
-            release[index].set()
-        with pytest.raises(QaError) as error: await task
-        assert error.value.code == 'qa_spec_unavailable'
-        assert len(calls) == 2 and await count(store, 'v2_qa_commissions') == 0
-    finally:
-        for item in release: item.set()
-        store.stop()
 
 
 @pytest.mark.parametrize('boundary', ['begin', 'insert'])

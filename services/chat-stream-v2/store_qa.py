@@ -152,11 +152,8 @@ def _text(value, field, limit=4000):
 def _scope(msg):
     spec = _text(msg.get("spec_id"), "spec_id", 256)
     surface = msg.get("surface")
-    if (
-        not isinstance(surface, str)
-        or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", surface) is None
-    ):
-        raise QaError("qa_invalid_request", "surface must be a stable lowercase slug")
+    if not isinstance(surface, str) or not surface.strip():
+        raise QaError("qa_invalid_request", "surface must be nonempty text")
     cycle = msg.get("cycle", 1)
     if type(cycle) is not int or cycle < 1:
         raise QaError("qa_invalid_request", "cycle must be a positive integer")
@@ -182,33 +179,6 @@ def _rejects(conn, spec, surface, cycle):
     ]
 
 
-def _pending_rejects(conn, spec, surface, cycle):
-    """Select one adjudicatable pending reject per open commission."""
-    pending = {}
-    commissions = conn.execute(
-        "SELECT * FROM v2_qa_commissions WHERE spec_id=? AND surface=? "
-        "AND cycle=? AND report_id IS NULL",
-        (spec, surface, cycle),
-    ).fetchall()
-    for commission in commissions:
-        key = tuple(commission[k] for k in ("reviewer", "generation", "msg_id"))
-        reports = conn.execute(
-            "SELECT * FROM v2_reports WHERE from_stream_id=? AND session_generation=? "
-            "AND status='done' AND qa_verdict='reject' ORDER BY created_at",
-            (commission["reviewer"], commission["generation"]),
-        )
-        for report in reports:
-            if not _adjudicatable(report):
-                continue
-            resolved, _ = _commission_for_report(conn, report)
-            if resolved is not None and tuple(
-                resolved[k] for k in ("reviewer", "generation", "msg_id")
-            ) == key:
-                pending[key] = report["report_id"]
-                break
-    return pending
-
-
 def _check_cycle(conn, spec, surface, cycle, limits=True):
     current = _current(conn, spec, surface)
     if cycle != current:
@@ -220,22 +190,6 @@ def _check_cycle(conn, spec, surface, cycle, limits=True):
             surface=surface,
         )
     if limits:
-        pending = _pending_rejects(conn, spec, surface, cycle)
-        if len(pending) >= 2:
-            report_ids = sorted(pending.values())
-            raise QaError(
-                "qa_adjudication_required",
-                "adjudicate these reject reports (--valid or --void) before another QA commission",
-                spec_id=spec,
-                surface=surface,
-                cycle=cycle,
-                report_ids=report_ids,
-                commands=[
-                    f"agent-orch spec-issue adjudicate {rid} --spec-id {spec} "
-                    f"--surface {surface} --cycle {cycle} --valid|--void --reason '<reason>'"
-                    for rid in report_ids
-                ],
-            )
         reports = _rejects(conn, spec, surface, cycle)
         if len(reports) >= 2:
             raise QaError(
@@ -536,142 +490,122 @@ class QaStoreMixin:
         msg_id,
         payload_hash,
         target_specs,
-        enforce=True,
         check_only=False,
         existing_reviewer=False,
         prepare_only=False,
         phase=None,
     ):
         scope, target_specs = copy.deepcopy(scope), copy.deepcopy(target_specs)
-        spec, surface, cycle = _scope(scope)
         if type(msg_id) is not int or msg_id < 0:
             raise QaError("qa_invalid_request", "msg_id must be a nonnegative integer")
         if existing_reviewer:
-            # A caller may have read this seat before admission began. Bind the
-            # current open generation once, then retain it across every await
-            # and retry; a later reopen must never inherit this commission.
             target = await self.submit(lambda conn: _session(conn, reviewer))
             if not target or target.get("status") != "open":
                 raise QaError("qa_reviewer_unavailable", "QA reviewer is not open")
             generation = target.get("session_generation")
+        source_owner, source_target = await self.submit(lambda conn: (
+            _session(conn, actor) if actor else None,
+            _session(conn, reviewer) if existing_reviewer else None))
+        identity_inputs = normalize_spec_ids(target_specs)
+        for source in (source_owner or {}, source_target or {}):
+            identity_inputs += normalize_spec_ids(source.get("qualified_spec_ids") or source.get("spec_ids"),
+                                                  source.get("spec_id"))
+            if effective_assignment(source):
+                identity_inputs.append(effective_assignment(source))
+        if isinstance(scope.get("spec_id"), str) and scope["spec_id"].strip():
+            identity_inputs += normalize_spec_ids([scope["spec_id"]])
+        identity_inputs = list(dict.fromkeys(identity_inputs))
+        try:
+            identities = (await self._resolve_spec_inputs(identity_inputs)).values
+        except SpecInputsUnavailable:
+            identities = {}
+
+        def canonical(value):
+            return identities.get(value) or ""
+
         def op(conn, *, transaction=True, validate_only=False):
             if transaction:
                 conn.execute("BEGIN IMMEDIATE")
             try:
-                resolve.check(conn)
-                owner = self._qa_actor(conn, actor, actor_generation, spec, resolve)
-                reviewer_generation = generation
+                owner = _session(conn, actor) if actor else {}
+                if actor and (not owner or owner.get("status") != "open" or owner.get("session_generation") != actor_generation):
+                    raise QaError("qa_unauthorized", "caller lifecycle is not open and verified")
                 reviewer_specs = target_specs
                 reviewer_phase = phase
                 if existing_reviewer:
                     target = _session(conn, reviewer)
-                    if not target or target.get("status") != "open":
-                        raise QaError(
-                            "qa_reviewer_unavailable", "QA reviewer is not open"
-                        )
-                    if target.get("session_generation") != generation:
+                    if not target or target.get("status") != "open" or target.get("session_generation") != generation:
                         raise QaError("qa_reviewer_unavailable", "QA reviewer generation changed")
                     reviewer_phase = target.get("phase")
-                    reviewer_generation = target.get("session_generation")
-                    reviewer_specs = normalize_spec_ids(
-                        target.get("spec_ids"), target.get("spec_id")
-                    )
+                    reviewer_specs = normalize_spec_ids(target.get("spec_ids"), target.get("spec_id"))
+                if reviewer == actor:
+                    raise QaError("qa_spec_mismatch", "reviewer must be independent")
                 reviewer_phase = str(reviewer_phase or "").strip().lower() or None
-                self._qa_planner_phase(owner, reviewer_phase)
-                canonical_targets = {
-                    resolve(value) for value in reviewer_specs
-                }
-                if spec not in canonical_targets or reviewer == actor:
-                    raise QaError(
-                        "qa_spec_mismatch",
-                        "independent reviewer must carry the commissioned spec",
-                    )
+                raw_candidates = normalize_spec_ids(reviewer_specs)
+                candidates = {canonical(value) for value in raw_candidates}
+                owner_specs = normalize_spec_ids(owner.get("qualified_spec_ids") or owner.get("spec_ids"), owner.get("spec_id"))
+                owner_candidates = {canonical(value) for value in owner_specs}
+                assigned = canonical(effective_assignment(owner)) if effective_assignment(owner) else ""
+                hint = scope.get("spec_id")
+                hint_ids = normalize_spec_ids([hint]) if isinstance(hint, str) and hint.strip() else []
+                if raw_candidates:
+                    if "" not in candidates and len(candidates) == 1:
+                        spec = next(iter(candidates))
+                    elif assigned and "" not in candidates and assigned in candidates:
+                        spec = assigned
+                    else:
+                        spec = ""
+                elif assigned:
+                    spec = assigned
+                elif owner_specs and "" not in owner_candidates and len(owner_candidates) == 1:
+                    spec = next(iter(owner_candidates))
+                elif len(hint_ids) == 1:
+                    spec = canonical(hint_ids[0])
+                else:
+                    spec = ""
+                named_surface = scope.get("surface")
+                surface = named_surface.strip() if isinstance(named_surface, str) and named_surface.strip() else (
+                    f"{spec}:{reviewer_phase or 'unknown'}" if spec else "")
+                cycle = _current(conn, spec, surface) if spec or surface else 1
                 if not check_only:
                     prior = conn.execute(
                         "SELECT * FROM v2_qa_commissions WHERE reviewer=? AND generation=? AND msg_id=?",
-                        (reviewer, reviewer_generation, msg_id),
+                        (reviewer, generation, msg_id),
                     ).fetchone()
                     if prior:
-                        self._qa_planner_phase(owner, prior["phase"])
-                        expected = (
-                            actor,
-                            actor_generation,
-                            spec,
-                            surface,
-                            cycle,
-                            payload_hash,
-                        )
-                        actual = tuple(
-                            prior[k]
-                            for k in (
-                                "coordinator",
-                                "coordinator_generation",
-                                "spec_id",
-                                "surface",
-                                "cycle",
-                                "payload_hash",
-                            )
-                        )
+                        expected = (actor, actor_generation, spec, surface, payload_hash)
+                        actual = tuple(prior[k] for k in ("coordinator", "coordinator_generation", "spec_id", "surface", "payload_hash"))
                         if expected != actual:
-                            raise QaError(
-                                "qa_commission_conflict",
-                                "review commission cannot be rebound",
-                            )
+                            raise QaError("qa_commission_conflict", "review commission cannot be rebound")
                         if transaction:
                             conn.commit()
                         return dict(prior)
-                _check_cycle(conn, spec, surface, cycle, limits=True)
+                if spec or surface:
+                    _check_cycle(conn, spec, surface, cycle, limits=True)
                 if not check_only and not validate_only:
-                    _text(reviewer_generation, "reviewer generation", 256)
-                    conn.execute(
-                        "INSERT OR IGNORE INTO v2_qa_surfaces VALUES (?,?,1)",
-                        (spec, surface),
-                    )
+                    _text(generation, "reviewer generation", 256)
+                    if spec or surface:
+                        conn.execute("INSERT OR IGNORE INTO v2_qa_surfaces VALUES (?,?,1)", (spec, surface))
                     conn.execute(
                         "INSERT INTO v2_qa_commissions "
                         "(reviewer,generation,msg_id,coordinator,coordinator_generation,spec_id,surface,cycle,payload_hash,created_at,phase) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            reviewer,
-                            reviewer_generation,
-                            msg_id,
-                            actor,
-                            owner["session_generation"],
-                            spec,
-                            surface,
-                            cycle,
-                            payload_hash,
-                            time.time(),
-                            reviewer_phase,
-                        ),
+                        (reviewer, generation, msg_id, actor, actor_generation, spec, surface,
+                         cycle, payload_hash, time.time(), reviewer_phase),
                     )
                 if transaction:
                     conn.commit()
-                return {
-                    "spec_id": spec,
-                    "surface": surface,
-                    "cycle": cycle,
-                    "coordinator_generation": owner["session_generation"],
-                    "generation": reviewer_generation,
-                }
+                return {"spec_id": spec, "surface": surface, "cycle": cycle,
+                        "coordinator_generation": actor_generation, "generation": generation}
             except BaseException:
                 if transaction:
                     conn.rollback()
                 raise
 
-        for attempt in range(2):
-            try:
-                resolve = await self._qa_spec_lookup(
-                    spec, actor, reviewer if existing_reviewer else None, target_specs, surface=surface)
-                if prepare_only:
-                    await self._submit_spec_commit(lambda conn: op(conn, validate_only=True))
-                    # One operation-local callback: the intent writer owns the
-                    # transaction and repeats every current authority check.
-                    return lambda conn: op(conn, transaction=False)
-                return await self._submit_spec_commit(op)
-            except SpecInputsUnavailable as exc:
-                if attempt:
-                    raise QaError("qa_spec_unavailable", str(exc)) from None
+        if prepare_only:
+            await self._submit_spec_commit(lambda conn: op(conn, validate_only=True))
+            return lambda conn: op(conn, transaction=False)
+        return await self._submit_spec_commit(op)
 
     async def qa_issue(self, verb, msg, *, actor="", actor_generation=""):
         msg = copy.deepcopy(msg)
@@ -742,8 +676,8 @@ class QaStoreMixin:
                                 candidate_msg_ids=candidate_msg_ids,
                             )
                         self._qa_planner_phase(caller, commission["phase"])
-                        if report["from_stream_id"] == actor or not _authorized_lineage(
-                            conn, caller, commission
+                        if report["from_stream_id"] == actor or (
+                            commission["coordinator"] and not _authorized_lineage(conn, caller, commission)
                         ):
                             raise QaError(
                                 "qa_unauthorized",
