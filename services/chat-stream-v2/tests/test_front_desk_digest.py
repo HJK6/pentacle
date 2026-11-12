@@ -5,7 +5,7 @@ from assistant_composite import AssistantComposite, AssistantCompositeConfig
 from store import Store
 
 
-def test_direct_front_desk_holds_start_but_other_parents_keep_delivery():
+def test_direct_front_desk_holds_routine_tell_but_other_parents_keep_delivery():
     async def run():
         store=Store(':memory:'); store.start()
         try:
@@ -13,10 +13,10 @@ def test_direct_front_desk_holds_start_but_other_parents_keep_delivery():
                 name='assistant', stream_id='h:assistant', direct_primary_stream_id='h:desk',
                 direct_primary_generation='g', astra_stream_id='h:desk'))
             held=await composite.suppress_routine_backend_ingress(target_stream_id='h:desk',
-                body='START: working', msg={'tell_id':'start-1'}, verb='tell')
+                body='receipt: working', msg={'tell_id':'start-1'}, verb='tell')
             assert held is not None and held['delivery_status']=='persisted'
             assert await composite.suppress_routine_backend_ingress(target_stream_id='h:parent',
-                body='START: working',msg={'tell_id':'start-2'},verb='tell') is None
+                body='receipt: working',msg={'tell_id':'start-2'},verb='tell') is None
         finally: store.stop()
     asyncio.run(run())
 
@@ -124,8 +124,8 @@ def test_wake_is_byte_identical_and_alone_while_digest_is_held(body,msg,tmp_path
             composite=_desk(store,target,h.sessions.get(target)['session_generation'])
             h.comms.assistant_ingress_policy=composite.suppress_routine_backend_ingress
             h.comms.front_desk_digest=composite.front_desk_digest
-            await h.comms.tell({'stream_id':target,'message':'START: work','tell_id':'held-start'})
-            await h.comms.tell({'stream_id':target,'message':'END: done','tell_id':'held-end'})
+            await h.comms.tell({'stream_id':target,'message':'receipt: work','tell_id':'held-start'})
+            await h.comms.tell({'stream_id':target,'message':'receipt: done','tell_id':'held-end'})
             assert not h.tmux.pasted
             await h.comms.tell({'stream_id':target,'message':body,'tell_id':'wake',**msg})
             assert h.tmux.pasted==[body]
@@ -140,7 +140,7 @@ def test_wake_is_byte_identical_and_alone_while_digest_is_held(body,msg,tmp_path
 
 
 @pytest.mark.parametrize('body,msg,dropped',[
-    ('START: begin',{},False),('END: done',{},False),('receipt: landed',{},False),
+    ('progress: begin',{},False),('progress: done',{},False),('receipt: landed',{},False),
     ('concur: proceed',{},False),('child inactivity threshold',{'_outbound_notice_kind':'watch'},False),
     ('tree idle',{'_outbound_notice_kind':'tree_idle'},True),
     ('context_advisory: h:child crossed threshold',{},True),
@@ -167,10 +167,10 @@ def test_deadline_anchored_to_oldest_restart_safe_no_empty_digest(tmp_path,monke
         try:
             desk=_desk(store,'h:desk','g').front_desk_digest
             async def hold(identity,stamp):
-                await desk.ingress(target_stream_id='h:desk',body='START: '+identity,
+                await desk.ingress(target_stream_id='h:desk',body='receipt: '+identity,
                     msg={'tell_id':identity},verb='tell')
                 await store.submit(lambda conn: (conn.execute('UPDATE v2_outbound_notices SET created_at=? WHERE body=?',
-                    (_iso(stamp),'START: '+identity)),conn.commit()))
+                    (_iso(stamp),'receipt: '+identity)),conn.commit()))
             await desk.tick(now=10000)
             assert not await store.list_outbound_notice_ids(force=True)
             await hold('first',1000);await hold('second',4500)
@@ -182,7 +182,7 @@ def test_deadline_anchored_to_oldest_restart_safe_no_empty_digest(tmp_path,monke
             assert len(ids)==1
             row=await store.outbound_notice_for_dedupe(ids[0])
             assert row['kind']=='lane_digest'
-            assert 'START: first' in row['body'] and 'START: second' in row['body']
+            assert 'receipt: first' in row['body'] and 'receipt: second' in row['body']
             await desk.tick(now=9000)
             assert await store.list_outbound_notice_ids(force=True)==ids
         finally:store.stop()
@@ -219,7 +219,7 @@ def test_notification_answer_with_held_items_preserves_trusted_envelope(tmp_path
             composite=_desk(store,target,sessions.get(target)['session_generation'])
             comms.assistant_ingress_policy=composite.suppress_routine_backend_ingress
             comms.front_desk_digest=composite.front_desk_digest
-            await comms.tell({'stream_id':target,'message':'END: finished','tell_id':'held-end'})
+            await comms.tell({'stream_id':target,'message':'receipt: finished','tell_id':'held-end'})
             question=await _seed_live_shaped_question(notify,producer_stream_id=target,question_id='q-digest-answer')
             await notify.notification({'type':'notification.resolve','request_id':'digest-answer',
                 'notification_id':question['notification_id'],'action_kind':'yes_no','choice':True,
@@ -251,8 +251,8 @@ def test_due_digest_uses_one_normal_outbound_submission_and_never_repeats(tmp_pa
             sessions.apply_live(target,online=True,pane_status='pane_alive')
             await store.update_session('fixture-host','v2-test',pane_status='pane_alive')
             WatchWake(store,sessions,queue,root_binding=composite.front_desk_digest.binding)
-            await comms.tell({'stream_id':target,'message':'START: work','tell_id':'held-start'})
-            await comms.tell({'stream_id':target,'message':'END: done','tell_id':'held-end'})
+            await comms.tell({'stream_id':target,'message':'receipt: work','tell_id':'held-start'})
+            await comms.tell({'stream_id':target,'message':'receipt: done','tell_id':'held-end'})
             assert await queue.drain_once(force=True)==0 and provider.pastes==[]
             monkeypatch.setenv('PENTACLE_FRONT_DESK_DIGEST_S','0')
             assert await queue.drain_once(force=True)==1
@@ -428,7 +428,7 @@ def test_canonical_composite_dispatch_reaches_front_desk_end_to_end(tmp_path):
 
 
 @pytest.mark.parametrize('body,msg', [
-    ('START: work', {}), ('END: done', {}),
+    ('receipt: work', {}), ('receipt: done', {}),
     ('tree idle', {'_outbound_notice_kind':'tree_idle'}),
     ('context_advisory: h:child high', {}),
     ('[Assistant lane ruling] '+json.dumps({'state':'done','action':'spawn'}),
@@ -458,7 +458,7 @@ def test_old_held_rows_delivered_after_restart_or_disable(tmp_path,monkeypatch,d
             composite=_desk(store,target,generation)
             comms.assistant_ingress_policy=composite.suppress_routine_backend_ingress
             comms.front_desk_digest=queue.front_desk_digest=composite.front_desk_digest
-            await comms.tell({'stream_id':target,'message':'END: old held item','tell_id':'old-held'})
+            await comms.tell({'stream_id':target,'message':'receipt: old held item','tell_id':'old-held'})
             if changed_generation:
                 await store.submit(lambda conn: (conn.execute(
                     'UPDATE v2_outbound_notices SET metadata=? WHERE kind=?',
@@ -475,7 +475,7 @@ def test_old_held_rows_delivered_after_restart_or_disable(tmp_path,monkeypatch,d
             assert await queue.drain_once(force=True)==1
             assert not await composite.front_desk_digest._rows(target)
             assert len(provider.pastes)==1
-            assert match_message_envelope(provider.pastes[0])['lanes'][0]['text']=='END: old held item'
+            assert match_message_envelope(provider.pastes[0])['lanes'][0]['text']=='receipt: old held item'
             assert await queue.drain_once(force=True)==0
     asyncio.run(run())
 
@@ -503,8 +503,8 @@ def test_notice_trim_digest_crosses_both_comms_ingress_calls(tmp_path, producer)
                 await store.evaluate_watch_wake(observations, now=100, root_binding=(target, root["session_generation"]))
                 await store.evaluate_watch_wake(observations, now=1900, root_binding=(target, root["session_generation"]))
             else:
-                await comms.tell({"stream_id": target, "tell_id": "routine-start", "message": "START: synthetic work"})
-                await comms.tell({"stream_id": target, "tell_id": "routine-end", "message": "END: synthetic completion"})
+                await comms.tell({"stream_id": target, "tell_id": "routine-start", "message": "receipt: synthetic work"})
+                await comms.tell({"stream_id": target, "tell_id": "routine-end", "message": "receipt: synthetic completion"})
                 await composite.front_desk_digest.tick(now=time.time() + 7200)
                 calls.clear()
             assert await queue.drain_once(force=True) == 1
@@ -581,7 +581,7 @@ def test_rows_held_for_a_former_fd_seat_fold_once_for_the_new_binding(tmp_path, 
             composite = _desk(store, old_id, old_gen)
             comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
             for i in range(2):
-                held = await comms.tell({'stream_id': old_id, 'message': f'END: held item {i}', 'tell_id': f'held-{i}'})
+                held = await comms.tell({'stream_id': old_id, 'message': f'receipt: held item {i}', 'tell_id': f'held-{i}'})
                 assert held['delivery_status'] == 'persisted'
             store.lifecycle_front_desk = {'name': 'assistant', 'env_binding': {'stream_id': old_id, 'generation': old_gen}}
             await store.recover_assistant_binding(name='assistant', target_stream_id=new,
@@ -595,7 +595,49 @@ def test_rows_held_for_a_former_fd_seat_fold_once_for_the_new_binding(tmp_path, 
             assert await queue.drain_once(force=True) == 1
             assert len(provider.pastes) == 1
             lanes = match_message_envelope(provider.pastes[0])['lanes']
-            assert [lane['text'] for lane in lanes] == ['END: held item 0', 'END: held item 1']
+            assert [lane['text'] for lane in lanes] == ['receipt: held item 0', 'receipt: held item 1']
             assert not await composite.front_desk_digest._rows(old_id)
             assert await queue.drain_once(force=True) == 0 and len(provider.pastes) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('body', [
+    'GATE6211740c', 'gate6211740c', 'BLOCKERmissing decision',
+    'blocker: missing decision', 'START: working', 'startwork',
+    'END: done', 'endwork',
+])
+def test_ordinary_tell_prefix_bypasses_hold_at_production_ingress(tmp_path, body):
+    """Recorded GATE body plus synthetic prefix controls, each with a fresh identity."""
+    async def run():
+        store = Store(str(tmp_path / 'store.db')); store.start()
+        try:
+            h = await _context_harness(store, parent=False)
+            target = f'{HOST}:child'
+            composite = _desk(store, target, h.sessions.get(target)['session_generation'])
+            h.comms.assistant_ingress_policy = composite.suppress_routine_backend_ingress
+            h.comms.front_desk_digest = composite.front_desk_digest
+            await h.comms.tell({'stream_id': target, 'message': body, 'tell_id': 'fresh-prefix'})
+            assert h.tmux.pasted == [body]
+            assert await composite.front_desk_digest._rows(target) == []
+        finally:
+            store.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('body,wakes', [
+    ('GATE6211740c', False), ('BLOCKERmissing', False),
+    ('START: working', False), ('END: done', False),
+    ('BLOCKER: existing baseline', True), ('GATE: existing baseline', True),
+])
+def test_typed_error_alert_prefix_classification_is_unchanged(body, wakes):
+    async def run():
+        store = Store(':memory:'); store.start()
+        try:
+            desk = _desk(store, 'h:desk', 'g').front_desk_digest
+            reply = await desk.ingress(target_stream_id='h:desk', body=body,
+                msg={'tell_id': 'fresh-alert', '_outbound_notice_kind': 'error_alert'}, verb='tell')
+            assert (reply is None) is wakes
+            assert len(await desk._rows('h:desk')) == (0 if wakes else 1)
+        finally:
+            store.stop()
     asyncio.run(run())
