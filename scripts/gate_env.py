@@ -747,6 +747,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     attempt_id = ga.new_attempt_id()
     tmp_root = (args.tmp_root or Path("/tmp/ge-%d" % os.getuid())).resolve()
     evidence = (args.evidence_dir or workspace / "evidence" / attempt_id).resolve()
+    requested_evidence = evidence
     try:
         max_tmp = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["max_tmpdir_bytes"]
         if type(max_tmp) is not int or max_tmp <= 0:
@@ -761,10 +762,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         evidence = Path("/tmp/gv-%d-%s" % (os.getuid(), short)).resolve()
         home, tmp, basetemp = scratch_paths(workspace, tmp_root, attempt_id)
         print("[gate-env] using owned temporary workspace and evidence: %s %s" % (workspace, evidence), flush=True)
-    if args.attempt_manifest and _inside(args.attempt_manifest.resolve(), checkout):
+    if args.attempt_manifest and (_inside(args.attempt_manifest.resolve(), checkout) or
+                                  (evidence != requested_evidence and _inside(args.attempt_manifest.resolve(), requested_evidence))):
         args.attempt_manifest = evidence / "attempt-manifest.json"
         print("[gate-env] using temporary attempt manifest: %s" % args.attempt_manifest, flush=True)
-    evidence.mkdir(parents=True, exist_ok=True)
+    try:
+        evidence.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        prior_evidence = evidence
+        evidence = Path("/tmp/gv-%d-%s" % (os.getuid(), attempt_id[:8])).resolve()
+        evidence.mkdir(parents=True, exist_ok=True)
+        if args.attempt_manifest and _inside(args.attempt_manifest.resolve(), prior_evidence):
+            args.attempt_manifest = evidence / "attempt-manifest.json"
+        print("[gate-env] using temporary evidence directory: %s" % evidence, flush=True)
 
     missing_identity = [n for n, v in (("spec", args.spec), ("series", args.series), ("purpose", args.purpose)) if not v]
     identity = {
