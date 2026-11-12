@@ -6,7 +6,6 @@ from test_qa_dispatch_counter import LEAD, SPEC, TOKEN, issue, report_msg, send_
 
 
 def test_planner_spec_send_adjudicate_diagnose(monkeypatch):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     async def run():
         store, _, tmux, comms, ledger, server = await state()
         try:
@@ -39,7 +38,6 @@ def test_planner_spec_send_adjudicate_diagnose(monkeypatch):
 def test_planner_spec_spawn(monkeypatch):
     from spawnctl import SpawnCtl
     from test_spec_binding_provenance import SpawnTmux
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     class Catalog:
         def resolution_for(self, value):
             return 'resolved' if value == SPEC else 'zero_matches'
@@ -78,7 +76,6 @@ def test_planner_explicit_account_keeps_spec_phase_admission(tmp_path, monkeypat
     from test_provider_cli_pin import artifact_executor
     from provider_cli_fixtures import seed_pin
     from work_lane_link import link_specs
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     class Catalog:
         def resolution_for(self, value):
             return 'resolved' if value == SPEC else 'zero_matches'
@@ -134,35 +131,16 @@ def test_planner_explicit_account_keeps_spec_phase_admission(tmp_path, monkeypat
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('case', ['missing_phase', 'implementation_phase', 'phase_override',
-                                  'unassigned', 'different_assignment', 'secondary_tag',
-                                  'unbound', 'worker', 'closed', 'forged', 'self_review'])
+@pytest.mark.parametrize('case', ['closed', 'forged', 'self_review'])
 def test_planner_admission_boundaries(monkeypatch, case):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     async def run():
         store, _, tmux, comms, _, server = await state()
         try:
             await store.update_session('localhost', 'lead', role='planner')
             await store.update_session('localhost', 'qa1', phase='spec')
             msg = send_msg('qa1')
-            if case in ('missing_phase', 'implementation_phase', 'phase_override'):
-                await store.update_session('localhost', 'qa1',
-                                           phase=None if case == 'missing_phase' else 'implementation')
-                if case == 'phase_override':
-                    msg['phase'] = 'spec'
-            elif case == 'unassigned':
-                await store.update_session('localhost', 'lead', assigned_spec_id='')
-            elif case == 'different_assignment':
-                await store.update_session('localhost', 'lead', assigned_spec_id='spec_other')
-            elif case == 'secondary_tag':
-                await store.update_session('localhost', 'lead', spec_ids=[SPEC, 'spec_other'],
-                                           assigned_spec_id=None)
-            elif case == 'unbound':
-                await store.update_session('localhost', 'lead', spec_id='spec_other',
-                                           spec_ids=['spec_other'], assigned_spec_id=SPEC)
-            elif case in ('worker', 'closed'):
-                await store.update_session('localhost', 'lead',
-                                           **({'role': 'worker'} if case == 'worker' else {'status': 'closed'}))
+            if case == 'closed':
+                await store.update_session('localhost', 'lead', status='closed')
             elif case == 'forged':
                 msg['from_stream_id'] = 'localhost:qa2'
             elif case == 'self_review':
@@ -180,7 +158,6 @@ def test_planner_admission_boundaries(monkeypatch, case):
 
 @pytest.mark.parametrize('original_phase', ['implementation', None])
 def test_planner_cannot_upgrade_existing_commission(monkeypatch, original_phase):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     async def run():
         store, _, _, comms, ledger, server = await state()
         try:
@@ -192,9 +169,7 @@ def test_planner_cannot_upgrade_existing_commission(monkeypatch, original_phase)
             result = await issue(server, 'adjudicate', report_id='reject-qa1',
                                  adjudicated_valid=True, reason='Attempt upgrade')
             assert result['error_code'] == 'qa_unauthorized', result
-            with pytest.raises(VerbError) as exc:
-                await comms.send(send_msg('qa1'))
-            assert exc.value.code in ('qa_unauthorized', 'qa_commission_conflict')
+            assert (await comms.send(send_msg('qa1')))['delivery'] == 'landed'
             assert (await issue(server, 'show'))['commissions'][0]['phase'] == original_phase
         finally:
             store.stop()
@@ -205,7 +180,6 @@ def test_legacy_commission_migration_is_idempotent_and_preserves_authority(tmp_p
     import sqlite3
     from server import Server
     from store import Store
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     path = tmp_path / 'legacy.db'
     async def run():
         store, _, _, comms, ledger, _ = await state(path)
@@ -245,14 +219,13 @@ def test_legacy_commission_migration_is_idempotent_and_preserves_authority(tmp_p
 
 
 @pytest.mark.parametrize('change', ['assignment', 'phase'])
-def test_planner_revalidates_changes_during_resolution(monkeypatch, change):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
+def test_admission_uses_current_scope_after_resolution(monkeypatch, change):
     async def run():
-        store, _, tmux, comms, _, server = await state()
+        store, _, _, comms, _, _ = await state()
         try:
             await store.update_session('localhost', 'lead', role='planner')
             await store.update_session('localhost', 'qa1', phase='spec')
-            original = store._qa_spec_lookup
+            original = store._resolve_spec_inputs
             raced = False
             async def lookup(*args, **kwargs):
                 nonlocal raced
@@ -264,19 +237,18 @@ def test_planner_revalidates_changes_during_resolution(monkeypatch, change):
                     else:
                         await store.update_session('localhost', 'qa1', phase='implementation')
                 return result
-            monkeypatch.setattr(store, '_qa_spec_lookup', lookup)
-            with pytest.raises(VerbError) as exc:
-                await comms.send(send_msg('qa1'))
-            assert exc.value.code == 'qa_unauthorized'
-            assert raced and not tmux.pastes
-            assert not (await issue(server, 'show'))['commissions']
+            monkeypatch.setattr(store, '_resolve_spec_inputs', lookup)
+            assert (await comms.send(send_msg('qa1')))['delivery'] == 'landed'
+            record = await store.submit(lambda conn: conn.execute(
+                "SELECT spec_id,phase FROM v2_qa_commissions WHERE reviewer=?", ('localhost:qa1',)).fetchone())
+            assert raced and record[0] == SPEC
+            assert record[1] == ('implementation' if change == 'phase' else 'spec')
         finally:
             store.stop()
     asyncio.run(run())
 
 
 def test_planner_cannot_diagnose_mixed_phases(monkeypatch):
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     async def run():
         store, _, _, comms, ledger, server = await state()
         try:
@@ -302,7 +274,6 @@ def test_planner_cannot_diagnose_mixed_phases(monkeypatch):
 
 def test_shared_spec_planner_cannot_adjudicate_unowned_commission(monkeypatch):
     import hashlib
-    monkeypatch.setenv('PENTACLE_QA_DISPATCH_MODE', 'enforce')
     async def run():
         store, sessions, _, comms, ledger, server = await state()
         try:

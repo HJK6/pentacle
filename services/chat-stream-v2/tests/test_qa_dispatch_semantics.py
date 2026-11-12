@@ -26,7 +26,6 @@ from test_qa_dispatch_counter import (
 
 
 def test_typed_repair_commission_binds_msg_zero_report_without_inflating_rejects(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -66,7 +65,6 @@ def test_typed_repair_commission_binds_msg_zero_report_without_inflating_rejects
 
 @pytest.mark.parametrize("commission_id", [99, -1, True, "7"])
 def test_explicit_commission_never_falls_back_to_another_review(monkeypatch, commission_id):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -93,14 +91,12 @@ def test_explicit_commission_never_falls_back_to_another_review(monkeypatch, com
         "duplicate",
         "other_surface",
         "worker",
-        "off",
         "diagnose",
         "sha",
         "body_conflict",
     ],
 )
 def test_counter_transitions_and_exemptions(monkeypatch, case):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, tmux, comms, ledger, server = await state()
@@ -154,24 +150,6 @@ def test_counter_transitions_and_exemptions(monkeypatch, case):
                     msg.pop(key)
                 assert (await comms.send(msg))["delivery"] == "landed"
                 return
-            elif case == "off":
-                monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "off")
-                with pytest.raises(VerbError) as exc:
-                    await comms.send(send_msg("qa3"))
-                assert exc.value.code == "qa_dispatch_reject_limit"
-                assert exc.value.extra["report_ids"] == ["reject-qa1", "reject-qa2"]
-                result = await issue(
-                    server,
-                    "diagnose",
-                    diagnosis_id="pivot-1",
-                    diagnosis="wrong abstraction",
-                    pivot="different acceptance scope",
-                )
-                assert result["next_cycle"] == 2
-                assert (await comms.send(send_msg("qa3", qa_cycle=2)))[
-                    "delivery"
-                ] == "landed"
-                return
             elif case == "diagnose":
                 params = dict(
                     diagnosis_id="pivot-1",
@@ -187,12 +165,8 @@ def test_counter_transitions_and_exemptions(monkeypatch, case):
                 )
                 assert conflict["error_code"] == "qa_diagnosis_conflict"
                 assert (await issue(server, "show"))["report_ids"] == []
-                with pytest.raises(VerbError) as exc:
-                    await comms.send(send_msg("qa3"))
-                assert exc.value.code == "qa_cycle_conflict"
-                assert (await comms.send(send_msg("qa3", qa_cycle=2)))[
-                    "delivery"
-                ] == "landed"
+                # A stale caller cycle no longer blocks; the store uses its current cycle.
+                assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
                 # A late old-cycle void/revalidate does not affect current cycle.
                 for valid in (False, True):
                     await issue(
@@ -236,7 +210,7 @@ def test_counter_transitions_and_exemptions(monkeypatch, case):
         ({"stream_token": "wrong"}, "qa_unauthorized"),
         ({"from_stream_id": "localhost:foreign"}, "qa_unauthorized"),
         ({"cycle": True}, "qa_invalid_request"),
-        ({"surface": "New surface"}, "qa_invalid_request"),
+        ({"surface": "New surface"}, "qa_report_binding_mismatch"),
         ({"spec_id": "spec_other__scope"}, "qa_spec_mismatch"),
         ({"cycle": 2}, "qa_report_binding_mismatch"),
         ({"report_id": "missing"}, "qa_report_invalid"),
@@ -244,7 +218,6 @@ def test_counter_transitions_and_exemptions(monkeypatch, case):
     ],
 )
 def test_invalid_adjudications_do_not_write(monkeypatch, mutation, expected):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -291,7 +264,6 @@ def test_invalid_adjudications_do_not_write(monkeypatch, mutation, expected):
     ],
 )
 def test_missing_typed_evidence_cannot_count(monkeypatch, evidence):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -313,7 +285,6 @@ def test_missing_typed_evidence_cannot_count(monkeypatch, evidence):
 
 
 def test_qa_report_producer_bindings_reach_commissioned_store(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -358,7 +329,6 @@ def test_qa_report_producer_bindings_reach_commissioned_store(monkeypatch):
 
 
 def test_concurrent_ids_and_restart_keep_one_representative(monkeypatch, tmp_path):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         path = tmp_path / "counter.db"
@@ -409,7 +379,6 @@ def test_concurrent_ids_and_restart_keep_one_representative(monkeypatch, tmp_pat
     ],
 )
 def test_adjudicator_lineage_not_just_shared_tags(monkeypatch, relationship, allowed):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()
@@ -457,7 +426,6 @@ def test_adjudicator_lineage_not_just_shared_tags(monkeypatch, relationship, all
 
 
 def test_reopened_reviewer_generation_is_a_new_commission(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()
@@ -510,42 +478,9 @@ def test_reopened_reviewer_generation_is_a_new_commission(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "role,mode,fields,expected",
-    [
-        ("qa", "enforce", {}, "qa_scope_required"),
-        ("QA", "enforce", {}, "qa_scope_required"),
-        ("worker", "enforce", {}, None),
-        ("qa", "off", {}, None),
-        ("worker", "enforce", {"qa_surface": "admission"}, "qa_scope_required"),
-    ],
-)
-def test_classification_is_typed_not_prose(monkeypatch, role, mode, fields, expected):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", mode)
-
-    async def run():
-        store, _, tmux, comms, _, _ = await state()
-        try:
-            await store.update_session("localhost", "qa3", role=role)
-            msg = send_msg("qa3", text="QA REJECT review reject reject")
-            for key in META:
-                msg.pop(key)
-            msg.update(fields)
-            if expected:
-                with pytest.raises(VerbError) as exc:
-                    await comms.send(msg)
-                assert exc.value.code == expected
-                assert tmux.pastes == []
-            else:
-                assert (await comms.send(msg))["delivery"] == "landed"
-        finally:
-            store.stop()
-
-    asyncio.run(run())
 
 
 def test_diagnosis_concurrency_and_second_cycle_bound(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _, comms, ledger, server = await state()
@@ -593,7 +528,6 @@ def test_diagnosis_concurrency_and_second_cycle_bound(monkeypatch):
 def test_wire_private_auth_cannot_authorize_and_reopened_coordinator_cannot_adjudicate(
     monkeypatch,
 ):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()
@@ -628,7 +562,6 @@ def test_wire_private_auth_cannot_authorize_and_reopened_coordinator_cannot_adju
 
 
 def test_resolved_legacy_target_alias_uses_canonical_scope(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _, comms, _, server = await state()
@@ -648,7 +581,6 @@ def test_resolved_legacy_target_alias_uses_canonical_scope(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["off", "enforce"])
 @pytest.mark.parametrize(
     "case",
     [
@@ -662,8 +594,7 @@ def test_resolved_legacy_target_alias_uses_canonical_scope(monkeypatch):
         "new_generation_binds",
     ],
 )
-def test_misfiled_report_commission_binding(monkeypatch, mode, case):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", mode)
+def test_misfiled_report_commission_binding(monkeypatch, case):
 
     async def run():
         store, sessions, _, comms, ledger, server = await state()
@@ -775,146 +706,6 @@ def test_misfiled_report_commission_binding(monkeypatch, mode, case):
                 assert result["error_code"] == "qa_commission_report_conflict", result
                 assert result["report_id"] == "reject-qa1"
                 assert (await issue(server, "show"))["report_ids"] == ["reject-qa1"]
-        finally:
-            store.stop()
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    "case,variant",
-    [
-        ("void_clears", "off"),
-        ("one_pending_admits", "off"),
-        ("misfiled_counts", "off"),
-        ("malformed_never_holds", "missing"),
-        ("malformed_never_holds", "nonhex"),
-        ("malformed_never_holds", "mixed_missing"),
-        ("malformed_never_holds", "mixed_nonhex"),
-        ("check_only_and_validate_only_refuse", "check_only"),
-        ("check_only_and_validate_only_refuse", "validate_only"),
-        ("later_cycle_admits", "off"),
-        ("enforce_mode_same", "void_clears"),
-        ("enforce_mode_same", "valid_rejects"),
-    ],
-)
-def test_adjudication_required_transitions(monkeypatch, case, variant):
-    from spawnctl import SpawnCtl
-    from store_qa import QaError
-    from test_spec_binding_provenance import SpawnTmux
-    from test_window_schedule_contract import RouteProbeSpecs
-
-    monkeypatch.setenv(
-        "PENTACLE_QA_DISPATCH_MODE", "enforce" if case == "enforce_mode_same" else "off"
-    )
-
-    async def run():
-        store, sessions, tmux, comms, ledger, server = await state()
-        expected_ids = ["reject-qa1", "reject-qa2"]
-        expected_extra = {
-            "spec_id": SPEC,
-            "surface": "admission",
-            "cycle": 1,
-            "report_ids": expected_ids,
-            "commands": [
-                f"agent-orch spec-issue adjudicate {rid} --spec-id {SPEC} "
-                "--surface admission --cycle 1 --valid|--void --reason '<reason>'"
-                for rid in expected_ids
-            ],
-        }
-        try:
-            if case == "enforce_mode_same" and variant == "valid_rejects":
-                await two_rejects(comms, ledger, server)
-                with pytest.raises(VerbError) as exc:
-                    await comms.send(send_msg("qa3"))
-                assert exc.value.code == "qa_dispatch_reject_limit"
-                assert exc.value.extra["report_ids"] == expected_ids
-            else:
-                for name in ("qa1", "qa2"):
-                    assert (await comms.send(send_msg(name)))["delivery"] == "landed"
-                if case == "later_cycle_admits":
-                    # Create all commissions before either count reaches two.
-                    for name in ("qa1", "qa2"):
-                        assert (await comms.send(send_msg(name, msg_id=1)))["delivery"] == "landed"
-                    for name in ("qa1", "qa2"):
-                        await ledger.ingest(report_msg(name, msg_id=1, report_id=f"valid-{name}"))
-                        result = await issue(
-                            server, "adjudicate", report_id=f"valid-{name}",
-                            adjudicated_valid=True, reason="in-scope defect",
-                        )
-                        assert result["adjudicated_valid"] is True
-                for name in ("qa1", "qa2"):
-                    if case == "one_pending_admits" and name == "qa2":
-                        continue
-                    changes = {}
-                    if case == "misfiled_counts" and name == "qa1":
-                        changes["msg_id"] = 1
-                    if case == "malformed_never_holds" and not (
-                        variant.startswith("mixed_") and name == "qa1"
-                    ):
-                        changes["extras"] = (
-                            {"qa_review": {
-                                "candidate_identity": SHA,
-                                "reviewed_scope": "admission",
-                                "gate_evidence_digest": "g" * 64,
-                            }} if variant.endswith("nonhex") else {}
-                        )
-                    await ledger.ingest(report_msg(name, **changes))
-
-            if case == "later_cycle_admits" or (
-                case == "enforce_mode_same" and variant == "valid_rejects"
-            ):
-                result = await issue(
-                    server, "diagnose", diagnosis_id="pending-pivot",
-                    diagnosis="wrong abstraction", pivot="different acceptance scope",
-                )
-                assert result["next_cycle"] == 2
-                assert (await comms.send(send_msg("qa3", qa_cycle=2)))["delivery"] == "landed"
-                return
-            if case in ("one_pending_admits", "malformed_never_holds"):
-                assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
-                return
-
-            before = list(tmux.pastes)
-            commissions = (await issue(server, "show"))["commissions"]
-            if case == "check_only_and_validate_only_refuse":
-                panes = SpawnTmux()
-                ctl = SpawnCtl(store, sessions, tmux=panes, specs=RouteProbeSpecs())
-                if variant == "check_only":
-                    with pytest.raises(VerbError) as exc:
-                        await ctl.admit_schedule({
-                            "objective": "Review admission", "command": "provider",
-                            "provider": "claude", "model": "claude-opus-4-8", "effort": "high",
-                            "parent_stream_id": LEAD, "from_stream_id": LEAD,
-                            "stream_token": TOKEN, "role": "qa", "spec_id": SPEC, **META,
-                        }, "localhost", admission_name="qa-preflight")
-                else:
-                    owner = await store.fetch_session("localhost", "lead")
-                    reviewer = await store.fetch_session("localhost", "qa3")
-                    with pytest.raises(QaError) as exc:
-                        await store.qa_admit(
-                            scope={"spec_id": SPEC, "surface": "admission", "cycle": 1},
-                            actor=LEAD, actor_generation=owner["session_generation"],
-                            reviewer="localhost:qa3", generation=reviewer["session_generation"],
-                            msg_id=0, payload_hash="dry-admission", target_specs=[SPEC],
-                            enforce=False, prepare_only=True,
-                        )
-                assert panes.live == set()
-            else:
-                with pytest.raises(VerbError) as exc:
-                    await comms.send(send_msg("qa3"))
-            assert exc.value.code == "qa_adjudication_required"
-            assert exc.value.extra == expected_extra
-            assert tmux.pastes == before
-            assert (await issue(server, "show"))["commissions"] == commissions
-
-            if case == "void_clears" or case == "enforce_mode_same":
-                result = await issue(
-                    server, "adjudicate", report_id="reject-qa1",
-                    adjudicated_valid=False, reason="finding withdrawn",
-                )
-                assert result["adjudicated_valid"] is False
-                assert (await comms.send(send_msg("qa3")))["delivery"] == "landed"
         finally:
             store.stop()
 

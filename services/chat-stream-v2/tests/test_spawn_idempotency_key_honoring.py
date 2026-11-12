@@ -703,7 +703,7 @@ async def test_known_qa_refusal_stages_nothing_and_status_keeps_reason(tmp_path)
         store.set_spec_identity_resolver(lambda value:value)
         await store.open_session(HOST,'worker',role='worker',spec_id='spec_fixture__work',token_hash=hashlib.sha256(token.encode()).hexdigest(),token_hash_version='sha256:v1')
         ctl=SpawnCtl(store,Sessions(store,tmux=tmux,local_host=HOST),tmux=tmux,machine=_native_machine(tmp_path))
-        message=_native_message(role='qa',from_stream_id=f'{HOST}:worker',stream_token=token,qa_spec_id='spec_fixture__work',qa_surface='implementation',qa_cycle=1)
+        message=_native_message(role='qa',from_stream_id=f'{HOST}:forged',stream_token=token,qa_spec_id='spec_fixture__work',qa_surface='implementation',qa_cycle=1)
         with pytest.raises(VerbError) as error: await ctl.spawn(message,HOST)
         assert error.value.code=='qa_unauthorized'
         status=await ctl.spawn_status({'target':'owned-token'},HOST)

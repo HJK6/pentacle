@@ -111,7 +111,6 @@ async def _diagnose(server, **fields):
 
 
 def test_real_topology_fd_successor_diagnoses_all_three(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, server = await topology()
@@ -129,7 +128,6 @@ def test_real_topology_fd_successor_diagnoses_all_three(monkeypatch):
 
 
 def test_one_edge_verified_successor_of_ancestor_diagnoses(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, server = await topology()
@@ -159,7 +157,6 @@ def test_one_edge_verified_successor_of_ancestor_diagnoses(monkeypatch):
     {"mid_handoff_from": "localhost:fdfailed"},  # intermediate pointer mismatch
 ])
 def test_unproven_custody_is_refused(monkeypatch, variant):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, server = await topology(**variant)
@@ -174,7 +171,6 @@ def test_unproven_custody_is_refused(monkeypatch, variant):
 
 
 def test_stale_live_actor_generation_is_refused(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()
@@ -187,7 +183,6 @@ def test_stale_live_actor_generation_is_refused(monkeypatch):
 
 
 def test_recycled_coordinator_generation_is_refused(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()
@@ -204,7 +199,6 @@ def test_recycled_coordinator_generation_is_refused(monkeypatch):
 
 
 def test_partial_ownership_refuses_diagnosis(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, server = await topology()
@@ -221,7 +215,6 @@ def test_partial_ownership_refuses_diagnosis(monkeypatch):
 
 @pytest.mark.parametrize("relation", ["sibling", "spec_only"])
 def test_unrelated_actor_is_refused(monkeypatch, relation):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, sessions, server = await topology()
@@ -240,7 +233,6 @@ def test_unrelated_actor_is_refused(monkeypatch, relation):
 
 
 def test_cyclic_chain_with_proven_edges_is_refused(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()
@@ -259,7 +251,6 @@ def test_cyclic_chain_with_proven_edges_is_refused(monkeypatch):
 
 
 def test_broken_chain_is_refused(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()
@@ -273,7 +264,6 @@ def test_broken_chain_is_refused(monkeypatch):
 
 
 def test_closed_actor_is_refused_by_existing_gate(monkeypatch):
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, server = await topology()
@@ -290,7 +280,6 @@ def test_closed_actor_is_refused_by_existing_gate(monkeypatch):
 def test_duplicate_target_seat_is_schema_refused(monkeypatch):
     """One seat row per target, so an exact P->S edge cannot be ambiguous."""
     import sqlite3
-    monkeypatch.setenv("PENTACLE_QA_DISPATCH_MODE", "enforce")
 
     async def run():
         store, _, _ = await topology()

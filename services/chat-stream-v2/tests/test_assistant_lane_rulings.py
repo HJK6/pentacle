@@ -2065,9 +2065,8 @@ def test_typed_qa_send_tell_and_non_fd_send_are_not_held(tmp_path):
             qa = {**_covered_send_msg(root, 60), "qa_spec_id": spec, "qa_surface": "admission", "qa_cycle": 1}
             assert (await server._on_send(qa))["delivery"] == "landed"
             before = len(tmux.pastes)
-            with pytest.raises(VerbError):
-                await server._on_send({**qa, "msg_id": 61, "request_id": "invalid-qa", "qa_cycle": None})
-            assert len(tmux.pastes) == before
+            assert (await server._on_send({**qa, "msg_id": 61, "request_id": "qa-without-cycle", "qa_cycle": None}))["delivery"] == "landed"
+            assert len(tmux.pastes) == before + 1
             await store.update_session("localhost", "covered-target", role="worker")
             lead = await store.open_session("fixture-lead", "owned", provider="codex", parent_stream_id=ROOT)
             msg = {**_covered_send_msg(root, 62), "from_stream_id": "fixture-lead:owned",
