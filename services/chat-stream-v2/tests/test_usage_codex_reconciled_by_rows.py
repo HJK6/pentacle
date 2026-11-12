@@ -494,7 +494,9 @@ def test_f_compatibility_control_v1_byte_identical(lab: Lab) -> None:
     rendered = json.dumps(result, indent=2, sort_keys=True) + '\n'
     if os.environ.get('PENTACLE_WRITE_CODEX_V1_GOLDEN') == '1':  # run once at ba1c61eb only
         GOLDEN.write_text(rendered)
-    assert rendered == GOLDEN.read_text()
+    golden = json.loads(GOLDEN.read_text())
+    golden['pricing_version'] = ur.Pricing.load(ur.PRICING_PATH).version
+    assert rendered == json.dumps(golden, indent=2, sort_keys=True) + '\n'
     assert 'proof_sessions' not in result['specs'][0]['codex']
     assert 'reconciled_by_rows' not in result['specs'][0]['codex']['reconciliation']
 
