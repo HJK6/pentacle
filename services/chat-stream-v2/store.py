@@ -74,7 +74,7 @@ from store_qa import QaStoreMixin, SpecInputsUnavailable, spec_binding_source
 from store_exchange import ExchangeStoreMixin
 
 from store_work_lanes import _WorkLanesStoreMixin, ensure_work_lane_schema
-from store_work_index import WorkIndexStoreMixin, WorkObservationDecodeCache
+from store_work_index import WorkIndexStoreMixin
 from store_work_lane_episodes import WorkLaneEpisodesStoreMixin
 from store_screen_lease import SCREEN_LEASE_DDL, ScreenLeaseStoreMixin, release_holder_conn
 from store_external_work import EXTERNAL_WORK_DDL, _ExternalWorkStoreMixin
@@ -1751,9 +1751,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             database = self._path if self._path in (':memory:', '') else Path(self._path).absolute().as_uri()
             conn = sqlite3.connect(database, uri=True, factory=HistoryConnection)
             conn.row_factory = sqlite3.Row
-            # Fresh connection gets fresh decode memos; they are bound to the
-            # connection lifetime, so a stop()/start() restart drops them.
-            conn.work_decode_cache = WorkObservationDecodeCache()
+            # A fresh connection gets a fresh delivery parse memo, bound to the
+            # connection lifetime, so a stop()/start() restart drops it.
             from tell_proof import TellDeliveryParseCache
             conn.delivery_parse_cache = TellDeliveryParseCache()
             # A provisioned empty file or auxiliary-only database is still a

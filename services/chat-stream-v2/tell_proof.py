@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+from bisect import bisect_right
 
 from submission_events import EventProof, provider_text_digest
 from retention import history_query
@@ -39,28 +40,38 @@ class TellDeliveryParseCache:
     `ProjectionDeliveries` rebuilds per request (and per write on the
     connection), re-decoding every delivery reply; that strict parse is the
     remaining store-thread cost after the round-1 instance reuse. Keyed
-    tell_id -> (reply_text, parsed): a changed reply (text differs) or a new
-    tell_id misses and reparses with the identical strict hooks, and tell_ids
-    absent from a completed scan are pruned. A failed strict parse is never
-    stored, so it keeps raising exactly as the uncached path does. Parsed
-    payloads are consumed read-only by the delivery/origin readers, so the
-    pristine parse is shared without a copy. Store-owned connection state,
-    never touched from the asyncio thread; a fresh connection gets a fresh
-    cache.
+    tell_id -> [reply_text, parsed, text_digest]: a changed reply (text
+    differs) or a new tell_id misses and reparses with the identical strict
+    hooks (dropping the digest with it), and tell_ids absent from a completed
+    scan are pruned. A failed strict parse is never stored, so it keeps raising
+    exactly as the uncached path does. Parsed payloads are consumed read-only by
+    the delivery/origin readers, so the pristine parse is shared without a
+    copy. `text_digest` is the per-ROW `provider_text_digest(delivery.text)`,
+    filled on first use after the row passed validation and valid only for the
+    reply it was computed from; it is distinct from the per-CALL input digests
+    `retained_proof` computes. Store-owned connection state, never touched from
+    the asyncio thread; a fresh connection gets a fresh cache.
     """
     __slots__ = ("_entries",)
 
     def __init__(self) -> None:
-        self._entries: dict[str, tuple[str, dict]] = {}
+        self._entries: dict[str, list] = {}
 
     def decode(self, tell_id: str, reply_text: str):
         entry = self._entries.get(tell_id)
         if entry is None or entry[0] != reply_text:
             parsed = json.loads(reply_text, object_pairs_hook=_unique_object,
                                 parse_constant=_nonfinite_constant)
-            entry = (reply_text, parsed)
+            entry = [reply_text, parsed, None]
             self._entries[tell_id] = entry
         return entry[1]
+
+    def text_digest(self, tell_id: str, text):
+        """Row digest for the reply `decode` last returned for `tell_id`."""
+        entry = self._entries[tell_id]
+        if entry[2] is None:
+            entry[2] = provider_text_digest(text)
+        return entry[2]
 
     def prune(self, live_tell_ids) -> None:
         # A completed scan leaves `_entries` a superset of the live ids, so an
@@ -70,17 +81,185 @@ class TellDeliveryParseCache:
             self._entries = {tell: entry for tell, entry in self._entries.items() if tell in live}
 
 
+# Reuse bounds: a stream larger than these is read per call exactly as before.
+_RECEIPT_REUSE_MAX_ROWS = 2048
+_TAIL_REUSE_MAX_ROWS = 4096
+_TAIL_REUSE_MAX_BYTES = 8 * 1024 * 1024
+
+_UNPARSED, _UNPARSEABLE = object(), object()
+
+
+class _TailEvent:
+    """One retained tail row; the parse is memoised for the life of a window.
+
+    `retained_proof` only reads the parsed event, so sharing it between
+    candidates is safe; an unparseable row stays unparseable (the failure is
+    memoised and re-raised as the ValueError the loop already skips).
+    """
+    __slots__ = ("event_id", "event_json", "_event")
+
+    def __init__(self, event_id, event_json):
+        self.event_id = event_id
+        self.event_json = event_json
+        self._event = _UNPARSED
+
+    def event(self):
+        cached = self._event
+        if cached is _UNPARSEABLE:
+            raise ValueError("unparseable tail event")
+        if cached is _UNPARSED:
+            try:
+                cached = json.loads(self.event_json)
+            except (TypeError, ValueError):
+                self._event = _UNPARSEABLE
+                raise
+            self._event = cached
+        return cached
+
+
+class _TailWindow:
+    """Every tail event of one (stream, lifecycle) after `floor`, ascending."""
+    __slots__ = ("floor", "events", "ids", "size")
+
+    def __init__(self, floor):
+        self.floor = floor
+        self.events = []
+        self.ids = []
+        self.size = 0
+
+
+class ProjectionReuse:
+    """Per-generation memo of the reads `input_origin` repeats for every input.
+
+    Owned by one `ProjectionDeliveries`, so it lives for one savepoint-held read
+    or one paged history request. It is keyed by stream and valid only while
+    `conn.total_changes` is unchanged since it was filled: the Store is one
+    thread on one connection and the daemon's only writer, so every mutation
+    advances that counter (a rolled-back write advances it too, which only
+    invalidates early). A write from any other connection would not advance it;
+    reuse is never offered across such a writer. Any uncertainty -- a value the
+    SQL predicate would coerce rather than compare, an oversized stream, a
+    failing read -- disables reuse for that stream, and the original SQL then
+    decides both the answer and any exception.
+    """
+
+    def __init__(self):
+        self._changes = None
+        self._receipts = {}
+        self._tail = {}
+
+    def _fresh(self, conn):
+        changes = conn.total_changes
+        if changes != self._changes:
+            self._receipts = {}
+            self._tail = {}
+            self._changes = changes
+
+    def receipt_rows(self, conn, target, text):
+        """`send_proofs`' candidate rows for `text` (at most 513, rowid order), or None."""
+        if not _lookup_string(target) or not _lookup_string(text):
+            return None
+        self._fresh(conn)
+        if target not in self._receipts:
+            self._receipts[target] = self._load_receipts(conn, target)
+        loaded = self._receipts[target]
+        if loaded is None:
+            return None
+        return [row for row, wire in loaded if wire in text][:513]
+
+    def tail_after(self, conn, target, birth, watermark):
+        """The `_TailEvent`s with event_id > `watermark`, ascending, or None.
+
+        One window per (stream, lifecycle) holds every event after the lowest
+        watermark asked for so far; a candidate that needs earlier events reads
+        only the gap below the window and lowers its floor, so no row is read
+        twice in a generation.
+        """
+        if not _lookup_string(target) or not _lookup_string(birth):
+            return None
+        self._fresh(conn)
+        key = (target, birth)
+        window = self._tail.get(key, _UNPARSED)
+        if window is None:
+            return None
+        if window is _UNPARSED or watermark < window.floor:
+            # The byte bound spans every window this generation holds.
+            held = sum(other.size for name, other in self._tail.items() if other is not None and name != key)
+            if window is _UNPARSED:
+                window = self._tail[key] = self._read_tail(conn, key, _TailWindow(watermark), None, held)
+            else:
+                window = self._tail[key] = self._read_tail(conn, key, window, watermark, held)
+        if window is None:
+            return None
+        return window.events[bisect_right(window.ids, watermark):]
+
+    @staticmethod
+    def _read_tail(conn, key, window, lower, held):
+        """Extend `window` down to `lower` (or fill a new one); None past the bounds."""
+        target, birth = key
+        floor = window.floor if lower is None else lower
+        sql = ("SELECT event_id,event_json FROM session_event_tail "
+               "WHERE stream_id=? AND session_created_at=? AND event_id>?")
+        params = [target, birth, floor]
+        if lower is not None:
+            sql += " AND event_id<=?"
+            params.append(window.floor)
+        try:
+            rows = conn.execute(sql + " ORDER BY event_id LIMIT ?",
+                                (*params, _TAIL_REUSE_MAX_ROWS + 1 - len(window.events))).fetchall()
+        except sqlite3.Error:
+            return None
+        size = window.size + sum(len(row["event_json"] or "") for row in rows)
+        if len(window.events) + len(rows) > _TAIL_REUSE_MAX_ROWS or held + size > _TAIL_REUSE_MAX_BYTES:
+            return None
+        window.events = [_TailEvent(row["event_id"], row["event_json"]) for row in rows] + window.events
+        window.ids = [event.event_id for event in window.events]
+        window.size = size
+        window.floor = floor
+        return window
+
+    @staticmethod
+    def _load_receipts(conn, target):
+        try:
+            rows = history_query(conn,
+                "SELECT rowid,*,json_extract(meta_json,'$._input_proof.wire_text') AS sql_wire "
+                "FROM v2_send_receipts WHERE to_stream_id=? "
+                "AND json_type(meta_json,'$._input_proof')='object' ORDER BY rowid LIMIT ?",
+                (target, _RECEIPT_REUSE_MAX_ROWS + 1)).fetchall()
+        except Exception:
+            return None
+        if len(rows) > _RECEIPT_REUSE_MAX_ROWS:
+            return None
+        loaded = []
+        for row in rows:
+            wire = row["sql_wire"]
+            if wire is None:
+                continue  # instr(text, NULL) is NULL, never a candidate
+            if not _lookup_string(wire):
+                return None  # SQLite would coerce/compare this, not Python
+            # The SQL-extracted lookup wire stays private to this cache; the
+            # row handed back to send_proofs must match the original
+            # `SELECT rowid,*` schema byte-for-byte (no `sql_wire` column), so
+            # the named send_proofs output is identical to the non-reuse path.
+            base = {k: row[k] for k in row.keys() if k != "sql_wire"}
+            loaded.append((base, wire))
+        return loaded
+
+
 class ProjectionDeliveries:
     """Lazy delivery snapshot owned and passed by one savepoint-held read.
 
     Any parser/equality uncertainty disables reuse for the rest of that read;
     the original SQL and parsing then determine both answers and exceptions.
+    It also carries the read's `ProjectionReuse` (send receipts), dropped with
+    the snapshot whenever the caller rebuilds it.
     """
 
     def __init__(self):
         self._by_target = None
         self._by_input = None
         self._legacy = False
+        self.reuse = ProjectionReuse()
 
     def rows_for(self, conn, target, text):
         if not _lookup_string(target) or not _lookup_string(text):
@@ -119,7 +298,9 @@ class ProjectionDeliveries:
                         if type(extracted) is not type(value) or extracted != value:
                             raise ValueError("SQLite/Python delivery lookup disagreement")
                     item = {"tell_id": row["tell_id"], "payload": payload, "delivery": delivery,
-                            "text_digest": provider_text_digest(delivery.get("text"))}
+                            "text_digest": (cache.text_digest(row["tell_id"], delivery.get("text"))
+                                            if cache is not None
+                                            else provider_text_digest(delivery.get("text")))}
                     by_target.setdefault(delivery.get("to_stream_id"), []).append(item)
                     by_input.setdefault((delivery.get("to_stream_id"), delivery.get("text")), []).append(payload)
             except (sqlite3.Error, TypeError, ValueError, AttributeError, RecursionError):
@@ -167,6 +348,19 @@ def finalize_prepared(conn, original, result):
     return result
 
 
+def _tail_events(conn, target, birth, watermark, reuse):
+    """Tail events after `watermark`: the request's shared window, else its own read."""
+    window = reuse.tail_after(conn, target, birth, watermark) if reuse is not None else None
+    if window is not None:
+        yield from window
+        return
+    for row in conn.execute(
+            "SELECT event_id,event_json FROM session_event_tail "
+            "WHERE stream_id=? AND session_created_at=? AND event_id>? ORDER BY event_id",
+            (target, birth, watermark)):
+        yield _TailEvent(row["event_id"], row["event_json"])
+
+
 def retained_proof(conn, payload, *, deliveries=None):
     """Run inside the promotion transaction; never infer missing original anchors."""
     delivery = payload.get("delivery") or {}
@@ -189,13 +383,26 @@ def retained_proof(conn, payload, *, deliveries=None):
     if current is None or (current["created_at"], current["generation"]) != (birth, generation):
         return None
     matches = []
+    # Per-CALL input digests: each distinct representation of `text` is hashed at
+    # most once, and only if a comparison below actually needs it.
+    memo = {}
+
+    def raw_input_digest():
+        if "raw" not in memo:
+            memo["raw"] = provider_text_digest(text)
+        return memo["raw"]
+
+    def accepted_input_digests():
+        if "stripped" not in memo:
+            stripped = strip_peer_delivery(text)
+            memo["stripped"] = raw_input_digest() if stripped == text else provider_text_digest(stripped)
+        return {raw_input_digest(), memo["stripped"]}
+
     # The retained history may be older than the current 500-event live tail.
-    for row in conn.execute(
-            "SELECT event_id,event_json FROM session_event_tail "
-            "WHERE stream_id=? AND session_created_at=? AND event_id>? ORDER BY event_id",
-            (target, birth, watermark)):
+    for tail in _tail_events(conn, target, birth, watermark,
+                             deliveries.reuse if deliveries is not None else None):
         try:
-            event = json.loads(row["event_json"])
+            event = tail.event()
             candidate_wire = delivery_wire(event)
             if (delivery.get("proof_event_id") is None and event.get("kind") in {"USER", "TELL"}
                     and isinstance(candidate_wire, str) and candidate_wire != text and text in candidate_wire
@@ -205,11 +412,10 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and (event.get("kind") == "USER" or (event.get("kind") == "TELL"
                          and isinstance((event.get("raw") or {}).get("peer_wire_text"), str)))
                     and delivery_wire(event) == text
-                    and ("provider_text_digest" not in event or event["provider_text_digest"] in {
-                        provider_text_digest(text), provider_text_digest(strip_peer_delivery(text))})
+                    and ("provider_text_digest" not in event or event["provider_text_digest"] in accepted_input_digests())
                     and not operator_dispatch(conn, target, text, generation)
-                    and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == row["event_id"])):
-                matches.append((row["event_id"], event.get("timestamp")))
+                    and (delivery.get("proof_event_id") is None or delivery["proof_event_id"] == tail.event_id)):
+                matches.append((tail.event_id, event.get("timestamp")))
         except (TypeError, ValueError, AttributeError):
             continue
     if len(matches) != 1:
@@ -230,7 +436,7 @@ def retained_proof(conn, payload, *, deliveries=None):
                     and type(lower) is int and lower < event_id
                     and not (type(upper) is int and upper <= watermark)
                     and (row["text_digest"] if rows is not None else provider_text_digest(other.get("text")))
-                    == provider_text_digest(text)):
+                    == raw_input_digest()):
                 return None
         except (TypeError, ValueError, AttributeError):
             return None  # Unverifiable ownership never establishes delivery.
@@ -238,15 +444,22 @@ def retained_proof(conn, payload, *, deliveries=None):
                       event_ts=str(timestamp) if timestamp else None).audit_fields()
 
 
-def send_proofs(conn, target, text):
-    """Read only daemon pre-input receipt JSON; public meta is voice-only."""
+def send_proofs(conn, target, text, *, reuse=None):
+    """Read only daemon pre-input receipt JSON; public meta is voice-only.
+
+    `reuse` (a `ProjectionReuse`) serves the stream's receipts from one read per
+    generation; its rows carry the original `SELECT rowid,*` schema, identical
+    to the non-reuse path (the lookup wire is kept private to the cache).
+    """
     attempts = {}
     no_input = set()
-    rows = history_query(conn,
-        "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
-        "AND json_type(meta_json,'$._input_proof')='object' "
-        "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
-        (target, text)).fetchall()
+    rows = reuse.receipt_rows(conn, target, text) if reuse is not None else None
+    if rows is None:
+        rows = history_query(conn,
+            "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
+            "AND json_type(meta_json,'$._input_proof')='object' "
+            "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
+            (target, text)).fetchall()
     if len(rows) > 512:
         return  # Unbounded/ambiguous history is never an origin grant.
     for row in rows:
@@ -418,7 +631,8 @@ def input_origin(conn, event, event_id, *, deliveries=None):
         payloads = [json.loads(row["reply"]) for row in conn.execute(
             "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
             "AND json_extract(reply,'$.delivery.text')=?", (target, text))]
-    payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
+    payloads.extend(payload for payload, _ in send_proofs(
+        conn, target, text, reuse=deliveries.reuse if deliveries is not None else None))
     for payload in payloads:
         delivery = payload.get('delivery') or {}
         if delivery.get('text') != text or delivery.get('proof_generation') != generation:
