@@ -996,8 +996,10 @@ def test_authority_change_is_linearized_with_manager_close(monkeypatch, change, 
                                        expected=1)
 
         finished_early, results = await _race(env, lambda: env.server._on_close(_close(manager, "fixture")),
-                                              "find_report", authority)
+                                              "lifecycle_authority_audit", authority)
         assert not finished_early, "authority changed while an admitted manager close was in flight"
+        assert results[0]["type"] == "close.ok"
+        assert not isinstance(results[1], BaseException)
         rows = await env.audit()
         assert _no_effect_after_authority_change(rows, "manager_close")
         applied = [r for r in rows if r["action"] == "manager_close" and r["result"] in {"admitted", "applied"}]
