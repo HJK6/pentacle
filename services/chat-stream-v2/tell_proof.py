@@ -80,17 +80,84 @@ class TellDeliveryParseCache:
             self._entries = {tell: entry for tell, entry in self._entries.items() if tell in live}
 
 
+# Reuse bounds: a stream larger than these is read per call exactly as before.
+_RECEIPT_REUSE_MAX_ROWS = 2048
+
+
+class ProjectionReuse:
+    """Per-generation memo of the reads `input_origin` repeats for every input.
+
+    Owned by one `ProjectionDeliveries`, so it lives for one savepoint-held read
+    or one paged history request. It is keyed by stream and valid only while
+    `conn.total_changes` is unchanged since it was filled: the Store is one
+    thread on one connection and the daemon's only writer, so every mutation
+    advances that counter (a rolled-back write advances it too, which only
+    invalidates early). A write from any other connection would not advance it;
+    reuse is never offered across such a writer. Any uncertainty -- a value the
+    SQL predicate would coerce rather than compare, an oversized stream, a
+    failing read -- disables reuse for that stream, and the original SQL then
+    decides both the answer and any exception.
+    """
+
+    def __init__(self):
+        self._changes = None
+        self._receipts = {}
+
+    def _fresh(self, conn):
+        changes = conn.total_changes
+        if changes != self._changes:
+            self._receipts = {}
+            self._changes = changes
+
+    def receipt_rows(self, conn, target, text):
+        """`send_proofs`' candidate rows for `text` (at most 513, rowid order), or None."""
+        if not _lookup_string(target) or not _lookup_string(text):
+            return None
+        self._fresh(conn)
+        if target not in self._receipts:
+            self._receipts[target] = self._load_receipts(conn, target)
+        loaded = self._receipts[target]
+        if loaded is None:
+            return None
+        return [row for row, wire in loaded if wire in text][:513]
+
+    @staticmethod
+    def _load_receipts(conn, target):
+        try:
+            rows = history_query(conn,
+                "SELECT rowid,*,json_extract(meta_json,'$._input_proof.wire_text') AS sql_wire "
+                "FROM v2_send_receipts WHERE to_stream_id=? "
+                "AND json_type(meta_json,'$._input_proof')='object' ORDER BY rowid LIMIT ?",
+                (target, _RECEIPT_REUSE_MAX_ROWS + 1)).fetchall()
+        except Exception:
+            return None
+        if len(rows) > _RECEIPT_REUSE_MAX_ROWS:
+            return None
+        loaded = []
+        for row in rows:
+            wire = row["sql_wire"]
+            if wire is None:
+                continue  # instr(text, NULL) is NULL, never a candidate
+            if not _lookup_string(wire):
+                return None  # SQLite would coerce/compare this, not Python
+            loaded.append((row, wire))
+        return loaded
+
+
 class ProjectionDeliveries:
     """Lazy delivery snapshot owned and passed by one savepoint-held read.
 
     Any parser/equality uncertainty disables reuse for the rest of that read;
     the original SQL and parsing then determine both answers and exceptions.
+    It also carries the read's `ProjectionReuse` (send receipts), dropped with
+    the snapshot whenever the caller rebuilds it.
     """
 
     def __init__(self):
         self._by_target = None
         self._by_input = None
         self._legacy = False
+        self.reuse = ProjectionReuse()
 
     def rows_for(self, conn, target, text):
         if not _lookup_string(target) or not _lookup_string(text):
@@ -264,15 +331,21 @@ def retained_proof(conn, payload, *, deliveries=None):
                       event_ts=str(timestamp) if timestamp else None).audit_fields()
 
 
-def send_proofs(conn, target, text):
-    """Read only daemon pre-input receipt JSON; public meta is voice-only."""
+def send_proofs(conn, target, text, *, reuse=None):
+    """Read only daemon pre-input receipt JSON; public meta is voice-only.
+
+    `reuse` (a `ProjectionReuse`) serves the stream's receipts from one read per
+    generation; its rows carry one extra `sql_wire` column.
+    """
     attempts = {}
     no_input = set()
-    rows = history_query(conn,
-        "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
-        "AND json_type(meta_json,'$._input_proof')='object' "
-        "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
-        (target, text)).fetchall()
+    rows = reuse.receipt_rows(conn, target, text) if reuse is not None else None
+    if rows is None:
+        rows = history_query(conn,
+            "SELECT rowid,* FROM v2_send_receipts WHERE to_stream_id=? "
+            "AND json_type(meta_json,'$._input_proof')='object' "
+            "AND instr(?,json_extract(meta_json,'$._input_proof.wire_text'))>0 ORDER BY rowid LIMIT 513",
+            (target, text)).fetchall()
     if len(rows) > 512:
         return  # Unbounded/ambiguous history is never an origin grant.
     for row in rows:
@@ -444,7 +517,8 @@ def input_origin(conn, event, event_id, *, deliveries=None):
         payloads = [json.loads(row["reply"]) for row in conn.execute(
             "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
             "AND json_extract(reply,'$.delivery.text')=?", (target, text))]
-    payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
+    payloads.extend(payload for payload, _ in send_proofs(
+        conn, target, text, reuse=deliveries.reuse if deliveries is not None else None))
     for payload in payloads:
         delivery = payload.get('delivery') or {}
         if delivery.get('text') != text or delivery.get('proof_generation') != generation:
