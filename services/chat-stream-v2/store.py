@@ -41,7 +41,8 @@ import uuid
 
 from retention import (HistoryConnection, prepare_history_schema, history_query,
                        next_receipt_rowid, bind_history_archive, default_archive_path,
-                       migrate_route_batch_archive)
+                       migrate_route_batch_archive, DELIVERY_PROOF_VALID,
+                       DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE)
 from send_metadata import normalize_send_meta
 from loop_watchdog import StoreProgress, request_timing
 import store_call_diag
@@ -6757,8 +6758,10 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             if not isinstance(wire, str):
                 return
             for payload, row in send_proofs(conn, target, wire):
+                if payload["delivery"].get("proof_event_id") is not None:
+                    continue
                 proof = retained_proof(conn, payload)
-                if proof is None or payload["delivery"].get("proof_event_id") is not None:
+                if proof is None:
                     continue
                 meta = json.loads(row["meta_json"])
                 meta["_input_proof"].update(proof)
@@ -6782,8 +6785,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 tell_id = candidate["id"]
             elif isinstance(wire, str) and wire.startswith("[pentacle-notice:"):
                 tell_id = await self.submit(lambda conn: next((row[0] for row in conn.execute(
-                    "SELECT tell_id FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
-                    "AND json_extract(reply,'$.delivery.text')=?", (target, wire))), None))
+                    f"SELECT tell_id FROM v2_tell_deliveries WHERE {DELIVERY_PROOF_VALID} "
+                    f"AND {DELIVERY_PROOF_TARGET}=? AND {DELIVERY_PROOF_WIRE}=?", (target, wire))), None))
         if not isinstance(tell_id, str) or not tell_id:
             return
         prior = await self.get_tell_delivery(tell_id)

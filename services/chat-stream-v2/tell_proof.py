@@ -8,7 +8,8 @@ import sqlite3
 from bisect import bisect_right
 
 from submission_events import EventProof, provider_text_digest
-from retention import history_query, RECEIPT_PROOF_PREDICATE, RECEIPT_PROOF_WIRE
+from retention import (history_query, RECEIPT_PROOF_PREDICATE, RECEIPT_PROOF_WIRE,
+                       DELIVERY_PROOF_VALID, DELIVERY_PROOF_TARGET, DELIVERY_PROOF_WIRE)
 from message_envelopes import strip_peer_delivery
 
 
@@ -550,8 +551,8 @@ def split_native_input(conn, event, *, lookup_deadline=None):
     spans = []
     ambiguous = False
     payloads = [json.loads(row["reply"]) for row in conn.execute(
-        "SELECT reply FROM v2_tell_deliveries WHERE json_extract(reply,'$.delivery.to_stream_id')=? "
-        "AND instr(?,json_extract(reply,'$.delivery.text'))>0", (target, text))]
+        f"SELECT reply FROM v2_tell_deliveries WHERE {DELIVERY_PROOF_VALID} "
+        f"AND {DELIVERY_PROOF_TARGET}=? AND instr(?,{DELIVERY_PROOF_WIRE})>0", (target, text))]
     payloads.extend(payload for payload, _ in send_proofs(conn, target, text))
     for payload in payloads:
         d = payload.get('delivery') or {}

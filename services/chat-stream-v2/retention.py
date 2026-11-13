@@ -107,6 +107,13 @@ RECEIPT_PROOF_PREDICATE = (
 RECEIPT_PROOF_WIRE = (
     "CASE WHEN json_valid(meta_json) THEN json_extract(meta_json,'$._input_proof.wire_text') END"
 )
+DELIVERY_PROOF_VALID = "json_valid(reply)"
+DELIVERY_PROOF_TARGET = (
+    "CASE WHEN json_valid(reply) THEN json_extract(reply,'$.delivery.to_stream_id') END"
+)
+DELIVERY_PROOF_WIRE = (
+    "CASE WHEN json_valid(reply) THEN json_extract(reply,'$.delivery.text') END"
+)
 
 
 def _receipt_proof_index(conn, prefix):
@@ -140,6 +147,8 @@ def prepare_history_schema(conn, *, fresh: bool, archive_path: Path | None) -> N
     for table, name, columns in indexes:
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_history_{name} ON {table}({columns})")
     _receipt_proof_index(conn, "history")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_delivery_proof_wire ON v2_tell_deliveries"
+                 f"({DELIVERY_PROOF_TARGET},{DELIVERY_PROOF_WIRE}) WHERE {DELIVERY_PROOF_VALID}")
     if fresh and _sequence(conn) is None:
         conn.execute("INSERT INTO v2_send_receipt_sequence VALUES(1,0,?,?,?)",
                      (uuid.uuid4().hex, str(archive_path or ""), int(archive_path is None)))
