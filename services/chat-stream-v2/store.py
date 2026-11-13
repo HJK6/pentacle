@@ -1603,6 +1603,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # carries its own mirror; empty keeps every non-direct
         # deployment unchanged.  Tuple: (composite_stream_id, source_stream_id,
         # source_generation, enabled_default, name).
+        self._assistant_strict_publication: dict[str, bool] = {}
         self._assistant_mirror_binding: dict[str, tuple[str, str, str, bool, str]] = {}
         self._init_routing_integrity_state()
 
@@ -2175,10 +2176,14 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
     async def configure_assistant_mirror(
         self, *, composite_stream_id: str, source_stream_id: str,
         source_generation: str, enabled_default: bool, name: str | None = None,
+        strict_publication_default: bool | None = None,
     ) -> None:
         name = name or primary_assistant_name()
         """Install one named assistant's trusted direct-primary mirror binding."""
         def _op(_conn: sqlite3.Connection) -> None:
+            self._assistant_strict_publication[composite_stream_id] = (
+                name == primary_assistant_name() if strict_publication_default is None else strict_publication_default
+            )
             self._assistant_mirror_binding[composite_stream_id] = (
                 composite_stream_id, source_stream_id, source_generation, enabled_default, name,
             )
@@ -2190,6 +2195,23 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
         # (daff) get their own per-name override key.
         return ("assistant.mirror.enabled" if name == primary_assistant_name()
                 else f"assistant.mirror.{name}.enabled")
+
+    def _strict_publication_state_conn(self, conn, composite_stream_id):
+        binding = self._assistant_mirror_binding.get(composite_stream_id)
+        if binding is None:
+            return {"enabled": False, "source": "unbound"}
+        name = binding[4]
+        key = ("assistant.strict_publication.enabled" if name == primary_assistant_name()
+               else f"assistant.strict_publication.{name}.enabled")
+        override = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
+        if override is None:
+            return {"enabled": self._assistant_strict_publication[composite_stream_id], "source": "env"}
+        normalized = str(override[0]).strip().lower()
+        return {"enabled": normalized in {"1", "true", "on"},
+                "source": "kv" if normalized in {"1", "true", "on", "0", "false", "off"} else "kv_invalid"}
+
+    async def strict_publication_state(self, composite_stream_id):
+        return await self.submit(lambda conn: self._strict_publication_state_conn(conn, composite_stream_id))
 
     def _effective_mirror_source_conn(
         self, conn: sqlite3.Connection, binding: tuple[str, str, str, bool, str] | None,
@@ -2447,6 +2469,8 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
             return
         effective_source_stream_id, source_generation, _source_binding = effective
         if source_stream_id != effective_source_stream_id:
+            return
+        if self._strict_publication_state_conn(conn, binding[0])["enabled"]:
             return
         if not self._assistant_mirror_state_conn(conn, binding[0])["enabled"]:
             return

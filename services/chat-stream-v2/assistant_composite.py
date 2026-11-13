@@ -105,6 +105,7 @@ class AssistantCompositeConfig:
     direct_primary_generation: str = ""
     authority_stream_id: str = ""
     rebind_authorized_spec_ids: frozenset[str] = frozenset()
+    strict_publication_default: bool = True
     mirror_enabled_default: bool = True
     title: str = "Zephyr"
 
@@ -184,6 +185,7 @@ class AssistantCompositeConfig:
             direct_primary_generation=direct_generation,
             authority_stream_id=authority_stream,
             rebind_authorized_spec_ids=frozenset(authorized_specs),
+            strict_publication_default=_env_bool(values, _k("STRICT_PUBLICATION"), name == primary_assistant_name(values)),
             mirror_enabled_default=_env_bool(values, _k("MIRROR_ENABLED"), True),
             title=str(values.get(_k("COMPOSITE_TITLE")) or "Zephyr").strip()[:120] or "Zephyr",
         )
@@ -681,6 +683,7 @@ class AssistantComposite:
                 source_stream_id=self.config.direct_primary_stream_id,
                 source_generation=self.config.direct_primary_generation,
                 enabled_default=self.config.mirror_enabled_default,
+                strict_publication_default=self.config.strict_publication_default,
                 name=self.config.name,
             )
         # The shared sessions schema stays untouched; these public fields are

@@ -4068,7 +4068,8 @@ class Server:
             )
         session = with_bootstrap_state(session, event_seen=bootstrap_event)
         if self._composite_for(stream_id) is not None:
-            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id)}
+            session = {**session, "assistant_mirror": await self.store.assistant_mirror_state(stream_id),
+                       "assistant_strict_publication": await self.store.strict_publication_state(stream_id)}
         if report_id is not None:
             existing_report = await self.store.get_report(report_id)
             if existing_report is not None and existing_report.get("from_stream_id") != stream_id:
