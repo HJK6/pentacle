@@ -31,3 +31,43 @@ Record artifact and runtime readbacks. Remove the token configuration or rotate
 its file to revoke existing sockets; stop only the monitor's own scheduled job
 when disabling the feature. Never log credentials or copy an implementation
 seat token into a service environment.
+
+## Fixed acquisitions browser principal
+
+`altum-acquisitions-browser` is a separate, fixed file principal for the
+unattended acquisitions browser job. It creates no seat. Configure the daemon
+with `PENTACLE_ACQ_BROWSER_TOKEN_FILE` and `PENTACLE_ACQ_BROWSER_HOST`, naming
+one approved host. Provision a fresh, distinct secret through the deployment's
+secure store into a user-owned 0600 token file readable only by the job's user.
+Never reuse a seat, monitor or other service credential. The runtime rejects
+absent, unreadable, empty, non-private or shared file credentials.
+
+The principal may authenticate an RPC-only hello and acquire, renew or release
+only its own screen lease on that host. Acquire must explicitly name the host.
+TTL is an integer from 1 to 120 seconds, defaulting to 120. It cannot force a
+lease, use another host, act on another holder's lease, read status/inventory,
+or invoke any tell, send or other verb. In particular, it has none of the
+monitor's composite/tell authority; the job reports through its existing
+job-alert path. Status read by an authorized caller shows holder
+`altum-acquisitions-browser` with label `Altum acquisitions browser`.
+
+Set `AGENT_ORCH_STREAM_ID=altum-acquisitions-browser` and
+`AGENT_ORCH_STREAM_TOKEN_FILE` for `agent-orch screen acquire|renew|release`.
+Identity is resolved before credentials: a missing or unreadable service token
+file fails rather than falling back to operator or seat credentials.
+
+To resolve a stored lease ID without a status read, release that ID. Success
+means it was held and is now released. `screen_lease_not_found` with state
+`released` or `expired` means no lease remains. State `unknown`, any other
+reply or a failed call leaves the outcome unknown. Normal contention with a
+seat or monitor yields `screen_held`; the existing
+`screen_front_desk_unavailable` response remains when no assistant is bound
+for a contention notice.
+
+Removing, emptying, rotating or loosening permissions on the credential file
+revokes already-bound connections on their next call, including tokenless
+calls. New connections may authenticate with the replacement secret after
+rotation. Provisioning, daemon settings, integration and live proof are fleet
+owned. Rollback is fleet-owned removal/rotation of the two daemon settings and
+the file in an FD release window; outstanding leases expire within 120 seconds.
+Fixture validation does not establish runtime acceptance.

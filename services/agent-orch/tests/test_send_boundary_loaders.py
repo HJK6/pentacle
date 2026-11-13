@@ -17,7 +17,7 @@ from agent_orch import cli, config, send_boundary as b, wsclient as w
 from send_boundary_capture import Connection, Socket, ENVELOPE, NONCE
 
 
-@pytest.mark.parametrize("values", list(product([None, "fixture:seat", "altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader", "codex-reset-monitor"], repeat=4)))
+@pytest.mark.parametrize("values", list(product([None, "fixture:seat", "altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader", "codex-reset-monitor", "altum-acquisitions-browser"], repeat=4)))
 def test_identity_all_source_conflicts(values):
     explicit, *environment = values
     env = {name: value for name, value in zip(b.IDENTITY_ENV, environment) if value is not None}
@@ -37,6 +37,8 @@ def test_service_mapping_matches_daemon():
     names = ("FIXED_SYSTEM_PRODUCER_STREAM_ID", "WMI_BACKUP_PRODUCER_STREAM_ID", "WORK_REPORT_READER")
     identities = {re.search(rf'^{name}\s*=\s*[\'"]([^\'"]+)', server, re.M).group(1) for name in names}
     principal=(Path(__file__).parents[2]/'chat-stream-v2/screen_monitor_principal.py').read_text()
+    identities.add(re.search(r"^ACTOR=['\"]([^'\"]+)",principal,re.M).group(1))
+    principal=(Path(__file__).parents[2]/'chat-stream-v2/screen_acquisitions_principal.py').read_text()
     identities.add(re.search(r"^ACTOR=['\"]([^'\"]+)",principal,re.M).group(1))
     assert set(b.FIXED_SERVICE_IDENTITIES) == identities
     assert b.FIXED_SERVICE_IDENTITIES["work-report-reader"] == ("env", "PENTACLE_WORK_REPORT_READER_TOKEN")
@@ -58,7 +60,7 @@ class Environment(dict):
         return super().__getitem__(key)
 
 
-@pytest.mark.parametrize("identity", ["altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader", "ambiguous"])
+@pytest.mark.parametrize("identity", ["altum-bot-cd", "amaterasu:wmi-pg-dailybackup", "work-report-reader", "altum-acquisitions-browser", "ambiguous"])
 @pytest.mark.parametrize("path", ["hello", "request", "retry", "reconnect", "cli"])
 def test_real_loader_path_never_reads_operator_for_services(monkeypatch, tmp_path, identity, path):
     token = tmp_path / "token"
