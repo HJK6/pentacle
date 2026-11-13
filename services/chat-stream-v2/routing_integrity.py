@@ -170,8 +170,12 @@ class RoutingIntegrity:
             if persisted is not None:
                 stream_id = f"{host}:{session_name}"
                 if self.guidelines is not None:
+                    incomplete = []
                     await self.guidelines.front_desk(stream=stream_id, generation=row.get("session_generation"),
-                                                     previous=row.get("context_tokens"), current=tokens)
+                                                     previous=row.get("context_tokens"), current=tokens,
+                                                     on_incomplete=incomplete.append)
+                    if incomplete:
+                        persisted = {**persisted, "incomplete_effect": incomplete[0]}
                 before = self.sessions.get(stream_id)
                 self.sessions.apply_durable(
                     stream_id,
@@ -283,9 +287,11 @@ class RoutingIntegrity:
                 )
             if integrity == "mismatch" and isinstance(episode, dict):
                 if result.get("should_notify"):
-                    await self._notify_episode_locked(
+                    notified = await self._notify_episode_locked(
                         episode, reason=reason or "routing_drift_detected"
                     )
+                    if notified is False:
+                        result["incomplete_effect"] = "routing_notification"
             return result
 
     async def refresh_for_report(self, stream_id: str) -> bool | None:
@@ -415,12 +421,12 @@ class RoutingIntegrity:
         tuple_value = (model, effort)
         repeated = self._claude_tuples.get(stream_id) == (generation, tuple_value)
         if repeated:
-            return None
+            return context_result if context_result and context_result.get("incomplete_effect") else None
         self._claude_tuples.pop(stream_id, None)
         self._claude_tuples[stream_id] = (generation, tuple_value)
         while len(self._claude_tuples) > MAX_CLAUDE_TUPLE_CACHE:
             self._claude_tuples.pop(next(iter(self._claude_tuples)))
-        return await self.observe_tuple(
+        result = await self.observe_tuple(
             host,
             session_name,
             provider="claude",
@@ -428,9 +434,13 @@ class RoutingIntegrity:
             observed_at=str(payload.get("timestamp") or "") or None,
             expected_generation=generation,
         )
+        if context_result and context_result.get("incomplete_effect"):
+            result = {**(result or {})}
+            result.setdefault("incomplete_effect", context_result["incomplete_effect"])
+        return result
 
 
-    async def _notify_episode_locked(self, episode: dict[str, Any], *, reason: str) -> None:
+    async def _notify_episode_locked(self, episode: dict[str, Any], *, reason: str) -> bool | None:
         stream_id = str(episode.get("stream_id") or "")
         expected_generation = str(episode.get("session_generation") or "")
         if expected_generation and ":" in stream_id:
@@ -480,7 +490,7 @@ class RoutingIntegrity:
             )
         except Exception:  # noqa: BLE001 - leave the durable episode retryable
             log.exception("routing-integrity alert failed stream=%s", stream_id)
-            return
+            return False
         marked = await self.store.mark_routing_integrity_notified(
             stream_id,
             str(episode.get("episode_id") or ""),
@@ -491,3 +501,4 @@ class RoutingIntegrity:
                 await self.broadcast(event)
             except Exception:  # noqa: BLE001 - durable card already exists
                 log.exception("routing-integrity alert broadcast failed stream=%s", stream_id)
+                return False
