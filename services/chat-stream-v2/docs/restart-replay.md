@@ -1,9 +1,10 @@
 # Receipt reads and first transcript replay
 
-Intake starts at byte zero and processes every record through the original
-split, receipt stamping, append, binding and tell promotion routines. Event
-identity, transaction boundaries, broadcasts, activity, usage, routing and
-normalizer state follow those routines unchanged.
+Intake starts at byte zero and processes every record. Event identity,
+transaction boundaries, broadcasts, activity, usage, routing and normalizer
+state stay unchanged. An already-bound receipt skips the read-only proof
+calculation whose result would be discarded; unbound receipt repair and tell
+promotion still perform their original proof checks.
 
 Receipt proof reads use a partial expression index over the destination stream
 and input-proof wire text. SQLite can evaluate the substring filter from the
@@ -14,7 +15,16 @@ The intended behavior change is that proof reads skip malformed metadata;
 previously SQLite raised when encountering it. Valid metadata retains the same
 ordering, limit, proof selection and later-bound-row precedence.
 
-The hot index is created at Store startup. Fresh archive pairs get the same
+A second guarded expression index covers delivery destination and wire text.
+The input splitter retains its destination filter and substring match; the
+notice lookup during reconciliation retains exact destination/text matching.
+These readers skip malformed reply JSON while inserts and updates still accept
+it. Other delivery readers retain their existing behavior. In particular,
+promotion's normalized-digest ambiguity check, the input-origin fallback SQL,
+and the shared delivery lookup are unchanged. Split spans keep their original
+ordering and overlap checks; equal notice candidates retain rowid order.
+
+The hot indexes are created at Store startup. Fresh archive pairs get the receipt
 index during initialization; existing pairs get it through the validated archive
 migration after the hot transaction commits. Pair identity and exact schema
 checks still precede archive changes. Missing, busy, incompatible or foreign
