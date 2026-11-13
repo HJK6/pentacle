@@ -794,7 +794,10 @@ def test_u2_missing_marker_selects_empty_window(boot_line):
                     "boot_marker_seen": False, "queue_depth_warnings": 0, "overflow_drops": 0,
                     "peer_4000_other": 0, "unparsed_conn_diag": 0, "failures": [], "kinds": {},
                     "excluded_auth_failure_count": 0, "excluded_auth_failure_conn_ids": [],
-                    "excluded_auth_failures": []}
+                    "excluded_auth_failures": [],
+                    "excluded_unauthenticated_keepalive_count": 0,
+                    "excluded_unauthenticated_keepalive_conn_ids": [],
+                    "excluded_unauthenticated_keepalives": []}
 
 
 def test_u2_explicit_no_marker_scans_whole_text():
@@ -1152,7 +1155,8 @@ def test_keepalive_kind_receipt_and_exit_stay_failed(kind, monkeypatch, capsys):
 @pytest.mark.parametrize('field', ['close_reason', 'close_sent_reason'])
 def test_keepalive_reason_without_force_classifies_liveness(field):
     scan = deploy_mod.classify_slow_consumer_lines([
-        _u2_line('close', **{field: 'keepalive_ping_timeout', 'close_code': 1011})])
+        _u2_line('close', **{field: 'keepalive_ping_timeout', 'close_code': 1011,
+                              'auth_state': 'accepted'})])
     assert scan['kinds'] == {'keepalive_timeout': 1}
 
 
