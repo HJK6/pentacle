@@ -35,11 +35,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import shlex
 import stat as stat_module
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 from time import monotonic
 from typing import Any, Awaitable, Callable
 
@@ -144,6 +147,8 @@ class _StreamIngest:
     identity_grace: _IdentityGrace | None = None
     # Coalesce entry/late refusals; eligibility advances only at attempt completion.
     identity_refusal: tuple[dict, dict] | None = None
+    idle_proof_at: float | None = None
+    idle_proof_inputs: tuple | None = None
     replay_boundary: int | None = None
     replay_complete: bool = False
     replay_pending: bool = False
@@ -356,6 +361,20 @@ class Ingest:
         self._previous_inventory: tuple[str, ...] = ()
         self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
         self.force_full_replay = os.environ.get(ENV_PREFIX + "FORCE_FULL_REPLAY") == "1"
+        try:
+            self.idle_proof_s = float(os.environ.get(ENV_PREFIX + "IDLE_PROOF_S", "30"))
+            if not math.isfinite(self.idle_proof_s) or self.idle_proof_s < 0:
+                raise ValueError
+        except ValueError:
+            self.idle_proof_s = 30.0
+            log.warning("invalid PENTACLE_INGEST_IDLE_PROOF_S; using 30 seconds")
+        self._proof_calls = 0
+        self._pass_window_started = monotonic()
+        self._pass_durations: list[float] = []
+        self._pass_seats: list[int] = []
+        self._pass_backoff_skips = 0
+        self._pass_idle_skips = 0
+        self._pass_proof_calls = 0
 
     def _hold_position(self, sid, st, reason):
         if not st.checkpoint_hold:
@@ -571,6 +590,9 @@ class Ingest:
         restart and whole-pass backoff do not inherit that bound; neither does
         the time to reach a prompt buried in a stream's own replay backlog.
         """
+        pass_started = monotonic()
+        proof_calls_before = self._proof_calls
+        seats = backoff_skips = idle_skips = 0
         cfg = self.config
         rows = [
             r for r in self.sessions.list_open()
@@ -612,13 +634,18 @@ class Ingest:
             if budget <= 0:
                 break
             sid = row["stream_id"]
+            seats += 1
             # A backoff skip is a visit, not an ingest attempt. It must still
             # advance the frontier, as must zero inserts and handled failures.
             self._last_visited_sid = sid
             st = self._streams.setdefault(sid, _StreamIngest())
             if now < st.next_attempt_monotonic:
+                backoff_skips += 1
                 continue  # this stream is in its own backoff window
             try:
+                if await self._skip_idle_stream(row, st):
+                    idle_skips += 1
+                    continue
                 n = await self._ingest_stream(row, st, budget)
             except Exception as exc:  # noqa: BLE001 - one sick stream never kills the pump
                 st.failures += 1
@@ -630,9 +657,52 @@ class Ingest:
                 st.failures = 0
                 budget -= n
                 appended += n
+        finished = monotonic()
+        self._pass_durations.append((finished - pass_started) * 1000)
+        self._pass_seats.append(seats)
+        self._pass_backoff_skips += backoff_skips
+        self._pass_idle_skips += idle_skips
+        self._pass_proof_calls += self._proof_calls - proof_calls_before
+        window_s = finished - self._pass_window_started
+        if window_s >= 60:
+            log.info("ingest_pass_summary %s", json.dumps({
+                "passes": len(self._pass_durations),
+                "pass_ms_median": median(self._pass_durations),
+                "pass_ms_max": max(self._pass_durations),
+                "seats_median": median(self._pass_seats),
+                "backoff_skips": self._pass_backoff_skips,
+                "idle_skips": self._pass_idle_skips,
+                "proof_calls": self._pass_proof_calls,
+                "window_s": window_s,
+            }, separators=(",", ":")))
+            self._pass_window_started = finished
+            self._pass_durations.clear()
+            self._pass_seats.clear()
+            self._pass_backoff_skips = self._pass_idle_skips = self._pass_proof_calls = 0
         return appended
 
     # -- per-stream ingest -------------------------------------------------
+
+    @staticmethod
+    def _idle_proof_inputs(row: dict[str, Any]) -> tuple:
+        # Freeze nested bindings: the registry may replace or mutate them later.
+        return deepcopy(tuple(row.get(key) for key in (
+            "session_generation", "observer_binding", "pane_pid", "account_binding",
+            "provider", "host", "status", "jsonl_path", "claude_session_id",
+        )))
+
+    async def _skip_idle_stream(self, row: dict[str, Any], st: _StreamIngest) -> bool:
+        if (self.idle_proof_s == 0 or st.idle_proof_at is None
+                or st.identity_refusal is not None or st.identity_grace is not None
+                or st.identity_incident_id is not None or not st.replay_complete
+                or not 0 <= monotonic() - st.idle_proof_at < self.idle_proof_s
+                or st.generation != row.get("session_generation")
+                or row.get("status") != "open"
+                or not isinstance(row.get("observer_binding"), dict)
+                or st.idle_proof_inputs != self._idle_proof_inputs(row)
+                or not st.path or st.fd is None or st.file_id is None):
+            return False
+        return await asyncio.to_thread(_idle_file_unchanged, st.path, st.fd, st.file_id, st.offset)
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
         st.identity_refusal = None
@@ -1171,6 +1241,21 @@ class Ingest:
         return appended
 
     async def _provider_root(self, row: dict[str, Any], name: str, *, observation: dict | None = None) -> tuple[str, str] | None:
+        started = monotonic()
+        inputs = self._idle_proof_inputs(row)
+        self._proof_calls += 1
+        st = self._streams.get(row.get("stream_id"))
+        if st is not None:
+            # Clear before the call so refusals and raised exceptions both revoke it.
+            st.idle_proof_at = None
+            st.idle_proof_inputs = None
+        result = await self._prove_provider_root(row, name, observation=observation)
+        if result is not None and st is not None:
+            st.idle_proof_at = started
+            st.idle_proof_inputs = inputs
+        return result
+
+    async def _prove_provider_root(self, row: dict[str, Any], name: str, *, observation: dict | None = None) -> tuple[str, str] | None:
         binding = row.get("observer_binding")
         account = row.get("account_binding")
         if account is not None:
@@ -1545,6 +1630,17 @@ def _codex_session_identity_from_fd(fd: int) -> str | None:
             session_id = codex_session_identity(record)
             return session_id or None
     return None
+
+
+def _idle_file_unchanged(path: str, fd: int, file_id: tuple[int, int, int], offset: int) -> bool:
+    """Only stat: bytes arriving after this observation wait for the next visit."""
+    try:
+        current = Path(path).expanduser().stat()
+        opened = os.fstat(fd)
+        return (_file_id(current) == _file_id(opened) == file_id
+                and current.st_size == opened.st_size == offset)
+    except (OSError, ValueError):
+        return False
 
 
 def _file_stat(path: str) -> tuple[int, tuple[int, int, int]] | None:

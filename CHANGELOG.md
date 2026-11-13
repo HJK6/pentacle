@@ -13,6 +13,8 @@ backfilled. Changes that land between releases accumulate under `Unreleased`.
 
 ## Unreleased
 
+- Reduce idle transcript identity probes while retaining fresh checks before reads and appends, with an opt-out switch and minute intake timing summaries.
+
 ## 2026-11-12
 
 - Use ordinary daemon releases with automatic restoration on failed serving proof, report later check failures without rollback, and run the deployed release checks nightly.
