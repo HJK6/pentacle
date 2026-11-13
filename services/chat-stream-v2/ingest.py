@@ -55,6 +55,7 @@ from provider_accounts import transcript_allowed
 from usage_accounting import native_provenance
 from usage_provenance import MAX_ITEMS as PROVENANCE_MAX_ITEMS, PAYLOAD_VERSION as PROVENANCE_VERSION
 from v2_runtime import env_number
+import ingest_checkpoint as checkpoint
 
 log = logging.getLogger("chat_streamd_v2.ingest")
 
@@ -117,8 +118,8 @@ class _IdentityGrace:
 @dataclass
 class _StreamIngest:
     """Per-stream supervised tail state — the unit B13 isolates so one sick
-    stream never kills the pump. Never persisted (rebuilt on daemon restart; the
-    durable identity dedups the replay-from-start)."""
+    stream never kills the pump. Only the proven complete frontier and necessary
+    continuation are persisted; supervision and stored projections stay fresh."""
 
     generation: str = ""
     selected_file_id: tuple[int, int] | None = None
@@ -146,6 +147,15 @@ class _StreamIngest:
     replay_boundary: int | None = None
     replay_complete: bool = False
     replay_pending: bool = False
+    resume_key: tuple | None = None
+    resume_reason: str = "unbound"
+    checkpoint_hash: Any = field(default_factory=hashlib.sha256)
+    checkpoint_offset: int = 0
+    checkpoint_span: tuple[int, bytes] | None = None
+    checkpoint_capped: bool = False
+    checkpoint_hold: str = ""
+    checkpoint_last: dict = field(default_factory=dict)
+    provenance_pass: tuple | None = None
 
 
 def _jsonl_event_identity(payload: dict) -> tuple:
@@ -256,6 +266,7 @@ async def append_ingested_event(
     lifecycle: dict[str, Any] | None = None,
     sessions: Any = None,
     _segments_prepared: bool = False,
+    on_incomplete: Callable[[str], None] | None = None,
 ) -> int | None:
     """Append one event under its raw identity, stamping durable receipt metadata."""
     if not _segments_prepared and hasattr(store, "prepare_native_input_events"):
@@ -264,7 +275,7 @@ async def append_ingested_event(
         for segment in segments:
             seq = await append_ingested_event(store, broadcast, segment, recent_limit=recent_limit,
                 routing_integrity=routing_integrity, lifecycle=lifecycle, sessions=sessions,
-                _segments_prepared=True)
+                _segments_prepared=True, on_incomplete=on_incomplete)
             if seq is not None:
                 last = seq
         return last
@@ -282,12 +293,18 @@ async def append_ingested_event(
             {"stream_id": stream_id, "event": corrected, "identity": raw_identity, "lifecycle": lifecycle},
         ], limit=recent_limit)
         if sequences is None or sequences[0] is ENTRY_DROPPED:
+            if on_incomplete is not None:
+                on_incomplete("lifecycle_refused")
             return None
         seq = sequences[0]
     if routing_integrity is not None:
         try:
-            await routing_integrity.observe_claude_event(corrected)
+            observation = await routing_integrity.observe_claude_event(corrected)
+            if isinstance(observation, dict) and observation.get("incomplete_effect") and on_incomplete is not None:
+                on_incomplete(observation["incomplete_effect"])
         except Exception as exc:  # noqa: BLE001 - ingest must keep accepting
+            if on_incomplete is not None:
+                on_incomplete("routing_observation")
             log.warning("routing-integrity Claude observation failed sid=%s: %s", stream_id, exc)
     if seq is not None:
         projected = await store.project_session_events([
@@ -338,6 +355,115 @@ class Ingest:
         self._last_visited_sid: str | None = None
         self._previous_inventory: tuple[str, ...] = ()
         self._started_monotonic = monotonic() if started_monotonic is None else started_monotonic
+        self.force_full_replay = os.environ.get(ENV_PREFIX + "FORCE_FULL_REPLAY") == "1"
+
+    def _hold_position(self, sid, st, reason):
+        if not st.checkpoint_hold:
+            st.checkpoint_hold = reason
+            log.warning("ingest_position_held sid=%s offset=%d reason=%s", sid, st.checkpoint_offset, reason)
+
+    async def _prepare_position(self, row, st, provider, size):
+        key = (st.path, st.file_id, st.session_id, st.generation)
+        if st.resume_key == key and size >= st.checkpoint_offset and st.offset >= st.checkpoint_offset:
+            return
+        prior_key = st.resume_key
+        st.resume_key = key
+        st.checkpoint_hash = hashlib.sha256()
+        st.checkpoint_offset = 0
+        st.checkpoint_last = {}
+        st.checkpoint_hold = ""
+        if prior_key is not None:
+            st.offset = 0
+            st.provenance_state.clear()
+            if self.routing_integrity is not None:
+                getattr(self.routing_integrity, "_claude_tuples", {}).pop(row["stream_id"], None)
+        reason = "missing"
+        try:
+            if self.force_full_replay:
+                raise ValueError("forced_full_replay")
+            if provider not in {"claude", "codex"}:
+                raise ValueError("unsupported_provider")
+            loader = getattr(self.store, "load_ingest_position", None)
+            if loader is None:
+                raise ValueError("store_unavailable")
+            saved = await loader(row["stream_id"])
+            position, provenance, routing = checkpoint.decode(saved)
+            expected = {"stream_id": row["stream_id"], "generation": st.generation,
+                        "lifecycle": str(row.get("created_at") or ""), "provider": provider,
+                        "session_id": st.session_id, "path": st.path, "file_id": list(st.file_id)}
+            for field, value in expected.items():
+                if position[field] != value:
+                    raise ValueError(field)
+            digest, elapsed = await asyncio.to_thread(checkpoint.verify_prefix, st.path, st.fd, position)
+            tuples = getattr(self.routing_integrity, "_claude_tuples", None)
+            if routing is not None and not isinstance(tuples, dict):
+                raise ValueError("routing_state_unavailable")
+            if isinstance(tuples, dict):
+                if routing is None:
+                    tuples.pop(row["stream_id"], None)
+                else:
+                    tuples[row["stream_id"]] = routing
+            st.offset = st.checkpoint_offset = position["offset"]
+            st.checkpoint_hash = digest
+            st.provenance_state = provenance
+            st.checkpoint_last = saved
+            reason = "resumed"
+            log.info("ingest_prefix_verified sid=%s bytes=%d elapsed_s=%.6f mb_s=%.3f",
+                     row["stream_id"], st.offset, elapsed, st.offset / max(elapsed, 1e-9) / 1e6)
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "unreadable"
+        except Exception:  # A checkpoint is optional; ordinary intake stays available.
+            reason = "unreadable"
+        st.resume_reason = reason
+        log.info("ingest_position sid=%s reason=%s offset=%d", row["stream_id"], reason, st.offset)
+
+    async def _finish_position(self, row, st):
+        span = st.checkpoint_span
+        if span is None or self.force_full_replay or row.get("provider") not in {"claude", "codex"}:
+            return
+        start, consumed = span
+        if st.offset <= start:
+            return
+        if st.checkpoint_offset != start or st.offset > start + len(consumed):
+            self._hold_position(row["stream_id"], st, "hash_frontier")
+            return
+        # Never re-read for saving: these are the exact bytes normalized above.
+        st.checkpoint_hash.update(consumed[:st.offset - start])
+        st.checkpoint_offset = st.offset
+        if st.checkpoint_capped or st.checkpoint_hold:
+            return
+        position = {"version": checkpoint.FORMAT_VERSION, "stream_id": row["stream_id"],
+                    "generation": st.generation, "lifecycle": str(row.get("created_at") or ""),
+                    "provider": row["provider"], "session_id": st.session_id,
+                    "path": st.path, "file_id": list(st.file_id), "offset": st.offset,
+                    "digest": st.checkpoint_hash.hexdigest()}
+        routing = getattr(self.routing_integrity, "_claude_tuples", {}).get(row["stream_id"])
+        try:
+            saved = {"position_json": checkpoint.encode(position),
+                     "provenance_json": checkpoint.encode(st.provenance_state),
+                     "routing_json": checkpoint.encode(routing)}
+            checkpoint.decode(saved)  # Same shape/size contract on both sides.
+            changes = {key: value for key, value in saved.items() if st.checkpoint_last.get(key) != value}
+            saver = getattr(self.store, "save_ingest_position", None)
+            if saver is None:
+                return
+            started = monotonic()
+            if not await saver(row, changes):
+                self._hold_position(row["stream_id"], st, "save_lifecycle_refused")
+                return
+            st.checkpoint_last = saved
+            log.debug("ingest_position_saved sid=%s offset=%d bytes=%d elapsed_s=%.6f",
+                      row["stream_id"], st.offset, sum(len(v.encode("utf-8")) for v in changes.values()),
+                      monotonic() - started)
+        except Exception as exc:
+            # No cache advancement on rollback. The earlier checkpoint remains
+            # a complete frontier, even after many further successful passes.
+            if isinstance(exc, ValueError) and str(exc) == "state_too_large":
+                await self.store.invalidate_ingest_position(row["stream_id"], st.generation)
+                st.checkpoint_last = {}
+                self._hold_position(row["stream_id"], st, "state_too_large")
+            else:
+                self._hold_position(row["stream_id"], st, "save_failed:" + type(exc).__name__)
 
     def _replay_backlog(self) -> bool:
         now = monotonic()
@@ -354,6 +480,7 @@ class Ingest:
             "elapsed_s": round(monotonic() - self._started_monotonic, 6),
             "boundary": st.replay_boundary, "offset": st.offset,
             "disposition": disposition,
+            "resume_reason": st.resume_reason,
         }, separators=(",", ":")))
 
     async def _record_provenance(self, sid: str, provider: str, records: list[dict], st: _StreamIngest) -> None:
@@ -371,12 +498,42 @@ class Ingest:
                 state=st.provenance_state, proof=True,
             )
             for start in range(0, len(items), PROVENANCE_MAX_ITEMS):
-                await self.provenance.admit(self.local_host, {
+                result = await self.provenance.admit(self.local_host, {
                     "version": PROVENANCE_VERSION,
                     "items": items[start:start + PROVENANCE_MAX_ITEMS],
                 })
+                if isinstance(result, dict) and (result.get("error") or result.get("rejected")
+                        or (result.get("counts") or {}).get("history_unavailable")):
+                    self._hold_position(sid, st, "provenance_rejected")
         except Exception as exc:  # noqa: BLE001 - backfill is the authority; ingest continues
+            self._hold_position(sid, st, "provenance_observation")
             log.warning("usage provenance failed sid=%s: %s", sid, exc)
+
+    def _align_provenance(self, st):
+        """Whole-span effects may precede the cap; carried state may not.
+
+        Recompute only the continuation, using already parsed consumed records.
+        This adds no Store work and leaves whole-span passes unchanged.
+        """
+        span = st.provenance_pass
+        st.provenance_pass = None
+        if span is None:
+            return
+        before, provider, records, ends, start, end = span
+        if st.offset == end:
+            return
+        st.provenance_state = before
+        if st.offset <= start:
+            return
+        consumed = [record for record, offset in zip(records, ends) if offset <= st.offset]
+        if not consumed:
+            return
+        bound = (st.path, st.session_id)
+        if before.get("_bound") != bound:
+            before.clear()
+            before["_bound"] = bound
+        native_provenance(provider, consumed, native_session_id=st.session_id or None,
+                          state=before, proof=True)
 
     # -- loop --------------------------------------------------------------
 
@@ -479,9 +636,20 @@ class Ingest:
 
     async def _ingest_stream(self, row: dict[str, Any], st: _StreamIngest, budget: int) -> int:
         st.identity_refusal = None
+        st.checkpoint_span = None
+        st.checkpoint_capped = False
+        st.provenance_pass = None
         previous_offset = st.offset
         st.replay_pending = False
-        appended = await self._ingest_stream_events(row, st, budget)
+        try:
+            appended = await self._ingest_stream_events(row, st, budget)
+        except BaseException:
+            if st.checkpoint_span is not None:
+                self._hold_position(row["stream_id"], st, "pass_incomplete")
+            st.checkpoint_span = None
+            raise
+        finally:
+            self._align_provenance(st)
         st.replay_pending = st.offset > previous_offset
         # A strict discovery/pre-append check can fail after entry was proven.
         # Surface that refusal at this pass's end, without consuming any bytes
@@ -513,6 +681,9 @@ class Ingest:
             await self._record_identity_blocked(failed_row, st, observation, completed_attempt=True)
         else:
             st.identity_grace = None
+        if refusal is None and st.fd is not None:
+            await self._finish_position(row, st)
+        st.checkpoint_span = None
         if st.replay_boundary is not None and st.offset >= st.replay_boundary:
             self._complete_replay(row["stream_id"], st)
         return appended
@@ -687,6 +858,12 @@ class Ingest:
                 })
                 return 0
             st.session_id = native
+        if provider == "codex" and not st.session_id:
+            native = await asyncio.to_thread(_codex_session_identity_from_fd, st.fd)
+            if not native:
+                return 0
+            st.session_id = native
+        await self._prepare_position(row, st, provider, size)
         if size < st.offset:
             # Rotation/truncation in place: replay from the start; dedup keeps
             # it exact.
@@ -741,6 +918,7 @@ class Ingest:
         if last_nl < 0:
             return 0  # no complete line yet
         consumed = chunk[: last_nl + 1]
+        st.checkpoint_span = (st.offset, consumed)
         new_offset = st.offset + len(consumed)
 
         records: list[dict] = []
@@ -796,6 +974,9 @@ class Ingest:
         # chat reader infers one from the session name. Keep that chat path;
         # accounting stays unknown until the durable provider is classified.
         if row.get("provider") in {"codex", "claude"}:
+            if self.provenance is not None and records:
+                st.provenance_pass = (checkpoint.snapshot_provenance(st.provenance_state),
+                                      provider, records, record_end_offsets, st.offset, new_offset)
             usage = await self.store.record_usage(
                 row, records, native_session_id=st.session_id,
                 collection_host=self.local_host, malformed=malformed_usage_span,
@@ -827,6 +1008,7 @@ class Ingest:
                         expected_generation=str(row.get("created_at") or "") or None,
                     )
                 except Exception as exc:  # noqa: BLE001 - event ingest remains available
+                    self._hold_position(sid, st, "context_observation")
                     log.warning("routing-integrity Codex context observation failed sid=%s: %s", sid, exc)
 
         if provider == "codex":
@@ -874,6 +1056,7 @@ class Ingest:
                 # No cap: the whole span is consumed, including any trailing
                 # non-record bytes past the last event.
                 consumed_to = new_offset
+            st.checkpoint_capped = capped
             if not entries:
                 st.offset = consumed_to
                 return 0
@@ -889,6 +1072,7 @@ class Ingest:
                     entries, limit=self.recent_limit,
                 )
             except Exception as exc:  # noqa: BLE001 - fail closed before broadcast
+                self._hold_position(sid, st, "append_binding_promotion")
                 log.warning("local Codex durable batch failed sid=%s: %s", sid, exc)
                 return 0
             if sequences is None:
@@ -902,6 +1086,7 @@ class Ingest:
                     try:
                         await self.routing_integrity.observe_claude_event(entry["event"])
                     except Exception as exc:  # noqa: BLE001 - existing best-effort observer
+                        self._hold_position(sid, st, "routing_observation")
                         log.warning("routing-integrity local observation failed sid=%s: %s", sid, exc)
             try:
                 inserted = [
@@ -927,6 +1112,7 @@ class Ingest:
                 if any(seq is not None for seq in sequences) and self.inventory_emitter is not None:
                     await self.inventory_emitter.emit_if_changed()
             except Exception as exc:  # noqa: BLE001 - never claim the failed batch
+                self._hold_position(sid, st, "projection_publication")
                 log.warning("local Codex broadcast failed sid=%s: %s", sid, exc)
                 return 0
             st.offset = consumed_to
@@ -969,6 +1155,7 @@ class Ingest:
                 routing_integrity=self.routing_integrity,
                 lifecycle=lifecycle,
                 sessions=self.sessions,
+                on_incomplete=lambda reason: self._hold_position(sid, st, reason),
             )
             if seq is not None:
                 appended += 1

@@ -53,6 +53,7 @@ import attachment_locks
 import store_exchange
 import store_attachments
 import store_usage
+import store_ingest_checkpoint
 import chat_recovery
 import store_capacity_retry
 import store_qa
@@ -1552,7 +1553,7 @@ def _iso_epoch(value: object) -> float | None:
 from store_voice_operations import VoiceOperationsStoreMixin, DDL as VOICE_OPERATIONS_DDL
 
 
-class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
+class Store(store_ingest_checkpoint.IngestCheckpointStoreMixin, ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsStoreMixin, WorkIndexStoreMixin, store_attachments.AttachmentStoreMixin, _WorkLanesStoreMixin, _ExternalWorkStoreMixin, QaStoreMixin, store_usage.UsageStoreMixin, ExchangeStoreMixin, AssistantBindingStoreMixin, _RoutingStoreMixin, _SpecPersistenceMixin, _WatchWakeStoreMixin, VoiceAnswersStoreMixin):
     """SQLite owned by exactly one worker thread; async callers use await."""
 
     def __init__(self, path: str = ":memory:", *, max_pending: int = 10_000,
@@ -2003,6 +2004,7 @@ class Store(ScreenLeaseStoreMixin, WorkLaneEpisodesStoreMixin, VoiceOperationsSt
                 if "objective" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN objective TEXT")
             store_qa.initialize(conn)
+            store_ingest_checkpoint.initialize(conn)
             lifecycle_authority.initialize(conn)
             host_transfer.initialize(conn)
             consent.initialize(conn)

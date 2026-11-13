@@ -283,9 +283,11 @@ class RoutingIntegrity:
                 )
             if integrity == "mismatch" and isinstance(episode, dict):
                 if result.get("should_notify"):
-                    await self._notify_episode_locked(
+                    notified = await self._notify_episode_locked(
                         episode, reason=reason or "routing_drift_detected"
                     )
+                    if notified is False:
+                        result["incomplete_effect"] = "routing_notification"
             return result
 
     async def refresh_for_report(self, stream_id: str) -> bool | None:
@@ -430,7 +432,7 @@ class RoutingIntegrity:
         )
 
 
-    async def _notify_episode_locked(self, episode: dict[str, Any], *, reason: str) -> None:
+    async def _notify_episode_locked(self, episode: dict[str, Any], *, reason: str) -> bool | None:
         stream_id = str(episode.get("stream_id") or "")
         expected_generation = str(episode.get("session_generation") or "")
         if expected_generation and ":" in stream_id:
@@ -480,7 +482,7 @@ class RoutingIntegrity:
             )
         except Exception:  # noqa: BLE001 - leave the durable episode retryable
             log.exception("routing-integrity alert failed stream=%s", stream_id)
-            return
+            return False
         marked = await self.store.mark_routing_integrity_notified(
             stream_id,
             str(episode.get("episode_id") or ""),
@@ -491,3 +493,4 @@ class RoutingIntegrity:
                 await self.broadcast(event)
             except Exception:  # noqa: BLE001 - durable card already exists
                 log.exception("routing-integrity alert broadcast failed stream=%s", stream_id)
+                return False

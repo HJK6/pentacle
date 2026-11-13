@@ -58,6 +58,20 @@ def _public_test_environment():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _legacy_full_replay_contract(request, monkeypatch):
+    """Existing replay contracts select the documented rollback mode explicitly.
+
+    Persisted-position behavior has its own real-process restart tests. Keep the
+    older per-event replay, repair and accounting assertions unchanged.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] in {
+        "test_ingest", "test_restart_replay", "test_tell_ingest_proof",
+        "test_usage_accounting", "test_usage_provenance",
+    }:
+        monkeypatch.setenv("PENTACLE_INGEST_FORCE_FULL_REPLAY", "1")
+
+
 @pytest.fixture
 def ruling_spec_root(tmp_path, monkeypatch):
     """Ruling tests commission readable canonical work, without host memory."""
