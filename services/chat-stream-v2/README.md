@@ -404,6 +404,33 @@ on bounded pass duration; a prompt buried within its own stream's history may
 still need more service before its durable USER proof appears. This scheduling
 bound alone does not guarantee readiness within the prompt-proof deadline.
 
+### Idle transcript proofs
+
+After initial replay completes, intake can skip an entire seat visit when its
+latest identity proof succeeded, its proof inputs are unchanged, no refusal,
+grace period or identity incident is pending, and the bound open transcript is
+still at its consumed offset. Path stat and descriptor stat must both match the
+recorded device, inode and link count, with both sizes equal to that offset.
+A skipped visit advances scheduling but performs no transcript reads, native
+header checks, binding, checkpoint or append work and changes no per-seat state.
+
+`PENTACLE_INGEST_IDLE_PROOF_S` is read once when intake is constructed. It defaults
+to 30 seconds; zero disables skipping. Invalid, negative or non-finite values
+log one warning and use 30. Age starts before the successful proof's probes and
+is never extended by a skip. At the first visit at or beyond the interval, or
+when any condition fails, the whole normal path runs with fresh identity probes.
+Bytes arriving after a skipped visit's stat wait for the next visit. An idle
+transcript header rewritten in place at the same size is checked at its next
+unskipped visit; pass scheduling and backoff mean this is not a wall-clock
+detection deadline. Active seats retain every proof guarding reads and appends.
+
+At the end of the first completed pass after each 60-second window, the INFO
+`ingest_pass_summary` JSON line reports `passes`, `pass_ms_median`, `pass_ms_max`,
+`seats_median` (rows visited, including backoff and idle skips), `backoff_skips`,
+`idle_skips`, `proof_calls` and `window_s`. Pass durations exclude the pump sleep;
+the summary also runs during replay. Proof calls count all identity-proof
+invocations, including refusals before a subprocess can launch.
+
 ### Busy-seat send probe
 
 `tools/busy_seat_send_probe.py --provider claude|codex [--host H --ssh USER@HOST]` reproduces a send to a working seat without a UI: it spawns one low-cost hidden seat, holds it in a ~75 s foreground command, sends once through `send`, and compares `send.result` with the pane's native-queue chrome. Verdicts: `queued_reported` (0), `queued_unreported` (1), `not_queued` (2), `harness_error` (3, including a failed cleanup close). The seat is always closed unless `--keep`. Codex 0.159 needs a working sandbox on the seat host (`bwrap` on Linux).
